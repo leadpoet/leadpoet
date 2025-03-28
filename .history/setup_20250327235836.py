@@ -1,5 +1,5 @@
-# IN PROGRESS FOR LEADPOET
-# The MIT License (MIT)
+#
+#  The MIT License (MIT)
 # Copyright © 2025 Yuma Rao
 # TODO(developer): Set your name
 # Copyright © 2025 <your name>

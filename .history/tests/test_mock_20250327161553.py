@@ -1,4 +1,3 @@
-# IN PROGRESS FOR LEADPOET
 import pytest
 import asyncio
 import bittensor as bt

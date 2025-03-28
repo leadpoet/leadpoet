@@ -1,7 +1,7 @@
 # The MIT License (MIT)
 # Copyright © 2025 Opentensor Foundation
 
-# IN PROGRESS FOR LEADPOET
+
 
 from typing import Union
 from bittensor import (

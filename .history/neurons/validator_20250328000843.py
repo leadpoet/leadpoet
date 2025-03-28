@@ -3,6 +3,14 @@
 # Leadpoet
 # Copyright © 2025 Leadpoet
 
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the “Software”), to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+# the Software.
+
 
 import re
 import random
@@ -26,12 +34,12 @@ class Validator(BaseValidatorNeuron):
         super(Validator, self).__init__(config=config)
         bt.logging.info("load_state()")
         self.load_state()
-       
+        # Email regex for format validation per documentation
         self.email_regex = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-        # 20% of batch
+        # Sample size for manual review (20% of batch as per documentation: 20/100)
         self.sample_ratio = 0.2
         # Track validator reputation and consistency for scoring
-        self.reputation_score = 0  
+        self.reputation_score = 0  # Starting reputation per documentation
         self.consistency_streak = 0  # For consistency factor
         # Configurable flag to use the open-source validator model
         self.use_open_source_model = config.get("use_open_source_validator_model", False) if config else False
@@ -98,7 +106,7 @@ class Validator(BaseValidatorNeuron):
     def _update_reputation_and_consistency(self, rewards: np.ndarray, miner_uids: list):
         """Updates validator reputation and consistency based on validation accuracy."""
         avg_reward = np.mean(rewards) if rewards.size > 0 else 0
-        if avg_reward >= 0.8:  # High accuracy threshold
+        if avg_reward >= 0.9:  # High accuracy threshold per documentation
             self.reputation_score += 5
             self.consistency_streak += 1
         else:
@@ -153,3 +161,5 @@ class Validator(BaseValidatorNeuron):
 if __name__ == "__main__":
     with Validator() as validator:
         while True:
+            bt.logging.info(f"Validator running... {time.time()}")
+            time.sleep(5)

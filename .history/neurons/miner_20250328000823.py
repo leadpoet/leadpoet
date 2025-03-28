@@ -7,7 +7,7 @@ import time
 import typing
 import bittensor as bt
 import template
-from Leadpoet.base.miner import BaseMinerNeuron
+from Leadpeot.base.miner import BaseMinerNeuron
 from miner_models.get_leads import get_leads  # Optional import
 
 class Miner(BaseMinerNeuron):

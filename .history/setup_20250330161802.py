@@ -50,7 +50,7 @@ requirements = [
     "aiohttp>=3.9.5",  
     "asyncio>=3.4.3",  
     "pyyaml>=6.0.1",  
-    "argparse>=1.4.0",  
+    "argparse>=1.4.0",  # For CLI argument parsing
     "pickle-mixin>=1.0.2"  # For caching in automated_checks.py
 ]
 

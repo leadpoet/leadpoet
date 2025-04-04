@@ -1,0 +1,123 @@
+Metadata-Version: 2.1
+Name: async-substrate-interface
+Version: 1.0.9
+Summary: Asyncio library for interacting with substrate. Mostly API-compatible with py-substrate-interface
+Author: Opentensor Foundation
+Author-email: BD Himes <benhimes@opentensor.dev>
+Maintainer-email: Opentensor Foundation <benhimes@opentensor.dev>, BD Himes <benhimes@opentensor.dev>
+License: MIT License
+        
+        Copyright (c) 2025 Opentensor
+        
+        Permission is hereby granted, free of charge, to any person obtaining a copy
+        of this software and associated documentation files (the "Software"), to deal
+        in the Software without restriction, including without limitation the rights
+        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+        copies of the Software, and to permit persons to whom the Software is
+        furnished to do so, subject to the following conditions:
+        
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+        
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+        SOFTWARE.
+        
+Project-URL: Repository, https://github.com/opentensor/async-substrate-interface/
+Keywords: substrate,development,bittensor
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Intended Audience :: Developers
+Classifier: Topic :: Software Development :: Libraries
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3 :: Only
+Requires-Python: <3.14,>=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: wheel
+Requires-Dist: asyncstdlib~=3.13.0
+Requires-Dist: bittensor-wallet>=2.1.3
+Requires-Dist: bt-decode==v0.5.0
+Requires-Dist: scalecodec~=1.2.11
+Requires-Dist: websockets>=14.1
+Requires-Dist: xxhash
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: bittensor; extra == "dev"
+Requires-Dist: pytest-asyncio; extra == "dev"
+
+# Async Substrate Interface
+This project provides an asynchronous interface for interacting with [Substrate](https://substrate.io/)-based blockchains. It is based on the [py-substrate-interface](https://github.com/polkascan/py-substrate-interface) project.
+
+Additionally, this project uses [bt-decode](https://github.com/opentensor/bt-decode) instead of [py-scale-codec](https://github.com/polkascan/py-scale-codec) for faster [SCALE](https://docs.substrate.io/reference/scale-codec/) decoding.
+
+## Installation
+
+To install the package, use the following command:
+
+```bash
+pip install async-substrate-interface
+```
+
+## Usage
+
+Here are examples of how to use the sync and async inferfaces:
+
+```python
+from async_substrate_interface import SubstrateInterface
+
+def main():
+    substrate = SubstrateInterface(
+        url="wss://rpc.polkadot.io"
+    )
+    with substrate:
+        result = substrate.query(
+            module='System',
+            storage_function='Account',
+            params=['5CZs3T15Ky4jch1sUpSFwkUbYEnsCfe1WCY51fH3SPV6NFnf']
+        )
+
+        print(result)
+
+main()
+```
+
+```python
+import asyncio
+from async_substrate_interface import AsyncSubstrateInterface
+
+async def main():
+    substrate = AsyncSubstrateInterface(
+        url="wss://rpc.polkadot.io"
+    )
+    async with substrate:
+        result = await substrate.query(
+            module='System',
+            storage_function='Account',
+            params=['5CZs3T15Ky4jch1sUpSFwkUbYEnsCfe1WCY51fH3SPV6NFnf']
+        )
+
+        print(result)
+
+asyncio.run(main())
+```
+
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request to the `staging` branch.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Contact
+
+For any questions or inquiries, please join the Bittensor Development Discord server: [Church of Rao](https://discord.gg/XC7ucQmq2Q).

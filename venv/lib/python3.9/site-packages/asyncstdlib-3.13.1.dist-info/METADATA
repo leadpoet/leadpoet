@@ -1,0 +1,81 @@
+Metadata-Version: 2.4
+Name: asyncstdlib
+Version: 3.13.1
+Summary: The missing async toolbox
+Keywords: async,enumerate,itertools,builtins,functools,contextlib
+Author-email: Max Kühn <maxfischer2781@gmail.com>
+Requires-Python: ~=3.8
+Description-Content-Type: text/x-rst
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Framework :: AsyncIO
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+License-File: LICENSE
+Requires-Dist: sphinx ; extra == "doc"
+Requires-Dist: sphinxcontrib-trio ; extra == "doc"
+Requires-Dist: pytest ; extra == "test"
+Requires-Dist: flake8 ; extra == "test"
+Requires-Dist: flake8-bugbear ; extra == "test"
+Requires-Dist: black ; extra == "test" and ( implementation_name=='cpython')
+Requires-Dist: coverage ; extra == "test"
+Requires-Dist: pytest-cov ; extra == "test"
+Requires-Dist: flake8-2020 ; extra == "test"
+Requires-Dist: mypy ; extra == "test" and ( implementation_name=='cpython')
+Requires-Dist: mypy ; extra == "typetest" and ( implementation_name=='cpython')
+Requires-Dist: pyright ; extra == "typetest"
+Requires-Dist: typing-extensions ; extra == "typetest"
+Project-URL: Documentation, https://asyncstdlib.readthedocs.io/en/latest/
+Project-URL: Source, https://github.com/maxfischer2781/asyncstdlib
+Provides-Extra: doc
+Provides-Extra: test
+Provides-Extra: typetest
+
+================================================
+``asyncstdlib`` -- the missing ``async`` toolbox
+================================================
+
+.. image:: https://readthedocs.org/projects/asyncstdlib/badge/?version=latest
+    :target: http://asyncstdlib.readthedocs.io/en/latest/?badge=latest
+    :alt: Documentation Status
+
+.. image:: https://img.shields.io/pypi/v/asyncstdlib.svg
+    :alt: Available on PyPI
+    :target: https://pypi.python.org/pypi/asyncstdlib/
+
+.. image:: https://anaconda.org/conda-forge/asyncstdlib/badges/version.svg
+    :alt: Available on Conda-Forge
+    :target: https://anaconda.org/conda-forge/asyncstdlib
+
+.. image:: https://img.shields.io/github/license/maxfischer2781/asyncstdlib.svg
+    :alt: License
+    :target: https://github.com/maxfischer2781/asyncstdlib/blob/master/LICENSE
+
+.. image:: https://badges.gitter.im/maxfischer2781/asyncstdlib.svg
+    :target: https://gitter.im/maxfischer2781/asyncstdlib?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge
+    :alt: Development Chat
+
+The ``asyncstdlib`` library re-implements functions and classes of the Python
+standard library to make them compatible with ``async`` callables, iterables
+and context managers.
+It is fully agnostic to ``async`` event loops and seamlessly works with
+``asyncio``, third-party libraries such as ``trio``, as well as
+any custom ``async`` event loop.
+
+* Full set of ``async`` versions of advantageous standard library helpers,
+  such as ``zip``, ``map``, ``enumerate``, ``functools.reduce``,
+  ``itertools.tee``, ``itertools.groupby`` and many others.
+* Safe handling of ``async`` iterators to ensure prompt cleanup, as well as
+  various helpers to simplify safely using custom ``async`` iterators.
+* Small but powerful toolset to seamlessly integrate existing sync code
+  into ``async`` programs and libraries.
+
+Check out the `documentation`_ to get started or take a look around.
+
+.. _documentation: http://asyncstdlib.readthedocs.io/

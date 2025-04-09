@@ -20,7 +20,7 @@ class Validator(BaseValidatorNeuron):
     """
     Validator neuron class for the LeadPoet subnet. This validator queries miners for lead batches,
     performs automated checks, validates lead quality, and scores miners. Uses the forward method
-    from templates/validator/forward.py and integrates open-source validation models.
+    from Leadpoet/validator/forward.py and integrates open-source validation models.
     """
 
     def __init__(self, config=None):

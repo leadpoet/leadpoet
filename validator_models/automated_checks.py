@@ -1,4 +1,5 @@
 import aiohttp
+import asyncio
 import dns.resolver
 import pickle
 import os
@@ -25,7 +26,7 @@ async def save_email_cache(cache):
     except Exception:
         pass
 
-#EMAIL_CACHE = await load_email_cache()
+EMAIL_CACHE = asyncio.run(load_email_cache())
 
 async def is_disposable_email(email: str) -> tuple[bool, str]:
     domain = email.split("@")[1].lower() if "@" in email else ""

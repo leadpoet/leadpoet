@@ -2,13 +2,19 @@
 # Copyright © 2025 Yuma Rao
 # Leadpoet
 # Copyright © 2025 Leadpoet
+# The MIT License (MIT)
+# Copyright © 2025 Yuma Rao
+# Leadpoet
+# Copyright © 2025 Leadpoet
 
+import sys
 import time
 import typing
 import bittensor as bt
-import Leadpoet
+from Leadpoet.protocol import LeadRequest  
 from Leadpoet.base.miner import BaseMinerNeuron
-from miner_models.get_leads import get_leads  # Optional import
+from miner_models.get_leads import get_leads  
+
 
 class Miner(BaseMinerNeuron):
     """
@@ -25,6 +31,16 @@ class Miner(BaseMinerNeuron):
         self.lead_counter = 0
         # Configurable flag to use the open-source lead generation model
         self.use_open_source_model = config.get("use_open_source_lead_model", False) if config else False
+        # Set a mock block number for BaseMinerNeuron.run()
+        self.block = 1 if '--mock' in sys.argv else self.subtensor.get_current_block()
+        # Set a mock uid for metagraph indexing in mock mode
+        self.uid = 0 if '--mock' in sys.argv else None  # Will be set by network in non-mock mode
+        # Ensure config.neuron exists and set epoch_length in mock mode
+        if '--mock' in sys.argv:
+            if not hasattr(self.config, 'neuron') or self.config.neuron is None:
+                self.config.neuron = bt.Config()
+            self.config.neuron.epoch_length = 1000  # Default epoch length (blocks between syncs)
+        bt.logging.info("Miner initialized.")
 
     def get_dummy_lead(self) -> dict:
         """Generates a single dummy lead with incremental uniqueness."""
@@ -41,16 +57,16 @@ class Miner(BaseMinerNeuron):
             "Region": "Dummy Region"
         }
 
-    async def forward(self, synapse: 'template.protocol.LeadRequest') -> 'template.protocol.LeadRequest':
+    async def forward(self, synapse: LeadRequest) -> LeadRequest:
         """
         Processes a LeadRequest synapse by generating a batch of leads based on the requested number.
         Optionally uses the open-source get_leads model if enabled, falling back to dummy leads on failure.
 
         Args:
-            synapse (template.protocol.LeadRequest): The incoming request with num_leads, industry, and region.
+            synapse (LeadRequest): The incoming request with num_leads, industry, and region.
 
         Returns:
-            template.protocol.LeadRequest: The synapse with the leads field populated.
+            LeadRequest: The synapse with the leads field populated.
         """
         start_time = time.time()
         if self.use_open_source_model:
@@ -67,13 +83,13 @@ class Miner(BaseMinerNeuron):
             bt.logging.warning(f"Lead generation exceeded 122 seconds: {elapsed:.2f}s")
         return synapse
 
-    async def blacklist(self, synapse: 'template.protocol.LeadRequest') -> typing.Tuple[bool, str]:
+    async def blacklist(self, synapse: LeadRequest) -> typing.Tuple[bool, str]:
         """
         Determines whether an incoming LeadRequest should be blacklisted. Only allows requests from
         registered hotkeys, with an optional check for validator status.
 
         Args:
-            synapse (template.protocol.LeadRequest): The incoming request from a validator or API.
+            synapse (LeadRequest): The incoming request from a validator or API.
 
         Returns:
             Tuple[bool, str]: (True, reason) if blacklisted, (False, reason) if allowed.
@@ -100,13 +116,13 @@ class Miner(BaseMinerNeuron):
         bt.logging.trace(f"Not blacklisting recognized hotkey {synapse.dendrite.hotkey}")
         return False, "Hotkey recognized!"
 
-    async def priority(self, synapse: 'template.protocol.LeadRequest') -> float:
+    async def priority(self, synapse: LeadRequest) -> float:
         """
         Assigns priority to incoming LeadRequests based on the stake of the requesting entity.
         Higher stake results in higher priority.
 
         Args:
-            synapse (template.protocol.LeadRequest): The incoming request.
+            synapse (LeadRequest): The incoming request.
 
         Returns:
             float: Priority score based on stake.
@@ -119,6 +135,7 @@ class Miner(BaseMinerNeuron):
         priority = float(self.metagraph.S[caller_uid])
         bt.logging.trace(f"Prioritizing {synapse.dendrite.hotkey} with value: {priority}")
         return priority
+
 
 if __name__ == "__main__":
     with Miner() as miner:

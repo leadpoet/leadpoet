@@ -6,16 +6,23 @@
 import bittensor as bt
 from typing import List, Optional, Union, Any, Dict
 from Leadpoet.protocol import LeadRequest
-from Leadpoet.subnets import SubnetsAPI
 from Leadpoet.api.get_query_axons import get_query_api_axons
 
-class LeadPoetAPI(SubnetsAPI):
+class LeadPoetAPI:
     """API for customers to request leads from the LeadPoet subnet."""
 
     def __init__(self, wallet: "bt.wallet", netuid: int = None):
-        super().__init__(wallet)
+        """
+        Initializes the LeadPoetAPI with a wallet and optional netuid.
+
+        Args:
+            wallet (bt.wallet): The customer's wallet for network interaction.
+            netuid (int, optional): The network UID of the Leadpoet subnet. Defaults to 33.
+        """
+        self.wallet = wallet
         self.netuid = netuid if netuid is not None else 33  # Default netuid, override as needed
         self.name = "leadpoet"
+        bt.logging.info(f"Initialized LeadPoetAPI with netuid: {self.netuid}")
 
     def prepare_synapse(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None) -> LeadRequest:
         """
@@ -57,7 +64,7 @@ class LeadPoetAPI(SubnetsAPI):
         bt.logging.info(f"Processed {len(leads)} leads from {len(responses)} responses")
         return leads
 
-    async def get_leads(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None, timeout: int = 122) -> List[Dict]:
+    async def get_leads(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None) -> List[Dict]:
         """
         Queries miners for a batch of leads based on customer request.
 
@@ -65,7 +72,6 @@ class LeadPoetAPI(SubnetsAPI):
             num_leads (int): Number of leads to request (1-100).
             industry (Optional[str]): Industry filter.
             region (Optional[str]): Region filter.
-            timeout (int): Query timeout in seconds (default 122, per miner max response time).
 
         Returns:
             List[Dict]: List of lead dictionaries.
@@ -82,13 +88,16 @@ class LeadPoetAPI(SubnetsAPI):
             bt.logging.warning("No available miners to query")
             return []
 
+        # Calculate dynamic timeout: 60 seconds base + 2 seconds per lead
+        timeout = 60 + 2 * num_leads
+        bt.logging.info(f"Querying {len(axons)} miners for {num_leads} leads with timeout {timeout}s")
+
         # Query miners
-        bt.logging.info(f"Querying {len(axons)} miners for {num_leads} leads")
         responses = await dendrite(
             axons=axons,
             synapse=synapse,
             deserialize=True,
-            timeout=timeout  # Max miner response time: 1 min + 2 sec/lead = 122 sec for 100 leads
+            timeout=timeout
         )
 
         # Process responses

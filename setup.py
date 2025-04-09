@@ -35,10 +35,10 @@ here = path.abspath(path.dirname(__file__))
 with open(path.join(here, "README.md"), encoding="utf-8") as f:
     long_description = f.read()
 
-with codecs.open(os.path.join(here, "template/__init__.py"), encoding="utf-8") as init_file:
+with codecs.open(os.path.join(here, "Leadpoet/__init__.py"), encoding="utf-8") as init_file:
     version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]", init_file.read(), re.M)
     if not version_match:
-        raise RuntimeError("Unable to find version string in template/__init__.py")
+        raise RuntimeError("Unable to find version string in Leadpoet/__init__.py")
     version_string = version_match.group(1)
 
 
@@ -72,7 +72,7 @@ setup(
         "console_scripts": [
             "leadpoet=neurons.miner:main",  # entry for miners
             "leadpoet-validate=neurons.validator:main",  
-            "leadpoet-api=template.api.leadpoet_api:main"  
+            "leadpoet-api=Leadpoet.api.leadpoet_api:main"  
         ]
     },
     classifiers=[

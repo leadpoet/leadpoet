@@ -28,10 +28,18 @@ class BaseValidatorNeuron(BaseNeuron):
         super().__init__(config=config)
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
         is_mock = getattr(self.config, 'mock', False)
-        if is_mock:
-            self.dendrite = MockDendrite(wallet=self.wallet)
-        else:
-            self.dendrite = bt.dendrite(wallet=self.wallet)
+
+        # Ensure config.neuron is initialized
+        if not hasattr(self.config, 'neuron') or self.config.neuron is None:
+            self.config.neuron = bt.Config()
+            self.config.neuron.axon_off = False  # Default: serve axon unless explicitly disabled
+            self.config.neuron.num_concurrent_forwards = 1  # Default: single forward pass
+            self.config.neuron.full_path = "./validator_state"  # Default state path
+            self.config.neuron.moving_average_alpha = 0.1  # Default for score updates
+            self.config.neuron.sample_size = 10  # Default sample size
+            bt.logging.debug("Initialized config.neuron with defaults")
+
+        self.dendrite = MockDendrite(wallet=self.wallet) if is_mock else bt.dendrite(wallet=self.wallet)
         bt.logging.info(f"Dendrite: {self.dendrite}")
         bt.logging.info("Building validation weights.")
         self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
@@ -39,8 +47,7 @@ class BaseValidatorNeuron(BaseNeuron):
         if not self.config.neuron.axon_off and not is_mock:
             self.serve_axon()
         else:
-            bt.logging.warning("axon off or in mock mode, not serving ip to chain.")
-        self.loop = asyncio.get_event_loop()
+            bt.logging.warning("Axon off or in mock mode, not serving ip to chain.")
         self.should_exit = False
         self.is_running = False
         self.thread = None
@@ -72,13 +79,17 @@ class BaseValidatorNeuron(BaseNeuron):
         self.sync()
         bt.logging.info(f"Validator starting at block: {self.block}")
         try:
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             while True:
                 bt.logging.info(f"step({self.step}) block({self.block})")
-                self.loop.run_until_complete(self.concurrent_forward())
+                loop.run_until_complete(self.concurrent_forward())
                 if self.should_exit:
                     break
                 self.sync()
                 self.step += 1
+            loop.close()
         except KeyboardInterrupt:
             if hasattr(self, 'axon'):
                 self.axon.stop()
@@ -101,7 +112,8 @@ class BaseValidatorNeuron(BaseNeuron):
         if self.is_running:
             bt.logging.debug("Stopping validator in background thread.")
             self.should_exit = True
-            self.thread.join(5)
+            if self.thread is not None:
+                self.thread.join(5)
             self.is_running = False
             bt.logging.debug("Stopped")
 
@@ -113,7 +125,8 @@ class BaseValidatorNeuron(BaseNeuron):
         if self.is_running:
             bt.logging.debug("Stopping validator in background thread.")
             self.should_exit = True
-            self.thread.join(5)
+            if self.thread is not None:
+                self.thread.join(5)
             self.is_running = False
             bt.logging.debug("Stopped")
 

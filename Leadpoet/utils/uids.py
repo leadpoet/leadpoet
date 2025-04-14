@@ -1,62 +1,55 @@
 import random
-import bittensor as bt
 import numpy as np
+import bittensor as bt
 from typing import List
 
 
 def check_uid_availability(
-    metagraph: "bt.metagraph.Metagraph", uid: int, vpermit_tao_limit: int
+    metagraph: "bt.metagraph", uid: int, vpermit_tao_limit: int
 ) -> bool:
-    """Check if uid is available. The UID should be available if it is serving and has less than vpermit_tao_limit stake
-    Args:
-        metagraph (:obj: bt.metagraph.Metagraph): Metagraph object
-        uid (int): uid to be checked
-        vpermit_tao_limit (int): Validator permit tao limit
-    Returns:
-        bool: True if uid is available, False otherwise
-    """
-    # Filter non serving axons.
+    """Check if a UID is available and meets staking requirements."""
+    if uid >= len(metagraph.hotkeys):
+        return False
+
+    is_mock = getattr(metagraph.subtensor, 'is_mock', False)
+    if is_mock:
+        return True  # In mock mode, all UIDs are available
+
     if not metagraph.axons[uid].is_serving:
         return False
-    # Filter validator permit > 1024 stake.
+
     if metagraph.validator_permit[uid]:
-        if metagraph.S[uid] > vpermit_tao_limit:
+        if metagraph.S[uid] < vpermit_tao_limit:
             return False
-    # Available otherwise.
+
     return True
 
 
 def get_random_uids(self, k: int, exclude: List[int] = None) -> np.ndarray:
-    """Returns k available random uids from the metagraph.
-    Args:
-        k (int): Number of uids to return.
-        exclude (List[int]): List of uids to exclude from the random sampling.
-    Returns:
-        uids (np.ndarray): Randomly sampled available uids.
-    Notes:
-        If `k` is larger than the number of available `uids`, set `k` to the number of available `uids`.
-    """
+    """Return k random UIDs, excluding specified UIDs and unavailable neurons."""
+    exclude = [] if exclude is None else exclude
+    is_mock = getattr(self.config, 'mock', False)
+    vpermit_tao_limit = (
+        0 if is_mock else self.config.neuron.vpermit_tao_limit
+    )
+
+    # Fallback if k is None or invalid
+    k = k if k is not None else getattr(self.config.neuron, 'sample_size', 10)
+
     candidate_uids = []
-    avail_uids = []
+    for uid in range(self.metagraph.n):
+        if uid in exclude:
+            continue
+        if check_uid_availability(
+            self.metagraph, uid, vpermit_tao_limit
+        ):
+            candidate_uids.append(uid)
 
-    for uid in range(self.metagraph.n.item()):
-        uid_is_available = check_uid_availability(
-            self.metagraph, uid, self.config.neuron.vpermit_tao_limit
-        )
-        uid_is_not_excluded = exclude is None or uid not in exclude
+    if len(candidate_uids) == 0:
+        bt.logging.warning("No available UIDs found.")
+        return np.array([], dtype=np.int64)
 
-        if uid_is_available:
-            avail_uids.append(uid)
-            if uid_is_not_excluded:
-                candidate_uids.append(uid)
-    # If k is larger than the number of available uids, set k to the number of available uids.
-    k = min(k, len(avail_uids))
-    # Check if candidate_uids contain enough for querying, if not grab all avaliable uids
-    available_uids = candidate_uids
-    if len(candidate_uids) < k:
-        available_uids += random.sample(
-            [uid for uid in avail_uids if uid not in candidate_uids],
-            k - len(candidate_uids),
-        )
-    uids = np.array(random.sample(available_uids, k))
-    return uids
+    k = min(k, len(candidate_uids))
+    return np.array(
+        random.sample(candidate_uids, k), dtype=np.int64
+    )

@@ -16,6 +16,7 @@ class MockAxonInfo:
         self.coldkey = "mock_coldkey"
         self.version = 1
         self.ip_type = 4  # IPv4
+        self.is_serving = True  # Mock axons are always serving
 
 
 class MockNeuron:
@@ -144,6 +145,7 @@ class BaseNeuron:
             self.subtensor = MockSubtensor(netuid=self.config.netuid)
         self.metagraph = bt.metagraph(netuid=self.config.netuid, subtensor=self.subtensor)
         self.step = 0
+        self.block = self.subtensor.get_current_block() if not is_mock else 1  # Default block in mock mode
 
     def sync(self):
         """Syncs the metagraph with the network."""
@@ -157,7 +159,7 @@ class Validator:
         super().__init__(BaseValidatorNeuron, self, config=config)
         bt.logging.info("load_state()")
         self.load_state()
-        self.email_regex = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+        self.email_regex = re.compile(r'^[a-zA-Z0.9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
         self.sample_ratio = 0.2
         self.reputation_score = 0
         self.consistency_streak = 0
@@ -179,7 +181,10 @@ class Validator:
         return base_rate
 
     async def forward(self):
-        await forward(self, post_process=self._update_reputation_and_consistency)
+        await forward(self, post_process=lambda rewards, uids: self._post_process_with_checks(rewards, uids))
+
+    def _post_process_with_checks(self, rewards: np.ndarray, miner_uids: list):
+        self._update_reputation_and_consistency(rewards, miner_uids)
 
     def _update_reputation_and_consistency(self, rewards: np.ndarray, miner_uids: list):
         avg_reward = np.mean(rewards) if rewards.size > 0 else 0

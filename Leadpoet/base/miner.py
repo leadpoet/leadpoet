@@ -1,52 +1,154 @@
-# The MIT License (MIT)
-# Copyright © 2025 Yuma Rao
-
-
-import time 
+import time
 import asyncio
 import threading
 import argparse
 import traceback
-
 import bittensor as bt
-
 from Leadpoet.base.neuron import BaseNeuron
-from Leadpoet.utils.config import add_miner_args
-
 from typing import Union
-
 
 class BaseMinerNeuron(BaseNeuron):
     """
     Base class for Bittensor miners.
     """
-
     neuron_type: str = "MinerNeuron"
 
     @classmethod
     def add_args(cls, parser: argparse.ArgumentParser):
-        super().add_args(parser)
-        add_miner_args(cls, parser)
+        """
+        Adds command-line arguments for the miner, including common and miner-specific options.
+        """
+        parser.add_argument(
+            "--netuid",
+            type=int,
+            help="The network UID of the subnet to connect to",
+            default=343
+        )
+        parser.add_argument(
+            "--subtensor_network",
+            type=str,
+            help="The network to connect to (e.g., test, main)",
+            default="test"
+        )
+        parser.add_argument(
+            "--wallet_name",
+            type=str,
+            help="The name of the wallet to use",
+            required=True
+        )
+        parser.add_argument(
+            "--wallet_hotkey",
+            type=str,
+            help="The hotkey of the wallet to use",
+            required=True
+        )
+        parser.add_argument(
+            "--use_open_source_lead_model",
+            action="store_true",
+            help="Use the open-source lead generation model instead of dummy leads"
+        )
+        parser.add_argument(
+            "--blacklist_force_validator_permit",
+            action="store_true",
+            help="Only allow validators to query the miner",
+            default=False
+        )
+        parser.add_argument(
+            "--blacklist_allow_non_registered",
+            action="store_true",
+            help="Allow non-registered hotkeys to query the miner",
+            default=False
+        )
+        parser.add_argument(
+            "--neuron_epoch_length",
+            type=int,
+            help="Number of blocks between metagraph syncs",
+            default=1000
+        )
+        parser.add_argument(
+            "--logging_trace",
+            action="store_true",
+            help="Enable trace-level logging",
+            default=False
+        )
+        parser.add_argument(
+            "--mock",
+            action="store_true",
+            help="Run in mock mode",
+            default=False
+        )
 
     def __init__(self, config=None):
         super().__init__(config=config)
+        if config.logging_trace:
+            bt.logging.set_trace(True)
+        is_mock = getattr(self.config, 'mock', False)
 
-        # Warn if allowing incoming requests from anyone.
-        if not self.config.blacklist.force_validator_permit:
-            bt.logging.warning(
-                "You are allowing non-validators to send requests to your miner. This is a security risk."
-            )
-        if self.config.blacklist.allow_non_registered:
-            bt.logging.warning(
-                "You are allowing non-registered entities to send requests to your miner. This is a security risk."
-            )
-        # The axon handles request processing, allowing validators to send this miner requests.
+        # Ensure config.axon is initialized
+        if not hasattr(self.config, 'axon') or self.config.axon is None:
+            self.config.axon = bt.Config()
+            self.config.axon.ip = "0.0.0.0"
+            self.config.axon.port = 8091
+            bt.logging.debug("Initialized config.axon with default values")
+
+        # Set miner UID
+        self.uid = None
+        if is_mock:
+            self.uid = 0  # Default UID for mock mode
+            bt.logging.info(f"Mock mode: Set miner UID to {self.uid}")
+        else:
+            max_retries = 5
+            retry_delay = 10
+            hotkey = self.wallet.hotkey.ss58_address
+            bt.logging.debug(f"Attempting to set UID for hotkey: {hotkey}")
+            for attempt in range(max_retries):
+                try:
+                    # Try neurons_lite
+                    bt.logging.debug("Querying neurons_lite")
+                    neurons = self.subtensor.neurons_lite(netuid=self.config.netuid)
+                    bt.logging.debug(f"Neurons retrieved via neurons_lite: {[n.hotkey for n in neurons]}")
+                    for neuron in neurons:
+                        if neuron.hotkey == hotkey:
+                            self.uid = neuron.uid
+                            bt.logging.info(f"Miner UID set to {self.uid} via neurons_lite")
+                            break
+                    if self.uid is not None:
+                        break
+                    # Fallback to neurons
+                    bt.logging.debug("Falling back to neurons method")
+                    neurons = self.subtensor.neurons(netuid=self.config.netuid)
+                    bt.logging.debug(f"Neurons retrieved via neurons: {[n.hotkey for n in neurons]}")
+                    for neuron in neurons:
+                        if neuron.hotkey == hotkey:
+                            self.uid = neuron.uid
+                            bt.logging.info(f"Miner UID set to {self.uid} via neurons")
+                            break
+                    if self.uid is not None:
+                        break
+                    bt.logging.warning(f"Attempt {attempt + 1}/{max_retries}: Wallet {self.config.wallet_name}/{self.config.wallet_hotkey} not found in netuid {self.config.netuid}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                except Exception as e:
+                    bt.logging.error(f"Attempt {attempt + 1}/{max_retries}: Failed to set UID: {str(e)}\n{traceback.format_exc()}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+            if self.uid is None:
+                bt.logging.warning(f"Wallet {self.config.wallet_name}/{self.config.wallet_hotkey} not registered on netuid {self.config.netuid} after {max_retries} attempts")
+                # Temporary manual UID (replace with actual UID from registration)
+                # self.uid = 3  # Uncomment and set to known UID if needed
+                # bt.logging.info(f"Manually set UID to {self.uid}")
+
+        # Warn if allowing incoming requests from anyone
+        if not self.config.blacklist_force_validator_permit:
+            bt.logging.warning("You are allowing non-validators to send requests to your miner. This is a security risk.")
+        if self.config.blacklist_allow_non_registered:
+            bt.logging.warning("You are allowing non-registered entities to send requests to your miner. This is a security risk.")
+
+        # Initialize axon
         self.axon = bt.axon(
             wallet=self.wallet,
             config=self.config() if callable(self.config) else self.config,
         )
-
-        # Attach determiners which functions are called when servicing a request.
         bt.logging.info(f"Attaching forward function to miner axon.")
         self.axon.attach(
             forward_fn=self.forward,
@@ -62,76 +164,48 @@ class BaseMinerNeuron(BaseNeuron):
         self.lock = asyncio.Lock()
 
     def run(self):
-        """
-        Initiates and manages the main loop for the miner on the Bittensor network. The main loop handles graceful shutdown on keyboard interrupts and logs unforeseen errors.
-
-        This function performs the following primary tasks:
-        1. Check for registration on the Bittensor network.
-        2. Starts the miner's axon, making it active on the network.
-        3. Periodically resynchronizes with the chain; updating the metagraph with the latest network state and setting weights.
-
-        The miner continues its operations until `should_exit` is set to True or an external interruption occurs.
-        During each epoch of its operation, the miner waits for new blocks on the Bittensor network, updates its
-        knowledge of the network (metagraph), and sets its weights. This process ensures the miner remains active
-        and up-to-date with the network's latest state.
-
-        Note:
-            - The function leverages the global configurations set during the initialization of the miner.
-            - The miner's axon serves as its interface to the Bittensor network, handling incoming and outgoing requests.
-
-        Raises:
-            KeyboardInterrupt: If the miner is stopped by a manual interruption.
-            Exception: For unforeseen errors during the miner's operation, which are logged for diagnosis.
-        """
-
-        # Check that miner is registered on the network.
         self.sync()
+        if self.uid is None:
+            bt.logging.error("Cannot run miner: UID not set. Please register the wallet on the network.")
+            return
 
-        # Serve passes the axon information to the network + netuid we are hosting on.
-        # This will auto-update if the axon port of external ip have changed.
-        bt.logging.info(
-            f"Serving miner axon {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
-        )
-        self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
-
-        # Start  starts the miner's axon, making it active on the network.
-        self.axon.start()
+        if not self.config.mock:
+            bt.logging.info(f"Serving miner axon {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}")
+            self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
+            self.axon.start()
+        else:
+            bt.logging.info("Mock mode: Not serving axon.")
 
         bt.logging.info(f"Miner starting at block: {self.block}")
-
-        # This loop maintains the miner's operations until intentionally stopped.
         try:
             while not self.should_exit:
-                while (
-                    self.block - self.metagraph.last_update[self.uid]
-                    < self.config.neuron.epoch_length
-                ):
-                    # Wait before checking again.
+                if self.config.mock:
+                    # In mock mode, skip epoch length check as last_update may be None
                     time.sleep(1)
-
-                    # Check if we should exit.
                     if self.should_exit:
                         break
-
-                # Sync metagraph and potentially set weights.
-                self.sync()
-                self.step += 1
-
-        # If someone intentionally stops the miner, it'll safely terminate operations.
+                    self.sync()
+                    self.step += 1
+                else:
+                    while (
+                        self.uid is not None and
+                        self.metagraph.last_update[self.uid] is not None and
+                        self.block - self.metagraph.last_update[self.uid] < self.config.neuron_epoch_length
+                    ):
+                        time.sleep(1)
+                        if self.should_exit:
+                            break
+                    self.sync()
+                    self.step += 1
         except KeyboardInterrupt:
-            self.axon.stop()
+            if not self.config.mock:
+                self.axon.stop()
             bt.logging.success("Miner killed by keyboard interrupt.")
             exit()
-
-        # In case of unforeseen errors, the miner will log the error and continue operations.
         except Exception as e:
             bt.logging.error(traceback.format_exc())
 
     def run_in_background_thread(self):
-        """
-        Starts the miner's operations in a separate background thread.
-        This is useful for non-blocking operations.
-        """
         if not self.is_running:
             bt.logging.debug("Starting miner in background thread.")
             self.should_exit = False
@@ -141,9 +215,6 @@ class BaseMinerNeuron(BaseNeuron):
             bt.logging.debug("Started")
 
     def stop_run_thread(self):
-        """
-        Stops the miner's operations that are running in the background thread.
-        """
         if self.is_running:
             bt.logging.debug("Stopping miner in background thread.")
             self.should_exit = True
@@ -153,31 +224,12 @@ class BaseMinerNeuron(BaseNeuron):
             bt.logging.debug("Stopped")
 
     def __enter__(self):
-        """
-        Starts the miner's operations in a background thread upon entering the context.
-        This method facilitates the use of the miner in a 'with' statement.
-        """
         self.run_in_background_thread()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        """
-        Stops the miner's background operations upon exiting the context.
-        This method facilitates the use of the miner in a 'with' statement.
-
-        Args:
-            exc_type: The type of the exception that caused the context to be exited.
-                      None if the context was exited without an exception.
-            exc_value: The instance of the exception that caused the context to be exited.
-                       None if the context was exited without an exception.
-            traceback: A traceback object encoding the stack trace.
-                       None if the context was exited without an exception.
-        """
         self.stop_run_thread()
 
     def resync_metagraph(self):
-        """Resyncs the metagraph and updates the hotkeys and moving averages based on the new metagraph."""
         bt.logging.info("resync_metagraph()")
-
-        # Sync the metagraph.
         self.metagraph.sync(subtensor=self.subtensor)

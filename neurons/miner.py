@@ -1,144 +1,110 @@
-# The MIT License (MIT)
-# Copyright © 2025 Yuma Rao
-# Leadpoet
-# Copyright © 2025 Leadpoet
-# The MIT License (MIT)
-# Copyright © 2025 Yuma Rao
-# Leadpoet
-# Copyright © 2025 Leadpoet
-
-import sys
 import time
-import typing
+import asyncio
+import threading
+import argparse
+import traceback
 import bittensor as bt
-from Leadpoet.protocol import LeadRequest  
 from Leadpoet.base.miner import BaseMinerNeuron
-from miner_models.get_leads import get_leads  
-
+from Leadpoet.protocol import LeadRequest
+from miner_models.get_leads import get_leads
+from typing import Union, Tuple
 
 class Miner(BaseMinerNeuron):
     """
-    Miner neuron class for the LeadPoet subnet. This miner responds to validator queries by providing batches
-    of leads, which are contact details for potential business opportunities. Validators then review these
-    leads for quality.
-
-    Inherits from BaseMinerNeuron, handling wallet, subtensor, metagraph, and other boilerplate tasks.
+    Miner neuron class for the LeadPoet subnet. Generates leads using get_leads.py
+    and responds to validator queries.
     """
-
     def __init__(self, config=None):
-        super(Miner, self).__init__(config=config)
-        # Initialize a counter for generating unique dummy leads
-        self.lead_counter = 0
-        # Configurable flag to use the open-source lead generation model
-        self.use_open_source_model = config.get("use_open_source_lead_model", False) if config else False
-        # Set a mock block number for BaseMinerNeuron.run()
-        self.block = 1 if '--mock' in sys.argv else self.subtensor.get_current_block()
-        # Set a mock uid for metagraph indexing in mock mode
-        self.uid = 0 if '--mock' in sys.argv else None  # Will be set by network in non-mock mode
-        # Ensure config.neuron exists and set epoch_length in mock mode
-        if '--mock' in sys.argv:
-            if not hasattr(self.config, 'neuron') or self.config.neuron is None:
-                self.config.neuron = bt.Config()
-            self.config.neuron.epoch_length = 1000  # Default epoch length (blocks between syncs)
-        bt.logging.info("Miner initialized.")
-
-    def get_dummy_lead(self) -> dict:
-        """Generates a single dummy lead with incremental uniqueness."""
-        self.lead_counter += 1
-        return {
-            "Business": f"Business {self.lead_counter}",
-            "Owner Full name": f"Owner {self.lead_counter}",
-            "First": f"First {self.lead_counter}",
-            "Last": f"Last {self.lead_counter}",
-            "Owner(s) Email": f"owner{self.lead_counter}@example.com",
-            "LinkedIn": f"https://linkedin.com/in/owner{self.lead_counter}",
-            "Website": f"https://business{self.lead_counter}.com",
-            "Industry": "Dummy Industry",
-            "Region": "Dummy Region"
-        }
+        super().__init__(config=config)
+        self.use_open_source_lead_model = config.get("use_open_source_lead_model", True) if config else True
+        bt.logging.info(f"Using open-source lead model: {self.use_open_source_lead_model}")
 
     async def forward(self, synapse: LeadRequest) -> LeadRequest:
-        """
-        Processes a LeadRequest synapse by generating a batch of leads based on the requested number.
-        Optionally uses the open-source get_leads model if enabled, falling back to dummy leads on failure.
-
-        Args:
-            synapse (LeadRequest): The incoming request with num_leads, industry, and region.
-
-        Returns:
-            LeadRequest: The synapse with the leads field populated.
-        """
+        """Handles LeadRequest queries by generating leads."""
+        bt.logging.debug(f"Received LeadRequest: num_leads={synapse.num_leads}, industry={synapse.industry}, region={synapse.region}")
         start_time = time.time()
-        if self.use_open_source_model:
-            try:
+
+        try:
+            if self.use_open_source_lead_model:
                 leads = await get_leads(synapse.num_leads, synapse.industry, synapse.region)
-            except Exception as e:
-                bt.logging.error(f"Open-source lead generation failed: {e}")
-                leads = [self.get_dummy_lead() for _ in range(synapse.num_leads)]
-        else:
-            leads = [self.get_dummy_lead() for _ in range(synapse.num_leads)]
-        synapse.leads = leads
-        elapsed = time.time() - start_time
-        if elapsed > 122:
-            bt.logging.warning(f"Lead generation exceeded 122 seconds: {elapsed:.2f}s")
+                bt.logging.debug(f"Generated {len(leads)} leads using open-source model")
+            else:
+                leads = [
+                    {
+                        "Business": f"Mock Business {i}",
+                        "Owner Full name": f"Owner {i}",
+                        "First": f"First {i}",
+                        "Last": f"Last {i}",
+                        "Owner(s) Email": f"owner{i}@mockleadpoet.com",
+                        "LinkedIn": f"https://linkedin.com/in/owner{i}",
+                        "Website": f"https://business{i}.com",
+                        "Industry": synapse.industry or "Tech & AI",
+                        "Region": synapse.region or "US"
+                    } for i in range(synapse.num_leads)
+                ]
+                bt.logging.debug(f"Generated {len(leads)} dummy leads")
+
+            synapse.leads = leads
+            synapse.dendrite.status_code = 200
+            synapse.dendrite.status_message = "OK"
+            synapse.dendrite.process_time = str(time.time() - start_time)
+        except Exception as e:
+            bt.logging.error(f"Error generating leads: {e}")
+            synapse.leads = []
+            synapse.dendrite.status_code = 500
+            synapse.dendrite.status_message = f"Error: {str(e)}"
+            synapse.dendrite.process_time = str(time.time() - start_time)
+
         return synapse
 
-    async def blacklist(self, synapse: LeadRequest) -> typing.Tuple[bool, str]:
-        """
-        Determines whether an incoming LeadRequest should be blacklisted. Only allows requests from
-        registered hotkeys, with an optional check for validator status.
+    def blacklist(self, synapse: LeadRequest) -> Tuple[bool, str]:
+        """Blacklist logic for incoming requests. Returns (is_blacklisted, reason)."""
+        if self.config.blacklist_force_validator_permit and not self.metagraph.axons[self.uid].is_serving:
+            bt.logging.debug(f"Blacklisting non-validator request from {synapse.dendrite.hotkey}")
+            return True, f"Non-validator request from {synapse.dendrite.hotkey}"
+        if not self.config.blacklist_allow_non_registered and synapse.dendrite.hotkey not in self.metagraph.hotkeys:
+            bt.logging.debug(f"Blacklisting non-registered hotkey {synapse.dendrite.hotkey}")
+            return True, f"Non-registered hotkey {synapse.dendrite.hotkey}"
+        return False, ""
 
-        Args:
-            synapse (LeadRequest): The incoming request from a validator or API.
+    def priority(self, synapse: LeadRequest) -> float:
+        """Assigns priority to requests (default: equal priority)."""
+        return 1.0
 
-        Returns:
-            Tuple[bool, str]: (True, reason) if blacklisted, (False, reason) if allowed.
-        """
-        if synapse.dendrite is None or synapse.dendrite.hotkey is None:
-            bt.logging.warning("Received a request without a dendrite or hotkey.")
-            return True, "Missing dendrite or hotkey"
+def main():
+    """Entry point for the leadpoet command."""
+    parser = argparse.ArgumentParser(description="LeadPoet Miner")
+    # Add miner-specific arguments from BaseMinerNeuron
+    BaseMinerNeuron.add_args(parser)  # Adds netuid, subtensor_network, wallet, blacklist, etc.
+    # Add additional arguments not covered by BaseMinerNeuron
+    parser.add_argument("--axon_port", type=int, default=8091, help="Port for axon")
+    args = parser.parse_args()
 
-        # Check if the hotkey is registered in the metagraph
-        if (
-            not self.config.blacklist.allow_non_registered
-            and synapse.dendrite.hotkey not in self.metagraph.hotkeys
-        ):
-            bt.logging.trace(f"Blacklisting un-registered hotkey {synapse.dendrite.hotkey}")
-            return True, "Unrecognized hotkey"
+    if args.logging_trace:
+        bt.logging.set_trace(True)
 
-        # Optionally enforce that only validators can query
-        if self.config.blacklist.force_validator_permit:
-            uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
-            if not self.metagraph.validator_permit[uid]:
-                bt.logging.warning(f"Blacklisting non-validator hotkey {synapse.dendrite.hotkey}")
-                return True, "Non-validator hotkey"
+    # Manually create config object
+    config = bt.Config()
+    config.wallet = bt.Config()
+    config.wallet.name = args.wallet_name
+    config.wallet.hotkey = args.wallet_hotkey
+    config.netuid = args.netuid
+    config.subtensor = bt.Config()
+    config.subtensor.network = args.subtensor_network
+    config.mock = args.mock
+    config.axon = bt.Config()
+    config.axon.port = args.axon_port
+    config.blacklist = bt.Config()
+    config.blacklist.force_validator_permit = args.blacklist_force_validator_permit
+    config.blacklist.allow_non_registered = args.blacklist_allow_non_registered
+    config.neuron = bt.Config()
+    config.neuron.epoch_length = args.neuron_epoch_length
+    config.use_open_source_lead_model = args.use_open_source_lead_model
 
-        bt.logging.trace(f"Not blacklisting recognized hotkey {synapse.dendrite.hotkey}")
-        return False, "Hotkey recognized!"
-
-    async def priority(self, synapse: LeadRequest) -> float:
-        """
-        Assigns priority to incoming LeadRequests based on the stake of the requesting entity.
-        Higher stake results in higher priority.
-
-        Args:
-            synapse (LeadRequest): The incoming request.
-
-        Returns:
-            float: Priority score based on stake.
-        """
-        if synapse.dendrite is None or synapse.dendrite.hotkey is None:
-            bt.logging.warning("Received a request without a dendrite or hotkey.")
-            return 0.0
-
-        caller_uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
-        priority = float(self.metagraph.S[caller_uid])
-        bt.logging.trace(f"Prioritizing {synapse.dendrite.hotkey} with value: {priority}")
-        return priority
-
-
-if __name__ == "__main__":
-    with Miner() as miner:
+    with Miner(config=config) as miner:
         while True:
             bt.logging.info(f"Miner running... {time.time()}")
             time.sleep(5)
+
+if __name__ == "__main__":
+    main()

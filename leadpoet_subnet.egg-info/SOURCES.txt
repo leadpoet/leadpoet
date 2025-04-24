@@ -13,6 +13,7 @@ Leadpoet/base/miner.py
 Leadpoet/base/neuron.py
 Leadpoet/base/validator.py
 Leadpoet/base/utils/__init__.py
+Leadpoet/base/utils/config.py
 Leadpoet/base/utils/weight_utils.py
 Leadpoet/utils/__init__.py
 Leadpoet/utils/config.py

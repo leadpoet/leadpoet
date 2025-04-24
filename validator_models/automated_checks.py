@@ -82,6 +82,9 @@ async def verify_company(company_domain: str) -> tuple[bool, str]:
         return False, f"Website inaccessible: {str(e)}"
 
 async def validate_lead_list(leads: list) -> list:
+    if "YOUR_HUNTER_API_KEY" in HUNTER_API_KEY:
+        bt.logging.info("Mock mode: Assuming all leads pass automated checks")
+        return [{"lead_index": i, "email": lead.get("Owner(s) Email", ""), "company_domain": urlparse(lead.get("Website", "")).netloc, "status": "Valid", "reason": "Mock pass"} for i, lead in enumerate(leads)]
     report = []
     for i, lead in enumerate(leads):
         email = lead.get("Owner(s) Email", "")

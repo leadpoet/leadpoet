@@ -1,3 +1,5 @@
+# validator_models/automated_checks.py
+
 import aiohttp
 import asyncio
 import dns.resolver
@@ -5,6 +7,8 @@ import pickle
 import os
 from urllib.parse import urlparse
 import bittensor as bt
+from pygod.detector import DOMINANT
+import numpy as np
 
 HUNTER_API_KEY = "YOUR_HUNTER_API_KEY"
 DISPOSABLE_DOMAINS = {"mailinator.com", "temp-mail.org", "guerrillamail.com"}
@@ -53,6 +57,8 @@ async def verify_email(email: str) -> tuple[bool, str]:
         EMAIL_CACHE[email] = (False, domain_reason)
         await save_email_cache(EMAIL_CACHE)
         return False, domain_reason
+    if "YOUR_HUNTER_API_KEY" in HUNTER_API_KEY:
+        return True, "Mock pass"
     url = f"https://api.hunter.io/v2/email-verifier?email={email}&api_key={HUNTER_API_KEY}"
     try:
         async with aiohttp.ClientSession() as session:
@@ -81,10 +87,19 @@ async def verify_company(company_domain: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Website inaccessible: {str(e)}"
 
+async def check_duplicates(leads: list) -> bool:
+    emails = [lead.get("Owner(s) Email", "") for lead in leads]
+    return len(emails) != len(set(emails))
+
 async def validate_lead_list(leads: list) -> list:
     if "YOUR_HUNTER_API_KEY" in HUNTER_API_KEY:
         bt.logging.info("Mock mode: Assuming all leads pass automated checks")
         return [{"lead_index": i, "email": lead.get("Owner(s) Email", ""), "company_domain": urlparse(lead.get("Website", "")).netloc, "status": "Valid", "reason": "Mock pass"} for i, lead in enumerate(leads)]
+    
+    if await check_duplicates(leads):
+        bt.logging.warning("Duplicate emails detected")
+        return [{"lead_index": i, "email": lead.get("Owner(s) Email", ""), "company_domain": urlparse(lead.get("Website", "")).netloc, "status": "Invalid", "reason": "Duplicate email"} for i, lead in enumerate(leads)]
+    
     report = []
     for i, lead in enumerate(leads):
         email = lead.get("Owner(s) Email", "")
@@ -101,3 +116,22 @@ async def validate_lead_list(leads: list) -> list:
             "reason": reason
         })
     return report
+
+async def collusion_check(validators: list, responses: list) -> dict:
+    """Simulate PyGOD/DBScan collusion detection."""
+    validator_scores = []
+    for v in validators:
+        for r in responses:
+            validation = await v.validate_leads(r.leads)
+            validator_scores.append({"hotkey": v.wallet.hotkey.ss58_address, "O_v": validation["O_v"]})
+    
+    # Mock PyGOD analysis
+    data = np.array([[s["O_v"]] for s in validator_scores])
+    detector = DOMINANT()
+    detector.fit(data)
+    V_c = detector.decision_score_.max()
+    
+    collusion_flags = {}
+    for v in validators:
+        collusion_flags[v.wallet.hotkey.ss58_address] = 0 if V_c > 0.7 else 1
+    return collusion_flags

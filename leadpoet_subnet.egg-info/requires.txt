@@ -7,3 +7,6 @@ asyncio>=3.4.3
 pyyaml>=6.0.1
 argparse>=1.4.0
 pickle-mixin>=1.0.2
+pygod>=1.1.0
+torch>=2.0.0
+torch_geometric>=2.4.0

@@ -51,7 +51,10 @@ requirements = [
     "asyncio>=3.4.3",  
     "pyyaml>=6.0.1",  
     "argparse>=1.4.0",  
-    "pickle-mixin>=1.0.2"  # For caching in automated_checks.py
+    "pickle-mixin>=1.0.2",  # For caching in automated_checks.py
+    "pygod>=1.1.0",  # For collusion detection in automated_checks.py
+    "torch>=2.0.0",  # Required by pygod for deep learning models
+    "torch_geometric>=2.4.0"  # Required by pygod for graph-based models
 ]
 
 setup(

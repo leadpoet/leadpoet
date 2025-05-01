@@ -12,22 +12,12 @@ from validator_models.automated_checks import validate_lead_list as auto_check_l
 from miner_models.get_leads import VALID_INDUSTRIES
 
 class LeadPoetAPI:
-    """API for customers to request leads from the LeadPoet subnet."""
     def __init__(self, wallet: "bt.wallet", netuid: int = 343, subtensor_network: str = "test", mock: bool = False):
-        """
-        Initializes the LeadPoetAPI with a wallet, netuid, subtensor network, and mock mode.
-        Args:
-            wallet (bt.wallet): The customer's wallet.
-            netuid (int, optional): The network UID. Defaults to 343.
-            subtensor_network (str, optional): Subtensor network name. Defaults to "test".
-            mock (bool, optional): Run in mock mode. Defaults to False.
-        """
         self.wallet = wallet
         self.netuid = netuid
         self.subtensor_network = subtensor_network
         self.mock = mock
         self.name = "leadpoet"
-        # Explicitly set mock config
         if mock:
             bt.config().mock = True
             bt.logging.debug(f"Explicitly set bt.config().mock to {bt.config().mock}")
@@ -38,10 +28,9 @@ class LeadPoetAPI:
             self.metagraph = bt.metagraph(netuid=netuid, network="mock", subtensor=subtensor)
         else:
             self.metagraph = bt.metagraph(netuid=netuid)
-        bt.logging.info(f"Initialized LeadPoetAPI with netuid: {self.netuid}, subtensor_network: {self.subtensor_network}, mock: {self.mock}, bt.config().mock: {bt.config().mock}")
+        bt.logging.info(f"Initialized LeadPoetAPI with netuid: {self.netuid}, subtensor_network: {self.subtensor_network}, mock: {self.mock}")
 
     def prepare_synapse(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None) -> LeadRequest:
-        """Prepares a LeadRequest synapse."""
         if not 1 <= num_leads <= 100:
             raise ValueError("num_leads must be between 1 and 100")
         synapse = LeadRequest(num_leads=num_leads, industry=industry, region=region)
@@ -49,7 +38,6 @@ class LeadPoetAPI:
         return synapse
 
     def process_responses(self, responses: List[Union["bt.Synapse", Any]]) -> List[Dict]:
-        """Processes miner responses, extracting valid leads."""
         leads = []
         for response in responses:
             if not isinstance(response, LeadRequest) or response.dendrite.status_code != 200:
@@ -63,18 +51,15 @@ class LeadPoetAPI:
         return leads
 
     async def get_leads(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None) -> List[Dict]:
-        """Retrieve leads by querying miners, validating, and checking them."""
         bt.logging.info(f"Requesting {num_leads} leads, industry={industry}, region={region}")
         max_retries = 3
         attempt = 1
 
         while attempt <= max_retries:
             bt.logging.info(f"Attempt {attempt}/{max_retries} to fetch leads")
-            
-            # Query miners, passing mock flag explicitly
             axons = await get_query_api_axons(self.wallet, self.metagraph, n=0.1, timeout=5, mock=self.mock)
             if not axons:
-                bt.logging.error("No available miners to query. Ensure miners are running.")
+                bt.logging.error("No available miners to query.")
                 raise RuntimeError("No active miners available")
 
             synapse = self.prepare_synapse(num_leads, industry, region)
@@ -90,7 +75,6 @@ class LeadPoetAPI:
                 bt.logging.error("No valid leads received from miners.")
                 raise RuntimeError("No valid leads returned by miners")
 
-            # Validate leads using os_validator_model
             validation = await validate_lead_list(leads, industry=industry)
             score = validation["score"] / 100.0
             bt.logging.info(f"Lead validation score: {score}")
@@ -103,7 +87,6 @@ class LeadPoetAPI:
                     return []
                 continue
 
-            # Run automated checks
             check_report = await auto_check_leads(leads)
             valid_count = sum(1 for entry in check_report if entry["status"] == "Valid")
             check_score = valid_count / len(leads) if leads else 0
@@ -117,12 +100,10 @@ class LeadPoetAPI:
                     return []
                 continue
 
-            # Add to pool and return leads
             from Leadpoet.base.utils.pool import add_to_pool
             add_to_pool(leads)
             bt.logging.info(f"Added {len(leads)} approved leads to pool")
             
-            # Filter leads by industry and region (if specified) and trim to num_leads
             filtered_leads = leads
             if industry:
                 filtered_leads = [lead for lead in filtered_leads if lead.get("Industry") == industry]
@@ -134,6 +115,13 @@ class LeadPoetAPI:
             return filtered_leads
 
         return []
+
+    async def submit_feedback(self, leads: List[Dict], feedback_score: float):
+        """Submit buyer feedback to validators."""
+        from neurons.validator import Validator  # Avoid circular import
+        validator = Validator(config=self.config)  # Mock validator instance
+        await validator.handle_buyer_feedback(leads, feedback_score)
+        bt.logging.info(f"Submitted feedback score {feedback_score} for leads")
 
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet API Client")
@@ -148,10 +136,9 @@ def main():
     if args.logging_trace:
         bt.logging.set_trace(True)
 
-    # Explicitly set mock config based on args
     if args.mock:
         bt.config().mock = True
-        bt.logging.debug(f"Set bt.config().mock to {bt.config().mock} based on --mock flag")
+        bt.logging.debug(f"Set bt.config().mock to {bt.config().mock}")
 
     wallet = MockWallet(name=args.wallet_name, hotkey=args.wallet_hotkey) if args.mock else bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
 
@@ -177,6 +164,8 @@ def main():
         print(f"Retrieved {len(leads)} leads:")
         for i, lead in enumerate(leads, 1):
             print(f"Lead {i}: {lead}")
+        feedback = float(input("Enter feedback score (0-10): "))
+        await api.submit_feedback(leads, feedback)
 
     asyncio.run(fetch_leads())
 

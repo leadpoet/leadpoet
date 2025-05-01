@@ -1,4 +1,4 @@
-# LeadPoet | Premium Sales Leads. Powered by Bittensor.
+# LeadPoet | Premium Sales Leads Powered by Bittensor.
 
 Welcome to LeadPoet, a decentralized lead generation subnet built on Bittensor, designed for SaaS, finance, healthcare, e-commerce, and B2B agencies seeking high-quality, conversion-ready sales leads.
 
@@ -13,8 +13,6 @@ LeadPoet leverages Bittensor's decentralized architecture to create a scalable m
 **Data Flow**: Buyers submit a query → Miners generate leads → Validators audit and score (≥90% to pass) → Approved leads undergo automated checks (≥90% to pass) → Highest-scoring leads are delivered to the buyer.
 
 **Token**: TAO is used for staking, rewards, and (future) lead purchases.
-
-> 🧪 *LeadPoet is currently live on testnet (netuid 343) as we refine validation and incentive mechanisms ahead of mainnet launch. Note: The current implementation in mock mode does not enforce active miner/validator processes, which is planned for future updates.*
 
 ## Getting Started
 
@@ -101,30 +99,31 @@ Leads follow this JSON structure:
 ### Miner Incentives
 Miners are rewarded based on lead quality and reliability:
 
-**Accuracy Score (G_i)**:
-- Calculated over 90 days: 50% weight (last 14 days), 20% (15–30 days), 30% (31–90 days).
-- Example: 90/100 leads in one batch, 7/10 in another → Total accuracy = 97/110.
+**Accuracy Score (A_m)**:
+- Calculated over time with weighted periods:
+  - Recent (previous 14 days): 55% weight
+  - Mid-term (previous 30 days): 25% weight
+  - Long-term (previous 90 days): 20% weight
 
-**Consistency Multiplier (C_i)**:
+**Dependability (D_m)**:
 - Based on uptime (queries responded to with approved leads / total queries).
-- Formula: C_i = min(1 + Uptime%/100, 2.0).
-- Example: 90% uptime → C_i = 1.9.
+- Weighted using the same time periods as accuracy.
 
-**Weighted Score (W_i)**: W_i = G_i × C_i.
+**Weighted Score (W_m)**: W_m = A_m × D_m.
 
-**Rewards (R_i)**:
-- Total emissions E (e.g., 1000 TAO/week) split proportionally.
-- Formula: R_i = E × (W_i / Σ W_j) for miners with G_i > 0.5.
+**Rewards (M_m)**:
+- Total emissions M split proportionally.
+- Formula: M_m = M × (W_m / Σ W_m) for miners with A_m > 0.5.
 
 **Example**:
-- Miner A: 450 good leads, 90% uptime (C_A = 1.9), W_A = 450 × 1.9 = 855.
-- Miner B: 450 good leads, 50% uptime (C_B = 1.5), W_B = 450 × 1.5 = 675.
+- Miner A: 450 good leads, 90% uptime (D_A = 1.9), W_A = 450 × 1.9 = 855.
+- Miner B: 450 good leads, 50% uptime (D_B = 1.5), W_B = 450 × 1.5 = 675.
 - Total W = 1530. Rewards: A gets ~559 TAO, B gets ~441 TAO.
 
 **Best Practices**:
 - Ensure accurate contact data (emails, LinkedIn URLs).
 - Align leads with requested industry/region.
-- Maintain high uptime to boost C_i.
+- Maintain high uptime to boost D_m.
 
 ## For Validators
 
@@ -169,39 +168,41 @@ python neurons/validator.py --netuid 343 --subtensor.network test --wallet.name 
 ### Validator Incentives
 Validators are rewarded based on accuracy and consistency:
 
-**Reputation Score (R_i)**:
-- Starts at 0.
+**Precision (P_v)**:
+- Reflects validator accuracy over time.
 - Adjustments:
-  - Correct validation: +5 points.
-  - Incorrect validation: -10 points.
-  - Buyer feedback: +15 (9–10/10), +10 (7–8), +2 (5–7), -10 (2–4), -25 (1).
-  - Failed automated checks: -20 points.
+  - Correct validation: +10 (O_v within 10% of final score)
+  - Incorrect validation: -15 (if invalid leads slip through)
+  - Buyer feedback: up to +15 or -25
 
-**Consistency Factor (C_i)**:
-- Formula: C_i = 1 + 0.025 × Streak_i, capped at 2.
-- Streak_i: Consecutive periods with ≥90% accuracy.
-- Resets to 1 if accuracy drops below 90%.
+**Consistency (C_v)**:
+- Reflects how often validator score O_v is close to final F.
+- Weighted with:
+  - Recent (previous 14 days): 55% weight
+  - Mid-term (previous 30 days): 25% weight
+  - Long-term (previous 90 days): 20% weight
 
-**Weighted Reputation (W_i)**: W_i = R_i × C_i.
+**Weighted Reputation (R_v)**: R_v = P_v × C_v × F_v.
+- Where F_v = 1 unless the validator is flagged for collusion (then F_v = 0)
 
-**Rewards (Reward_i)**:
-- Total emissions E split proportionally.
-- Formula: Reward_i = E × (W_i / Σ W_j) for validators with R_i > 15.
+**Final score (F)**:
+- Each validator's score O_v is weighted by their reputation R_v.
+- F = ∑[O_v × (R_v / Rs_total)] where Rs_total = ∑R_v across all validators v with R_v > 15.
+- The lead list with the highest final score is sent to the buyer.
+
+**Rewards (V_v)**:
+- Total emissions V split proportionally.
+- Formula: V_v = V × (R_v / ∑R_v) for validators with R_v > 15.
 
 **Trusted Validators**:
-- W_i ≥ 100 and ≥1 month of operation.
+- R_v ≥ 100 and ≥1 month of operation.
 - If >67% reject a batch, it's denied (even if >50% approve).
 
-**Example**:
-- Validator A: R_A = 120, 8-period streak (C_A = 1.8), W_A = 216.
-- Validator B: R_B = 100, new (C_B = 1), W_B = 100.
-- Total W = 316. Rewards: A gets ~68.35 TAO, B gets ~31.65 TAO.
-
 **Best Practices**:
-- Maintain high accuracy to avoid reputation penalties.
-- Ensure consistency for higher C_i.
+- Maintain high scoring precision to avoid reputation penalties.
+- Ensure consistency with the final score F.
 - Monitor logs for validation failures.
-
+  
 ## For Buyers
 
 ### Participation Requirements
@@ -251,14 +252,14 @@ Post-validation checks ensure lead quality:
 
 2. **Collusion Check**: Analyzes buyer feedback and validator scoring patterns using PyGOD and DBScan.
    - Collusion Score (V_c) ≥ 0.7 flags validators.
-   - Penalty: R_i = 0 for 90 days, no emissions. Buyers are temporarily restricted.
+   - Penalty: If V_c ≥ 0.7, F_v is set to 0 for 90 days, disabling emissions. Affected buyers are also temporarily restricted from submitting queries.
 
 ## Technical Details
 
 ### Architecture
-- **Miners**: neurons/miner.py uses get_leads.py (our example open source model) to generate leads.
-- **Validators**: neurons/validator.py uses os_validator_model.py (our example open source model) and automated_checks.py for scoring.
-- **Buyers**: Leadpoet/api/leadpoet_api.py queries miners and recieves the validated leads.
+- **Miners**: neurons/miner.py uses get_leads.py to generate leads.
+- **Validators**: neurons/validator.py uses os_validator_model.py and automated_checks.py for scoring.
+- **Buyers**: Leadpoet/api/leadpoet_api.py queries miners and filters validated leads.
 - **Mock Mode**: Uses Leadpoet/mock.py (MockDendrite, MockSubtensor) for local testing.
 
 ### Lead Workflow
@@ -268,6 +269,9 @@ Post-validation checks ensure lead quality:
 4. Approved leads undergo automated_checks.py (≥90% to pass).
 5. Leads are added to a pool (Leadpoet/base/utils/pool.py) and filtered for delivery.
 6. Up to three retry attempts if validation or checks fail.
+
+### API Endpoints
+- **POST /generate_leads**: Request leads with num_leads (1-100), optional industry and region.
 
 ### Open-Source Frameworks
 - **Lead Generation**: miner_models/get_leads.py uses Hunter.io/Clearbit (non-mock mode).
@@ -316,7 +320,6 @@ Note: Mock mode uses dummy data and does not currently enforce active miner/vali
 ## Support
 - Email: [hello@leadpoet.com](mailto:hello@leadpoet.com)
 - Website: https://leadpoet.com
-- Issues: GitHub Issues
 
 ## License
 MIT License - see LICENSE for details.

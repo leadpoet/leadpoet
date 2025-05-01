@@ -1,3 +1,5 @@
+# Leadpoet/base/validator.py
+
 import copy
 import numpy as np
 import asyncio
@@ -13,10 +15,9 @@ from Leadpoet.base.utils.weight_utils import (
 )
 from Leadpoet.mock import MockDendrite
 from Leadpoet.utils.config import add_validator_args
-
+from Leadpoet.validator.reward import calculate_emissions
 
 class BaseValidatorNeuron(BaseNeuron):
-    """Base class for Bittensor validators."""
     neuron_type: str = "ValidatorNeuron"
 
     @classmethod
@@ -28,15 +29,14 @@ class BaseValidatorNeuron(BaseNeuron):
         super().__init__(config=config)
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
         is_mock = getattr(self.config, 'mock', False)
-
-        # Ensure config.neuron is initialized
+        
         if not hasattr(self.config, 'neuron') or self.config.neuron is None:
             self.config.neuron = bt.Config()
-            self.config.neuron.axon_off = False  # Default: serve axon unless explicitly disabled
-            self.config.neuron.num_concurrent_forwards = 1  # Default: single forward pass
-            self.config.neuron.full_path = "./validator_state"  # Default state path
-            self.config.neuron.moving_average_alpha = 0.1  # Default for score updates
-            self.config.neuron.sample_size = 10  # Default sample size
+            self.config.neuron.axon_off = False
+            self.config.neuron.num_concurrent_forwards = 1
+            self.config.neuron.full_path = "./validator_state"
+            self.config.neuron.moving_average_alpha = 0.1
+            self.config.neuron.sample_size = 10
             bt.logging.debug("Initialized config.neuron with defaults")
 
         self.dendrite = MockDendrite(wallet=self.wallet) if is_mock else bt.dendrite(wallet=self.wallet)
@@ -46,15 +46,13 @@ class BaseValidatorNeuron(BaseNeuron):
         self.sync()
         if not self.config.neuron.axon_off and not is_mock:
             self.serve_axon()
-        else:
-            bt.logging.warning("Axon off or in mock mode, not serving ip to chain.")
         self.should_exit = False
         self.is_running = False
         self.thread = None
         self.lock = asyncio.Lock()
+        self.total_emissions = 1000.0  # Mock value, remmber to replace with actual subnet emissions
 
     def serve_axon(self):
-        """Serve axon to enable external connections."""
         bt.logging.info("serving ip to chain...")
         try:
             self.axon = bt.axon(wallet=self.wallet, config=self.config)
@@ -74,12 +72,14 @@ class BaseValidatorNeuron(BaseNeuron):
             for _ in range(self.config.neuron.num_concurrent_forwards)
         ]
         await asyncio.gather(*coroutines)
+        # Calculate emissions after forward pass
+        emissions = calculate_emissions(self, self.total_emissions, [self])  # In a real subnet, include all validators
+        bt.logging.info(f"Validator emissions: {emissions}")
 
     def run(self):
         self.sync()
         bt.logging.info(f"Validator starting at block: {self.block}")
         try:
-            # Create a new event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             while True:

@@ -1,4 +1,0 @@
-[console_scripts]
-leadpoet = neurons.miner:main
-leadpoet-api = Leadpoet.api.leadpoet_api:main
-leadpoet-validate = neurons.validator:main

@@ -1,7 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.history/
+
+# macOS
+.DS_Store
+
+# Bittensor-specific
+*.log
+*.npz  # For validator state files (e.g., validator_state.npz)
+*.key  # For any stray key files
+
+# Leadpoet-specific
 wallet.hotkey/
 lead_pool.json
 leadpoet_subnet.egg-info/
-venv/
 .history/
 
-
+# Testing and Development
+*.pytest_cache/
+coverage/
+.coverage
+*.tox/

@@ -14,6 +14,7 @@ from Leadpoet.protocol import LeadRequest
 from validator_models.os_validator_model import validate_lead_list
 from validator_models.automated_checks import validate_lead_list as auto_check_leads
 from Leadpoet.validator.reward import post_approval_check
+from Leadpoet.base.utils.config import add_validator_args
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
@@ -23,9 +24,8 @@ class Validator(BaseValidatorNeuron):
         
         self.email_regex = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
         self.sample_ratio = 0.2
-        self.use_open_source_model = config.get("use_open_source_validator_model", True) if config else True
+        self.use_open_source_model = config.get("neuron", {}).get("use_open_source_validator_model", True)
         
-      
         self.precision = 15.0 
         self.consistency = 1.0  
         self.collusion_flag = 1  # F_v: 1 (no collusion) or 0 (collusion)
@@ -53,7 +53,7 @@ class Validator(BaseValidatorNeuron):
         if self.use_open_source_model:
             report = await validate_lead_list(leads, industry or "Unknown")
             O_v = report["score"] / 100.0
-            if await self.run_automated_checks(leads) == False:
+            if not await self.run_automated_checks(leads):
                 O_v = 0.0  # Set O_v = 0 if automated checks fail
             return {"score": report["score"], "O_v": O_v}
         else:
@@ -61,7 +61,7 @@ class Validator(BaseValidatorNeuron):
             sample_leads = random.sample(leads, min(sample_size, len(leads)))
             valid_emails = sum(1 for lead in sample_leads if self.validate_email(lead.get('Owner(s) Email', '')))
             O_v = random.uniform(0.8, 1.0) * (valid_emails / sample_size)
-            if await self.run_automated_checks(leads) == False:
+            if not await self.run_automated_checks(leads):
                 O_v = 0.0
             return {"score": O_v * 100, "O_v": O_v}
 
@@ -292,13 +292,20 @@ class Validator(BaseValidatorNeuron):
 
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Validator")
+    # Add bittensor arguments directly
+    bt.wallet.add_args(parser)
+    bt.subtensor.add_args(parser)
+    bt.logging.add_args(parser)
+    bt.axon.add_args(parser)
+    # Add validator-specific arguments
+    add_validator_args(None, parser)
+    # Add custom arguments
     parser.add_argument("--wallet_name", type=str, help="Wallet name")
     parser.add_argument("--wallet_hotkey", type=str, help="Wallet hotkey")
     parser.add_argument("--netuid", type=int, default=343, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default="test", help="Subtensor network")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
-    BaseValidatorNeuron.add_args(parser)
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -313,10 +320,14 @@ def main():
     config.subtensor.network = args.subtensor_network
     config.mock = args.mock
     config.neuron = bt.Config()
-    config.neuron.sample_size = getattr(args, 'neuron_sample_size', 10)
+    config.neuron.sample_size = getattr(args, 'neuron_sample_size', 50)  # Match default from add_validator_args
     config.neuron.moving_average_alpha = getattr(args, 'neuron_moving_average_alpha', 0.1)
     config.neuron.use_open_source_validator_model = getattr(args, 'use_open_source_validator_model', True)
-    config.neuron.num_concurrent_forwards = 1
+    config.neuron.num_concurrent_forwards = getattr(args, 'neuron_num_concurrent_forwards', 1)
+    config.neuron.timeout = getattr(args, 'neuron_timeout', 10)
+    config.neuron.name = getattr(args, 'neuron_name', 'validator')
+    config.neuron.disable_set_weights = getattr(args, 'neuron_disable_set_weights', False)
+    config.neuron.vpermit_tao_limit = getattr(args, 'neuron_vpermit_tao_limit', 4096)
 
     with Validator(config=config) as validator:
         while True:

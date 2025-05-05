@@ -7,7 +7,7 @@ from Leadpoet.protocol import LeadRequest
 from Leadpoet.mock import MockDendrite
 
 async def ping_uids(dendrite, metagraph, uids, timeout=5, mock=False):
-    # In mock mode, assume all UIDs are available
+    # In mock mode - assume all UIDs are available
     if mock or getattr(bt.config(), 'mock', False) or isinstance(dendrite, MockDendrite):
         bt.logging.debug(f"Mock mode or MockDendrite: Assuming all UIDs {uids} are available")
         return uids, []

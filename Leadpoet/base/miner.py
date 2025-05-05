@@ -8,16 +8,12 @@ from Leadpoet.base.neuron import BaseNeuron
 from typing import Union
 
 class BaseMinerNeuron(BaseNeuron):
-    """
-    Base class for Bittensor miners.
-    """
+   
     neuron_type: str = "MinerNeuron"
 
     @classmethod
     def add_args(cls, parser: argparse.ArgumentParser):
-        """
-        Adds command-line arguments for the miner, including common and miner-specific options.
-        """
+    
         parser.add_argument(
             "--netuid",
             type=int,
@@ -134,9 +130,7 @@ class BaseMinerNeuron(BaseNeuron):
                         time.sleep(retry_delay)
             if self.uid is None:
                 bt.logging.warning(f"Wallet {self.config.wallet_name}/{self.config.wallet_hotkey} not registered on netuid {self.config.netuid} after {max_retries} attempts")
-                # Temporary manual UID (replace with actual UID from registration)
-                # self.uid = 3  # Uncomment and set to known UID if needed
-                # bt.logging.info(f"Manually set UID to {self.uid}")
+              
 
         # Warn if allowing incoming requests from anyone
         if not self.config.blacklist_force_validator_permit:

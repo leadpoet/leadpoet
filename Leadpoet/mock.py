@@ -11,7 +11,6 @@ import numpy as np
 from validator_models.automated_checks import validate_lead_list as auto_check_leads
 
 class MockWallet:
-    """A mock wallet class for use in mock mode, bypassing file-based key access."""
     def __init__(self, name: str = "mock_wallet", hotkey: str = "default"):
         self.name = name
         self.hotkey_str = hotkey

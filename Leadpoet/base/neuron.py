@@ -2,10 +2,10 @@ import numpy as np
 import bittensor as bt
 import os
 import sys
-import argparse  # Added for add_args
+import argparse 
 
 class MockAxonInfo:
-    """Simple mock AxonInfo class to mimic bittensor.AxonInfo."""
+
     def __init__(self):
         self.ip = "0.0.0.0"
         self.port = 0
@@ -16,7 +16,7 @@ class MockAxonInfo:
         self.is_serving = True
 
 class MockNeuron:
-    """Simple mock neuron class to mimic NeuronInfoLite."""
+   
     def __init__(self, uid, stake, hotkey):
         self.uid = uid
         self.stake = stake
@@ -34,7 +34,7 @@ class MockNeuron:
         self.axon_info = MockAxonInfo()
 
 class MockSubtensor:
-    """Minimal mock Subtensor class to bypass connection attempts."""
+   
     def __init__(self, netuid=343):  # Default to command-line netuid
         self.netuid = netuid
         self.chain_endpoint = None
@@ -61,7 +61,7 @@ class MockSubtensor:
         return None
 
 class MockWallet:
-    """Simple mock wallet class to bypass keyfile requirements in mock mode."""
+    
     def __init__(self):
         self.hotkey = MockHotkey()
         self.coldkey = MockColdkey()
@@ -75,24 +75,24 @@ class MockWallet:
         return MockKeyfile()
 
 class MockHotkey:
-    """Mock hotkey with a dummy SS58 address."""
+
     ss58_address = "5MockHotkeyAddress123456789"
 
 class MockColdkey:
-    """Mock coldkey with a dummy SS58 address."""
+    
     ss58_address = "5MockColdkeyAddress123456789"
 
 class MockKeyfile:
-    """Mock keyfile to simulate existence."""
+    
     def exists(self):
         return True
 
 class BaseNeuron:
-    """Base class for all neurons in the Leadpoet subnet."""
+   
     @classmethod
     def add_args(cls, parser: argparse.ArgumentParser):
-        """Basic argument parser method for inheritance."""
-        pass  # Minimal implementation to satisfy super() call
+        
+        pass  # _
 
     def __init__(self, config=None):
         if config is None:
@@ -141,5 +141,5 @@ class BaseNeuron:
         self.block = self.subtensor.get_current_block() if not is_mock else 1
 
     def sync(self):
-        """Syncs the metagraph with the network."""
+        
         self.metagraph.sync(subtensor=self.subtensor)

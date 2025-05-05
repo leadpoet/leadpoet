@@ -7,16 +7,7 @@ import typing
 import bittensor as bt
 
 class LeadRequest(bt.Synapse):
-    """
-    Protocol for the LeadPoet subnet. Validators send a LeadRequest to miners specifying the number
-    of leads needed and optional filters (industry, region). Miners respond by filling the leads field.
-
-    Attributes:
-        num_leads (int): Number of leads requested by the validator (1-100).
-        industry (Optional[str]): Optional filter for the industry of the leads.
-        region (Optional[str]): Optional filter for the region of the leads.
-        leads (Optional[List[dict]]): List of lead dictionaries filled by the miner.
-    """
+   
     num_leads: int
     industry: typing.Optional[str] = None
     region: typing.Optional[str] = None

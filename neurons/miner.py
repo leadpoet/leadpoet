@@ -4,6 +4,7 @@ import threading
 import argparse
 import traceback
 import bittensor as bt
+import socket
 from Leadpoet.base.miner import BaseMinerNeuron
 from Leadpoet.protocol import LeadRequest
 from miner_models.get_leads import get_leads
@@ -71,13 +72,31 @@ class Miner(BaseMinerNeuron):
         """Assigns priority to requests (default: equal priority)."""
         return 1.0
 
+    def check_port_availability(self, port: int) -> bool:
+        """Check if a port is available."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('0.0.0.0', port))
+                return True
+            except socket.error:
+                return False
+
+    def find_available_port(self, start_port: int, max_attempts: int = 10) -> int:
+        """Find an available port starting from start_port."""
+        port = start_port
+        for _ in range(max_attempts):
+            if self.check_port_availability(port):
+                return port
+            port += 1
+        raise RuntimeError(f"No available ports found between {start_port} and {start_port + max_attempts - 1}")
+
 def main():
     """Entry point for the leadpoet command."""
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     # Add miner-specific arguments from BaseMinerNeuron
-    BaseMinerNeuron.add_args(parser)  # Adds netuid, subtensor_network, wallet, blacklist, etc.
-    # Add additional arguments not covered by BaseMinerNeuron
-    parser.add_argument("--axon_port", type=int, default=8091, help="Port for axon")
+    BaseMinerNeuron.add_args(parser)
+    # Add additional arguments
+    parser.add_argument("--axon_port", type=int, default=8092, help="Port for axon")
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -101,7 +120,16 @@ def main():
     config.neuron.epoch_length = args.neuron_epoch_length
     config.use_open_source_lead_model = args.use_open_source_lead_model
 
-    with Miner(config=config) as miner:
+    miner = Miner(config=config)
+    try:
+        # Find an available port
+        config.axon.port = miner.find_available_port(config.axon.port)
+        bt.logging.info(f"Using axon port: {config.axon.port}")
+    except RuntimeError as e:
+        bt.logging.error(str(e))
+        return
+
+    with miner:
         while True:
             bt.logging.info(f"Miner running... {time.time()}")
             time.sleep(5)

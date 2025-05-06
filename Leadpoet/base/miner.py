@@ -8,12 +8,10 @@ from Leadpoet.base.neuron import BaseNeuron
 from typing import Union
 
 class BaseMinerNeuron(BaseNeuron):
-   
     neuron_type: str = "MinerNeuron"
 
     @classmethod
     def add_args(cls, parser: argparse.ArgumentParser):
-    
         parser.add_argument(
             "--netuid",
             type=int,
@@ -80,17 +78,15 @@ class BaseMinerNeuron(BaseNeuron):
             bt.logging.set_trace(True)
         is_mock = getattr(self.config, 'mock', False)
 
-        # Ensure config.axon is initialized
         if not hasattr(self.config, 'axon') or self.config.axon is None:
             self.config.axon = bt.Config()
             self.config.axon.ip = "0.0.0.0"
             self.config.axon.port = 8091
             bt.logging.debug("Initialized config.axon with default values")
 
-        # Set miner UID
         self.uid = None
         if is_mock:
-            self.uid = 0  # Default UID for mock mode
+            self.uid = 0
             bt.logging.info(f"Mock mode: Set miner UID to {self.uid}")
         else:
             max_retries = 5
@@ -99,7 +95,6 @@ class BaseMinerNeuron(BaseNeuron):
             bt.logging.debug(f"Attempting to set UID for hotkey: {hotkey}")
             for attempt in range(max_retries):
                 try:
-                    # Try neurons_lite
                     bt.logging.debug("Querying neurons_lite")
                     neurons = self.subtensor.neurons_lite(netuid=self.config.netuid)
                     bt.logging.debug(f"Neurons retrieved via neurons_lite: {[n.hotkey for n in neurons]}")
@@ -110,7 +105,6 @@ class BaseMinerNeuron(BaseNeuron):
                             break
                     if self.uid is not None:
                         break
-                    # Fallback to neurons
                     bt.logging.debug("Falling back to neurons method")
                     neurons = self.subtensor.neurons(netuid=self.config.netuid)
                     bt.logging.debug(f"Neurons retrieved via neurons: {[n.hotkey for n in neurons]}")
@@ -130,15 +124,12 @@ class BaseMinerNeuron(BaseNeuron):
                         time.sleep(retry_delay)
             if self.uid is None:
                 bt.logging.warning(f"Wallet {self.config.wallet_name}/{self.config.wallet_hotkey} not registered on netuid {self.config.netuid} after {max_retries} attempts")
-              
 
-        # Warn if allowing incoming requests from anyone
         if not self.config.blacklist_force_validator_permit:
             bt.logging.warning("You are allowing non-validators to send requests to your miner. This is a security risk.")
         if self.config.blacklist_allow_non_registered:
             bt.logging.warning("You are allowing non-registered entities to send requests to your miner. This is a security risk.")
 
-        # Initialize axon
         self.axon = bt.axon(
             wallet=self.wallet,
             config=self.config() if callable(self.config) else self.config,
@@ -151,7 +142,6 @@ class BaseMinerNeuron(BaseNeuron):
         )
         bt.logging.info(f"Axon created: {self.axon}")
 
-        # Instantiate runners
         self.should_exit: bool = False
         self.is_running: bool = False
         self.thread: Union[threading.Thread, None] = None
@@ -173,19 +163,18 @@ class BaseMinerNeuron(BaseNeuron):
         bt.logging.info(f"Miner starting at block: {self.block}")
         try:
             while not self.should_exit:
+                bt.logging.info(f"Miner running... {time.time()}")
+                time.sleep(5)
                 if self.config.mock:
-                    # In mock mode, skip epoch length check as last_update may be None
-                    time.sleep(1)
-                    if self.should_exit:
-                        break
                     self.sync()
                     self.step += 1
                 else:
-                    while (
-                        self.uid is not None and
-                        self.metagraph.last_update[self.uid] is not None and
-                        self.block - self.metagraph.last_update[self.uid] < self.config.neuron_epoch_length
-                    ):
+                    last_update = self.metagraph.last_update[self.uid] if self.uid is not None and self.uid < len(self.metagraph.last_update) else 0
+                    if last_update is None or last_update == 0:
+                        bt.logging.warning(f"last_update for UID {self.uid} is invalid. Resyncing metagraph.")
+                        self.resync_metagraph()
+                        continue
+                    while self.uid is not None and self.block - last_update < self.config.neuron_epoch_length:
                         time.sleep(1)
                         if self.should_exit:
                             break

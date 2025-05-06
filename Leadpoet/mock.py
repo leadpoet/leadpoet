@@ -1,5 +1,3 @@
-# Leadpoet/mock.py
-
 import time
 import asyncio
 import random
@@ -16,9 +14,9 @@ class MockWallet:
         self.hotkey_str = hotkey
         self._hotkey = MockHotkey()
         self._coldkey = MockHotkey()
-        self.hotkey_ss58_address = "5MockHotkeyAddress123456789"  # Direct attribute for compatibility
+        self.hotkey_ss58_address = "5MockHotkeyAddress123456789"
         self.coldkey_ss58_address = "5MockColdkeyAddress123456789"
-        self.ss58_address = "5MockHotkeyAddress123456789"  # Fallback for dendrite compatibility
+        self.ss58_address = "5MockHotkeyAddress123456789"
 
     @property
     def hotkey(self):
@@ -29,26 +27,22 @@ class MockWallet:
         return self._coldkey
 
     def sign(self, data: bytes) -> bytes:
-        """Mock sign method to handle unexpected dendrite calls."""
         bt.logging.debug("MockWallet.sign called, returning dummy signature")
-        return b"\x00" * 64  # Dummy 64-byte signature
+        return b"\x00" * 64
 
 class MockHotkey:
-    """A mock hotkey class to simulate a bittensor keypair."""
     def __init__(self):
         self.ss58_address = "5MockHotkeyAddress123456789"
-        self.public_key = b"\x00" * 32  # Dummy public key
+        self.public_key = b"\x00" * 32
 
     def verify(self, *args, **kwargs):
-        return True  # Always pass verification in mock mode
+        return True
 
     def sign(self, data: bytes) -> bytes:
-        """Mock sign method to handle unexpected dendrite calls."""
         bt.logging.debug("MockHotkey.sign called, returning dummy signature")
-        return b"\x00" * 64  # Dummy 64-byte signature
+        return b"\x00" * 64
 
 class MockSubtensor(bt.MockSubtensor):
-    """Mock Bittensor subtensor for LeadPoet subnet simulation."""
     def __init__(self, netuid: int = 343, n: int = 5, wallet: Optional[bt.wallet] = None, network: str = "mock"):
         super().__init__(network=network)
         self.netuid = netuid
@@ -60,7 +54,6 @@ class MockSubtensor(bt.MockSubtensor):
         bt.logging.debug(f"Subnet info for netuid {netuid}: {self._subnets.get(netuid, {})}")
 
     def _initialize_subnet(self, netuid: int):
-        """Initialize subnet with default values."""
         if not self.subnet_exists(netuid):
             self.create_subnet(netuid)
         self._subnets[netuid] = {
@@ -229,7 +222,7 @@ class MockSubtensor(bt.MockSubtensor):
                 'hotkey': wallet_hotkey,
                 'coldkey': wallet_coldkey,
                 'balance': 100000,
-                'stake': 100000,  # Ensure stake is set
+                'stake': 20.0,
                 'validator_permit': True,
                 'ip': '127.0.0.1',
                 'port': 8091,
@@ -244,7 +237,7 @@ class MockSubtensor(bt.MockSubtensor):
                 'hotkey': f"miner-hotkey-{i}",
                 'coldkey': f"mock-coldkey-{i}",
                 'balance': 100000,
-                'stake': 100000,  # Ensure stake is set
+                'stake': 2.0,
                 'validator_permit': False,
                 'ip': '127.0.0.1',
                 'port': 8091 + i,
@@ -306,7 +299,6 @@ class MockSubtensor(bt.MockSubtensor):
         return None
 
     def get_metagraph_info(self, netuid: int, block: Optional[int] = None) -> 'bt.MetagraphInfo':
-        """Mock implementation of get_metagraph_info."""
         if not self.subnet_exists(netuid):
             raise Exception("Subnet does not exist")
         subnet_info = self._subnets.get(netuid)
@@ -479,27 +471,61 @@ class MockMetagraph(bt.metagraph):
         if subtensor is not None:
             self.subtensor = subtensor
         self.sync(subtensor=subtensor)
-        # Initialize stake array
-        self.S = np.array([neuron.stake for neuron in self.neurons], dtype=np.float32)
-        for axon in self.axons:
-            axon.ip = "127.0.0.1"
-            axon.port = 8091 + self.axons.index(axon)
-        bt.logging.info(f"MockMetagraph: {self}")
+        neurons = self.subtensor.neurons_lite(netuid=netuid)
+        self.S = np.array([neuron.stake for neuron in neurons], dtype=np.float32)
+        self.axons = [
+            bt.AxonInfo(
+                ip="127.0.0.1",
+                port=8091 + neuron.uid,
+                ip_type=4,
+                hotkey=neuron.hotkey,
+                coldkey=neuron.coldkey,
+                version=600
+            ) for neuron in neurons
+        ]
+        self.n = len(neurons)
+        self.hotkeys = [neuron.hotkey for neuron in neurons]
+        self.validator_permit = [neuron.validator_permit for neuron in neurons]
+        bt.logging.info(f"MockMetagraph initialized: {len(neurons)} neurons, stakes: {self.S.tolist()}")
         bt.logging.debug(f"Axons: {self.axons}")
         bt.logging.debug(f"Stake array (S): {self.S}")
 
+    def sync(self, subtensor=None):
+        if subtensor is None:
+            subtensor = self.subtensor
+        super().sync(subtensor=subtensor)
+        neurons = subtensor.neurons_lite(netuid=self.netuid)
+        self.S = np.array([neuron.stake for neuron in neurons], dtype=np.float32)
+        self.axons = [
+            bt.AxonInfo(
+                ip="127.0.0.1",
+                port=8091 + neuron.uid,
+                ip_type=4,
+                hotkey=neuron.hotkey,
+                coldkey=neuron.coldkey,
+                version=600
+            ) for neuron in neurons
+        ]
+        self.n = len(neurons)
+        self.hotkeys = [neuron.hotkey for neuron in neurons]
+        self.validator_permit = [neuron.validator_permit for neuron in neurons]
+        bt.logging.debug(f"MockMetagraph synced: {len(neurons)} neurons, stakes: {self.S.tolist()}")
+
 class MockDendrite(bt.dendrite):
-    """Mock dendrite for LeadPoet subnet, simulating miner responses."""
     def __init__(self, wallet: bt.wallet, use_open_source: bool = True):
         super().__init__(wallet)
         self._wallet = wallet
         self.use_open_source = use_open_source
         self.email_counter = 0
         self._session = None
+        self.miner = None
         bt.logging.debug(f"MockDendrite initialized with wallet: {self._wallet}")
 
+    def set_miner(self, miner):
+        self.miner = miner
+        bt.logging.debug("Miner set for MockDendrite")
+
     def generate_dummy_lead(self) -> Dict:
-        """Generate a single dummy lead."""
         self.email_counter += 1
         lead = {
             "Business": f"Mock Business {self.email_counter}",
@@ -516,9 +542,7 @@ class MockDendrite(bt.dendrite):
         return lead
 
     def preprocess_synapse_for_request(self, axon: bt.AxonInfo, synapse: bt.Synapse, timeout: float) -> bt.Synapse:
-        """Override preprocessing for mock wallet."""
         try:
-            # Use wallet's hotkey_ss58_address or fallback
             wallet_hotkey = getattr(self._wallet, 'hotkey_ss58_address', '5MockHotkeyAddress123456789')
             synapse.dendrite = bt.TerminalInfo(
                 hotkey=wallet_hotkey,
@@ -553,7 +577,6 @@ class MockDendrite(bt.dendrite):
         run_async: bool = True,
         streaming: bool = False,
     ) -> List[LeadRequest]:
-        """Simulate miner responses."""
         bt.logging.debug(f"MockDendrite.forward called with {len(axons)} axons, synapse={synapse}")
         if streaming:
             raise NotImplementedError("Streaming not implemented.")
@@ -564,6 +587,7 @@ class MockDendrite(bt.dendrite):
             bt.logging.debug(f"Querying axon {axon.hotkey} at {axon.ip}:{axon.port}")
             start_time = time.time()
             response = synapse.copy()
+            normalized_leads = []  # Initialize to avoid undefined variable
             try:
                 response = self.preprocess_synapse_for_request(axon, response, timeout)
                 process_time = random.uniform(0.5, min(5, timeout))
@@ -576,7 +600,15 @@ class MockDendrite(bt.dendrite):
                     response.dendrite.status_message = "Timeout"
                     response.dendrite.process_time = str(timeout)
                 else:
-                    if self.use_open_source:
+                    if self.miner and hasattr(self.miner, 'forward'):
+                        miner_response = await self.miner.forward(response)
+                        if isinstance(miner_response, LeadRequest) and miner_response.leads:
+                            normalized_leads = miner_response.leads
+                            bt.logging.debug(f"Miner processed {len(normalized_leads)} leads for axon {axon.hotkey}")
+                        else:
+                            bt.logging.warning(f"Miner returned invalid response for axon {axon.hotkey}")
+                            normalized_leads = [self.generate_dummy_lead() for _ in range(synapse.num_leads)]
+                    elif self.use_open_source:
                         try:
                             bt.logging.debug(f"Calling get_leads for {synapse.num_leads} leads, industry={synapse.industry}, region={synapse.region}")
                             leads = await get_leads(synapse.num_leads, synapse.industry, synapse.region)

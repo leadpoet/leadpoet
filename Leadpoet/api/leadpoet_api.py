@@ -1,5 +1,3 @@
-# Leadpoet/api/leadpoet_api.py
-
 import bittensor as bt
 from typing import List, Optional, Union, Any, Dict
 import asyncio
@@ -73,9 +71,16 @@ class LeadPoetAPI:
             
             if not leads:
                 bt.logging.error("No valid leads received from miners.")
-                raise RuntimeError("No valid leads returned by miners")
+                attempt += 1
+                if attempt > max_retries:
+                    bt.logging.error(f"Max retries ({max_retries}) reached, no valid leads found.")
+                    return []
+                continue
 
-            validation = await validate_lead_list(leads, industry=industry)
+            # Send leads to validator for scoring
+            from neurons.validator import Validator
+            validator = Validator(config=bt.config())  # Initialize validator with mock config
+            validation = await validator.validate_leads(leads, industry=industry)
             score = validation["score"] / 100.0
             bt.logging.info(f"Lead validation score: {score}")
 
@@ -117,9 +122,8 @@ class LeadPoetAPI:
         return []
 
     async def submit_feedback(self, leads: List[Dict], feedback_score: float):
-        """Submit buyer feedback to validators."""
-        from neurons.validator import Validator  # Avoid circular import
-        validator = Validator(config=self.config)  # Mock validator instance
+        from neurons.validator import Validator
+        validator = Validator(config=bt.config())
         await validator.handle_buyer_feedback(leads, feedback_score)
         bt.logging.info(f"Submitted feedback score {feedback_score} for leads")
 
@@ -153,11 +157,11 @@ def main():
     num_leads = int(input("Enter number of leads (1-100): "))
     print(f"Available industries: {', '.join(VALID_INDUSTRIES)}")
     while True:
-        industry = input("Enter industry (or press Enter to skip): ").strip() or None
+        industry = input("Enter industry: ").strip() 
         if industry is None or industry in VALID_INDUSTRIES:
             break
         print(f"Invalid industry. Please choose from: {', '.join(VALID_INDUSTRIES)}")
-    region = input("Enter region (e.g., 'US') or press Enter to skip: ").strip() or None
+    region = input("Enter region (e.g., 'US'): ").strip() 
 
     async def fetch_leads():
         leads = await api.get_leads(num_leads, industry, region)

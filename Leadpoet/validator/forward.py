@@ -1,5 +1,3 @@
-# Leadpoet/validator/forward.py
-
 import time
 import asyncio
 import numpy as np
@@ -12,7 +10,7 @@ from validator_models.os_validator_model import validate_lead_list
 async def forward(
     self,
     post_process=None,
-    num_leads: int = 100,
+    num_leads: int = 10,
     industry: str = None,
     region: str = None,
 ) -> Tuple[np.ndarray, list]:
@@ -31,17 +29,20 @@ async def forward(
     responses = await self.dendrite(
         axons=axons,
         synapse=request,
-        timeout=30,
+        timeout=60,
         deserialize=True
     )
     bt.logging.info(f"Received {len(responses)} lead batch responses from miners")
 
-    rewards = np.zeros(len(responses), dtype=np.float32)
+    rewards = np.zeros(len(miner_uids), dtype=np.float32)
+    valid_responses = []
+
     for idx, response in enumerate(responses):
         if not isinstance(response, LeadRequest):
             bt.logging.warning(f"Invalid response from UID {miner_uids[idx]}: Not a LeadRequest")
             rewards[idx] = 0.0
             continue
+
         if response.dendrite.status_code != 200:
             bt.logging.warning(f"Invalid response from UID {miner_uids[idx]}: Status {response.dendrite.status_code}")
             rewards[idx] = 0.0
@@ -51,10 +52,11 @@ async def forward(
             rewards[idx] = 0.0
             continue
         validation = await self.validate_leads(response.leads, industry=response.industry)
-        rewards[idx] = validation["O_v"]  # Use O_v as the reward
+        rewards[idx] = validation["O_v"]
+        valid_responses.append(response)
 
     if post_process is not None:
-        await post_process(rewards, miner_uids, responses)
+        await post_process(rewards, miner_uids, valid_responses)
 
     self.update_scores(rewards, miner_uids)
     bt.logging.info(f"Scored responses: {rewards.tolist()}")

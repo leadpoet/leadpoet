@@ -1,5 +1,3 @@
-# neurons/validator.py
-
 import re
 import time
 import random
@@ -28,7 +26,7 @@ class Validator(BaseValidatorNeuron):
         
         self.precision = 15.0 
         self.consistency = 1.0  
-        self.collusion_flag = 1  # F_v: 1 (no collusion) or 0 (collusion)
+        self.collusion_flag = 1
         self.reputation = self.precision * self.consistency * self.collusion_flag  
         self.validation_history = []  
         self.trusted_validator = False  
@@ -54,7 +52,7 @@ class Validator(BaseValidatorNeuron):
             report = await validate_lead_list(leads, industry or "Unknown")
             O_v = report["score"] / 100.0
             if not await self.run_automated_checks(leads):
-                O_v = 0.0  # Set O_v = 0 if automated checks fail
+                O_v = 0.0
             return {"score": report["score"], "O_v": O_v}
         else:
             sample_size = max(1, int(len(leads) * self.sample_ratio))
@@ -71,12 +69,11 @@ class Validator(BaseValidatorNeuron):
         return valid_count / len(leads) >= 0.9 if leads else False
 
     async def reputation_challenge(self):
-        """Simulate dummy lead list audit."""
         dummy_leads = [
-            {"Business": f"Mock Business {i}", "Owner(s) Email": f"owner{i}@mock.com", "Website": f"https://business{i}.com", "Industry": "Tech & AI"}
+            {"Business": f"Mock Business {i}", "Owner(s) Email": f"owner{i}@mockleadpoet.com", "Website": f"https://business{i}.com", "Industry": "Tech & AI"}
             for i in range(10)
         ]
-        known_score = random.uniform(0.8, 1.0)  # Simulate known quality score
+        known_score = random.uniform(0.8, 1.0)
         validation = await self.validate_leads(dummy_leads)
         O_v = validation["O_v"]
         if abs(O_v - known_score) <= 0.1:
@@ -87,7 +84,6 @@ class Validator(BaseValidatorNeuron):
         self.update_reputation()
 
     def update_consistency(self):
-        """Calculate C_v based on J_v over 14, 30, and 90 days."""
         now = datetime.now()
         periods = {
             "14_days": timedelta(days=14),
@@ -109,15 +105,12 @@ class Validator(BaseValidatorNeuron):
         bt.logging.debug(f"Updated C_v: {self.consistency}, J_v: {J_v}")
 
     def update_reputation(self):
-        """Calculate R_v = P_v * C_v * F_v."""
         self.reputation = self.precision * self.consistency * self.collusion_flag
-        # Check trusted validator status
         registration_duration = (datetime.now() - self.registration_time).days
         self.trusted_validator = self.reputation > 85 and registration_duration >= 30
         bt.logging.debug(f"Updated R_v: {self.reputation}, Trusted: {self.trusted_validator}")
 
     async def handle_buyer_feedback(self, leads: list, feedback_score: float):
-        """Adjust P_v and F based on buyer feedback (B)."""
         feedback_map = {
             (0, 1): (-20, 0.0),
             (1, 5): (-10, 0.2),
@@ -129,7 +122,6 @@ class Validator(BaseValidatorNeuron):
         for (low, high), (p_adj, f_new) in feedback_map.items():
             if low < feedback_score <= high:
                 self.precision = max(0, min(100, self.precision + p_adj))
-                # Update validation history with new F
                 for validation in self.validation_history:
                     if validation["leads"] == leads:
                         validation["F"] = f_new
@@ -138,7 +130,6 @@ class Validator(BaseValidatorNeuron):
         self.update_reputation()
 
     async def submit_appeal(self):
-        """Submit a collusion flag appeal."""
         if self.collusion_flag == 1:
             bt.logging.info("No collusion flag to appeal")
             return
@@ -146,7 +137,6 @@ class Validator(BaseValidatorNeuron):
         bt.logging.info("Collusion flag appeal submitted")
 
     async def vote_on_appeal(self, validator_hotkey: str, vote: int):
-        """Vote on an appeal (E_v = 0 or 1)."""
         if self.appeal_status is None or self.appeal_status != "pending":
             bt.logging.warning("No active appeal to vote on")
             return
@@ -155,7 +145,6 @@ class Validator(BaseValidatorNeuron):
         bt.logging.debug(f"Vote submitted: E_v={vote}, H_v={weight}")
 
     async def resolve_appeal(self):
-        """Resolve appeal after 7 days."""
         if self.appeal_status is None or (datetime.now() - self.appeal_status["start_time"]).days < 7:
             return
         votes = self.appeal_status["votes"]
@@ -175,22 +164,21 @@ class Validator(BaseValidatorNeuron):
         self.update_reputation()
 
     async def forward(self):
-        await forward(self, post_process=self._post_process_with_checks, num_leads=100)
+        await forward(self, post_process=self._post_process_with_checks, num_leads=10)
 
     async def _post_process_with_checks(self, rewards: np.ndarray, miner_uids: list, responses: list):
-        """Calculate F, update P_v, and handle trusted validator logic."""
-        validators = [self]  # In a real subnet, query other validators
+        validators = [self]
         validator_scores = []
         trusted_validators = [v for v in validators if v.trusted_validator]
         
         for i, response in enumerate(responses):
-            if not response.leads:
+            if not isinstance(response, LeadRequest) or not response.leads:
+                bt.logging.warning(f"Skipping invalid response from UID {miner_uids[i]}")
                 continue
-            validation = await self.validate_leads(response.leads, response.industry)
+            validation = await self.validate_leads(response.leads, industry=response.industry)
             O_v = validation["O_v"]
             validator_scores.append({"O_v": O_v, "R_v": self.reputation, "leads": response.leads})
         
-        # Check trusted validator conditions
         trusted_low_scores = sum(1 for v in trusted_validators for s in validator_scores if v == self and s["O_v"] < 0.8)
         trusted_rejections = sum(1 for v in trusted_validators for s in validator_scores if v == self and s["O_v"] == 0)
         use_trusted = trusted_low_scores / len(trusted_validators) > 0.67 if trusted_validators else False
@@ -200,7 +188,6 @@ class Validator(BaseValidatorNeuron):
             bt.logging.info("Submission rejected by >50% trusted validators")
             return
         
-        # Calculate F
         Rs_total = sum(s["R_v"] for s in validator_scores if s["R_v"] > 15)
         F = sum(s["O_v"] * (s["R_v"] / Rs_total) for s in validator_scores if s["R_v"] > 15) if Rs_total > 0 else 0
         if use_trusted:
@@ -208,7 +195,6 @@ class Validator(BaseValidatorNeuron):
             Rs_total_trusted = sum(s["R_v"] for s in trusted_scores if s["R_v"] > 15)
             F = sum(s["O_v"] * (s["R_v"] / Rs_total_trusted) for s in trusted_scores if s["R_v"] > 15) if Rs_total_trusted > 0 else 0
         
-        # Update P_v and history
         for s in validator_scores:
             if abs(s["O_v"] - F) <= 0.1:
                 self.precision = min(100, self.precision + 10)
@@ -219,9 +205,8 @@ class Validator(BaseValidatorNeuron):
         self.update_consistency()
         self.update_reputation()
         
-        # Add to pool if approved
         for i, (reward, response) in enumerate(zip(rewards, responses)):
-            if reward >= 0.9 and response.leads:
+            if reward >= 0.9 and isinstance(response, LeadRequest) and response.leads:
                 if await self.run_automated_checks(response.leads):
                     from Leadpoet.base.utils.pool import add_to_pool
                     add_to_pool(response.leads)
@@ -230,12 +215,10 @@ class Validator(BaseValidatorNeuron):
                     self.precision = max(0, self.precision - 15)
                     bt.logging.warning(f"Post-approval check failed for UID {miner_uids[i]}, P_v reduced: {self.precision}")
         
-        # Periodically run reputation challenge
-        if random.random() < 0.1:  # 10% chance per forward pass
+        if random.random() < 0.1:
             await self.reputation_challenge()
 
     def save_state(self):
-        """Saves validator state."""
         bt.logging.info("Saving validator state.")
         state_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "validator_state.npz")
         np.savez(
@@ -253,7 +236,6 @@ class Validator(BaseValidatorNeuron):
         )
 
     def load_state(self):
-        """Loads validator state with defaults if not found."""
         state_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "validator_state.npz")
         if os.path.exists(state_path):
             bt.logging.info("Loading validator state.")
@@ -277,7 +259,6 @@ class Validator(BaseValidatorNeuron):
             self._initialize_default_state()
 
     def _initialize_default_state(self):
-        """Initializes default state values."""
         self.step = 0
         self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
         self.hotkeys = self.metagraph.hotkeys.copy()
@@ -292,18 +273,16 @@ class Validator(BaseValidatorNeuron):
 
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Validator")
-    # Add bittensor arguments directly
     bt.wallet.add_args(parser)
     bt.subtensor.add_args(parser)
     bt.logging.add_args(parser)
     bt.axon.add_args(parser)
-    # Add validator-specific arguments
     add_validator_args(None, parser)
-    # Add custom arguments
     parser.add_argument("--wallet_name", type=str, help="Wallet name")
     parser.add_argument("--wallet_hotkey", type=str, help="Wallet hotkey")
     parser.add_argument("--netuid", type=int, default=343, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default="test", help="Subtensor network")
+    parser.add_argument("--axon_port", type=int, default=8093, help="Port for axon")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
     args = parser.parse_args()
@@ -319,8 +298,10 @@ def main():
     config.subtensor = bt.Config()
     config.subtensor.network = args.subtensor_network
     config.mock = args.mock
+    config.axon = bt.Config()
+    config.axon.port = args.axon_port
     config.neuron = bt.Config()
-    config.neuron.sample_size = getattr(args, 'neuron_sample_size', 50)  # Match default from add_validator_args
+    config.neuron.sample_size = getattr(args, 'neuron_sample_size', 5)
     config.neuron.moving_average_alpha = getattr(args, 'neuron_moving_average_alpha', 0.1)
     config.neuron.use_open_source_validator_model = getattr(args, 'use_open_source_validator_model', True)
     config.neuron.num_concurrent_forwards = getattr(args, 'neuron_num_concurrent_forwards', 1)

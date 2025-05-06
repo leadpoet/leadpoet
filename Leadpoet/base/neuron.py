@@ -2,26 +2,25 @@ import numpy as np
 import bittensor as bt
 import os
 import sys
-import argparse 
+import argparse
 
 class MockAxonInfo:
-
-    def __init__(self):
-        self.ip = "0.0.0.0"
-        self.port = 0
-        self.hotkey = "mock_hotkey"
-        self.coldkey = "mock_coldkey"
-        self.version = 1
+    def __init__(self, uid):
+        self.ip = "127.0.0.1"
+        self.port = 8091 + uid
+        self.hotkey = f"mock_hotkey_{uid}"
+        self.coldkey = f"mock_coldkey_{uid}"
+        self.version = 600
         self.ip_type = 4
         self.is_serving = True
 
 class MockNeuron:
-   
-    def __init__(self, uid, stake, hotkey):
+    def __init__(self, uid, stake, hotkey, validator_permit=False):
         self.uid = uid
         self.stake = stake
         self.hotkey = hotkey
         self.trust = 0.0
+        self.validator_trust = 0.0
         self.rank = 0.0
         self.consensus = 0.0
         self.incentive = 0.0
@@ -29,18 +28,22 @@ class MockNeuron:
         self.dividends = 0.0
         self.last_update = 1
         self.active = True
-        self.validator_permit = False
-        self.validator_trust = 0.0
-        self.axon_info = MockAxonInfo()
+        self.validator_permit = validator_permit
+        self.axon_info = MockAxonInfo(uid)
 
 class MockSubtensor:
-   
-    def __init__(self, netuid=343):  # Default to command-line netuid
+    def __init__(self, netuid=343):
         self.netuid = netuid
         self.chain_endpoint = None
         self.subnets = {netuid: {'stake': 0, 'block': 1}}
         self._neurons = {
-            netuid: [MockNeuron(uid=i, stake=0, hotkey=f'mock_hotkey_{i}') for i in range(5)]
+            netuid: [
+                MockNeuron(uid=0, stake=20.0, hotkey="5CJyMxw6YJJvLhPf58gSpMB7mvSKSCMx9RXhXJum6cNfqMEz", validator_permit=True),
+                MockNeuron(uid=1, stake=2.0, hotkey="5D73anXA8XELS2tSjnGQKMoVog1vKuTQCoJHrEGaXpZBAWpS"),
+                MockNeuron(uid=2, stake=2.0, hotkey="mock_hotkey_2"),
+                MockNeuron(uid=3, stake=2.0, hotkey="mock_hotkey_3"),
+                MockNeuron(uid=4, stake=2.0, hotkey="mock_hotkey_4"),
+            ]
         }
         self.block = 1
 
@@ -61,7 +64,6 @@ class MockSubtensor:
         return None
 
 class MockWallet:
-    
     def __init__(self):
         self.hotkey = MockHotkey()
         self.coldkey = MockColdkey()
@@ -75,24 +77,19 @@ class MockWallet:
         return MockKeyfile()
 
 class MockHotkey:
-
     ss58_address = "5MockHotkeyAddress123456789"
 
 class MockColdkey:
-    
     ss58_address = "5MockColdkeyAddress123456789"
 
 class MockKeyfile:
-    
     def exists(self):
         return True
 
 class BaseNeuron:
-   
     @classmethod
     def add_args(cls, parser: argparse.ArgumentParser):
-        
-        pass  # _
+        pass
 
     def __init__(self, config=None):
         if config is None:
@@ -106,10 +103,10 @@ class BaseNeuron:
             config.subtensor.chain_endpoint = None
             config.subtensor.network = "mock_network"
             if not hasattr(config, 'netuid') or config.netuid is None:
-                config.netuid = 343  # Match command-line netuid
+                config.netuid = 343
             config.subtensor.mock_subnets = {config.netuid: {'stake': 0, 'block': 1}}
             config.subtensor.mock_neurons = {
-                config.netuid: [{'uid': i, 'stake': 0, 'hotkey': f'mock_hotkey_{i}'} for i in range(5)]
+                config.netuid: [{'uid': i, 'stake': 2.0 if i > 0 else 20.0, 'hotkey': f'mock_hotkey_{i}'} for i in range(5)]
             }
             if not hasattr(config, 'blacklist') or config.blacklist is None:
                 config.blacklist = bt.Config()
@@ -126,11 +123,10 @@ class BaseNeuron:
             bt.logging.info(f"Using MockSubtensor for netuid {self.config.netuid}")
         else:
             try:
-                # Explicitly set testnet endpoint if not configured
                 if not hasattr(self.config, 'subtensor') or not hasattr(self.config.subtensor, 'chain_endpoint'):
                     self.config.subtensor = bt.Config()
                     self.config.subtensor.network = "test"
-                    self.config.subtensor.chain_endpoint = "ws://testnet-finch.opentensor.ai:9944"
+                    self.config.subtensor.chain_endpoint = "wss://test.finney.opentensor.ai:443"
                 self.subtensor = bt.subtensor(config=self.config)
                 bt.logging.info(f"Subtensor initialized, endpoint: {self.subtensor.chain_endpoint}, network: {self.config.subtensor.network}")
             except Exception as e:
@@ -141,5 +137,4 @@ class BaseNeuron:
         self.block = self.subtensor.get_current_block() if not is_mock else 1
 
     def sync(self):
-        
         self.metagraph.sync(subtensor=self.subtensor)

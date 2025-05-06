@@ -1,11 +1,10 @@
-# Leadpoet/base/validator.py
-
 import copy
 import numpy as np
 import asyncio
 import argparse
 import threading
 import bittensor as bt
+import socket
 from typing import List, Union
 from traceback import print_exception
 from Leadpoet.base.neuron import BaseNeuron
@@ -36,8 +35,14 @@ class BaseValidatorNeuron(BaseNeuron):
             self.config.neuron.num_concurrent_forwards = 1
             self.config.neuron.full_path = "./validator_state"
             self.config.neuron.moving_average_alpha = 0.1
-            self.config.neuron.sample_size = 10
+            self.config.neuron.sample_size = 5
             bt.logging.debug("Initialized config.neuron with defaults")
+
+        if not hasattr(self.config, 'axon') or self.config.axon is None:
+            self.config.axon = bt.Config()
+            self.config.axon.ip = "0.0.0.0"
+            self.config.axon.port = 8093
+            bt.logging.debug("Initialized config.axon with default values")
 
         self.dendrite = MockDendrite(wallet=self.wallet) if is_mock else bt.dendrite(wallet=self.wallet)
         bt.logging.info(f"Dendrite: {self.dendrite}")
@@ -50,21 +55,47 @@ class BaseValidatorNeuron(BaseNeuron):
         self.is_running = False
         self.thread = None
         self.lock = asyncio.Lock()
-        self.total_emissions = 1000.0  # Mock value, remmber to replace with actual subnet emissions
+        self.total_emissions = 1000.0  # Mock value, replace with actual subnet emissions
+
+    def check_port_availability(self, port: int) -> bool:
+        """Check if a port is available."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('0.0.0.0', port))
+                return True
+            except socket.error:
+                return False
+
+    def find_available_port(self, start_port: int, max_attempts: int = 10) -> int:
+        """Find an available port starting from start_port."""
+        port = start_port
+        for _ in range(max_attempts):
+            if self.check_port_availability(port):
+                return port
+            port += 1
+        raise RuntimeError(f"No available ports found between {start_port} and {start_port + max_attempts - 1}")
 
     def serve_axon(self):
-        bt.logging.info("serving ip to chain...")
+        bt.logging.info("Serving validator axon...")
         try:
+            # Ensure axon port is available
+            self.config.axon.port = self.find_available_port(self.config.axon.port)
+            bt.logging.info(f"Using axon port: {self.config.axon.port}")
+
             self.axon = bt.axon(wallet=self.wallet, config=self.config)
-            self.subtensor.serve_axon(
-                netuid=self.config.netuid,
-                axon=self.axon,
-            )
-            bt.logging.info(
-                f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
-            )
+            if not self.config.mock:
+                self.subtensor.serve_axon(
+                    netuid=self.config.netuid,
+                    axon=self.axon,
+                )
+                bt.logging.info(
+                    f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
+                )
+            else:
+                bt.logging.info("Mock mode: Not serving axon.")
         except Exception as e:
-            bt.logging.error(f"Failed to serve Axon: {e}")
+            bt.logging.error(f"Failed to serve axon: {e}")
+            self.axon = None
 
     async def concurrent_forward(self):
         coroutines = [
@@ -91,7 +122,7 @@ class BaseValidatorNeuron(BaseNeuron):
                 self.step += 1
             loop.close()
         except KeyboardInterrupt:
-            if hasattr(self, 'axon'):
+            if hasattr(self, 'axon') and self.axon is not None:
                 self.axon.stop()
             bt.logging.success("Validator killed by keyboard interrupt.")
             exit()

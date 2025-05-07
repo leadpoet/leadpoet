@@ -38,16 +38,17 @@ async def get_query_api_nodes(dendrite, metagraph, n=0.1, timeout=5, mock=False)
     bt.logging.debug(f"Fetching available miner nodes for subnet {metagraph.netuid}")
     metagraph.sync(subtensor=metagraph.subtensor)
     if mock:
-        top_uids = [i for i in range(len(metagraph.axons))]
-        bt.logging.debug(f"Mock mode: Using all UIDs {top_uids}")
-    elif metagraph.S.size == 0 or np.isnan(metagraph.S).any():
-        bt.logging.warning("Stake array is empty or contains NaN. Selecting all active UIDs.")
-        top_uids = [i for i in range(len(metagraph.axons)) if metagraph.axons[i].is_serving]
+        bt.logging.debug("Mock mode: Using all UIDs [0]")
+        top_uids = [0]  # Prioritize miner at UID 0
     else:
-        top_uids = np.where(metagraph.S > np.quantile(metagraph.S, 1 - n))[0].tolist()
-        if not top_uids:
-            bt.logging.warning("No UIDs with sufficient stake. Falling back to all active UIDs.")
+        if metagraph.S.size == 0 or np.isnan(metagraph.S).any():
+            bt.logging.warning("Stake array is empty or contains NaN. Selecting all active UIDs.")
             top_uids = [i for i in range(len(metagraph.axons)) if metagraph.axons[i].is_serving]
+        else:
+            top_uids = np.where(metagraph.S > np.quantile(metagraph.S, 1 - n))[0].tolist()
+            if not top_uids:
+                bt.logging.warning("No UIDs with sufficient stake. Falling back to all active UIDs.")
+                top_uids = [i for i in range(len(metagraph.axons)) if metagraph.axons[i].is_serving]
     bt.logging.debug(f"Top UIDs by stake: {top_uids}")
     
     if mock:
@@ -60,8 +61,6 @@ async def get_query_api_nodes(dendrite, metagraph, n=0.1, timeout=5, mock=False)
             query_uids = [i for i in range(len(metagraph.axons)) if metagraph.axons[i].is_serving]
     
     bt.logging.debug(f"Available miner UIDs for subnet {metagraph.netuid}: {query_uids}")
-    if len(query_uids) > 5:
-        query_uids = random.sample(query_uids, 5)
     return query_uids
 
 async def get_query_api_axons(wallet, metagraph=None, n=0.1, timeout=5, uids=None, mock=False):

@@ -2,6 +2,7 @@ import time
 import asyncio
 import random
 import bittensor as bt
+import aiohttp
 from typing import List, Dict, Optional
 from Leadpoet.protocol import LeadRequest
 from miner_models.get_leads import get_leads
@@ -215,22 +216,23 @@ class MockSubtensor(bt.MockSubtensor):
         neurons = []
         wallet_hotkey = getattr(wallet, 'hotkey_ss58_address', '5MockHotkeyAddress123456789')
         wallet_coldkey = getattr(wallet, 'coldkey_ss58_address', '5MockColdkeyAddress123456789')
-        if wallet is not None:
-            neurons.append({
-                'uid': 0,
-                'netuid': netuid,
-                'hotkey': wallet_hotkey,
-                'coldkey': wallet_coldkey,
-                'balance': 100000,
-                'stake': 20.0,
-                'validator_permit': True,
-                'ip': '127.0.0.1',
-                'port': 8091,
-                'ip_type': 4,
-                'version': 600,
-                'active': 1
-            })
-        for i in range(1, n + 1):
+        # Register the actual miner as UID 0
+        neurons.append({
+            'uid': 0,
+            'netuid': netuid,
+            'hotkey': wallet_hotkey,
+            'coldkey': wallet_coldkey,
+            'balance': 100000,
+            'stake': 2.0,
+            'validator_permit': False,
+            'ip': '127.0.0.1',
+            'port': 8092,  # Miner axon port
+            'ip_type': 4,
+            'version': 600,
+            'active': 1
+        })
+        # Register additional mock miners
+        for i in range(1, n):
             neurons.append({
                 'uid': i,
                 'netuid': netuid,
@@ -240,11 +242,26 @@ class MockSubtensor(bt.MockSubtensor):
                 'stake': 2.0,
                 'validator_permit': False,
                 'ip': '127.0.0.1',
-                'port': 8091 + i,
+                'port': 8092 + i,
                 'ip_type': 4,
                 'version': 600,
                 'active': 1
             })
+        # Register a validator
+        neurons.append({
+            'uid': n,
+            'netuid': netuid,
+            'hotkey': "validator-hotkey",
+            'coldkey': "mock-coldkey-validator",
+            'balance': 100000,
+            'stake': 20.0,
+            'validator_permit': True,
+            'ip': '127.0.0.1',
+            'port': 8093,
+            'ip_type': 4,
+            'version': 600,
+            'active': 1
+        })
         self._mock_neurons[netuid] = neurons
         if not hasattr(self, '_neurons'):
             self._neurons = {}
@@ -476,7 +493,7 @@ class MockMetagraph(bt.metagraph):
         self.axons = [
             bt.AxonInfo(
                 ip="127.0.0.1",
-                port=8091 + neuron.uid,
+                port=neuron.axon_info.port,
                 ip_type=4,
                 hotkey=neuron.hotkey,
                 coldkey=neuron.coldkey,
@@ -499,7 +516,7 @@ class MockMetagraph(bt.metagraph):
         self.axons = [
             bt.AxonInfo(
                 ip="127.0.0.1",
-                port=8091 + neuron.uid,
+                port=neuron.axon_info.port,
                 ip_type=4,
                 hotkey=neuron.hotkey,
                 coldkey=neuron.coldkey,
@@ -518,7 +535,6 @@ class MockDendrite(bt.dendrite):
         self.use_open_source = use_open_source
         self.email_counter = 0
         self._session = None
-        self.miner = None
         bt.logging.debug(f"MockDendrite initialized with wallet: {self._wallet}")
 
     def set_miner(self, miner):
@@ -587,7 +603,6 @@ class MockDendrite(bt.dendrite):
             bt.logging.debug(f"Querying axon {axon.hotkey} at {axon.ip}:{axon.port}")
             start_time = time.time()
             response = synapse.copy()
-            normalized_leads = []  # Initialize to avoid undefined variable
             try:
                 response = self.preprocess_synapse_for_request(axon, response, timeout)
                 process_time = random.uniform(0.5, min(5, timeout))
@@ -600,15 +615,35 @@ class MockDendrite(bt.dendrite):
                     response.dendrite.status_message = "Timeout"
                     response.dendrite.process_time = str(timeout)
                 else:
-                    if self.miner and hasattr(self.miner, 'forward'):
-                        miner_response = await self.miner.forward(response)
-                        if isinstance(miner_response, LeadRequest) and miner_response.leads:
-                            normalized_leads = miner_response.leads
-                            bt.logging.debug(f"Miner processed {len(normalized_leads)} leads for axon {axon.hotkey}")
-                        else:
-                            bt.logging.warning(f"Miner returned invalid response for axon {axon.hotkey}")
-                            normalized_leads = [self.generate_dummy_lead() for _ in range(synapse.num_leads)]
-                    elif self.use_open_source:
+                    if axon.port == 8092:  # Actual miner
+                        url = f"http://{axon.ip}:{axon.port}/lead_request"
+                        payload = {
+                            "num_leads": synapse.num_leads,
+                            "industry": synapse.industry,
+                            "region": synapse.region
+                        }
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.post(url, json=payload, timeout=timeout) as resp:
+                                    if resp.status != 200:
+                                        bt.logging.warning(f"HTTP error from miner {axon.hotkey}: {resp.status}")
+                                        response.leads = []
+                                        response.dendrite.status_code = resp.status
+                                        response.dendrite.status_message = await resp.text()
+                                    else:
+                                        data = await resp.json()
+                                        response.leads = data.get("leads", [])
+                                        response.dendrite.status_code = 200
+                                        response.dendrite.status_message = "OK"
+                                    response.dendrite.process_time = str(time.time() - start_time)
+                        except Exception as e:
+                            bt.logging.error(f"Error querying miner {axon.hotkey}: {e}")
+                            response.leads = []
+                            response.dendrite.status_code = 500
+                            response.dendrite.status_message = f"Error: {e}"
+                            response.dendrite.process_time = str(time.time() - start_time)
+                    else:
+                        # Fallback to open-source model for other mock axons
                         try:
                             bt.logging.debug(f"Calling get_leads for {synapse.num_leads} leads, industry={synapse.industry}, region={synapse.region}")
                             leads = await get_leads(synapse.num_leads, synapse.industry, synapse.region)
@@ -626,16 +661,16 @@ class MockDendrite(bt.dendrite):
                                 } for lead in leads
                             ]
                             bt.logging.debug(f"Generated {len(normalized_leads)} leads for axon {axon.hotkey}")
+                            response.leads = normalized_leads
+                            response.dendrite.status_code = 200
+                            response.dendrite.status_message = "OK"
+                            response.dendrite.process_time = str(process_time)
                         except Exception as e:
                             bt.logging.warning(f"Open-source lead generation failed for axon {axon.hotkey}: {e}. Falling back to dummy leads.")
-                            normalized_leads = [self.generate_dummy_lead() for _ in range(synapse.num_leads)]
-                    else:
-                        normalized_leads = [self.generate_dummy_lead() for _ in range(synapse.num_leads)]
-                        bt.logging.debug(f"Generated {len(normalized_leads)} dummy leads for axon {axon.hotkey}")
-                    response.leads = normalized_leads
-                    response.dendrite.status_code = 200
-                    response.dendrite.status_message = "OK"
-                    response.dendrite.process_time = str(process_time)
+                            response.leads = [self.generate_dummy_lead() for _ in range(synapse.num_leads)]
+                            response.dendrite.status_code = 200
+                            response.dendrite.status_message = "OK"
+                            response.dendrite.process_time = str(process_time)
             except Exception as e:
                 bt.logging.error(f"Error processing axon {axon.hotkey}: {e}")
                 response.leads = []

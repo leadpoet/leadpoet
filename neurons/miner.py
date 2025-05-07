@@ -9,19 +9,17 @@ from Leadpoet.base.miner import BaseMinerNeuron
 from Leadpoet.protocol import LeadRequest
 from miner_models.get_leads import get_leads
 from typing import Union, Tuple
+from aiohttp import web
 
 class Miner(BaseMinerNeuron):
-    """
-    Miner neuron class for the LeadPoet subnet. Generates leads using get_leads.py
-    and responds to validator queries.
-    """
     def __init__(self, config=None):
         super().__init__(config=config)
         self.use_open_source_lead_model = config.get("use_open_source_lead_model", True) if config else True
         bt.logging.info(f"Using open-source lead model: {self.use_open_source_lead_model}")
+        self.app = web.Application()
+        self.app.add_routes([web.post('/lead_request', self.handle_lead_request)])
 
     async def forward(self, synapse: LeadRequest) -> LeadRequest:
-        """Handles LeadRequest queries by generating leads."""
         bt.logging.debug(f"Received LeadRequest: num_leads={synapse.num_leads}, industry={synapse.industry}, region={synapse.region}")
         start_time = time.time()
 
@@ -58,8 +56,32 @@ class Miner(BaseMinerNeuron):
 
         return synapse
 
+    async def handle_lead_request(self, request):
+        bt.logging.info(f"Received HTTP lead request: {await request.text()}")
+        try:
+            data = await request.json()
+            num_leads = data.get("num_leads", 1)
+            industry = data.get("industry")
+            region = data.get("region")
+            synapse = LeadRequest(num_leads=num_leads, industry=industry, region=region)
+            response = await self.forward(synapse)
+            bt.logging.info(f"Returning {len(response.leads)} leads to HTTP request")
+            return web.json_response({
+                "leads": response.leads,
+                "status_code": response.dendrite.status_code,
+                "status_message": response.dendrite.status_message,
+                "process_time": response.dendrite.process_time
+            })
+        except Exception as e:
+            bt.logging.error(f"Error in HTTP lead request: {e}")
+            return web.json_response({
+                "leads": [],
+                "status_code": 500,
+                "status_message": f"Error: {str(e)}",
+                "process_time": "0"
+            }, status=500)
+
     def blacklist(self, synapse: LeadRequest) -> Tuple[bool, str]:
-        """Blacklist logic for incoming requests. Returns (is_blacklisted, reason)."""
         if self.config.blacklist_force_validator_permit and not self.metagraph.axons[self.uid].is_serving:
             bt.logging.debug(f"Blacklisting non-validator request from {synapse.dendrite.hotkey}")
             return True, f"Non-validator request from {synapse.dendrite.hotkey}"
@@ -69,11 +91,9 @@ class Miner(BaseMinerNeuron):
         return False, ""
 
     def priority(self, synapse: LeadRequest) -> float:
-        """Assigns priority to requests (default: equal priority)."""
         return 1.0
 
     def check_port_availability(self, port: int) -> bool:
-        """Check if a port is available."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind(('0.0.0.0', port))
@@ -82,7 +102,6 @@ class Miner(BaseMinerNeuron):
                 return False
 
     def find_available_port(self, start_port: int, max_attempts: int = 10) -> int:
-        """Find an available port starting from start_port."""
         port = start_port
         for _ in range(max_attempts):
             if self.check_port_availability(port):
@@ -90,19 +109,29 @@ class Miner(BaseMinerNeuron):
             port += 1
         raise RuntimeError(f"No available ports found between {start_port} and {start_port + max_attempts - 1}")
 
+    async def start_http_server(self):
+        runner = web.AppRunner(self.app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', self.config.axon.port)
+        await site.start()
+        bt.logging.info(f"HTTP server started on port {self.config.axon.port}")
+
+async def run_miner(miner):
+    await miner.start_http_server()
+    with miner:
+        while True:
+            bt.logging.info(f"Miner running... {time.time()}")
+            await asyncio.sleep(5)
+
 def main():
-    """Entry point for the leadpoet command."""
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
-    # Add miner-specific arguments from BaseMinerNeuron
     BaseMinerNeuron.add_args(parser)
-    # Add additional arguments
-    parser.add_argument("--axon_port", type=int, default=8092, help="Port for axon")
+    parser.add_argument("--axon_port", type=int, default=8092, help="Port for axon and HTTP server")
     args = parser.parse_args()
 
     if args.logging_trace:
         bt.logging.set_trace(True)
 
-    # Manually create config object
     config = bt.Config()
     config.wallet = bt.Config()
     config.wallet.name = args.wallet_name
@@ -122,17 +151,23 @@ def main():
 
     miner = Miner(config=config)
     try:
-        # Find an available port
         config.axon.port = miner.find_available_port(config.axon.port)
         bt.logging.info(f"Using axon port: {config.axon.port}")
+        # Ensure axon uses the same port
+        miner.config.axon.port = config.axon.port
+        miner.axon = bt.axon(
+            port=config.axon.port,
+            ip='0.0.0.0',
+            wallet=miner.wallet,
+            external_ip='0.0.0.0'
+        )
+        miner.axon.attach(forward_fn=miner.forward, blacklist_fn=miner.blacklist, priority_fn=miner.priority)
+        bt.logging.info(f"Reattached axon on port {config.axon.port}")
     except RuntimeError as e:
         bt.logging.error(str(e))
         return
 
-    with miner:
-        while True:
-            bt.logging.info(f"Miner running... {time.time()}")
-            time.sleep(5)
+    asyncio.run(run_miner(miner))
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,33 @@
+---
+description: 
+globs: **/*.ps1,**/*.psm1,scripts/**
+alwaysApply: false
+---
+---
+description: "Establish project context for the LeadPoet subnet repository."
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Project Context
+
+You are working on the LeadPoet subnet, a Bittensor-based decentralized lead generation network:
+- **Purpose**: Miners source high-quality prospects into a Prospect Pool; validators verify their legitimacy; miners curate prospects based on buyer ICP criteria; validators score curated prospects for clients.
+- **Tech Stack**: Bittensor (Python, for miners/validators), Supabase (for Prospect Pool storage), FastAPI (for buyer-facing API), ML models (e.g., XGBoost for validation, inference for scoring).
+- **Workflow**:
+  1. Miners source prospects and submit to validators.
+  2. Validators perform legitimacy audits (format, contact legitimacy, compliance, duplicates) and add valid prospects to the Prospect Pool (Supabase).
+  3. Buyers submit ICP queries via API; miners curate prospect lists from the pool.
+  4. Validators score curated prospects using a conversion model; the top 10 prospects (C > 0.1) are sent to the buyer.
+  5. Buyer feedback updates prospect Conversion Scores (C) via CRM integrations.
+- **Data Model**:
+  - `prospects` table: Stores pool prospects (fields: Business, Owner Full name, First, Last, Owner(s) Email, LinkedIn, Website, Industry, Region, Source, Conversion_Score).
+  - `queries` table: Tracks buyer ICP queries (fields: query_id, buyer_hotkey, industry, region, status).
+  - `curated_lists` table: Stores miner-curated lists (fields: query_id, miner_uid, prospect_ids, submission_timestamp).
+  - `scores` table: Stores validator-assigned Conversion Scores (fields: query_id, prospect_id, conversion_score, validator_hotkey).
+- **Incentives**:
+  - Miners earn emissions based on Sourcing Score (Sₘ, 40%) and Curating Score (Kₘ, 60%).
+  - Validators earn emissions based on validation accuracy and reputation.
+- **Authentication**: Bittensor wallet-based authentication for miners/validators; API keys for buyers.
+- **UX Flow**: Buyer submits ICP query → API triggers miner curation → Validators score prospects → Buyer receives curated list → Feedback via CRM.

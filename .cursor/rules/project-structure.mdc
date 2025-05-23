@@ -1,0 +1,55 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: "Enforce folder and file structure for the LeadPoet subnet."
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Project Structure Standards
+
+The LeadPoet subnet follows a modular structure to support miners, validators, and API functionality. All files must adhere to the following structure:
+
+## Directory Structure
+- **neurons/**: Core miner and validator logic.
+  - `miner.py`: Miner sourcing and curation logic.
+  - `validator.py`: Validator legitimacy audit and scoring logic.
+- **Leadpoet/**:
+  - **api/**: Buyer-facing API endpoints.
+    - `leadpoet_api.py`: Main API logic for query submission and retrieval.
+    - `get_query_axons.py`: Axon selection for API queries.
+  - **base/**: Shared utilities and base classes.
+    - `miner.py`: Base miner class.
+    - `validator.py`: Base validator class.
+    - `neuron.py`: Base neuron class.
+    - **utils/**:
+      - `pool.py`: Prospect Pool management (add/query prospects).
+      - `config.py`: Configuration and argument parsing.
+      - `weight_utils.py`: Weight setting utilities.
+  - **validator/**: Validator-specific logic.
+    - `forward.py`: Forward pass for validation.
+    - `reward.py`: Reward calculation for validators.
+  - **utils/**: Additional utilities (e.g., `uids.py` for UID management).
+- **miner_models/**: Lead generation models (e.g., `get_leads.py`).
+- **validator_models/**: Validation and scoring models (e.g., `os_validator_model.py`, `automated_checks.py`).
+- **supabase/migrations/**: Database migrations for Prospect Pool.
+- **tests/**: Unit and integration tests.
+  - `miner_tests.py`: Tests for miner sourcing/curation.
+  - `validator_tests.py`: Tests for validator audits/scoring.
+  - `api_tests.py`: Tests for API endpoints.
+- **docs/**: Documentation.
+  - `database/*.md`: Database schema and usage.
+  - `incentives.md`: Incentive mechanism details.
+
+## Naming
+- Use snake_case for files and directories (e.g., `leadpoet_api.py`, `miner_models`).
+- Group files by domain: miner logic in `miner_models`, validator logic in `validator_models`, API in `Leadpoet/api`.
+
+## Standards
+- Each module must include a docstring describing its purpose.
+- Avoid cross-folder dependencies outside `Leadpoet/base/utils`.
+- Include a `README.md` in each directory explaining its contents.

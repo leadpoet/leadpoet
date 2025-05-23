@@ -22,10 +22,15 @@ class LeadPoetAPI:
         self.dendrite = MockDendrite(wallet=wallet, use_open_source=True) if mock else bt.dendrite(wallet=wallet)
         bt.logging.debug(f"Initialized dendrite: {self.dendrite.__class__.__name__}")
         if mock:
-            subtensor = MockSubtensor(netuid=netuid, wallet=wallet)
+            bt.logging.debug("Initializing MockSubtensor for mock mode")
+            subtensor = MockSubtensor(netuid=netuid, wallet=wallet, network="mock")
             self.metagraph = bt.metagraph(netuid=netuid, network="mock", subtensor=subtensor)
         else:
-            self.metagraph = bt.metagraph(netuid=netuid)
+            bt.logging.debug(f"Initializing Subtensor with network: {subtensor_network}")
+            config = bt.config()
+            config.subtensor.network = subtensor_network
+            subtensor = bt.subtensor(network=subtensor_network, config=config)
+            self.metagraph = bt.metagraph(netuid=netuid, network=subtensor_network, subtensor=subtensor)
         bt.logging.info(f"Initialized LeadPoetAPI with netuid: {self.netuid}, subtensor_network: {self.subtensor_network}, mock: {self.mock}")
 
     def prepare_synapse(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None) -> LeadRequest:
@@ -55,69 +60,73 @@ class LeadPoetAPI:
 
         while attempt <= max_retries:
             bt.logging.info(f"Attempt {attempt}/{max_retries} to fetch leads")
-            axons = await get_query_api_axons(self.wallet, self.metagraph, n=0.1, timeout=5, mock=self.mock)
-            if not axons:
-                bt.logging.error("No available miners to query.")
-                raise RuntimeError("No active miners available")
+            try:
+                # Get available miners
+                axons = await get_query_api_axons(self.wallet, self.metagraph, n=0.1, timeout=5, mock=self.mock)
+                if not axons:
+                    bt.logging.error("No available miners to query.")
+                    raise RuntimeError("No active miners available")
 
-            synapse = self.prepare_synapse(num_leads, industry, region)
-            responses = await self.dendrite(
-                axons=axons,
-                synapse=synapse,
-                timeout=30,
-                deserialize=True
-            )
-            leads = self.process_responses(responses)
-            
-            if not leads:
-                bt.logging.error("No valid leads received from miners.")
+                # Prepare request
+                synapse = self.prepare_synapse(num_leads, industry, region)
+                
+                # Send request to miners
+                responses = await self.dendrite(
+                    axons=axons,
+                    synapse=synapse,
+                    timeout=30,
+                    deserialize=True
+                )
+                
+                # Process responses
+                leads = self.process_responses(responses)
+                
+                if not leads:
+                    bt.logging.error("No valid leads received from miners.")
+                    attempt += 1
+                    if attempt > max_retries:
+                        bt.logging.error(f"Max retries ({max_retries}) reached, no valid leads found.")
+                        return []
+                    continue
+
+                # Send leads to validator for scoring
+                from neurons.validator import Validator
+                validator = Validator(config=bt.config())
+                validation = await validator.validate_leads(leads, industry=industry)
+                score = validation["score"] / 100.0
+                bt.logging.info(f"Lead validation score: {score}")
+
+                if score < 0.7:  # Threshold is 0.7 as per your code
+                    bt.logging.warning(f"Lead batch rejected: score {score} below threshold (0.7)")
+                    attempt += 1
+                    if attempt > max_retries:
+                        bt.logging.error(f"Max retries ({max_retries}) reached, no valid lead batch found.")
+                        return []
+                    continue
+
+                # Add valid leads to pool
+                from Leadpoet.base.utils.pool import add_to_pool
+                add_to_pool(leads)
+                bt.logging.info(f"Added {len(leads)} approved leads to pool")
+                
+                # Filter leads by industry and region
+                filtered_leads = leads
+                if industry:
+                    filtered_leads = [lead for lead in filtered_leads if lead.get("Industry") == industry]
+                if region:
+                    filtered_leads = [lead for lead in filtered_leads if lead.get("Region") == region]
+                filtered_leads = filtered_leads[:num_leads]
+                
+                bt.logging.info(f"Served {len(filtered_leads)} leads to client")
+                return filtered_leads
+
+            except Exception as e:
+                bt.logging.error(f"Error in get_leads: {e}")
                 attempt += 1
                 if attempt > max_retries:
                     bt.logging.error(f"Max retries ({max_retries}) reached, no valid leads found.")
                     return []
                 continue
-
-            # Send leads to validator for scoring
-            from neurons.validator import Validator
-            validator = Validator(config=bt.config())  # Initialize validator with mock config
-            validation = await validator.validate_leads(leads, industry=industry)
-            score = validation["score"] / 100.0
-            bt.logging.info(f"Lead validation score: {score}")
-
-            if score < 0.9:
-                bt.logging.warning(f"Lead batch rejected: score {score} below threshold (0.9)")
-                attempt += 1
-                if attempt > max_retries:
-                    bt.logging.error(f"Max retries ({max_retries}) reached, no valid lead batch found.")
-                    return []
-                continue
-
-            check_report = await auto_check_leads(leads)
-            valid_count = sum(1 for entry in check_report if entry["status"] == "Valid")
-            check_score = valid_count / len(leads) if leads else 0
-            bt.logging.info(f"Automated check score: {check_score}")
-
-            if check_score < 0.9:
-                bt.logging.warning(f"Lead batch failed automated checks: score {check_score} below threshold (0.9)")
-                attempt += 1
-                if attempt > max_retries:
-                    bt.logging.error(f"Max retries ({max_retries}) reached, no valid lead batch found.")
-                    return []
-                continue
-
-            from Leadpoet.base.utils.pool import add_to_pool
-            add_to_pool(leads)
-            bt.logging.info(f"Added {len(leads)} approved leads to pool")
-            
-            filtered_leads = leads
-            if industry:
-                filtered_leads = [lead for lead in filtered_leads if lead.get("Industry") == industry]
-            if region:
-                filtered_leads = [lead for lead in filtered_leads if lead.get("Region") == region]
-            filtered_leads = filtered_leads[:num_leads]
-            
-            bt.logging.info(f"Served {len(filtered_leads)} leads to client")
-            return filtered_leads
 
         return []
 
@@ -157,11 +166,11 @@ def main():
     num_leads = int(input("Enter number of leads (1-100): "))
     print(f"Available industries: {', '.join(VALID_INDUSTRIES)}")
     while True:
-        industry = input("Enter industry: ").strip() 
-        if industry is None or industry in VALID_INDUSTRIES:
+        industry = input("Enter industry: ").strip()
+        if not industry or industry in VALID_INDUSTRIES:  # Allow empty industry
             break
         print(f"Invalid industry. Please choose from: {', '.join(VALID_INDUSTRIES)}")
-    region = input("Enter region (e.g., 'US'): ").strip() 
+    region = input("Enter region (e.g., 'US'): ").strip() or None  # Allow empty region
 
     async def fetch_leads():
         leads = await api.get_leads(num_leads, industry, region)

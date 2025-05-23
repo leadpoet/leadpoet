@@ -1,0 +1,45 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: "Enforce standards for validator scoring of curated prospect lists."
+globs:
+  - "neurons/validator.py"
+  - "Leadpoet/base/validator.py"
+  - "Leadpoet/validator/*.py"
+alwaysApply: true
+---
+
+# Validator Scoring Standards
+
+Validators score curated prospect lists using an inference-based conversion model. The following standards ensure compliance:
+
+## Scoring Logic
+- Retrieve curated lists from `curated_lists` table for a given `query_id`.
+- For each prospect (`prospect_id`), compute Conversion Score (C) using `validator_models.os_validator_model`:
+  - Inputs: Prospect attributes (`business`, `industry`, `region`, etc.), buyer ICP (`industry`, `region`).
+  - Output: `conversion_score` (0.0-1.0) estimating conversion likelihood.
+- Store scores in `scores` table with `query_id`, `prospect_id`, `conversion_score`, and `validator_hotkey`.
+- Select top 10 prospects with `conversion_score > 0.1` for the Final Curated List.
+- If <10 prospects meet threshold, mark query `status` as 'failed' in `queries` table and re-queue.
+
+## Inference Model
+- Use XGBoost-based model (`validator_models.os_validator_model`) trained on attributes: company fit, role fit, readiness to convert.
+- Mock model in tests with random scores (0.0-1.0) for consistency.
+
+## Incentive Integration
+- Update `validation_history` with scoring results to track validator `precision` and `consistency`.
+- Apply buyer feedback (`Buyer Feedback Score (F)`) to adjust `conversion_score` via `handle_buyer_feedback`.
+- Calculate `F` using: `F = 1 / (1 + e^(-k * (B - µ)))`, with `k` increasing from 1 to 2, `µ` from 0.5 to 0.8.
+
+## Security
+- Verify `commit_hash` and `reveal_timestamp` in `curated_lists` to ensure miner submission integrity.
+- Rate-limit scoring requests to prevent validator overload (e.g., max 5 queries/minute).
+- Log scoring results to Supabase (`scoring_logs` table) for auditing.
+
+## Testing
+- Write unit tests (`tests/validator_scoring_tests.py`) mocking XGBoost model and Supabase queries.
+- Test edge cases: <10 valid prospects, invalid `commit_hash`, feedback updates.
+- Ensure >90% coverage for scoring logic.

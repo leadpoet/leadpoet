@@ -2,8 +2,8 @@
 import pytest
 import asyncio
 import bittensor as bt
-from prompting.mock import MockDendrite, MockMetagraph, MockSubtensor
-from prompting.protocol import PromptingSynapse
+from Leadpoet.mock import MockDendrite, MockMetagraph, MockSubtensor
+from Leadpoet.protocol import PromptingSynapse
 
 
 @pytest.mark.parametrize("netuid", [1, 2, 3])

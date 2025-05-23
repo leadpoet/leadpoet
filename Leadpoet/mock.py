@@ -226,7 +226,7 @@ class MockSubtensor(bt.MockSubtensor):
             'stake': 2.0,
             'validator_permit': False,
             'ip': '127.0.0.1',
-            'port': 8092,  # Miner axon port
+            'port': 8091, 
             'ip_type': 4,
             'version': 600,
             'active': 1
@@ -242,7 +242,7 @@ class MockSubtensor(bt.MockSubtensor):
                 'stake': 2.0,
                 'validator_permit': False,
                 'ip': '127.0.0.1',
-                'port': 8092 + i,
+                'port': 8091 + i, 
                 'ip_type': 4,
                 'version': 600,
                 'active': 1
@@ -615,7 +615,7 @@ class MockDendrite(bt.dendrite):
                     response.dendrite.status_message = "Timeout"
                     response.dendrite.process_time = str(timeout)
                 else:
-                    if axon.port == 8092:  # Actual miner
+                    if axon.port == 8091:  # Miner's port
                         url = f"http://{axon.ip}:{axon.port}/lead_request"
                         payload = {
                             "num_leads": synapse.num_leads,
@@ -632,10 +632,12 @@ class MockDendrite(bt.dendrite):
                                         response.dendrite.status_message = await resp.text()
                                     else:
                                         data = await resp.json()
-                                        response.leads = data.get("leads", [])
+                                        leads = data.get("leads", [])
+                                    
+                                        response.leads = leads # SUPER IMPORTANT: we're using the leads directly since they're already mapped correctly by the miner, but if you change the fields in the miner this needs to be changed as well
                                         response.dendrite.status_code = 200
                                         response.dendrite.status_message = "OK"
-                                    response.dendrite.process_time = str(time.time() - start_time)
+                                        response.dendrite.process_time = str(time.time() - start_time)
                         except Exception as e:
                             bt.logging.error(f"Error querying miner {axon.hotkey}: {e}")
                             response.leads = []
@@ -649,15 +651,15 @@ class MockDendrite(bt.dendrite):
                             leads = await get_leads(synapse.num_leads, synapse.industry, synapse.region)
                             normalized_leads = [
                                 {
-                                    "Business": lead.get("Business", "Unknown"),
-                                    "Owner Full name": lead.get("Owner Full name", "Unknown"),
-                                    "First": lead.get("First", "Unknown"),
-                                    "Last": lead.get("Last", "Unknown"),
-                                    "Owner(s) Email": lead.get("Owner(s) Email", "unknown@mock.com"),
-                                    "LinkedIn": lead.get("LinkedIn", ""),
-                                    "Website": lead.get("Website", ""),
-                                    "Industry": lead.get("Industry", "Unknown"),
-                                    "Region": synapse.region or "Global"
+                                    "business": lead.get("Business", "Unknown"),
+                                    "owner_full_name": lead.get("Owner Full name", "Unknown"),
+                                    "first": lead.get("First", "Unknown"),
+                                    "last": lead.get("Last", "Unknown"),
+                                    "owner_email": lead.get("Owner(s) Email", "unknown@mock.com"),
+                                    "linkedin": lead.get("LinkedIn", ""),
+                                    "website": lead.get("Website", ""),
+                                    "industry": lead.get("Industry", "Unknown"),
+                                    "region": synapse.region or "Global"
                                 } for lead in leads
                             ]
                             bt.logging.debug(f"Generated {len(normalized_leads)} leads for axon {axon.hotkey}")

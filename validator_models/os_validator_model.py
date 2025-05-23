@@ -14,12 +14,39 @@ MAILGUN_DOMAIN = os.getenv("MAILGUN_DOMAIN", "YOUR_MAILGUN_DOMAIN")
 EMAIL_ENGAGEMENT_WINDOW_DAYS = 30
 
 async def validate_lead_list(leads: List[Dict], industry: Optional[str] = None) -> Dict:
+    bt.logging.debug(f"validate_lead_list raw input: {leads}")
     bt.logging.debug(f"Validating {len(leads)} leads")
     from validator_models.automated_checks import validate_lead_list as auto_check_leads
     
-    report = await auto_check_leads(leads)
+    # First map all leads to consistent field names
+    mapped_leads = []
+    for lead in leads:
+        email = (
+            lead.get("email") or
+            lead.get("owner_email") or
+            lead.get("Owner(s) Email") or
+            lead.get("Email") or
+            ""
+        )
+        mapped_lead = {
+            "email": email,
+            "website": lead.get("Website", lead.get("website", "")),
+            "industry": lead.get("Industry", lead.get("industry", "")),
+            "business": lead.get("Business", lead.get("business", "")),
+            "owner_full_name": lead.get("Owner Full name", lead.get("owner_full_name", "")),
+            "first": lead.get("First", lead.get("first", "")),
+            "last": lead.get("Last", lead.get("last", "")),
+            "linkedin": lead.get("LinkedIn", lead.get("linkedin", "")),
+            "region": lead.get("Region", lead.get("region", "")),
+            "conversion_score": lead.get("conversion_score", None)
+        }
+        mapped_leads.append(mapped_lead)
+    
+    # Run automated checks on the mapped leads
+    report = await auto_check_leads(mapped_leads)
+    
     valid_count = sum(1 for entry in report if entry["status"] == "Valid")
-    if valid_count / len(leads) < 0.9:
+    if valid_count / len(mapped_leads) < 0.9:
         bt.logging.warning("Lead list failed automated checks")
         return {"validation_report": report, "score": 0, "O_v": 0.0}
 
@@ -27,66 +54,109 @@ async def validate_lead_list(leads: List[Dict], industry: Optional[str] = None) 
     valid_count = 0
     disposable_domains = await load_disposable_domains()
 
-    for idx, lead in enumerate(leads):
-        email = lead.get("Owner(s) Email", "")
-        website = lead.get("Website", "")
-        lead_industry = lead.get("Industry", "")
-        result = {"lead_index": idx, "email": email, "status": "Invalid", "reasons": []}
+    for idx, lead in enumerate(mapped_leads):
+        email = lead["email"]  # Use the mapped email field
+        website = lead["website"]
+        lead_industry = lead["industry"]
+        
+        result = {
+            "lead_index": idx,
+            "email": email,  # This is now using the mapped field
+            "status": "Invalid",
+            "reasons": []
+        }
 
+        # First check for required fields
+        if not email:
+            result["status"] = "Rejected"
+            result["reasons"].append("Missing required field: email")
+            validation_report.append(result)
+            continue
+            
+        if not website:
+            result["status"] = "Rejected"
+            result["reasons"].append("Missing required field: website")
+            validation_report.append(result)
+            continue
+
+        # Then do the rest of validation
         if not is_valid_email(email):
+            result["status"] = "Rejected"
             result["reasons"].append("Invalid email format")
-        else:
-            domain = email.split("@")[1].lower()
-            if domain in disposable_domains:
-                result["reasons"].append("Disposable email domain")
-            else:
-                try:
-                    domain_valid = await validate_domain(domain)
-                    if not domain_valid:
-                        result["reasons"].append("Invalid email domain")
-                except Exception as e:
-                    result["reasons"].append(f"Domain validation error: {str(e)}")
+            validation_report.append(result)
+            continue
+            
+        domain = email.split("@")[1].lower()
+        if domain in disposable_domains:
+            result["status"] = "Rejected"
+            result["reasons"].append("Disposable email domain")
+            validation_report.append(result)
+            continue
+            
+        try:
+            domain_valid = await validate_domain(domain)
+            if not domain_valid:
+                result["status"] = "Rejected"
+                result["reasons"].append("Invalid email domain")
+                validation_report.append(result)
+                continue
+        except Exception as e:
+            result["status"] = "Rejected"
+            result["reasons"].append(f"Domain validation error: {str(e)}")
+            validation_report.append(result)
+            continue
 
-        if website:
-            try:
-                parsed_url = urlparse(website)
-                if not parsed_url.scheme or not parsed_url.netloc:
-                    result["reasons"].append("Invalid website URL")
-                else:
-                    website_valid = await validate_website(website)
-                    if not website_valid:
-                        result["reasons"].append("Website unreachable")
-            except Exception as e:
-                result["reasons"].append(f"Website validation error: {str(e)}")
-        else:
-            result["reasons"].append("Missing website")
+        try:
+            parsed_url = urlparse(website)
+            if not parsed_url.scheme or not parsed_url.netloc:
+                result["status"] = "Rejected"
+                result["reasons"].append("Invalid website URL")
+                validation_report.append(result)
+                continue
+                
+            website_valid = await validate_website(website)
+            if not website_valid:
+                result["status"] = "Rejected"
+                result["reasons"].append("Website unreachable")
+                validation_report.append(result)
+                continue
+        except Exception as e:
+            result["status"] = "Rejected"
+            result["reasons"].append(f"Website validation error: {str(e)}")
+            validation_report.append(result)
+            continue
 
         # Only check industry if explicitly specified
         if industry and lead_industry:
             if industry.lower() != lead_industry.lower():
+                result["status"] = "Rejected"
                 result["reasons"].append(f"Industry mismatch: expected {industry}, got {lead_industry}")
+                validation_report.append(result)
+                continue
 
         if email and is_valid_email(email):
             try:
                 engagement_valid, engagement_reason = await check_email_engagement(email)
                 if not engagement_valid:
+                    result["status"] = "Medium Quality"
                     result["reasons"].append(engagement_reason)
+                    valid_count += 0.75
+                else:
+                    result["status"] = "High Quality"
+                    valid_count += 1.0
             except Exception as e:
+                result["status"] = "Medium Quality"
                 result["reasons"].append(f"Email engagement check failed: {str(e)}")
-
-        if not result["reasons"]:
-            result["status"] = "High Quality"
-            valid_count += 1
-        elif len(result["reasons"]) == 1 and "Mock: No recent email engagement detected" in result["reasons"]:
-            result["status"] = "Medium Quality"
-            valid_count += 0.75
+                valid_count += 0.75
         else:
-            result["status"] = "Low Quality"
-            valid_count += 0.25
+            result["status"] = "Rejected"
+            result["reasons"].append("Invalid email format")
+            validation_report.append(result)
+            continue
 
         validation_report.append(result)
 
-    score = (valid_count / len(leads)) * 100 if leads else 0
+    score = (valid_count / len(mapped_leads)) * 100 if mapped_leads else 0
     O_v = score / 100.0
     bt.logging.debug(f"Validation complete: score={score}, O_v={O_v}")
     bt.logging.debug(f"Validation report: {validation_report}")
@@ -194,3 +264,12 @@ async def validate_website(url: str) -> bool:
     except Exception as e:
         bt.logging.trace(f"Website {url} unreachable: {e}")
         return False
+
+def extract_email(lead):
+    for key in ["Owner(s) Email", "owner_email", "email", "Email"]:
+        for actual_key in lead.keys():
+            if actual_key.strip().lower() == key.strip().lower():
+                value = lead[actual_key]
+                if value and value.strip():
+                    return value.strip()
+    return ""

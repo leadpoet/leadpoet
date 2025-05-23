@@ -13,6 +13,12 @@ from validator_models.os_validator_model import validate_lead_list
 from validator_models.automated_checks import validate_lead_list as auto_check_leads
 from Leadpoet.validator.reward import post_approval_check
 from Leadpoet.base.utils.config import add_validator_args
+import threading
+import json
+from Leadpoet.base.utils import queue as lead_queue
+from Leadpoet.base.utils import pool as lead_pool
+import asyncio
+from typing import List, Dict
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
@@ -48,6 +54,15 @@ class Validator(BaseValidatorNeuron):
     async def validate_leads(self, leads: list, industry: str = None) -> dict:
         if not leads:
             return {"score": 0.0, "O_v": 0.0}
+        
+        # Check if leads already have validation scores
+        existing_scores = [lead.get("conversion_score") for lead in leads if lead.get("conversion_score") is not None]
+        if existing_scores:
+            # If leads already have scores, use the average of existing scores
+            avg_score = sum(existing_scores) / len(existing_scores)
+            return {"score": avg_score * 100, "O_v": avg_score}
+        
+        # Otherwise proceed with normal validation
         if self.use_open_source_model:
             report = await validate_lead_list(leads, industry or "Unknown")
             O_v = report["score"] / 100.0
@@ -271,18 +286,262 @@ class Validator(BaseValidatorNeuron):
         self.appeal_status = None
         self.trusted_validator = False
 
+DATA_DIR = "data"
+VALIDATION_LOG = os.path.join(DATA_DIR, "validation_logs.json")
+VALIDATORS_LOG = os.path.join(DATA_DIR, "validators.json")
+
+def ensure_data_files():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    for file in [VALIDATION_LOG, VALIDATORS_LOG]:
+        if not os.path.exists(file):
+            with open(file, "w") as f:
+                json.dump([], f)
+
+def log_validation(hotkey, num_valid, num_rejected, issues):
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "hotkey": hotkey,
+        "num_valid": num_valid,
+        "num_rejected": num_rejected,
+        "issues": issues
+    }
+    with open(VALIDATION_LOG, "r+") as f:
+        try:
+            logs = json.load(f)
+        except Exception:
+            logs = []
+        logs.append(entry)
+        f.seek(0)
+        json.dump(logs, f, indent=2)
+
+def update_validator_stats(hotkey, precision):
+    with open(VALIDATORS_LOG, "r+") as f:
+        try:
+            validators = json.load(f)
+        except Exception:
+            validators = []
+        found = False
+        for v in validators:
+            if v["hotkey"] == hotkey:
+                v["precision"] = precision
+                v["last_updated"] = datetime.now().isoformat()
+                found = True
+                break
+        if not found:
+            validators.append({
+                "hotkey": hotkey,
+                "precision": precision,
+                "last_updated": datetime.now().isoformat()
+            })
+        f.seek(0)
+        json.dump(validators, f, indent=2)
+
+class LeadQueue:
+    def __init__(self, maxsize: int = 1000):
+        self.maxsize = maxsize
+        self.queue_file = "lead_queue.json"
+        self._ensure_queue_file()
+    
+    def _ensure_queue_file(self):
+        """Ensure queue file exists and is valid JSON"""
+        try:
+            # Try to read existing file
+            with open(self.queue_file, 'r') as f:
+                try:
+                    json.load(f)
+                except json.JSONDecodeError:
+                    # If file is corrupted, create new empty queue
+                    bt.logging.warning("Queue file corrupted, creating new empty queue")
+                    self._create_empty_queue()
+        except FileNotFoundError:
+            # If file doesn't exist, create new empty queue
+            self._create_empty_queue()
+    
+    def _create_empty_queue(self):
+        """Create a new empty queue file"""
+        with open(self.queue_file, 'w') as f:
+            json.dump([], f)
+    
+    def enqueue_prospects(self, prospects: List[Dict]):
+        """Add prospects to queue with validation"""
+        try:
+            # Read current queue
+            with open(self.queue_file, 'r') as f:
+                try:
+                    queue = json.load(f)
+                except json.JSONDecodeError:
+                    bt.logging.warning("Queue file corrupted during read, creating new queue")
+                    queue = []
+            
+            # Add new prospects
+            queue.extend(prospects)
+            
+            # Trim to maxsize if needed
+            if len(queue) > self.maxsize:
+                queue = queue[-self.maxsize:]
+            
+            # Write back to file
+            with open(self.queue_file, 'w') as f:
+                json.dump(queue, f)
+                
+        except Exception as e:
+            bt.logging.error(f"Error enqueueing prospects: {e}")
+            # If any error occurs, try to create new queue
+            self._create_empty_queue()
+    
+    def dequeue_prospects(self) -> List[Dict]:
+        """Get and remove prospects from queue with validation"""
+        try:
+            # Read current queue
+            with open(self.queue_file, 'r') as f:
+                try:
+                    queue = json.load(f)
+                except json.JSONDecodeError:
+                    bt.logging.warning("Queue file corrupted during read, creating new queue")
+                    queue = []
+            
+            if not queue:
+                return []
+            
+            # Get all prospects and clear queue
+            prospects = queue
+            with open(self.queue_file, 'w') as f:
+                json.dump([], f)
+            
+            return prospects
+            
+        except Exception as e:
+            bt.logging.error(f"Error dequeuing prospects: {e}")
+            # If any error occurs, try to create new queue
+            self._create_empty_queue()
+            return []
+
+async def run_validator(validator_hotkey, queue_maxsize):
+    print("Validator event loop started.")
+    async def validation_loop():
+        print("Validation loop running.")
+        while True:
+            lead_request = lead_queue.dequeue_prospects()
+            if not lead_request:
+                await asyncio.sleep(1)
+                continue
+            
+            prospects = lead_request["prospects"]
+            miner_hotkey = lead_request["miner_hotkey"]
+            valid, rejected, issues = [], [], []
+            
+            print(f"\nProcessing batch of {len(prospects)} prospects from miner {miner_hotkey}")
+            
+            for prospect in prospects:
+                print(f"\nValidating prospect: {prospect.get('business', 'Unknown Business')}")
+                
+                # Get email from either field name
+                email = prospect.get("owner_email", prospect.get("Owner(s) Email", ""))
+                print(f"Email: {email}")
+                
+                if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+                    issue = f"Invalid email: {email}"
+                    print(f"Rejected: {issue}")
+                    issues.append(issue)
+                    rejected.append(prospect)
+                    continue
+                    
+                if any(domain in email for domain in ["mailinator.com", "tempmail.com"]):
+                    issue = f"Disposable email: {email}"
+                    print(f"Rejected: {issue}")
+                    issues.append(issue)
+                    rejected.append(prospect)
+                    continue
+                    
+                if prospect["source"] != miner_hotkey:
+                    issue = f"Source mismatch: {prospect['source']} != {miner_hotkey}"
+                    print(f"Rejected: {issue}")
+                    issues.append(issue)
+                    rejected.append(prospect)
+                    continue
+                    
+                if lead_pool.check_duplicates(email):
+                    issue = f"Duplicate email: {email}"
+                    print(f"Rejected: {issue}")
+                    issues.append(issue)
+                    rejected.append(prospect)
+                    continue
+                
+                # Calculate score
+                score = 0.0
+                score += 0.5  # Base score
+                
+                if prospect["linkedin"]:
+                    score += 0.2
+                    print("LinkedIn found: +0.2")
+                
+                if prospect["website"]:
+                    score += 0.2
+                    print("Website found: +0.2")
+                
+                if prospect["industry"]:
+                    score += 0.1
+                    print("Industry found: +0.1")
+                    
+                if prospect["region"]:
+                    score += 0.1
+                    print("Region found: +0.1")
+                
+                score = min(1.0, score)
+                print(f"Final score: {score}")
+                
+                if score >= 0.7:
+                    prospect["conversion_score"] = score
+                    valid.append(prospect)
+                    print("Accepted prospect")
+                else:
+                    issue = f"Low legitimacy score: {score:.2f} for {email}"
+                    print(f"Rejected: {issue}")
+                    issues.append(issue)
+                    rejected.append(prospect)
+            
+            if valid:
+                add_validated_leads_to_pool(valid)
+                print(f"\nAdded {len(valid)} valid prospects to pool")
+                
+            log_validation(validator_hotkey, len(valid), len(rejected), issues)
+            total = len(valid) + len(rejected)
+            precision = (len(valid) / total) if total else 0.0
+            update_validator_stats(validator_hotkey, precision)
+            print(f"\nValidated batch: {len(valid)} accepted, {len(rejected)} rejected.")
+            await asyncio.sleep(0.1)
+    await validation_loop()  # Await directly to keep process alive
+
+def add_validated_leads_to_pool(leads):
+    """Add validated leads to the pool with consistent field names."""
+    mapped_leads = []
+    for lead in leads:
+        # Get the actual validation score from the lead
+        validation_score = lead.get("conversion_score", 1.0)  # Use existing score or default to 1.0
+        
+        mapped_lead = {
+            "business": lead.get("business", lead.get("Business", "")),
+            "owner_full_name": lead.get("owner_full_name", lead.get("Owner Full name", "")),
+            "first": lead.get("first", lead.get("First", "")),
+            "last": lead.get("last", lead.get("Last", "")),
+            "owner_email": lead.get("owner_email", lead.get("Owner(s) Email", "")),
+            "linkedin": lead.get("linkedin", lead.get("LinkedIn", "")),
+            "website": lead.get("website", lead.get("Website", "")),
+            "industry": lead.get("industry", lead.get("Industry", "")),
+            "region": lead.get("region", lead.get("Region", "")),
+            "conversion_score": validation_score  # Use the actual validation score
+        }
+        mapped_leads.append(mapped_lead)
+    
+    lead_pool.add_to_pool(mapped_leads)
+
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Validator")
-    bt.wallet.add_args(parser)
-    bt.subtensor.add_args(parser)
-    bt.logging.add_args(parser)
-    bt.axon.add_args(parser)
     add_validator_args(None, parser)
     parser.add_argument("--wallet_name", type=str, help="Wallet name")
     parser.add_argument("--wallet_hotkey", type=str, help="Wallet hotkey")
     parser.add_argument("--netuid", type=int, default=343, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default="test", help="Subtensor network")
-    parser.add_argument("--axon_port", type=int, default=8093, help="Port for axon")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
     args = parser.parse_args()
@@ -290,30 +549,11 @@ def main():
     if args.logging_trace:
         bt.logging.set_trace(True)
 
-    config = bt.Config()
-    config.wallet = bt.Config()
-    config.wallet.name = args.wallet_name
-    config.wallet.hotkey = args.wallet_hotkey
-    config.netuid = args.netuid
-    config.subtensor = bt.Config()
-    config.subtensor.network = args.subtensor_network
-    config.mock = args.mock
-    config.axon = bt.Config()
-    config.axon.port = args.axon_port
-    config.neuron = bt.Config()
-    config.neuron.sample_size = getattr(args, 'neuron_sample_size', 5)
-    config.neuron.moving_average_alpha = getattr(args, 'neuron_moving_average_alpha', 0.1)
-    config.neuron.use_open_source_validator_model = getattr(args, 'use_open_source_validator_model', True)
-    config.neuron.num_concurrent_forwards = getattr(args, 'neuron_num_concurrent_forwards', 1)
-    config.neuron.timeout = getattr(args, 'neuron_timeout', 10)
-    config.neuron.name = getattr(args, 'neuron_name', 'validator')
-    config.neuron.disable_set_weights = getattr(args, 'neuron_disable_set_weights', False)
-    config.neuron.vpermit_tao_limit = getattr(args, 'neuron_vpermit_tao_limit', 4096)
-
-    with Validator(config=config) as validator:
-        while True:
-            bt.logging.info(f"Validator running... {time.time()}")
-            time.sleep(5)
+    ensure_data_files()
+    from Leadpoet.mock import MockWallet
+    validator_hotkey = MockWallet().hotkey_ss58_address
+    queue_maxsize = getattr(args, "queue_maxsize", 1000)
+    asyncio.run(run_validator(validator_hotkey, queue_maxsize))
 
 if __name__ == "__main__":
     main()

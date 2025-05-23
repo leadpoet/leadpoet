@@ -8,8 +8,17 @@ import socket
 from Leadpoet.base.miner import BaseMinerNeuron
 from Leadpoet.protocol import LeadRequest
 from miner_models.get_leads import get_leads
-from typing import Union, Tuple
+from typing import Union, Tuple, List, Dict, Optional
 from aiohttp import web
+import os
+import re
+import html
+import uuid
+from datetime import datetime
+from Leadpoet.base.utils import queue as lead_queue
+from Leadpoet.base.utils import pool as lead_pool
+import json
+from Leadpoet.base.utils.pool import get_leads_from_pool
 
 class Miner(BaseMinerNeuron):
     def __init__(self, config=None):
@@ -18,41 +27,77 @@ class Miner(BaseMinerNeuron):
         bt.logging.info(f"Using open-source lead model: {self.use_open_source_lead_model}")
         self.app = web.Application()
         self.app.add_routes([web.post('/lead_request', self.handle_lead_request)])
+        self.sourcing_mode = True  # Start in sourcing mode
+        self.sourcing_lock = asyncio.Lock()  # Lock for switching modes
 
     async def forward(self, synapse: LeadRequest) -> LeadRequest:
-        bt.logging.debug(f"Received LeadRequest: num_leads={synapse.num_leads}, industry={synapse.industry}, region={synapse.region}")
+        bt.logging.debug(f"Received lead request: {synapse}")
         start_time = time.time()
 
         try:
-            if self.use_open_source_lead_model:
-                leads = await get_leads(synapse.num_leads, synapse.industry, synapse.region)
-                bt.logging.debug(f"Generated {len(leads)} leads using open-source model")
-            else:
-                leads = [
-                    {
-                        "Business": f"Mock Business {i}",
-                        "Owner Full name": f"Owner {i}",
-                        "First": f"First {i}",
-                        "Last": f"Last {i}",
-                        "Owner(s) Email": f"owner{i}@mockleadpoet.com",
-                        "LinkedIn": f"https://linkedin.com/in/owner{i}",
-                        "Website": f"https://business{i}.com",
-                        "Industry": synapse.industry or "Tech & AI",
-                        "Region": synapse.region or "US"
-                    } for i in range(synapse.num_leads)
-                ]
-                bt.logging.debug(f"Generated {len(leads)} dummy leads")
-
-            synapse.leads = leads
-            synapse.dendrite.status_code = 200
-            synapse.dendrite.status_message = "OK"
-            synapse.dendrite.process_time = str(time.time() - start_time)
+            # Temporarily disable sourcing while curating
+            async with self.sourcing_lock:
+                self.sourcing_mode = False
+                try:
+                    # Get leads from pool first
+                    curated_leads = get_leads_from_pool(
+                        synapse.num_leads,
+                        industry=synapse.industry,
+                        region=synapse.region
+                    )
+                    
+                    if not curated_leads:
+                        bt.logging.info("No leads found in pool, generating new leads")
+                        new_leads = await get_leads(synapse.num_leads, synapse.industry, synapse.region)
+                        sanitized = [sanitize_prospect(p, self.wallet.hotkey.ss58_address) for p in new_leads]
+                        curated_leads = sanitized
+                    
+                    # Map the fields to match the API format and ensure all required fields are present
+                    mapped_leads = []
+                    for lead in curated_leads:
+                        # Map the fields correctly - note the field name changes
+                        mapped_lead = {
+                            "email": lead.get("owner_email", ""),
+                            "Business": lead.get("business", ""),
+                            "Owner Full name": lead.get("owner_full_name", ""),
+                            "First": lead.get("first", ""),
+                            "Last": lead.get("last", ""),
+                            "LinkedIn": lead.get("linkedin", ""),
+                            "Website": lead.get("website", ""),
+                            "Industry": lead.get("industry", ""),
+                            "Region": lead.get("region", ""),
+                            "conversion_score": lead.get("conversion_score", 1.0)
+                        }
+                        # Only include leads that have all required fields
+                        if all(mapped_lead.get(field) for field in ["email", "Business", "Owner Full name"]):
+                            mapped_leads.append(mapped_lead)
+                    
+                    if not mapped_leads:
+                        bt.logging.warning("No valid leads found in pool after mapping")
+                        synapse.leads = []
+                        synapse.dendrite.status_code = 404
+                        synapse.dendrite.status_message = "No valid leads found matching criteria"
+                        synapse.dendrite.process_time = str(time.time() - start_time)
+                        return synapse
+                    
+                    bt.logging.info(f"Returning {len(mapped_leads)} leads to request")
+                    synapse.leads = mapped_leads
+                    synapse.dendrite.status_code = 200
+                    synapse.dendrite.status_message = "OK"
+                    synapse.dendrite.process_time = str(time.time() - start_time)
+                    
+                finally:
+                    # Re-enable sourcing after curation
+                    self.sourcing_mode = True
+                
         except Exception as e:
-            bt.logging.error(f"Error generating leads: {e}")
+            bt.logging.error(f"Error curating leads: {e}")
             synapse.leads = []
             synapse.dendrite.status_code = 500
             synapse.dendrite.status_message = f"Error: {str(e)}"
             synapse.dendrite.process_time = str(time.time() - start_time)
+            # Ensure sourcing is re-enabled even on error
+            self.sourcing_mode = True
 
         return synapse
 
@@ -63,14 +108,62 @@ class Miner(BaseMinerNeuron):
             num_leads = data.get("num_leads", 1)
             industry = data.get("industry")
             region = data.get("region")
-            synapse = LeadRequest(num_leads=num_leads, industry=industry, region=region)
-            response = await self.forward(synapse)
-            bt.logging.info(f"Returning {len(response.leads)} leads to HTTP request")
+            
+            # Get leads from pool first
+            curated_leads = get_leads_from_pool(
+                num_leads,
+                industry=industry,
+                region=region
+            )
+            
+            if not curated_leads:
+                bt.logging.info("No leads found in pool, generating new leads")
+                new_leads = await get_leads(num_leads, industry, region)
+                sanitized = [sanitize_prospect(p, self.wallet.hotkey.ss58_address) for p in new_leads]
+                curated_leads = sanitized
+            
+            # Map the fields - FIXED VERSION
+            mapped_leads = []
+            for lead in curated_leads:
+                # Map the fields correctly using the same keys as stored in pool
+                mapped_lead = {
+                    "email": lead.get("owner_email", ""),
+                    "Business": lead.get("business", ""),
+                    "Owner Full name": lead.get("owner_full_name", ""),
+                    "First": lead.get("first", ""),
+                    "Last": lead.get("last", ""),
+                    "LinkedIn": lead.get("linkedin", ""),
+                    "Website": lead.get("website", ""),
+                    "Industry": lead.get("industry", ""),
+                    "Region": lead.get("region", ""),
+                    "conversion_score": lead.get("conversion_score", 1.0)
+                }
+                
+                # Debug log to see what's happening
+                bt.logging.debug(f"Original lead: {lead}")
+                bt.logging.debug(f"Mapped lead: {mapped_lead}")
+                
+                # Only include leads that have all required fields
+                if all(mapped_lead.get(field) for field in ["email", "Business", "Owner Full name"]):
+                    mapped_leads.append(mapped_lead)
+                else:
+                    bt.logging.warning(f"Lead missing required fields: {mapped_lead}")
+            
+            if not mapped_leads:
+                bt.logging.warning("No valid leads found in pool after mapping")
+                return web.json_response({
+                    "leads": [],
+                    "status_code": 404,
+                    "status_message": "No valid leads found matching criteria",
+                    "process_time": "0"
+                }, status=404)
+            
+            bt.logging.info(f"Returning {len(mapped_leads)} leads to HTTP request")
             return web.json_response({
-                "leads": response.leads,
-                "status_code": response.dendrite.status_code,
-                "status_message": response.dendrite.status_message,
-                "process_time": response.dendrite.process_time
+                "leads": mapped_leads,
+                "status_code": 200,
+                "status_message": "OK",
+                "process_time": "0"
             })
         except Exception as e:
             bt.logging.error(f"Error in HTTP lead request: {e}")
@@ -116,17 +209,137 @@ class Miner(BaseMinerNeuron):
         await site.start()
         bt.logging.info(f"HTTP server started on port {self.config.axon.port}")
 
-async def run_miner(miner):
+DATA_DIR = "data"
+SOURCING_LOG = os.path.join(DATA_DIR, "sourcing_logs.json")
+MINERS_LOG = os.path.join(DATA_DIR, "miners.json")
+LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
+
+def ensure_data_files():
+    """Ensure data directory and required JSON files exist."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    for file in [SOURCING_LOG, MINERS_LOG, LEADS_FILE]:
+        if not os.path.exists(file):
+            with open(file, "w") as f:
+                json.dump([], f)
+
+def sanitize_prospect(prospect, miner_hotkey=None):
+    """Sanitize and validate prospect fields."""
+    def strip_html(s):
+        return re.sub('<.*?>', '', html.unescape(str(s))) if isinstance(s, str) else s
+    def valid_url(url):
+        return bool(re.match(r"^https?://[^\s]+$", url))
+    
+    # Special handling for email field
+    email = prospect.get("Owner(s) Email", "")
+    sanitized = {
+        "business": strip_html(prospect.get("Business", "")),
+        "owner_full_name": strip_html(prospect.get("Owner Full name", "")),
+        "first": strip_html(prospect.get("First", "")),
+        "last": strip_html(prospect.get("Last", "")),
+        "owner_email": strip_html(email),  # Use consistent field name
+        "linkedin": strip_html(prospect.get("LinkedIn", "")),
+        "website": strip_html(prospect.get("Website", "")),
+        "industry": strip_html(prospect.get("Industry", "")),
+        "region": strip_html(prospect.get("Region", "")),
+        "source": miner_hotkey  # Add source field
+    }
+    
+    if not valid_url(sanitized["linkedin"]):
+        sanitized["linkedin"] = ""
+    if not valid_url(sanitized["website"]):
+        sanitized["website"] = ""
+    
+    sanitized["id"] = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat()
+    sanitized["created_at"] = now
+    sanitized["updated_at"] = now
+    sanitized["conversion_score"] = 0.0
+    return sanitized
+
+def log_sourcing(hotkey, num_prospects):
+    entry = {"timestamp": datetime.utcnow().isoformat(), "hotkey": hotkey, "num_prospects": num_prospects}
+    with threading.Lock():
+        if not os.path.exists(SOURCING_LOG):
+            logs = []
+        else:
+            with open(SOURCING_LOG, "r") as f:
+                try:
+                    logs = json.load(f)
+                except Exception:
+                    logs = []
+        logs.append(entry)
+        with open(SOURCING_LOG, "w") as f:
+            json.dump(logs, f, indent=2)
+
+def update_miner_stats(hotkey, valid_count):
+    with threading.Lock():
+        if not os.path.exists(MINERS_LOG):
+            miners = []
+        else:
+            with open(MINERS_LOG, "r") as f:
+                try:
+                    miners = json.load(f)
+                except Exception:
+                    miners = []
+        found = False
+        for miner in miners:
+            if miner["hotkey"] == hotkey:
+                miner["valid_prospects_count"] += valid_count
+                miner["last_updated"] = datetime.utcnow().isoformat()
+                found = True
+                break
+        if not found:
+            miners.append({
+                "hotkey": hotkey,
+                "valid_prospects_count": valid_count,
+                "last_updated": datetime.utcnow().isoformat()
+            })
+        with open(MINERS_LOG, "w") as f:
+            json.dump(miners, f, indent=2)
+
+async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
+    # Start HTTP server
     await miner.start_http_server()
-    with miner:
+    
+    async def sourcing_loop():
         while True:
-            bt.logging.info(f"Miner running... {time.time()}")
-            await asyncio.sleep(5)
+            try:
+                if not miner.sourcing_mode:
+                    await asyncio.sleep(1)
+                    continue
+                    
+                # Generate leads
+                num_prospects = 10  # Default batch size
+                bt.logging.debug(f"Generating {num_prospects} leads, industry=None, region=None")
+                prospects = await get_leads(num_prospects)
+                bt.logging.debug(f"Generated {len(prospects)} leads")
+                
+                # Sanitize prospects with miner_hotkey
+                sanitized = [sanitize_prospect(p, miner_hotkey) for p in prospects]
+                
+                # Add to queue for validation
+                lead_queue.enqueue_prospects(sanitized, miner_hotkey)
+                bt.logging.info(f"Sourced and enqueued {len(sanitized)} prospects at {datetime.utcnow().isoformat()}")
+                
+                # Log sourcing activity
+                log_sourcing(miner_hotkey, len(sanitized))
+                
+            except Exception as e:
+                bt.logging.error(f"Error in sourcing loop: {e}")
+            
+            await asyncio.sleep(interval)
+    
+    # Start sourcing loop
+    asyncio.create_task(sourcing_loop())
+    
+    # Keep the process alive
+    while True:
+        await asyncio.sleep(1)
 
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
-    parser.add_argument("--axon_port", type=int, default=8092, help="Port for axon and HTTP server")
+    parser.add_argument("--axon_port", type=int, default=8091, help="Port for axon and HTTP server")
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -149,6 +362,7 @@ def main():
     config.neuron.epoch_length = args.neuron_epoch_length
     config.use_open_source_lead_model = args.use_open_source_lead_model
 
+    ensure_data_files()
     miner = Miner(config=config)
     try:
         config.axon.port = miner.find_available_port(config.axon.port)
@@ -167,7 +381,22 @@ def main():
         bt.logging.error(str(e))
         return
 
-    asyncio.run(run_miner(miner))
+    miner_hotkey = None
+    interval = 60
+    queue_maxsize = 1000
+    if config.mock:
+        try:
+            from Leadpoet.mock import MockWallet
+            miner_hotkey = MockWallet().hotkey_ss58_address
+        except Exception:
+            miner_hotkey = "5MockHotkeyAddress123456789"
+        from Leadpoet.base.utils.config import add_validator_args
+        parser = argparse.ArgumentParser()
+        add_validator_args(None, parser)
+        args, _ = parser.parse_known_args()
+        interval = getattr(args, "sourcing_interval", 60)
+        queue_maxsize = getattr(args, "queue_maxsize", 1000)
+    asyncio.run(run_miner(miner, miner_hotkey, interval, queue_maxsize))
 
 if __name__ == "__main__":
     main()

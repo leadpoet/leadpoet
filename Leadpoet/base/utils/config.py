@@ -18,3 +18,15 @@ def add_validator_args(cls, parser: argparse.ArgumentParser):
         help="Moving average alpha for score updates",
         default=0.1
     )
+    parser.add_argument(
+        "--sourcing_interval",
+        type=int,
+        help="Interval (in seconds) between each sourcing cycle by the miner",
+        default=60
+    )
+    parser.add_argument(
+        "--queue_maxsize",
+        type=int,
+        help="Maximum size of the in-memory prospect queue",
+        default=1000
+    )

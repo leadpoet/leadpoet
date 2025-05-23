@@ -1,0 +1,50 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: "Enforce standards for validator legitimacy audits of sourced prospects."
+globs:
+  - "neurons/validator.py"
+  - "Leadpoet/base/validator.py"
+  - "Leadpoet/validator/*.py"
+  - "validator_models/*.py"
+alwaysApply: true
+---
+
+# Validator Legitimacy Audit Standards
+
+Validators perform legitimacy audits on miner-sourced prospects before adding them to the Prospect Pool. The following standards ensure compliance:
+
+## Audit Components
+- **Format**: Use regex to validate `owner_email` (e.g., `^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`).
+- **Contact Legitimacy**:
+  - Check `owner_email` against disposable email domains (e.g., using a blocklist).
+  - Use external APIs (e.g., Hunter.io) to verify email deliverability (mock in tests).
+  - Apply ML model (e.g., XGBoost via `validator_models.os_validator_model`) to detect synthetic prospects.
+- **Compliance**: Verify `Source` field matches miner’s hotkey or approved external source.
+- **Duplicates**: Query `prospects` table to reject prospects with matching `owner_email`.
+
+## Validation Logic
+- Implement in `neurons/validator.py` via `validate_leads` method.
+- Return a validation report: `{ "score": float, "O_v": float, "issues": list }`.
+  - `score`: Percentage of valid prospects (0-100).
+  - `O_v`: Normalized score (0.0-1.0) for miner rewards.
+  - `issues`: List of rejection reasons (e.g., "invalid email", "duplicate").
+- Prospects with `O_v >= 0.9` are added to `prospects` table via `Leadpoet.base.utils.pool.add_to_pool`.
+
+## Incentive Tracking
+- Validators track their `precision`, `consistency`, and `reputation` per the incentive mechanism.
+- Update `validation_history` with each audit result to calculate `J_v` (consistency over 14/30/90 days).
+- Apply buyer feedback to adjust `precision` via `handle_buyer_feedback`.
+
+## Security
+- Validate miner signatures on `LeadRequest` to ensure authenticity.
+- Rate-limit miner submissions to prevent spam (e.g., max 10 batches/minute).
+- Log all audit results to Supabase (`validation_logs` table) for auditing.
+
+## Testing
+- Write unit tests (`tests/validator_tests.py`) mocking Hunter.io API and XGBoost model.
+- Ensure >90% coverage for `validate_leads` and `run_automated_checks`.
+- Test duplicate detection by inserting mock prospects into `prospects` table.

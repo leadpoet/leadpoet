@@ -1,0 +1,42 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: "Enforce standards for miner sourcing prospects into the Prospect Pool."
+globs:
+  - "neurons/miner.py"
+  - "Leadpoet/base/miner.py"
+  - "miner_models/*.py"
+alwaysApply: true
+---
+
+# Miner Sourcing Standards
+
+Miners source prospects and submit them to validators for legitimacy audits. The following standards ensure compliance with the LeadPoet subnet’s sourcing workflow:
+
+## Sourcing Logic
+- Miners must call `miner_models.get_leads` (or equivalent) to source prospects with fields: `Business`, `Owner Full name`, `First`, `Last`, `Owner(s) Email`, `LinkedIn`, `Website`, `Industry`, `Region`.
+- Prospects must include a `Source` field (miner’s hotkey or approved external source).
+- Prospects are submitted via `LeadRequest` synapse to validators, with `num_leads` set to the batch size (default 100).
+- Miners must retry failed submissions (e.g., validator timeout) up to 3 times with exponential backoff.
+
+## Pool Integration
+- Validated prospects (passing legitimacy audit) are added to the `prospects` table via `Leadpoet.base.utils.pool.add_to_pool`.
+- Miners must track their sourced prospects’ `id` (UUID) for incentive calculations (Qₘ(t)).
+
+## Incentive Tracking
+- Miners must maintain a local cache of sourced prospects that appear in `curated_lists` to calculate `Qₘ(t)` (number of curated sourced prospects).
+- Miners must query `scores` table to compute `Rₘ(t)` (average Conversion Score of curated sourced prospects).
+- Sourcing Score (Pₘ(t)) is calculated as: `Pₘ(t) = (Qₘ(t) * Rₘ(t)) / (∑ₘ (Qₘ(t) * Rₘ(t)))`.
+- Weighted Sourcing Score (Sₘ) is: `Sₘ = 0.55 * Pₘ(last 14 days) + 0.25 * Pₘ(last 30 days) + 0.20 * Pₘ(last 90 days)`.
+
+## Security
+- Prospects must be sanitized (e.g., strip HTML, validate URLs) before submission.
+- Miners must sign submissions with their Bittensor wallet to ensure authenticity.
+- Blacklist non-validator requests unless `blacklist_allow_non_registered` is set (security risk).
+
+## Logging
+- Log each sourcing batch: number of prospects, submission timestamp, validator UIDs queried.
+- Log validation results: number of prospects accepted/rejected, reasons (e.g., duplicates, invalid email).

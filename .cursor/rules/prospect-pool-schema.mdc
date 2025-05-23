@@ -1,0 +1,88 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: "Define and enforce the Supabase schema for the Prospect Pool and related tables."
+globs:
+  - "supabase/migrations/*.sql"
+  - "docs/database/*.md"
+alwaysApply: true
+---
+
+# Prospect Pool Schema Standards
+
+The LeadPoet subnet uses Supabase to store the Prospect Pool and related data. All database migrations and documentation must adhere to the following schema:
+
+## Tables
+
+- **prospects**:
+  - Columns:
+    - `id`: UUID (primary key, auto-generated).
+    - `business`: VARCHAR(255) (required, company name).
+    - `owner_full_name`: VARCHAR(255) (required).
+    - `first`: VARCHAR(100) (required).
+    - `last`: VARCHAR(100) (required).
+    - `owner_email`: VARCHAR(255) (required, unique, validated via regex).
+    - `linkedin`: VARCHAR(255) (optional, URL).
+    - `website`: VARCHAR(255) (optional, URL).
+    - `industry`: VARCHAR(100) (required, e.g., 'Tech & AI').
+    - `region`: VARCHAR(100) (required, e.g., 'US').
+    - `source`: VARCHAR(255) (required, miner’s hotkey or approved source).
+    - `conversion_score`: FLOAT (default 0.0, updated by validators/buyer feedback).
+    - `created_at`: TIMESTAMP (default NOW()).
+    - `updated_at`: TIMESTAMP (default NOW(), updated on changes).
+  - Indexes:
+    - Unique index on `owner_email` to prevent duplicates.
+    - Index on `industry`, `region` for efficient curation queries.
+  - Security:
+    - Row-Level Security (RLS): Only miners with valid hotkeys can insert; validators can read/update `conversion_score`.
+    - Encryption: `owner_email` encrypted at rest.
+
+- **queries**:
+  - Columns:
+    - `query_id`: UUID (primary key, auto-generated).
+    - `buyer_hotkey`: VARCHAR(255) (required, Bittensor hotkey).
+    - `industry`: VARCHAR(100) (optional, ICP filter).
+    - `region`: VARCHAR(100) (optional, ICP filter).
+    - `status`: VARCHAR(50) (default 'pending', values: 'pending', 'curating', 'scoring', 'completed', 'failed').
+    - `created_at`: TIMESTAMP (default NOW()).
+  - Indexes:
+    - Index on `buyer_hotkey`, `status` for query tracking.
+  - Security:
+    - RLS: Buyers (via API key) can insert; miners/validators can read.
+
+- **curated_lists**:
+  - Columns:
+    - `id`: UUID (primary key, auto-generated).
+    - `query_id`: UUID (foreign key to `queries.query_id`).
+    - `miner_uid`: INT (required, miner’s UID from metagraph).
+    - `prospect_ids`: UUID[] (array of `prospects.id`).
+    - `submission_timestamp`: TIMESTAMP (default NOW()).
+    - `commit_hash`: VARCHAR(64) (required, hash of curated list).
+    - `reveal_timestamp`: TIMESTAMP (must be within 20s of `submission_timestamp`).
+  - Indexes:
+    - Index on `query_id`, `miner_uid`.
+  - Security:
+    - RLS: Miners can insert; validators can read.
+
+- **scores**:
+  - Columns:
+    - `id`: UUID (primary key, auto-generated).
+    - `query_id`: UUID (foreign key to `queries.query_id`).
+    - `prospect_id`: UUID (foreign key to `prospects.id`).
+    - `conversion_score`: FLOAT (required, 0.0-1.0, validator-assigned).
+    - `validator_hotkey`: VARCHAR(255) (required, validator’s hotkey).
+    - `created_at`: TIMESTAMP (default NOW()).
+  - Indexes:
+    - Index on `query_id`, `prospect_id`.
+  - Security:
+    - RLS: Validators can insert; buyers can read.
+
+## Standards
+- All migrations must include `CREATE TABLE` statements with the above columns, indexes, and RLS policies.
+- Documentation (`docs/database/*.md`) must describe each table, its purpose, and RLS rules.
+- Use triggers to enforce `updated_at` timestamps and validate `owner_email` regex.
+- Ensure foreign keys are enforced (`ON DELETE CASCADE` for `query_id`, `prospect_id`).
+- Validate `commit_hash` and `reveal_timestamp` in `curated_lists` to enforce 20-second commit-reveal window.

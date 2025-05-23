@@ -88,22 +88,34 @@ async def verify_company(company_domain: str) -> tuple[bool, str]:
         return False, f"Website inaccessible: {str(e)}"
 
 async def check_duplicates(leads: list) -> bool:
-    emails = [lead.get("Owner(s) Email", "") for lead in leads]
+    emails = [lead.get("email", "") for lead in leads]
     return len(emails) != len(set(emails))
 
 async def validate_lead_list(leads: list) -> list:
     if "YOUR_HUNTER_API_KEY" in HUNTER_API_KEY:
         bt.logging.info("Mock mode: Assuming all leads pass automated checks")
-        return [{"lead_index": i, "email": lead.get("Owner(s) Email", ""), "company_domain": urlparse(lead.get("Website", "")).netloc, "status": "Valid", "reason": "Mock pass"} for i, lead in enumerate(leads)]
+        return [{
+            "lead_index": i,
+            "email": lead.get("Owner(s) Email", lead.get("email", "")),
+            "company_domain": urlparse(lead.get("Website", lead.get("website", ""))).netloc,
+            "status": "Valid",
+            "reason": "Mock pass"
+        } for i, lead in enumerate(leads)]
     
     if await check_duplicates(leads):
         bt.logging.warning("Duplicate emails detected")
-        return [{"lead_index": i, "email": lead.get("Owner(s) Email", ""), "company_domain": urlparse(lead.get("Website", "")).netloc, "status": "Invalid", "reason": "Duplicate email"} for i, lead in enumerate(leads)]
+        return [{
+            "lead_index": i,
+            "email": lead.get("email", ""),
+            "company_domain": urlparse(lead.get("website", "")).netloc,
+            "status": "Invalid",
+            "reason": "Duplicate email"
+        } for i, lead in enumerate(leads)]
     
     report = []
     for i, lead in enumerate(leads):
-        email = lead.get("Owner(s) Email", "")
-        domain = urlparse(lead.get("Website", "")).netloc if lead.get("Website") else ""
+        email = lead.get("Owner(s) Email", lead.get("email", ""))
+        domain = urlparse(lead.get("website", "")).netloc if lead.get("website") else ""
         email_valid, email_reason = await verify_email(email) if email else (False, "No email")
         company_valid, company_reason = await verify_company(domain)
         status = "Valid" if email_valid and company_valid else "Invalid"

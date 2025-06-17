@@ -86,7 +86,32 @@ class BaseMinerNeuron(BaseNeuron):
 
         self.uid = None
         if is_mock:
-            self.uid = 0
+            # Assign UID based on wallet hotkey to support infinite miners
+            if hasattr(self.config, 'wallet') and hasattr(self.config.wallet, 'hotkey'):
+                hotkey = self.config.wallet.hotkey
+                # Extract number from hotkey (e.g., "default" -> 0, "default1" -> 1, "default2" -> 2)
+                if hotkey == "default":
+                    self.uid = 0
+                elif hotkey.startswith("default"):
+                    try:
+                        # Extract number from hotkey like "default1", "default2", etc.
+                        number_part = hotkey[7:]  # Remove "default" prefix
+                        if number_part:
+                            self.uid = int(number_part)
+                        else:
+                            self.uid = 0
+                    except ValueError:
+                        # Fallback: use hash of hotkey
+                        import hashlib
+                        uid_hash = int(hashlib.md5(hotkey.encode()).hexdigest(), 16)
+                        self.uid = uid_hash % 1000  # Use modulo to get reasonable UID
+                else:
+                    # Fallback: use hash of hotkey for any other hotkey names
+                    import hashlib
+                    uid_hash = int(hashlib.md5(hotkey.encode()).hexdigest(), 16)
+                    self.uid = uid_hash % 1000
+            else:
+                self.uid = 0  # Fallback
             bt.logging.info(f"Mock mode: Set miner UID to {self.uid}")
         else:
             max_retries = 5

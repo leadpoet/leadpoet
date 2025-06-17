@@ -615,7 +615,8 @@ class MockDendrite(bt.dendrite):
                     response.dendrite.status_message = "Timeout"
                     response.dendrite.process_time = str(timeout)
                 else:
-                    if axon.port == 8091:  # Miner's port
+                    # Check if this is a miner axon (ports 8091, 8092, 8093, etc.)
+                    if axon.port >= 8091 and axon.port <= 8100:  # Miner port range
                         url = f"http://{axon.ip}:{axon.port}/lead_request"
                         payload = {
                             "num_leads": synapse.num_leads,

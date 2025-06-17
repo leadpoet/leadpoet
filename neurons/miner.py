@@ -19,6 +19,9 @@ from Leadpoet.base.utils import queue as lead_queue
 from Leadpoet.base.utils import pool as lead_pool
 import json
 from Leadpoet.base.utils.pool import get_leads_from_pool
+from validator_models.os_validator_model import validate_lead_list
+from Leadpoet.api.leadpoet_api import get_query_api_axons
+from Leadpoet.mock import MockWallet
 
 class Miner(BaseMinerNeuron):
     def __init__(self, config=None):
@@ -55,7 +58,6 @@ class Miner(BaseMinerNeuron):
                     # Map the fields to match the API format and ensure all required fields are present
                     mapped_leads = []
                     for lead in curated_leads:
-                        # Map the fields correctly - note the field name changes
                         mapped_lead = {
                             "email": lead.get("owner_email", ""),
                             "Business": lead.get("business", ""),
@@ -66,13 +68,20 @@ class Miner(BaseMinerNeuron):
                             "Website": lead.get("website", ""),
                             "Industry": lead.get("industry", ""),
                             "Region": lead.get("region", ""),
-                            "conversion_score": lead.get("conversion_score", 1.0)
+                            "source":       lead.get("source", ""),
+                            "curated_by":   self.wallet.hotkey.ss58_address,
                         }
                         # Only include leads that have all required fields
                         if all(mapped_lead.get(field) for field in ["email", "Business", "Owner Full name"]):
                             mapped_leads.append(mapped_lead)
                     
-                    if not mapped_leads:
+                    # run the open-source validator model to attach conversion_score
+                    val = await validate_lead_list(mapped_leads, synapse.industry)
+                    scored = val.get("scored_leads", mapped_leads)
+                    scored.sort(key=lambda x: x.get("conversion_score", 0), reverse=True)
+                    top_leads = scored[: synapse.num_leads]
+                    
+                    if not top_leads:
                         bt.logging.warning("No valid leads found in pool after mapping")
                         synapse.leads = []
                         synapse.dendrite.status_code = 404
@@ -80,8 +89,8 @@ class Miner(BaseMinerNeuron):
                         synapse.dendrite.process_time = str(time.time() - start_time)
                         return synapse
                     
-                    bt.logging.info(f"Returning {len(mapped_leads)} leads to request")
-                    synapse.leads = mapped_leads
+                    bt.logging.info(f"Returning {len(top_leads)} scored leads")
+                    synapse.leads = top_leads
                     synapse.dendrite.status_code = 200
                     synapse.dendrite.status_message = "OK"
                     synapse.dendrite.process_time = str(time.time() - start_time)
@@ -136,7 +145,9 @@ class Miner(BaseMinerNeuron):
                     "Website": lead.get("website", ""),
                     "Industry": lead.get("industry", ""),
                     "Region": lead.get("region", ""),
-                    "conversion_score": lead.get("conversion_score", 1.0)
+                    "conversion_score": lead.get("conversion_score", 1.0),
+                    "source":       lead.get("source", ""),
+                    "curated_by":   self.wallet.hotkey.ss58_address,
                 }
                 
                 # Debug log to see what's happening
@@ -159,6 +170,12 @@ class Miner(BaseMinerNeuron):
                 }, status=404)
             
             bt.logging.info(f"Returning {len(mapped_leads)} leads to HTTP request")
+            lead_queue.enqueue_prospects(
+                mapped_leads,
+                self.wallet.hotkey.ss58_address,
+                request_type="curated",
+                requested=num_leads
+            )
             return web.json_response({
                 "leads": mapped_leads,
                 "status_code": 200,
@@ -363,11 +380,16 @@ def main():
     config.use_open_source_lead_model = args.use_open_source_lead_model
 
     ensure_data_files()
+    if config.mock:
+        miner_wallet = MockWallet(name=config.wallet.name, hotkey=config.wallet.hotkey)
+    else:
+        miner_wallet = bt.wallet(name=config.wallet.name, hotkey=config.wallet.hotkey)
+
     miner = Miner(config=config)
+    miner.wallet = miner_wallet
     try:
         config.axon.port = miner.find_available_port(config.axon.port)
         bt.logging.info(f"Using axon port: {config.axon.port}")
-        # Ensure axon uses the same port
         miner.config.axon.port = config.axon.port
         miner.axon = bt.axon(
             port=config.axon.port,
@@ -386,7 +408,6 @@ def main():
     queue_maxsize = 1000
     if config.mock:
         try:
-            from Leadpoet.mock import MockWallet
             miner_hotkey = MockWallet().hotkey_ss58_address
         except Exception:
             miner_hotkey = "5MockHotkeyAddress123456789"

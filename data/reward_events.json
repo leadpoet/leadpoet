@@ -1,0 +1,326 @@
+[
+  {
+    "timestamp": "2025-06-06T01:00:37.985409",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:07:43.442612",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:07:43.442873",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:07:43.583402",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:07:43.583955",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:07:43.584154",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:08:01.762749",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:08:01.763134",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:08:02.917546",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:08:02.917957",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:11:33.825994",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:11:33.826277",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:11:35.965471",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:11:35.965752",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:11:35.965966",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:11:35.966186",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-11T00:11:35.966416",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:35:27.341548",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:35:27.343406",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:36:28.735021",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:36:28.735426",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:36:43.897442",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:37:42.173252",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:37:42.175640",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 0.8999999999999999
+  },
+  {
+    "timestamp": "2025-06-15T03:37:42.175958",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 0.8999999999999999
+  },
+  {
+    "timestamp": "2025-06-15T03:37:42.176265",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:37:56.354792",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:37:56.355508",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:37:56.355860",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-15T03:37:56.356194",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T03:54:21.544803",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T03:54:21.545536",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T03:54:21.545912",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T03:54:25.681327",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T04:14:19.629403",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T04:14:19.631873",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T04:14:22.776393",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T04:25:00.260197",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T04:25:00.260673",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T04:25:00.261071",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-16T04:25:00.261477",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:17:16.923789",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:17:17.064200",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:17:17.064847",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:17:17.205957",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 0.8999999999999999
+  },
+  {
+    "timestamp": "2025-06-17T03:17:17.206530",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:17:17.209124",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:17:17.209674",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:17:17.210216",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:39:15.917067",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:39:15.918712",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:39:15.919200",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:39:16.045832",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  },
+  {
+    "timestamp": "2025-06-17T03:39:16.046273",
+    "source": "5MockHotkeyAddress123456789",
+    "curated_by": "",
+    "score": 1.0
+  }
+]

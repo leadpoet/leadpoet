@@ -13,12 +13,20 @@ def initialize_queue():
         with open(QUEUE_FILE, "w") as f:
             json.dump([], f)
 
-def enqueue_prospects(prospects, miner_hotkey):
+def enqueue_prospects(prospects,
+                      miner_hotkey: str,
+                      request_type: str = "sourced",
+                      **meta):
     with _queue_lock:
         initialize_queue()
         with open(QUEUE_FILE, "r") as f:
             queue = json.load(f)
-        queue.append({"prospects": prospects, "miner_hotkey": miner_hotkey})
+        queue.append({
+            "prospects": prospects,
+            "miner_hotkey": miner_hotkey,
+            "request_type": request_type,
+            **meta
+        })
         with open(QUEUE_FILE, "w") as f:
             json.dump(queue, f, indent=2)
 

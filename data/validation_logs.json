@@ -6174,5 +6174,453 @@
       "Duplicate email: josh@hideparkapparel.com",
       "Duplicate email: herra@ohlolly.com"
     ]
+  },
+  {
+    "timestamp": "2025-06-05T20:28:23.415433",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: info@ar1group.com",
+      "Duplicate email: info@drinkmothersmilk.com",
+      "Duplicate email: info@vegzone.it",
+      "Duplicate email: atevonyan1@gmail.com",
+      "Duplicate email: daniel@evanaturals.com",
+      "Duplicate email: kmurphy@enspice.com",
+      "Duplicate email: Roman@monarchsolutions.ai",
+      "Duplicate email: contact@threadzco.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-05T21:00:37.985801",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 1,
+    "num_rejected": 9,
+    "issues": [
+      "Duplicate email: venessa@popartsnacks.com",
+      "Duplicate email: joey@caulipuffs.com",
+      "Duplicate email: bruces@strikeforceenergy.com",
+      "Duplicate email: aidan@reservlabs.com",
+      "Duplicate email: joyson@jayswatermelonade.com",
+      "Duplicate email: info@drinkmothersmilk.com",
+      "Duplicate email: sebastian@optimalnutrition.us",
+      "Duplicate email: info@wangda.clothing",
+      "Duplicate email: rebekah@rebekahspureliving.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-10T20:07:43.443398",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: krista@nunonalife.com",
+      "Duplicate email: Connor@coventrycoffeeco.co.uk",
+      "Duplicate email: harrison@blatepapes.com",
+      "Duplicate email: akash@progic.co",
+      "Duplicate email: desmond@usacontractsolutions.com",
+      "Duplicate email: kim@shamswear.com",
+      "Duplicate email: sammy@ecomsniper.io",
+      "Duplicate email: xmmochabeans@xpressivemocha.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-10T20:07:43.584438",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 3,
+    "num_rejected": 7,
+    "issues": [
+      "Duplicate email: Beautifulamore@gmail.com",
+      "Duplicate email: info@vicodeo.com",
+      "Duplicate email: felicia@yina.co",
+      "Duplicate email: natalie@bewellcompany.com",
+      "Duplicate email: heather@renov8.fitness",
+      "Duplicate email: rudra@metrosurgehouse.com",
+      "Duplicate email: kristen.rumfola@happyfamilybrands.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-10T20:08:01.763527",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: andrew@goldencoastmead.com",
+      "Duplicate email: info@reasonandrationality.com",
+      "Duplicate email: hamilton.bakes@outlook.com",
+      "Duplicate email: stugold@xzactly.ai",
+      "Duplicate email: anisha@ummskincare.com",
+      "Duplicate email: vanessa@vhskincare.com",
+      "Duplicate email: Lisa@kpaxhealth.com",
+      "Duplicate email: aidan@reservlabs.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-10T20:08:02.918353",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: akash@progic.co",
+      "Duplicate email: rudra@metrosurgehouse.com",
+      "Duplicate email: ggonong0002@gmail.com",
+      "Duplicate email: aditi@libi.com",
+      "Duplicate email: Beautifulamore@gmail.com",
+      "Duplicate email: sales@tiktokshopthrive.com",
+      "Duplicate email: celeste@heydewdrop.com",
+      "Duplicate email: felicia@yina.co"
+    ]
+  },
+  {
+    "timestamp": "2025-06-10T20:11:33.826587",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: serena@seadropskincare.com",
+      "Duplicate email: wsiddique@activeapparel.net",
+      "Duplicate email: arshan@midline.studio",
+      "Duplicate email: marc@orgonolivingsilica.com",
+      "Duplicate email: info@irieplates.com",
+      "Duplicate email: sima@pistacheskincare.com",
+      "Duplicate email: hello@culinarytemptations.co.uk",
+      "Duplicate email: nolan@popzup.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-10T20:11:35.966712",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 5,
+    "num_rejected": 5,
+    "issues": [
+      "Duplicate email: Patrick@peeledbeverages.ca",
+      "Duplicate email: rknoss@apluseveryday.com",
+      "Duplicate email: yoru.yarns@gmail.com",
+      "Duplicate email: info@varchuk.ca",
+      "Duplicate email: ml@chlorophyllwater.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-14T23:35:27.343618",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: ion@tornea.net",
+      "Duplicate email: tonya@drinkhardlywater.com",
+      "Duplicate email: phillip.mccauley@watershed.net",
+      "Duplicate email: craig.gillan@prowandbeacon.com",
+      "Duplicate email: ricky@nhq.rocks",
+      "Duplicate email: nantime@aol.com",
+      "Duplicate email: aubri@rebrandskincare.com",
+      "Duplicate email: max@platecrate.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-14T23:35:30.486264",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 0,
+    "num_rejected": 10,
+    "issues": [
+      "Duplicate email: tyler@fr3e.co",
+      "Duplicate email: raeka@raekabeauty.com",
+      "Duplicate email: ky@demandos.com",
+      "Duplicate email: adam@buildauthority.co",
+      "Duplicate email: sean@bow-crew.com",
+      "Duplicate email: hpenn@hppyskin.com",
+      "Duplicate email: josh@readyto.com\n",
+      "Duplicate email: tonya@drinkhardlywater.com",
+      "Duplicate email: Austin@LegendsFinancial.US",
+      "Duplicate email: chung@itrllc.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-14T23:36:28.735818",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: lia@bezelsforwatches.com",
+      "Duplicate email: ranya@getsibz.com",
+      "Duplicate email: christina@drinkmebeverages.com",
+      "Duplicate email: oneil.dennis@sciio.ai",
+      "Duplicate email: josiah@hearthandhomesteadstore.com",
+      "Duplicate email: Matt@abatismedia.com",
+      "Duplicate email: ruud.vanheijst@live.nl",
+      "Duplicate email: suz@mamap.life"
+    ]
+  },
+  {
+    "timestamp": "2025-06-14T23:36:43.897924",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 1,
+    "num_rejected": 9,
+    "issues": [
+      "Duplicate email: chung@itrllc.com",
+      "Duplicate email: audra@dinnerdone.com",
+      "Duplicate email: bryan@goviter.com",
+      "Duplicate email: joyson@jayswatermelonade.com",
+      "Duplicate email: info@bemoxiesupplements.com",
+      "Duplicate email: hussain@cawgo.com",
+      "Duplicate email: ed@mothernatureorganics.com",
+      "Duplicate email: muhammad.rafikov@oplex.us",
+      "Duplicate email: ky@demandos.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-14T23:37:42.176669",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 4,
+    "num_rejected": 6,
+    "issues": [
+      "Duplicate email: oubed@doorstepdesserts.co.uk",
+      "Duplicate email: boh@vennskincare.com",
+      "Duplicate email: hamilton.bakes@outlook.com",
+      "Duplicate email: megan@furtherproducts.com",
+      "Duplicate email: yoru.yarns@gmail.com",
+      "Duplicate email: jeremy@humesupernatural.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-14T23:37:56.356741",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 4,
+    "num_rejected": 6,
+    "issues": [
+      "Duplicate email: scott@skinkind.com",
+      "Duplicate email: eric@ericphuddleston.com",
+      "Duplicate email: lauryn@eatsnoods.com",
+      "Duplicate email: carson@candthemoon.com",
+      "Duplicate email: jimmy@drinkgleem.com",
+      "Duplicate email: info@conquerwithfaith.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-15T23:54:21.546315",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 3,
+    "num_rejected": 7,
+    "issues": [
+      "Duplicate email: lia@bezelsforwatches.com",
+      "Duplicate email: heather@renov8.fitness",
+      "Duplicate email: inbar@aandewatches.com",
+      "Duplicate email: contact@asbu.ai",
+      "Duplicate email: founders@simplifine.com",
+      "Duplicate email: sean@machapparel.com",
+      "Duplicate email: info@mebli.app"
+    ]
+  },
+  {
+    "timestamp": "2025-06-15T23:54:25.681813",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 1,
+    "num_rejected": 9,
+    "issues": [
+      "Duplicate email: matt.bunce@whoamommaprotein.com",
+      "Duplicate email: gabriel.dire@strps.ca",
+      "Duplicate email: akash@progic.co",
+      "Duplicate email: teresa@tdconnections.com",
+      "Duplicate email: junyoung@weavel.ai",
+      "Duplicate email: jenyu@jaxonlane.com",
+      "Duplicate email: david.istier@gutzyorganic.com",
+      "Duplicate email: thrive@thrivecandy.com",
+      "Duplicate email: housni@amklo.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T00:14:19.632522",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: Lorenzo@publytics.net",
+      "Duplicate email: sd@bixjet.com",
+      "Duplicate email: greg@octonuts.com",
+      "Duplicate email: tori@felineapparel.com",
+      "Duplicate email: info@big3bears.com",
+      "Duplicate email: james@woollooshoe.com",
+      "Duplicate email: troy@hibegone.com",
+      "Duplicate email: elisette@sendbars.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T00:14:22.781604",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 1,
+    "num_rejected": 9,
+    "issues": [
+      "Duplicate email: shasmina@giftboxes.ae",
+      "Duplicate email: maddie@ellasflats.com",
+      "Duplicate email: hello@thegreekprovidore.com.au",
+      "Duplicate email: simkinashley@gmail.com",
+      "Duplicate email: kelley@greenjuju.com",
+      "Duplicate email: luly1289@gmail.com",
+      "Duplicate email: mac@provitas.com",
+      "Duplicate email: sean@machapparel.com",
+      "Duplicate email: usama@goconvert.co"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T00:25:00.261919",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 4,
+    "num_rejected": 6,
+    "issues": [
+      "Duplicate email: olivia@tick-mitt.com",
+      "Duplicate email: Manjul@technomorph.tech",
+      "Duplicate email: tessaschrupp@drinkwholesome.com",
+      "Duplicate email: info@cocofro.com",
+      "Duplicate email: deividas@scaletriple.com",
+      "Duplicate email: george@boldsnax.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T00:25:04.395578",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 0,
+    "num_rejected": 10,
+    "issues": [
+      "Duplicate email: support@xohalal.com",
+      "Duplicate email: thomas@dolphinblue.com",
+      "Duplicate email: gloriana@lyfestyleventures.com",
+      "Duplicate email: marc@tmwlongevity.com",
+      "Duplicate email: contact@wassupmedia.co.in",
+      "Duplicate email: audra@dinnerdone.com",
+      "Duplicate email: salina@diaperlab.com",
+      "Duplicate email: chelsea@mooskisnacks.com",
+      "Duplicate email: jeff@octivdigital.com",
+      "Duplicate email: hello@nervyco.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T23:17:16.926301",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 1,
+    "num_rejected": 9,
+    "issues": [
+      "Duplicate email: rudra@metrosurgehouse.com",
+      "Duplicate email: lletts@drinkhylux.com",
+      "Duplicate email: info@yourfinancepartners.com",
+      "Duplicate email: jimmy@drinkgleem.com",
+      "Duplicate email: virginia@flawlesscanvas.com",
+      "Duplicate email: ron@urbanmix.tech",
+      "Duplicate email: chung@itrllc.com",
+      "Duplicate email: info@nakedbeautymd.com",
+      "Duplicate email: wesleym@steadyhandsapparel.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T23:17:17.065452",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: bryan@goviter.com",
+      "Duplicate email: courteneylowe@therunnerbox.com",
+      "Duplicate email: larrivas@gmail.com",
+      "Duplicate email: hello@nervyco.com",
+      "Duplicate email: team@whatrr.com",
+      "Duplicate email: tiffany@dewmighty.com",
+      "Duplicate email: lauren@mastels.com\n",
+      "Duplicate email: prayatna@luminr.co"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T23:17:17.210841",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 5,
+    "num_rejected": 5,
+    "issues": [
+      "Duplicate email: jeremy@whdreams.com",
+      "Duplicate email: tony@runyon.co",
+      "Duplicate email: justin@kovoplus.com",
+      "Duplicate email: rahim@addzune.com",
+      "Duplicate email: jeff@drinktiiga.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T23:30:24.573187",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 0,
+    "num_rejected": 10,
+    "issues": [
+      "Duplicate email: brianna@moodeaux.com",
+      "Duplicate email: Teo@astry.agency",
+      "Duplicate email: garcesmariapaula@gmail.com",
+      "Duplicate email: aditi@libi.com",
+      "Duplicate email: lorenzoremohi@theglowfilter.com",
+      "Duplicate email: mschieldge@snakking.com",
+      "Duplicate email: deborah@deborahelizabethbeauty.com",
+      "Duplicate email: harry@exxonmarketing.com",
+      "Duplicate email: treatyourselfwithkindnessco@gmail.com",
+      "Duplicate email: anisha@ummskincare.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T23:30:24.714963",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 0,
+    "num_rejected": 10,
+    "issues": [
+      "Duplicate email: glen@jsgorganics.com",
+      "Duplicate email: info@utggrosir.com",
+      "Duplicate email: christina@drinkmebeverages.com",
+      "Duplicate email: zach@driveforce.golf",
+      "Duplicate email: info@brandly.au",
+      "Duplicate email: burtonms@brainfoodmood.com",
+      "Duplicate email: katelyn@drinkmosa.com",
+      "Duplicate email: rajiv@theguidedculture.be",
+      "Duplicate email: athomas@esploru.com",
+      "Duplicate email: rasmus@jjacquisition.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T23:39:15.777878",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 0,
+    "num_rejected": 10,
+    "issues": [
+      "Duplicate email: magali@liquidoxygen.com",
+      "Duplicate email: atevonyan1@gmail.com",
+      "Duplicate email: Rebecca@therefineryskinclinic.com",
+      "Duplicate email: maya@circcell.com",
+      "Duplicate email: brandon@amafruits.com",
+      "Duplicate email: katharine@givingbeauty.com",
+      "Duplicate email: ivibeslp@gmail.com",
+      "Duplicate email: felipe@myglobalbodega.com",
+      "Duplicate email: alcinderlewis@gmail.com",
+      "Duplicate email: serena@seadropskincare.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T23:39:15.919746",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 3,
+    "num_rejected": 7,
+    "issues": [
+      "Duplicate email: maddie@ellasflats.com",
+      "Duplicate email: sophie@theartofbroth.com",
+      "Duplicate email: aditi@libi.com",
+      "Duplicate email: max@halobeauty.com",
+      "Duplicate email: omar@indevify.com",
+      "Duplicate email: tonya@drinkhardlywater.com",
+      "Duplicate email: georgaare@gmail.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-16T23:39:16.048322",
+    "hotkey": "5MockHotkeyAddress123456789",
+    "num_valid": 2,
+    "num_rejected": 8,
+    "issues": [
+      "Duplicate email: admin@resumaster.ai",
+      "Duplicate email: info@columnsplus.ca",
+      "Duplicate email: justdropitnow@gmail.com",
+      "Duplicate email: John.Kowalchik@baxters.com",
+      "Duplicate email: jaan@arkhelm.com",
+      "Duplicate email: brittany@loverlygrey.com",
+      "Duplicate email: olivia@tick-mitt.com",
+      "Duplicate email: Arjun@trustworthy.io"
+    ]
   }
 ]

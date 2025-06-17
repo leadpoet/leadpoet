@@ -362,7 +362,7 @@ class LeadQueue:
         with open(self.queue_file, 'w') as f:
             json.dump([], f)
     
-    def enqueue_prospects(self, prospects: List[Dict]):
+    def enqueue_prospects(self, prospects: List[Dict], miner_hotkey: str, request_type: str = "sourced", **meta):
         """Add prospects to queue with validation"""
         try:
             # Read current queue
@@ -383,6 +383,9 @@ class LeadQueue:
             # Write back to file
             with open(self.queue_file, 'w') as f:
                 json.dump(queue, f)
+                
+            # Enqueue the prospects
+            lead_queue.enqueue_prospects(prospects, miner_hotkey, request_type=request_type, **meta)
                 
         except Exception as e:
             bt.logging.error(f"Error enqueueing prospects: {e}")
@@ -426,8 +429,35 @@ async def run_validator(validator_hotkey, queue_maxsize):
                 await asyncio.sleep(1)
                 continue
             
-            prospects = lead_request["prospects"]
-            miner_hotkey = lead_request["miner_hotkey"]
+            request_type = lead_request.get("request_type", "sourced")
+            prospects     = lead_request["prospects"]
+            miner_hotkey  = lead_request["miner_hotkey"]
+
+            # ───────────────────────── curated list ─────────────────────────
+            if request_type == "curated":
+                # score with your open-source conversion model
+                report  = await validate_lead_list(prospects, industry="Unknown")
+                scores  = report.get("detailed_scores", [1.0]*len(prospects))
+                for p, s in zip(prospects, scores):
+                    p["conversion_score"] = s
+
+                # print human-readable ranking
+                ranked = sorted(prospects, key=lambda x: x["conversion_score"], reverse=True)
+                bt.logging.info(f"\n=== Curated batch from {miner_hotkey} ===")
+                for idx, lead in enumerate(ranked, 1):
+                    bt.logging.info(
+                        f"{idx:2d}. {lead.get('business','?')[:30]:30s}  "
+                        f"score={lead['conversion_score']:.3f}"
+                    )
+                asked_for = lead_request.get("requested", len(ranked))
+                top_n = min(asked_for, len(ranked))
+                bt.logging.info(f"▲▲ Sent top-{top_n} leads to buyer ▲▲\n")
+
+                # store in pool and record reward-event
+                add_validated_leads_to_pool(ranked[:top_n])
+                continue          # skip legitimacy audit branch altogether
+            # ─────────────────── end curated branch ─────────────────────────
+            
             valid, rejected, issues = [], [], []
             
             print(f"\nProcessing batch of {len(prospects)} prospects from miner {miner_hotkey}")
@@ -529,11 +559,14 @@ def add_validated_leads_to_pool(leads):
             "website": lead.get("website", lead.get("Website", "")),
             "industry": lead.get("industry", lead.get("Industry", "")),
             "region": lead.get("region", lead.get("Region", "")),
-            "conversion_score": validation_score  # Use the actual validation score
+            "conversion_score": validation_score,
+            "source":     lead.get("source", ""),
+            "curated_by": lead.get("curated_by", ""),
         }
         mapped_leads.append(mapped_lead)
     
     lead_pool.add_to_pool(mapped_leads)
+
 
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Validator")

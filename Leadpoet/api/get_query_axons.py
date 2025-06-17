@@ -38,8 +38,8 @@ async def get_query_api_nodes(dendrite, metagraph, n=0.1, timeout=5, mock=False)
     bt.logging.debug(f"Fetching available miner nodes for subnet {metagraph.netuid}")
     metagraph.sync(subtensor=metagraph.subtensor)
     if mock:
-        bt.logging.debug("Mock mode: Using all UIDs [0]")
-        top_uids = [0]  # Prioritize miner at UID 0
+        bt.logging.debug("Mock mode: Using miner UIDs [0, 1]")
+        top_uids = [0, 1]  # Return both miners for competition
     else:
         if metagraph.S.size == 0 or np.isnan(metagraph.S).any():
             bt.logging.warning("Stake array is empty or contains NaN. Selecting all active UIDs.")

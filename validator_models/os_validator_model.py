@@ -72,7 +72,7 @@ async def validate_lead_list(leads: List[Dict], industry: Optional[str] = None) 
             result["reasons"].append("Missing required field: email")
             validation_report.append(result)
             continue
-            
+
         if not website:
             result["status"] = "Rejected"
             result["reasons"].append("Missing required field: website")
@@ -85,14 +85,14 @@ async def validate_lead_list(leads: List[Dict], industry: Optional[str] = None) 
             result["reasons"].append("Invalid email format")
             validation_report.append(result)
             continue
-            
+
         domain = email.split("@")[1].lower()
         if domain in disposable_domains:
             result["status"] = "Rejected"
             result["reasons"].append("Disposable email domain")
             validation_report.append(result)
             continue
-            
+
         try:
             domain_valid = await validate_domain(domain)
             if not domain_valid:
@@ -113,7 +113,7 @@ async def validate_lead_list(leads: List[Dict], industry: Optional[str] = None) 
                 result["reasons"].append("Invalid website URL")
                 validation_report.append(result)
                 continue
-                
+
             website_valid = await validate_website(website)
             if not website_valid:
                 result["status"] = "Rejected"
@@ -147,12 +147,23 @@ async def validate_lead_list(leads: List[Dict], industry: Optional[str] = None) 
             except Exception as e:
                 result["status"] = "Medium Quality"
                 result["reasons"].append(f"Email engagement check failed: {str(e)}")
-                valid_count += 0.75
+            valid_count += 0.75
         else:
             result["status"] = "Rejected"
             result["reasons"].append("Invalid email format")
             validation_report.append(result)
             continue
+
+        # --- NEW: simple conversion-score heuristic ------------------------
+        conv = 0.5
+        if lead["linkedin"]:                       conv += 0.2
+        if lead["website"]:                        conv += 0.2
+        if industry and lead_industry:             conv += 0.1 if industry.lower()==lead_industry.lower() else 0
+        if lead.get("region"):                     conv += 0.1
+        lead["conversion_score"] = round(min(conv, 1.0), 3)
+        # -------------------------------------------------------------------
+        result["status"] = "High Quality"
+        valid_count += lead["conversion_score"]
 
         validation_report.append(result)
 
@@ -163,7 +174,8 @@ async def validate_lead_list(leads: List[Dict], industry: Optional[str] = None) 
     return {
         "validation_report": validation_report,
         "score": score,
-        "O_v": O_v
+        "O_v": O_v,
+        "scored_leads": mapped_leads
     }
 
 async def check_email_engagement(email: str) -> tuple[bool, str]:

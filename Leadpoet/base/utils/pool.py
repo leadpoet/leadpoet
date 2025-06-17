@@ -2,6 +2,7 @@ import json
 import os
 import threading
 import bt
+from Leadpoet.validator import reward as _reward
 
 DATA_DIR = "data"
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
@@ -30,6 +31,13 @@ def add_to_pool(prospects):
         leads.extend(new_prospects)
         with open(LEADS_FILE, "w") as f:
             json.dump(leads, f, indent=2)
+
+    # ----- NEW: log reward-eligible events -----
+    for p in new_prospects:
+        try:
+            _reward.record_event(p)
+        except Exception:
+            pass
 
 def check_duplicates(email: str) -> bool:
     """Check if owner_email exists in leads.json."""

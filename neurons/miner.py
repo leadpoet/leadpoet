@@ -403,14 +403,11 @@ def main():
         bt.logging.error(str(e))
         return
 
-    miner_hotkey = None
+    # Use the actual miner wallet's hotkey instead of creating a new one
+    miner_hotkey = miner_wallet.hotkey_ss58_address
     interval = 60
     queue_maxsize = 1000
     if config.mock:
-        try:
-            miner_hotkey = MockWallet().hotkey_ss58_address
-        except Exception:
-            miner_hotkey = "5MockHotkeyAddress123456789"
         from Leadpoet.base.utils.config import add_validator_args
         parser = argparse.ArgumentParser()
         add_validator_args(None, parser)

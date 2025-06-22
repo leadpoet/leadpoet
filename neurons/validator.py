@@ -435,6 +435,10 @@ async def run_validator(validator_hotkey, queue_maxsize):
 
             # ───────────────────────── curated list ─────────────────────────
             if request_type == "curated":
+                # Set the curator hotkey for all prospects in this batch
+                for prospect in prospects:
+                    prospect["curated_by"] = miner_hotkey
+                
                 # score with your open-source conversion model
                 report  = await validate_lead_list(prospects, industry="Unknown")
                 scores  = report.get("detailed_scores", [1.0]*len(prospects))
@@ -453,8 +457,14 @@ async def run_validator(validator_hotkey, queue_maxsize):
                 top_n = min(asked_for, len(ranked))
                 bt.logging.info(f"▲▲ Sent top-{top_n} leads to buyer ▲▲\n")
 
-                # store in pool and record reward-event
-                add_validated_leads_to_pool(ranked[:top_n])
+                # store in pool and record reward-event for delivered leads
+                delivered_leads = ranked[:top_n]
+                add_validated_leads_to_pool(delivered_leads)
+                
+                # Record rewards for the delivered leads
+                from Leadpoet.base.utils.pool import record_delivery_rewards
+                record_delivery_rewards(delivered_leads, miner_hotkey)
+                
                 continue          # skip legitimacy audit branch altogether
             # ─────────────────── end curated branch ─────────────────────────
             

@@ -46,6 +46,41 @@ def _init_event_file():
             json.dump([], f)
 
 
+def print_current_rewards():
+    """
+    Print current reward distribution for debugging and verification.
+    """
+    print("\n" + "="*60)
+    print("CURRENT REWARD DISTRIBUTION")
+    print("="*60)
+    
+    try:
+        rewards = calculate_miner_emissions(100.0)  # 100 Alpha total emission
+        
+        print(f"\nSourcing Scores (S):")
+        for hotkey, score in rewards["S"].items():
+            print(f"  {hotkey}: {score:.4f}")
+            
+        print(f"\nCurating Scores (K):")
+        for hotkey, score in rewards["K"].items():
+            print(f"  {hotkey}: {score:.4f}")
+            
+        print(f"\nCombined Weights (W = 0.4*S + 0.6*K):")
+        for hotkey, weight in rewards["W"].items():
+            print(f"  {hotkey}: {weight:.4f}")
+            
+        print(f"\nEmission Distribution (E):")
+        total_emission = sum(rewards["E"].values())
+        for hotkey, emission in rewards["E"].items():
+            percentage = (emission / total_emission * 100) if total_emission > 0 else 0
+            print(f"  {hotkey}: {emission:.2f} Alpha ({percentage:.1f}%)")
+            
+        print(f"\nTotal Emission: {total_emission:.2f} Alpha")
+        print("="*60)
+        
+    except Exception as e:
+        print(f"Error calculating rewards: {e}")
+
 def record_event(prospect: Dict):
     """
     Persist an event once a prospect reaches the *final curated list*.
@@ -75,6 +110,13 @@ def record_event(prospect: Dict):
         )
         with open(EVENTS_FILE, "w") as f:
             json.dump(events, f, indent=2)
+        
+        # Print reward event for debugging
+        print(f"\n🎯 REWARD EVENT RECORDED:")
+        print(f"   Source: {prospect['source']}")
+        print(f"   Curator: {prospect['curated_by']}")
+        print(f"   Score: {prospect.get('conversion_score', 0.0):.3f}")
+        print(f"   Email: {prospect.get('owner_email', 'unknown')}")
 
 
 # ----------  internal helpers ------------------------------------------------
@@ -104,6 +146,10 @@ def calculate_miner_emissions(total_emission: float = 100.0) -> Dict:
     """
     Returns dict with per-miner sourcing (S), curating (K),
     combined weight (W) and emission share (E).
+    
+    The 40/60 split is implemented here:
+    - 40% of rewards go to sourcing miners
+    - 60% of rewards go to curating miners
     """
     weights = [(14, 0.55), (30, 0.25), (90, 0.20)]
     S, K = defaultdict(float), defaultdict(float)
@@ -121,6 +167,7 @@ def calculate_miner_emissions(total_emission: float = 100.0) -> Dict:
             for m, v in cur_tot.items():
                 K[m] += w * (v / tot_cur_score)
 
+    # Calculate combined weight with 40/60 split
     W = {m: 0.40 * S.get(m, 0) + 0.60 * K.get(m, 0) for m in set(S) | set(K)}
     total_W = sum(W.values())
     emissions = {m: (total_emission * w / total_W) if total_W else 0 for m, w in W.items()}

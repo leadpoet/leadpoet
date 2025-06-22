@@ -8,16 +8,23 @@ from Leadpoet.protocol import LeadRequest
 from miner_models.get_leads import get_leads
 import numpy as np
 from validator_models.automated_checks import validate_lead_list as auto_check_leads
+import hashlib
 
 class MockWallet:
     def __init__(self, name: str = "mock_wallet", hotkey: str = "default"):
         self.name = name
         self.hotkey_str = hotkey
-        self._hotkey = MockHotkey()
-        self._coldkey = MockHotkey()
-        self.hotkey_ss58_address = "5MockHotkeyAddress123456789"
-        self.coldkey_ss58_address = "5MockColdkeyAddress123456789"
-        self.ss58_address = "5MockHotkeyAddress123456789"
+        
+        # Generate unique hotkey based on name and hotkey string
+        unique_id = f"{name}_{hotkey}"
+        hash_obj = hashlib.md5(unique_id.encode())
+        unique_suffix = hash_obj.hexdigest()[:8]
+        
+        self._hotkey = MockHotkey(unique_suffix)
+        self._coldkey = MockHotkey(unique_suffix)
+        self.hotkey_ss58_address = f"5MockHotkey{unique_suffix}"
+        self.coldkey_ss58_address = f"5MockColdkey{unique_suffix}"
+        self.ss58_address = f"5MockHotkey{unique_suffix}"
 
     @property
     def hotkey(self):
@@ -32,8 +39,8 @@ class MockWallet:
         return b"\x00" * 64
 
 class MockHotkey:
-    def __init__(self):
-        self.ss58_address = "5MockHotkeyAddress123456789"
+    def __init__(self, unique_suffix: str = "123456789"):
+        self.ss58_address = f"5MockHotkey{unique_suffix}"
         self.public_key = b"\x00" * 32
 
     def verify(self, *args, **kwargs):
@@ -638,7 +645,7 @@ class MockDendrite(bt.dendrite):
                                         response.leads = leads # SUPER IMPORTANT: we're using the leads directly since they're already mapped correctly by the miner, but if you change the fields in the miner this needs to be changed as well
                                         response.dendrite.status_code = 200
                                         response.dendrite.status_message = "OK"
-                                        response.dendrite.process_time = str(time.time() - start_time)
+                                    response.dendrite.process_time = str(time.time() - start_time)
                         except Exception as e:
                             bt.logging.error(f"Error querying miner {axon.hotkey}: {e}")
                             response.leads = []

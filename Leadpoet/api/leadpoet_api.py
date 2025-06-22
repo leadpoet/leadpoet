@@ -104,7 +104,7 @@ class LeadPoetAPI:
                         return []
                     continue
 
-                # Add valid leads to pool
+                # Add valid leads to pool (without recording rewards yet)
                 from Leadpoet.base.utils.pool import add_to_pool
                 add_to_pool(leads)
                 bt.logging.info(f"Added {len(leads)} approved leads to pool")
@@ -116,6 +116,10 @@ class LeadPoetAPI:
                 if region:
                     filtered_leads = [lead for lead in filtered_leads if lead.get("Region") == region]
                 filtered_leads = filtered_leads[:num_leads]
+                
+                # Record rewards when leads are actually delivered to buyer
+                from Leadpoet.base.utils.pool import record_delivery_rewards
+                record_delivery_rewards(filtered_leads, self.wallet.hotkey.ss58_address)
                 
                 bt.logging.info(f"Served {len(filtered_leads)} leads to client")
                 return filtered_leads

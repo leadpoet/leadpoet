@@ -1,7 +1,17 @@
 [
   {
     "hotkey": "5MockHotkeyAddress123456789",
-    "precision": 0.2,
-    "last_updated": "2025-06-16T23:39:16.054449"
+    "precision": 0.0,
+    "last_updated": "2025-06-19T17:56:05.825433"
+  },
+  {
+    "hotkey": "5MockHotkey89cf661c1803c485",
+    "precision": 0.0,
+    "last_updated": "2025-06-19T17:52:06.564640"
+  },
+  {
+    "hotkey": "5MockHotkey5118fd42",
+    "precision": 1.0,
+    "last_updated": "2025-06-22T19:22:51.696133"
   }
 ]

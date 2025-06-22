@@ -1,12 +1,15 @@
 import json
 import os
 import threading
-import bt
+import bittensor as bt
 from Leadpoet.validator import reward as _reward
+from collections import defaultdict
 
 DATA_DIR = "data"
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
+CURATED_LEADS_FILE = os.path.join(DATA_DIR, "curated_leads.json")
 _leads_lock = threading.Lock()
+_curation_lock = threading.Lock()
 
 def initialize_pool():
     """Initialize the leads pool file if it doesn't exist."""
@@ -14,6 +17,75 @@ def initialize_pool():
     if not os.path.exists(LEADS_FILE):
         with open(LEADS_FILE, "w") as f:
             json.dump([], f)
+    if not os.path.exists(CURATED_LEADS_FILE):
+        with open(CURATED_LEADS_FILE, "w") as f:
+            json.dump([], f)
+
+def _save_curated_leads(curated_leads):
+    """Save curated leads to the curated_leads.json file."""
+    with open(CURATED_LEADS_FILE, "w") as f:
+        json.dump(curated_leads, f, indent=2)
+
+def record_delivery_rewards(delivered_leads, curator_hotkey):
+    """
+    Record reward events when leads are delivered to buyers.
+    Now handles proportional splitting PER QUERY (no historical tracking).
+    """
+    # For each API query, we start fresh with no historical tracking
+    # Track curators only within this current delivery batch
+    current_query_curators = defaultdict(dict)
+    
+    # First pass: collect all curators for this query
+    for lead in delivered_leads:
+        email = lead.get('owner_email', lead.get('email', '')).lower()
+        current_query_curators[email][curator_hotkey] = lead.get('conversion_score', 1.0)
+    
+    # Second pass: calculate proportional rewards
+    for lead in delivered_leads:
+        email = lead.get('owner_email', lead.get('email', '')).lower()
+        lead["curated_by"] = curator_hotkey
+        
+        if not lead.get("source") or not lead.get("curated_by"):
+            bt.logging.warning(f"Lead missing source or curated_by: {email}")
+            continue
+        
+        # Check if multiple miners have curated this lead in THIS QUERY
+        if email in current_query_curators and len(current_query_curators[email]) > 1:
+            # Multiple curators in this query - calculate proportional score
+            total_score = sum(current_query_curators[email].values())
+            original_score = lead.get('conversion_score', 1.0)
+            proportional_score = (original_score / total_score) * original_score
+            lead["conversion_score"] = proportional_score
+            
+            bt.logging.info(f"Proportional reward event: {email} | "
+                          f"Source: {lead['source']} | Curator: {curator_hotkey} | "
+                          f"Score: {proportional_score:.3f} (original: {original_score:.3f}) | "
+                          f"Total curators in this query: {len(current_query_curators[email])}")
+        else:
+            # Single curator in this query - record normally
+            bt.logging.info(f"Single curator reward event: {email} | "
+                          f"Source: {lead['source']} | Curator: {curator_hotkey}")
+        
+        try:
+            _reward.record_event(lead)
+        except Exception as e:
+            bt.logging.error(f"Error recording reward event: {e}")
+    
+    # Save to curated_leads.json for storage (not used for mining)
+    try:
+        with open(CURATED_LEADS_FILE, "r") as f:
+            existing_curated = json.load(f)
+    except Exception:
+        existing_curated = []
+    
+    # Add the delivered leads to curated_leads.json
+    for lead in delivered_leads:
+        existing_curated.append(lead)
+    
+    _save_curated_leads(existing_curated)
+    
+    # Print current reward distribution after recording
+    _reward.print_current_rewards()
 
 def add_to_pool(prospects):
     """Add valid prospects to leads.json, ensuring no duplicates by owner_email."""
@@ -32,12 +104,7 @@ def add_to_pool(prospects):
         with open(LEADS_FILE, "w") as f:
             json.dump(leads, f, indent=2)
 
-    # ----- NEW: log reward-eligible events -----
-    for p in new_prospects:
-        try:
-            _reward.record_event(p)
-        except Exception:
-            pass
+    # Note: Rewards are now recorded when leads are delivered to buyers, not when added to pool
 
 def check_duplicates(email: str) -> bool:
     """Check if owner_email exists in leads.json."""

@@ -421,7 +421,12 @@ class LeadQueue:
 
 async def run_validator(validator_hotkey, queue_maxsize):
     print("Validator event loop started.")
+    
+    # Track all delivered leads for this API query
+    all_delivered_leads = []
+    
     async def validation_loop():
+        nonlocal all_delivered_leads
         print("Validation loop running.")
         while True:
             lead_request = lead_queue.dequeue_prospects()
@@ -461,9 +466,24 @@ async def run_validator(validator_hotkey, queue_maxsize):
                 delivered_leads = ranked[:top_n]
                 add_validated_leads_to_pool(delivered_leads)
                 
-                # Record rewards for the delivered leads
+                # Add to all delivered leads for this query
+                all_delivered_leads.extend(delivered_leads)
+                
+                # Record rewards for ALL delivered leads in this query
                 from Leadpoet.base.utils.pool import record_delivery_rewards
-                record_delivery_rewards(delivered_leads, miner_hotkey)
+                record_delivery_rewards(all_delivered_leads)
+                
+                # Send leads to buyer
+                bt.logging.info(f"▲▲ Sent top-{len(delivered_leads)} leads to buyer ▲▲")
+                
+                # Add source hotkey display
+                for lead in delivered_leads:
+                    source_hotkey = lead.get('source', 'unknown')
+                    bt.logging.info(f"Lead sourced by: {source_hotkey}")
+                
+                # Save curated leads to separate file
+                from Leadpoet.base.utils.pool import save_curated_leads
+                save_curated_leads(delivered_leads)
                 
                 continue          # skip legitimacy audit branch altogether
             # ─────────────────── end curated branch ─────────────────────────

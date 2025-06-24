@@ -117,9 +117,9 @@ class LeadPoetAPI:
                     filtered_leads = [lead for lead in filtered_leads if lead.get("Region") == region]
                 filtered_leads = filtered_leads[:num_leads]
                 
-                # Record rewards when leads are actually delivered to buyer
-                from Leadpoet.base.utils.pool import record_delivery_rewards
-                record_delivery_rewards(filtered_leads, self.wallet.hotkey.ss58_address)
+                # Validator already recorded the reward for this query.
+                # Do NOT call record_delivery_rewards() here – it causes
+                # double emission tables and inconsistent numbers.
                 
                 bt.logging.info(f"Served {len(filtered_leads)} leads to client")
                 return filtered_leads

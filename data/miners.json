@@ -1,1 +1,12 @@
-[]
+[
+  {
+    "hotkey": "5MockHotkey43717f6e",
+    "valid_prospects_count": 140,
+    "last_updated": "2025-06-28T03:23:24.363211+00:00"
+  },
+  {
+    "hotkey": "5MockHotkeyea99368c",
+    "valid_prospects_count": 150,
+    "last_updated": "2025-06-28T03:23:20.684914+00:00"
+  }
+]

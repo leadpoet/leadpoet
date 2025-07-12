@@ -1,0 +1,15 @@
+---
+description: "Standardized rule format."
+globs: 
+alwaysApply: true
+---
+---
+globs: ["**/*.py", "**/*.ts"]
+alwaysApply: true
+description: Ensure resilient Fire Enrich calls with retry and dead-letter handling.
+---
+### Rule
+All enrichment client code **must**:
+1. Retry on HTTP 429 or 5xx with exponential back-off, max 5 attempts.
+2. After final failure, write the original record to `dead_letter/enrich_fail.jsonl`.
+3. Log retries and failures with reason code.

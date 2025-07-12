@@ -1,0 +1,12 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+---
+globs: ["**/tasks.md"]
+alwaysApply: true
+description: Cursor Kanban linkage.
+---
+### Rule
+Each task header must start with `[ ]` or `[x]` so Cursor converts to a checklist card.

@@ -1,0 +1,24 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+---
+globs:
+  - "**/*.ps1"
+  - "dev/run.ps1"
+alwaysApply: true          # keep the rule active
+description: Ensure the project ships a PowerShell-Core script that mirrors the Linux shell entry-point and remains cross-platform.
+---
+
+### Rule
+1. Provide **dev/run.ps1** (PowerShell Core ≥ 7) that performs the same steps as **run.sh**:  
+   - virtual-env setup / package install  
+   - environment-variable loading  
+   - invocation of the miner entry point  
+2. In every *.ps1* file:  
+   - Use `$PSScriptRoot` and `Join-Path` for all paths (no hard-coded `C:\\` or `/`).  
+   - Exit with a non-zero code on failure (`exit 1`).  
+3. Do **not** call Windows-exclusive utilities when a standard *nix alternative exists (e.g., use `Compress-Archive` **and** `tar` fallbacks).  
+4. Document Windows setup in **README** under “Running the miner on Windows (PowerShell 7)”.  
+5. CI must lint *.ps1* scripts with **PSScriptAnalyzer** and fail on issues of severity ≥ Warning.

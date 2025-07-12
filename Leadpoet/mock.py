@@ -485,6 +485,7 @@ class MockSubtensor(bt.MockSubtensor):
             'hotkey_ranks': subnet_info.get('hotkey_ranks', []),
             'hotkey_consensus': subnet_info.get('hotkey_consensus', []),
             'hotkey_pruning_scores': subnet_info.get('hotkey_pruning_scores', []),
+            'identity': subnet_info.get('identity', 'mock_identity_value'),
         }
         bt.logging.debug(f"Returning metagraph info for netuid {netuid}: {metagraph_dict}")
         return bt.MetagraphInfo.from_dict(metagraph_dict)
@@ -623,13 +624,17 @@ class MockDendrite(bt.dendrite):
                     response.dendrite.process_time = str(timeout)
                 else:
                     # Check if this is a miner axon (ports 8091, 8092, 8093, etc.)
-                    if axon.port >= 8091 and axon.port <= 8100:  # Miner port range
-                        url = f"http://{axon.ip}:{axon.port}/lead_request"
+               
+                    if axon.port >= 8091 and axon.port <= 8100:  # miner axon range
+                        http_port = axon.port + 100              # miners expose HTTP on axon+100
+                        url = f"http://{axon.ip}:{http_port}/lead_request"
                         payload = {
                             "num_leads": synapse.num_leads,
+                            "business_desc": synapse.business_desc,  # ← pass buyer description to miner
                             "industry": synapse.industry,
-                            "region": synapse.region
+                            "region": synapse.region,
                         }
+
                         try:
                             async with aiohttp.ClientSession() as session:
                                 async with session.post(url, json=payload, timeout=timeout) as resp:

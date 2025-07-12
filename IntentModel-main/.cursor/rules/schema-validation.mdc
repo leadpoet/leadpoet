@@ -1,0 +1,13 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+---
+globs: ["**/schema/**", "**/outbox/**/*.jsonl"]
+alwaysApply: true
+description: Outbox JSON schema enforcement.
+---
+### Rule
+Provide `schema/outbox_lead.schema.json`.  
+CI must validate every JSON line in `outbox/pending_validator/**/*.jsonl` against the schema and fail on error.

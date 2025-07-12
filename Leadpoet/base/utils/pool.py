@@ -5,6 +5,8 @@ import bittensor as bt
 from collections import defaultdict
 from Leadpoet.validator import reward as _reward
 import time
+import sys
+from Leadpoet.validator.reward import record_event as _rec
 
 DATA_DIR = "data"
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
@@ -71,8 +73,12 @@ def get_leads_from_pool(num_leads, industry=None, region=None):
                 filtered_leads = [l for l in filtered_leads if l.get("region", "").lower() == region.lower()]
                 
             # Sort by conversion score (highest first) and ensure all required fields
-            filtered_leads = [l for l in filtered_leads if all(l.get(field) for field in 
-                ["owner_email", "website", "business", "owner_full_name"])]
+            # owner_full_name is nice-to-have but not mandatory
+            required_fields = ["owner_email", "website", "business"]
+            filtered_leads = [
+                l for l in filtered_leads
+                if all(l.get(field) for field in required_fields)
+            ]
             filtered_leads.sort(key=lambda x: x.get("conversion_score", 0), reverse=True)
             
             # Return top N leads
@@ -101,11 +107,20 @@ def calculate_per_query_rewards(all_delivered_leads):
     Calculate rewards for the current API query only (no historical tracking).
     Implements proper proportional splitting when multiple miners curate the same lead.
     """
+    bt.logging.info(f"=== REWARD CALCULATION DEBUG ===")
+    bt.logging.info(f"Total delivered leads: {len(all_delivered_leads)}")
+    
     # Group leads by email to find duplicates within this query
     lead_groups = defaultdict(list)
     for lead in all_delivered_leads:
-        email = lead.get('owner_email', lead.get('email', '')).lower()
+        email = lead.get('owner_email') or lead.get('email', '').lower()
         lead_groups[email].append(lead)
+    
+    bt.logging.info(f"Unique leads (by email): {len(lead_groups)}")
+    for email, leads in lead_groups.items():
+        bt.logging.info(f"  {email}: {len(leads)} instances")
+        for i, lead in enumerate(leads):
+            bt.logging.info(f"    Instance {i+1}: source={lead.get('source')}, curator={lead.get('curated_by')}, score={lead.get('conversion_score', 1.0)}")
     
     # Track all unique hotkeys for sourcing and curating
     sourcing_scores = defaultdict(float)
@@ -123,7 +138,7 @@ def calculate_per_query_rewards(all_delivered_leads):
             sourcing_scores[source_hotkey] += score * 0.4
             curating_scores[curator_hotkey] += score * 0.6
             
-            bt.logging.info(f"Single curator: {email} | Source: {source_hotkey} | Curator: {curator_hotkey} | Score: {score}")
+            bt.logging.info(f"Single curator: {email} | Source: {source_hotkey} (+{score * 0.4:.3f}) | Curator: {curator_hotkey} (+{score * 0.6:.3f})")
             
         else:
             # Multiple curators for same lead - PROPORTIONAL SPLITTING
@@ -145,9 +160,8 @@ def calculate_per_query_rewards(all_delivered_leads):
                 
                 curating_scores[curator_hotkey] += curating_reward
                 
-                bt.logging.info(f"Proportional curator: {email} | Source: {source_hotkey} | "
-                              f"Curator: {curator_hotkey} | Share: {proportional_share:.3f} | "
-                              f"Reward: {curating_reward:.3f}")
+                bt.logging.info(f"Proportional curator: {email} | Source: {source_hotkey} (+{sourcing_reward_per_lead:.3f}) | "
+                              f"Curator: {curator_hotkey} (+{curating_reward:.3f}, share={proportional_share:.3f})")
     
     # Calculate combined weights (W = S + K) - no need for 0.4*S + 0.6*K since we already applied the split
     combined_weights = {}
@@ -167,12 +181,36 @@ def calculate_per_query_rewards(all_delivered_leads):
         else:
             emissions[hotkey] = 0.0
     
+    bt.logging.info(f"Final scores:")
+    bt.logging.info(f"  Sourcing: {dict(sourcing_scores)}")
+    bt.logging.info(f"  Curating: {dict(curating_scores)}")
+    bt.logging.info(f"  Combined: {combined_weights}")
+    bt.logging.info(f"  Emissions: {emissions}")
+    bt.logging.info(f"=== END REWARD CALCULATION ===")
+    
     return {
         "S": dict(sourcing_scores),
         "K": dict(curating_scores), 
         "W": combined_weights,
         "E": emissions
     }
+
+def _print_emission_table(scores: dict):
+    """
+    Pretty-print the current block-emission table and flush stdout so it
+    appears immediately.  Suppressed only for the API client.
+    """
+    if not scores:
+        return
+    if 'api' in sys.argv[0]:      #  don't spam the CLI client
+        return
+    total_W = sum(scores.values())
+    print("\n========== BLOCK EMISSION ==========")
+    for hotkey, W in scores.items():
+        share = (W / total_W) if total_W else 0
+        print(f"{hotkey:20s}  W={W:7.3f}   share={share:6.1%}")
+    print("====================================\n")
+    sys.stdout.flush()
 
 def record_delivery_rewards(delivered):
     rewards = calculate_per_query_rewards(delivered)
@@ -182,6 +220,24 @@ def record_delivery_rewards(delivered):
         for hk, w in rewards["W"].items():
             scores[hk] = scores.get(hk, 0) + w     # accumulate
         _save_scores(scores)
+
+    # ────────────────────────────────────────────────────────────────
+    # ALSO persist each delivered lead into reward_events.json so that
+    # the 14 / 30 / 90-day weighting in
+    #     Leadpoet.validator.reward.calculate_miner_emissions(...)
+    # has the correct, up-to-date history.
+    # This keeps the fast 'block-emission' table and the periodic weight
+    # calculator perfectly in sync.
+    # ────────────────────────────────────────────────────────────────
+    for lead in delivered:
+        try:
+            _rec(lead)          # source, curated_by, conversion_score
+        except Exception as e:
+            bt.logging.warning(f"Failed to record reward event: {e}")
+
+    # Print immediately in the validator process; miners will pick it up
+    # on their next tick but we also flush now for fast feedback.
+    _print_emission_table(scores)
 
 def check_duplicates(email: str) -> bool:
     """Check if owner_email exists in leads.json."""
@@ -211,18 +267,7 @@ def _emission_loop():
         time.sleep(EMISSION_INTERVAL)
         with state_lock:
             scores = _load_scores()
-        if not scores:            # nothing yet
-            continue
-        total_W = sum(scores.values())
-        
-        # Only print in validator and miner processes, not API
-        import sys
-        if 'validator' in sys.argv or 'miner' in sys.argv:
-            print("\n========== BLOCK EMISSION ==========")
-            for hotkey, W in scores.items():
-                share = (W / total_W) if total_W else 0
-                print(f"{hotkey:20s}  W={W:7.3f}   share={share:6.1%}")
-            print("====================================\n")
+        _print_emission_table(scores)
 
 # fire the daemon
 threading.Thread(target=_emission_loop, daemon=True).start()

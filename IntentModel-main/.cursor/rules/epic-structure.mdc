@@ -1,0 +1,19 @@
+---
+description: 
+globs: **/BRD*.md
+alwaysApply: false
+---
+---
+description: "Enforce epic structure with Goal, Story table, Acceptance Criteria, and tasks."
+globs:
+  - "**/BRD*.md"
+alwaysApply: false
+---
+
+# Epic Structure
+
+1. Each epic begins with a `### Epic X: [Title]` heading.
+2. Next line must be **Goal:** followed by a concise statement.
+3. Include a table with columns: `Story ID`, `User Story`, `Acceptance Criteria`.
+4. After the table, add an **Acceptance Criteria:** bullet list.
+5. Conclude with a **Tasks:** numbered list.

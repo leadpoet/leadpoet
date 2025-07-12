@@ -1,0 +1,414 @@
+{
+  "info": {
+    "name": "Leadpoet Intent Model API",
+    "description": "B2B lead scoring and ranking API that returns the K leads most likely to purchase any B2B product specified in a free-text prompt. Achieves < 400ms P95 latency at ≤ $0.002 COGS per lead under 250 QPS load.",
+    "version": "1.1.0",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://api.leadpoet.com",
+      "type": "string"
+    },
+    {
+      "key": "api_key",
+      "value": "your_api_key_here",
+      "type": "string"
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{api_key}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Query Leads",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"query\": \"Find companies looking for CRM software\",\n  \"limit\": 25,\n  \"filters\": {\n    \"industries\": [\"technology\", \"saas\"],\n    \"company_size\": [\"10-50\", \"51-200\"],\n    \"location\": \"United States\",\n    \"exclude\": [\"competitor1.com\", \"competitor2.com\"]\n  }\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/query",
+          "host": ["{{base_url}}"],
+          "path": ["query"]
+        },
+        "description": "Submit a natural language query to find relevant B2B leads. This is the main endpoint for lead discovery and scoring."
+      },
+      "response": [
+        {
+          "name": "Success Response",
+          "originalRequest": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"Find companies looking for CRM software\",\n  \"limit\": 25\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/query",
+              "host": ["{{base_url}}"],
+              "path": ["query"]
+            }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "cookie": [],
+          "body": "{\n  \"leads\": [\n    {\n      \"lead_id\": \"lead_12345\",\n      \"company_name\": \"TechCorp Inc\",\n      \"domain\": \"techcorp.com\",\n      \"industry\": \"Technology\",\n      \"company_size\": \"51-200\",\n      \"location\": \"San Francisco, CA\",\n      \"score\": 0.92,\n      \"confidence\": 0.85,\n      \"contact_info\": {\n        \"name\": \"John Smith\",\n        \"title\": \"CTO\",\n        \"email\": \"john.smith@techcorp.com\",\n        \"phone\": \"+1-555-0123\"\n      },\n      \"intent_signals\": [\n        \"Recently posted job for CRM administrator\",\n        \"Company website mentions 'customer relationship management'\",\n        \"LinkedIn shows recent CRM-related activity\"\n      ]\n    }\n  ],\n  \"metadata\": {\n    \"total_leads\": 150,\n    \"query_processed\": \"Find companies looking for CRM software\",\n    \"processing_time_ms\": 245,\n    \"cost_usd\": 0.0018,\n    \"llm_calls\": 3,\n    \"cache_hit_rate\": 0.75\n  }\n}"
+        }
+      ]
+    },
+    {
+      "name": "Query with Advanced Filters",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"query\": \"Find technology companies in San Francisco looking for marketing automation\",\n  \"limit\": 50,\n  \"filters\": {\n    \"industries\": [\"technology\"],\n    \"location\": \"San Francisco\",\n    \"company_size\": [\"51-200\", \"201-1000\"],\n    \"technologies\": [\"hubspot\", \"marketo\"],\n    \"job_titles\": [\"CTO\", \"VP Engineering\", \"Head of Sales\"]\n  }\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/query",
+          "host": ["{{base_url}}"],
+          "path": ["query"]
+        },
+        "description": "Example of a more complex query with multiple filters to demonstrate advanced filtering capabilities."
+      },
+      "response": [
+        {
+          "name": "Success Response",
+          "originalRequest": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"Find technology companies in San Francisco looking for marketing automation\",\n  \"limit\": 50,\n  \"filters\": {\n    \"industries\": [\"technology\"],\n    \"location\": \"San Francisco\",\n    \"company_size\": [\"51-200\", \"201-1000\"],\n    \"technologies\": [\"hubspot\", \"marketo\"],\n    \"job_titles\": [\"CTO\", \"VP Engineering\", \"Head of Sales\"]\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/query",
+              "host": ["{{base_url}}"],
+              "path": ["query"]
+            }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "cookie": [],
+          "body": "{\n  \"leads\": [\n    {\n      \"lead_id\": \"lead_67890\",\n      \"company_name\": \"MarTech Solutions Inc\",\n      \"domain\": \"martechsolutions.com\",\n      \"industry\": \"Technology\",\n      \"company_size\": \"201-1000\",\n      \"location\": \"San Francisco, CA\",\n      \"score\": 0.94,\n      \"confidence\": 0.88,\n      \"contact_info\": {\n        \"name\": \"Sarah Johnson\",\n        \"title\": \"VP Engineering\",\n        \"email\": \"sarah.johnson@martechsolutions.com\",\n        \"phone\": \"+1-555-0456\"\n      },\n      \"intent_signals\": [\n        \"Recently posted job for Marketing Automation Engineer\",\n        \"Company website mentions 'marketing automation platform'\",\n        \"LinkedIn shows recent HubSpot integration activity\",\n        \"Job posting indicates migration from Marketo to HubSpot\"\n      ]\n    },\n    {\n      \"lead_id\": \"lead_67891\",\n      \"company_name\": \"TechGrowth Ventures\",\n      \"domain\": \"techgrowth.com\",\n      \"industry\": \"Technology\",\n      \"company_size\": \"51-200\",\n      \"location\": \"San Francisco, CA\",\n      \"score\": 0.89,\n      \"confidence\": 0.82,\n      \"contact_info\": {\n        \"name\": \"Michael Chen\",\n        \"title\": \"CTO\",\n        \"email\": \"michael.chen@techgrowth.com\",\n        \"phone\": \"+1-555-0789\"\n      },\n      \"intent_signals\": [\n        \"Company website mentions 'customer journey automation'\",\n        \"Recent blog post about marketing automation ROI\",\n        \"LinkedIn shows engagement with HubSpot content\",\n        \"Job posting for Marketing Operations Manager\"\n      ]\n    }\n  ],\n  \"metadata\": {\n    \"total_leads\": 45,\n    \"query_processed\": \"Find technology companies in San Francisco looking for marketing automation\",\n    \"processing_time_ms\": 312,\n    \"cost_usd\": 0.0036,\n    \"llm_calls\": 2,\n    \"cache_hit_rate\": 0.60,\n    \"filters_applied\": {\n      \"industries\": [\"technology\"],\n      \"location\": \"San Francisco\",\n      \"company_size\": [\"51-200\", \"201-1000\"],\n      \"technologies\": [\"hubspot\", \"marketo\"],\n      \"job_titles\": [\"CTO\", \"VP Engineering\", \"Head of Sales\"]\n    }\n  }\n}"
+        },
+        {
+          "name": "Rate Limit Error",
+          "originalRequest": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"Find technology companies in San Francisco looking for marketing automation\",\n  \"limit\": 50,\n  \"filters\": {\n    \"industries\": [\"technology\"],\n    \"location\": \"San Francisco\",\n    \"company_size\": [\"51-200\", \"201-1000\"],\n    \"technologies\": [\"hubspot\", \"marketo\"],\n    \"job_titles\": [\"CTO\", \"VP Engineering\", \"Head of Sales\"]\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/query",
+              "host": ["{{base_url}}"],
+              "path": ["query"]
+            }
+          },
+          "status": "Too Many Requests",
+          "code": 429,
+          "_postman_previewlanguage": "json",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "key": "X-RateLimit-Limit",
+              "value": "100"
+            },
+            {
+              "key": "X-RateLimit-Remaining",
+              "value": "0"
+            },
+            {
+              "key": "X-RateLimit-Reset",
+              "value": "1640995200"
+            }
+          ],
+          "cookie": [],
+          "body": "{\n  \"error\": {\n    \"code\": \"RATE_LIMIT_EXCEEDED\",\n    \"message\": \"Rate limit exceeded. Please try again in 60 seconds.\",\n    \"details\": {\n      \"limit\": 100,\n      \"window\": \"1 minute\",\n      \"retry_after\": 60\n    }\n  },\n  \"timestamp\": \"2024-12-19T10:30:00Z\",\n  \"request_id\": \"req_def456\"\n}"
+        },
+        {
+          "name": "Invalid Query Error",
+          "originalRequest": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"Find companies\",\n  \"limit\": 50,\n  \"filters\": {\n    \"industries\": [\"technology\"],\n    \"location\": \"San Francisco\",\n    \"company_size\": [\"51-200\", \"201-1000\"],\n    \"technologies\": [\"hubspot\", \"marketo\"],\n    \"job_titles\": [\"CTO\", \"VP Engineering\", \"Head of Sales\"]\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/query",
+              "host": ["{{base_url}}"],
+              "path": ["query"]
+            }
+          },
+          "status": "Bad Request",
+          "code": 400,
+          "_postman_previewlanguage": "json",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "cookie": [],
+          "body": "{\n  \"error\": {\n    \"code\": \"INVALID_QUERY\",\n    \"message\": \"Query must be at least 10 characters long and contain specific intent\",\n    \"details\": {\n      \"field\": \"query\",\n      \"min_length\": 10,\n      \"provided_length\": 13,\n      \"suggestion\": \"Please provide more specific criteria such as industry, technology, or use case\"\n    }\n  },\n  \"timestamp\": \"2024-12-19T10:30:00Z\",\n  \"request_id\": \"req_ghi789\"\n}"
+        }
+      ]
+    },
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/healthz",
+          "host": ["{{base_url}}"],
+          "path": ["healthz"]
+        },
+        "description": "Check API health and status. Returns information about service health, uptime, and component status."
+      },
+      "response": [
+        {
+          "name": "Healthy Response",
+          "originalRequest": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/healthz",
+              "host": ["{{base_url}}"],
+              "path": ["healthz"]
+            }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "cookie": [],
+          "body": "{\n  \"status\": \"healthy\",\n  \"timestamp\": \"2024-12-19T10:30:00Z\",\n  \"version\": \"1.1.0\",\n  \"uptime_seconds\": 86400,\n  \"database\": \"connected\",\n  \"redis\": \"connected\",\n  \"llm_service\": \"available\"\n}"
+        }
+      ]
+    },
+    {
+      "name": "Metrics",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/metrics",
+          "host": ["{{base_url}}"],
+          "path": ["metrics"]
+        },
+        "description": "Prometheus-compatible metrics endpoint. Returns detailed metrics about API performance, costs, and usage."
+      },
+      "response": [
+        {
+          "name": "Metrics Response",
+          "originalRequest": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/metrics",
+              "host": ["{{base_url}}"],
+              "path": ["metrics"]
+            }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "text",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "text/plain"
+            }
+          ],
+          "cookie": [],
+          "body": "# HELP leadpoet_api_requests_total Total number of API requests\n# TYPE leadpoet_api_requests_total counter\nleadpoet_api_requests_total{endpoint=\"/query\",method=\"POST\"} 1250\n\n# HELP leadpoet_api_request_duration_seconds Request duration in seconds\n# TYPE leadpoet_api_request_duration_seconds histogram\nleadpoet_api_request_duration_seconds_bucket{endpoint=\"/query\",le=\"0.1\"} 100\nleadpoet_api_request_duration_seconds_bucket{endpoint=\"/query\",le=\"0.4\"} 950\nleadpoet_api_request_duration_seconds_bucket{endpoint=\"/query\",le=\"+Inf\"} 1250\n\n# HELP leadpoet_cost_per_lead_usd Cost per lead in USD\n# TYPE leadpoet_cost_per_lead_usd gauge\nleadpoet_cost_per_lead_usd 0.0018"
+        }
+      ]
+    },
+    {
+      "name": "Query Quality Reputation",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/query-quality/reputation",
+          "host": ["{{base_url}}"],
+          "path": ["query-quality", "reputation"]
+        },
+        "description": "Get query quality reputation for the current API key. Shows performance metrics and recommendations for improving query quality."
+      },
+      "response": [
+        {
+          "name": "Reputation Response",
+          "originalRequest": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/query-quality/reputation",
+              "host": ["{{base_url}}"],
+              "path": ["query-quality", "reputation"]
+            }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "cookie": [],
+          "body": "{\n  \"api_key\": \"sk_...\",\n  \"reputation_score\": 0.85,\n  \"total_queries\": 1250,\n  \"successful_queries\": 1180,\n  \"failed_queries\": 70,\n  \"average_response_time_ms\": 245,\n  \"cost_efficiency\": 0.92,\n  \"throttle_status\": \"active\",\n  \"throttle_reason\": \"High cost per lead\",\n  \"recommendations\": [\n    \"Consider using more specific queries\",\n    \"Add industry filters to reduce noise\",\n    \"Limit results to improve cost efficiency\"\n  ]\n}"
+        }
+      ]
+    },
+    {
+      "name": "Query Quality Alerts",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/query-quality/alerts",
+          "host": ["{{base_url}}"],
+          "path": ["query-quality", "alerts"]
+        },
+        "description": "Get active alerts for query quality issues. Shows current alerts and their severity levels."
+      },
+      "response": [
+        {
+          "name": "Alerts Response",
+          "originalRequest": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/query-quality/alerts",
+              "host": ["{{base_url}}"],
+              "path": ["query-quality", "alerts"]
+            }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "cookie": [],
+          "body": "{\n  \"alerts\": [\n    {\n      \"alert_id\": \"alert_123\",\n      \"type\": \"high_cost\",\n      \"severity\": \"warning\",\n      \"message\": \"Cost per lead exceeded threshold\",\n      \"threshold\": 0.002,\n      \"current_value\": 0.0025,\n      \"created_at\": \"2024-12-19T10:00:00Z\",\n      \"status\": \"active\"\n    }\n  ],\n  \"summary\": {\n    \"total_alerts\": 1,\n    \"critical_alerts\": 0,\n    \"warning_alerts\": 1,\n    \"info_alerts\": 0\n  }\n}"
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Add request timestamp for tracking",
+          "pm.request.headers.add({\n    key: 'X-Request-Timestamp',\n    value: new Date().toISOString()\n});",
+          "",
+          "// Log request details for debugging",
+          "console.log('Request:', pm.request.method, pm.request.url);"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Basic response validation",
+          "pm.test('Status code is 200', function () {",
+          "    pm.response.to.have.status(200);",
+          "});",
+          "",
+          "pm.test('Response time is less than 400ms', function () {",
+          "    pm.expect(pm.response.responseTime).to.be.below(400);",
+          "});",
+          "",
+          "// Validate JSON responses",
+          "if (pm.response.headers.get('Content-Type') && pm.response.headers.get('Content-Type').includes('application/json')) {",
+          "    pm.test('Response is valid JSON', function () {",
+          "        pm.response.to.be.json;",
+          "    });",
+          "}",
+          "",
+          "// Log response details",
+          "console.log('Response Status:', pm.response.status);",
+          "console.log('Response Time:', pm.response.responseTime + 'ms');"
+        ]
+      }
+    }
+  ]
+} 

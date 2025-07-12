@@ -1,0 +1,20 @@
+---
+description: "Standardized rule format."
+globs: 
+alwaysApply: true
+---
+---
+description: "Establish project context for all files in the Leadpoet MVP repository"
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Project Context
+
+You are working on Leadpoet.com’s MVP:
+- **Tech Stack:** Supabase (Auth, Database, Realtime), Google Cloud Functions (Node.js/TypeScript), React (Vite or Next.js), TailwindCSS.
+- **Workflow:** Frontend submits queries → writes to Supabase → triggers GCF → writes lead results back to Supabase.
+- **Data Model:** `filter_options`, `queries`, `leads` tables.
+- **Authentication:** Supabase Auth (no email verification).
+- **UX Flow:** Login → Dashboard with filters → Submit → History view with status → CSV download.

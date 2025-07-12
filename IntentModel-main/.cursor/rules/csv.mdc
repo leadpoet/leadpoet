@@ -1,0 +1,16 @@
+---
+description: "Standardized rule format."
+globs: 
+alwaysApply: true
+---
+---
+globs: ["**/shared/domains.csv", "**/metrics/**/*.csv"]
+alwaysApply: true
+description: CSV format constraints.
+---
+### Rule
+CSV files must:
+- Use comma delimiter, no quotes in header.
+- First row for domains.csv exactly `domain,last_scraped`.
+- `last_scraped` values ISO-8601 with Z or offset.
+- End with LF, UTF-8 encoded.

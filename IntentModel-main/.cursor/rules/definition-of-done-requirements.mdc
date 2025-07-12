@@ -1,0 +1,15 @@
+---
+description: 
+globs: **/BRD*.md
+alwaysApply: false
+---
+---
+globs: ["**/tasks.md"]
+alwaysApply: true
+description: Definition of Done for each task card.
+---
+### Rule
+Mark a task “Done” only when:
+- Code merged to `main` with unit tests green.
+- Metrics CSV for a 10-minute dry-run generated and stored.
+- Outbox JSON validated against schema with zero errors.

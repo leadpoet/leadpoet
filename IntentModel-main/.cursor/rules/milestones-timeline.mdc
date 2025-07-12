@@ -1,0 +1,12 @@
+---
+description: 
+globs: **/BRD*.md
+alwaysApply: false
+---
+---
+globs: ["**/tasks.md"]
+alwaysApply: true
+description: Enforce 3-day MVP timeline.
+---
+### Rule
+tasks.md must list milestones whose total estimated effort ≤ 24 developer-hours and calendar spread ≤ 3 days.

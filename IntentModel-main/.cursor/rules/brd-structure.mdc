@@ -1,0 +1,18 @@
+---
+description: "Standardized rule format."
+globs: 
+alwaysApply: true
+---
+---
+globs: ["**/Firecrawl*Brd*.md"]
+alwaysApply: true
+description: Enforce Firecrawl BRD heading presence and order.
+---
+### Rule
+A valid BRD **must** contain the following level-3 headings (###):
+- Scraping Engine
+- Pre-Enrich Legitimacy Check
+- Enrichment Module
+- Submission Stub
+- Monitoring & Logging
+Fail if any are missing or mis-cased.

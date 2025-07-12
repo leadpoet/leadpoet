@@ -8,6 +8,9 @@ from Leadpoet.mock import MockDendrite, MockWallet, MockSubtensor
 from validator_models.os_validator_model import validate_lead_list
 from validator_models.automated_checks import validate_lead_list as auto_check_leads
 from miner_models.get_leads import VALID_INDUSTRIES
+import logging as _py_logging
+import aiohttp
+import socket
 
 class LeadPoetAPI:
     def __init__(self, wallet: "bt.wallet", netuid: int = 343, subtensor_network: str = "test", mock: bool = False):
@@ -33,6 +36,24 @@ class LeadPoetAPI:
             self.metagraph = bt.metagraph(netuid=netuid, network=subtensor_network, subtensor=subtensor)
         bt.logging.info(f"Initialized LeadPoetAPI with netuid: {self.netuid}, subtensor_network: {self.subtensor_network}, mock: {self.mock}")
 
+    def find_validator_port(self) -> Optional[int]:
+        """Find the validator port by trying common ports."""
+        common_ports = [8093, 8101, 8094, 8095, 8096, 8097, 8098, 8099, 8100, 8102]
+        
+        for port in common_ports:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(1)
+                    result = s.connect_ex(('localhost', port))
+                    if result == 0:
+                        bt.logging.info(f"Found validator on port {port}")
+                        return port
+            except Exception:
+                continue
+        
+        bt.logging.warning("Could not find validator port automatically")
+        return None
+
     def prepare_synapse(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None) -> LeadRequest:
         if not 1 <= num_leads <= 100:
             raise ValueError("num_leads must be between 1 and 100")
@@ -53,79 +74,47 @@ class LeadPoetAPI:
         bt.logging.info(f"Processed {len(leads)} leads from {len(responses)} responses")
         return leads
 
-    async def get_leads(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None) -> List[Dict]:
-        bt.logging.info(f"Requesting {num_leads} leads, industry={industry}, region={region}")
+    async def get_leads(self, num_leads: int, business_desc: str) -> List[Dict]:
+        bt.logging.info(f"Requesting {num_leads} leads, desc='{business_desc[:40]}…'")
         max_retries = 3
         attempt = 1
 
         while attempt <= max_retries:
             bt.logging.info(f"Attempt {attempt}/{max_retries} to fetch leads")
             try:
-                # Get available miners
-                axons = await get_query_api_axons(self.wallet, self.metagraph, n=0.1, timeout=5, mock=self.mock)
-                if not axons:
-                    bt.logging.error("No available miners to query.")
-                    raise RuntimeError("No active miners available")
-
-                # Prepare request
-                synapse = self.prepare_synapse(num_leads, industry, region)
-                
-                # Send request to miners
-                responses = await self.dendrite(
-                    axons=axons,
-                    synapse=synapse,
-                    timeout=30,
-                    deserialize=True
-                )
-                
-                # Process responses
-                leads = self.process_responses(responses)
-                
-                if not leads:
-                    bt.logging.error("No valid leads received from miners.")
+                # Find validator port
+                validator_port = self.find_validator_port()
+                if not validator_port:
+                    bt.logging.error("Could not find validator port")
                     attempt += 1
-                    if attempt > max_retries:
-                        bt.logging.error(f"Max retries ({max_retries}) reached, no valid leads found.")
-                        return []
                     continue
-
-                # Send leads to validator for scoring
-                from neurons.validator import Validator
-                validator = Validator(config=bt.config())
-                validation = await validator.validate_leads(leads, industry=industry)
-                score = validation["score"] / 100.0
-                bt.logging.info(f"Lead validation score: {score}")
-
-                if score < 0.7:  # Threshold is 0.7 as per your code
-                    bt.logging.warning(f"Lead batch rejected: score {score} below threshold (0.7)")
-                    attempt += 1
-                    if attempt > max_retries:
-                        bt.logging.error(f"Max retries ({max_retries}) reached, no valid lead batch found.")
-                        return []
-                    continue
-
-                # Add valid leads to pool (without recording rewards yet)
-                from Leadpoet.base.utils.pool import add_to_pool
-                add_to_pool(leads)
-                bt.logging.info(f"Added {len(leads)} approved leads to pool")
                 
-                # Filter leads by industry and region
-                filtered_leads = leads
-                if industry:
-                    filtered_leads = [lead for lead in filtered_leads if lead.get("Industry") == industry]
-                if region:
-                    filtered_leads = [lead for lead in filtered_leads if lead.get("Region") == region]
-                filtered_leads = filtered_leads[:num_leads]
+                # Call validator API
+                validator_url = f"http://localhost:{validator_port}/api/leads"
+                request_data = {"num_leads": num_leads,
+                                "business_desc": business_desc}
                 
-                # Validator already recorded the reward for this query.
-                # Do NOT call record_delivery_rewards() here – it causes
-                # double emission tables and inconsistent numbers.
+                bt.logging.info(f"Calling validator API at {validator_url}")
                 
-                bt.logging.info(f"Served {len(filtered_leads)} leads to client")
-                return filtered_leads
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(validator_url, json=request_data, timeout=30) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            leads = data.get("leads", [])
+                            bt.logging.info(f"Received {len(leads)} leads from validator")
+                            return leads
+                        else:
+                            error_text = await response.text()
+                            bt.logging.error(f"Validator API error: {response.status} - {error_text}")
+                            attempt += 1
+                            continue
 
+            except aiohttp.ClientConnectorError as e:
+                bt.logging.error(f"Connection error to validator: {e}")
+                attempt += 1
+                continue
             except Exception as e:
-                bt.logging.error(f"Error in get_leads: {e}")
+                bt.logging.error(f"Error calling validator API: {e}")
                 attempt += 1
                 if attempt > max_retries:
                     bt.logging.error(f"Max retries ({max_retries}) reached, no valid leads found.")
@@ -150,8 +139,19 @@ def main():
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace-level logging")
     args = parser.parse_args()
 
+    # ------------------------------------------------------------------
+    # QUIET-MODE: unless the user explicitly supplied --logging_trace,
+    # drop the global logging level to WARNING.  This suppresses all the
+    # huge DEBUG / INFO payload printed by bittensor + mock objects.
+    # ------------------------------------------------------------------
+    if not args.logging_trace:
+        _py_logging.getLogger().setLevel(_py_logging.WARNING)
+        # If bittensor's helper is present, drop its trace flag as well.
+        if getattr(bt.logging, "set_trace", None):
+            bt.logging.set_trace(False)
+
     if args.logging_trace:
-        bt.logging.set_trace(True)
+        bt.logging.set_trace(True)      # unchanged – trace beats quiet mode
 
     if args.mock:
         bt.config().mock = True
@@ -167,21 +167,34 @@ def main():
     )
 
     print("Welcome to LeadPoet API")
-    num_leads = int(input("Enter number of leads (1-100): "))
-    print(f"Available industries: {', '.join(VALID_INDUSTRIES)}")
-    while True:
-        industry = input("Enter industry: ").strip()
-        if not industry or industry in VALID_INDUSTRIES:  # Allow empty industry
-            break
-        print(f"Invalid industry. Please choose from: {', '.join(VALID_INDUSTRIES)}")
-    region = input("Enter region (e.g., 'US'): ").strip() or None  # Allow empty region
+    num_leads     = int(input("Enter number of leads (1-100): "))
+    business_desc = input("Describe your business & ideal customer: ").strip()
+
+    # build new request
+    payload = {"num_leads": num_leads,
+               "business_desc": business_desc}
 
     async def fetch_leads():
-        leads = await api.get_leads(num_leads, industry, region)
+        leads = await api.get_leads(num_leads, business_desc)
         print(f"Retrieved {len(leads)} leads:")
         for i, lead in enumerate(leads, 1):
             print(f"Lead {i}: {lead}")
-        feedback = float(input("Enter feedback score (0-10): "))
+        
+        # Handle empty feedback input
+        while True:
+            feedback_input = input("Enter feedback score (0-10): ").strip()
+            if feedback_input == "":
+                print("Please enter a valid feedback score.")
+                continue
+            try:
+                feedback = float(feedback_input)
+                if 0 <= feedback <= 10:
+                    break
+                else:
+                    print("Feedback score must be between 0 and 10.")
+            except ValueError:
+                print("Please enter a valid number.")
+        
         await api.submit_feedback(leads, feedback)
 
     asyncio.run(fetch_leads())

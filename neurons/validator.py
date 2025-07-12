@@ -19,12 +19,18 @@ from Leadpoet.base.utils import queue as lead_queue
 from Leadpoet.base.utils import pool as lead_pool
 import asyncio
 from typing import List, Dict
+from aiohttp import web
+import socket
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super(Validator, self).__init__(config=config)
         bt.logging.info("load_state()")
         self.load_state()
+        
+        # Add HTTP server for API requests
+        self.app = web.Application()
+        self.app.add_routes([web.post('/api/leads', self.handle_api_request)])
         
         self.email_regex = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
         self.sample_ratio = 0.2
@@ -233,6 +239,13 @@ class Validator(BaseValidatorNeuron):
         if random.random() < 0.1:
             await self.reputation_challenge()
 
+        # Record rewards for ALL delivered leads in this query
+        from Leadpoet.base.utils.pool import record_delivery_rewards
+        record_delivery_rewards(all_delivered_leads)
+
+        # Reset all_delivered_leads after recording rewards to prevent accumulation across API calls
+        all_delivered_leads = []
+
     def save_state(self):
         bt.logging.info("Saving validator state.")
         state_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "validator_state.npz")
@@ -285,6 +298,109 @@ class Validator(BaseValidatorNeuron):
         self.registration_time = datetime.now()
         self.appeal_status = None
         self.trusted_validator = False
+
+    async def handle_api_request(self, request):
+        """Handle API requests from clients and broadcast to miners."""
+        try:
+            data = await request.json()
+            num_leads     = data.get("num_leads", 1)
+            business_desc = data.get("business_desc", "")
+            print(f"\n RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:50]}…'")
+            bt.logging.info(f" RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:50]}…'")
+            
+            # Get available miners - fix the mock parameter access
+            from Leadpoet.api.get_query_axons import get_query_api_axons
+            mock_mode = getattr(self.config, 'mock', False)  # Get mock from config
+            axons = await get_query_api_axons(self.wallet, self.metagraph, n=0.1, timeout=5, mock=mock_mode)
+            
+            if not axons:
+                print("❌ No available miners to query.")
+                bt.logging.error("No available miners to query.")
+                return web.json_response({
+                    "leads": [],
+                    "status_code": 503,
+                    "status_message": "No active miners available",
+                    "process_time": "0"
+                }, status=503)
+            
+            print(f" SENDING QUERY to {len(axons)} available miners...")
+            bt.logging.info(f" BROADCASTING QUERY to {len(axons)} miners")
+            
+            # Prepare request
+            synapse = LeadRequest(num_leads=num_leads,
+                                   business_desc=business_desc)
+            
+            # Send request to all miners
+            responses = await self.dendrite(
+                axons=axons,
+                synapse=synapse,
+                timeout=30,
+                deserialize=True
+            )
+            
+            print(f" RECEIVED responses from {len(responses)} miners")
+            
+            # Process responses and collect all leads
+            all_leads = []
+            for response in responses:
+                if isinstance(response, LeadRequest) and response.dendrite.status_code == 200 and response.leads:
+                    all_leads.extend(response.leads)
+            
+            if not all_leads:
+                print("❌ No valid leads received from miners")
+                bt.logging.warning("No valid leads received from miners")
+                return web.json_response({
+                    "leads": [],
+                    "status_code": 404,
+                    "status_message": "No valid leads found",
+                    "process_time": "0"
+                }, status=404)
+            
+            print(f"📊 RECEIVED {len(all_leads)} leads from miners, ranking by conversion score...")
+            
+            # Rank leads by conversion score
+            all_leads.sort(key=lambda x: x.get("conversion_score", 0), reverse=True)
+            top_leads = all_leads[:num_leads]
+            
+            print(f" TOP {len(top_leads)} RANKED LEADS:")
+            for i, lead in enumerate(top_leads, 1):
+                business = lead.get('Business', lead.get('business', 'Unknown'))
+                score = lead.get('conversion_score', 0)
+                source = lead.get('source', 'Unknown')
+                curator = lead.get('curated_by', 'Unknown')
+                print(f"  {i}. {business} (Score: {score:.3f}, Source: {source}, Curator: {curator})")
+            
+            print(f"📤 SENDING top {len(top_leads)} leads to client")
+            bt.logging.info(f" RETURNING top {len(top_leads)} leads to client")
+            
+            return web.json_response({
+                "leads": top_leads,
+                "status_code": 200,
+                "status_message": "OK",
+                "process_time": "0"
+            })
+            
+        except Exception as e:
+            print(f"❌ Error handling API request: {e}")
+            bt.logging.error(f"Error handling API request: {e}")
+            return web.json_response({
+                "leads": [],
+                "status_code": 500,
+                "status_message": f"Error: {str(e)}",
+                "process_time": "0"
+            }, status=500)
+
+    async def start_http_server(self):
+        """Start HTTP server for API requests."""
+        runner = web.AppRunner(self.app)
+        await runner.setup()
+        
+        # Find available port
+        port = self.find_available_port(8093)
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        bt.logging.info(f"🔴 Validator HTTP server started on port {port}")
+        return port
 
 DATA_DIR = "data"
 VALIDATION_LOG = os.path.join(DATA_DIR, "validation_logs.json")
@@ -362,34 +478,34 @@ class LeadQueue:
         with open(self.queue_file, 'w') as f:
             json.dump([], f)
     
-    def enqueue_prospects(self, prospects: List[Dict], miner_hotkey: str, request_type: str = "sourced", **meta):
+    def enqueue_prospects(self, prospects: List[Dict], miner_hotkey: str,
+                          request_type: str = "sourced", **meta):
         """Add prospects to queue with validation"""
         try:
-            # Read current queue
             with open(self.queue_file, 'r') as f:
                 try:
                     queue = json.load(f)
                 except json.JSONDecodeError:
                     bt.logging.warning("Queue file corrupted during read, creating new queue")
                     queue = []
-            
-            # Add new prospects
-            queue.extend(prospects)
-            
-            # Trim to maxsize if needed
+
+            # 1️⃣ append once
+            queue.append({
+                "prospects": prospects,
+                "miner_hotkey": miner_hotkey,
+                "request_type": request_type,
+                **meta
+            })
+
+            # trim & write back
             if len(queue) > self.maxsize:
                 queue = queue[-self.maxsize:]
-            
-            # Write back to file
+
             with open(self.queue_file, 'w') as f:
-                json.dump(queue, f)
-                
-            # Enqueue the prospects
-            lead_queue.enqueue_prospects(prospects, miner_hotkey, request_type=request_type, **meta)
-                
+                json.dump(queue, f, indent=2)
+
         except Exception as e:
             bt.logging.error(f"Error enqueueing prospects: {e}")
-            # If any error occurs, try to create new queue
             self._create_empty_queue()
     
     def dequeue_prospects(self) -> List[Dict]:
@@ -422,12 +538,22 @@ class LeadQueue:
 async def run_validator(validator_hotkey, queue_maxsize):
     print("Validator event loop started.")
     
+    # Create validator instance
+    from Leadpoet.mock import MockWallet
+    wallet = MockWallet()
+    config = bt.config()
+    config.mock = True
+    validator = Validator(config=config)
+    
+    # Start HTTP server
+    http_port = await validator.start_http_server()
+    
     # Track all delivered leads for this API query
     all_delivered_leads = []
     
     async def validation_loop():
         nonlocal all_delivered_leads
-        print("Validation loop running.")
+        print("🔄 Validation loop running - waiting for leads to process...")
         while True:
             lead_request = lead_queue.dequeue_prospects()
             if not lead_request:
@@ -438,8 +564,11 @@ async def run_validator(validator_hotkey, queue_maxsize):
             prospects     = lead_request["prospects"]
             miner_hotkey  = lead_request["miner_hotkey"]
 
+            print(f"\n📥 Processing {request_type} batch of {len(prospects)} prospects from miner {miner_hotkey[:8]}...")
+
             # ───────────────────────── curated list ─────────────────────────
             if request_type == "curated":
+                print(f"🔍 Processing curated leads from {miner_hotkey[:20]}...")
                 # Set the curator hotkey for all prospects in this batch
                 for prospect in prospects:
                     prospect["curated_by"] = miner_hotkey
@@ -452,15 +581,18 @@ async def run_validator(validator_hotkey, queue_maxsize):
 
                 # print human-readable ranking
                 ranked = sorted(prospects, key=lambda x: x["conversion_score"], reverse=True)
-                bt.logging.info(f"\n=== Curated batch from {miner_hotkey} ===")
+                print(f"\n Curated leads from {miner_hotkey[:20]} (ranked by score):")
                 for idx, lead in enumerate(ranked, 1):
-                    bt.logging.info(
-                        f"{idx:2d}. {lead.get('business','?')[:30]:30s}  "
-                        f"score={lead['conversion_score']:.3f}"
-                    )
+                    business = lead.get('business', 'Unknown')[:30]
+                    # accept either lowercase or capitalised field
+                    business = lead.get('business') or lead.get('Business', 'Unknown')
+                    business = business[:30]
+                    score = lead['conversion_score']
+                    print(f"  {idx:2d}. {business:30s}  score={score:.3f}")
+               
                 asked_for = lead_request.get("requested", len(ranked))
                 top_n = min(asked_for, len(ranked))
-                bt.logging.info(f"▲▲ Sent top-{top_n} leads to buyer ▲▲\n")
+                print(f"✅ Sending top-{top_n} leads to buyer")
 
                 # store in pool and record reward-event for delivered leads
                 delivered_leads = ranked[:top_n]
@@ -474,103 +606,81 @@ async def run_validator(validator_hotkey, queue_maxsize):
                 record_delivery_rewards(all_delivered_leads)
                 
                 # Send leads to buyer
-                bt.logging.info(f"▲▲ Sent top-{len(delivered_leads)} leads to buyer ▲▲")
+                print(f"✅ Sent {len(delivered_leads)} leads to buyer")
                 
                 # Add source hotkey display
                 for lead in delivered_leads:
                     source_hotkey = lead.get('source', 'unknown')
-                    bt.logging.info(f"Lead sourced by: {source_hotkey}")
+                    print(f"   Lead sourced by: {source_hotkey}")   # show full hotkey
                 
                 # Save curated leads to separate file
                 from Leadpoet.base.utils.pool import save_curated_leads
                 save_curated_leads(delivered_leads)
                 
+                # Reset all_delivered_leads after recording rewards
+                all_delivered_leads = []
+                
                 continue          # skip legitimacy audit branch altogether
-            # ─────────────────── end curated branch ─────────────────────────
             
+            # ───────────────────────── sourced list ─────────────────────────
+            print(f"🔍 Validating {len(prospects)} sourced leads...")
             valid, rejected, issues = [], [], []
             
-            print(f"\nProcessing batch of {len(prospects)} prospects from miner {miner_hotkey}")
-            
             for prospect in prospects:
-                print(f"\nValidating prospect: {prospect.get('business', 'Unknown Business')}")
+                business = prospect.get('business', 'Unknown Business')
+                print(f"\n  Validating: {business}")
                 
                 # Get email from either field name
                 email = prospect.get("owner_email", prospect.get("Owner(s) Email", ""))
-                print(f"Email: {email}")
+                print(f"    Email: {email}")
                 
                 if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
                     issue = f"Invalid email: {email}"
-                    print(f"Rejected: {issue}")
+                    print(f"    ❌ Rejected: {issue}")
                     issues.append(issue)
                     rejected.append(prospect)
                     continue
                     
                 if any(domain in email for domain in ["mailinator.com", "tempmail.com"]):
                     issue = f"Disposable email: {email}"
-                    print(f"Rejected: {issue}")
+                    print(f"    ❌ Rejected: {issue}")
                     issues.append(issue)
                     rejected.append(prospect)
                     continue
                     
                 if prospect["source"] != miner_hotkey:
                     issue = f"Source mismatch: {prospect['source']} != {miner_hotkey}"
-                    print(f"Rejected: {issue}")
+                    print(f"    ❌ Rejected: {issue}")
                     issues.append(issue)
                     rejected.append(prospect)
                     continue
                     
                 if lead_pool.check_duplicates(email):
                     issue = f"Duplicate email: {email}"
-                    print(f"Rejected: {issue}")
+                    print(f"    ❌ Rejected: {issue}")
                     issues.append(issue)
                     rejected.append(prospect)
                     continue
                 
-                # Calculate score
-                score = 0.0
-                score += 0.5  # Base score
-                
-                if prospect["linkedin"]:
-                    score += 0.2
-                    print("LinkedIn found: +0.2")
-                
-                if prospect["website"]:
-                    score += 0.2
-                    print("Website found: +0.2")
-                
-                if prospect["industry"]:
-                    score += 0.1
-                    print("Industry found: +0.1")
-                    
-                if prospect["region"]:
-                    score += 0.1
-                    print("Region found: +0.1")
-                
-                score = min(1.0, score)
-                print(f"Final score: {score}")
-                
-                if score >= 0.7:
-                    prospect["conversion_score"] = score
-                    valid.append(prospect)
-                    print("Accepted prospect")
-                else:
-                    issue = f"Low legitimacy score: {score:.2f} for {email}"
-                    print(f"Rejected: {issue}")
-                    issues.append(issue)
-                    rejected.append(prospect)
+                # All checks passed ⇒ accept
+                valid.append(prospect)
             
             if valid:
                 add_validated_leads_to_pool(valid)
-                print(f"\nAdded {len(valid)} valid prospects to pool")
+                print(f"\n✅ Added {len(valid)} valid prospects to pool")
                 
             log_validation(validator_hotkey, len(valid), len(rejected), issues)
             total = len(valid) + len(rejected)
             precision = (len(valid) / total) if total else 0.0
             update_validator_stats(validator_hotkey, precision)
-            print(f"\nValidated batch: {len(valid)} accepted, {len(rejected)} rejected.")
+            print(f"\n Validation summary: {len(valid)} accepted, {len(rejected)} rejected.")
             await asyncio.sleep(0.1)
-    await validation_loop()  # Await directly to keep process alive
+    
+    # Run both the HTTP server and validation loop
+    await asyncio.gather(
+        validation_loop(),
+        asyncio.sleep(float('inf'))  # Keep HTTP server running
+    )
 
 def add_validated_leads_to_pool(leads):
     """Add validated leads to the pool with consistent field names."""
@@ -588,11 +698,15 @@ def add_validated_leads_to_pool(leads):
             "linkedin": lead.get("linkedin", lead.get("LinkedIn", "")),
             "website": lead.get("website", lead.get("Website", "")),
             "industry": lead.get("industry", lead.get("Industry", "")),
+            "sub_industry": lead.get("sub_industry", lead.get("Sub Industry", "")),
             "region": lead.get("region", lead.get("Region", "")),
-            "conversion_score": validation_score,
             "source":     lead.get("source", ""),
             "curated_by": lead.get("curated_by", ""),
         }
+
+        # score is kept only if the lead already has it (i.e. curated phase)
+        if "conversion_score" in lead:
+            mapped_lead["conversion_score"] = validation_score
         mapped_leads.append(mapped_lead)
     
     lead_pool.add_to_pool(mapped_leads)

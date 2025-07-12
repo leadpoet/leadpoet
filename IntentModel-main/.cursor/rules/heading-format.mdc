@@ -1,0 +1,17 @@
+---
+description: "Standardized rule format."
+globs: 
+alwaysApply: true
+---
+---
+description: "Validate numbering hierarchy and heading levels for consistency."
+globs:
+  - "**/BRD*.md"
+alwaysApply: true
+---
+
+# Heading Format
+
+- All section headings use `##` for level 2 and `###` for epics.
+- Section numbers must increment by one (e.g., 1 → 2 → 3).
+- Epic headings follow pattern `### Epic [0-9]+: ` with a title.

@@ -7273,5 +7273,1088 @@
     "num_valid": 10,
     "num_rejected": 0,
     "issues": []
+  },
+  {
+    "timestamp": "2025-06-24T20:24:14.142940",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-24T20:24:14.260403",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-24T20:32:02.636499",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-24T20:32:05.766635",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: knightgearapprl@gmail.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T20:48:10.827934",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-24T20:48:11.961568",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: info@nrarh.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T20:49:23.735538",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: adam@buildauthority.co"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T20:49:23.863542",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: info@donikaoliveoil.com",
+      "Duplicate email: cassamajorbeatrice34@gmail.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T22:42:31.869321",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: lucia@carelabdivas.com",
+      "Duplicate email: angela@karviva.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T22:42:32.999433",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-24T22:53:11.778621",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: sally@crushedtonic.com",
+      "Duplicate email: rachele@capable.design"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T22:53:12.908778",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: rachele@capable.design",
+      "Duplicate email: Matt@abatismedia.com",
+      "Duplicate email: all0y.inco@gmail.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T23:01:29.818963",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: ej2489@columbia.edu"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T23:11:52.081539",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 5,
+    "num_rejected": 5,
+    "issues": [
+      "Duplicate email: ada@nalacare.com",
+      "Duplicate email: alfonso@tarinatarantino.com",
+      "Duplicate email: valerie.jcasagrande@biomilkskincare.com",
+      "Duplicate email: ron@urbanmix.tech",
+      "Duplicate email: ahmedpinger@assumed-breach.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T23:11:55.209681",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 6,
+    "num_rejected": 4,
+    "issues": [
+      "Duplicate email: henri@artsorigin.com",
+      "Duplicate email: angela@karviva.com",
+      "Duplicate email: bryan@goviter.com",
+      "Duplicate email: contactus@goldenmomentsbyrei.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T23:41:38.249584",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: ege@traveldynamo.com",
+      "Duplicate email: admin@netlify.app",
+      "Duplicate email: alexandre.dulac@blockloads.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T23:41:41.391941",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: Roman@monarchsolutions.ai",
+      "Duplicate email: ahmedpinger@assumed-breach.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T23:47:06.253497",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: admin@contactscience.io",
+      "Duplicate email: yujie@kronosai.co",
+      "Duplicate email: chris@beefuel.org"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T23:47:08.383846",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-24T23:58:26.752633",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: chris@beefuel.org",
+      "Duplicate email: lucia@carelabdivas.com",
+      "Duplicate email: customer.service@ameenodrink.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-24T23:58:26.871105",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: ali@juristai.org",
+      "Duplicate email: contactus@goldenmomentsbyrei.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:01:30.252135",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: sydney@undosupplements.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:01:31.897268",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: stas@bluntskincare.com",
+      "Duplicate email: lindsey@elderberryqueen.net"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:03:49.306154",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:03:49.436220",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:06:56.830931",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:07:06.563081",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: hannahsowd@hannahsowd.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:08:51.897835",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:08:55.029348",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: sales@tiktokshopthrive.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:10:23.342268",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: kristen.rumfola@happyfamilybrands.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:11:04.859457",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:11:08.997498",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: info@drinkmothersmilk.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:16:59.837370",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:17:00.966588",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: serhat@sozenmedia.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:18:30.739192",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:18:31.867116",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:27:19.660121",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: sally@crushedtonic.com",
+      "Duplicate email: Beautifulamore@gmail.com",
+      "Duplicate email: aaron@wyomingwindtunnel.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:27:19.784791",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:29:46.171613",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:29:46.280663",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: b.engen@vikingwaffles.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:29:53.866171",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: leo@ratas.io"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:29:54.991133",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: knightgearapprl@gmail.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:30:37.875575",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:30:41.998225",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:31:47.510015",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: bryan@goviter.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:31:47.635224",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:45:05.026500",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: info@museaestheticsga.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:45:06.138245",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-25T00:46:41.107183",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: sales@sdsdrinks.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T00:46:41.233896",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: aiden@getmillet.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T21:09:36.705131",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: namik@gngrlabs.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T21:09:37.842914",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: aiden@getmillet.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:01:00.180369",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 6,
+    "num_rejected": 4,
+    "issues": [
+      "Duplicate email: alfonso@tarinatarantino.com",
+      "Duplicate email: james@woollooshoe.com",
+      "Duplicate email: shawn@theshroomworks.com",
+      "Duplicate email: ada@nalacare.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:01:00.308423",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: james@woollooshoe.com",
+      "Duplicate email: doug@rebelliousbeveragecompany.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:11:06.252346",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 6,
+    "num_rejected": 4,
+    "issues": [
+      "Duplicate email: hussain@cawgo.com",
+      "Duplicate email: guillermo.pabon@ibericotaste.us",
+      "Duplicate email: christophertarver@gmail.com",
+      "Duplicate email: sam@indersity.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:11:06.383294",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: eugene.nest2020@gmail.com",
+      "Duplicate email: sales@sdsdrinks.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:11:12.517102",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: reed@drinklockerbox.com",
+      "Duplicate email: shanmugasundaram.ganesan@tufts.edu",
+      "Duplicate email: sabry@drinkbrightfox.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:11:15.650252",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: Chrisi@sunshinebuns.com",
+      "Duplicate email: Carson@kingsmanmarketing.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:15:00.666362",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: guillermo.pabon@ibericotaste.us",
+      "Duplicate email: kela@organicallybathbeauty.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:15:01.795875",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 6,
+    "num_rejected": 4,
+    "issues": [
+      "Duplicate email: martin@untoxicated.com",
+      "Duplicate email: joemanconi@gmail.com",
+      "Duplicate email: elena@calitheagoddess.com",
+      "Duplicate email: b.engen@vikingwaffles.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:24:03.762138",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 6,
+    "num_rejected": 4,
+    "issues": [
+      "Duplicate email: info@ar1group.com",
+      "Duplicate email: hanieh@qyral.com",
+      "Duplicate email: b.engen@vikingwaffles.com",
+      "Duplicate email: willis@offshoregreens.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:24:04.896244",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: jordan@korshots.com",
+      "Duplicate email: knightgearapprl@gmail.com",
+      "Duplicate email: max@eltonpepple.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:58:26.364150",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: natalie@kpsessentials.com",
+      "Duplicate email: contactus@goldenmomentsbyrei.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-25T23:58:26.503433",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 6,
+    "num_rejected": 4,
+    "issues": [
+      "Duplicate email: gavin@brosndough.com",
+      "Duplicate email: shanmugasundaram.ganesan@tufts.edu",
+      "Duplicate email: alexander@arrowheadtacticalapparel.com",
+      "Duplicate email: contact@skincentric.us"
+    ]
+  },
+  {
+    "timestamp": "2025-06-26T00:07:31.561048",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-26T00:07:31.685174",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: sally@crushedtonic.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-26T00:11:00.797067",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 6,
+    "num_rejected": 4,
+    "issues": [
+      "Duplicate email: rajiv@theguidedculture.be",
+      "Duplicate email: kevin@hempbevco.com",
+      "Duplicate email: andres.p@theboyandthebear.com",
+      "Duplicate email: sally@crushedtonic.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-26T00:13:05.079846",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: henri@artsorigin.com",
+      "Duplicate email: andrew@optimizeai.net"
+    ]
+  },
+  {
+    "timestamp": "2025-06-27T23:26:00.903849",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: info@revivedsmiles.com",
+      "Duplicate email: hello@thegreekprovidore.com.au",
+      "Duplicate email: sophia@eatrealsy.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-28T00:07:52.698874",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: treatyourselfwithkindnessco@gmail.com",
+      "Duplicate email: liad@aimeverse.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-28T00:07:53.826005",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-28T00:18:22.866030",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-28T00:18:23.991162",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: dan@valrbrand.com",
+      "Duplicate email: deividas@scaletriple.com",
+      "Duplicate email: jcontreras@microsaltinc.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-28T00:33:48.113535",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 8,
+    "num_rejected": 2,
+    "issues": [
+      "Duplicate email: joe@awardsandapparel.com",
+      "Duplicate email: info@drdianebowen.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-28T00:36:10.490274",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: analiapparel5@gmail.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-28T00:36:10.610315",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 6,
+    "num_rejected": 4,
+    "issues": [
+      "Duplicate email: fmelius@biospectrumhemp.com",
+      "Duplicate email: john@illicitelixirs.com",
+      "Duplicate email: cryss@lambandhoney.com",
+      "Duplicate email: ollie@drinkcapetide.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-28T00:40:34.805355",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: edita@rawandlovely.com",
+      "Duplicate email: ada@nalacare.com",
+      "Duplicate email: bryan@goviter.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-28T00:40:35.926214",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 7,
+    "num_rejected": 3,
+    "issues": [
+      "Duplicate email: leah@leahlaniskincare.com",
+      "Duplicate email: chendrickson@legacystrategygroup.com",
+      "Duplicate email: andrew@goldencoastmead.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-28T00:41:42.271612",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-28T00:41:42.385802",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-28T00:58:38.406927",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: gsantiago@freshnhealthymeals.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-28T00:58:39.532080",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-28T01:08:11.611890",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-28T01:08:11.727449",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-28T01:13:39.970639",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-28T01:13:44.782525",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T11:12:27.516975",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T11:12:27.638620",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: ilay@eatbezi.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-29T11:13:18.358656",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 9,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: mustafa@mytimeshift.com"
+    ]
+  },
+  {
+    "timestamp": "2025-06-29T15:31:18.980838",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T15:31:19.115347",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T15:31:19.235313",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T15:31:19.350651",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 10,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T15:31:19.469168",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 5,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T15:32:25.077804",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 5,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T15:41:54.297423",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 5,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T15:42:29.465895",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 5,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T17:53:53.828014",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 5,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-29T20:39:02.288082",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 5,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-30T19:33:23.394602",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 2,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-30T20:32:36.732647",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 2,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-06-30T21:08:54.079691",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 2,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-02T20:19:53.434285",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 2,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-02T20:25:43.110781",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 2,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-02T20:31:09.749688",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 2,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-02T20:31:48.935918",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 2,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-07T19:54:02.664442",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 2,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-07T22:59:25.479841",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-07T23:35:36.451490",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-07T23:35:46.590990",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-08T18:09:21.041173",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-08T18:13:42.666422",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-08T18:25:25.789410",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-08T18:25:59.969453",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-08T18:37:58.280618",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-08T18:56:28.284257",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-08T19:09:52.758358",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-08T19:16:40.583173",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-11T19:43:16.370080",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-11T20:08:54.156547",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-11T20:25:17.772375",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-11T20:29:19.324512",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-11T20:49:57.491052",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-11T21:18:14.323651",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-12T00:01:13.528610",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-12T00:01:13.637866",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-12T00:02:10.863390",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-12T00:28:47.099224",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-12T00:59:19.072757",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
   }
 ]

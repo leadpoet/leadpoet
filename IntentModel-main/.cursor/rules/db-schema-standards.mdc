@@ -1,0 +1,19 @@
+---
+description: 
+globs: **/BRD*.md
+alwaysApply: false
+---
+---
+description: "Check Database Schema section for table definitions, columns, indexes, and security."
+globs:
+  - "**/BRD*.md"
+alwaysApply: false
+---
+
+# Database Schema Standards
+
+- Section `## 4. Database Schema` must list each table as `- **table_name**:`.
+- Under each table:
+  - Use sublist `- Columns:` with bullet items specifying name, type, constraints.
+  - Include `- Indexes:` sublist.
+  - Include `- Security:` sublist (e.g., RLS, encryption).

@@ -1,0 +1,25 @@
+---
+description: On demand, generate a `tasks.md` file enumerating every Agile sub‑task from the provided BRD
+globs: 
+alwaysApply: false
+---
+---
+globs:
+  - "**/Firecrawl*Brd*.md"
+  - "**/*Lead*Sourcing*Brd*.md"
+alwaysApply: true
+description: Ensure tasks.md mirrors BRD epics, tasks, sub-tasks, and maps each §5 function and §10 metric.
+---
+### Rule
+When ChatGPT generates **tasks.md**:
+1. Create one epic per BRD §5 functional subsection:
+   - Scraping Engine
+   - Pre-Enrich Legitimacy Check
+   - Enrichment Module
+   - Submission Stub
+   - Monitoring and Logging
+2. Under each epic, list tasks with check-box sub-steps and:
+   - output artifact path
+   - estimated hours (int)
+   - owner placeholder "@TODO"
+3. Verify every BRD success metric appears as at least one acceptance criterion.

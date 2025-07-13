@@ -20,7 +20,7 @@ from Leadpoet.base.utils import pool as lead_pool
 import json
 from Leadpoet.base.utils.pool import get_leads_from_pool
 from validator_models.os_validator_model import validate_lead_list
-from miner_models.intent_model import rank_leads
+from miner_models.intent_model import rank_leads, classify_industry
 from Leadpoet.api.leadpoet_api import get_query_api_axons
 from Leadpoet.mock import MockWallet
 from collections import OrderedDict
@@ -48,17 +48,21 @@ class Miner(BaseMinerNeuron):
             async with self.sourcing_lock:
                 self.sourcing_mode = False
                 try:
-                    # Get leads from pool first
+                    # ── derive target industry from buyer description ───────────
+                    target_ind = classify_industry(synapse.business_desc) or synapse.industry
+                    print(f"🔍 Target industry inferred: {target_ind or 'any'}")
+
+                    # Get leads from pool first, filtered by that industry
                     curated_leads = get_leads_from_pool(
-                        synapse.num_leads,
-                        industry=synapse.industry,
+                        synapse.num_leads * 3,          # ask for extra, we’ll rank later
+                        industry=target_ind,
                         region=synapse.region
                     )
                     
                     if not curated_leads:
                         print("📝 No leads found in pool, generating new leads...")
                         bt.logging.info("No leads found in pool, generating new leads")
-                        new_leads = await get_leads(synapse.num_leads, synapse.industry, synapse.region)
+                        new_leads = await get_leads(synapse.num_leads * 2, target_ind, synapse.region)
                         sanitized = [sanitize_prospect(p, self.wallet.hotkey.ss58_address) for p in new_leads]
                         curated_leads = sanitized
                     else:
@@ -88,7 +92,7 @@ class Miner(BaseMinerNeuron):
                  
                     # run the open-source validator model to attach conversion_score
                     print(" Scoring leads with conversion model...")
-                    val          = await validate_lead_list(mapped_leads, synapse.industry)
+                    val          = await validate_lead_list(mapped_leads, target_ind)
                     scored_copy  = val.get("scored_leads", [])
                     # bring scores back onto our rich objects (keeps Business/source/curated_by)
                     for orig, sc in zip(mapped_leads, scored_copy):
@@ -143,23 +147,26 @@ class Miner(BaseMinerNeuron):
         try:
             data = await request.json()
             num_leads = data.get("num_leads", 1)
-            industry = data.get("industry")
+            industry = data.get("industry")      # legacy field – may be empty
             region = data.get("region")
             business_desc = data.get("business_desc", "")
             
             print(f"⏸️  Stopping sourcing, switching to curation mode...")
             
             # Get leads from pool first
+            target_ind = classify_industry(business_desc) or industry
+            print(f"🔍 Target industry inferred: {target_ind or 'any'}")
+
             curated_leads = get_leads_from_pool(
-                num_leads,
-                industry=industry,
+                num_leads * 3,
+                industry=target_ind,
                 region=region
             )
             
             if not curated_leads:
                 print("📝 No leads found in pool, generating new leads...")
                 bt.logging.info("No leads found in pool, generating new leads")
-                new_leads = await get_leads(num_leads, industry, region)
+                new_leads = await get_leads(num_leads * 2, target_ind, region)
                 sanitized = [sanitize_prospect(p, self.wallet.hotkey.ss58_address) for p in new_leads]
                 curated_leads = sanitized
             else:
@@ -207,7 +214,7 @@ class Miner(BaseMinerNeuron):
             
             # ── score + intent-rank ────────────────────────────────────────────
             print(" Scoring leads with conversion model and intent ranking...")
-            val         = await validate_lead_list(mapped_leads, industry)
+            val         = await validate_lead_list(mapped_leads, target_ind)
             scored_copy = val.get("scored_leads", [])
             for orig, sc in zip(mapped_leads, scored_copy):
                 orig["conversion_score"] = sc.get("conversion_score", 0.0)

@@ -8356,5 +8356,33 @@
     "num_valid": 1,
     "num_rejected": 0,
     "issues": []
+  },
+  {
+    "timestamp": "2025-07-12T01:16:54.652489",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-12T01:18:45.975337",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-12T01:28:43.799096",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-12T01:35:55.698329",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
   }
 ]

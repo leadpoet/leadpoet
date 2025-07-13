@@ -1733,6 +1733,8 @@ SUB_INDUSTRY_KEYWORDS: "OrderedDict[str, tuple[str,list[str]]]" = OrderedDict([
     ("3D Printing",      ("Energy & Industry", ["3d printing", "additive manufacturing"])),
 ])
 
+MODEL_NAME = "mistralai/mistral-7b-instruct"   # single source of truth
+
 def _classify_industry(meta_txt: str) -> tuple[str, str]:
     # ---- single source of truth → LLM ----
     print("\n🛈  LLM-CLASSIFY  INPUT ↓")
@@ -1743,9 +1745,11 @@ def _classify_industry(meta_txt: str) -> tuple[str, str]:
         industry, sub = result
         print("🛈  LLM-CLASSIFY  OUTPUT ↓")
         print({"industry": industry, "sub_industry": sub})   #  debug
+        print(f"✅ LLM-CLASSIFY succeeded (model: {MODEL_NAME})")
         return industry, sub
 
     # fallback (should be rare – only if API/key fails)
+    print(f"⚠️  LLM-CLASSIFY failed – falling back to keyword heuristic")
     return "Media & Education", "General Media"
 
 # ──────────────────────── CORE CRAWLER ──────────────────────────────
@@ -1812,7 +1816,7 @@ def _llm_classify(text: str) -> tuple[str, str] | None:
                 "Content-Type": "application/json"
             },
             json={
-                "model": "mistralai/mistral-7b-instruct",
+                "model": MODEL_NAME,
                 "messages": [
                     {"role": "system", "content": prompt_system},
                     {"role": "user", "content": prompt_user}

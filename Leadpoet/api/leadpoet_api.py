@@ -97,7 +97,7 @@ class LeadPoetAPI:
                 bt.logging.info(f"Calling validator API at {validator_url}")
                 
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(validator_url, json=request_data, timeout=30) as response:
+                    async with session.post(validator_url, json=request_data, timeout=90) as response:
                         if response.status == 200:
                             data = await response.json()
                             leads = data.get("leads", [])

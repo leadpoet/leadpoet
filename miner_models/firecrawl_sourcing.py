@@ -1733,7 +1733,11 @@ SUB_INDUSTRY_KEYWORDS: "OrderedDict[str, tuple[str,list[str]]]" = OrderedDict([
     ("3D Printing",      ("Energy & Industry", ["3d printing", "additive manufacturing"])),
 ])
 
-MODEL_NAME = "mistralai/mistral-7b-instruct"   # single source of truth
+# ── OpenRouter model selection ────────────────────────────────
+PRIMARY_MODEL  = "mistralai/mistral-small-3.2-24b-instruct:free"
+FALLBACK_MODEL = "mistralai/mistral-7b-instruct"
+# keep legacy name so the rest of the file still works
+MODEL_NAME     = PRIMARY_MODEL
 
 def _classify_industry(meta_txt: str) -> tuple[str, str]:
     # ---- single source of truth → LLM ----
@@ -1742,10 +1746,10 @@ def _classify_industry(meta_txt: str) -> tuple[str, str]:
 
     result = _llm_classify(meta_txt)
     if result:
-        industry, sub = result
+        industry, sub, model_used = result
         print("🛈  LLM-CLASSIFY  OUTPUT ↓")
         print({"industry": industry, "sub_industry": sub})   #  debug
-        print(f"✅ LLM-CLASSIFY succeeded (model: {MODEL_NAME})")
+        print(f"✅ LLM-CLASSIFY succeeded (model: {model_used})")
         return industry, sub
 
     # fallback (should be rare – only if API/key fails)
@@ -1793,13 +1797,16 @@ async def _crawl_domain(session, domain: str) -> list[dict]:
 
 OPENROUTER_KEY = ARGS.openrouter_key
 
-def _llm_classify(text: str) -> tuple[str, str] | None:
+def _llm_classify(text: str) -> tuple[str, str, str] | None:
     """
-    Ask Mistral-7B (openrouter.ai) to classify the company.
-    Returns (industry, sub_industry) or None on any failure.
+    Classify a company snippet with OpenRouter.
+    1️⃣ Try the free 24-B Mistral model.
+    2️⃣ On error → fall back to Mistral-7B.
+    Returns (industry, sub_industry, model_used) or None.
     """
     if not OPENROUTER_KEY:
         return None
+
     prompt_system = (
         "You are an industry classifier. "
         "Given short snippets (domain, page title / description, contact URL) "
@@ -1808,32 +1815,41 @@ def _llm_classify(text: str) -> tuple[str, str] | None:
         " \"sub_industry\":\"<your best guess sub-industry>\"}"
     )
     prompt_user = textwrap.shorten(text, width=400, placeholder=" …")
-    try:
-        r = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": MODEL_NAME,
-                "messages": [
-                    {"role": "system", "content": prompt_system},
-                    {"role": "user", "content": prompt_user}
-                ],
-                "temperature": 0.2
-            },
-            timeout=20
-        )
-        r.raise_for_status()
-        content = r.json()["choices"][0]["message"]["content"]
-        j = json.loads(content.strip())
-        ind  = j.get("industry")
-        sub  = j.get("sub_industry") or j.get("subIndustry")
-        if ind and sub:
-            return ind, sub
-    except Exception as e:
-        logger.warning("llm_classify_failed", error=str(e)[:200])
+
+    for model_name in (PRIMARY_MODEL, FALLBACK_MODEL):
+        try:
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": prompt_system},
+                        {"role": "user",   "content": prompt_user},
+                    ],
+                    "temperature": 0.2,
+                },
+                timeout=20,
+            )
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"].strip()
+            if content.startswith("```"):
+                content = content.strip("`").lstrip("json").strip()
+            j = json.loads(content)
+            ind = j.get("industry")
+            sub = j.get("sub_industry") or j.get("subIndustry")
+            if ind and sub:
+                return ind, sub, model_name
+        except Exception as e:
+            logger.warning("llm_classify_failed_attempt",
+                           model=model_name,
+                           error=str(e)[:200])
+            # try next model
+            continue
+
     return None
 
 if __name__ == "__main__":

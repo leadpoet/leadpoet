@@ -1,6 +1,7 @@
 import re
 import time
 import random
+import requests, textwrap              # ← new deps
 import numpy as np
 import bittensor as bt
 import os
@@ -21,6 +22,109 @@ import asyncio
 from typing import List, Dict
 from aiohttp import web
 import socket
+
+# ─────────── LLM re-scoring helpers ────────────────────────────────
+AVAILABLE_MODELS = [
+    "deepseek/deepseek-chat-v3-0324:free",
+    "deepseek/deepseek-r1:free",
+    "meta-llama/llama-3.1-405b-instruct:free",
+    #"mistralai/mistral-7b-instruct",
+    "google/gemini-2.0-flash-exp:free",
+    "moonshotai/kimi-k2:free",
+    "mistralai/mistral-small-3.2-24b-instruct:free",
+    #"cognitivecomputations/dolphin3.0-mistral-24b:free",
+    #"openrouter/quasar-alpha",
+    #"qwen/qwen-2.5-72b-instruct:free",
+    #"google/gemma-3-27b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free"
+]
+
+# New – models tried ONLY when a primary call fails  ────────────────
+FALLBACK_MODELS = [
+    "mistralai/mistral-7b-instruct",
+    #"qwen/qwen3-4b:free",
+]
+
+OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
+
+def _llm_score_lead(lead: dict, description: str, model: str) -> float:
+    """
+    Return a 0-0.5 score telling how well this lead fits the buyer
+    description.  Falls back to a tiny keyword heuristic on failure.
+    """
+    def _heuristic() -> float:
+        d  = description.lower()
+        txt = (lead.get("Business","") + " " + lead.get("Industry","")).lower()
+        overlap = len(set(d.split()) & set(txt.split()))
+        return min(overlap * 0.05, 0.5)
+
+    if not OPENROUTER_KEY:
+        return _heuristic()
+
+    prompt_system = (
+            "You are an expert B2B match-maker.\n"
+            "FIRST LINE → JSON ONLY  {\"score\": <float between 0.0 and 0.5>}  (0.0 = bad match ⇢ 0.5 = perfect match)\n"
+            "SECOND LINE → ≤40-word reason referencing the single lead.\n"
+            "⚠️ Do not go outside the 0.0–0.5 range."
+        )
+
+    prompt_user = (
+        f"BUYER:\n{description}\n\n"
+        f"LEAD:\nCompany: {lead.get('Business')}\n"
+        f"Industry: {lead.get('Industry')}\n"
+        f"Website: {lead.get('Website')}"
+    )
+
+    # ─── debug: show what the model is judging ─────────────────────
+    print("\n🛈  VALIDATOR-LLM INPUT ↓")
+    print(textwrap.shorten(prompt_user, width=250, placeholder=" …"))
+
+    def _extract(json_plus_reason: str) -> float:
+        """Return score from first {...} block; raise if not parsable."""
+        txt = json_plus_reason.strip()
+        if txt.startswith("```"):
+            txt = txt.strip("`").lstrip("json").strip()
+        start, end = txt.find("{"), txt.find("}")
+        if start == -1 or end == -1:
+            raise ValueError("No JSON object found")
+        payload = txt[start:end + 1]
+        score = float(json.loads(payload).get("score", 0))
+        score = max(0.0, min(score, 0.5))     # <= clamp every time
+        print("🛈  VALIDATOR-LLM OUTPUT ↓")
+        print(textwrap.shorten(txt, width=250, placeholder=" …"))
+        return max(0.0, min(score, 0.5))
+
+    def _try(model_name: str) -> float:
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={ "Authorization": f"Bearer {OPENROUTER_KEY}",
+                      "Content-Type": "application/json"},
+            json={ "model": model_name, "temperature": 0.2,
+                   "messages":[{"role":"system","content":prompt_system},
+                               {"role":"user","content":prompt_user}]},
+            timeout=15)
+        r.raise_for_status()
+        return _extract(r.json()["choices"][0]["message"]["content"])
+
+    # 1️⃣ primary
+    try:
+        return _try(model)
+    except Exception as e:
+        print(f"⚠️  Primary model failed ({model}): {e}")
+        print("🛈  VALIDATOR-LLM OUTPUT ↓")
+        print("<< no JSON response – using fallback >>")
+
+    # 2️⃣ fallback picked at random
+    for fb_model in random.sample(FALLBACK_MODELS, k=len(FALLBACK_MODELS)):
+        try:
+            print(f"🔄  Trying fallback model: {fb_model}")
+            return _try(fb_model)
+        except Exception as e:
+            print(f"⚠️  Fallback failed ({fb_model}): {e}")
+            print("<< fallback also failed – using heuristic >>")
+
+    # Last-ditch heuristic
+    return _heuristic()
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
@@ -356,19 +460,32 @@ class Validator(BaseValidatorNeuron):
                     "process_time": "0"
                 }, status=404)
             
-            print(f"📊 RECEIVED {len(all_leads)} leads from miners, ranking by conversion score...")
-            
-            # Rank leads by conversion score
-            all_leads.sort(key=lambda x: x.get("conversion_score", 0), reverse=True)
+            print(f"📊 RECEIVED {len(all_leads)} leads – running TWO LLM re-scoring rounds…")
+
+            aggregated = {id(ld): 0.0 for ld in all_leads}
+            for rnd in range(2):
+                mdl = random.choice(AVAILABLE_MODELS)
+                print(f"\n🔄  LLM round {rnd+1}/2  (model: {mdl})")
+                for ld in all_leads:
+                    aggregated[id(ld)] += _llm_score_lead(ld, business_desc, mdl)
+
+            for ld in all_leads:
+                ld["validator_intent_score"] = round(aggregated[id(ld)], 3)
+
+            # Rank primarily by LLM aggregate, tie-break by conversion_score
+            all_leads.sort(key=lambda x: (x["validator_intent_score"],
+                              x.get("conversion_score",0)), reverse=True)
             top_leads = all_leads[:num_leads]
             
             print(f" TOP {len(top_leads)} RANKED LEADS:")
             for i, lead in enumerate(top_leads, 1):
-                business = lead.get('Business', lead.get('business', 'Unknown'))
-                score = lead.get('conversion_score', 0)
-                source = lead.get('source', 'Unknown')
-                curator = lead.get('curated_by', 'Unknown')
-                print(f"  {i}. {business} (Score: {score:.3f}, Source: {source}, Curator: {curator})")
+                business    = lead.get('Business', lead.get('business', 'Unknown'))
+                score_llm   = lead.get('validator_intent_score', 0)
+                score_conv  = lead.get('conversion_score', 0)
+                source      = lead.get('source', 'Unknown')
+                curator     = lead.get('curated_by', 'Unknown')
+                print(f"  {i}. {business} (LLM {score_llm:.3f} | Conv {score_conv:.3f}, "
+                      f"Source: {source}, Curator: {curator})")
             
             print(f"📤 SENDING top {len(top_leads)} leads to client")
             bt.logging.info(f" RETURNING top {len(top_leads)} leads to client")

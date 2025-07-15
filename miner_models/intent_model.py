@@ -58,12 +58,17 @@ INDUSTRIES = [
     "Energy & Industry",
 ]
 
+
 def classify_industry(description: str) -> Optional[str]:
     """
     Use OpenRouter to map free-form buyer text → one of the 5 umbrella
-    INDUSTRIES.  Falls back to the keyword heuristic if the call fails.
+    INDUSTRIES.
+
+    Flow:
+        1. Try PRIMARY_MODEL.
+        2. On failure → try FALLBACK_MODEL.
+        3. On failure → keyword heuristic.
     """
-    # heuristic fallback used multiple places
     fallback = infer_industry(description)
 
     if not OPENROUTER:
@@ -79,35 +84,54 @@ def classify_industry(description: str) -> Optional[str]:
 
     print("\n🛈  INDUSTRY-LLM  INPUT ↓")
     print(prompt_user)
-    try:
+
+    def _try_model(model_name: str) -> Optional[str]:
         r = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER}",
-                     "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {OPENROUTER}",
+                "Content-Type": "application/json",
+            },
             json={
-                "model": MODEL_NAME,
+                "model": model_name,
                 "temperature": 0.2,
                 "messages": [
                     {"role": "system", "content": prompt_system},
-                    {"role": "user",   "content": prompt_user}
-                ]},
+                    {"role": "user", "content": prompt_user},
+                ],
+            },
             timeout=10,
         )
         r.raise_for_status()
         raw = r.json()["choices"][0]["message"]["content"].strip()
         print("🛈  INDUSTRY-LLM  OUTPUT ↓")
         print(raw[:300])
-
-        # strip code-block fences if present
         if raw.startswith("```"):
             raw = raw.strip("`").lstrip("json").strip()
         ind = json.loads(raw).get("industry", "")
         if ind in INDUSTRIES:
-            print(f"✅ INDUSTRY-LLM succeeded → {ind}  (model: {MODEL_NAME})")
+            print(f"✅ INDUSTRY-LLM succeeded → {ind}  (model: {model_name})")
             return ind.lower()
-    except Exception as e:
-        logging.warning(f"Industry LLM failed: {e}")
+        return None
 
+    # 1️⃣ Primary
+    try:
+        result = _try_model(PRIMARY_MODEL)
+        if result:
+            return result
+    except Exception as e:
+        logging.warning(f"Industry LLM primary model failed: {e}")
+
+    # 2️⃣ Fallback
+    try:
+        print("⚠️  Primary model failed – trying fallback")
+        result = _try_model(FALLBACK_MODEL)
+        if result:
+            return result
+    except Exception as e:
+        logging.warning(f"Industry LLM fallback model failed: {e}")
+
+    # 3️⃣ Heuristic
     print("⚠️  INDUSTRY-LLM failed – using heuristic")
     return fallback.lower() if fallback else None
 
@@ -150,11 +174,28 @@ import asyncio, os, json, textwrap, requests
 OPENROUTER = os.getenv("OPENROUTER_API_KEY")
 
 PROMPT_SYSTEM = (
-    "You are a B2B lead-generation assistant.  "
-    "Given a buyer description and a candidate lead, reply with JSON ONLY: "
-    '{"score": <0-1 float where 1 = perfect fit>}')
+    "You are a B2B lead-generation assistant.\n"
+    "FIRST LINE → JSON ONLY  {\"score\": <0-1 float>}  (0-0.8 bad ↔ 1 perfect)\n"
+    "SECOND LINE → a brief explanation (max 40 words).\n")
 
-MODEL_NAME = "mistralai/mistral-7b-instruct"   # central place
+PRIMARY_MODEL   = "deepseek/deepseek-chat-v3-0324:free"
+FALLBACK_MODEL  = "mistralai/mistral-7b-instruct"
+# For backward-compat parts of the file (industry LLM)  
+MODEL_NAME      = PRIMARY_MODEL
+
+def _call(model: str, prompt_user: str):             # ← sync now
+    return requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER}",
+                 "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": PROMPT_SYSTEM},
+                {"role": "user",   "content": prompt_user}
+            ]},
+        timeout=15)
 
 async def _score_one(lead: dict, description: str) -> float:
     """
@@ -190,23 +231,12 @@ async def _score_one(lead: dict, description: str) -> float:
     print(textwrap.shorten(prompt_user, width=300, placeholder=" …"))
 
     try:
-        r = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER}",
-                     "Content-Type": "application/json"},
-            json={
-                "model": MODEL_NAME,
-                "temperature": 0.2,
-                "messages": [
-                    {"role": "system", "content": PROMPT_SYSTEM},
-                    {"role": "user",   "content": prompt_user}
-                ]},
-            timeout=15)
+        r = await asyncio.to_thread(_call, PRIMARY_MODEL, prompt_user)
         r.raise_for_status()
         raw = r.json()["choices"][0]["message"]["content"].strip()
         print("🛈  INTENT-LLM  OUTPUT ↓")
         print(textwrap.shorten(raw, width=300, placeholder=" …"))
-        print(f"✅ OpenRouter call succeeded (model: {MODEL_NAME})")
+        print(f"✅ OpenRouter call succeeded (model: {PRIMARY_MODEL})")
         # strip back-ticks / code-block fences
         if raw.startswith("```"):
             raw = raw.strip("`").lstrip("json").strip()
@@ -221,9 +251,26 @@ async def _score_one(lead: dict, description: str) -> float:
             score = _heuristic()
         return score
     except Exception as e:
-        logging.warning(f"OpenRouter intent-score failed: {e}")
-        print(f"⚠️  OpenRouter call failed – using heuristic ({e})")
-        return _heuristic()      # graceful degrade
+        print(f"⚠️  Primary model failed ({e}) – trying fallback")
+        try:
+            r = await asyncio.to_thread(_call, FALLBACK_MODEL, prompt_user)
+            r.raise_for_status()
+            raw = r.json()["choices"][0]["message"]["content"].strip()
+
+            # ─── debug output for fallback ───────────────────────────────
+            print("🛈  INTENT-LLM  OUTPUT ↓")
+            print(textwrap.shorten(raw, width=300, placeholder=" …"))
+            print(f"✅ OpenRouter call succeeded (model: {FALLBACK_MODEL})")
+            # ------------------------------------------------------------
+
+            if raw.startswith("```"):
+                raw = raw.strip("`").lstrip("json").strip()
+            start, end = raw.find("{"), raw.rfind("}")
+            payload = raw[start:end + 1]
+            return float(json.loads(payload).get("score", _heuristic()))
+        except Exception as e2:
+            logging.warning(f"Fallback model failed: {e2}")
+            return _heuristic()
 
 async def rank_leads(leads: list[dict], description: str) -> list[dict]:
     """
@@ -235,9 +282,6 @@ async def rank_leads(leads: list[dict], description: str) -> list[dict]:
     intents = await asyncio.gather(*tasks)
 
     for ld, intent in zip(leads, intents):
-        base   = ld.get("conversion_score", 0.0)
-        final  = FINAL_SCORE_FIT_W * base + FINAL_SCORE_INT_W * intent
-        ld["intent_score"] = intent
-        ld["conversion_score"] = round(final, 3)
+        ld["miner_intent_score"] = round(intent, 3)
 
-    return sorted(leads, key=lambda x: x["conversion_score"], reverse=True) 
+    return sorted(leads, key=lambda x: x["miner_intent_score"], reverse=True) 

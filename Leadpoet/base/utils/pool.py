@@ -44,7 +44,8 @@ def add_to_pool(prospects):
         sanitised = []
         for p in prospects:
             p = dict(p)                       # shallow-copy
-            p.pop("curated_by", None)         # strip curation info
+            p.pop("curated_by", None)
+            p.pop("conversion_score", None)   # drop legacy field
             sanitised.append(p)
 
         new_prospects = [p for p in sanitised
@@ -79,10 +80,12 @@ def get_leads_from_pool(num_leads, industry=None, region=None):
                 l for l in filtered_leads
                 if all(l.get(field) for field in required_fields)
             ]
-            filtered_leads.sort(key=lambda x: x.get("conversion_score", 0), reverse=True)
-            
-            # Return top N leads
-            return filtered_leads[:num_leads]
+            # Random sample up to the requested size
+            import random, itertools
+            if len(filtered_leads) <= num_leads:
+                return filtered_leads
+            # sample WITHOUT replacement for fairness
+            return random.sample(filtered_leads, num_leads)
         except Exception as e:
             bt.logging.error(f"Error reading leads from pool: {e}")
             return []

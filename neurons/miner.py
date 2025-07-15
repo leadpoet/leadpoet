@@ -177,7 +177,8 @@ class Miner(BaseMinerNeuron):
             for lead in curated_leads:
                 # Map the fields correctly using the same keys as stored in pool
                 mapped_lead = {
-                    "email": lead.get("owner_email", ""),
+                    "email":       lead.get("owner_email", ""),
+                    "owner_email": lead.get("owner_email", ""),
                     "Business": lead.get("business", ""),
                     "Owner Full name": lead.get("owner_full_name", ""),
                     "First": lead.get("first", ""),
@@ -187,7 +188,6 @@ class Miner(BaseMinerNeuron):
                     "Industry": lead.get("industry", ""),
                     "sub_industry": lead.get("sub_industry", ""),
                     "Region": lead.get("region", ""),
-                    "conversion_score": lead.get("conversion_score", 1.0),
                     "source":       lead.get("source", ""),
                     "curated_by":   self.wallet.hotkey.ss58_address,
                 }
@@ -217,7 +217,7 @@ class Miner(BaseMinerNeuron):
             val         = await validate_lead_list(mapped_leads, target_ind)
             scored_copy = val.get("scored_leads", [])
             for orig, sc in zip(mapped_leads, scored_copy):
-                orig["conversion_score"] = sc.get("conversion_score", 0.0)
+                orig["conversion_score"]     = sc.get("conversion_score", 0.0)
 
             ranked    = await rank_leads(mapped_leads, description=business_desc)
             top_leads = ranked[:num_leads]
@@ -338,7 +338,6 @@ def sanitize_prospect(prospect, miner_hotkey=None):
     now = datetime.now(timezone.utc).isoformat()
     sanitized["created_at"] = now
     sanitized["updated_at"] = now
-    sanitized["conversion_score"] = 0.0
     return sanitized
 
 def log_sourcing(hotkey, num_prospects):

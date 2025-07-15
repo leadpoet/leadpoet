@@ -8384,5 +8384,82 @@
     "num_valid": 1,
     "num_rejected": 0,
     "issues": []
+  },
+  {
+    "timestamp": "2025-07-13T16:43:46.464936",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-13T16:47:08.936691",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-13T21:02:34.017796",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-14T00:20:33.441082",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-14T00:20:33.551442",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-14T15:00:48.739507",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-14T20:23:31.572347",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-14T22:26:55.694690",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-14T22:29:31.023506",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-14T22:32:49.472588",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T18:18:28.702331",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
   }
 ]

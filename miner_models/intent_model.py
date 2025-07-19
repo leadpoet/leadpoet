@@ -26,36 +26,44 @@ FIT_WEIGHT_REGION   = 0.15
 FINAL_SCORE_FIT_W   = 0.6
 FINAL_SCORE_INT_W   = 0.4
 
+# ---------------------------------------------------------------------
+# New 11-sector taxonomy  ─────────────────────────────────────────────
 KEYWORDS = {
-    "tech & ai": ["saas", "ai", "ml", "software", "cloud", "data"],
-    "finance & fintech": ["fintech", "payments", "bank", "crypto", "lending"],
-    "health & wellness": ["health", "clinic", "medical", "fitness", "wellness"],
-    "media & education": ["edtech", "education", "course", "content", "media"],
-    "energy & industry": ["energy", "solar", "oil", "gas", "renewable"],
+    "marketing":      ["marketing", "advertising", "seo", "content", "campaign"],
+    "technology":     ["software", "saas", "cloud", "ai", "machine learning"],
+    "finance":        ["fintech", "payments", "bank", "crypto", "lending"],
+    "healthcare":     ["health", "clinic", "medical", "pharma", "hospital"],
+    "manufacturing":  ["manufacturing", "industrial", "factory", "automation"],
+    "retail":         ["retail", "e-commerce", "store", "consumer"],
+    "education":      ["edtech", "school", "university", "training", "course"],
+    "real estate":    ["real estate", "proptech", "property", "broker"],
+    "energy & utilities": ["energy", "solar", "utility", "renewable", "power"],
+    "transportation & logistics": ["logistics", "shipping", "transport", "automotive"],
+    "media & entertainment": ["media", "gaming", "music", "streaming", "content"],
 }
 
 # ---------------------------------------------------------------------
-# Fast heuristic to map a free-form buyer description → high-level industry
+# Fast heuristic to map buyer description → high-level industry
 def infer_industry(description: str) -> Optional[str]:
-    """
-    Very lightweight – scans the buyer text for any keyword token belonging to
-    one of our five umbrella industries.
-    Returns the matching industry string (e.g. 'tech & ai') or None.
-    """
     d = _norm(description)
     for bucket, kws in KEYWORDS.items():
-        for kw in kws:
-            if kw in d:
-                return bucket
+        if any(kw in d for kw in kws):
+            return bucket.title()       # Capitalise first letter of each word
     return None
 
 # ------------- LLM industry classifier ---------------------------------
 INDUSTRIES = [
-    "Tech & AI",
-    "Finance & Fintech",
-    "Health & Wellness",
-    "Media & Education",
-    "Energy & Industry",
+    "Marketing",
+    "Technology",
+    "Finance",
+    "Healthcare",
+    "Manufacturing",
+    "Retail",
+    "Education",
+    "Real Estate",
+    "Energy & Utilities",
+    "Transportation & Logistics",
+    "Media & Entertainment",
 ]
 
 
@@ -108,7 +116,15 @@ def classify_industry(description: str) -> Optional[str]:
         print(raw[:300])
         if raw.startswith("```"):
             raw = raw.strip("`").lstrip("json").strip()
-        ind = json.loads(raw).get("industry", "")
+        # extract first {...}
+        start, end = raw.find("{"), raw.find("}")
+        if start != -1 and end != -1:
+            try:
+                ind = json.loads(raw[start:end + 1]).get("industry", "")
+            except Exception:
+                ind = ""
+        else:
+            ind = ""
         if ind in INDUSTRIES:
             print(f"✅ INDUSTRY-LLM succeeded → {ind}  (model: {model_name})")
             return ind.lower()
@@ -224,6 +240,7 @@ async def _score_one(lead: dict, description: str) -> float:
         f"LEAD:\n"
         f"Company: {lead.get('Business')}\n"
         f"Sub-industry: {lead.get('sub_industry')}\n"
+        f"Role: {lead.get('role','')}\n"
         f"Website: {lead.get('Website')}"
     )
     # ─── debug ─────────────────────────────────────────────────────
@@ -278,10 +295,180 @@ async def rank_leads(leads: list[dict], description: str) -> list[dict]:
     intent_score from the LLM or heuristic:
         final = 0.6 * conversion + 0.4 * intent
     """
-    tasks  = [_score_one(ld, description) for ld in leads]
-    intents = await asyncio.gather(*tasks)
+    desired_roles = classify_roles(description)
+    
+    if desired_roles:
+        print(f"🛈 Role filter active: {desired_roles}")
+        # keep only leads whose role roughly matches the request
+        filt = [ld for ld in leads if _role_match(ld.get("role",""), desired_roles)]
+        if not filt:          # nothing matched → fall back to all leads
+            print("⚠️  No leads matched role filter – using all leads")
+            filt = leads
+        else:
+            print(f"✅ Filtered to {len(filt)} leads matching roles: {desired_roles}")
+    else:
+        filt = leads
 
-    for ld, intent in zip(leads, intents):
-        ld["miner_intent_score"] = round(intent, 3)
+    intents = await asyncio.gather(*[_score_one(ld, description) for ld in filt])
+    for ld, sc in zip(filt, intents):
+        ld["miner_intent_score"] = round(sc, 3)
 
-    return sorted(leads, key=lambda x: x["miner_intent_score"], reverse=True) 
+    # any lead not evaluated (filtered-out) gets score 0 so downstream code is safe
+    for ld in leads:
+        ld.setdefault("miner_intent_score", 0.0)
+
+    return sorted(filt, key=lambda x: x["miner_intent_score"], reverse=True) 
+
+# ─────────────────────────────────────────────────────────────────────
+# Role taxonomy & helpers
+# --------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Optional role filter (k-NN style, not exact) ─────────────────────────
+# Only used when the buyer description explicitly mentions roles.
+# ---------------------------------------------------------------------
+ROLE_KEYWORDS: dict[str, list[str]] = {
+    # Leadership
+    "founder":  ["founder", "co-founder", "cofounder", "owner"],
+    "ceo":      ["ceo", "chief executive officer", "president"],
+    "cto":      ["cto", "chief technology officer"],
+    "cmo":      ["cmo", "chief marketing officer"],
+
+    # Engineering & data
+    "software engineer": ["software engineer", "engineer", "developer", "dev",
+                          "full-stack", "backend", "front-end"],
+    "data scientist":    ["data scientist", "data science", "ml engineer",
+                          "machine learning engineer", "ai engineer"],
+
+    # Product
+    "product manager":   ["product manager", "product management", "pm"],
+
+    # Go-to-market
+    "business development": ["business development", "bd", "partnerships", "growth"],
+    "sdr":               ["sdr", "sales development representative",
+                          "sales development"],
+    "sales":             ["sales", "account executive", "ae"],
+    "marketing":         ["marketing", "marketer", "demand gen"],
+
+    # Ops / misc
+    "operations":        ["operations", "ops"],
+    "finance":           ["finance", "cfo", "financial"],
+}
+
+def _tokens(txt: str) -> set[str]:
+    """Lower-cased word tokens with punctuation stripped."""
+    return set(_norm(txt).split())
+
+def _extract_roles(text: str) -> list[str]:
+    """Fast heuristic fallback for role detection (singular/plural)."""
+    d = _norm(text)
+    out = []
+    for role, kws in ROLE_KEYWORDS.items():
+        if any(kw in d or f"{kw}s" in d for kw in kws):
+            out.append(role)
+    return out
+
+# ---------------------------------------------------------------------
+# LLM-based role classifier (similar to industry classifier)
+# ---------------------------------------------------------------------
+ROLES_CANON = [
+    "Founder", "CEO", "CTO", "CMO",
+    "Software Engineer", "Data Scientist", "Product Manager",
+    "Business Development", "SDR", "Sales", "Marketing",
+    "Operations", "Finance"
+]
+
+def classify_roles(description: str) -> list[str]:
+    """
+    Use OpenRouter to extract explicitly requested roles from buyer text.
+    Only called when role keywords are detected in the description.
+    """
+    # Quick heuristic pre-check
+    heuristic_roles = _extract_roles(description)
+    if not heuristic_roles:
+        return []  # No roles mentioned
+
+    if not OPENROUTER:
+        return heuristic_roles
+
+    prompt_system = (
+        "You are a role classifier for B2B lead generation.\n"
+        "Return JSON ONLY: {\"roles\": [<zero or more of "
+        + " | ".join(ROLES_CANON)
+        + ">]}  – choose ONLY roles that the buyer *explicitly* asks for."
+    )
+    prompt_user = _norm(description)[:400]
+
+    print("\n🛈  ROLE-LLM  INPUT ↓")
+    print(prompt_user)
+
+    def _try_model(model_name: str) -> list[str]:
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model_name,
+                "temperature": 0.2,
+                "messages": [
+                    {"role": "system", "content": prompt_system},
+                    {"role": "user", "content": prompt_user},
+                ],
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        raw = r.json()["choices"][0]["message"]["content"].strip()
+        print("🛈  ROLE-LLM  OUTPUT ↓")
+        print(raw[:300])
+        
+        if raw.startswith("```"):
+            raw = raw.strip("`").lstrip("json").strip()
+        # extract first {...}
+        start, end = raw.find("{"), raw.find("}")
+        if start != -1 and end != -1:
+            try:
+                roles = json.loads(raw[start:end + 1]).get("roles", [])
+                # validate against canonical list
+                valid_roles = [r.lower() for r in roles if r in ROLES_CANON]
+                if valid_roles:
+                    print(f"✅ ROLE-LLM succeeded → {valid_roles}  (model: {model_name})")
+                    return valid_roles
+            except Exception:
+                pass
+        return []
+
+    # 1️⃣ Primary
+    try:
+        result = _try_model(PRIMARY_MODEL)
+        if result:
+            return result
+    except Exception as e:
+        logging.warning(f"Role LLM primary model failed: {e}")
+
+    # 2️⃣ Fallback
+    try:
+        print("⚠️  Primary model failed – trying fallback")
+        result = _try_model(FALLBACK_MODEL)
+        if result:
+            return result
+    except Exception as e:
+        logging.warning(f"Role LLM fallback model failed: {e}")
+
+    # 3️⃣ Heuristic
+    print("⚠️  ROLE-LLM failed – using heuristic")
+    return heuristic_roles
+
+def _role_match(lead_role: str, targets: list[str]) -> bool:
+    """Loose match between one lead’s role and desired roles."""
+    if not targets:            # no filter ⇒ accept all
+        return True
+    lr_toks = _tokens(lead_role)
+    for tgt in targets:
+        if tgt in lr_toks:
+            return True
+        for kw in ROLE_KEYWORDS[tgt]:
+            if kw in lr_toks or f"{kw}s" in lr_toks:
+                return True
+    return False 

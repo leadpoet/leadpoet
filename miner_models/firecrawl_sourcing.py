@@ -1411,8 +1411,9 @@ async def get_firecrawl_leads(num_leads: int,
                     "Owner(s) Email":  email,
                     "LinkedIn":        c.get("enrichment", {}).get("pdl", {}).get("linkedin", ""),
                     "Website":         website,
-                    "Industry":       industry,
-                    "sub_industry":   sub_ind,      # <- lower-case, consistent
+                    "Industry":        industry,
+                    "sub_industry":    sub_ind,      # lower-case consistent
+                    "role":            c.get("title", ""),
                     "Region":          region or "Global",
                 }
                 # basic filtering so we don't return empty rows
@@ -1459,125 +1460,59 @@ LEADS_PER_DOMAIN = 1          # emit every lead immediately
 
 # keyword → (sub-industry, industry)
 KEYWORD_MAP = {
-    # Tech & AI  (25)
-    "saas":               ("SaaS", "Tech & AI"),
-    "software":           ("Software Development", "Tech & AI"),
-    "cloud":              ("Cloud Computing", "Tech & AI"),
-    "devops":             ("DevOps", "Tech & AI"),
-    "cybersecurity":      ("Cybersecurity", "Tech & AI"),
-    "security":           ("Cybersecurity", "Tech & AI"),
-    "ai":                 ("Artificial Intelligence", "Tech & AI"),
-    "machine learning":   ("Artificial Intelligence", "Tech & AI"),
-    "deep learning":      ("Artificial Intelligence", "Tech & AI"),
-    "nlp":                ("Artificial Intelligence", "Tech & AI"),
-    "data analytics":     ("Data Analytics", "Tech & AI"),
-    "big data":           ("Data Analytics", "Tech & AI"),
-    "iot":                ("Internet of Things", "Tech & AI"),
-    "internet of things": ("Internet of Things", "Tech & AI"),
-    "robotics":           ("Robotics", "Tech & AI"),
-    "semiconductor":      ("Semiconductors", "Tech & AI"),
-    "hardware":           ("Hardware", "Tech & AI"),
-    "ar":                 ("Augmented Reality / VR", "Tech & AI"),
-    "vr":                 ("Augmented Reality / VR", "Tech & AI"),
-    "virtual reality":    ("Augmented Reality / VR", "Tech & AI"),
-    "augmented reality":  ("Augmented Reality / VR", "Tech & AI"),
-    "gaming":             ("Gaming", "Tech & AI"),
-    "esports":            ("Gaming", "Tech & AI"),
-    "web development":    ("Web Development", "Tech & AI"),
-    "mobile app":         ("Mobile Development", "Tech & AI"),
+    # Marketing
+    "marketing":           ("Marketing Services", "Marketing"),
+    "advertising":         ("Advertising",        "Marketing"),
+    "seo":                 ("SEO",               "Marketing"),
+    "content":             ("Content Marketing", "Marketing"),
 
-    # Finance & Fintech (21)
-    "fintech":            ("FinTech", "Finance & Fintech"),
-    "payments":           ("Payments", "Finance & Fintech"),
-    "payment":            ("Payments", "Finance & Fintech"),
-    "crypto":             ("Cryptocurrency", "Finance & Fintech"),
-    "cryptocurrency":     ("Cryptocurrency", "Finance & Fintech"),
-    "blockchain":         ("Blockchain", "Finance & Fintech"),
-    "defi":               ("DeFi", "Finance & Fintech"),
-    "lending":            ("Lending", "Finance & Fintech"),
-    "insurtech":          ("InsurTech", "Finance & Fintech"),
-    "insurance":          ("InsurTech", "Finance & Fintech"),
-    "bank":               ("Banking", "Finance & Fintech"),
-    "banking":            ("Banking", "Finance & Fintech"),
-    "wealth":             ("Wealth Management", "Finance & Fintech"),
-    "investment":         ("Wealth Management", "Finance & Fintech"),
-    "trading":            ("Trading", "Finance & Fintech"),
-    "brokerage":          ("Trading", "Finance & Fintech"),
-    "regtech":            ("RegTech", "Finance & Fintech"),
-    "accounting":         ("Accounting", "Finance & Fintech"),
-    "payments gateway":   ("Payments", "Finance & Fintech"),
-    "pos":                ("Payments", "Finance & Fintech"),
-    "personal finance":   ("Personal Finance", "Finance & Fintech"),
+    # Technology
+    "software":            ("Software",      "Technology"),
+    "saas":                ("SaaS",          "Technology"),
+    "cloud":               ("Cloud",         "Technology"),
+    "ai":                  ("Artificial Intelligence","Technology"),
 
-    # Health & Wellness (21)
-    "health":             ("Healthcare", "Health & Wellness"),
-    "healthcare":         ("Healthcare", "Health & Wellness"),
-    "clinic":             ("Healthcare Provider", "Health & Wellness"),
-    "hospital":           ("Healthcare Provider", "Health & Wellness"),
-    "pharma":             ("Pharmaceuticals", "Health & Wellness"),
-    "pharmaceutical":     ("Pharmaceuticals", "Health & Wellness"),
-    "biotech":            ("Biotech", "Health & Wellness"),
-    "life science":       ("Biotech", "Health & Wellness"),
-    "medical device":     ("Medical Devices", "Health & Wellness"),
-    "medtech":            ("Medical Devices", "Health & Wellness"),
-    "telemedicine":       ("Telemedicine", "Health & Wellness"),
-    "telehealth":         ("Telemedicine", "Health & Wellness"),
-    "fitness":            ("Fitness", "Health & Wellness"),
-    "wellness":           ("Fitness", "Health & Wellness"),
-    "nutrition":          ("Nutrition", "Health & Wellness"),
-    "mental health":      ("Mental Health", "Health & Wellness"),
-    "dental":             ("Healthcare Provider", "Health & Wellness"),
-    "veterinary":         ("Healthcare Provider", "Health & Wellness"),
-    "elder care":         ("Elder Care", "Health & Wellness"),
-    "digital health":     ("Digital Health", "Health & Wellness"),
-    "sports medicine":    ("Sports Medicine", "Health & Wellness"),
+    # Finance
+    "fintech":             ("FinTech",   "Finance"),
+    "payments":            ("Payments",  "Finance"),
+    "bank":                ("Banking",   "Finance"),
+    "crypto":              ("Cryptocurrency", "Finance"),
 
-    # Media & Education (23)
-    "edtech":             ("EdTech", "Media & Education"),
-    "education":          ("Education Services", "Media & Education"),
-    "e-learning":         ("EdTech", "Media & Education"),
-    "online course":      ("EdTech", "Media & Education"),
-    "school":             ("Education Services", "Media & Education"),
-    "university":         ("Education Services", "Media & Education"),
-    "training":           ("Training & Coaching", "Media & Education"),
-    "coaching":           ("Training & Coaching", "Media & Education"),
-    "publishing":         ("Publishing", "Media & Education"),
-    "media":              ("Media & Entertainment", "Media & Education"),
-    "news":               ("Media & Entertainment", "Media & Education"),
-    "content":            ("Media & Entertainment", "Media & Education"),
-    "streaming":          ("Streaming", "Media & Education"),
-    "video":              ("Streaming", "Media & Education"),
-    "audio":              ("Streaming", "Media & Education"),
-    "podcast":            ("Streaming", "Media & Education"),
-    "marketing":          ("Marketing Services", "Media & Education"),
-    "advertising":        ("Marketing Services", "Media & Education"),
-    "pr agency":          ("Marketing Services", "Media & Education"),
-    "game studio":        ("Game Studio", "Media & Education"),
-    "animation":          ("Media Production", "Media & Education"),
-    "film":               ("Media Production", "Media & Education"),
-    "music":              ("Media Production", "Media & Education"),
+    # Healthcare
+    "health":              ("Healthcare", "Healthcare"),
+    "clinic":              ("Healthcare Provider", "Healthcare"),
+    "pharma":              ("Pharma", "Healthcare"),
 
-    # Energy & Industry (20)
-    "energy":             ("Energy", "Energy & Industry"),
-    "oil":                ("Oil & Gas", "Energy & Industry"),
-    "gas":                ("Oil & Gas", "Energy & Industry"),
-    "lng":                ("Oil & Gas", "Energy & Industry"),
-    "renewable":          ("Renewable Energy", "Energy & Industry"),
-    "solar":              ("Renewable Energy", "Energy & Industry"),
-    "wind":               ("Renewable Energy", "Energy & Industry"),
-    "geothermal":         ("Renewable Energy", "Energy & Industry"),
-    "battery":            ("Energy Storage", "Energy & Industry"),
-    "storage":            ("Energy Storage", "Energy & Industry"),
-    "mining":             ("Mining", "Energy & Industry"),
-    "manufacturing":      ("Manufacturing", "Energy & Industry"),
-    "automotive":         ("Automotive", "Energy & Industry"),
-    "industrial":         ("Industrial Automation", "Energy & Industry"),
-    "automation":         ("Industrial Automation", "Energy & Industry"),
-    "chemicals":          ("Chemicals", "Energy & Industry"),
-    "aerospace":          ("Aerospace", "Energy & Industry"),
-    "construction":       ("Construction", "Energy & Industry"),
-    "logistics":          ("Logistics & Supply Chain", "Energy & Industry"),
-    "supply chain":       ("Logistics & Supply Chain", "Energy & Industry"),
+    # Manufacturing
+    "manufacturing":       ("Manufacturing", "Manufacturing"),
+    "industrial":          ("Industrial",     "Manufacturing"),
+
+    # Retail
+    "retail":              ("Retail",       "Retail"),
+    "e-commerce":          ("E-commerce",   "Retail"),
+
+    # Education
+    "edtech":              ("EdTech",   "Education"),
+    "school":              ("K-12 / Higher-Ed", "Education"),
+
+    # Real-Estate
+    "real estate":         ("Real Estate", "Real Estate"),
+    "proptech":            ("PropTech",    "Real Estate"),
+
+    # Energy & Utilities
+    "energy":              ("Energy",   "Energy & Utilities"),
+    "solar":               ("Renewables","Energy & Utilities"),
+    "utility":             ("Utilities","Energy & Utilities"),
+
+    # Transportation & Logistics
+    "logistics":           ("Logistics",         "Transportation & Logistics"),
+    "shipping":            ("Shipping",          "Transportation & Logistics"),
+    "automotive":          ("Automotive",        "Transportation & Logistics"),
+
+    # Media & Entertainment
+    "media":               ("Media",   "Media & Entertainment"),
+    "gaming":              ("Gaming",  "Media & Entertainment"),
+    "music":               ("Music",   "Media & Entertainment"),
 }
 
 def _classify(text: str) -> tuple[str, str]:

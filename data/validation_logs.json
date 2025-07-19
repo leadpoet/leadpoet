@@ -8461,5 +8461,272 @@
     "num_valid": 1,
     "num_rejected": 0,
     "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T21:07:47.428274",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T21:10:46.824449",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T21:48:06.917885",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:02:56.575229",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:19:09.016191",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:19:09.132481",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:29:38.384124",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:35:26.136208",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:42:19.578311",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:43:46.822576",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:48:26.400370",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:50:13.694981",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T22:55:16.350327",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T23:06:25.789546",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T23:08:40.124316",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T23:19:12.271327",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T23:22:26.725424",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T23:25:25.911989",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T23:51:20.398317",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-15T23:59:59.138194",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T00:03:29.704311",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T00:06:05.043949",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T00:11:19.790729",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T00:31:30.792431",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 0,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: info@focalwear.store"
+    ]
+  },
+  {
+    "timestamp": "2025-07-16T00:48:50.354420",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 0,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: reagan@vaerdesign.com"
+    ]
+  },
+  {
+    "timestamp": "2025-07-16T01:28:34.601201",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T01:33:41.247858",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 0,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: lorenzoremohi@theglowfilter.com"
+    ]
+  },
+  {
+    "timestamp": "2025-07-16T01:35:31.557169",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T10:18:32.063762",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T16:00:18.523586",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 0,
+    "num_rejected": 1,
+    "issues": [
+      "Duplicate email: support@storywithai.info"
+    ]
+  },
+  {
+    "timestamp": "2025-07-16T18:25:22.199386",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T18:50:15.622317",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T18:54:23.552584",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T19:05:36.448463",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T19:16:04.231759",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T19:31:42.095911",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-16T19:34:41.571309",
+    "hotkey": "5MockHotkey5118fd42",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
   }
 ]

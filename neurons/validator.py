@@ -68,12 +68,17 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
             "⚠️ Do not go outside the 0.0–0.5 range."
         )
 
+ # Accept either camel-case or lower-case field names coming from the miner
     prompt_user = (
         f"BUYER:\n{description}\n\n"
-        f"LEAD:\nCompany: {lead.get('Business')}\n"
-        f"Industry: {lead.get('Industry')}\n"
-        f"Website: {lead.get('Website')}"
+        f"LEAD:\n"
+        f"Company:  {lead.get('Business',  lead.get('business',  ''))}\n"
+        f"Industry: {lead.get('Industry', lead.get('industry', ''))}\n"
+        f"Role:     {lead.get('role',     lead.get('Role', ''))}\n"
+        f"Website:  {lead.get('Website',  lead.get('website',  ''))}"
     )
+
+
 
     # ─── debug: show what the model is judging ─────────────────────
     print("\n🛈  VALIDATOR-LLM INPUT ↓")
@@ -435,10 +440,11 @@ class Validator(BaseValidatorNeuron):
                                    business_desc=business_desc)
             
             # Send request to all miners
+            # give miners enough time to curate
             responses = await self.dendrite(
                 axons=axons,
                 synapse=synapse,
-                timeout=30,
+                timeout=90,           # ← was 30 s
                 deserialize=True
             )
             
@@ -450,15 +456,32 @@ class Validator(BaseValidatorNeuron):
                 if isinstance(response, LeadRequest) and response.dendrite.status_code == 200 and response.leads:
                     all_leads.extend(response.leads)
             
+            # miner may still be finishing – wait once more up to 90 s
             if not all_leads:
-                print("❌ No valid leads received from miners")
+                print("⏳ No leads yet – waiting up to 90 s for miners to finish")
+                try:
+                    more = await asyncio.wait_for(
+                        self.dendrite(axons=axons,
+                                      synapse=synapse,
+                                      timeout=90,
+                                      deserialize=True),
+                        timeout=90
+                    )
+                    for r in more:
+                        if isinstance(r, LeadRequest) and r.dendrite.status_code == 200 and r.leads:
+                            all_leads.extend(r.leads)
+                except asyncio.TimeoutError:
+                    pass
+
+            if not all_leads:
+                print("❌ Still no leads – giving up")
                 bt.logging.warning("No valid leads received from miners")
-                return web.json_response({
-                    "leads": [],
-                    "status_code": 404,
-                    "status_message": "No valid leads found",
-                    "process_time": "0"
-                }, status=404)
+                return web.json_response(
+                    {"leads": [],
+                     "status_code": 504,
+                     "status_message":"Timeout waiting for miners",
+                     "process_time":"0"},
+                    status=504)
             
             print(f"📊 RECEIVED {len(all_leads)} leads – running TWO LLM re-scoring rounds…")
 
@@ -472,20 +495,31 @@ class Validator(BaseValidatorNeuron):
             for ld in all_leads:
                 ld["validator_intent_score"] = round(aggregated[id(ld)], 3)
 
-            # Rank primarily by LLM aggregate, tie-break by conversion_score
-            all_leads.sort(key=lambda x: (x["validator_intent_score"],
-                              x.get("conversion_score",0)), reverse=True)
+             # Rank primarily by LLM aggregate, tie-break by miner’s score.
+            #  -> always default to 0 so we never compare None with float.
+            all_leads.sort(
+                key=lambda x: (
+                    x.get("validator_intent_score", 0.0),
+                    x.get("miner_intent_score",     0.0)
+                ),
+                reverse=True,
+            )
+
             top_leads = all_leads[:num_leads]
             
             print(f" TOP {len(top_leads)} RANKED LEADS:")
             for i, lead in enumerate(top_leads, 1):
                 business    = lead.get('Business', lead.get('business', 'Unknown'))
                 score_llm   = lead.get('validator_intent_score', 0)
-                score_conv  = lead.get('conversion_score', 0)
+                score_miner = lead.get('miner_intent_score', 0)
                 source      = lead.get('source', 'Unknown')
                 curator     = lead.get('curated_by', 'Unknown')
-                print(f"  {i}. {business} (LLM {score_llm:.3f} | Conv {score_conv:.3f}, "
-                      f"Source: {source}, Curator: {curator})")
+                print(
+                    f"  {i}. {business} "
+                    f"(LLM {score_llm:.3f} | Miner {score_miner:.3f}, "
+                    f"Source: {source}, Curator: {curator})"
+                )
+
             
             print(f"📤 SENDING top {len(top_leads)} leads to client")
             bt.logging.info(f" RETURNING top {len(top_leads)} leads to client")

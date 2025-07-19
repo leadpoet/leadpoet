@@ -20,7 +20,12 @@ from Leadpoet.base.utils import pool as lead_pool
 import json
 from Leadpoet.base.utils.pool import get_leads_from_pool
 from validator_models.os_validator_model import validate_lead_list
-from miner_models.intent_model import rank_leads, classify_industry
+from miner_models.intent_model import (
+    rank_leads,
+    classify_industry,
+    classify_roles,
+    _role_match,
+)
 from Leadpoet.api.leadpoet_api import get_query_api_axons
 from Leadpoet.mock import MockWallet
 from collections import OrderedDict
@@ -52,11 +57,30 @@ class Miner(BaseMinerNeuron):
                     target_ind = classify_industry(synapse.business_desc) or synapse.industry
                     print(f"🔍 Target industry inferred: {target_ind or 'any'}")
 
-                    # Get leads from pool first, filtered by that industry
-                    curated_leads = get_leads_from_pool(
-                        synapse.num_leads * 3,          # ask for extra, we’ll rank later
+                    # 1️⃣ detect role keywords ONCE
+                    desired_roles = classify_roles(synapse.business_desc)
+                    if desired_roles:
+                        print(f"🛈  Role filter active → {desired_roles}")
+
+                    # 2️⃣ pull a LARGE slice of the pool for this industry
+                    pool_slice = get_leads_from_pool(
+                        1000,                           # big number = “all we have”
                         industry=target_ind,
                         region=synapse.region
+                    )
+
+                    # 3️⃣ role-filter first, then random-sample down
+                    if desired_roles:
+                        pool_slice = [
+                            ld for ld in pool_slice
+                            if _role_match(ld.get("role", ""), desired_roles)
+                        ] or pool_slice  # fall back if nothing matched
+
+                    # finally down-sample to N×3 for ranking
+                    import random
+                    curated_leads = random.sample(
+                        pool_slice,
+                        min(len(pool_slice), synapse.num_leads * 3)
                     )
                     
                     if not curated_leads:
@@ -82,6 +106,7 @@ class Miner(BaseMinerNeuron):
                             "Industry": lead.get("industry", ""),
                             "sub_industry": lead.get("sub_industry", ""),
                             "Region": lead.get("region", ""),
+                            "role": lead.get("role", ""),
                             "source":       lead.get("source", ""),
                             "curated_by":   self.wallet.hotkey.ss58_address,
                         }
@@ -115,8 +140,8 @@ class Miner(BaseMinerNeuron):
                     print(f"📤 SENDING {len(top_leads)} curated leads to validator:")
                     for i, lead in enumerate(top_leads, 1):
                         business = lead.get('Business', 'Unknown')
-                        score = lead.get('conversion_score', 0)
-                        print(f"  {i}. {business} (Score: {score:.3f})")
+                        score = lead.get('miner_intent_score', 0)
+                        print(f"  {i}. {business} (intent={score:.3f})")
                     
                     bt.logging.info(f"Returning {len(top_leads)} scored leads")
                     synapse.leads = top_leads
@@ -157,10 +182,30 @@ class Miner(BaseMinerNeuron):
             target_ind = classify_industry(business_desc) or industry
             print(f"🔍 Target industry inferred: {target_ind or 'any'}")
 
-            curated_leads = get_leads_from_pool(
-                num_leads * 3,
+            # 1️⃣ detect role keywords ONCE
+            desired_roles = classify_roles(business_desc)
+            if desired_roles:
+                print(f"🛈  Role filter active → {desired_roles}")
+
+            # 2️⃣ pull a LARGE slice of the pool for this industry
+            pool_slice = get_leads_from_pool(
+                1000,                           # big number = “all we have”
                 industry=target_ind,
                 region=region
+            )
+
+            # 3️⃣ role-filter first, then random-sample down
+            if desired_roles:
+                pool_slice = [
+                    ld for ld in pool_slice
+                    if _role_match(ld.get("role", ""), desired_roles)
+                ] or pool_slice  # fall back if nothing matched
+
+            # finally down-sample to N×3 for ranking
+            import random
+            curated_leads = random.sample(
+                pool_slice,
+                min(len(pool_slice), num_leads * 3)
             )
             
             if not curated_leads:
@@ -187,6 +232,7 @@ class Miner(BaseMinerNeuron):
                     "Website": lead.get("website", ""),
                     "Industry": lead.get("industry", ""),
                     "sub_industry": lead.get("sub_industry", ""),
+                    "role": lead.get("role", ""),
                     "Region": lead.get("region", ""),
                     "source":       lead.get("source", ""),
                     "curated_by":   self.wallet.hotkey.ss58_address,
@@ -225,8 +271,8 @@ class Miner(BaseMinerNeuron):
             print(f"📤 SENDING {len(top_leads)} curated leads to validator:")
             for i, lead in enumerate(top_leads, 1):
                 business = lead.get('Business', 'Unknown')
-                score    = lead.get('conversion_score', 0)
-                print(f"  {i}. {business}  (score={score:.3f})")
+                score    = lead.get('miner_intent_score', 0)
+                print(f"  {i}. {business}  (intent={score:.3f})")
 
             print("▶️  Resuming sourcing mode...")
 
@@ -321,6 +367,7 @@ def sanitize_prospect(prospect, miner_hotkey=None):
         "linkedin": strip_html(prospect.get("LinkedIn", "")),
         "website": strip_html(prospect.get("Website", "")),
         "industry": strip_html(prospect.get("Industry", "")),
+        "role": strip_html(prospect.get("role", "") or prospect.get("Title","")),
         # accept either spelling, but store lower-case
         "sub_industry": strip_html(
             prospect.get("sub_industry") or prospect.get("Sub Industry", "")

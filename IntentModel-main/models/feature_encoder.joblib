@@ -1,2 +1,0 @@
-This is a placeholder for the pre-trained feature encoder (e.g., a scikit-learn OneHotEncoder).
-In a real implementation, this would be a serialized Python object (e.g., using joblib). 

@@ -472,3 +472,4 @@ def _role_match(lead_role: str, targets: list[str]) -> bool:
             if kw in lr_toks or f"{kw}s" in lr_toks:
                 return True
     return False 
+ 

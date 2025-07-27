@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: leadpoet-prod
-  labels:
-    name: leadpoet-prod
-    environment: production
-    project: leadpoet 

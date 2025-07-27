@@ -55,12 +55,6 @@ def add_args(cls, parser):
         default=100,
     )
     parser.add_argument(
-        "--mock",
-        action="store_true",
-        help="Mock neuron and all network components.",
-        default=False,
-    )
-    parser.add_argument(
         "--neuron.events_retention_size",
         type=str,
         help="Events retention size.",

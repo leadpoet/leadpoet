@@ -4,7 +4,6 @@ import asyncio
 import argparse
 from Leadpoet.protocol import LeadRequest
 from Leadpoet.api.get_query_axons import get_query_api_axons
-from Leadpoet.mock import MockDendrite, MockWallet, MockSubtensor
 from validator_models.os_validator_model import validate_lead_list
 from validator_models.automated_checks import validate_lead_list as auto_check_leads
 from miner_models.get_leads import VALID_INDUSTRIES
@@ -13,28 +12,31 @@ import aiohttp
 import socket
 
 class LeadPoetAPI:
-    def __init__(self, wallet: "bt.wallet", netuid: int = 343, subtensor_network: str = "test", mock: bool = False):
+    def __init__(
+        self,
+        wallet: "bt.wallet",
+        netuid: int = 343,
+        subtensor_network: str = "test",
+        validator_host: Optional[str] = None,
+        validator_port: Optional[int] = None,
+    ):
         self.wallet = wallet
         self.netuid = netuid
         self.subtensor_network = subtensor_network
-        self.mock = mock
         self.name = "leadpoet"
-        if mock:
-            bt.config().mock = True
-            bt.logging.debug(f"Explicitly set bt.config().mock to {bt.config().mock}")
-        self.dendrite = MockDendrite(wallet=wallet, use_open_source=True) if mock else bt.dendrite(wallet=wallet)
+        self.validator_host = validator_host   # may be None
+        self.validator_port = validator_port   # may be None
+        self.dendrite = bt.dendrite(wallet=wallet)
         bt.logging.debug(f"Initialized dendrite: {self.dendrite.__class__.__name__}")
-        if mock:
-            bt.logging.debug("Initializing MockSubtensor for mock mode")
-            subtensor = MockSubtensor(netuid=netuid, wallet=wallet, network="mock")
-            self.metagraph = bt.metagraph(netuid=netuid, network="mock", subtensor=subtensor)
-        else:
-            bt.logging.debug(f"Initializing Subtensor with network: {subtensor_network}")
-            config = bt.config()
-            config.subtensor.network = subtensor_network
-            subtensor = bt.subtensor(network=subtensor_network, config=config)
-            self.metagraph = bt.metagraph(netuid=netuid, network=subtensor_network, subtensor=subtensor)
-        bt.logging.info(f"Initialized LeadPoetAPI with netuid: {self.netuid}, subtensor_network: {self.subtensor_network}, mock: {self.mock}")
+        bt.logging.debug(f"Initializing Subtensor with network: {subtensor_network}")
+        config = bt.config()
+        # `bt.config()` may not contain a subtensor section yet.
+        if not hasattr(config, "subtensor") or config.subtensor is None:
+            config.subtensor = bt.Config()
+        config.subtensor.network = subtensor_network
+        self.subtensor = bt.subtensor(network=subtensor_network, config=config)
+        self.metagraph = bt.metagraph(netuid=netuid, network=subtensor_network, subtensor=self.subtensor)
+        bt.logging.info(f"Initialized LeadPoetAPI with netuid: {self.netuid}, subtensor_network: {self.subtensor_network}")
 
     def find_validator_port(self) -> Optional[int]:
         """Find the validator port by trying common ports."""
@@ -76,23 +78,24 @@ class LeadPoetAPI:
 
     async def get_leads(self, num_leads: int, business_desc: str) -> List[Dict]:
         bt.logging.info(f"Requesting {num_leads} leads, desc='{business_desc[:40]}…'")
+        return await self._get_leads_via_bittensor(num_leads, business_desc)
+
+    async def _get_leads_via_http(self, num_leads: int, business_desc: str) -> List[Dict]:
+        """Legacy HTTP server approach for mock mode"""
         max_retries = 3
         attempt = 1
 
         while attempt <= max_retries:
             bt.logging.info(f"Attempt {attempt}/{max_retries} to fetch leads")
             try:
-                # Find validator port
                 validator_port = self.find_validator_port()
                 if not validator_port:
                     bt.logging.error("Could not find validator port")
                     attempt += 1
                     continue
                 
-                # Call validator API
                 validator_url = f"http://localhost:{validator_port}/api/leads"
-                request_data = {"num_leads": num_leads,
-                                "business_desc": business_desc}
+                request_data = {"num_leads": num_leads, "business_desc": business_desc}
                 
                 bt.logging.info(f"Calling validator API at {validator_url}")
                 
@@ -123,6 +126,55 @@ class LeadPoetAPI:
 
         return []
 
+    async def _get_leads_via_bittensor(self, num_leads: int, business_desc: str) -> List[Dict]:
+        """Use the actual Bittensor network to get leads"""
+        try:
+            # Create synapse for the request
+            synapse = LeadRequest(
+                num_leads=num_leads,
+                business_desc=business_desc
+            )
+            
+            # Get available validators from the metagraph
+            self.metagraph.sync(subtensor=self.subtensor)
+            
+            # Debug: Print metagraph info
+            print(f" Metagraph info:")
+            print(f"   Total axons: {len(self.metagraph.axons)}")
+            print(f"   Validator permits: {self.metagraph.validator_permit}")
+            print(f"   Axon serving status: {[axon.is_serving for axon in self.metagraph.axons]}")
+            
+            validator_uids = [uid for uid in range(len(self.metagraph.axons)) 
+                            if self.metagraph.validator_permit[uid] and self.metagraph.axons[uid].is_serving]
+            
+            print(f"   Found validator UIDs: {validator_uids}")
+            
+            if not validator_uids:
+                bt.logging.error("No active validators found on the network")
+                return []
+            
+            # Query the first available validator
+            validator_axon = self.metagraph.axons[validator_uids[0]]
+            bt.logging.info(f"Querying validator {validator_uids[0]} at {validator_axon.ip}:{validator_axon.port}")
+            
+            # Send request through Bittensor network
+            responses = await self.dendrite([validator_axon], synapse, timeout=30)
+            
+            if responses and len(responses) > 0:
+                response = responses[0]
+                if response.dendrite.status_code == 200 and response.leads:
+                    bt.logging.info(f"Received {len(response.leads)} leads from validator")
+                    return response.leads
+                else:
+                    bt.logging.error(f"Validator response error: {response.dendrite.status_message}")
+            else:
+                bt.logging.error("No response from validator")
+                
+        except Exception as e:
+            bt.logging.error(f"Error querying Bittensor network: {e}")
+
+        return []
+
     async def submit_feedback(self, leads: List[Dict], feedback_score: float):
         from neurons.validator import Validator
         validator = Validator(config=bt.config())
@@ -135,7 +187,10 @@ def main():
     parser.add_argument("--wallet_hotkey", type=str, required=True, help="Hotkey of the wallet")
     parser.add_argument("--netuid", type=int, default=343, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default="test", help="Subtensor network")
-    parser.add_argument("--mock", action="store_true", help="Run in mock mode")
+    parser.add_argument("--validator_host", type=str,
+                        help="Public IP or DNS name of the validator (omit for localhost dev)")
+    parser.add_argument("--validator_port", type=int,
+                        help="Validator HTTP port (defaults to 8093 or auto-scan)")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace-level logging")
     args = parser.parse_args()
 
@@ -153,17 +208,14 @@ def main():
     if args.logging_trace:
         bt.logging.set_trace(True)      # unchanged – trace beats quiet mode
 
-    if args.mock:
-        bt.config().mock = True
-        bt.logging.debug(f"Set bt.config().mock to {bt.config().mock}")
-
-    wallet = MockWallet(name=args.wallet_name, hotkey=args.wallet_hotkey) if args.mock else bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
+    wallet = bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
 
     api = LeadPoetAPI(
         wallet=wallet,
         netuid=args.netuid,
         subtensor_network=args.subtensor_network,
-        mock=args.mock
+        validator_host=args.validator_host,
+        validator_port=args.validator_port,
     )
 
     print("Welcome to LeadPoet API")

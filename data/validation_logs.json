@@ -8728,5 +8728,19 @@
     "num_valid": 1,
     "num_rejected": 0,
     "issues": []
+  },
+  {
+    "timestamp": "2025-07-26T12:15:18.856616",
+    "hotkey": "5CJyMxw6YJJvLhPf58gSpMB7mvSKSCMx9RXhXJum6cNfqMEz",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
+  },
+  {
+    "timestamp": "2025-07-26T13:58:48.550776",
+    "hotkey": "5CJyMxw6YJJvLhPf58gSpMB7mvSKSCMx9RXhXJum6cNfqMEz",
+    "num_valid": 1,
+    "num_rejected": 0,
+    "issues": []
   }
 ]

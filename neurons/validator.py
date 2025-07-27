@@ -133,7 +133,32 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
-        super(Validator, self).__init__(config=config)
+        super().__init__(config=config)
+        
+        # Set validator UID
+        bt.logging.info("Registering validator wallet on network...")
+        max_retries = 3
+        retry_delay = 5
+        for attempt in range(max_retries):
+            try:
+                self.uid = self.subtensor.get_uid_for_hotkey_on_subnet(
+                    hotkey_ss58=self.wallet.hotkey.ss58_address,
+                    netuid=self.config.netuid,
+                )
+                if self.uid is not None:
+                    bt.logging.success(f"Validator registered with UID: {self.uid}")
+                    break
+                else:
+                    bt.logging.warning(f"Attempt {attempt + 1}/{max_retries}: Validator not registered on netuid {self.config.netuid}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+            except Exception as e:
+                bt.logging.error(f"Attempt {attempt + 1}/{max_retries}: Failed to set UID: {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+        if self.uid is None:
+            bt.logging.warning(f"Validator {self.config.wallet_name}/{self.config.wallet_hotkey} not registered on netuid {self.config.netuid} after {max_retries} attempts")
+
         bt.logging.info("load_state()")
         self.load_state()
         
@@ -200,7 +225,7 @@ class Validator(BaseValidatorNeuron):
 
     async def reputation_challenge(self):
         dummy_leads = [
-            {"Business": f"Mock Business {i}", "Owner(s) Email": f"owner{i}@mockleadpoet.com", "Website": f"https://business{i}.com", "Industry": "Tech & AI"}
+            {"Business": f"Test Business {i}", "Owner(s) Email": f"owner{i}@testleadpoet.com", "Website": f"https://business{i}.com", "Industry": "Tech & AI"}
             for i in range(10)
         ]
         known_score = random.uniform(0.8, 1.0)
@@ -417,10 +442,9 @@ class Validator(BaseValidatorNeuron):
             print(f"\n RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:50]}…'")
             bt.logging.info(f" RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:50]}…'")
             
-            # Get available miners - fix the mock parameter access
+            # Get available miners
             from Leadpoet.api.get_query_axons import get_query_api_axons
-            mock_mode = getattr(self.config, 'mock', False)  # Get mock from config
-            axons = await get_query_api_axons(self.wallet, self.metagraph, n=0.1, timeout=5, mock=mock_mode)
+            axons = await get_query_api_axons(self.wallet, self.metagraph, n=0.1, timeout=5)
             
             if not axons:
                 print("❌ No available miners to query.")
@@ -552,6 +576,300 @@ class Validator(BaseValidatorNeuron):
         await site.start()
         bt.logging.info(f"🔴 Validator HTTP server started on port {port}")
         return port
+
+    def run(self):
+        """Override the base run method to not run continuous validation"""
+        self.sync()
+        
+        # Check if validator is properly registered
+        if not hasattr(self, 'uid') or self.uid is None:
+            bt.logging.error("Cannot run validator: UID not set. Please register the wallet on the network.")
+            return
+
+        print(f"Running validator for subnet: {self.config.netuid} on network: {self.subtensor.chain_endpoint}")
+        print(f"🔍 Validator UID: {self.uid}")
+        print(f"🔍 Validator hotkey: {self.wallet.hotkey.ss58_address}")
+        
+        self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
+        self.axon.start()
+
+        print(f"Validator starting at block: {self.block}")
+        print("✅ Validator is now serving on the Bittensor network")
+        print("   Processing sourced leads and waiting for client requests...")
+        
+        # Show available miners
+        self.show_available_miners()
+        
+        try:
+            # Keep the validator running and continuously process leads
+            while not self.should_exit:
+                # Process any new leads that need validation (continuous)
+                self.process_sourced_leads_continuous()
+                
+                self.sync()
+        except KeyboardInterrupt:
+            self.axon.stop()
+            bt.logging.success("Validator killed by keyboard interrupt.")
+            exit()
+        except Exception as e:
+            bt.logging.error(f"Error in validator: {e}")
+            import traceback
+            bt.logging.error(traceback.format_exc())
+
+    def show_available_miners(self):
+        """Show all available miners on the network"""
+        try:
+            print("\n🔍 Discovering available miners on subnet 401...")
+            self.sync()  # Sync metagraph to get latest data
+            
+            available_miners = []
+            running_miners = []
+            for uid in range(self.metagraph.n):
+                if uid != self.uid:  # Don't include self
+                    hotkey = self.metagraph.hotkeys[uid]
+                    stake = self.metagraph.S[uid].item()
+                    axon_info = self.metagraph.axons[uid]
+                    
+                    miner_info = {
+                        'uid': uid,
+                        'hotkey': hotkey,
+                        'stake': stake,
+                        'ip': axon_info.ip,
+                        'port': axon_info.port
+                    }
+                    available_miners.append(miner_info)
+                    
+                    # Check if this miner is currently running (has axon info)
+                    if axon_info.ip != '0.0.0.0' and axon_info.port != 0:
+                        running_miners.append(miner_info)
+            
+            print(f"📊 Found {len(available_miners)} registered miners:")
+            for miner in available_miners:
+                print(f"   UID {miner['uid']}: {miner['hotkey'][:10]}... (stake: {miner['stake']:.2f})")
+             
+            print(f"\n🔍 Found {len(running_miners)} currently running miners:")
+            for miner in running_miners:
+                print(f"   UID {miner['uid']}: {miner['hotkey'][:10]}... (IP: {miner['ip']}:{miner['port']})")
+            
+            if not available_miners:
+                print("   ⚠️  No miners found on the network")
+            elif not running_miners:
+                print("   ⚠️  No miners currently running")
+            
+        except Exception as e:
+            print(f"❌ Error discovering miners: {e}")
+
+    def process_sourced_leads_continuous(self):
+        """Process leads that have been sourced by miners"""
+        try:
+            # Check for new leads in the prospect queue (pending validation)
+            prospect_queue_file = "data/prospect_queue.json"
+            
+            if os.path.exists(prospect_queue_file):
+                with open(prospect_queue_file, 'r') as f:
+                    prospect_queue = json.load(f)
+                
+                # Process each entry in the prospect queue
+                unvalidated_leads = []
+                miner_hotkeys = set()
+                for entry in prospect_queue:
+                    if 'prospects' in entry:
+                        for prospect in entry['prospects']:
+                            if 'validation_score' not in prospect:
+                                unvalidated_leads.append(prospect)
+                                if 'miner_hotkey' in entry:
+                                    miner_hotkeys.add(entry['miner_hotkey'])
+                
+                if unvalidated_leads:
+                    miner_hotkey = list(miner_hotkeys)[0] if miner_hotkeys else "Unknown"
+                    print(f"\n🔄 Processing sourced batch of {len(unvalidated_leads)} prospects from miner {miner_hotkey[:10]}....")
+                    print(f"🔍 Validating {len(unvalidated_leads)} sourced leads...")
+                    print()
+                    
+                    # Validate each lead
+                    valid_count = 0
+                    for lead in unvalidated_leads:
+                        domain = lead.get('business', 'Unknown')
+                        email = lead.get('owner_email', 'Unknown')
+                        print(f"  Validating: {domain}")
+                        print(f"    Email: {email}")
+                        
+                        # Calculate validation score with detailed breakdown
+                        score_breakdown = self.calculate_validation_score_breakdown(lead)
+                        
+                        # Print score breakdown
+                        if score_breakdown['website_score'] > 0:
+                            print(f"    ✅ Website found: +{score_breakdown['website_score']:.1f}")
+                        if score_breakdown['industry_score'] > 0:
+                            print(f"    ✅ Industry found: +{score_breakdown['industry_score']:.1f}")
+                        if score_breakdown['region_score'] > 0:
+                            print(f"    ✅ Region found: +{score_breakdown['region_score']:.1f}")
+                        print()
+                        
+                        try:
+                            # Use the validation logic from the forward method
+                            validation_result = self.validate_lead(lead)
+                            
+                            if validation_result['is_legitimate']:
+                                # Move to validated leads
+                                self.move_to_validated_leads(lead, validation_result['score'])
+                                valid_count += 1
+                            else:
+                                print(f"    ❌ Lead rejected: {validation_result['reason']}")
+                            
+                            # Remove from prospect queue
+                            self.remove_from_prospect_queue(lead)
+                            
+                        except Exception as e:
+                            print(f"    ❌ Error validating lead: {e}")
+                    
+                    if valid_count > 0:
+                        print(f"✅ Added {valid_count} valid prospects to pool")
+                else:
+                    # Only sleep if no leads to process
+                    time.sleep(1)  # Brief sleep to prevent CPU spinning
+            else:
+                # Only sleep if file doesn't exist
+                time.sleep(1)  # Brief sleep to prevent CPU spinning
+                             
+        except Exception as e:
+            print(f"❌ Error processing sourced leads: {e}")
+            import traceback
+            print(traceback.format_exc())
+            time.sleep(1)  # Brief sleep on error
+
+    def move_to_validated_leads(self, lead, score):
+        """Move validated lead to leads.json"""
+        try:
+            leads_file = "data/leads.json"
+            leads = []
+            
+            if os.path.exists(leads_file):
+                with open(leads_file, 'r') as f:
+                    leads = json.load(f)
+            
+            # Keep only the original lead structure (no extra fields)
+            clean_lead = {
+                'business': lead.get('business', ''),
+                'owner_full_name': lead.get('owner_full_name', ''),
+                'first': lead.get('first', ''),
+                'last': lead.get('last', ''),
+                'owner_email': lead.get('owner_email', ''),
+                'linkedin': lead.get('linkedin', ''),
+                'website': lead.get('website', ''),
+                'industry': lead.get('industry', ''),
+                'sub_industry': lead.get('sub_industry', ''),
+                'region': lead.get('region', ''),
+                'source': lead.get('source', '')
+            }
+            
+            leads.append(clean_lead)
+            
+            # Save back to file
+            with open(leads_file, 'w') as f:
+                json.dump(leads, f, indent=2)
+                
+        except Exception as e:
+            bt.logging.error(f"Error moving to validated leads: {e}")
+
+    def remove_from_prospect_queue(self, lead):
+        """Remove lead from prospect queue after validation"""
+        try:
+            prospect_queue_file = "data/prospect_queue.json"
+            if os.path.exists(prospect_queue_file):
+                with open(prospect_queue_file, 'r') as f:
+                    prospect_queue = json.load(f)
+                
+                # Remove the lead from prospect queue
+                original_count = len(prospect_queue)
+                # Remove the specific prospect from the appropriate entry
+                for entry in prospect_queue:
+                    if 'prospects' in entry:
+                        entry['prospects'] = [p for p in entry['prospects'] if not (
+                            p.get('owner_email') == lead.get('owner_email') and 
+                            p.get('business') == lead.get('business')
+                        )]
+                
+                # Remove empty entries
+                prospect_queue = [entry for entry in prospect_queue if entry.get('prospects')]
+                
+                # Save back to file
+                with open(prospect_queue_file, 'w') as f:
+                    json.dump(prospect_queue, f, indent=2)
+                    
+        except Exception as e:
+            bt.logging.error(f"Error removing from prospect queue: {e}")
+
+    def is_disposable_email(self, email):
+        """Check if email is from a disposable email provider"""
+        disposable_domains = {
+            '10minutemail.com', 'guerrillamail.com', 'mailinator.com', 'tempmail.org',
+            'throwaway.email', 'temp-mail.org', 'yopmail.com', 'getnada.com'
+        }
+        domain = email.split('@')[-1].lower()
+        return domain in disposable_domains
+
+    def check_domain_legitimacy(self, domain):
+        """Check domain legitimacy score"""
+        try:
+            # Simple domain scoring based on length and common patterns
+            if len(domain) < 5:
+                return 0.1
+            elif len(domain) > 20:
+                return 0.3
+            elif '.' not in domain:
+                return 0.0
+            else:
+                return 0.8  # Default good score for valid domains
+        except:
+            return 0.0
+
+    def validate_lead(self, lead):
+        """Validate a single lead using the same logic as forward method"""
+        try:
+            # Basic validation checks
+            email = lead.get('owner_email', '')
+            domain = lead.get('business', '')
+            
+            if not email or not domain:
+                return {'is_legitimate': False, 'reason': 'Missing email or domain', 'score': 0.0}
+            
+            # Check for disposable email
+            if self.is_disposable_email(email):
+                return {'is_legitimate': False, 'reason': 'Disposable email detected', 'score': 0.0}
+            
+            # Check domain legitimacy
+            domain_score = self.check_domain_legitimacy(domain)
+            
+            # Calculate overall score
+            score = domain_score * 0.7 + 0.3  # Base score of 0.3 + domain score
+            
+            is_legitimate = score > 0.5
+            
+            return {
+                'is_legitimate': is_legitimate,
+                'reason': 'Passed validation' if is_legitimate else 'Low domain score',
+                'score': score
+            }
+            
+        except Exception as e:
+            bt.logging.error(f"Error in validate_lead: {e}")
+            return {'is_legitimate': False, 'reason': f'Validation error: {e}', 'score': 0.0}
+
+    def calculate_validation_score_breakdown(self, lead):
+        """Calculate validation score with detailed breakdown"""
+        try:
+            website_score = 0.2 if lead.get('website') else 0.0
+            industry_score = 0.1 if lead.get('industry') else 0.0
+            region_score = 0.1 if lead.get('region') else 0.0
+            
+            return {
+                'website_score': website_score,
+                'industry_score': industry_score,
+                'region_score': region_score
+            }
+        except:
+            return {'website_score': 0.0, 'industry_score': 0.0, 'region_score': 0.0}
 
 DATA_DIR = "data"
 VALIDATION_LOG = os.path.join(DATA_DIR, "validation_logs.json")
@@ -690,10 +1008,7 @@ async def run_validator(validator_hotkey, queue_maxsize):
     print("Validator event loop started.")
     
     # Create validator instance
-    from Leadpoet.mock import MockWallet
-    wallet = MockWallet()
     config = bt.config()
-    config.mock = True
     validator = Validator(config=config)
     
     # Start HTTP server
@@ -870,7 +1185,6 @@ def main():
     parser.add_argument("--wallet_hotkey", type=str, help="Wallet hotkey")
     parser.add_argument("--netuid", type=int, default=343, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default="test", help="Subtensor network")
-    parser.add_argument("--mock", action="store_true", help="Run in mock mode")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
     args = parser.parse_args()
 
@@ -878,10 +1192,25 @@ def main():
         bt.logging.set_trace(True)
 
     ensure_data_files()
-    from Leadpoet.mock import MockWallet
-    validator_hotkey = MockWallet().hotkey_ss58_address
-    queue_maxsize = getattr(args, "queue_maxsize", 1000)
-    asyncio.run(run_validator(validator_hotkey, queue_maxsize))
+
+    # Run the proper Bittensor validator
+    config = bt.Config()
+    config.wallet = bt.Config()
+    config.wallet.name = args.wallet_name
+    config.wallet.hotkey = args.wallet_hotkey
+    config.netuid = args.netuid
+    config.subtensor = bt.Config()
+    config.subtensor.network = args.subtensor_network
+    
+    validator = Validator(config=config)
+    
+    print("🚀 Starting LeadPoet Validator on Bittensor Network...")
+    print(f"   Wallet: {validator.wallet.hotkey.ss58_address}")
+    print(f"   NetUID: {config.netuid}")
+    print("   Validator will process sourced leads and respond to API requests via Bittensor network")
+    
+    # Run the validator on the Bittensor network
+    validator.run()
 
 if __name__ == "__main__":
     main()

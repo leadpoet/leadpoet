@@ -27,7 +27,6 @@ from miner_models.intent_model import (
     _role_match,
 )
 from Leadpoet.api.leadpoet_api import get_query_api_axons
-from Leadpoet.mock import MockWallet
 from collections import OrderedDict
 
 
@@ -427,9 +426,6 @@ def update_miner_stats(hotkey, valid_count):
             json.dump(miners, f, indent=2)
 
 async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
-    # Start HTTP server
-    await miner.start_http_server()
-    
     # Suppress Bittensor verbose logs but keep block emissions
     import logging
     logging.getLogger('bittensor.subtensor').setLevel(logging.WARNING)
@@ -484,7 +480,6 @@ async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
-    parser.add_argument("--axon_port", type=int, default=8091, help="Port for axon and HTTP server")
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -497,52 +492,67 @@ def main():
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     config.subtensor.network = args.subtensor_network
-    config.mock = args.mock
-    config.axon = bt.Config()
-    config.axon.port = args.axon_port
     config.blacklist = bt.Config()
     config.blacklist.force_validator_permit = args.blacklist_force_validator_permit
     config.blacklist.allow_non_registered = args.blacklist_allow_non_registered
     config.neuron = bt.Config()
     config.neuron.epoch_length = args.neuron_epoch_length
+    # Ensure epoch_length is set to a default if None
+    if config.neuron.epoch_length is None:
+        config.neuron.epoch_length = 1000
     config.use_open_source_lead_model = args.use_open_source_lead_model
 
     ensure_data_files()
-    if config.mock:
-        miner_wallet = MockWallet(name=config.wallet.name, hotkey=config.wallet.hotkey)
-    else:
-        miner_wallet = bt.wallet(name=config.wallet.name, hotkey=config.wallet.hotkey)
-
+    
+    # Create miner and run it properly on the Bittensor network
     miner = Miner(config=config)
-    miner.wallet = miner_wallet
-    try:
-        config.axon.port = miner.find_available_port(config.axon.port)
-        bt.logging.info(f"Using axon port: {config.axon.port}")
-        miner.config.axon.port = config.axon.port
-        miner.axon = bt.axon(
-            port=config.axon.port,
-            ip='0.0.0.0',
-            wallet=miner.wallet,
-            external_ip='0.0.0.0'
-        )
-        miner.axon.attach(forward_fn=miner.forward, blacklist_fn=miner.blacklist, priority_fn=miner.priority)
-        bt.logging.info(f"Reattached axon on port {config.axon.port}")
-    except RuntimeError as e:
-        bt.logging.error(str(e))
+    
+    # Check if miner is properly registered
+    print(f"🔍 Checking miner registration...")
+    print(f"   Wallet: {miner.wallet.hotkey.ss58_address}")
+    print(f"   NetUID: {config.netuid}")
+    print(f"   UID: {miner.uid}")
+    
+    if miner.uid is None:
+        print("❌ Miner is not registered on the network!")
+        print("   Please register your wallet on subnet 401 first.")
         return
-
-    # Use the actual miner wallet's hotkey instead of creating a new one
-    miner_hotkey = miner_wallet.hotkey_ss58_address
-    interval = 60
-    queue_maxsize = 1000
-    if config.mock:
-        from Leadpoet.base.utils.config import add_validator_args
-        parser = argparse.ArgumentParser()
-        add_validator_args(None, parser)
-        args, _ = parser.parse_known_args()
-        interval = getattr(args, "sourcing_interval", 60)
-        queue_maxsize = getattr(args, "queue_maxsize", 1000)
-    asyncio.run(run_miner(miner, miner_hotkey, interval, queue_maxsize))
+    
+    print(f"✅ Miner registered with UID: {miner.uid}")
+    
+    # Start the Bittensor miner in background thread (this will start the axon and connect to testnet)
+    import threading
+    def run_miner_safe():
+        try:
+            print(" Starting Bittensor miner axon...")
+            print("   Syncing metagraph...")
+            miner.sync()
+            print(f"   Current block: {miner.block}")
+            print(f"   Metagraph has {len(miner.metagraph.axons)} axons")
+            print(f"   My axon should be at index {miner.uid}")
+            
+            miner.run()
+        except Exception as e:
+            print(f"❌ Error in miner.run(): {e}")
+            import traceback
+            traceback.print_exc()
+    
+    miner_thread = threading.Thread(target=run_miner_safe, daemon=True)
+    miner_thread.start()
+    
+    # Give the miner a moment to start up
+    import time
+    time.sleep(3)
+    
+    # Run the sourcing loop in the main thread
+    async def run_sourcing():
+        miner_hotkey = miner.wallet.hotkey.ss58_address
+        interval = 60
+        queue_maxsize = 1000
+        await run_miner(miner, miner_hotkey, interval, queue_maxsize)
+    
+    # Run the sourcing loop
+    asyncio.run(run_sourcing())
 
 if __name__ == "__main__":
     main()

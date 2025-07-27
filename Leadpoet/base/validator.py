@@ -4,7 +4,7 @@ import asyncio
 import argparse
 import threading
 import bittensor as bt
-import socket
+import time
 from typing import List, Union
 from traceback import print_exception
 from Leadpoet.base.neuron import BaseNeuron
@@ -12,7 +12,6 @@ from Leadpoet.base.utils.weight_utils import (
     process_weights_for_netuid,
     convert_weights_and_uids_for_emit,
 )
-from Leadpoet.mock import MockDendrite
 from Leadpoet.utils.config import add_validator_args
 from Leadpoet.validator.reward import calculate_emissions
 
@@ -27,8 +26,6 @@ class BaseValidatorNeuron(BaseNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
-        is_mock = getattr(self.config, 'mock', False)
-        
         if not hasattr(self.config, 'neuron') or self.config.neuron is None:
             self.config.neuron = bt.Config()
             self.config.neuron.axon_off = False
@@ -44,55 +41,30 @@ class BaseValidatorNeuron(BaseNeuron):
             self.config.axon.port = 8093
             bt.logging.debug("Initialized config.axon with default values")
 
-        self.dendrite = MockDendrite(wallet=self.wallet) if is_mock else bt.dendrite(wallet=self.wallet)
+        self.dendrite = bt.dendrite(wallet=self.wallet)
         bt.logging.info(f"Dendrite: {self.dendrite}")
         bt.logging.info("Building validation weights.")
         self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
         self.sync()
-        if not self.config.neuron.axon_off and not is_mock:
+        if not self.config.neuron.axon_off:
             self.serve_axon()
         self.should_exit = False
         self.is_running = False
         self.thread = None
         self.lock = asyncio.Lock()
-        self.total_emissions = 1000.0  # Mock value, replace with actual subnet emissions
-
-    def check_port_availability(self, port: int) -> bool:
-        """Check if a port is available."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(('0.0.0.0', port))
-                return True
-            except socket.error:
-                return False
-
-    def find_available_port(self, start_port: int, max_attempts: int = 10) -> int:
-        """Find an available port starting from start_port."""
-        port = start_port
-        for _ in range(max_attempts):
-            if self.check_port_availability(port):
-                return port
-            port += 1
-        raise RuntimeError(f"No available ports found between {start_port} and {start_port + max_attempts - 1}")
+        self.total_emissions = 1000.0  # Default emissions value for subnet
 
     def serve_axon(self):
         bt.logging.info("Serving validator axon...")
         try:
-            # Ensure axon port is available
-            self.config.axon.port = self.find_available_port(self.config.axon.port)
-            bt.logging.info(f"Using axon port: {self.config.axon.port}")
-
             self.axon = bt.axon(wallet=self.wallet, config=self.config)
-            if not self.config.mock:
-                self.subtensor.serve_axon(
-                    netuid=self.config.netuid,
-                    axon=self.axon,
-                )
-                bt.logging.info(
-                    f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
-                )
-            else:
-                bt.logging.info("Mock mode: Not serving axon.")
+            self.subtensor.serve_axon(
+                netuid=self.config.netuid,
+                axon=self.axon,
+            )
+            bt.logging.info(
+                f"Running validator for subnet: {self.config.netuid} on network: {self.config.subtensor.chain_endpoint} with config: {self.config}"
+            )
         except Exception as e:
             bt.logging.error(f"Failed to serve axon: {e}")
             self.axon = None
@@ -103,8 +75,7 @@ class BaseValidatorNeuron(BaseNeuron):
             for _ in range(self.config.neuron.num_concurrent_forwards)
         ]
         await asyncio.gather(*coroutines)
-        # Calculate emissions after forward pass
-        emissions = calculate_emissions(self, self.total_emissions, [self])  # In a real subnet, include all validators
+        emissions = calculate_emissions(self, self.total_emissions, [self])
         bt.logging.info(f"Validator emissions: {emissions}")
 
     def run(self):
@@ -122,8 +93,7 @@ class BaseValidatorNeuron(BaseNeuron):
                 self.step += 1
             loop.close()
         except KeyboardInterrupt:
-            if hasattr(self, 'axon') and self.axon is not None:
-                self.axon.stop()
+            self.axon.stop()
             bt.logging.success("Validator killed by keyboard interrupt.")
             exit()
         except Exception as err:
@@ -170,6 +140,7 @@ class BaseValidatorNeuron(BaseNeuron):
         raw_weights = self.scores / norm
         bt.logging.debug("raw_weights", raw_weights)
         bt.logging.debug("raw_weight_uids", str(self.metagraph.uids.tolist()))
+
         processed_weight_uids, processed_weights = process_weights_for_netuid(
             uids=self.metagraph.uids,
             weights=raw_weights,
@@ -179,25 +150,26 @@ class BaseValidatorNeuron(BaseNeuron):
         )
         bt.logging.debug("processed_weights", processed_weights)
         bt.logging.debug("processed_weight_uids", processed_weight_uids)
+
         uint_uids, uint_weights = convert_weights_and_uids_for_emit(
             uids=processed_weight_uids, weights=processed_weights
         )
         bt.logging.debug("uint_weights", uint_weights)
         bt.logging.debug("uint_uids", uint_uids)
-        if not self.config.mock:
-            result, msg = self.subtensor.set_weights(
-                wallet=self.wallet,
-                netuid=self.config.netuid,
-                uids=uint_uids,
-                weights=uint_weights,
-                wait_for_finalization=False,
-                wait_for_inclusion=False,
-                version_key=self.spec_version,
-            )
-            if result:
-                bt.logging.info("set_weights on chain successfully!")
-            else:
-                bt.logging.error("set_weights failed", msg)
+
+        result, msg = self.subtensor.set_weights(
+            wallet=self.wallet,
+            netuid=self.config.netuid,
+            uids=uint_uids,
+            weights=uint_weights,
+            wait_for_finalization=False,
+            wait_for_inclusion=False,
+            version_key=self.spec_version,
+        )
+        if result:
+            bt.logging.info("set_weights on chain successfully!")
+        else:
+            bt.logging.error("set_weights failed", msg)
 
     def resync_metagraph(self):
         bt.logging.info("resync_metagraph()")

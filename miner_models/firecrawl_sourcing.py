@@ -118,8 +118,14 @@ class EmailValidator:
         if self.is_disposable_domain(email):
             return False
         
+        # Use provided mx_check or EmailValidator's mx_exists
+        if mx_check is None:
+            mx_check = self.mx_exists
+        
         domain = email.split("@")[-1]
-        has_mx = await self.mx_exists(domain)
+        has_mx = await mx_check(domain)
+        if has_mx:
+            return True
         return has_mx
     
     def get_disposable_domains(self) -> Set[str]:

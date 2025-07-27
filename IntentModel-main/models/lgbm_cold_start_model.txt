@@ -1,2 +1,0 @@
-This is a placeholder for the pre-trained LightGBM model.
-In a real implementation, this would be a binary file. 

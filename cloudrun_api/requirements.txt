@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+google-cloud-firestore
+pydantic
+bittensor>=6.0.0

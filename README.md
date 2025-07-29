@@ -1,14 +1,18 @@
-# LeadPoet | Premium Sales Leads Powered by Bittensor.
+# LeadPoet | Premium Sales Leads Powered by Bittensor
 
 Welcome to LeadPoet, a decentralized prospect generation subnet built on Bittensor, with an initial focus on SMB sales agencies seeking high-quality, conversion-ready sales leads.
 
 ## Overview
 
-LeadPoet leverages Bittensor's decentralized architecture to create a scalable marketplace for prospect generation. Miners generate prospect batches, validators ensure quality through rigorous auditing, and buyers access curated, real-time prospects optimized for conversion. This eliminates reliance on static databases, ensuring fresher, more relevant prospects at lower costs.
+LeadPoet leverages Bittensor's decentralized architecture to create a scalable marketplace for prospect generation. Miners source high-quality prospects, validators ensure quality through rigorous auditing, and buyers access curated, real-time prospects optimized for conversion. This eliminates reliance on static databases, ensuring fresher, more relevant prospects at lower costs.
 
-- **Miners**: Generate prospect batches in response to buyer queries using their prospect generation model (example model provided in miner_models/get_leads.py).
-- **Validators**: Audit prospect quality using their own model or validator_models/os_validator_model.py.
-- **Buyers**: Request prospects via the Leadpoet/api/leadpoet_api.py CLI or the leadpoet.com website, receiving validated prospects with fields like Email and LinkedIn Pages.
+**Workflow**:
+1. Miners source high-quality prospects using Firecrawl web scraping and LLM classification
+2. Validators check legitimacy of sourced prospects; legitimate prospects enter the Prospect Pool
+3. Buyers submit requests to validators who send it to all available miners for prospect lists based on their Ideal Customer Profile (ICP)
+4. Miners curate prospect lists from the Prospect Pool and submit them to validators
+5. Validators score each prospect with an inference-based conversion model
+6. Buyers receive the Final Curated List from the validator—the highest-scoring ICP prospects—and manage them in their CRM systems
 
 **Data Flow**: Buyers submit a query → Miners generate prospects → Validators audit and score (≥90% to pass) → Approved prospects undergo automated checks (≥90% to pass) → Highest-scoring prospects are delivered to the buyer.
 
@@ -18,14 +22,24 @@ LeadPoet leverages Bittensor's decentralized architecture to create a scalable m
 
 ### Prerequisites
 
-- **Hardware**: 16GB RAM, 4-core CPU, 100GB SSD.
-- **Software**: Python 3.8+, Bittensor CLI (pip install bittensor>=6.9.3).
-- **TAO Wallet**: Required for staking and rewards. Create with btcli wallet create.
-- **API Keys (Optional for Miners)**: For real prospect generation using Hunter.io and Clearbit, set:
-  
+- **Hardware**: 16GB RAM, 4-core CPU, 100GB SSD
+- **Software**: Python 3.8+, Bittensor CLI (`pip install bittensor>=6.9.3`)
+- **TAO Wallet**: Required for staking and rewards. Create with `btcli wallet create`
+- **API Keys**: Required for real prospect generation and validation:
+
 ```bash
+# Required for miners using Firecrawl sourcing
+export FIRECRAWL_API_KEY=your_firecrawl_api_key
+
+# Required for miners using OpenRouter LLM classification
+export OPENROUTER_API_KEY=your_openrouter_api_key
+
+# Required for validators using Hunter.io email verification
 export HUNTER_API_KEY=your_hunter_api_key
-export CLEARBIT_API_KEY=your_clearbit_api_key
+
+# Required for validators using Mailgun email validation
+export MAILGUN_API_KEY=your_mailgun_api_key
+export MAILGUN_DOMAIN=your_mailgun_domain
 ```
 
 ### Installation
@@ -41,56 +55,53 @@ cd Leadpoet
 pip install .
 ```
 
-This installs dependencies listed in setup.py, including bittensor, requests, numpy, and others.
+This installs dependencies listed in `setup.py`, including bittensor, requests, numpy, and others.
 
 **Configure Your Wallet**:
-1. Create a wallet if you haven't: `btcli wallet create`.
-2. Stake TAO as needed (see participation requirements below).
-3. Verify wallet setup: `btcli wallet overview --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>`.
-
-**Set API Keys (Optional for Miners)**:
-To enable real prospect generation in miner_models/get_leads.py:
-```bash
-export HUNTER_API_KEY=your_hunter_api_key
-export CLEARBIT_API_KEY=your_clearbit_api_key
-```
+1. Create a wallet if you haven't: `btcli wallet create`
+2. Stake TAO as needed (see participation requirements below)
+3. Verify wallet setup: `btcli wallet overview --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>`
 
 ## For Miners
 
 ### Participation Requirements
-- **Register**: Burn a variable amount of TAO to register on the subnet (netuid 343):
+- **Register**: Burn a variable amount of TAO to register on the subnet (netuid 401):
 ```bash
-btcli subnet register --netuid 343 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
+btcli subnet register --netuid 401 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
 ```
 
 ### Running a Miner
 Run your miner to generate prospects:
 ```bash
-python neurons/miner.py --netuid 343 --subtensor.network test --wallet.name miner --wallet.hotkey default --logging.debug
+python neurons/miner.py \
+    --wallet_name miner \
+    --wallet_hotkey default \
+    --netuid 401 \
+    --subtensor_network test \
+    --use_open_source_lead_model
 ```
 
-- Add `--use_open_source_lead_model` to use get_leads.py with Hunter.io/Clearbit (requires API keys).
-- Add `--mock` for local testing with dummy data.
-- Add `--logging_trace` for detailed logs.
-
 **Behavior**:
-- Responds to validator/buyer queries within 2 minutes + 2 seconds per prospect.
-- Generates prospects in JSON format (see below).
-- In mock mode, uses MockDendrite and MockSubtensor to simulate responses.
+- Responds to validator/buyer queries within 2 minutes + 2 seconds per prospect
+- Generates prospects in JSON format (see below)
+- Uses Firecrawl for web scraping and OpenRouter for LLM classification
+- Continuously sources new leads from domains in `data/domains.csv`
 
 ### Prospect Format
 Prospects follow this JSON structure:
 ```json
 {
-    "Business": "Octiv",
-    "Owner Full name": "Jeff Romero",
-    "First": "Jeff",
-    "Last": "Romero",
-    "Owner(s) Email": "jeff@octivdigital.com",
-    "LinkedIn": "https://www.linkedin.com/in/jeffromero/",
-    "Website": "https://www.octivdigital.com/",
-    "Industry": "Tech & AI",
-    "Region": "US"
+    "business": "A Dozen Cousins",
+    "owner_full_name": "Ibraheem Basir",
+    "first": "Ibraheem",
+    "last": "Basir",
+    "owner_email": "ib@adozencousins.com",
+    "linkedin": "https://www.linkedin.com/in/ibraheembasir/",
+    "website": "https://adozencousins.com/",
+    "industry": "Tech & AI",
+    "sub_industry": "",
+    "region": "US",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth"
 }
 ```
 
@@ -98,9 +109,9 @@ Prospects follow this JSON structure:
 Miners are rewarded based on prospect quality and reliability:
 
 **Best Practices**:
-- Ensure accurate contact data (emails, LinkedIn URLs).
-- Align prospects with requested industry/region.
-- Maintain high uptime to boost rewards.
+- Ensure accurate contact data (emails, LinkedIn URLs)
+- Align prospects with requested industry/region
+- Maintain high uptime to boost rewards
 
 ## For Validators
 
@@ -109,52 +120,57 @@ Miners are rewarded based on prospect quality and reliability:
 ```bash
 btcli stake --amount 20 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
 ```
-- **Register**: Registers on the subnet (netuid 343):
+- **Register**: Register on the subnet (netuid 401):
 ```bash
-btcli subnet register --netuid 343 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
+btcli subnet register --netuid 401 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
+```
+- **Add Validator Permissions**: Add validator permissions to your wallet:
+```bash
+btcli subnet add --netuid 401 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
 ```
 
 ### Running a Validator
 Run your validator to audit prospects:
 ```bash
-python neurons/validator.py --netuid 343 --subtensor.network test --wallet.name validator --wallet.hotkey default --logging.debug
+python neurons/validator.py \
+    --wallet_name validator \
+    --wallet_hotkey default \
+    --netuid 401 \
+    --subtensor_network test
 ```
 
-- Add `--use_open_source_validator_model` to use os_validator_model.py.
-- Add `--mock` for local testing.
-- Add `--logging_trace` for detailed logs.
-
 **Behavior**:
-- Queries miners for prospect batches (100 prospects by default).
-- Validates ~20% of each batch within 2 minutes using os_validator_model.py.
-- Runs automated checks with automated_checks.py.
-- Assigns scores (0–100%) and updates miner weights.
+- Queries miners for prospect batches (100 prospects by default)
+- Validates ~20% of each batch within 2 minutes using `os_validator_model.py`
+- Runs automated checks with `automated_checks.py`
+- Assigns scores (0–100%) and updates miner weights
+- Processes sourced leads continuously and adds them to the prospect pool
 
 ### Validation Process
 **Audit**:
 - Checks:
-  - Format: Email regex (^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$), no duplicates.
-  - Accuracy: No disposable domains, basic domain/website reachability.
-  - Relevance: Matches industry/region filters.
-- Outcome: Approves if ≥90% of sampled prospects are valid; rejects otherwise.
+  - Format: Email regex (`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`), no duplicates
+  - Accuracy: No disposable domains, basic domain/website reachability
+  - Relevance: Matches industry/region filters
+- Outcome: Approves if ≥90% of sampled prospects are valid; rejects otherwise
 
 **Automated Checks**:
-- Post-validation using automated_checks.py.
-- Verifies email existence (Hunter.io in non-mock mode) and company website accessibility.
-- Approves if ≥90% pass; otherwise, validator reputation decreases (-20 points).
+- Post-validation using `automated_checks.py`
+- Verifies email existence (Hunter.io) and company website accessibility
+- Approves if ≥90% pass; otherwise, validator reputation decreases (-20 points)
 
 ### Validator Incentives
 Validators are rewarded based on accuracy and consistency.
 
 **Best Practices**:
-- Maintain high scoring precision to avoid reputation penalties.
-- Ensure consistency with the final score.
-- Monitor logs for validation failures.
-  
+- Maintain high scoring precision to avoid reputation penalties
+- Ensure consistency with the final score
+- Monitor logs for validation failures
+
 ## For Buyers
 
 ### Participation Requirements
-- **Stake**: Minimum 50 TAO.
+- **Stake**: Minimum 50 TAO
 ```bash
 btcli stake --amount 50 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
 ```
@@ -162,36 +178,36 @@ btcli stake --amount 50 --subtensor.network test --wallet.name <your_wallet> --w
 ### Accessing Prospects
 Buyers request prospects via the CLI API, receiving validated batches:
 ```bash
-python leadpoet-api --netuid 343  --subtensor.network test --wallet.name buyer --wallet.hotkey default --logging.debug
+python Leadpoet/api/leadpoet_api.py \
+    --wallet_name owner \
+    --wallet_hotkey default \
+    --netuid 401 \
+    --subtensor_network test
 ```
 
-- Add `--mock` for local testing.
-- Add `--logging_trace` for detailed logs.
-
 **Interactive CLI**:
-1. Input number of prospects (1–100).
-2. Select industry (Tech & AI, Finance & Fintech, Health & Wellness, Media & Education, Energy & Industry) or skip.
-3. Specify region (e.g., US) or skip.
-4. Receive prospects with Owner(s) Email, LinkedIn, etc.
+1. Input number of prospects (1–100)
+2. Describe your business & ideal customer
+3. Receive prospects with owner_email, linkedin, etc.
 
 **Example Output**:
 ```json
 [
     {
-        "Business": "Octiv",
-        "Owner Full name": "Jeff Romero",
-        "First": "Jeff",
-        "Last": "Romero",
-        "Owner(s) Email": "jeff@octivdigital.com",
-        "LinkedIn": "https://www.linkedin.com/in/jeffromero/",
-        "Website": "https://www.octivdigital.com/",
-        "Industry": "Tech & AI",
-        "Region": "US"
+        "business": "A Dozen Cousins",
+        "owner_full_name": "Ibraheem Basir",
+        "first": "Ibraheem",
+        "last": "Basir",
+        "owner_email": "ib@adozencousins.com",
+        "linkedin": "https://www.linkedin.com/in/ibraheembasir/",
+        "website": "https://adozencousins.com/",
+        "industry": "Tech & AI",
+        "sub_industry": "",
+        "region": "US",
+        "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth"
     }
 ]
 ```
-
-Note: The HTTP API endpoint (POST /generate_leads) is planned for future updates. Currently, use the CLI.
 
 ## Automated Subnet Checks
 Post-validation checks ensure prospect quality:
@@ -199,66 +215,69 @@ Post-validation checks ensure prospect quality:
 1. **Invalid Prospect Check**: Detects duplicates, invalid emails, or incorrect formats. If failed, batch score resets to 0, and validator reputation decreases (-20 points).
 
 2. **Collusion Check**: Analyzes buyer feedback and validator scoring patterns using PyGOD and DBScan.
-   - Collusion Score (V_c) ≥ 0.7 flags validators.
+   - Collusion Score (V_c) ≥ 0.7 flags validators
    - Penalty: If V_c ≥ 0.7, F_v is set to 0 for 90 days, disabling emissions. Affected buyers are also temporarily restricted from submitting queries.
 
 ## Technical Details
 
 ### Architecture
-- **Miners**: neurons/miner.py uses get_leads.py to generate prospects.
-- **Validators**: neurons/validator.py uses os_validator_model.py and automated_checks.py for scoring.
-- **Buyers**: Leadpoet/api/leadpoet_api.py queries miners and filters validated prospects.
-- **Mock Mode**: Uses Leadpoet/mock.py (MockDendrite, MockSubtensor) for local testing.
+- **Miners**: `neurons/miner.py` uses `get_leads.py` and `firecrawl_sourcing.py` to generate prospects
+- **Validators**: `neurons/validator.py` uses `os_validator_model.py` and `automated_checks.py` for scoring
+- **Buyers**: `Leadpoet/api/leadpoet_api.py` queries miners and filters validated prospects
 
 ### Prospect Workflow
-1. Buyer requests prospects (1–100, optional industry/region) via leadpoet-api.
-2. Miners generate prospects using get_leads.py.
-3. Validators score prospects using os_validator_model.py (≥90% to pass).
-4. Approved prospects undergo automated_checks.py (≥90% to pass).
-5. Prospects are added to a pool (Leadpoet/base/utils/pool.py) and filtered for delivery.
-6. Up to three retry attempts if validation or checks fail.
+1. Buyer requests prospects (1–100, business description) via `leadpoet_api.py`
+2. Miners generate prospects using `get_leads.py` and `firecrawl_sourcing.py`
+3. Validators score prospects using `os_validator_model.py` (≥90% to pass)
+4. Approved prospects undergo `automated_checks.py` (≥90% to pass)
+5. Prospects are added to a pool (`Leadpoet/base/utils/pool.py`) and filtered for delivery
+6. Up to three retry attempts if validation or checks fail
 
 ### API Endpoints
-- **POST /generate_leads**: Request prospects with num_leads (1-100), optional industry and region.
+- **CLI Interface**: Interactive command-line interface for requesting prospects
 
 ### Open-Source Frameworks
-- **Prospect Generation**: miner_models/get_leads.py uses Hunter.io/Clearbit (non-mock mode).
-- **Validation**: validator_models/os_validator_model.py checks email format, domain/website reachability.
-- **Automated Checks**: validator_models/automated_checks.py verifies email existence and company websites.
+- **Prospect Generation**: `miner_models/get_leads.py` uses Hunter.io APIs
+- **Web Scraping**: `miner_models/firecrawl_sourcing.py` uses Firecrawl API for contact extraction
+- **LLM Classification**: Uses OpenRouter API for industry classification
+- **Validation**: `validator_models/os_validator_model.py` checks email format, domain/website reachability
+- **Automated Checks**: `validator_models/automated_checks.py` verifies email existence and company websites
 
-### Running in Mock Mode
-Test locally without a network connection:
+## API Key Setup
 
-**Miner**:
+### Required API Keys
+
+**For Miners**:
+- **Firecrawl API Key**: Required for web scraping and contact extraction
+  - Get from: https://firecrawl.dev/
+  - Set: `export FIRECRAWL_API_KEY=your_key`
+
+- **OpenRouter API Key**: Required for LLM-based industry classification
+  - Get from: https://openrouter.ai/
+  - Set: `export OPENROUTER_API_KEY=your_key`
+
+**For Validators**:
+- **Hunter.io API Key**: Required for email verification
+  - Get from: https://hunter.io/
+  - Set: `export HUNTER_API_KEY=your_key`
+
+- **Mailgun API Key**: Required for email validation
+  - Get from: https://mailgun.com/
+  - Set: `export MAILGUN_API_KEY=your_key`
+  - Set: `export MAILGUN_DOMAIN=your_domain`
+
+### Setting Up API Keys
 ```bash
-python neurons/miner.py --netuid 343 --subtensor.network test --wallet.name miner --wallet.hotkey default --logging.debug
+# Add to your ~/.bashrc or ~/.zshrc for persistence
+export FIRECRAWL_API_KEY=your_firecrawl_api_key
+export OPENROUTER_API_KEY=your_openrouter_api_key
+export HUNTER_API_KEY=your_hunter_api_key
+export MAILGUN_API_KEY=your_mailgun_api_key
+export MAILGUN_DOMAIN=your_mailgun_domain
+
+# Reload shell configuration
+source ~/.bashrc  # or source ~/.zshrc
 ```
-
-**Validator**:
-```bash
-python neurons/validator.py --netuid 343 --subtensor.network test --wallet.name validator --wallet.hotkey default --logging.debug
-```
-
-**API**:
-```bash
-python leadpoet-api --netuid 343  --subtensor.network test --wallet.name buyer --wallet.hotkey default --logging.debug
-```
-
-Note: Mock mode uses dummy data and does not currently enforce active miner/validator processes.
-
-## Roadmap
-
-1. **MVP (Current)**:
-   - Live on testnet.
-   - Core prospect generation, validation, and CLI API functinality.
-
-2. **Next**:
-   - Mainnet launch.
-   - Early access for CRM and prospect generation at leadpoet.com.
-
-3. **Future**:
-   - Enforce compliance auditing.
-   - Full launch at leadpoet.com, including pricing tiers.
 
 ## Support
 - Email: [hello@leadpoet.com](mailto:hello@leadpoet.com)

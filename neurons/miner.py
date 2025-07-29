@@ -28,6 +28,7 @@ from miner_models.intent_model import (
 )
 from Leadpoet.api.leadpoet_api import get_query_api_axons
 from collections import OrderedDict
+from Leadpoet.utils.cloud_db import get_cloud_leads
 
 
 class Miner(BaseMinerNeuron):
@@ -190,7 +191,8 @@ class Miner(BaseMinerNeuron):
             pool_slice = get_leads_from_pool(
                 1000,                           # big number = “all we have”
                 industry=target_ind,
-                region=region
+                region=region,
+                wallet=self.wallet               # <-- passes hotkey for auth
             )
 
             # 3️⃣ role-filter first, then random-sample down

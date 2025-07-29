@@ -10,6 +10,129 @@ from miner_models.get_leads import VALID_INDUSTRIES
 import logging as _py_logging
 import aiohttp
 import socket
+import requests
+import base64
+import json
+import time
+import os
+
+# Cloud API configuration
+CLOUD_API_URL = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
+SUBNET_UID = 401  # Your subnet ID
+
+class CloudDatabase:
+    """Centralized database operations for LeadPoet subnet"""
+    
+    def __init__(self, wallet: bt.wallet = None):
+        self.wallet = wallet
+        self.api_url = CLOUD_API_URL
+        
+    def _verify_miner_registration(self, hotkey: str) -> bool:
+        """Verify if a hotkey is registered as a miner on the subnet"""
+        try:
+            subtensor = bt.subtensor(network="test")
+            metagraph = subtensor.metagraph(netuid=SUBNET_UID)
+            
+            # Check if hotkey exists in metagraph
+            if hotkey in metagraph.hotkeys:
+                uid = metagraph.hotkeys.index(hotkey)
+                # For miners, we just check they're registered (not validator permit)
+                return uid < metagraph.n
+            return False
+        except Exception as e:
+            bt.logging.error(f"Error verifying miner registration: {e}")
+            return False
+    
+    def _verify_validator_registration(self, hotkey: str) -> bool:
+        """Verify if a hotkey is registered as a validator on the subnet"""
+        try:
+            subtensor = bt.subtensor(network="test")
+            metagraph = subtensor.metagraph(netuid=SUBNET_UID)
+            
+            if hotkey in metagraph.hotkeys:
+                uid = metagraph.hotkeys.index(hotkey)
+                # Check if they have validator permit
+                return metagraph.validator_permit[uid].item()
+            return False
+        except Exception as e:
+            bt.logging.error(f"Error verifying validator registration: {e}")
+            return False
+    
+    def read_leads(self, limit: int = 100) -> List[Dict]:
+        """Read leads from cloud database (for miners)"""
+        if not self.wallet:
+            raise ValueError("Wallet required for authenticated reads")
+            
+        # Verify miner registration
+        if not self._verify_miner_registration(self.wallet.hotkey.ss58_address):
+            raise ValueError("Wallet not registered as miner on subnet")
+        
+        try:
+            response = requests.get(
+                f"{self.api_url}/leads",
+                params={"limit": limit},
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            bt.logging.error(f"Failed to read leads from cloud: {e}")
+            return []
+    
+    def write_leads(self, leads: List[Dict]) -> bool:
+        """Write validated leads to cloud database (for validators only)"""
+        if not self.wallet:
+            raise ValueError("Wallet required for authenticated writes")
+            
+        # Verify validator registration
+        if not self._verify_validator_registration(self.wallet.hotkey.ss58_address):
+            raise ValueError("Wallet not registered as validator on subnet")
+        
+        if not leads:
+            return True
+            
+        try:
+            # Create signed payload
+            timestamp = str(int(time.time()) // 300)  # 5-min window
+            payload = (timestamp + json.dumps(leads, sort_keys=True)).encode()
+            signature = base64.b64encode(self.wallet.sign(payload)).decode()
+            
+            # Prepare request
+            body = {
+                "wallet": self.wallet.hotkey.ss58_address,
+                "signature": signature,
+                "leads": leads
+            }
+            
+            # Send to cloud API
+            response = requests.post(
+                f"{self.api_url}/leads",
+                json=body,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            bt.logging.info(f"Successfully wrote {result.get('stored', 0)} leads to cloud database")
+            return True
+            
+        except requests.exceptions.RequestException as e:
+            bt.logging.error(f"Failed to write leads to cloud: {e}")
+            return False
+        except Exception as e:
+            bt.logging.error(f"Error in write_leads: {e}")
+            return False
+
+# Convenience functions for easy integration
+def get_cloud_leads(wallet: bt.wallet, limit: int = 100) -> List[Dict]:
+    """Get leads from cloud database"""
+    db = CloudDatabase(wallet)
+    return db.read_leads(limit)
+
+def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
+    """Save leads to cloud database"""
+    db = CloudDatabase(wallet)
+    return db.write_leads(leads)
 
 class LeadPoetAPI:
     def __init__(

@@ -22,6 +22,7 @@ import asyncio
 from typing import List, Dict
 from aiohttp import web
 import socket
+from Leadpoet.utils.cloud_db import save_leads_to_cloud 
 
 # ─────────── LLM re-scoring helpers ────────────────────────────────
 AVAILABLE_MODELS = [
@@ -739,38 +740,28 @@ class Validator(BaseValidatorNeuron):
             time.sleep(1)  # Brief sleep on error
 
     def move_to_validated_leads(self, lead, score):
-        """Move validated lead to leads.json"""
+        """Move validated lead to cloud database"""
         try:
-            leads_file = "data/leads.json"
-            leads = []
+            # Add validation metadata
+            lead['validation_score'] = score
+            lead['validator_hotkey'] = self.wallet.hotkey.ss58_address
+            lead['validated_at'] = time.time()
             
-            if os.path.exists(leads_file):
-                with open(leads_file, 'r') as f:
-                    leads = json.load(f)
+            # Save to cloud database
+            success = save_leads_to_cloud(self.wallet, [lead])
             
-            # Keep only the original lead structure (no extra fields)
-            clean_lead = {
-                'business': lead.get('business', ''),
-                'owner_full_name': lead.get('owner_full_name', ''),
-                'first': lead.get('first', ''),
-                'last': lead.get('last', ''),
-                'owner_email': lead.get('owner_email', ''),
-                'linkedin': lead.get('linkedin', ''),
-                'website': lead.get('website', ''),
-                'industry': lead.get('industry', ''),
-                'sub_industry': lead.get('sub_industry', ''),
-                'region': lead.get('region', ''),
-                'source': lead.get('source', '')
-            }
-            
-            leads.append(clean_lead)
-            
-            # Save back to file
-            with open(leads_file, 'w') as f:
-                json.dump(leads, f, indent=2)
+            if success:
+                bt.logging.info(f"Lead validated and saved to cloud database: {lead.get('email', 'unknown')}")
+                
+                # Also save locally as backup
+                self._save_to_local_backup(lead)
+            else:
+                bt.logging.error(f"Failed to save lead to cloud database: {lead.get('email', 'unknown')}")
                 
         except Exception as e:
-            bt.logging.error(f"Error moving to validated leads: {e}")
+            bt.logging.error(f"Error in move_to_validated_leads: {e}")
+            # Fallback to local save
+            self._save_to_local_backup(lead)
 
     def remove_from_prospect_queue(self, lead):
         """Remove lead from prospect queue after validation"""
@@ -810,51 +801,46 @@ class Validator(BaseValidatorNeuron):
         return domain in disposable_domains
 
     def check_domain_legitimacy(self, domain):
-        """Check domain legitimacy score"""
+        """Return True iff the domain looks syntactically valid (dot & no spaces)."""
         try:
-            # Simple domain scoring based on length and common patterns
-            if len(domain) < 5:
-                return 0.1
-            elif len(domain) > 20:
-                return 0.3
-            elif '.' not in domain:
-                return 0.0
-            else:
-                return 0.8  # Default good score for valid domains
-        except:
-            return 0.0
+            return "." in domain and " " not in domain
+        except Exception:
+            return False
 
     def validate_lead(self, lead):
-        """Validate a single lead using the same logic as forward method"""
+        """Validate a single lead (sourcing-side). No scoring – just pass / fail."""
         try:
-            # Basic validation checks
-            email = lead.get('owner_email', '')
+            email  = lead.get('owner_email', '')
             domain = lead.get('business', '')
-            
+
+            # 1️⃣  Required fields present
             if not email or not domain:
-                return {'is_legitimate': False, 'reason': 'Missing email or domain', 'score': 0.0}
-            
-            # Check for disposable email
+                return {'is_legitimate': False,
+                        'reason': 'Missing email or domain',
+                        'score': 0.0}
+
+            # 2️⃣  Disposable / throw-away e-mail check
             if self.is_disposable_email(email):
-                return {'is_legitimate': False, 'reason': 'Disposable email detected', 'score': 0.0}
-            
-            # Check domain legitimacy
-            domain_score = self.check_domain_legitimacy(domain)
-            
-            # Calculate overall score
-            score = domain_score * 0.7 + 0.3  # Base score of 0.3 + domain score
-            
-            is_legitimate = score > 0.5
-            
-            return {
-                'is_legitimate': is_legitimate,
-                'reason': 'Passed validation' if is_legitimate else 'Low domain score',
-                'score': score
-            }
-            
+                return {'is_legitimate': False,
+                        'reason': 'Disposable email detected',
+                        'score': 0.0}
+
+            # 3️⃣  Domain syntax validity
+            if not self.check_domain_legitimacy(domain):
+                return {'is_legitimate': False,
+                        'reason': 'Invalid domain',
+                        'score': 0.0}
+
+            # 4️⃣  Duplicate detection handled elsewhere; if we reach here we pass
+            return {'is_legitimate': True,
+                    'reason': 'Passed validation',
+                    'score': 1.0}
+
         except Exception as e:
             bt.logging.error(f"Error in validate_lead: {e}")
-            return {'is_legitimate': False, 'reason': f'Validation error: {e}', 'score': 0.0}
+            return {'is_legitimate': False,
+                    'reason': f'Validation error: {e}',
+                    'score': 0.0}
 
     def calculate_validation_score_breakdown(self, lead):
         """Calculate validation score with detailed breakdown"""

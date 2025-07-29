@@ -7,6 +7,7 @@ from Leadpoet.validator import reward as _reward
 import time
 import sys
 from Leadpoet.validator.reward import record_event as _rec
+from Leadpoet.utils.cloud_db import get_cloud_leads       # NEW
 
 DATA_DIR = "data"
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
@@ -56,39 +57,47 @@ def add_to_pool(prospects):
 
     # Note: Rewards are now recorded when leads are delivered to buyers, not when added to pool
 
-def get_leads_from_pool(num_leads, industry=None, region=None):
-    """Get leads from the pool, filtered by industry and region if specified."""
-    with _leads_lock:
-        if not os.path.exists(LEADS_FILE):
-            return []
-            
+def get_leads_from_pool(num_leads, industry=None, region=None, wallet=None):
+    """Return up-to-date leads from Firestore with local JSON as fallback."""
+    if wallet is not None:
         try:
-            with open(LEADS_FILE, "r") as f:
-                leads = json.load(f)
-                
-            # Filter leads by industry and region if specified
-            filtered_leads = leads
-            if industry:
-                filtered_leads = [l for l in filtered_leads if l.get("industry", "").lower() == industry.lower()]
-            if region:
-                filtered_leads = [l for l in filtered_leads if l.get("region", "").lower() == region.lower()]
-                
-            # Sort by conversion score (highest first) and ensure all required fields
-            # owner_full_name is nice-to-have but not mandatory
-            required_fields = ["owner_email", "website", "business"]
-            filtered_leads = [
-                l for l in filtered_leads
-                if all(l.get(field) for field in required_fields)
-            ]
-            # Random sample up to the requested size
-            import random, itertools
-            if len(filtered_leads) <= num_leads:
-                return filtered_leads
-            # sample WITHOUT replacement for fairness
-            return random.sample(filtered_leads, num_leads)
+            leads = get_cloud_leads(wallet, limit=max(1000, num_leads))
         except Exception as e:
-            bt.logging.error(f"Error reading leads from pool: {e}")
-            return []
+            bt.logging.error(f"Cloud read failed, falling back to JSON: {e}")
+            leads = []
+    else:
+        leads = []
+
+    # Fallback to local JSON if cloud empty / errored
+    if not leads:
+        with _leads_lock:
+            if not os.path.exists(LEADS_FILE):
+                return []
+
+            try:
+                with open(LEADS_FILE, "r") as f:
+                    leads = json.load(f)
+            except Exception as e:
+                bt.logging.error(f"Error reading local leads: {e}")
+                return []
+
+    # ---------------- filtering & sampling stays unchanged ----------------
+    filtered_leads = leads
+    if industry:
+        filtered_leads = [l for l in filtered_leads
+                          if l.get("industry", "").lower() == industry.lower()]
+    if region:
+        filtered_leads = [l for l in filtered_leads
+                          if l.get("region", "").lower() == region.lower()]
+
+    required_fields = ["owner_email", "website", "business"]
+    filtered_leads = [l for l in filtered_leads
+                      if all(l.get(f) for f in required_fields)]
+
+    import random
+    if len(filtered_leads) <= num_leads:
+        return filtered_leads
+    return random.sample(filtered_leads, num_leads)
 
 def save_curated_leads(curated_leads):
     """Save curated leads to curated_leads.json."""

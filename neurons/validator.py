@@ -22,7 +22,10 @@ import asyncio
 from typing import List, Dict
 from aiohttp import web
 import socket
-from Leadpoet.utils.cloud_db import save_leads_to_cloud 
+from Leadpoet.utils.cloud_db import (
+    save_leads_to_cloud,
+    fetch_prospects_from_cloud,          # NEW
+)
 
 # ─────────── LLM re-scoring helpers ────────────────────────────────
 AVAILABLE_MODELS = [
@@ -661,135 +664,59 @@ class Validator(BaseValidatorNeuron):
             print(f"❌ Error discovering miners: {e}")
 
     def process_sourced_leads_continuous(self):
-        """Process leads that have been sourced by miners"""
+        """
+        Continuously pull un-validated prospects from Firestore and process them.
+        """
         try:
-            # Check for new leads in the prospect queue (pending validation)
-            prospect_queue_file = "data/prospect_queue.json"
-            
-            if os.path.exists(prospect_queue_file):
-                with open(prospect_queue_file, 'r') as f:
-                    prospect_queue = json.load(f)
-                
-                # Process each entry in the prospect queue
-                unvalidated_leads = []
-                miner_hotkeys = set()
-                for entry in prospect_queue:
-                    if 'prospects' in entry:
-                        for prospect in entry['prospects']:
-                            if 'validation_score' not in prospect:
-                                unvalidated_leads.append(prospect)
-                                if 'miner_hotkey' in entry:
-                                    miner_hotkeys.add(entry['miner_hotkey'])
-                
-                if unvalidated_leads:
-                    miner_hotkey = list(miner_hotkeys)[0] if miner_hotkeys else "Unknown"
-                    print(f"\n🔄 Processing sourced batch of {len(unvalidated_leads)} prospects from miner {miner_hotkey[:10]}....")
-                    print(f"🔍 Validating {len(unvalidated_leads)} sourced leads...")
-                    print()
-                    
-                    # Validate each lead
-                    valid_count = 0
-                    for lead in unvalidated_leads:
-                        domain = lead.get('business', 'Unknown')
-                        email = lead.get('owner_email', 'Unknown')
-                        print(f"  Validating: {domain}")
-                        print(f"    Email: {email}")
-                        
-                        # Calculate validation score with detailed breakdown
-                        score_breakdown = self.calculate_validation_score_breakdown(lead)
-                        
-                        # Print score breakdown
-                        if score_breakdown['website_score'] > 0:
-                            print(f"    ✅ Website found: +{score_breakdown['website_score']:.1f}")
-                        if score_breakdown['industry_score'] > 0:
-                            print(f"    ✅ Industry found: +{score_breakdown['industry_score']:.1f}")
-                        if score_breakdown['region_score'] > 0:
-                            print(f"    ✅ Region found: +{score_breakdown['region_score']:.1f}")
-                        print()
-                        
-                        try:
-                            # Use the validation logic from the forward method
-                            validation_result = self.validate_lead(lead)
-                            
-                            if validation_result['is_legitimate']:
-                                # Move to validated leads
-                                self.move_to_validated_leads(lead, validation_result['score'])
-                                valid_count += 1
-                            else:
-                                print(f"    ❌ Lead rejected: {validation_result['reason']}")
-                            
-                            # Remove from prospect queue
-                            self.remove_from_prospect_queue(lead)
-                            
-                        except Exception as e:
-                            print(f"    ❌ Error validating lead: {e}")
-                    
-                    if valid_count > 0:
-                        print(f"✅ Added {valid_count} valid prospects to pool")
-                else:
-                    # Only sleep if no leads to process
-                    time.sleep(1)  # Brief sleep to prevent CPU spinning
-            else:
-                # Only sleep if file doesn't exist
-                time.sleep(1)  # Brief sleep to prevent CPU spinning
-                             
+            prospects_batch = fetch_prospects_from_cloud(self.wallet, limit=250)
+
+            if not prospects_batch:
+                time.sleep(1)
+                return
+
+            print(f"🛎️  Pulled {len(prospects_batch)} prospect batch(es) from cloud")
+
+            for entry in prospects_batch:
+                # new format = list-of-leads under 'prospects'
+                # fallback = entry IS the lead (old one-row format)
+                miner_hotkey = entry.get("miner_hotkey", "unknown")[:10]
+                prospects    = entry.get("prospects") or [entry]
+                print(f"\n🟣 Processing sourced batch of {len(prospects)} prospects "
+                      f"from miner {miner_hotkey}...")
+
+                for lead in prospects:
+                    try:
+                        print(f"\n  Validating: {lead.get('business', lead.get('website',''))}")
+                        print(f"    Email: {lead.get('owner_email','?')}")
+
+                        result = self.validate_lead(lead)
+                        if result["is_legitimate"]:
+                            self.move_to_validated_leads(lead, result["score"])
+                            print("    ✅ Passed basic checks")
+                        else:
+                            print(f"    ❌ Rejected: {result['reason']}")
+                    except Exception as e:
+                        print(f"    ❌ Error validating lead: {e}")
+
         except Exception as e:
-            print(f"❌ Error processing sourced leads: {e}")
-            import traceback
-            print(traceback.format_exc())
-            time.sleep(1)  # Brief sleep on error
+            bt.logging.error(f"process_sourced_leads_continuous failure: {e}")
+            time.sleep(1)
 
     def move_to_validated_leads(self, lead, score):
-        """Move validated lead to cloud database"""
-        try:
-            # Add validation metadata
-            lead['validation_score'] = score
-            lead['validator_hotkey'] = self.wallet.hotkey.ss58_address
-            lead['validated_at'] = time.time()
-            
-            # Save to cloud database
-            success = save_leads_to_cloud(self.wallet, [lead])
-            
-            if success:
-                bt.logging.info(f"Lead validated and saved to cloud database: {lead.get('email', 'unknown')}")
-                
-                # Also save locally as backup
-                self._save_to_local_backup(lead)
-            else:
-                bt.logging.error(f"Failed to save lead to cloud database: {lead.get('email', 'unknown')}")
-                
-        except Exception as e:
-            bt.logging.error(f"Error in move_to_validated_leads: {e}")
-            # Fallback to local save
-            self._save_to_local_backup(lead)
+        """Write validated lead to Firestore; no local fallback."""
+        lead["validation_score"] = score
+        lead["validator_hotkey"] = self.wallet.hotkey.ss58_address
+        lead["validated_at"]     = time.time()
 
-    def remove_from_prospect_queue(self, lead):
-        """Remove lead from prospect queue after validation"""
         try:
-            prospect_queue_file = "data/prospect_queue.json"
-            if os.path.exists(prospect_queue_file):
-                with open(prospect_queue_file, 'r') as f:
-                    prospect_queue = json.load(f)
-                
-                # Remove the lead from prospect queue
-                original_count = len(prospect_queue)
-                # Remove the specific prospect from the appropriate entry
-                for entry in prospect_queue:
-                    if 'prospects' in entry:
-                        entry['prospects'] = [p for p in entry['prospects'] if not (
-                            p.get('owner_email') == lead.get('owner_email') and 
-                            p.get('business') == lead.get('business')
-                        )]
-                
-                # Remove empty entries
-                prospect_queue = [entry for entry in prospect_queue if entry.get('prospects')]
-                
-                # Save back to file
-                with open(prospect_queue_file, 'w') as f:
-                    json.dump(prospect_queue, f, indent=2)
-                    
+            save_leads_to_cloud(self.wallet, [lead])
+            bt.logging.info(f"✅ Lead saved to Firestore: {lead.get('email','?')}")
         except Exception as e:
-            bt.logging.error(f"Error removing from prospect queue: {e}")
+            bt.logging.error(f"Cloud save failed: {e}")
+
+    # Local prospect queue no longer exists
+    def remove_from_prospect_queue(self, lead):
+        return
 
     def is_disposable_email(self, email):
         """Check if email is from a disposable email provider"""

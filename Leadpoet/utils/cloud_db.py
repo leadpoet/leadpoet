@@ -45,11 +45,15 @@ def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
         return True
 
     if not _VERIFY.is_validator(wallet.hotkey.ss58_address):
-        raise PermissionError("Hotkey not registered as validator on subnet")
+        bt.logging.warning(           # ← NEW: soft-fail instead of raise
+            f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered "
+            "validator – storing leads anyway (DEV mode)"
+        )
+        # continue – do NOT raise
 
-    ts       = str(int(time.time()) // 300)                 # 5-min window
-    payload  = (ts + json.dumps(leads, sort_keys=True)).encode()
-    sig_b64  = base64.b64encode(wallet.sign(payload)).decode()
+    ts      = str(int(time.time()) // 300)
+    payload = (ts + json.dumps(leads, sort_keys=True)).encode()
+    sig_b64 = base64.b64encode(wallet.hotkey.sign(payload)).decode()
 
     body = {
         "wallet":    wallet.hotkey.ss58_address,
@@ -59,3 +63,62 @@ def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
     r = requests.post(f"{API_URL}/leads", json=body, timeout=30)
     r.raise_for_status()
     return True
+
+# ───────────────────────────── Queued prospects ─────────────────────────────
+def push_prospects_to_cloud(wallet: bt.wallet, prospects: List[Dict]) -> bool:
+    """
+    Miners call this to enqueue prospects for validation.
+    """
+    if not prospects:
+        return True
+    if not _VERIFY.is_miner(wallet.hotkey.ss58_address):
+        raise PermissionError("Hotkey not registered as miner on subnet")
+
+    ts      = str(int(time.time()) // 300)
+    payload = (ts + json.dumps(prospects, sort_keys=True)).encode()
+    sig     = base64.b64encode(wallet.hotkey.sign(payload)).decode()
+
+    body = {"wallet": wallet.hotkey.ss58_address,
+            "signature": sig,
+            "prospects": prospects}
+    r = requests.post(f"{API_URL}/prospects", json=body, timeout=30)
+    r.raise_for_status()
+    bt.logging.info(f"✅ Pushed {len(prospects)} prospects to cloud queue")
+    print(f"✅ Cloud-queue ACK: {len(prospects)} prospect(s)")
+    return True
+
+
+def fetch_prospects_from_cloud(wallet: bt.wallet, limit: int = 100) -> List[Dict]:
+    """
+    Validators call this to atomically fetch + delete a batch of prospects.
+    Returns an empty list when nothing is available or the endpoint is missing.
+    """
+    if not _VERIFY.is_validator(wallet.hotkey.ss58_address):
+        bt.logging.warning(
+            f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered "
+            "validator – pulling prospects anyway (DEV mode)"
+        )
+
+    ts      = str(int(time.time()) // 300)
+    payload = (ts + str(limit)).encode()
+    sig     = base64.b64encode(wallet.hotkey.sign(payload)).decode()
+
+    body = {
+        "wallet":    wallet.hotkey.ss58_address,
+        "signature": sig,
+        "limit":     limit,
+    }
+
+    try:
+        r = requests.post(f"{API_URL}/prospects/fetch", json=body, timeout=30)
+        if r.status_code == 404:                     # ← graceful fallback
+            bt.logging.error(
+                "Cloud API route /prospects/fetch not found -- did you "
+                "deploy the latest server?  Returning empty prospect list."
+            )
+            return []
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        bt.logging.error(f"fetch_prospects_from_cloud: {e}")
+        return []

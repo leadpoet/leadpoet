@@ -29,6 +29,8 @@ from miner_models.intent_model import (
 from Leadpoet.api.leadpoet_api import get_query_api_axons
 from collections import OrderedDict
 from Leadpoet.utils.cloud_db import get_cloud_leads
+from Leadpoet.utils.cloud_db import push_prospects_to_cloud         # NEW
+from Leadpoet.utils.cloud_db import fetch_prospects_from_cloud     # NEW
 
 
 class Miner(BaseMinerNeuron):
@@ -66,7 +68,8 @@ class Miner(BaseMinerNeuron):
                     pool_slice = get_leads_from_pool(
                         1000,                           # big number = “all we have”
                         industry=target_ind,
-                        region=synapse.region
+                        region=synapse.region,
+                        wallet=self.wallet            # ensures cloud read
                     )
 
                     # 3️⃣ role-filter first, then random-sample down
@@ -278,12 +281,8 @@ class Miner(BaseMinerNeuron):
             print("▶️  Resuming sourcing mode...")
 
             bt.logging.info(f"Returning {len(top_leads)} leads to HTTP request")
-            lead_queue.enqueue_prospects(
-                top_leads,
-                self.wallet.hotkey.ss58_address,
-                request_type="curated",
-                requested=num_leads
-            )
+            # 🔄 send prospects to Firestore queue
+            push_prospects_to_cloud(self.wallet, top_leads)
             return web.json_response({
                 "leads": top_leads,
                 "status_code": 200,
@@ -452,17 +451,13 @@ async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
                         email = lead.get('owner_email', 'No email')
                         print(f"  {i}. {business} - {owner} ({email})")
                     
-                    # Add to queue for validation (NOT directly to pool)
-                    lead_queue.enqueue_prospects(
-                        sanitized,
-                        miner_hotkey,
-                        request_type="sourced"
-                    )
-                    
-                    # Log sourcing activity
-                    log_sourcing(miner_hotkey, len(sanitized))
-                    
-                    print(f"📤 Queued {len(sanitized)} leads for validation at {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+                    # Push to Firestore prospects queue
+                    try:
+                        push_prospects_to_cloud(miner.wallet, sanitized)
+                        print(f"✅ Pushed {len(sanitized)} prospects to cloud queue "
+                              f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+                    except Exception as e:
+                        print(f"❌ Cloud push failed: {e}")
                     
                 else:
                     print("⏸️  Sourcing paused (in curation mode)")
@@ -519,7 +514,7 @@ def main():
         print("❌ Miner is not registered on the network!")
         print("   Please register your wallet on subnet 401 first.")
         return
-    
+
     print(f"✅ Miner registered with UID: {miner.uid}")
     
     # Start the Bittensor miner in background thread (this will start the axon and connect to testnet)

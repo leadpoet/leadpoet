@@ -220,7 +220,7 @@ def ensure_domains_file(path: str):
 def parse_args(argv: list | None = None):
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Firecrawl Lead Sourcing Pipeline")
-    parser.add_argument("--domains", default="data/domains.csv", help="Path to domains CSV file")
+    parser.add_argument("--domains", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "domains.csv"), help="Path to domains CSV file")
     parser.add_argument("--max-pages-per-domain", type=int, default=50, help="Maximum pages to crawl per domain")
     parser.add_argument("--batch-size", type=int, default=10, help="Batch size for enrichment")
     parser.add_argument("--flush-sec", type=int, default=60, help="Flush timeout in seconds")
@@ -1680,22 +1680,88 @@ FALLBACK_MODEL = "mistralai/mistral-7b-instruct"
 # keep legacy name so the rest of the file still works
 MODEL_NAME     = PRIMARY_MODEL
 
-def _classify_industry(meta_txt: str) -> tuple[str, str]:
-    # ---- single source of truth → LLM ----
-    print("\n🛈  LLM-CLASSIFY  INPUT ↓")
-    print(meta_txt[:800])                         #  debug
+# ───────────────────── New taxonomy utils ─────────────────────────────
+ALLOWED_INDUSTRIES = [
+    "Marketing", "Technology", "Finance", "Healthcare", "Manufacturing",
+    "Retail", "Education", "Real Estate", "Energy & Utilities",
+    "Transportation & Logistics", "Media & Entertainment",
+]
 
+_LEGACY_TO_NEW = {
+    "Tech & AI": "Technology",
+    "Finance & Fintech": "Finance",
+    "Health & Wellness": "Healthcare",
+    "Media & Education": "Media & Entertainment",
+    "Energy & Industry": "Energy & Utilities",
+}
+
+def _normalize_industry(ind: str) -> str:
+    """Map any label → one of the 11 canonical buckets."""
+    if not ind:
+        return "Unknown"
+    low = ind.lower().strip()
+
+    for canon in ALLOWED_INDUSTRIES:
+        if canon.lower() == low:
+            return canon
+
+    for old, new in _LEGACY_TO_NEW.items():
+        if old.lower() == low:
+            return new
+
+    # heuristic fallback
+    if any(k in low for k in ("tech", "software", "saas", "ai")):                           return "Technology"
+    if any(k in low for k in ("finance", "fintech", "bank", "crypto", "payment")):         return "Finance"
+    if any(k in low for k in ("health", "med", "clinic", "hospital", "pharma")):           return "Healthcare"
+    if any(k in low for k in ("manufactur", "factory", "industrial")):                     return "Manufacturing"
+    if any(k in low for k in ("retail", "e-commerce", "store", "shop")):                   return "Retail"
+    if any(k in low for k in ("education", "edtech", "school", "learning")):               return "Education"
+    if any(k in low for k in ("real estate", "proptech", "property")):                     return "Real Estate"
+    if any(k in low for k in ("energy", "utility", "solar", "oil", "gas", "power")):       return "Energy & Utilities"
+    if any(k in low for k in ("transport", "logistics", "shipping", "delivery")):          return "Transportation & Logistics"
+    if any(k in low for k in ("media", "entertainment", "music", "video", "film", "game")): return "Media & Entertainment"
+    if any(k in low for k in ("marketing", "advertising", "seo", "campaign")):             return "Marketing"
+    return "Technology"  # safe default
+
+# ----------------- updated keyword heuristic -------------------------
+INDUSTRY_KEYWORDS = {
+    "marketing":        "Marketing",
+    "advertising":      "Marketing",
+    "seo":              "Marketing",
+    "saas":             "Technology",
+    "software":         "Technology",
+    "ai":               "Technology",
+    "machine learning": "Technology",
+    "blockchain":       "Finance",
+    "crypto":           "Finance",
+    "bank":             "Finance",
+    "clinic":           "Healthcare",
+    "hospital":         "Healthcare",
+    "pharma":           "Healthcare",
+    "fitness":          "Healthcare",
+    "solar":            "Energy & Utilities",
+    "oil":              "Energy & Utilities",
+    "gas":              "Energy & Utilities",
+    "manufacturing":    "Manufacturing",
+    "retail":           "Retail",
+    "e-commerce":       "Retail",
+}
+
+def _classify_industry(meta_txt: str) -> tuple[str, str]:
+    print("\n🛈  LLM-CLASSIFY  INPUT ↓")
+    print(meta_txt[:800])
     result = _llm_classify(meta_txt)
     if result:
         industry, sub, model_used = result
+        industry = _normalize_industry(industry)
         print("🛈  LLM-CLASSIFY  OUTPUT ↓")
-        print({"industry": industry, "sub_industry": sub})   #  debug
+        print({"industry": industry, "sub_industry": sub})
         print(f"✅ LLM-CLASSIFY succeeded (model: {model_used})")
         return industry, sub
 
-    # fallback (should be rare – only if API/key fails)
-    print(f"⚠️  LLM-CLASSIFY failed – falling back to keyword heuristic")
-    return "Media & Education", "General Media"
+    print("⚠️  LLM-CLASSIFY failed – falling back to keyword heuristic")
+    fallback_ind = _normalize_industry(_infer_industry(meta_txt))
+    return fallback_ind, "General"
 
 # ──────────────────────── CORE CRAWLER ──────────────────────────────
 async def _crawl_domain(session, domain: str) -> list[dict]:
@@ -1751,9 +1817,9 @@ def _llm_classify(text: str) -> tuple[str, str, str] | None:
     prompt_system = (
         "You are an industry classifier. "
         "Given short snippets (domain, page title / description, contact URL) "
-        "return JSON ONLY: {\"industry\":\"<one of: Tech & AI | Finance & Fintech | "
-        "Health & Wellness | Media & Education | Energy & Industry>\","
-        " \"sub_industry\":\"<your best guess sub-industry>\"}"
+        "return JSON ONLY: {\"industry\":\"<one of: "
+        + " | ".join(ALLOWED_INDUSTRIES)
+        + ">\", \"sub_industry\":\"<your best guess sub-industry>\"}"
     )
     prompt_user = textwrap.shorten(text, width=400, placeholder=" …")
 
@@ -1795,3 +1861,5 @@ def _llm_classify(text: str) -> tuple[str, str, str] | None:
 
 if __name__ == "__main__":
     asyncio.run(miner()) 
+
+    from Leadpoet.base.utils import safe_json_load   # at top

@@ -1,6 +1,6 @@
 # LeadPoet | Premium Sales Leads Powered by Bittensor
 
-Welcome to LeadPoet, a decentralized prospect generation subnet built on Bittensor, with an initial focus on SMB sales agencies seeking high-quality, conversion-ready sales leads.
+Welcome to LeadPoet, a decentralized prospect generation subnet built on Bittensor.
 
 ## Overview
 
@@ -72,6 +72,22 @@ This installs dependencies listed in `setup.py`, including bittensor, requests, 
 ```bash
 btcli subnet register --netuid 401 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
 ```
+
+### One-time: publish your miner’s public address
+Forward a TCP port on your router / VPS (e.g. `18091`) **once**, then run:
+
+```bash
+python scripts/post_ip.py \
+    --netuid 401 \
+    --subtensor_network test \
+    --wallet_name <your_wallet> \
+    --wallet_hotkey <your_hotkey> \
+    --external_ip <your_public_ip> \
+    --external_port <forwarded_port>
+```
+
+This writes the `(ip,port)` to the subnet metagraph so validators can reach
+your axon. Re-run it only if your IP or port changes.
 
 ### Running a Miner
 Run your miner to generate prospects:
@@ -217,9 +233,7 @@ Post-validation checks ensure prospect quality:
 
 1. **Invalid Prospect Check**: Detects duplicates, invalid emails, or incorrect formats. If failed, batch score resets to 0, and validator reputation decreases (-20 points).
 
-2. **Collusion Check**: Analyzes buyer feedback and validator scoring patterns using PyGOD and DBScan.
-   - Collusion Score (V_c) ≥ 0.7 flags validators
-   - Penalty: If V_c ≥ 0.7, F_v is set to 0 for 90 days, disabling emissions. Affected buyers are also temporarily restricted from submitting queries.
+
 
 ## Technical Details
 

@@ -24,8 +24,14 @@ from aiohttp import web
 import socket
 from Leadpoet.utils.cloud_db import (
     save_leads_to_cloud,
-    fetch_prospects_from_cloud,          # NEW
+    fetch_prospects_from_cloud,
+    fetch_curation_requests,
+    push_curation_result,
+    push_miner_curation_request,     # ← NEW
+    fetch_miner_curation_result,     # ← NEW
 )
+import uuid
+import grpc
 
 # ─────────── LLM re-scoring helpers ────────────────────────────────
 AVAILABLE_MODELS = [
@@ -134,6 +140,34 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
 
     # Last-ditch heuristic
     return _heuristic()
+
+import os, grpc, asyncio
+os.environ.setdefault("GRPC_VERBOSITY", "DEBUG")
+os.environ.setdefault("GRPC_TRACE", "handshaker,tsi,security,api,transport,http,call_error")
+
+async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
+    try:
+        ch = grpc.aio.insecure_channel(addr)
+        await asyncio.wait_for(ch.channel_ready(), timeout=timeout)
+        await ch.close()
+        print(f"✅ gRPC preflight OK → {addr}")
+        return True
+    except Exception as e:
+        print(f"⚠️ aio preflight failed for {addr}: {e}")
+    # Fallback to sync probe, run in a thread so it doesn't require a Task
+    def _sync_probe() -> bool:
+        ch = grpc.insecure_channel(addr)
+        grpc.channel_ready_future(ch).result(timeout=timeout)
+        ch.close()
+        return True
+    try:
+        ok = await asyncio.get_running_loop().run_in_executor(None, _sync_probe)
+        if ok:
+            print(f"✅ gRPC preflight OK (sync) → {addr}")
+            return True
+    except Exception as e:
+        print(f"❌ gRPC preflight FAIL → {addr} | {e}")
+    return False
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
@@ -322,8 +356,161 @@ class Validator(BaseValidatorNeuron):
         self.appeal_status = None
         self.update_reputation()
 
-    async def forward(self):
-        await forward(self, post_process=self._post_process_with_checks, num_leads=10)
+# ------------------------------------------------------------------+
+#  Buyer → validator  (runs once per API call, not in a loop)       +
+# ------------------------------------------------------------------+
+    async def forward(self, synapse: LeadRequest) -> LeadRequest:
+        """
+        Respond to a buyer's LeadRequest arriving over Bittensor.
+        Delegates to miners for curation, then ranks the results.
+        """
+        print(f"\n🟡 RECEIVED QUERY from buyer: {synapse.num_leads} leads | "
+              f"desc='{synapse.business_desc[:40]}…'")
+
+        import time, numpy as np
+        from datetime import datetime
+
+        # Always refresh metagraph just before selecting miners so we don't use stale flags.
+        try:
+            self.metagraph.sync(subtensor=self.subtensor)
+            print("🔄 Metagraph refreshed for miner selection.")
+        except Exception as e:
+            print(f"⚠️  Metagraph refresh failed (continuing with cached state): {e}")
+
+        # 1️⃣ build the FULL list of miner axons (exclude validators)
+        # IMPORTANT: Follow user's semantics:
+        # - ACTIVE == True → validator (exclude)
+        # - ACTIVE == False → miner (include)
+        # Also require is_serving == True.
+        active_flags = getattr(self.metagraph, "active", [False] * self.metagraph.n)
+        vperm_flags  = getattr(self.metagraph, "validator_permit", [False] * self.metagraph.n)
+        print("DBG flags:", {
+            "n": self.metagraph.n,
+            "serving": [bool(self.metagraph.axons[u].is_serving) for u in range(self.metagraph.n)],
+            "active":  [bool(active_flags[u]) for u in range(self.metagraph.n)],
+            "vperm":   [bool(vperm_flags[u]) for u in range(self.metagraph.n)],
+        })
+        my_uid = getattr(self, "uid", None)
+        miner_uids = [
+            uid for uid in range(self.metagraph.n)
+            if getattr(self.metagraph.axons[uid], "is_serving", False)
+            and uid != my_uid   # exclude the validator itself
+        ]
+        axons = [self.metagraph.axons[uid] for uid in miner_uids]
+
+        print(f"🔍 Found {len(miner_uids)} active miners: {miner_uids}")
+        print(f"🔍 Axon status: {[self.metagraph.axons[uid].is_serving for uid in miner_uids]}")
+        if miner_uids:
+            endpoints = [f"{self.metagraph.axons[uid].ip}:{self.metagraph.axons[uid].port}" for uid in miner_uids]
+            print(f"🔍 Miner endpoints: {endpoints}")
+            # Hairpin NAT bypass: if miner ip == my public ip, use localhost
+            my_pub_ip = None
+            try:
+                if my_uid is not None:
+                    my_pub_ip = getattr(self.metagraph.axons[my_uid], "ip", None)
+            except Exception:
+                pass
+
+            for uid in miner_uids:
+                ax = self.metagraph.axons[uid]
+                if ax.ip == my_pub_ip:
+                    print(f"🔧 Hairpin bypass for UID {uid}: {ax.ip} → 127.0.0.1")
+                    ax.ip = "127.0.0.1"
+
+            # TCP + robust gRPC preflight
+            grpc_ready = {}
+            for uid, ep in zip(miner_uids, endpoints):
+                host, p = ep.split(":")
+                try:
+                    with socket.create_connection((host, int(p)), timeout=3):
+                        print(f"✅ TCP preflight OK → {host}:{p} (UID {uid})")
+                except Exception as e:
+                    print(f"❌ TCP preflight FAIL → {host}:{p} (UID {uid}) :: {e}")
+                grpc_ready[uid] = await _grpc_ready_check(ep, timeout=5.0)
+
+        # Always start with an empty list so we never hit UnboundLocalError
+        all_miner_leads: list = []
+
+        # When dialing dendrite, wrap in a Task (prevents “Timeout context manager should be used inside a task”)
+        print("\n─────────  VALIDATOR ➜ DENDRITE  ─────────")
+        print(f"📡  Dialing {len(axons)} miners: {[f'UID{u}' for u in miner_uids]}")
+        print(f"⏱️   at {datetime.utcnow().isoformat()} UTC")
+
+        _t0 = time.time()            # <── fix NameError
+        miner_req = LeadRequest(num_leads=synapse.num_leads,
+                                business_desc=synapse.business_desc)
+
+        # bump timeout to 85 s (miner will cut off at 90 s)
+        responses_task = asyncio.create_task(self.dendrite(
+            axons       = axons,
+            synapse     = miner_req,
+            timeout     = 85,                   # <── was 60
+            deserialize = False,
+        ))
+        responses = await responses_task
+        print(f"⏲️  Dendrite completed in {(time.time() - _t0):.2f}s, analysing responses…")
+        # Inspect each response with full status
+        for uid, resp in zip(miner_uids, responses):
+            if isinstance(resp, LeadRequest):
+                sc = getattr(resp.dendrite, "status_code", None)
+                sm = getattr(resp.dendrite, "status_message", None)
+                pl = len(getattr(resp, "leads", []) or [])
+                print(f"📥 UID {uid} dendrite status={sc} msg={sm} leads={pl}")
+                if resp.leads:
+                    all_miner_leads.extend(resp.leads)
+            else:
+                print(f"❌ UID {uid}: unexpected response type {type(resp).__name__} → {repr(resp)[:80]}")
+        print("─────────  END DENDRITE BLOCK  ─────────\n")
+
+        # 3️⃣ If no leads from Bittensor, fallback to Cloud-Run
+        if not all_miner_leads:
+            print("⚠️  Axon unreachable – falling back to cloud broker")
+            req_id = push_miner_curation_request(
+                self.wallet,
+                {"num_leads": synapse.num_leads, "business_desc": synapse.business_desc}
+            )
+            print(f"📤 Sent curation request to Cloud-Run: {req_id}")
+            
+            # ── Wait for miner response via Cloud-Run ─────────────────────
+            MAX_ATTEMPTS = 40      # 40 × 5 s  = 200 s
+            SLEEP_SEC    = 5
+            total_wait   = MAX_ATTEMPTS * SLEEP_SEC
+            print(f"⏳ Waiting for miner response (up to {total_wait} s)…")
+
+            for _ in range(MAX_ATTEMPTS):
+                res = fetch_miner_curation_result(self.wallet)
+                if res and res.get("leads"):
+                    all_miner_leads = res["leads"]
+                    print(f"✅ Received {len(all_miner_leads)} leads from Cloud-Run")
+                    break
+                time.sleep(SLEEP_SEC)
+
+        # 4️⃣ Rank leads using LLM scoring
+        if all_miner_leads:
+            print(f"🔍 Ranking {len(all_miner_leads)} leads with LLM...")
+            scored_leads = []
+            for lead in all_miner_leads:
+                score = _llm_score_lead(lead, synapse.business_desc, "deepseek/deepseek-chat-v3-0324:free")
+                lead["llm_score"] = score
+                scored_leads.append(lead)
+            
+            # Sort by LLM score and take top N
+            scored_leads.sort(key=lambda x: x["llm_score"], reverse=True)
+            top_leads = scored_leads[:synapse.num_leads]
+            
+            print(f" Top {len(top_leads)} leads selected:")
+            for i, lead in enumerate(top_leads, 1):
+                business = lead.get('Business', lead.get('business', 'Unknown'))
+                score = lead.get('llm_score', 0)
+                print(f"  {i}. {business} (score={score:.3f})")
+            
+            synapse.leads = top_leads
+        else:
+            print("❌ No leads received from any source")
+            synapse.leads = []
+
+        synapse.dendrite.status_code = 200
+        return synapse
 
     async def _post_process_with_checks(self, rewards: np.ndarray, miner_uids: list, responses: list):
         validators = [self]
@@ -377,12 +564,8 @@ class Validator(BaseValidatorNeuron):
         if random.random() < 0.1:
             await self.reputation_challenge()
 
-        # Record rewards for ALL delivered leads in this query
-        from Leadpoet.base.utils.pool import record_delivery_rewards
-        record_delivery_rewards(all_delivered_leads)
-
-        # Reset all_delivered_leads after recording rewards to prevent accumulation across API calls
-        all_delivered_leads = []
+        # Reward bookkeeping for delivered leads is handled in the main
+        # `run_validator` validation loop, so nothing to do here.
 
     def save_state(self):
         bt.logging.info("Saving validator state.")
@@ -472,7 +655,7 @@ class Validator(BaseValidatorNeuron):
             responses = await self.dendrite(
                 axons=axons,
                 synapse=synapse,
-                timeout=90,           # ← was 30 s
+                timeout=60,           # ← was 30 s
                 deserialize=True
             )
             
@@ -486,15 +669,15 @@ class Validator(BaseValidatorNeuron):
             
             # miner may still be finishing – wait once more up to 90 s
             if not all_leads:
-                print("⏳ No leads yet – waiting up to 90 s for miners to finish")
+                print("⏳ No leads yet – waiting up to 60 s for miners to finish")
                 try:
-                    more = await asyncio.wait_for(
+                    more_task = asyncio.create_task(
                         self.dendrite(axons=axons,
                                       synapse=synapse,
-                                      timeout=90,
+                                      timeout=60,
                                       deserialize=True),
-                        timeout=90
                     )
+                    more = await asyncio.wait_for(more_task, timeout=60)
                     for r in more:
                         if isinstance(r, LeadRequest) and r.dendrite.status_code == 200 and r.leads:
                             all_leads.extend(r.leads)
@@ -594,8 +777,39 @@ class Validator(BaseValidatorNeuron):
         print(f"🔍 Validator UID: {self.uid}")
         print(f"🔍 Validator hotkey: {self.wallet.hotkey.ss58_address}")
         
-        self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
+        # Enable low-level gRPC logs (printed directly to console)
+        os.environ.setdefault("GRPC_VERBOSITY", "DEBUG")
+        os.environ.setdefault(
+            "GRPC_TRACE",
+            "handshaker,tsi,security,api,transport,http,call_error"
+        )
+        print(f"🧪 gRPC env → VERBOSITY={os.getenv('GRPC_VERBOSITY')} "
+              f"TRACE={os.getenv('GRPC_TRACE')}")
+
+        # NOW build the axon with the **correct** port
+        self.axon = bt.axon(
+            wallet=self.wallet,
+            ip      = "0.0.0.0",
+            port    = self.config.axon.port,
+            external_ip   = self.config.axon.external_ip,
+            external_port = self.config.axon.external_port,
+        )
+        # expose buyer-query endpoint (LeadRequest → LeadRequest)
+        self.axon.attach(self.forward)           # ← NEW
+        # Defer on-chain publish/start to run() to avoid double-serve hangs.
+        print("───────────────────────────────────────────")
+        # publish endpoint as PLAINTEXT so validators use insecure gRPC
+        self.subtensor.serve_axon(
+            netuid = self.config.netuid,
+            axon   = self.axon,
+        )
+        print("✅ Axon published on-chain (plaintext)")
         self.axon.start()
+        print("   Axon started successfully!")
+        # Post-start visibility
+        print(f"🖧  Local gRPC listener  : 0.0.0.0:{self.config.axon.port}")
+        print(f"🌐  External endpoint   : {self.config.axon.external_ip}:{self.config.axon.external_port}")
+        print("───────────────────────────────────────────")
 
         print(f"Validator starting at block: {self.block}")
         print("✅ Validator is now serving on the Bittensor network")
@@ -609,6 +823,7 @@ class Validator(BaseValidatorNeuron):
             while not self.should_exit:
                 # Process any new leads that need validation (continuous)
                 self.process_sourced_leads_continuous()
+                self.process_curation_requests_continuous()
                 
                 self.sync()
         except KeyboardInterrupt:
@@ -702,15 +917,39 @@ class Validator(BaseValidatorNeuron):
             bt.logging.error(f"process_sourced_leads_continuous failure: {e}")
             time.sleep(1)
 
+# ─────────────────────────────────────────────────────────
+#  NEW: handle buyer curation requests coming via Cloud Run
+# ─────────────────────────────────────────────────────────
+    def process_curation_requests_continuous(self):
+        req = fetch_curation_requests()
+        if not req:
+            return
+
+        print(f"\n💼 Buyer curation request: {req}")
+        syn = LeadRequest(num_leads=req["num_leads"],
+                          business_desc=req["business_desc"])
+
+        # run the existing async pipeline inside the event-loop
+        leads = asyncio.run(self.forward(syn)).leads
+
+        push_curation_result({"request_id": req["request_id"], "leads": leads})
+        print(f"✅ Curated {len(leads)} leads for request {req['request_id']}")
+
     def move_to_validated_leads(self, lead, score):
-        """Write validated lead to Firestore; no local fallback."""
+        """Write validated lead to Firestore; skip if it already exists."""
         lead["validation_score"] = score
         lead["validator_hotkey"] = self.wallet.hotkey.ss58_address
         lead["validated_at"]     = time.time()
 
         try:
-            save_leads_to_cloud(self.wallet, [lead])
-            bt.logging.info(f"✅ Lead saved to Firestore: {lead.get('email','?')}")
+            stored = save_leads_to_cloud(self.wallet, [lead])   # True ↔ actually written
+            email  = lead.get("owner_email", lead.get("email", "?"))
+            biz    = lead.get("business", lead.get("website", ""))
+
+            if stored:
+                print(f"✅ Added 1 verified lead to main DB → {biz} ({email})")
+            else:
+                print(f"⚠️  Duplicate lead skipped → {biz} ({email})")
         except Exception as e:
             bt.logging.error(f"Cloud save failed: {e}")
 
@@ -1096,7 +1335,7 @@ def main():
     add_validator_args(None, parser)
     parser.add_argument("--wallet_name", type=str, help="Wallet name")
     parser.add_argument("--wallet_hotkey", type=str, help="Wallet hotkey")
-    parser.add_argument("--netuid", type=int, default=343, help="Network UID")
+    parser.add_argument("--netuid", type=int, default=401, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default="test", help="Subtensor network")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
     args = parser.parse_args()

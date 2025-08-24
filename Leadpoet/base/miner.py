@@ -4,15 +4,17 @@ import threading
 import argparse
 import traceback
 import bittensor as bt
+import os
 from Leadpoet.base.neuron import BaseNeuron
 from typing import Union
+import random
 
 class BaseMinerNeuron(BaseNeuron):
     neuron_type: str = "MinerNeuron"
 
     @classmethod
     def add_args(cls, parser: argparse.ArgumentParser):
-        parser.add_argument("--netuid", type=int, help="The network UID of the subnet to connect to", default=343)
+        parser.add_argument("--netuid", type=int, help="The network UID of the subnet to connect to", default=401)
         parser.add_argument("--subtensor_network", type=str, help="The network to connect to (e.g., test, main)", default="test")
         parser.add_argument("--wallet_name", type=str, help="The name of the wallet to use", required=True)
         parser.add_argument("--wallet_hotkey", type=str, help="The hotkey of the wallet to use", required=True)
@@ -21,6 +23,15 @@ class BaseMinerNeuron(BaseNeuron):
         parser.add_argument("--blacklist_allow_non_registered", action="store_true", help="Allow non-registered hotkeys to query the miner", default=False)
         parser.add_argument("--neuron_epoch_length", type=int, help="Number of blocks between metagraph syncs", default=1000)
         parser.add_argument("--logging_trace", action="store_true", help="Enable trace-level logging", default=False)
+        # ───────────────────────── NETWORKING ─────────────────────────
+        # Public address that will be advertised on-chain so validators
+        # can reach this miner directly (instead of Cloud-Run fallback).
+        parser.add_argument("--axon_ip", type=str,
+                            help="Public IP address that validators should use to reach this miner",
+                            default=None)
+        parser.add_argument("--axon_port", type=int,
+                            help="Public port that validators should use to reach this miner",
+                            default=None)
 
     def __init__(self, config=None):
         super().__init__(config=config)
@@ -41,6 +52,13 @@ class BaseMinerNeuron(BaseNeuron):
             self.config.axon.ip = "0.0.0.0"
             self.config.axon.port = 8091
             bt.logging.debug("Initialized config.axon with default values")
+
+        # ─── Override with CLI-supplied public address ───
+        if getattr(self.config, "axon_ip", None):
+            self.config.axon.external_ip = self.config.axon_ip
+        if getattr(self.config, "axon_port", None):
+            self.config.axon.external_port = self.config.axon_port
+            self.config.axon.port         = self.config.axon_port
 
         if not hasattr(self.config, 'blacklist') or self.config.blacklist is None:
             self.config.blacklist = bt.Config()
@@ -83,9 +101,39 @@ class BaseMinerNeuron(BaseNeuron):
         if self.config.blacklist_allow_non_registered:
             bt.logging.info("Testnet mode: Allowing non-registered entities to send requests (normal for testnet)")
 
+        # ─── Auto-adopt previously-published axon address (before we build the axon) ───
+        if (
+            not getattr(self.config.axon, "external_ip", None)
+            or not getattr(self.config.axon, "external_port", None)
+        ):
+            try:
+                published = self.metagraph.axons[self.uid]          # on-chain record
+                self.config.axon.external_ip   = published.ip
+                self.config.axon.external_port = int(published.port)
+                self.config.axon.port          = int(published.port)  # bind locally on same port
+                bt.logging.info(
+                    f"Adopted on-chain axon endpoint "
+                    f"{self.config.axon.external_ip}:{self.config.axon.external_port}"
+                )
+            except Exception as e:
+                bt.logging.warning(f"Could not read on-chain axon metadata: {e}")
+
+        # Enable low-level gRPC logs (printed directly to console)
+        os.environ.setdefault("GRPC_VERBOSITY", "DEBUG")
+        os.environ.setdefault(
+            "GRPC_TRACE",
+            "handshaker,tsi,security,api,transport,http,call_error"
+        )
+        print(f"🧪 gRPC env → VERBOSITY={os.getenv('GRPC_VERBOSITY')} "
+              f"TRACE={os.getenv('GRPC_TRACE')}")
+
+        # NOW build the axon with the **correct** port
         self.axon = bt.axon(
             wallet=self.wallet,
-            config=self.config() if callable(self.config) else self.config,
+            ip      = "0.0.0.0",
+            port    = self.config.axon.port,
+            external_ip   = self.config.axon.external_ip,
+            external_port = self.config.axon.external_port,
         )
         bt.logging.info(f"Attaching forward function to miner axon.")
         self.axon.attach(
@@ -94,6 +142,13 @@ class BaseMinerNeuron(BaseNeuron):
             priority_fn=self.priority,
         )
         bt.logging.info(f"Axon created: {self.axon}")
+
+        # Add debug for axon registration
+        print(f"🔧 Axon config: ip={self.config.axon.ip}, port={self.config.axon.port}")
+        print(f"🔧 Axon external: {self.config.axon.external_ip}:{self.config.axon.external_port}")
+
+        # Defer on-chain publish/start to run() to avoid double-serve hangs.
+        print("───────────────────────────────────────────")
 
         self.should_exit: bool = False
         self.is_running: bool = False
@@ -108,10 +163,15 @@ class BaseMinerNeuron(BaseNeuron):
 
         print(f"   Starting axon serve...")
         bt.logging.info(f"Running miner for subnet: {self.config.netuid} on network: {self.config.subtensor.chain_endpoint} with config: {self.config}")
+        print("   [axon.serve] calling serve()")
         self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
         print(f"   Axon serve completed, starting axon...")
+        print("   [axon.start] starting gRPC server …")
         self.axon.start()
-        print(f"   Axon started successfully!")
+        print("   Axon started successfully!")
+        # Post-start visibility
+        print(f"🖧  Local gRPC listener  : 0.0.0.0:{self.config.axon.port}")
+        print(f"🌐  External endpoint   : {self.config.axon.external_ip}:{self.config.axon.external_port}")
 
         bt.logging.info(f"Miner starting at block: {self.block}")
         try:

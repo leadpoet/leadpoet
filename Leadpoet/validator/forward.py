@@ -29,7 +29,7 @@ async def forward(
     responses = await self.dendrite(
         axons=axons,
         synapse=request,
-        timeout=60,
+        timeout=120,
         deserialize=True
     )
     bt.logging.info(f"Received {len(responses)} lead batch responses from miners")

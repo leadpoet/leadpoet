@@ -8,6 +8,7 @@ import time
 import sys
 from Leadpoet.validator.reward import record_event as _rec
 from Leadpoet.utils.cloud_db import get_cloud_leads       # NEW
+from Leadpoet.base.utils import safe_json_load
 
 DATA_DIR = "data"
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
@@ -34,11 +35,7 @@ def add_to_pool(prospects):
         if not os.path.exists(LEADS_FILE):
             leads = []
         else:
-            with open(LEADS_FILE, "r") as f:
-                try:
-                    leads = json.load(f)
-                except Exception:
-                    leads = []
+            leads = safe_json_load(LEADS_FILE)
         existing_emails = {lead.get("owner_email", "").lower() for lead in leads}
 
         # ‼️  NEVER store the curator field inside leads.json
@@ -74,12 +71,7 @@ def get_leads_from_pool(num_leads, industry=None, region=None, wallet=None):
             if not os.path.exists(LEADS_FILE):
                 return []
 
-            try:
-                with open(LEADS_FILE, "r") as f:
-                    leads = json.load(f)
-            except Exception as e:
-                bt.logging.error(f"Error reading local leads: {e}")
-                return []
+            leads = safe_json_load(LEADS_FILE)
 
     # ---------------- filtering & sampling stays unchanged ----------------
     filtered_leads = leads
@@ -102,11 +94,7 @@ def get_leads_from_pool(num_leads, industry=None, region=None, wallet=None):
 def save_curated_leads(curated_leads):
     """Save curated leads to curated_leads.json."""
     with _curated_lock:
-        try:
-            with open(CURATED_LEADS_FILE, "r") as f:
-                existing_curated = json.load(f)
-        except Exception:
-            existing_curated = []
+        existing_curated = safe_json_load(CURATED_LEADS_FILE)
         
         # Add new curated leads
         existing_curated.extend(curated_leads)
@@ -283,3 +271,13 @@ def _emission_loop():
 
 # fire the daemon
 threading.Thread(target=_emission_loop, daemon=True).start()
+
+def _read_json(path):
+     try:
+         with open(path, "r") as f:
+             try:
+                 return json.load(f)
+             except json.JSONDecodeError:
+                 return []
+     except FileNotFoundError:
+         return []

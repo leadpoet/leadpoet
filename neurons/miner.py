@@ -31,7 +31,31 @@ from collections import OrderedDict
 from Leadpoet.utils.cloud_db import get_cloud_leads
 from Leadpoet.utils.cloud_db import push_prospects_to_cloud         # NEW
 from Leadpoet.utils.cloud_db import fetch_prospects_from_cloud     # NEW
+from Leadpoet.utils.cloud_db import (
+    get_cloud_leads,
+    push_prospects_to_cloud,
+    fetch_prospects_from_cloud,
+    fetch_miner_curation_request,      # NEW
+    push_miner_curation_result,        # NEW
+)
+import logging
+import random
+import socket, struct     # already have socket; add struct
+import grpc  # add near other imports
 
+# Remove this if you don't want to silence noisy "InvalidRequestNameError … Improperly formatted request" lines ──
+class _SilenceInvalidRequest(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Drop only those specific ERROR messages – let everything else through.
+        if record.levelno >= logging.ERROR and "InvalidRequestNameError" in record.getMessage():
+            return False
+        return True
+
+root_logger       = logging.getLogger()            # root
+bittensor_logger  = logging.getLogger("bittensor") # axon middleware logs here
+root_logger.addFilter(_SilenceInvalidRequest())
+bittensor_logger.addFilter(_SilenceInvalidRequest())
+# ────────────────────────────────────────────────────────────────────────────────
 
 class Miner(BaseMinerNeuron):
     def __init__(self, config=None):
@@ -40,19 +64,172 @@ class Miner(BaseMinerNeuron):
         bt.logging.info(f"Using open-source lead model: {self.use_open_source_lead_model}")
         self.app = web.Application()
         self.app.add_routes([web.post('/lead_request', self.handle_lead_request)])
-        self.sourcing_mode = True  # Start in sourcing mode
-        self.sourcing_lock = asyncio.Lock()  # Lock for switching modes
+        self.sourcing_mode = True
+        self.sourcing_lock = threading.Lock()   # thread-safe
+        # background loop orchestration
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self.sourcing_task: Optional[asyncio.Task] = None
+        self.cloud_task: Optional[asyncio.Task] = None
+        self._bg_interval: int = 60
+        self._miner_hotkey: Optional[str] = None
 
-    async def forward(self, synapse: LeadRequest) -> LeadRequest:
-        bt.logging.debug(f"Received lead request: {synapse}")
+    def pause_sourcing(self):
+        print("⏸️ Pausing sourcing (cancel background task)…")
+        self.sourcing_mode = False
+        if self._loop and self.sourcing_task and not self.sourcing_task.done():
+            try:
+                self._loop.call_soon_threadsafe(self.sourcing_task.cancel)
+            except Exception as e:
+                print(f"⚠️ pause_sourcing error: {e}")
+
+    def resume_sourcing(self):
+        if not self._loop or not self._miner_hotkey:
+            return
+        def _restart():
+            if self.sourcing_task and not self.sourcing_task.done():
+                return
+            print("▶️ Resuming sourcing (restart background task)…")
+            self.sourcing_mode = True
+            self.sourcing_task = asyncio.create_task(
+                self.sourcing_loop(self._bg_interval, self._miner_hotkey),
+                name="sourcing_loop"
+            )
+        try:
+            self._loop.call_soon_threadsafe(_restart)
+        except Exception as e:
+            print(f"⚠️ resume_sourcing error: {e}")
+
+    async def sourcing_loop(self, interval: int, miner_hotkey: str):
+        print(f"🔄 Starting continuous sourcing loop (interval: {interval}s)")
+        while True:
+            try:
+                # cooperative pause: don’t hold the lock during network I/O
+                if not self.sourcing_mode:
+                    await asyncio.sleep(1)
+                    continue
+                with self.sourcing_lock:
+                    if not self.sourcing_mode:
+                        continue
+                    print(f"\n🔄 Sourcing new leads...")
+                # do network I/O OUTSIDE the lock so pause can cancel immediately
+                new_leads = await get_leads(1, industry=None, region=None)
+                sanitized = [sanitize_prospect(p, miner_hotkey) for p in new_leads]
+                print(f"🔄 Sourced {len(sanitized)} new leads:")
+                for i, lead in enumerate(sanitized, 1):
+                    business = lead.get('business', 'Unknown')
+                    owner = lead.get('owner_full_name', 'Unknown')
+                    email = lead.get('owner_email', 'No email')
+                    print(f"  {i}. {business} - {owner} ({email})")
+                try:
+                    push_prospects_to_cloud(self.wallet, sanitized)
+                    print(f"✅ Pushed {len(sanitized)} prospects to cloud queue "
+                          f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+                except Exception as e:
+                    print(f"❌ Cloud push failed: {e}")
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                print("🛑 Sourcing task cancelled")
+                break
+            except Exception as e:
+                print(f"❌ Error in sourcing loop: {e}")
+                await asyncio.sleep(interval)
+
+    async def cloud_curation_loop(self, miner_hotkey: str):
+        print("🔄 Polling Cloud-Run for curation jobs")
+        while True:
+            try:
+                req = fetch_miner_curation_request(self.wallet)
+                if req:
+                    # stop sourcing immediately
+                    self.pause_sourcing()
+                    with self.sourcing_lock:
+                        print(f"🟢 Curation request pulled from cloud: "
+                              f"{req.get('business_desc','')[:40]}…")
+                        n = int(req.get("num_leads", 1))
+                        target_ind = classify_industry(req.get("business_desc", ""))
+                        print(f"🔍 Target industry inferred: {target_ind or 'any'}")
+                    # rest of curation OUTSIDE lock
+                    desired_roles = classify_roles(req.get("business_desc", ""))
+                    if desired_roles:
+                        print(f"🛈  Role filter active → {desired_roles}")
+                    pool_slice = get_leads_from_pool(
+                        1000, industry=target_ind, region=None, wallet=self.wallet
+                    )
+                    if desired_roles:
+                        pool_slice = [
+                            ld for ld in pool_slice
+                            if _role_match(ld.get("role", ""), desired_roles)
+                        ] or pool_slice
+                    curated_leads = random.sample(pool_slice, min(len(pool_slice), n * 3))
+                    if not curated_leads:
+                        print("📝 No leads found in pool, generating new leads...")
+                        new_leads = await get_leads(n * 2, target_ind, None)
+                        curated_leads = [sanitize_prospect(p, miner_hotkey) for p in new_leads]
+                    else:
+                        print(f" Curated {len(curated_leads)} leads in pool")
+                    mapped_leads = []
+                    for lead in curated_leads:
+                        m = {
+                            "email": lead.get("owner_email", ""),
+                            "Business": lead.get("business", ""),
+                            "Owner Full name": lead.get("owner_full_name", ""),
+                            "First": lead.get("first", ""),
+                            "Last": lead.get("last", ""),
+                            "LinkedIn": lead.get("linkedin", ""),
+                            "Website": lead.get("website", ""),
+                            "Industry": lead.get("industry", ""),
+                            "sub_industry": lead.get("sub_industry", ""),
+                            "Region": lead.get("region", ""),
+                            "role": lead.get("role", ""),
+                            "source": lead.get("source", ""),
+                            "curated_by": self.wallet.hotkey.ss58_address,
+                        }
+                        if all(m.get(f) for f in ["email", "Business"]):
+                            mapped_leads.append(m)
+                    print(" Scoring leads with conversion model...")
+                    val = await validate_lead_list(mapped_leads, target_ind)
+                    scored_copy = val.get("scored_leads", [])
+                    for orig, sc in zip(mapped_leads, scored_copy):
+                        orig["conversion_score"] = sc.get("conversion_score", 0.0)
+                    ranked = await rank_leads(mapped_leads, description=req.get("business_desc",""))
+                    top_leads = ranked[:n]
+                    print(f"📤 SENDING {len(top_leads)} curated leads to validator:")
+                    for i, lead in enumerate(top_leads, 1):
+                        print(f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})")
+                    push_miner_curation_result(
+                        self.wallet,
+                        {"miner_request_id": req["miner_request_id"], "leads": top_leads},
+                    )
+                    print(f"✅ Returned {len(top_leads)} leads to cloud broker")
+                    # resume sourcing after job
+                    self.resume_sourcing()
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                print("🛑 Cloud-curation task cancelled")
+                break
+            except Exception as e:
+                print(f"❌ Cloud-curation loop error: {e}")
+                await asyncio.sleep(10)
+
+    async def _forward_async(self, synapse: LeadRequest) -> LeadRequest:
+        # ─────────────────────────────────────────────────────────────
+        import time as _t
+        _t0 = _t.time()
+        print("\n─────────  AXON ➜ MINER  ─────────")
+        print(f"⚡  AXON call received  | leads={synapse.num_leads}"
+              f" industry={synapse.industry or '∅'} region={synapse.region or '∅'}")
+        print(f"⏱️   at {datetime.utcnow().isoformat()} UTC")
+        # ─────────────────────────────────────────────────────────────
+        bt.logging.info(f" AXON CALL RECEIVED: {synapse}")
+
         start_time = time.time()
 
         try:
             print(f"\n🟡 RECEIVED QUERY from validator: {synapse.num_leads} leads, industry={synapse.industry}, region={synapse.region}")
             print("⏸️  Stopping sourcing, switching to curation mode...")
             
-            # Temporarily disable sourcing while curating
-            async with self.sourcing_lock:
+            # Take the global lock so sourcing stays paused
+            with self.sourcing_lock:
                 self.sourcing_mode = False
                 try:
                     # ── derive target industry from buyer description ───────────
@@ -80,7 +257,6 @@ class Miner(BaseMinerNeuron):
                         ] or pool_slice  # fall back if nothing matched
 
                     # finally down-sample to N×3 for ranking
-                    import random
                     curated_leads = random.sample(
                         pool_slice,
                         min(len(pool_slice), synapse.num_leads * 3)
@@ -146,27 +322,26 @@ class Miner(BaseMinerNeuron):
                         score = lead.get('miner_intent_score', 0)
                         print(f"  {i}. {business} (intent={score:.3f})")
                     
+                    print("🚚 Returning leads over AXON")
+                    print(f"✅  Prepared {len(top_leads)} leads in"
+                          f" {(_t.time()-_t0):.2f}s – sending back to validator")
                     bt.logging.info(f"Returning {len(top_leads)} scored leads")
                     synapse.leads = top_leads
                     synapse.dendrite.status_code = 200
                     synapse.dendrite.status_message = "OK"
                     synapse.dendrite.process_time = str(time.time() - start_time)
-                            
+                                                    
                 finally:
                     # Re-enable sourcing after curation
                     print("▶️  Resuming sourcing mode...")
                     self.sourcing_mode = True
             
         except Exception as e:
-            print(f"❌ Error curating leads: {e}")
-            bt.logging.error(f"Error curating leads: {e}")
+            print(f"❌ AXON FORWARD ERROR: {e}")
+            bt.logging.error(f"AXON FORWARD ERROR: {e}")
+            # Return empty response so validator gets something
             synapse.leads = []
             synapse.dendrite.status_code = 500
-            synapse.dendrite.status_message = f"Error: {str(e)}"
-            synapse.dendrite.process_time = str(time.time() - start_time)
-            # Ensure sourcing is re-enabled even on error
-            self.sourcing_mode = True
-
         return synapse
 
     async def handle_lead_request(self, request):
@@ -206,7 +381,6 @@ class Miner(BaseMinerNeuron):
                 ] or pool_slice  # fall back if nothing matched
 
             # finally down-sample to N×3 for ranking
-            import random
             curated_leads = random.sample(
                 pool_slice,
                 min(len(pool_slice), num_leads * 3)
@@ -299,13 +473,29 @@ class Miner(BaseMinerNeuron):
                 "process_time": "0"
             }, status=500)
 
+    # Pause sourcing at the earliest possible moment when any axon call arrives
     def blacklist(self, synapse: LeadRequest) -> Tuple[bool, str]:
-        if self.config.blacklist_force_validator_permit and not self.metagraph.axons[self.uid].is_serving:
-            bt.logging.debug(f"Blacklisting non-validator request from {synapse.dendrite.hotkey}")
-            return True, f"Non-validator request from {synapse.dendrite.hotkey}"
-        if not self.config.blacklist_allow_non_registered and synapse.dendrite.hotkey not in self.metagraph.hotkeys:
-            bt.logging.debug(f"Blacklisting non-registered hotkey {synapse.dendrite.hotkey}")
-            return True, f"Non-registered hotkey {synapse.dendrite.hotkey}"
+        # Ignore random HTTP scanners that trigger InvalidRequestNameError
+        if getattr(synapse, "dendrite", None) is None:
+            return True, "Malformed request"
+        try:
+            self.pause_sourcing()
+        except Exception as _e:
+            print(f"⚠️ pause_sourcing in blacklist failed: {_e}")
+        caller_hk = getattr(synapse.dendrite, "hotkey", None)
+        caller_uid = None
+        if caller_hk in self.metagraph.hotkeys:
+            caller_uid = self.metagraph.hotkeys.index(caller_hk)
+        if getattr(self.config.blacklist, "force_validator_permit", False):
+            is_validator = (caller_uid is not None and bool(self.metagraph.validator_permit[caller_uid]))
+            if not is_validator:
+                print(f"🛑 Blacklist: rejecting {caller_hk} (not a validator)")
+                return True, "Caller is not a validator"
+        if not getattr(self.config.blacklist, "allow_non_registered", True):
+            if caller_uid is None:
+                print(f"🛑 Blacklist: rejecting {caller_hk} (not registered)")
+                return True, "Caller not registered"
+        print(f"✅ Blacklist: allowing {caller_hk} (uid={caller_uid})")
         return False, ""
 
     def priority(self, synapse: LeadRequest) -> float:
@@ -335,6 +525,69 @@ class Miner(BaseMinerNeuron):
         site = web.TCPSite(runner, '0.0.0.0', http_port)
         await site.start()
         bt.logging.info(f"HTTP server started on port {http_port}")
+
+    # -------------------------------------------------------------------
+    #  Wrapper the axon actually calls (sync)
+    # -------------------------------------------------------------------
+    def forward(self, synapse: LeadRequest) -> LeadRequest:
+        # 🔔 this fires only when the request arrives via AXON
+        print(f"🔔 AXON QUERY from {getattr(synapse.dendrite, 'hotkey', 'unknown')} | "
+              f"{synapse.num_leads} leads | desc='{(synapse.business_desc or '')[:40]}…'")
+        # stop sourcing immediately
+        self.pause_sourcing()
+        result_holder = {}
+        error_holder = {}
+        def _runner():
+            try:
+                result_holder["res"] = asyncio.run(self._forward_async(synapse))
+            except Exception as e:
+                error_holder["err"] = e
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+        t.join(timeout=120)                          # <── was 90
+        if t.is_alive():
+            print("⏳ AXON forward timed out after 95 s")
+            synapse.leads = []
+            synapse.dendrite.status_code = 504
+            synapse.dendrite.status_message = "Miner forward timeout"
+            self.resume_sourcing()
+            return synapse
+        if "err" in error_holder:
+            print(f"❌ AXON FORWARD ERROR: {error_holder['err']}")
+            synapse.leads = []
+            synapse.dendrite.status_code = 500
+            synapse.dendrite.status_message = f"Error: {error_holder['err']}"
+            self.resume_sourcing()
+            return synapse
+        res = result_holder["res"]
+        self.resume_sourcing()
+        return res
+
+    def stop(self):
+        try:
+            if getattr(self, "axon", None):
+                print("🛑 Stopping axon gRPC server…")
+                self.axon.stop()
+                print("✅ Axon stopped")
+        except Exception as e:
+            print(f"⚠️ Error stopping axon: {e}")
+        try:
+            self.resume_sourcing()  # ensure background is not left paused
+        except Exception:
+            pass
+
+    def run(self):
+        # Delegate to the base class run loop; avoids calling non-callable step() and missing stop().
+        bt.logging.info(f"Miner starting at block: {self.block}")
+        try:
+            return super().run()
+        except KeyboardInterrupt:
+            self.stop()
+            bt.logging.success("Miner killed by keyboard interrupt.")
+        except Exception as e:
+            print(f"❌ Error in miner.run(): {e}")
+            bt.logging.error(traceback.format_exc())
+            self.stop()
 
 DATA_DIR = "data"
 SOURCING_LOG = os.path.join(DATA_DIR, "sourcing_logs.json")
@@ -427,52 +680,46 @@ def update_miner_stats(hotkey, valid_count):
             json.dump(miners, f, indent=2)
 
 async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
-    # Suppress Bittensor verbose logs but keep block emissions
-    import logging
     logging.getLogger('bittensor.subtensor').setLevel(logging.WARNING)
     logging.getLogger('bittensor.axon').setLevel(logging.WARNING)
-    # Keep block emission logs by not suppressing them
-    
-    async def sourcing_loop():
-        print(f"🔄 Starting continuous sourcing loop (interval: {interval}s)")
-        while True:
-            try:
-                if miner.sourcing_mode:
-                    print(f"\n🔄 Sourcing new leads...")
-                    # fetch ONE lead at a time so the validator sees it sooner
-                    new_leads = await get_leads(1, industry=None, region=None)
-                    sanitized = [sanitize_prospect(p, miner_hotkey) for p in new_leads]
-                    
-                    # Print sourced leads
-                    print(f"🔄 Sourced {len(sanitized)} new leads:")
-                    for i, lead in enumerate(sanitized, 1):
-                        business = lead.get('business', 'Unknown')
-                        owner = lead.get('owner_full_name', 'Unknown')
-                        email = lead.get('owner_email', 'No email')
-                        print(f"  {i}. {business} - {owner} ({email})")
-                    
-                    # Push to Firestore prospects queue
-                    try:
-                        push_prospects_to_cloud(miner.wallet, sanitized)
-                        print(f"✅ Pushed {len(sanitized)} prospects to cloud queue "
-                              f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
-                    except Exception as e:
-                        print(f"❌ Cloud push failed: {e}")
-                    
-                else:
-                    print("⏸️  Sourcing paused (in curation mode)")
-                
-                await asyncio.sleep(interval)
-            except Exception as e:
-                print(f"❌ Error in sourcing loop: {e}")
-                await asyncio.sleep(interval)
-    
-    # Start sourcing loop
-    asyncio.create_task(sourcing_loop())
-    
-    # Keep the process alive
+    miner._loop = asyncio.get_running_loop()
+    miner._bg_interval = interval
+    miner._miner_hotkey = miner_hotkey
+    # start both background tasks
+    miner.sourcing_task = asyncio.create_task(
+        miner.sourcing_loop(interval, miner_hotkey), name="sourcing_loop"
+    )
+    miner.cloud_task = asyncio.create_task(
+        miner.cloud_curation_loop(miner_hotkey), name="cloud_curation_loop"
+    )
+    # keep alive
     while True:
         await asyncio.sleep(1)
+
+async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
+    try:
+        ch = grpc.aio.insecure_channel(addr)
+        await asyncio.wait_for(ch.channel_ready(), timeout=timeout)
+        await ch.close()
+        print(f"✅ gRPC preflight OK → {addr}")
+        return True
+    except Exception as e:
+        print(f"⚠️ aio preflight failed for {addr}: {e}")
+    # Fallback to sync probe, run in a thread so it doesn't require a Task
+    def _sync_probe() -> bool:
+        ch = grpc.insecure_channel(addr)
+        grpc.channel_ready_future(ch).result(timeout=timeout)
+        ch.close()
+        return True
+    try:
+        ok = await asyncio.get_running_loop().run_in_executor(None, _sync_probe)
+        if ok:
+            print(f"✅ gRPC preflight OK (sync) → {addr}")
+            return True
+    except Exception as e:
+        print(f"❌ gRPC preflight FAIL → {addr} | {e}")
+    return False
+
 
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
@@ -493,11 +740,20 @@ def main():
     config.blacklist.force_validator_permit = args.blacklist_force_validator_permit
     config.blacklist.allow_non_registered = args.blacklist_allow_non_registered
     config.neuron = bt.Config()
-    config.neuron.epoch_length = args.neuron_epoch_length
-    # Ensure epoch_length is set to a default if None
-    if config.neuron.epoch_length is None:
-        config.neuron.epoch_length = 1000
+    config.neuron.epoch_length = args.neuron_epoch_length or 1000
     config.use_open_source_lead_model = args.use_open_source_lead_model
+
+    # ──────────────────────── AXON NETWORKING ──────────────────────────
+    # Bind locally on 0.0.0.0 but advertise the user-supplied external
+    # IP/port on-chain so validators can connect over the Internet.
+    config.axon = bt.Config()
+    config.axon.ip   = "0.0.0.0"                 # listen on all interfaces
+    config.axon.port = args.axon_port or 8091    # internal bind port
+    if args.axon_ip:
+        config.axon.external_ip = args.axon_ip   # public address
+    if args.axon_port:
+        config.axon.external_port = args.axon_port
+        config.axon.port = args.axon_port
 
     ensure_data_files()
     

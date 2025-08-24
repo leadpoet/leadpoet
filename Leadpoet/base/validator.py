@@ -58,6 +58,8 @@ class BaseValidatorNeuron(BaseNeuron):
         bt.logging.info("Serving validator axon...")
         try:
             self.axon = bt.axon(wallet=self.wallet, config=self.config)
+            # expose buyer-query endpoint (LeadRequest → LeadRequest)
+            self.axon.attach(self.forward)           # ← NEW
             self.subtensor.serve_axon(
                 netuid=self.config.netuid,
                 axon=self.axon,

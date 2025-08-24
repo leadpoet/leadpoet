@@ -10,6 +10,14 @@ COLLECTION_LEADS      = "leads"       # verified + client-visible
 COLLECTION_PROSPECTS  = "prospects"   # awaiting validator review
 MAX_BATCH  = 500                     # Firestore batch-write limit
 
+# ───────── new collections ─────────────────
+COLL_CURATE_REQ  = "curation_requests"
+COLL_CURATE_RES  = "curation_results"
+
+# NEW: collections for validator↔miner fallback ----------------------
+COLL_MINER_REQ   = "curation_miner_requests"
+COLL_MINER_RES   = "curation_miner_results"
+
 # ---------- Helper: role checks -----------------
 def is_miner(wallet_ss58: str) -> bool:
     subtensor = bt.subtensor(network="test")
@@ -72,20 +80,40 @@ async def add_leads(request: Request):
 
     if not verify_sig(wallet, payload, sig):
         print("[WARN] bad signature – continuing (DEV mode)")
-
     if not is_validator(wallet):
         print("[WARN] hotkey lacks validator-permit – continuing (DEV mode)")
 
-    # 3. commit to Firestore
-    batch, count = db.batch(), 0
+    # 3. commit, but skip duplicates (same e-mail already stored)
+    batch, stored, dupes = db.batch(), 0, 0
     for lead in leads:
+        email = (
+            lead.get("email")
+            or lead.get("owner_email")
+            or lead.get("Owner(s) Email")
+            or ""
+        ).lower()
+
+        if email:
+            col = db.collection(COLLECTION_LEADS)
+            dup = any(col.where("email",        "==", email).limit(1).stream()) \
+                or any(col.where("owner_email", "==", email).limit(1).stream())
+            if dup:
+                print(f"[INFO] duplicate e-mail skipped: {email}")
+                dupes += 1
+                continue
+
+        # always store both aliases to keep future checks simple
         doc_ref = db.collection(COLLECTION_LEADS).document()
-        batch.set(doc_ref, lead)
-        count += 1
-        if count % MAX_BATCH == 0:
-            batch.commit(); batch = db.batch()
+        batch.set(
+            doc_ref,
+            lead
+            | {"email": email,
+               "owner_email": email}
+        )
+        stored += 1
+    # flush
     batch.commit()
-    return {"stored": count}
+    return {"stored": stored, "duplicates": dupes}
 
 
 # ===================================================================
@@ -151,3 +179,83 @@ async def fetch_prospects(request: Request):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+# ───────── buyer submits request ───────────
+@app.post("/curate")
+async def create_curation(request: Request):
+    body = await request.json()
+    doc   = db.collection(COLL_CURATE_REQ).document()
+    doc.set({
+        "created_at": firestore.SERVER_TIMESTAMP,
+        **body               # num_leads, business_desc, maybe wallet
+    })
+    return {"request_id": doc.id}
+
+# ───────── validator pulls next request ────
+@app.post("/curate/fetch")
+async def fetch_curation(request: Request):
+    docs = list(db.collection(COLL_CURATE_REQ).order_by("created_at")
+                                   .limit(1).stream())
+    if not docs:
+        return {}
+    d = docs[0]
+    db.collection(COLL_CURATE_REQ).document(d.id).delete()
+    return d.to_dict() | {"request_id": d.id}
+
+# ───────── validator pushes result ─────────
+@app.post("/curate/result")
+async def push_curation_result(request: Request):
+    body = await request.json()          # {request_id, leads:[…]}
+    req_id = body.get("request_id")
+    if not req_id:
+        raise HTTPException(status_code=400, detail="request_id missing")
+    db.collection(COLL_CURATE_RES).document(req_id).set(body)
+    return {"stored": True}
+
+# ───────── buyer polls result ──────────────
+@app.get("/curate/result/{request_id}")
+async def get_curation_result(request_id: str):
+    doc = db.collection(COLL_CURATE_RES).document(request_id).get()
+    if not doc.exists:
+        return {}
+    return doc.to_dict()
+
+# ───────── validator → miner ------------------------------------------------
+@app.post("/curate/miner_request")
+async def create_miner_request(request: Request):
+    body = await request.json()                           # num_leads , business_desc , …
+    doc  = db.collection(COLL_MINER_REQ).document()
+    doc.set({"created_at": firestore.SERVER_TIMESTAMP, **body})
+    return {"miner_request_id": doc.id}
+
+# ───────── miner pulls next queued query ───────────────────────────
+@app.post("/curate/miner_request/fetch")
+async def fetch_miner_request(_: Request):
+    docs = list(db.collection(COLL_MINER_REQ).order_by("created_at").limit(1).stream())
+    if not docs:
+        return {}
+    d = docs[0]
+    db.collection(COLL_MINER_REQ).document(d.id).delete()
+    return d.to_dict() | {"miner_request_id": d.id}
+
+# ───────── miner pushes curated leads back ─────────────────────────
+@app.post("/curate/miner_result")
+async def push_miner_result(request: Request):
+    body = await request.json()               # miner_request_id , leads
+    rid  = body.get("miner_request_id")
+    if not rid:
+        raise HTTPException(status_code=400, detail="miner_request_id missing")
+    db.collection(COLL_MINER_RES).document(rid).set(
+        {"created_at": firestore.SERVER_TIMESTAMP, **body}
+    )
+    return {"stored": True}
+
+# ───────── validator polls curated leads ───────────────────────────
+@app.post("/curate/miner_result/fetch")
+async def fetch_miner_result(_: Request):
+    docs = list(db.collection(COLL_MINER_RES).order_by("created_at").limit(1).stream())
+    if not docs:
+        return {}
+    d = docs[0]
+    db.collection(COLL_MINER_RES).document(d.id).delete()
+    return d.to_dict()

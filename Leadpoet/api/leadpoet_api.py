@@ -15,6 +15,9 @@ import base64
 import json
 import time
 import os
+from Leadpoet.utils.cloud_db import (
+     push_curation_request, fetch_curation_result)
+import uuid
 
 # Cloud API configuration
 CLOUD_API_URL = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
@@ -138,7 +141,7 @@ class LeadPoetAPI:
     def __init__(
         self,
         wallet: "bt.wallet",
-        netuid: int = 343,
+        netuid: int = 401,
         subtensor_network: str = "test",
         validator_host: Optional[str] = None,
         validator_port: Optional[int] = None,
@@ -200,8 +203,32 @@ class LeadPoetAPI:
         return leads
 
     async def get_leads(self, num_leads: int, business_desc: str) -> List[Dict]:
+        """
+        Submit the curation request to Cloud-Run and poll for the
+        validator’s response.  The Bittensor axon path is bypassed.
+        """
         bt.logging.info(f"Requesting {num_leads} leads, desc='{business_desc[:40]}…'")
-        return await self._get_leads_via_bittensor(num_leads, business_desc)
+
+        # ── 1️⃣  push request to Cloud-Run
+        req_id = push_curation_request(
+            {"num_leads": num_leads, "business_desc": business_desc}
+        )
+        bt.logging.info(f"Sent curation request to Cloud-Run: {req_id}")
+
+        # ── 2️⃣  poll for validator result
+        MAX_ATTEMPTS = 80      # 80 × 5 s = 400 s
+        SLEEP_SEC    = 5
+        total_wait   = MAX_ATTEMPTS * SLEEP_SEC
+        print(f"⏳ Waiting for validator result (up to {total_wait} s)…")
+
+        for _ in range(MAX_ATTEMPTS):
+            res = fetch_curation_result(req_id)
+            if res.get("leads"):
+                return res["leads"]
+            time.sleep(SLEEP_SEC)
+
+        bt.logging.error("Timed-out waiting for validator result")
+        return []
 
     async def _get_leads_via_http(self, num_leads: int, business_desc: str) -> List[Dict]:
         """Legacy HTTP server approach for mock mode"""
@@ -280,12 +307,26 @@ class LeadPoetAPI:
             validator_axon = self.metagraph.axons[validator_uids[0]]
             bt.logging.info(f"Querying validator {validator_uids[0]} at {validator_axon.ip}:{validator_axon.port}")
             
-            # Send request through Bittensor network
-            responses = await self.dendrite([validator_axon], synapse, timeout=30)
-            
-            if responses and len(responses) > 0:
-                response = responses[0]
-                if response.dendrite.status_code == 200 and response.leads:
+            # Send request through Bittensor network  (auto-decode LeadRequest)
+            responses = await self.dendrite(
+                axons=[validator_axon],
+                synapse=synapse,
+                timeout=45,
+                deserialize=True,
+            )
+
+            if responses:
+                first = responses[0]
+                # bittensor returns a “responses per axon” structure
+                if isinstance(first, list):
+                    if not first or first[0] is None:       # validator sent nothing
+                        bt.logging.error("Validator sent no data")
+                        return []
+                    response = first[0]
+                else:
+                    response = first
+
+                if response and response.dendrite.status_code == 200 and response.leads:
                     bt.logging.info(f"Received {len(response.leads)} leads from validator")
                     return response.leads
                 else:

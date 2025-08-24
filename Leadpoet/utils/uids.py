@@ -49,6 +49,10 @@ def get_random_uids(self, k: int, exclude: List[int] = None) -> np.ndarray:
         if uid in exclude:
             print(f"   UID {uid} rejected: In exclude list")
             continue
+        # NEW: Exclude validators from being queried for curation
+        if self.metagraph.validator_permit[uid]:
+            print(f"   UID {uid} rejected: Is validator (not a miner)")
+            continue
         if check_uid_availability(self.metagraph, uid, vpermit_tao_limit):
             candidate_uids.append(uid)
         else:

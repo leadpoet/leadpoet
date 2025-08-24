@@ -38,3 +38,4 @@ All LeadPoet subnet components must be thoroughly tested to ensure reliability. 
 ## Logging
 - Log test results to Supabase (`test_logs` table) with `test_name`, `status`, `timestamp`, `error` (if any).
 - Ensure no sensitive data (e.g., API keys) is logged.
+

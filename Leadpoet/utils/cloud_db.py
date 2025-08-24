@@ -62,7 +62,11 @@ def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
     }
     r = requests.post(f"{API_URL}/leads", json=body, timeout=30)
     r.raise_for_status()
-    return True
+    res = r.json()
+    stored  = res.get("stored", 0)
+    dupes   = res.get("duplicates", 0)
+    print(f"✅ Cloud save: {stored} new / {dupes} duplicate")
+    return stored > 0
 
 # ───────────────────────────── Queued prospects ─────────────────────────────
 def push_prospects_to_cloud(wallet: bt.wallet, prospects: List[Dict]) -> bool:
@@ -122,3 +126,54 @@ def fetch_prospects_from_cloud(wallet: bt.wallet, limit: int = 100) -> List[Dict
     except requests.exceptions.RequestException as e:
         bt.logging.error(f"fetch_prospects_from_cloud: {e}")
         return []
+
+# ---- Curations -------------------------------------------------------
+def push_curation_request(payload: dict) -> str:
+    r = requests.post(f"{API_URL}/curate", json=payload, timeout=10)
+    r.raise_for_status(); return r.json()["request_id"]
+
+def fetch_curation_requests() -> dict:
+    r = requests.post(f"{API_URL}/curate/fetch", timeout=10); r.raise_for_status()
+    return r.json()
+
+def push_curation_result(result: dict):
+    requests.post(f"{API_URL}/curate/result", json=result, timeout=30).raise_for_status()
+
+def fetch_curation_result(request_id: str) -> dict:
+    try:
+        r = requests.get(f"{API_URL}/curate/result/{request_id}", timeout=30)
+        r.raise_for_status()
+    except requests.exceptions.Timeout:
+        return None        # let the caller loop again
+    return r.json()
+
+def _signed_body(wallet: bt.wallet, extra: dict) -> dict:
+    ts       = str(int(time.time()) // 300)
+    payload  = (ts + json.dumps(extra, sort_keys=True)).encode()
+    sig_b64  = base64.b64encode(wallet.hotkey.sign(payload)).decode()
+    return {"wallet": wallet.hotkey.ss58_address,
+            "signature": sig_b64, **extra}
+
+# ───────── validator → miner ------------------------------------------------
+def push_miner_curation_request(wallet: bt.wallet, payload: dict) -> str:
+    body = _signed_body(wallet, payload)
+    r    = requests.post(f"{API_URL}/curate/miner_request", json=body, timeout=10)
+    r.raise_for_status()
+    return r.json()["miner_request_id"]
+
+def fetch_miner_curation_request(wallet: bt.wallet) -> dict:
+    body = _signed_body(wallet, {})
+    r    = requests.post(f"{API_URL}/curate/miner_request/fetch", json=body, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+# ───────── miner → validator -----------------------------------------------
+def push_miner_curation_result(wallet: bt.wallet, result: dict):
+    body = _signed_body(wallet, result)
+    requests.post(f"{API_URL}/curate/miner_result", json=body, timeout=30).raise_for_status()
+
+def fetch_miner_curation_result(wallet: bt.wallet) -> dict:
+    body = _signed_body(wallet, {})
+    r    = requests.post(f"{API_URL}/curate/miner_result/fetch", json=body, timeout=10)
+    r.raise_for_status()
+    return r.json()

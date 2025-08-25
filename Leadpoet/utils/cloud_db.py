@@ -177,3 +177,9 @@ def fetch_miner_curation_result(wallet: bt.wallet) -> dict:
     r    = requests.post(f"{API_URL}/curate/miner_result/fetch", json=body, timeout=10)
     r.raise_for_status()
     return r.json()
+
+def push_validator_weights(wallet: bt.wallet, uid: int, weights: dict):
+    body   = _signed_body(wallet, {"uid": uid, "weights": weights})
+    r      = requests.post(f"{API_URL}/validator_weights", json=body, timeout=10)
+    r.raise_for_status()
+    print("📝 Stored weights in Firestore via Cloud-Run")

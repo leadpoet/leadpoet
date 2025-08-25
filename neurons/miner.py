@@ -330,7 +330,7 @@ class Miner(BaseMinerNeuron):
                     synapse.dendrite.status_code = 200
                     synapse.dendrite.status_message = "OK"
                     synapse.dendrite.process_time = str(time.time() - start_time)
-                                                    
+                                                            
                 finally:
                     # Re-enable sourcing after curation
                     print("▶️  Resuming sourcing mode...")

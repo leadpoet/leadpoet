@@ -29,9 +29,13 @@ from Leadpoet.utils.cloud_db import (
     push_curation_result,
     push_miner_curation_request,     # ← NEW
     fetch_miner_curation_result,     # ← NEW
+    push_validator_weights,
 )
 import uuid
 import grpc
+from google.cloud import firestore
+from datetime import datetime, timezone
+from math import isclose
 
 # ─────────── LLM re-scoring helpers ────────────────────────────────
 AVAILABLE_MODELS = [
@@ -167,12 +171,35 @@ async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
             return True
     except Exception as e:
         print(f"❌ gRPC preflight FAIL → {addr} | {e}")
-    return False
+    return False            # ← requires google-cloud-firestore already in requirements
 
+# ──────────────────────────────────────────────────────────────────────────────
+def _store_weights_in_firestore(uid: int, hotkey: str, weights: dict):
+    """
+    Persist the latest weight vector to Firestore.
+    Collection: validator_weights
+      • uid        – validator UID (int)
+      • hotkey     – SS58 hotkey string
+      • weights    – { miner_hotkey: share_float }
+      • created_at – server timestamp (UTC)
+    """
+    try:
+        db  = firestore.Client()
+        doc = {
+            "uid":        uid,
+            "hotkey":     hotkey,
+            "weights":    weights,
+            "created_at": datetime.utcnow()
+        }
+        db.collection("validator_weights").add(doc)
+        print("📝 Stored weights in Firestore (validator_weights)")
+    except Exception as e:
+        print(f"⚠️  Firestore write failed: {e}")
+# ───────────────────────────────────────────────────────
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
-        
+
         # Set validator UID
         bt.logging.info("Registering validator wallet on network...")
         max_retries = 3
@@ -199,7 +226,7 @@ class Validator(BaseValidatorNeuron):
 
         bt.logging.info("load_state()")
         self.load_state()
-        
+
         # Add HTTP server for API requests
         self.app = web.Application()
         self.app.add_routes([web.post('/api/leads', self.handle_api_request)])
@@ -232,14 +259,14 @@ class Validator(BaseValidatorNeuron):
     async def validate_leads(self, leads: list, industry: str = None) -> dict:
         if not leads:
             return {"score": 0.0, "O_v": 0.0}
-        
+
         # Check if leads already have validation scores
         existing_scores = [lead.get("conversion_score") for lead in leads if lead.get("conversion_score") is not None]
         if existing_scores:
             # If leads already have scores, use the average of existing scores
             avg_score = sum(existing_scores) / len(existing_scores)
             return {"score": avg_score * 100, "O_v": avg_score}
-        
+
         # Otherwise proceed with normal validation
         if self.use_open_source_model:
             report = await validate_lead_list(leads, industry or "Unknown")
@@ -431,7 +458,7 @@ class Validator(BaseValidatorNeuron):
         # Always start with an empty list so we never hit UnboundLocalError
         all_miner_leads: list = []
 
-        # When dialing dendrite, wrap in a Task (prevents “Timeout context manager should be used inside a task”)
+        # When dialing dendrite, wrap in a Task (prevents "Timeout context manager should be used inside a task")
         print("\n─────────  VALIDATOR ➜ DENDRITE  ─────────")
         print(f"📡  Dialing {len(axons)} miners: {[f'UID{u}' for u in miner_uids]}")
         print(f"⏱️   at {datetime.utcnow().isoformat()} UTC")
@@ -470,7 +497,7 @@ class Validator(BaseValidatorNeuron):
                 {"num_leads": synapse.num_leads, "business_desc": synapse.business_desc}
             )
             print(f"📤 Sent curation request to Cloud-Run: {req_id}")
-            
+
             # ── Wait for miner response via Cloud-Run ─────────────────────
             MAX_ATTEMPTS = 40      # 40 × 5 s  = 200 s
             SLEEP_SEC    = 5
@@ -493,18 +520,78 @@ class Validator(BaseValidatorNeuron):
                 score = _llm_score_lead(lead, synapse.business_desc, "deepseek/deepseek-chat-v3-0324:free")
                 lead["llm_score"] = score
                 scored_leads.append(lead)
-            
+
             # Sort by LLM score and take top N
             scored_leads.sort(key=lambda x: x["llm_score"], reverse=True)
             top_leads = scored_leads[:synapse.num_leads]
-            
+
             print(f" Top {len(top_leads)} leads selected:")
             for i, lead in enumerate(top_leads, 1):
                 business = lead.get('Business', lead.get('business', 'Unknown'))
                 score = lead.get('llm_score', 0)
                 print(f"  {i}. {business} (score={score:.3f})")
-            
+
             synapse.leads = top_leads
+
+            # ✅ V2: After Final Curated List is frozen, call reward calculation
+            if top_leads:
+                try:
+                    from Leadpoet.validator.reward import calculate_weights, record_event
+
+                    # Record events for each lead in the Final Curated List
+                    for lead in top_leads:
+                        if lead.get("source") and lead.get("curated_by"):
+                            # Ensure lead has required fields for V2 calculation
+                            lead["conversion_score"] = lead.get("llm_score", 0.5)
+                            record_event(lead)
+
+                    # Calculate V2 weights and emissions
+                    rewards = calculate_weights(100.0)  # 100 Alpha total emission
+
+                    # Log final weights and emissions
+                    print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
+                    print(f"   Final Curated List: {len(top_leads)} prospects")
+                    print(f"   K weights (Legitimacy): {rewards['K']}")
+                    print(f"   S weights (Sourcing): {rewards['S']}")
+                    print(f"   C weights (Curating): {rewards['C']}")
+                    print(f"   Final weights (W): {rewards['W']}")
+                    print(f"   Emissions: {rewards['E']}")
+
+                    weights_dict = rewards["W"]                   # miner-hotkey ➜ share
+                    # ─── NEW: publish weights on-chain ─────────────────────────────────
+                    try:
+                        # map hotkeys → uids present in current metagraph
+                        uids, weights = [], []
+                        for hk, w in weights_dict.items():
+                            if hk in self.metagraph.hotkeys and w > 0:
+                                uids.append(self.metagraph.hotkeys.index(hk))
+                                weights.append(float(w))
+
+                        # normalise to 1.0 as required by bittensor
+                        s = sum(weights)
+                        if not isclose(s, 1.0) and s > 0:
+                            weights = [w / s for w in weights]
+
+                        self.subtensor.set_weights(
+                            wallet             = self.wallet,
+                            netuid             = self.config.netuid,
+                            uids               = uids,
+                            weights            = weights,
+                            wait_for_inclusion = True,     # non-blocking
+                        )
+                        print(self.wallet, self.config.netuid, uids, weights)
+                        print("✅ Published new weights on-chain")
+                    except Exception as e:
+                        print(f"⚠️  Failed to publish weights on-chain: {e}")
+
+                    # SINGLE remaining Firestore write
+                    push_validator_weights(self.wallet, self.uid, weights_dict)
+                    # ───────────────────────────────────────────────────────────────────
+
+                except Exception as e:
+                    print(f"⚠️  V2 reward calculation failed: {e}")
+            else:
+                print("⚠️  No prospects in Final Curated List - skipping reward calculation")
         else:
             print("❌ No leads received from any source")
             synapse.leads = []
@@ -555,6 +642,18 @@ class Validator(BaseValidatorNeuron):
             if reward >= 0.9 and isinstance(response, LeadRequest) and response.leads:
                 if await self.run_automated_checks(response.leads):
                     from Leadpoet.base.utils.pool import add_to_pool
+
+                    # ✅ V2: Record events for reward calculation before adding to pool
+                    try:
+                        from Leadpoet.validator.reward import record_event
+                        for lead in response.leads:
+                            if lead.get("source") and lead.get("curated_by") and lead.get("conversion_score"):
+                                record_event(lead)
+                                print(f"🎯 V2: Recorded event for lead {lead.get('owner_email', 'unknown')} "
+                                      f"(source: {lead['source']}, curator: {lead['curated_by']})")
+                    except Exception as e:
+                        print(f"⚠️  V2: Failed to record events: {e}")
+
                     add_to_pool(response.leads)
                     bt.logging.info(f"Added {len(response.leads)} leads from UID {miner_uids[i]} to pool")
                 else:
@@ -628,11 +727,11 @@ class Validator(BaseValidatorNeuron):
             business_desc = data.get("business_desc", "")
             print(f"\n RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:50]}…'")
             bt.logging.info(f" RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:50]}…'")
-            
+
             # Get available miners
             from Leadpoet.api.get_query_axons import get_query_api_axons
             axons = await get_query_api_axons(self.wallet, self.metagraph, n=0.1, timeout=5)
-            
+
             if not axons:
                 print("❌ No available miners to query.")
                 bt.logging.error("No available miners to query.")
@@ -642,14 +741,14 @@ class Validator(BaseValidatorNeuron):
                     "status_message": "No active miners available",
                     "process_time": "0"
                 }, status=503)
-            
+
             print(f" SENDING QUERY to {len(axons)} available miners...")
             bt.logging.info(f" BROADCASTING QUERY to {len(axons)} miners")
-            
+
             # Prepare request
             synapse = LeadRequest(num_leads=num_leads,
                                    business_desc=business_desc)
-            
+
             # Send request to all miners
             # give miners enough time to curate
             responses = await self.dendrite(
@@ -658,15 +757,15 @@ class Validator(BaseValidatorNeuron):
                 timeout=60,           # ← was 30 s
                 deserialize=True
             )
-            
+
             print(f" RECEIVED responses from {len(responses)} miners")
-            
+
             # Process responses and collect all leads
             all_leads = []
             for response in responses:
                 if isinstance(response, LeadRequest) and response.dendrite.status_code == 200 and response.leads:
                     all_leads.extend(response.leads)
-            
+
             # miner may still be finishing – wait once more up to 90 s
             if not all_leads:
                 print("⏳ No leads yet – waiting up to 60 s for miners to finish")
@@ -693,7 +792,7 @@ class Validator(BaseValidatorNeuron):
                      "status_message":"Timeout waiting for miners",
                      "process_time":"0"},
                     status=504)
-            
+
             print(f"📊 RECEIVED {len(all_leads)} leads – running TWO LLM re-scoring rounds…")
 
             aggregated = {id(ld): 0.0 for ld in all_leads}
@@ -706,7 +805,7 @@ class Validator(BaseValidatorNeuron):
             for ld in all_leads:
                 ld["validator_intent_score"] = round(aggregated[id(ld)], 3)
 
-             # Rank primarily by LLM aggregate, tie-break by miner’s score.
+             # Rank primarily by LLM aggregate, tie-break by miner's score.
             #  -> always default to 0 so we never compare None with float.
             all_leads.sort(
                 key=lambda x: (
@@ -717,7 +816,7 @@ class Validator(BaseValidatorNeuron):
             )
 
             top_leads = all_leads[:num_leads]
-            
+
             print(f" TOP {len(top_leads)} RANKED LEADS:")
             for i, lead in enumerate(top_leads, 1):
                 business    = lead.get('Business', lead.get('business', 'Unknown'))
@@ -731,17 +830,17 @@ class Validator(BaseValidatorNeuron):
                     f"Source: {source}, Curator: {curator})"
                 )
 
-            
+
             print(f"📤 SENDING top {len(top_leads)} leads to client")
             bt.logging.info(f" RETURNING top {len(top_leads)} leads to client")
-            
+
             return web.json_response({
                 "leads": top_leads,
                 "status_code": 200,
                 "status_message": "OK",
                 "process_time": "0"
             })
-            
+
         except Exception as e:
             print(f"❌ Error handling API request: {e}")
             bt.logging.error(f"Error handling API request: {e}")
@@ -756,7 +855,7 @@ class Validator(BaseValidatorNeuron):
         """Start HTTP server for API requests."""
         runner = web.AppRunner(self.app)
         await runner.setup()
-        
+
         # Find available port
         port = self.find_available_port(8093)
         site = web.TCPSite(runner, '0.0.0.0', port)
@@ -767,7 +866,7 @@ class Validator(BaseValidatorNeuron):
     def run(self):
         """Override the base run method to not run continuous validation"""
         self.sync()
-        
+
         # Check if validator is properly registered
         if not hasattr(self, 'uid') or self.uid is None:
             bt.logging.error("Cannot run validator: UID not set. Please register the wallet on the network.")
@@ -776,7 +875,7 @@ class Validator(BaseValidatorNeuron):
         print(f"Running validator for subnet: {self.config.netuid} on network: {self.subtensor.chain_endpoint}")
         print(f"🔍 Validator UID: {self.uid}")
         print(f"🔍 Validator hotkey: {self.wallet.hotkey.ss58_address}")
-        
+
         # Enable low-level gRPC logs (printed directly to console)
         os.environ.setdefault("GRPC_VERBOSITY", "DEBUG")
         os.environ.setdefault(
@@ -814,17 +913,17 @@ class Validator(BaseValidatorNeuron):
         print(f"Validator starting at block: {self.block}")
         print("✅ Validator is now serving on the Bittensor network")
         print("   Processing sourced leads and waiting for client requests...")
-        
+
         # Show available miners
         self.show_available_miners()
-        
+
         try:
             # Keep the validator running and continuously process leads
             while not self.should_exit:
                 # Process any new leads that need validation (continuous)
                 self.process_sourced_leads_continuous()
                 self.process_curation_requests_continuous()
-                
+
                 self.sync()
         except KeyboardInterrupt:
             self.axon.stop()
@@ -840,7 +939,7 @@ class Validator(BaseValidatorNeuron):
         try:
             print("\n🔍 Discovering available miners on subnet 401...")
             self.sync()  # Sync metagraph to get latest data
-            
+
             available_miners = []
             running_miners = []
             for uid in range(self.metagraph.n):
@@ -848,7 +947,7 @@ class Validator(BaseValidatorNeuron):
                     hotkey = self.metagraph.hotkeys[uid]
                     stake = self.metagraph.S[uid].item()
                     axon_info = self.metagraph.axons[uid]
-                    
+
                     miner_info = {
                         'uid': uid,
                         'hotkey': hotkey,
@@ -857,24 +956,24 @@ class Validator(BaseValidatorNeuron):
                         'port': axon_info.port
                     }
                     available_miners.append(miner_info)
-                    
+
                     # Check if this miner is currently running (has axon info)
                     if axon_info.ip != '0.0.0.0' and axon_info.port != 0:
                         running_miners.append(miner_info)
-            
+
             print(f"📊 Found {len(available_miners)} registered miners:")
             for miner in available_miners:
                 print(f"   UID {miner['uid']}: {miner['hotkey'][:10]}... (stake: {miner['stake']:.2f})")
-             
+
             print(f"\n🔍 Found {len(running_miners)} currently running miners:")
             for miner in running_miners:
                 print(f"   UID {miner['uid']}: {miner['hotkey'][:10]}... (IP: {miner['ip']}:{miner['port']})")
-            
+
             if not available_miners:
                 print("   ⚠️  No miners found on the network")
             elif not running_miners:
                 print("   ⚠️  No miners currently running")
-            
+
         except Exception as e:
             print(f"❌ Error discovering miners: {e}")
 
@@ -906,8 +1005,14 @@ class Validator(BaseValidatorNeuron):
 
                         result = self.validate_lead(lead)
                         if result["is_legitimate"]:
+                            # ✅ V2: Set current K miner after automated checks pass
+                            from Leadpoet.validator.reward import set_current_K_miner
+                            set_current_K_miner(miner_hotkey)
+                            print(f"    ✅ Passed basic checks - K miner updated to {miner_hotkey}")
+                            print(f"    🔑 K miner allocation: {miner_hotkey} now has Kₘ = 1, all others have Kₘ = 0")
+
+                            # Add prospect to pool after K miner update
                             self.move_to_validated_leads(lead, result["score"])
-                            print("    ✅ Passed basic checks")
                         else:
                             print(f"    ❌ Rejected: {result['reason']}")
                     except Exception as e:
@@ -931,6 +1036,12 @@ class Validator(BaseValidatorNeuron):
 
         # run the existing async pipeline inside the event-loop
         leads = asyncio.run(self.forward(syn)).leads
+
+        # ── annotate each lead with the curation timestamp (seconds since epoch)
+        curated_at = time.time()
+        for lead in leads:
+         
+            lead["created_at"]    = datetime.utcfromtimestamp(curated_at).isoformat() + "Z"
 
         push_curation_result({"request_id": req["request_id"], "leads": leads})
         print(f"✅ Curated {len(leads)} leads for request {req['request_id']}")
@@ -1014,7 +1125,7 @@ class Validator(BaseValidatorNeuron):
             website_score = 0.2 if lead.get('website') else 0.0
             industry_score = 0.1 if lead.get('industry') else 0.0
             region_score = 0.1 if lead.get('region') else 0.0
-            
+
             return {
                 'website_score': website_score,
                 'industry_score': industry_score,
@@ -1078,7 +1189,7 @@ class LeadQueue:
         self.maxsize = maxsize
         self.queue_file = "lead_queue.json"
         self._ensure_queue_file()
-    
+
     def _ensure_queue_file(self):
         """Ensure queue file exists and is valid JSON"""
         try:
@@ -1093,12 +1204,12 @@ class LeadQueue:
         except FileNotFoundError:
             # If file doesn't exist, create new empty queue
             self._create_empty_queue()
-    
+
     def _create_empty_queue(self):
         """Create a new empty queue file"""
         with open(self.queue_file, 'w') as f:
             json.dump([], f)
-    
+
     def enqueue_prospects(self, prospects: List[Dict], miner_hotkey: str,
                           request_type: str = "sourced", **meta):
         """Add prospects to queue with validation"""
@@ -1128,7 +1239,7 @@ class LeadQueue:
         except Exception as e:
             bt.logging.error(f"Error enqueueing prospects: {e}")
             self._create_empty_queue()
-    
+
     def dequeue_prospects(self) -> List[Dict]:
         """Get and remove prospects from queue with validation"""
         try:
@@ -1139,17 +1250,17 @@ class LeadQueue:
                 except json.JSONDecodeError:
                     bt.logging.warning("Queue file corrupted during read, creating new queue")
                     queue = []
-            
+
             if not queue:
                 return []
-            
+
             # Get all prospects and clear queue
             prospects = queue
             with open(self.queue_file, 'w') as f:
                 json.dump([], f)
-            
+
             return prospects
-            
+
         except Exception as e:
             bt.logging.error(f"Error dequeuing prospects: {e}")
             # If any error occurs, try to create new queue
@@ -1158,17 +1269,17 @@ class LeadQueue:
 
 async def run_validator(validator_hotkey, queue_maxsize):
     print("Validator event loop started.")
-    
+
     # Create validator instance
     config = bt.config()
     validator = Validator(config=config)
-    
+
     # Start HTTP server
     http_port = await validator.start_http_server()
-    
+
     # Track all delivered leads for this API query
     all_delivered_leads = []
-    
+
     async def validation_loop():
         nonlocal all_delivered_leads
         print("🔄 Validation loop running - waiting for leads to process...")
@@ -1177,7 +1288,7 @@ async def run_validator(validator_hotkey, queue_maxsize):
             if not lead_request:
                 await asyncio.sleep(1)
                 continue
-            
+
             request_type = lead_request.get("request_type", "sourced")
             prospects     = lead_request["prospects"]
             miner_hotkey  = lead_request["miner_hotkey"]
@@ -1190,7 +1301,7 @@ async def run_validator(validator_hotkey, queue_maxsize):
                 # Set the curator hotkey for all prospects in this batch
                 for prospect in prospects:
                     prospect["curated_by"] = miner_hotkey
-                
+
                 # score with your open-source conversion model
                 report  = await validate_lead_list(prospects, industry="Unknown")
                 scores  = report.get("detailed_scores", [1.0]*len(prospects))
@@ -1207,7 +1318,7 @@ async def run_validator(validator_hotkey, queue_maxsize):
                     business = business[:30]
                     score = lead['conversion_score']
                     print(f"  {idx:2d}. {business:30s}  score={score:.3f}")
-               
+
                 asked_for = lead_request.get("requested", len(ranked))
                 top_n = min(asked_for, len(ranked))
                 print(f"✅ Sending top-{top_n} leads to buyer")
@@ -1215,85 +1326,85 @@ async def run_validator(validator_hotkey, queue_maxsize):
                 # store in pool and record reward-event for delivered leads
                 delivered_leads = ranked[:top_n]
                 add_validated_leads_to_pool(delivered_leads)
-                
+
                 # Add to all delivered leads for this query
                 all_delivered_leads.extend(delivered_leads)
-                
+
                 # Record rewards for ALL delivered leads in this query
                 from Leadpoet.base.utils.pool import record_delivery_rewards
                 record_delivery_rewards(all_delivered_leads)
-                
+
                 # Send leads to buyer
                 print(f"✅ Sent {len(delivered_leads)} leads to buyer")
-                
+
                 # Add source hotkey display
                 for lead in delivered_leads:
                     source_hotkey = lead.get('source', 'unknown')
                     print(f"   Lead sourced by: {source_hotkey}")   # show full hotkey
-                
+
                 # Save curated leads to separate file
                 from Leadpoet.base.utils.pool import save_curated_leads
                 save_curated_leads(delivered_leads)
-                
+
                 # Reset all_delivered_leads after recording rewards
                 all_delivered_leads = []
-                
+
                 continue          # skip legitimacy audit branch altogether
-            
+
             # ───────────────────────── sourced list ─────────────────────────
             print(f"🔍 Validating {len(prospects)} sourced leads...")
             valid, rejected, issues = [], [], []
-            
+
             for prospect in prospects:
                 business = prospect.get('business', 'Unknown Business')
                 print(f"\n  Validating: {business}")
-                
+
                 # Get email from either field name
                 email = prospect.get("owner_email", prospect.get("Owner(s) Email", ""))
                 print(f"    Email: {email}")
-                
+
                 if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
                     issue = f"Invalid email: {email}"
                     print(f"    ❌ Rejected: {issue}")
                     issues.append(issue)
                     rejected.append(prospect)
                     continue
-                    
+
                 if any(domain in email for domain in ["mailinator.com", "tempmail.com"]):
                     issue = f"Disposable email: {email}"
                     print(f"    ❌ Rejected: {issue}")
                     issues.append(issue)
                     rejected.append(prospect)
                     continue
-                    
+
                 if prospect["source"] != miner_hotkey:
                     issue = f"Source mismatch: {prospect['source']} != {miner_hotkey}"
                     print(f"    ❌ Rejected: {issue}")
                     issues.append(issue)
                     rejected.append(prospect)
                     continue
-                    
+
                 if lead_pool.check_duplicates(email):
                     issue = f"Duplicate email: {email}"
                     print(f"    ❌ Rejected: {issue}")
                     issues.append(issue)
                     rejected.append(prospect)
                     continue
-                
+
                 # All checks passed ⇒ accept
                 valid.append(prospect)
-            
+
             if valid:
                 add_validated_leads_to_pool(valid)
                 print(f"\n✅ Added {len(valid)} valid prospects to pool")
-                
+
             log_validation(validator_hotkey, len(valid), len(rejected), issues)
             total = len(valid) + len(rejected)
             precision = (len(valid) / total) if total else 0.0
             update_validator_stats(validator_hotkey, precision)
             print(f"\n Validation summary: {len(valid)} accepted, {len(rejected)} rejected.")
             await asyncio.sleep(0.1)
-    
+
     # Run both the HTTP server and validation loop
     await asyncio.gather(
         validation_loop(),
@@ -1306,7 +1417,7 @@ def add_validated_leads_to_pool(leads):
     for lead in leads:
         # Get the actual validation score from the lead
         validation_score = lead.get("conversion_score", 1.0)  # Use existing score or default to 1.0
-        
+
         mapped_lead = {
             "business": lead.get("business", lead.get("Business", "")),
             "owner_full_name": lead.get("owner_full_name", lead.get("Owner Full name", "")),
@@ -1326,7 +1437,18 @@ def add_validated_leads_to_pool(leads):
         if "conversion_score" in lead:
             mapped_lead["conversion_score"] = validation_score
         mapped_leads.append(mapped_lead)
-    
+
+    # ✅ V2: Record events for reward calculation when leads are added to pool
+    try:
+        from Leadpoet.validator.reward import record_event
+        for lead in leads:
+            if lead.get("source") and lead.get("curated_by") and lead.get("conversion_score"):
+                record_event(lead)
+                print(f"🎯 V2: Recorded event for lead {lead.get('owner_email', 'unknown')} "
+                      f"(source: {lead['source']}, curator: {lead['curated_by']})")
+    except Exception as e:
+        print(f"⚠️  V2: Failed to record events: {e}")
+
     lead_pool.add_to_pool(mapped_leads)
 
 
@@ -1353,14 +1475,14 @@ def main():
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     config.subtensor.network = args.subtensor_network
-    
+
     validator = Validator(config=config)
-    
+
     print("🚀 Starting LeadPoet Validator on Bittensor Network...")
     print(f"   Wallet: {validator.wallet.hotkey.ss58_address}")
     print(f"   NetUID: {config.netuid}")
     print("   Validator will process sourced leads and respond to API requests via Bittensor network")
-    
+
     # Run the validator on the Bittensor network
     validator.run()
 

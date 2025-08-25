@@ -1,1 +1,92 @@
-[]
+[
+  {
+    "timestamp": "2025-08-24T22:03:05.285407",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.3
+  },
+  {
+    "timestamp": "2025-08-24T22:13:01.877588",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.3
+  },
+  {
+    "timestamp": "2025-08-25T00:52:18.884193",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.45
+  },
+  {
+    "timestamp": "2025-08-25T01:02:03.610808",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.1
+  },
+  {
+    "timestamp": "2025-08-25T01:10:04.088082",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.0
+  },
+  {
+    "timestamp": "2025-08-25T01:31:23.306975",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.4
+  },
+  {
+    "timestamp": "2025-08-25T01:41:35.699665",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.45
+  },
+  {
+    "timestamp": "2025-08-25T02:05:00.075099",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.45
+  },
+  {
+    "timestamp": "2025-08-25T02:11:05.259587",
+    "source": "5FBhsXVWpezSHcpogXo4CjMcgTBctLcZ7VnNoKzn3oEGST44",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.45
+  },
+  {
+    "timestamp": "2025-08-25T02:13:50.162322",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.2
+  },
+  {
+    "timestamp": "2025-08-25T03:02:53.927643",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.4
+  },
+  {
+    "timestamp": "2025-08-25T03:06:41.018060",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.2
+  },
+  {
+    "timestamp": "2025-08-25T03:10:30.203801",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.45
+  },
+  {
+    "timestamp": "2025-08-25T04:08:49.637068",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.45
+  },
+  {
+    "timestamp": "2025-08-25T04:48:31.768518",
+    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "curated_by": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
+    "score": 0.45
+  }
+]

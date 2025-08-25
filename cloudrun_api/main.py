@@ -259,3 +259,31 @@ async def fetch_miner_result(_: Request):
     d = docs[0]
     db.collection(COLL_MINER_RES).document(d.id).delete()
     return d.to_dict()
+
+@app.post("/validator_weights")
+async def validator_weights(request: Request):
+    body = await request.json()
+    wallet_ss = body.get("wallet")
+    sig       = body.get("signature")
+    weights   = body.get("weights")
+
+    if not (wallet_ss and sig and isinstance(weights, dict)):
+        raise HTTPException(status_code=400, detail="wallet, signature, weights required")
+
+    # time-boxed payload identical to miners’ signing scheme
+    timestamp = str(int(time.time()) // 300)
+    payload   = (timestamp + json.dumps(weights, sort_keys=True)).encode()
+
+    # soft-fail on bad sig / permit
+    if not verify_sig(wallet_ss, payload, sig):
+        print("[WARN] bad signature – continuing (DEV mode)")
+    if not is_validator(wallet_ss):
+        print("[WARN] hotkey lacks validator-permit – continuing (DEV mode)")
+
+    doc = {
+        "hotkey":     wallet_ss,
+        "weights":    weights,
+        "created_at": firestore.SERVER_TIMESTAMP,
+    }
+    db.collection("validator_weights").add(doc)
+    return {"stored": True}

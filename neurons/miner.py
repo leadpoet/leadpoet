@@ -19,7 +19,7 @@ from Leadpoet.base.utils import queue as lead_queue
 from Leadpoet.base.utils import pool as lead_pool
 import json
 from Leadpoet.base.utils.pool import get_leads_from_pool
-from validator_models.os_validator_model import validate_lead_list
+
 from miner_models.intent_model import (
     rank_leads,
     classify_industry,
@@ -183,16 +183,18 @@ class Miner(BaseMinerNeuron):
                             "role": lead.get("role", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
+                            "curated_at": datetime.now(timezone.utc).isoformat(),
                         }
                         if all(m.get(f) for f in ["email", "Business"]):
                             mapped_leads.append(m)
-                    print(" Scoring leads with conversion model...")
-                    val = await validate_lead_list(mapped_leads, target_ind)
-                    scored_copy = val.get("scored_leads", [])
-                    for orig, sc in zip(mapped_leads, scored_copy):
-                        orig["conversion_score"] = sc.get("conversion_score", 0.0)
+                    print(" Ranking leads by intent...")
                     ranked = await rank_leads(mapped_leads, description=req.get("business_desc",""))
                     top_leads = ranked[:n]
+                    
+                    # Add curated_at timestamp to each lead
+                    for lead in top_leads:
+                        lead["curated_at"] = datetime.now(timezone.utc).isoformat()
+                    
                     print(f"📤 SENDING {len(top_leads)} curated leads to validator:")
                     for i, lead in enumerate(top_leads, 1):
                         print(f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})")
@@ -288,20 +290,13 @@ class Miner(BaseMinerNeuron):
                             "role": lead.get("role", ""),
                             "source":       lead.get("source", ""),
                             "curated_by":   self.wallet.hotkey.ss58_address,
+                            "curated_at":   datetime.now(timezone.utc).isoformat(),  # NEW: ISO timestamp
                         }
                         # Only include leads that have all required fields
                         if all(mapped_lead.get(field) for field in ["email", "Business"]):
                             mapped_leads.append(mapped_lead)
                     
-                 
-                    # run the open-source validator model to attach conversion_score
-                    print(" Scoring leads with conversion model...")
-                    val          = await validate_lead_list(mapped_leads, target_ind)
-                    scored_copy  = val.get("scored_leads", [])
-                    # bring scores back onto our rich objects (keeps Business/source/curated_by)
-                    for orig, sc in zip(mapped_leads, scored_copy):
-                        orig["conversion_score"] = sc.get("conversion_score", 0.0)
-
+                    # REMOVED: conversion_score calculation - no longer needed
                     # ── NEW: apply business-intent ranking ──────────────────────────
                     ranked = await rank_leads(mapped_leads, description=synapse.business_desc)
                     # ────────────────────────────────────────────────────────────────
@@ -436,14 +431,9 @@ class Miner(BaseMinerNeuron):
                     "process_time": "0"
                 }, status=404)
             
-            # ── score + intent-rank ────────────────────────────────────────────
-            print(" Scoring leads with conversion model and intent ranking...")
-            val         = await validate_lead_list(mapped_leads, target_ind)
-            scored_copy = val.get("scored_leads", [])
-            for orig, sc in zip(mapped_leads, scored_copy):
-                orig["conversion_score"]     = sc.get("conversion_score", 0.0)
-
-            ranked    = await rank_leads(mapped_leads, description=business_desc)
+            # ── intent-rank ────────────────────────────────────────────
+            print(" Ranking leads by intent...")
+            ranked = await rank_leads(mapped_leads, description=business_desc)
             top_leads = ranked[:num_leads]
 
             print(f"📤 SENDING {len(top_leads)} curated leads to validator:")
@@ -634,10 +624,7 @@ def sanitize_prospect(prospect, miner_hotkey=None):
     if not valid_url(sanitized["website"]):
         sanitized["website"] = ""
     
-    sanitized["id"] = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    sanitized["created_at"] = now
-    sanitized["updated_at"] = now
+    # REMOVED: id, created_at, updated_at - these should only be added during curation
     return sanitized
 
 def log_sourcing(hotkey, num_prospects):

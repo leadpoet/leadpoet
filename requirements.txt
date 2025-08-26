@@ -64,3 +64,7 @@ coverage>=7.3.0
 
 # Additional utilities
 typing-extensions>=4.7.0
+
+# Enhanced validation dependencies
+python-whois>=0.7.3
+fuzzywuzzy>=0.18.0

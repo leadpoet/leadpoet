@@ -4,7 +4,6 @@ import asyncio
 import argparse
 from Leadpoet.protocol import LeadRequest
 from Leadpoet.api.get_query_axons import get_query_api_axons
-from validator_models.os_validator_model import validate_lead_list
 from validator_models.automated_checks import validate_lead_list as auto_check_leads
 from miner_models.get_leads import VALID_INDUSTRIES
 import logging as _py_logging

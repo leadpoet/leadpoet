@@ -160,8 +160,7 @@ python neurons/validator.py \
 
 **Behavior**:
 - Queries miners for prospect batches (100 prospects by default)
-- Validates ~20% of each batch within 2 minutes using `os_validator_model.py`
-- Runs automated checks with `automated_checks.py`
+- Validates ~20% of each batch within 2 minutes using `automated_checks.py`
 - Assigns scores (0–100%) and updates miner weights
 - Processes sourced leads continuously and adds them to the prospect pool
 
@@ -238,24 +237,21 @@ Post-validation checks ensure prospect quality:
 ## Technical Details
 
 ### Architecture
-- **Miners**: `neurons/miner.py` uses `get_leads.py` and `firecrawl_sourcing.py` to generate prospects
+- **Miners**: `neurons/miner.py` uses `get_leads.py`to generate prospects
 - **Validators**: `neurons/validator.py` uses `os_validator_model.py` and `automated_checks.py` for scoring
 - **Buyers**: `Leadpoet/api/leadpoet_api.py` queries miners and filters validated prospects
 
 ### Prospect Workflow
-1. Buyer requests prospects (1–100, business description) via `leadpoet_api.py`
-2. Miners generate prospects using `get_leads.py` and `firecrawl_sourcing.py`
-3. Validators score prospects using `os_validator_model.py` (≥90% to pass)
-4. Approved prospects undergo `automated_checks.py` (≥90% to pass)
-5. Prospects are added to a pool (`Leadpoet/base/utils/pool.py`) and filtered for delivery
-6. Up to three retry attempts if validation or checks fail
+1. Buyer requests prospects (1–100, business description) via `leadpoet_api.py`.
+2. Miners curate prospects using `intent_model.py` and are sent to the validator.
+4. Validator scores prospects based on their intent using an LLM classification model and automated checks.
+6. Prospects with the highest deduced economic intent are sent back to the buyer.
 
 ### API Endpoints
 - **CLI Interface**: Interactive command-line interface for requesting prospects
 
 ### Open-Source Frameworks
-- **Prospect Generation**: `miner_models/get_leads.py` uses Hunter.io APIs
-- **Web Scraping**: `miner_models/firecrawl_sourcing.py` uses Firecrawl API for contact extraction
+- **Prospect Generation**: `miner_models/get_leads.py` uses Hunter.io APIs and Firecrawl API for contact extraction
 - **LLM Classification**: Uses OpenRouter API for industry classification
 - **Validation**: `validator_models/os_validator_model.py` checks email format, domain/website reachability
 - **Automated Checks**: `validator_models/automated_checks.py` verifies email existence and company websites

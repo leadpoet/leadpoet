@@ -8,10 +8,8 @@ import os
 import argparse
 from datetime import datetime, timedelta
 from Leadpoet.base.validator import BaseValidatorNeuron
-from Leadpoet.validator.forward import forward
 from Leadpoet.protocol import LeadRequest
-from validator_models.os_validator_model import validate_lead_list
-from validator_models.automated_checks import validate_lead_list as auto_check_leads
+from validator_models.automated_checks import validate_lead_list as auto_check_leads, run_automated_checks
 from Leadpoet.validator.reward import post_approval_check
 from Leadpoet.base.utils.config import add_validator_args
 import threading
@@ -267,21 +265,12 @@ class Validator(BaseValidatorNeuron):
             avg_score = sum(existing_scores) / len(existing_scores)
             return {"score": avg_score * 100, "O_v": avg_score}
 
-        # Otherwise proceed with normal validation
-        if self.use_open_source_model:
-            report = await validate_lead_list(leads, industry or "Unknown")
-            O_v = report["score"] / 100.0
-            if not await self.run_automated_checks(leads):
-                O_v = 0.0
-            return {"score": report["score"], "O_v": O_v}
-        else:
-            sample_size = max(1, int(len(leads) * self.sample_ratio))
-            sample_leads = random.sample(leads, min(sample_size, len(leads)))
-            valid_emails = sum(1 for lead in sample_leads if self.validate_email(lead.get('Owner(s) Email', '')))
-            O_v = random.uniform(0.8, 1.0) * (valid_emails / sample_size)
-            if not await self.run_automated_checks(leads):
-                O_v = 0.0
-            return {"score": O_v * 100, "O_v": O_v}
+        # Use automated_checks for all validation
+        report = await auto_check_leads(leads)
+        valid_count = sum(1 for entry in report if entry["status"] == "Valid")
+        score = (valid_count / len(leads)) * 100 if leads else 0
+        O_v = score / 100.0
+        return {"score": score, "O_v": O_v}
 
     async def run_automated_checks(self, leads: list) -> bool:
         report = await auto_check_leads(leads)
@@ -512,24 +501,45 @@ class Validator(BaseValidatorNeuron):
                     break
                 time.sleep(SLEEP_SEC)
 
-        # 4️⃣ Rank leads using LLM scoring
+        # 4️⃣ Rank leads using LLM scoring (TWO rounds as intended)
         if all_miner_leads:
             print(f"🔍 Ranking {len(all_miner_leads)} leads with LLM...")
             scored_leads = []
+            
+            # Initialize aggregation dictionary for each lead
+            aggregated = {id(lead): 0.0 for lead in all_miner_leads}
+            
+            # ROUND 1: First LLM scoring
+            print(f"🔄 LLM round 1/2 (model: deepseek/deepseek-chat-v3-0324:free)")
             for lead in all_miner_leads:
                 score = _llm_score_lead(lead, synapse.business_desc, "deepseek/deepseek-chat-v3-0324:free")
-                lead["llm_score"] = score
+                aggregated[id(lead)] += score
+            
+            # ROUND 2: Second LLM scoring (random model selection)
+            second_model = random.choice(AVAILABLE_MODELS)
+            print(f"🔄 LLM round 2/2 (model: {second_model})")
+            for lead in all_miner_leads:
+                score = _llm_score_lead(lead, synapse.business_desc, second_model)
+                aggregated[id(lead)] += score
+            
+            # Apply aggregated scores to leads
+            for lead in all_miner_leads:
+                lead["intent_score"] = round(aggregated[id(lead)], 3)  # Total of both rounds (0.0 - 1.0)
                 scored_leads.append(lead)
 
-            # Sort by LLM score and take top N
-            scored_leads.sort(key=lambda x: x["llm_score"], reverse=True)
+            # Sort by aggregated intent_score and take top N
+            scored_leads.sort(key=lambda x: x["intent_score"], reverse=True)
             top_leads = scored_leads[:synapse.num_leads]
 
             print(f" Top {len(top_leads)} leads selected:")
             for i, lead in enumerate(top_leads, 1):
                 business = lead.get('Business', lead.get('business', 'Unknown'))
-                score = lead.get('llm_score', 0)
+                score = lead.get('intent_score', 0)
                 print(f"  {i}. {business} (score={score:.3f})")
+
+            # Add c_validator_hotkey to leads being sent to client via Bittensor
+            for lead in top_leads:
+                lead["c_validator_hotkey"] = self.wallet.hotkey.ss58_address
 
             synapse.leads = top_leads
 
@@ -541,8 +551,7 @@ class Validator(BaseValidatorNeuron):
                     # Record events for each lead in the Final Curated List
                     for lead in top_leads:
                         if lead.get("source") and lead.get("curated_by"):
-                            # Ensure lead has required fields for V2 calculation
-                            lead["conversion_score"] = lead.get("llm_score", 0.5)
+                          
                             record_event(lead)
 
                     # Calculate V2 weights and emissions
@@ -803,14 +812,14 @@ class Validator(BaseValidatorNeuron):
                     aggregated[id(ld)] += _llm_score_lead(ld, business_desc, mdl)
 
             for ld in all_leads:
-                ld["validator_intent_score"] = round(aggregated[id(ld)], 3)
+                ld["intent_score"] = round(aggregated[id(ld)], 3)
 
-             # Rank primarily by LLM aggregate, tie-break by miner's score.
+            # Rank primarily by LLM aggregate, tie-break by miner's score.
             #  -> always default to 0 so we never compare None with float.
             all_leads.sort(
                 key=lambda x: (
-                    x.get("validator_intent_score", 0.0),
-                    x.get("miner_intent_score",     0.0)
+                    x.get("intent_score", 0.0),
+                    x.get("miner_intent_score", 0.0)
                 ),
                 reverse=True,
             )
@@ -820,7 +829,7 @@ class Validator(BaseValidatorNeuron):
             print(f" TOP {len(top_leads)} RANKED LEADS:")
             for i, lead in enumerate(top_leads, 1):
                 business    = lead.get('Business', lead.get('business', 'Unknown'))
-                score_llm   = lead.get('validator_intent_score', 0)
+                score_llm   = lead.get('intent_score', 0)
                 score_miner = lead.get('miner_intent_score', 0)
                 source      = lead.get('source', 'Unknown')
                 curator     = lead.get('curated_by', 'Unknown')
@@ -830,6 +839,9 @@ class Validator(BaseValidatorNeuron):
                     f"Source: {source}, Curator: {curator})"
                 )
 
+            # Add c_validator_hotkey to leads being sent to client
+            for lead in top_leads:
+                lead["c_validator_hotkey"] = self.wallet.hotkey.ss58_address
 
             print(f"📤 SENDING top {len(top_leads)} leads to client")
             bt.logging.info(f" RETURNING top {len(top_leads)} leads to client")
@@ -1003,12 +1015,13 @@ class Validator(BaseValidatorNeuron):
                         print(f"\n  Validating: {lead.get('business', lead.get('website',''))}")
                         print(f"    Email: {lead.get('owner_email','?')}")
 
-                        result = self.validate_lead(lead)
+                        # Run async validate_lead in sync context
+                        result = asyncio.run(self.validate_lead(lead))
                         if result["is_legitimate"]:
                             # ✅ V2: Set current K miner after automated checks pass
                             from Leadpoet.validator.reward import set_current_K_miner
                             set_current_K_miner(miner_hotkey)
-                            print(f"    ✅ Passed basic checks - K miner updated to {miner_hotkey}")
+                            print(f"    ✅ Passed automated checks - K miner updated to {miner_hotkey}")
                             print(f"    🔑 K miner allocation: {miner_hotkey} now has Kₘ = 1, all others have Kₘ = 0")
 
                             # Add prospect to pool after K miner update
@@ -1048,9 +1061,10 @@ class Validator(BaseValidatorNeuron):
 
     def move_to_validated_leads(self, lead, score):
         """Write validated lead to Firestore; skip if it already exists."""
-        lead["validation_score"] = score
+        # REMOVED: validation_score - this should only be added during curation
         lead["validator_hotkey"] = self.wallet.hotkey.ss58_address
-        lead["validated_at"]     = time.time()
+        # Use ISO format timestamp instead of Unix timestamp
+        lead["validated_at"] = datetime.now(timezone.utc).isoformat()
 
         try:
             stored = save_leads_to_cloud(self.wallet, [lead])   # True ↔ actually written
@@ -1084,35 +1098,38 @@ class Validator(BaseValidatorNeuron):
         except Exception:
             return False
 
-    def validate_lead(self, lead):
-        """Validate a single lead (sourcing-side). No scoring – just pass / fail."""
+    async def validate_lead(self, lead):
+        """Validate a single lead using automated_checks. Returns pass/fail."""
         try:
-            email  = lead.get('owner_email', '')
-            domain = lead.get('business', '')
-
-            # 1️⃣  Required fields present
-            if not email or not domain:
+            # 1️⃣ Check for required email field first
+            email = lead.get('owner_email', lead.get('email', ''))
+            if not email:
                 return {'is_legitimate': False,
-                        'reason': 'Missing email or domain',
+                        'reason': 'Missing email',
                         'score': 0.0}
-
-            # 2️⃣  Disposable / throw-away e-mail check
-            if self.is_disposable_email(email):
-                return {'is_legitimate': False,
-                        'reason': 'Disposable email detected',
-                        'score': 0.0}
-
-            # 3️⃣  Domain syntax validity
-            if not self.check_domain_legitimacy(domain):
-                return {'is_legitimate': False,
-                        'reason': 'Invalid domain',
-                        'score': 0.0}
-
-            # 4️⃣  Duplicate detection handled elsewhere; if we reach here we pass
-            return {'is_legitimate': True,
-                    'reason': 'Passed validation',
-                    'score': 1.0}
-
+            
+            # 2️⃣ Map your field names to what automated_checks expects
+            mapped_lead = {
+                "email": email,  # Map to "email" field
+                "Email 1": email,  # Also map to "Email 1" as backup
+                "Company": lead.get('business', lead.get('website', '')),  # Map business -> Company
+                "Website": lead.get('website', lead.get('business', '')),  # Map to Website
+                "website": lead.get('website', lead.get('business', '')),  # Also lowercase
+                "First Name": lead.get('first', ''),
+                "Last Name": lead.get('last', ''),
+                # Include any other fields that might be useful
+                **lead  # Include all original fields too
+            }
+            
+            # 3️⃣ Use automated_checks for comprehensive validation
+            passed, reason = await run_automated_checks(mapped_lead)
+            
+            return {
+                'is_legitimate': passed,
+                'reason': reason,
+                'score': 1.0 if passed else 0.0
+            }
+            
         except Exception as e:
             bt.logging.error(f"Error in validate_lead: {e}")
             return {'is_legitimate': False,

@@ -1,0 +1,3 @@
+{"timestamp": "2025-08-25T23:03:00.347559", "stage": "email_regex", "email": "contact@preparedcitizenstg.com", "company": "preparedcitizenstg.com", "passed": true, "reason": "Valid email format"}
+{"timestamp": "2025-08-25T23:04:50.869507", "stage": "email_regex", "email": "contact@www.caffepiazza.com", "company": "www.caffepiazza.com", "passed": true, "reason": "Valid email format"}
+{"timestamp": "2025-08-25T23:24:14.780235", "stage": "email_regex", "email": "contact@www.hugedomains.com", "company": "www.hugedomains.com", "passed": true, "reason": "Valid email format"}

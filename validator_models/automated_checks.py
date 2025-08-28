@@ -487,37 +487,60 @@ async def check_zerobounce_email(lead: dict) -> Tuple[bool, str]:
         return validation_cache[cache_key]
 
     try:
-        # Mock-mode fallback
+        # Mock-mode fallback - both validation and scoring work
         if "YOUR_ZEROBOUNCE_API_KEY" in ZEROBOUNCE_API_KEY:
-            result = (True, "Mock pass - ZeroBounce check")
+            # Mock both API calls
+            score = -1  # Mock AI score if no API key
+            lead["email_score"] = score
+            print(f"📊 ZeroBounce AI score for {email}: {score} (MOCK)")
+            result = (True, f"Mock pass - ZeroBounce check, score={score}")
             validation_cache[cache_key] = result
             return result
 
         async with API_SEMAPHORE:
             async with aiohttp.ClientSession() as session:
-                # 1️⃣ standard validation
+                # 1️⃣ standard validation FIRST
                 url_validate = "https://api.zerobounce.net/v2/validate"
                 params_val   = {"api_key": ZEROBOUNCE_API_KEY, "email": email}
                 async with session.get(url_validate, params=params_val, timeout=10) as resp_val:
                     data_val  = await resp_val.json()
                     status    = data_val.get("status", "unknown")
 
-                # 2️⃣ A.I. email score
-                url_score  = "https://api-us.zerobounce.net/v2/scoring"
-                params_scr = {"api_key": ZEROBOUNCE_API_KEY, "email": email}
-                async with session.get(url_score, params=params_scr, timeout=10) as resp_scr:
-                    data_scr = await resp_scr.json()
-                    score    = float(data_scr.get("score", -1))   # 0-10 or -1 on error
+                # Check for problematic email statuses and fail immediately
+                problematic_statuses = ["do_not_mail", "spamtrap", "abuse"]
+                if status in problematic_statuses:
+                    status_messages = {
+                        "do_not_mail": "Email marked as do_not_mail",
+                        "spamtrap": "Email is a spamtrap/honeypot - do not mail",
+                        "abuse": "Email marked as abuse"
+                    }
+                    result = (False, status_messages.get(status, f"Email has problematic status: {status}"))
+                    validation_cache[cache_key] = result
+                    return result
 
-        # Store score directly on the lead so downstream code can use it
-        lead["email_score"] = score
-        print(f"📊 ZeroBounce AI score for {email}: {score}")
+                # Check if validation passed
+                validation_passed = status in ["valid", "catch-all"]
+                
+                if validation_passed:
+                    # 2️⃣ A.I. email score - ONLY if validation passed
+                    url_score  = "https://api-us.zerobounce.net/v2/scoring"
+                    params_scr = {"api_key": ZEROBOUNCE_API_KEY, "email": email}
+                    async with session.get(url_score, params=params_scr, timeout=10) as resp_scr:
+                        data_scr = await resp_scr.json()
+                        score    = float(data_scr.get("score", -1))   # 0-10 or -1 on error
+                    
+                    # Store score directly on the lead so downstream code can use it
+                    lead["email_score"] = score
+                    print(f"📊 ZeroBounce AI score for {email}: {score}")
+                else:
+                    # Validation failed - don't make scoring API call
+                    score = -1  # Indicate no score was obtained
 
         # Decide pass/fail using the original validation status
         if status in ["valid", "catch-all"]:
             result = (True, f"Email validated ({status}), score={score}")
         elif status == "invalid":
-            result = (False, f"Email marked invalid, score={score}")
+            result = (False, f"Email marked invalid")
         else:
             result = (True, f"Email status {status}, score={score} (assumed valid)")
 

@@ -7,7 +7,7 @@ validation_artifacts/
 data/
 logs/
 validator_weights/
-miner_models/lead_sorcerer_main/main_env.template
+env.txt
 
 # macOS
 .DS_Store

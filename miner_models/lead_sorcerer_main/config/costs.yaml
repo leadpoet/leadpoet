@@ -1,0 +1,54 @@
+# Provider cost configuration for Lead Sorcerer
+# All costs are in USD per unit
+
+coresignal:
+  unit: 'lookup'
+  usd_per_unit: 0.0100
+
+mailgun:
+  unit: 'smtp_validation'
+  usd_per_unit: 0.0020
+
+snovio:
+  unit: 'credit'
+  usd_per_unit: 0.0150
+  # Snov.io pricing:
+  # - 1 credit per prospect search
+  # - 1 credit per email found
+  # - No charge for searches with zero results
+
+company_enrich:
+  unit: 'lookup'
+  usd_per_unit: 0.0100
+  # CompanyEnrich pricing:
+  # - $0.01 per company lookup
+  # - $0.02 per contact lookup
+  # - $0.015 per email lookup
+
+anymail_finder:
+  unit: 'lookup'
+  usd_per_unit: 0.0080
+  # Anymail Finder pricing:
+  # - $0.008 per company lookup
+  # - $0.015 per contact lookup
+  # - $0.012 per email lookup
+
+apollo:
+  unit: 'credit'
+  usd_per_unit: 0.0150
+  # Apollo pricing:
+  # - 1 credit per search request
+  # - 1 credit per enrichment request
+  # - Bulk operations may have different pricing
+
+openrouter:
+  unit: '1k_tokens'
+  usd_per_unit: 0.0020
+
+gse:
+  unit: 'request'
+  usd_per_unit: 0.0005
+
+firecrawl:
+  unit: 'extract'
+  usd_per_unit: 0.0010

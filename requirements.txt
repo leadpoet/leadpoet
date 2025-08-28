@@ -64,7 +64,27 @@ coverage>=7.3.0
 
 # Additional utilities
 typing-extensions>=4.7.0
+python-Levenshtein>=0.23.0
+
 
 # Enhanced validation dependencies
 python-whois>=0.7.3
 fuzzywuzzy>=0.18.0
+
+# Core dependencies
+httpx>=0.27.0
+openrouter>=1.0.0
+firecrawl>=2.16.0
+openai>=1.0.0
+
+mailgun>=1.1.0,<2.0.0
+phonenumbers>=8.13.0
+portalocker>=2.7.0
+publicsuffix2>=2.20191221
+
+# Note: Snov.io package not available on PyPI - will implement custom client using httpx
+# Custom implementation will be in src/enrich.py for Snov.io API calls
+
+# Schema validation and configuration
+jsonschema>=4.17.0
+PyYAML>=6.0

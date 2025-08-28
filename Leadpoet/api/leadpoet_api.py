@@ -390,29 +390,48 @@ def main():
                "business_desc": business_desc}
 
     async def fetch_leads():
-        leads = await api.get_leads(num_leads, business_desc)
-        print(f"Retrieved {len(leads)} leads:")
-        for i, lead in enumerate(leads, 1):
-            print(f"Lead {i}: {lead}")
-        
-        # Handle empty feedback input
-        while True:
-            feedback_input = input("Enter feedback score (0-10): ").strip()
-            if feedback_input == "":
-                print("Please enter a valid feedback score.")
-                continue
-            try:
-                feedback = float(feedback_input)
-                if 0 <= feedback <= 10:
-                    break
-                else:
-                    print("Feedback score must be between 0 and 10.")
-            except ValueError:
-                print("Please enter a valid number.")
-        
-        await api.submit_feedback(leads, feedback)
+        try:
+            leads = await api.get_leads(num_leads, business_desc)
+            print(f"Retrieved {len(leads)} leads:")
+            for i, lead in enumerate(leads, 1):
+                print(f"Lead {i}: {lead}")
+            
+            # Handle empty feedback input
+            while True:
+                feedback_input = input("Enter feedback score (0-10): ").strip()
+                if feedback_input == "":
+                    print("Please enter a valid feedback score.")
+                    continue
+                try:
+                    feedback = float(feedback_input)
+                    if 0 <= feedback <= 10:
+                        break
+                    else:
+                        print("Feedback score must be between 0 and 10.")
+                except ValueError:
+                    print("Please enter a valid number.")
+            
+            await api.submit_feedback(leads, feedback)
+        except Exception as e:
+            print(f"❌ Error occurred: {e}")
+            print("This could be due to network connectivity issues or API unavailability.")
+            print("Please check your connection and try again.")
+            return  # Return gracefully instead of crashing
 
-    asyncio.run(fetch_leads())
+    # Add a retry loop for the main API interaction
+    while True:
+        try:
+            asyncio.run(fetch_leads())
+            break  # Exit if successful
+        except KeyboardInterrupt:
+            print("\nExiting...")
+            break
+        except Exception as e:
+            print(f"❌ Connection failed: {e}")
+            retry = input("Would you like to retry? (y/n): ").strip().lower()
+            if retry != 'y':
+                break
+            print("Retrying...")
 
 if __name__ == "__main__":
     main()

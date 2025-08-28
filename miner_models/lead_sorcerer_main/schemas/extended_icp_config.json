@@ -1,0 +1,433 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lead-sorcerer.com/schemas/extended_icp_config.json",
+  "title": "Extended ICP Configuration Schema with Apollo Support",
+  "description": "Extended ICP configuration schema supporting traditional and Apollo lead generation modes",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "maxLength": 2048,
+      "description": "Human-readable name for this ICP configuration"
+    },
+    "icp_text": {
+      "type": "string",
+      "maxLength": 4096,
+      "description": "Detailed description of the Ideal Customer Profile"
+    },
+    "lead_generation_mode": {
+      "type": "string",
+      "enum": ["traditional", "specific_urls", "apollo"],
+      "default": "traditional",
+      "description": "Lead generation strategy to use. 'traditional' = Domain→Crawl→Enrich, 'apollo' = Apollo-first generation"
+    },
+    "queries": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2048
+      },
+      "maxItems": 50,
+      "description": "Search queries for traditional mode domain discovery"
+    },
+    "required_fields": {
+      "type": "object",
+      "properties": {
+        "company": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 20
+        },
+        "contact": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 20
+        }
+      },
+      "additionalProperties": false
+    },
+    "optional_fields": {
+      "type": "object",
+      "properties": {
+        "company": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 20
+        },
+        "contact": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 20
+        }
+      },
+      "additionalProperties": false
+    },
+    "threshold": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.7,
+      "description": "ICP fit threshold for progression"
+    },
+    "filtering_strict": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether to apply strict filtering"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["fast", "thorough"],
+      "default": "fast",
+      "description": "Processing mode for traditional pipeline"
+    },
+    "refresh_policy": {
+      "type": "object",
+      "properties": {
+        "revisit_after_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365
+        },
+        "failure_revisit_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "domain_serp_ttl_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168
+        },
+        "crawl_ttl_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365
+        }
+      },
+      "additionalProperties": false
+    },
+    "concurrency": {
+      "type": "object",
+      "properties": {
+        "max_concurrent_requests": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "search": {
+      "type": "object",
+      "properties": {
+        "max_pages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "testing": {
+      "type": "object",
+      "properties": {
+        "process_rejected": {
+          "type": "boolean"
+        },
+        "process_low_crawl": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "caps": {
+      "type": "object",
+      "properties": {
+        "company_usd": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "contact_usd": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "run_usd_max": {
+          "type": "number",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "role_priority": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 99
+      },
+      "description": "Role priority mapping (lower = higher priority)"
+    },
+    "exports": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "default_country": {
+      "type": "string",
+      "maxLength": 10,
+      "description": "Default country for location-based searches"
+    },
+    "exclusion_criteria": {
+      "type": "object",
+      "properties": {
+        "ownership_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        },
+        "max_locations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "excluded_keywords": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "targeting": {
+      "type": "object",
+      "properties": {
+        "location_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        },
+        "practice_sizes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        },
+        "ownership_models": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "apollo": {
+      "type": "object",
+      "description": "Apollo-specific configuration (required when lead_generation_mode == 'apollo')",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether Apollo integration is enabled"
+        },
+        "search": {
+          "type": "object",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "enum": ["company_first", "person_first"],
+              "default": "company_first",
+              "description": "Search strategy: find companies first then contacts, or vice versa"
+            },
+            "company_filters": {
+              "type": "object",
+              "properties": {
+                "industry": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "description": "Industry keywords for company filtering (loaded from icp_config)"
+                },
+                "size": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "description": "Company size criteria (loaded from icp_config)"
+                },
+                "location": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "description": "Location criteria (loaded from icp_config)"
+                },
+                "technologies": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "description": "Technology stack criteria (loaded from icp_config)"
+                },
+                "funding_stage": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "description": "Funding stage criteria (loaded from icp_config)"
+                }
+              },
+              "additionalProperties": false
+            },
+            "person_filters": {
+              "type": "object",
+              "properties": {
+                "job_titles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "description": "Job title criteria (loaded from icp_config.role_priority keys)"
+                },
+                "seniority": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "description": "Seniority criteria (loaded from icp_config)"
+                },
+                "departments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "description": "Department criteria (loaded from icp_config)"
+                }
+              },
+              "additionalProperties": false
+            },
+            "max_results": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000,
+              "default": 1000,
+              "description": "Maximum number of results to return from Apollo search"
+            },
+            "use_pagination": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether to use pagination for large result sets"
+            }
+          },
+          "additionalProperties": false
+        },
+        "enrich": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether to enable Apollo enrichment"
+            },
+            "use_bulk": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether to use bulk enrichment operations"
+            },
+            "batch_size": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25,
+              "description": "Batch size for bulk enrichment operations"
+            },
+            "required_fields": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["email", "phone", "linkedin_url", "company_name", "industry", "size"]
+              },
+              "description": "Fields that must be present after enrichment"
+            }
+          },
+          "additionalProperties": false
+        },
+        "fallback": {
+          "type": "object",
+          "properties": {
+            "to_traditional_flow": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether to fallback to traditional pipeline on Apollo failure"
+            },
+            "max_retries": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 3,
+              "description": "Maximum number of retry attempts for Apollo operations"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "lead_generation_mode": {
+            "const": "apollo"
+          }
+        }
+      },
+      "then": {
+        "required": ["apollo"],
+        "properties": {
+          "apollo": {
+            "required": ["enabled"],
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

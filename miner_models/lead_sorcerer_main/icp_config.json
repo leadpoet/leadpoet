@@ -1,0 +1,158 @@
+{
+  "name": "Dental Practice Acquisition - Optimized ICP",
+  "icp_text": "Independent and regional dental practice groups in the United States with 5+ locations that are not private equity backed and not part of large national franchises. Focus on practices showing potential for acquisition or transition.",
+  "queries": [
+    "family owned dental practices multiple offices New England"
+  ],
+  "specific_urls": ["https://www.dentalfone.com/"],
+  "required_fields": {
+    "company": ["name", "hq_location", "number_of_locations", "ownership_type", "industry"],
+    "contact": ["email", "job_title", "full_name"]
+  },
+  "optional_fields": {
+    "company": ["tech_stack", "revenue_range", "employee_count", "specialties", "founded_year", "company_type"],
+    "contact": ["phone", "linkedin_url", "decision_maker", "department", "seniority"]
+  },
+  "threshold": 0.5,
+  "filtering_strict": false,
+  "mode": "fast",
+  "apollo": {
+    "enrich": {
+      "enabled": true
+    }
+  },
+  "enrichment_providers": {
+    "anymail_finder": {
+      "enabled": true
+    },
+    "apollo": {
+      "enabled": true
+    }
+  },
+  "refresh_policy": {
+    "revisit_after_days": 90,
+    "failure_revisit_days": 7,
+    "domain_serp_ttl_hours": 48,
+    "crawl_ttl_days": 14,
+    "enrich_ttl_days": 30
+  },
+  "concurrency": {
+    "max_concurrent_requests": 3
+  },
+  "search": {
+    "max_pages": 5,
+    "max_results_per_query": 50
+  },
+  "testing": {
+    "process_rejected": true,
+    "process_low_crawl": true,
+    "force_contact_discovery": true
+  },
+  "caps": {
+    "company_usd": 0.02,
+    "contact_usd": 0.03,
+    "run_usd_max": 10.0,
+    "max_domains_per_run": 20,
+    "max_crawl_per_run": 20,
+    "max_enrich_per_run": 20
+  },
+  "role_priority": {
+    "ceo": 1,
+    "owner": 1,
+    "founder": 1,
+    "president": 1,
+    "vp operations": 2,
+    "practice administrator": 3,
+    "office manager": 4,
+    "director": 5,
+    "default": 99
+  },
+  "exports": {
+    "enabled": true
+  },
+  "default_country": "US",
+  "exclusion_criteria": {
+    "ownership_types": ["private_equity", "large_franchise", "corporate_chain", "public_company"],
+    "max_locations": 50,
+    "excluded_keywords": ["franchise", "corporate", "private equity", "investor backed", "public company", "national chain"]
+  },
+  "targeting": {
+    "location_types": ["multi_location", "regional", "independent"],
+    "practice_sizes": ["5-20 locations", "20-50 locations"],
+    "ownership_models": ["family_owned", "partnership", "independent_group", "llc"],
+    "geographic_focus": ["Northeast", "New England", "Mid-Atlantic", "Southeast"]
+  },
+  "intent_config": {
+    "purpose": "dental_practice_acquisition",
+    "target_action": "sell_practice",
+    "intent_signals": {
+      "high_intent": [
+        "owner retirement planning",
+        "succession planning",
+        "looking for partners",
+        "transition mode",
+        "no clear family successor",
+        "owner age 60+",
+        "practice for sale",
+        "broker listing",
+        "exit planning",
+        "transition assistance",
+        "FOR SALE",
+        "dental practice for sale",
+        "practice transition",
+        "owner exit",
+        "broker listing",
+        "practice listing",
+        "seeking strategic partner",
+        "growth capital needed",
+        "expansion opportunity"
+      ],
+      "medium_intent": [
+        "expansion planning",
+        "growth capital needed",
+        "partnership exploring",
+        "early succession planning",
+        "considering strategic options",
+        "strategic buyer",
+        "growth opportunity",
+        "looking for investment",
+        "considering partnerships",
+        "strategic review"
+      ],
+      "low_intent": [
+        "recently acquired",
+        "part of corporate group",
+        "family succession secure",
+        "no exit plans",
+        "committed to independence",
+        "recently expanded",
+        "not for sale",
+        "family owned for generations",
+        "stable ownership",
+        "no transition plans"
+      ]
+    },
+    "intent_sources": [
+      "about_pages",
+      "leadership_pages",
+      "careers_pages",
+      "recent_news",
+      "social_media",
+      "team_pages",
+      "broker_listings",
+      "practice_details",
+      "listing_pages",
+      "contact_pages",
+      "staff_pages"
+    ],
+    "scoring_rules": {
+      "high_intent_weight": 0.8,
+      "medium_intent_weight": 0.4,
+      "low_intent_weight": -0.3,
+      "base_score": 0.5,
+      "location_bonus": 0.1,
+      "age_bonus": 0.1,
+      "ownership_bonus": 0.1
+    }
+  }
+}

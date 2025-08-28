@@ -7,7 +7,7 @@ import bittensor as bt
 import socket
 from Leadpoet.base.miner import BaseMinerNeuron
 from Leadpoet.protocol import LeadRequest
-from miner_models.get_leads import get_leads
+from miner_models.lead_sorcerer_main.main_leads import get_leads
 from typing import Union, Tuple, List, Dict, Optional
 from aiohttp import web
 import os
@@ -325,7 +325,7 @@ class Miner(BaseMinerNeuron):
                     synapse.dendrite.status_code = 200
                     synapse.dendrite.status_message = "OK"
                     synapse.dendrite.process_time = str(time.time() - start_time)
-                                                            
+                                                                    
                 finally:
                     # Re-enable sourcing after curation
                     print("▶️  Resuming sourcing mode...")

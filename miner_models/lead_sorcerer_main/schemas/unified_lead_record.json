@@ -1,0 +1,924 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lead-sorcerer.com/schemas/unified_lead_record.json",
+  "title": "Unified Lead Record Schema",
+  "description": "Canonical schema for lead records across all Lead Sorcerer tools",
+  "type": "object",
+  "required": ["lead_id", "domain", "company", "contacts", "icp", "provenance", "status", "status_history", "audit", "cost"],
+  "properties": {
+    "lead_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Deterministic UUID5 identifier for the lead"
+    },
+    "domain": {
+      "type": "string",
+      "format": "hostname",
+      "description": "eTLD+1 normalized domain name"
+    },
+    "company": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Company name"
+        },
+        "description": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Company description"
+        },
+        "industry": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Primary industry"
+        },
+        "naics_keywords": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 50,
+          "description": "NAICS industry keywords"
+        },
+        "hq_location": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Headquarters location"
+        },
+        "locations": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "maxLength": 2048
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": ["string", "null"],
+                    "maxLength": 2048,
+                    "description": "Full address of the location"
+                  },
+                  "city": {
+                    "type": ["string", "null"],
+                    "maxLength": 2048,
+                    "description": "City name"
+                  },
+                  "state": {
+                    "type": ["string", "null"],
+                    "maxLength": 2048,
+                    "description": "State or province"
+                  },
+                  "country": {
+                    "type": ["string", "null"],
+                    "maxLength": 2048,
+                    "description": "Country name"
+                  },
+                  "is_primary": {
+                    "type": ["boolean", "null"],
+                    "description": "Whether this is the primary location"
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          },
+          "maxItems": 100,
+          "description": "Additional office locations (strings or detailed objects)"
+        },
+        "size_hint": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Company size indicator"
+        },
+        "socials": {
+          "type": "object",
+          "properties": {
+            "linkedin": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "github": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "twitter": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "telegram": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "instagram": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "facebook": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "youtube": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "tiktok": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "discord": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "pinterest": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "reddit": {
+              "type": ["string", "null"],
+              "format": "uri",
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "careers_url": {
+          "type": ["string", "null"],
+          "format": "uri",
+          "maxLength": 2048
+        },
+        "blog_url": {
+          "type": ["string", "null"],
+          "format": "uri",
+          "maxLength": 2048
+        },
+        "tech_stack": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 50,
+          "description": "Technology stack components"
+        },
+        "founded_year": {
+          "type": ["integer", "null"],
+          "minimum": 1800,
+          "maximum": 2100,
+          "description": "Year company was founded"
+        },
+        "ownership_type": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Type of ownership (e.g., private, public, franchise, etc.)"
+        },
+        "company_type": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Company type/category from external sources"
+        },
+        "business_status": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Business operational status (e.g., active, inactive, closed)"
+        },
+        "ids": {
+          "type": "object",
+          "properties": {
+            "linkedin": {
+              "type": ["string", "null"],
+              "pattern": "^/company/[^/]+$",
+              "maxLength": 2048
+            },
+            "crunchbase": {
+              "type": ["string", "null"],
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false
+        },
+        "hq_country": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Country where company headquarters is located"
+        },
+        "hq_regions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 10,
+          "description": "Geographic regions where company operates"
+        },
+        "sector": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Business sector classification"
+        },
+        "followers_count": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Number of social media followers"
+        },
+        "ticker": {
+          "type": ["string", "null"],
+          "maxLength": 20,
+          "description": "Stock ticker symbol"
+        },
+        "exchange": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Stock exchange where company is listed"
+        },
+        "enriched_summary": {
+          "type": ["string", "null"],
+          "maxLength": 4096,
+          "description": "AI-generated company summary"
+        },
+        "enriched_keywords": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 50,
+          "description": "AI-extracted business keywords"
+        },
+        "enriched_b2b_score": {
+          "type": ["number", "null"],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "B2B relevance score"
+        },
+        "enriched_category": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "AI-categorized business type"
+        },
+        "number_of_locations": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Total number of office locations"
+        },
+        "employee_count": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Number of employees or range"
+        },
+        "revenue_range": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Annual revenue range"
+        },        "specialties": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 50,
+          "description": "Company specialties and focus areas"
+        },
+        "phone_numbers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 50
+          },
+          "maxItems": 50,
+          "description": "Company phone numbers"
+        },
+        "emails": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 2048
+          },
+          "maxItems": 50,
+          "description": "Company email addresses (Firecrawl extracted)"
+        },
+        "company_emails": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 2048
+          },
+          "maxItems": 50,
+          "description": "Company email addresses"
+        },
+        "funding": {
+          "type": "object",
+          "properties": {
+            "last_round_type": {
+              "type": ["string", "null"],
+              "maxLength": 2048,
+              "description": "Type of most recent funding round"
+            },
+            "last_round_date": {
+              "type": ["string", "null"],
+              "maxLength": 2048,
+              "description": "Date of most recent funding round"
+            },
+            "last_round_amount": {
+              "type": ["string", "null"],
+              "maxLength": 2048,
+              "description": "Amount raised in most recent round"
+            },
+            "total_rounds": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "description": "Total number of funding rounds"
+            },
+            "last_round_investors": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "description": "Number of investors in most recent round"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Company funding information"
+        },
+        "business_features": {
+          "type": "object",
+          "properties": {
+            "pricing_available": {
+              "type": ["boolean", "null"],
+              "description": "Whether pricing information is available"
+            },
+            "free_trial_available": {
+              "type": ["boolean", "null"],
+              "description": "Whether free trial is available"
+            },
+            "demo_available": {
+              "type": ["boolean", "null"],
+              "description": "Whether product demo is available"
+            },
+            "is_downloadable": {
+              "type": ["boolean", "null"],
+              "description": "Whether product is downloadable"
+            },
+            "mobile_apps_exist": {
+              "type": ["boolean", "null"],
+              "description": "Whether mobile apps exist"
+            },
+            "online_reviews_exist": {
+              "type": ["boolean", "null"],
+              "description": "Whether online reviews exist"
+            },
+            "api_docs_exist": {
+              "type": ["boolean", "null"],
+              "description": "Whether API documentation exists"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Business feature flags"
+        },
+        "metadata_title": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Website metadata title"
+        },
+        "evidence_urls": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uri",
+                "maxLength": 2048,
+                "description": "Simple URL string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri",
+                    "maxLength": 2048,
+                    "description": "URL of the evidence page"
+                  },
+                  "title": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "description": "Title of the evidence page"
+                  },
+                  "snippet": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "description": "Snippet/description of the evidence page"
+                  },
+                  "query": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "description": "Search query that led to this evidence"
+                  },
+                  "page_index": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Page number where this result was found"
+                  },
+                  "rank_on_page": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Rank position on the page"
+                  },
+                  "fetched_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "ISO-8601 UTC timestamp when this was fetched"
+                  },
+                  "domain": {
+                    "type": "string",
+                    "format": "hostname",
+                    "description": "Normalized domain of the evidence page"
+                  }
+                },
+                "required": ["url", "title", "snippet", "query", "page_index", "rank_on_page", "fetched_at", "domain"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "maxItems": 100,
+          "description": "Evidence supporting company data (SERP results or simple URLs)"
+        }
+       },
+       "additionalProperties": true
+     },
+     "contacts": {
+       "type": "array",
+       "items": {
+         "type": "object",
+         "properties": {
+          "full_name": {
+            "type": ["string", "null"],
+            "maxLength": 2048,
+            "description": "Full name of the contact"
+          },
+          "contact_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Unique identifier for this contact"
+          },
+          "role": {
+            "type": ["string", "null"],
+            "maxLength": 2048,
+            "description": "Job title/role"
+          },
+          "department": {
+            "type": ["string", "null"],
+            "maxLength": 2048,
+            "description": "Department within the company"
+          },
+          "decision_maker": {
+            "type": ["boolean", "null"],
+            "description": "Whether this person is a decision maker"
+          },
+          "location": {
+            "type": ["string", "null"],
+            "maxLength": 2048,
+            "description": "Office location if specified"
+          },
+          "seniority": {
+            "type": ["string", "integer", "null"],
+            "maxLength": 2048,
+            "description": "Seniority level (string or numeric rank)"
+          },
+          "role_priority": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 99,
+            "description": "Priority score for the role (lower = higher priority)"
+          },
+          "email": {
+            "type": ["string", "null"],
+            "format": "email",
+            "maxLength": 2048
+          },
+          "email_confidence": {
+            "type": ["number", "null"],
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Confidence score for email validity"
+          },
+          "email_status": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["unknown", "valid", "risky", "invalid", "catch_all"]
+            },
+            "minItems": 1,
+            "maxItems": 5
+          },
+          "email_source": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["provider", "csv"]
+            },
+            "minItems": 1,
+            "maxItems": 2
+          },
+          "phone": {
+            "type": "string",
+            "pattern": "^\\+[1-9]\\d{1,14}$",
+            "maxLength": 20,
+            "description": "E.164 formatted phone number"
+          },
+          "linkedin": {
+            "type": ["string", "null"],
+            "pattern": "^/in/[^/]+$",
+            "maxLength": 2048,
+            "description": "Canonical LinkedIn profile path"
+          },
+          "other_links": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "maxItems": 10,
+            "description": "Additional professional links"
+          },
+          "evidence_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "maxItems": 5,
+            "description": "URLs providing evidence for contact data"
+          }
+        },
+        "additionalProperties": true
+      },
+      "maxItems": 100
+    },
+    "icp": {
+      "type": "object",
+      "required": ["pre_score", "pre_reason", "pre_pass", "pre_flags", "scoring_meta", "crawl_score", "crawl_reason", "threshold", "filtering_strict"],
+      "properties": {
+        "pre_score": {
+          "type": ["number", "null"],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Pre-crawl ICP fit score"
+        },
+        "pre_reason": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Reasoning for pre-score"
+        },
+        "pre_pass": {
+          "type": ["boolean", "null"],
+          "description": "Whether lead passed pre-crawl ICP threshold"
+        },
+        "pre_flags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 20,
+          "description": "Flags from pre-crawl analysis"
+        },
+        "scoring_meta": {
+          "type": "object",
+          "required": ["method", "model", "prompt_fingerprint", "temperature"],
+          "properties": {
+            "method": {
+              "type": ["string", "null"],
+              "maxLength": 2048
+            },
+            "model": {
+              "type": ["string", "null"],
+              "maxLength": 2048
+            },
+            "prompt_fingerprint": {
+              "type": ["string", "null"],
+              "maxLength": 64,
+              "description": "SHA256 hash of scoring prompt"
+            },
+            "temperature": {
+              "type": ["number", "null"],
+              "minimum": 0.0,
+              "maximum": 2.0
+            }
+          },
+          "additionalProperties": false
+        },
+        "crawl_score": {
+          "type": ["number", "null"],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Post-crawl ICP fit score"
+        },
+        "crawl_reason": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Reasoning for crawl score"
+        },
+        "threshold": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.7,
+          "description": "ICP fit threshold for progression"
+        },
+        "filtering_strict": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to apply strict filtering"
+        }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["queries", "discovery_evidence", "scored_at", "crawled_at", "enriched_at", "next_revisit_at", "tool_versions", "cache", "evidence_paths"],
+      "properties": {
+        "queries": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 50,
+          "description": "Search queries used for discovery"
+        },
+        "discovery_evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "format": "uri",
+                "maxLength": 2048,
+                "description": "URL of the discovered page"
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 2048,
+                "description": "Title of the discovered page"
+              },
+              "snippet": {
+                "type": "string",
+                "maxLength": 2048,
+                "description": "Snippet/description of the discovered page"
+              },
+              "query": {
+                "type": "string",
+                "maxLength": 2048,
+                "description": "Search query that led to this discovery"
+              },
+              "page_index": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Page number where this result was found"
+              },
+              "rank_on_page": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Rank position on the page"
+              },
+              "fetched_at": {
+                "type": "string",
+                "format": "date-time",
+                "description": "ISO-8601 UTC timestamp when this was fetched"
+              },
+              "domain": {
+                "type": "string",
+                "format": "hostname",
+                "description": "Normalized domain of the discovered page"
+              }
+            },
+            "required": ["url", "title", "snippet", "query", "page_index", "rank_on_page", "fetched_at", "domain"],
+            "additionalProperties": false
+          },
+          "maxItems": 100,
+          "description": "Evidence supporting lead discovery (SERP results)"
+        },
+        "scored_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO-8601 UTC timestamp of scoring"
+        },
+        "crawled_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO-8601 UTC timestamp of crawling"
+        },
+        "enriched_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO-8601 UTC timestamp of enrichment"
+        },
+        "next_revisit_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO-8601 UTC timestamp for next revisit"
+        },
+        "tool_versions": {
+          "type": "object",
+          "required": ["domain", "crawl", "enrich"],
+          "properties": {
+            "domain": {
+              "type": "object",
+              "required": ["version", "schema_version"],
+              "properties": {
+                "version": {
+                  "type": ["string", "null"],
+                  "maxLength": 2048
+                },
+                "schema_version": {
+                  "type": ["string", "null"],
+                  "maxLength": 64,
+                  "description": "SHA256 hash of schema used"
+                }
+              },
+              "additionalProperties": false
+            },
+            "crawl": {
+              "type": "object",
+              "required": ["version", "schema_version"],
+              "properties": {
+                "version": {
+                  "type": ["string", "null"],
+                  "maxLength": 2048
+                },
+                "schema_version": {
+                  "type": ["string", "null"],
+                  "maxLength": 64,
+                  "description": "SHA256 hash of schema used"
+                }
+              },
+              "additionalProperties": false
+            },
+            "enrich": {
+              "type": "object",
+              "required": ["version", "schema_version"],
+              "properties": {
+                "version": {
+                  "type": ["string", "null"],
+                  "maxLength": 2048
+                },
+                "schema_version": {
+                  "type": ["string", "null"],
+                  "maxLength": 64,
+                  "description": "SHA256 hash of schema used"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "cache": {
+          "type": "object",
+          "properties": {
+            "domain_cache_hit": {
+              "type": ["boolean", "null"],
+              "description": "Whether domain search used cached results"
+            }
+          },
+          "additionalProperties": false
+        },
+        "evidence_paths": {
+          "type": "object",
+          "required": ["domain", "crawl", "enrich"],
+          "properties": {
+            "domain": {
+              "type": ["string", "null"],
+              "maxLength": 2048,
+              "description": "Path to domain evidence file"
+            },
+            "crawl": {
+              "type": ["string", "null"],
+              "maxLength": 2048,
+              "description": "Path to crawl artifacts file"
+            },
+            "enrich": {
+              "type": ["string", "null"],
+              "maxLength": 2048,
+              "description": "Path to enrichment evidence file"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "best_contact_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "ID of the best contact for this lead"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["new", "scored", "crawled", "enrich_ready", "enriched", "crawl_failed", "enrich_partial"],
+      "description": "Current status in the lead processing pipeline"
+    },
+    "status_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["status", "ts", "notes"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["new", "scored", "crawled", "enrich_ready", "enriched", "crawl_failed", "enrich_partial"]
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 UTC timestamp of status change"
+          },
+          "notes": {
+            "type": ["string", "null"],
+            "maxLength": 2048,
+            "description": "Notes about the status change"
+          }
+        },
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 100
+    },
+    "audit": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["step", "notes", "ts"],
+        "properties": {
+          "step": {
+            "type": "string",
+            "enum": ["Domain", "Crawl", "Enrich"]
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "Audit notes for this step"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 UTC timestamp of audit entry"
+          }
+        },
+        "additionalProperties": false
+      },
+      "maxItems": 1000
+    },
+    "cost": {
+      "type": "object",
+      "required": ["domain_usd", "crawl_usd", "enrich_usd", "total_usd"],
+      "properties": {
+        "domain_usd": {
+          "type": "number",
+          "minimum": 0.0,
+          "default": 0.0,
+          "description": "Cost in USD for domain stage"
+        },
+        "crawl_usd": {
+          "type": "number",
+          "minimum": 0.0,
+          "default": 0.0,
+          "description": "Cost in USD for crawl stage"
+        },
+        "enrich_usd": {
+          "type": "number",
+          "minimum": 0.0,
+          "default": 0.0,
+          "description": "Cost in USD for enrich stage"
+        },
+        "total_usd": {
+          "type": "number",
+          "minimum": 0.0,
+          "default": 0.0,
+          "description": "Total cost in USD across all stages"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,19 @@
+ICP: {icp_text}
+
+Select the BEST contact who can make technology business decisions or allocate resources. Prioritize:
+- CTOs and technology executives
+- Engineering directors and VPs
+- Product managers and technical leads
+- IT decision makers and architects
+- Technology founders and owners
+
+AVOID: Marketing executives, consultants, or people without technology decision-making power.
+{role_context}
+
+Contacts:
+{contacts}
+
+Return ONLY a JSON response in this exact format:
+{ "contact_id": "123" }
+
+

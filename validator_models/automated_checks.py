@@ -22,7 +22,7 @@ load_dotenv()
 HUNTER_API_KEY = os.getenv("HUNTER_API_KEY", "YOUR_HUNTER_API_KEY")
 ZEROBOUNCE_API_KEY = os.getenv("ZEROBOUNCE_API_KEY", "YOUR_ZEROBOUNCE_API_KEY")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY", "YOUR_APOLLO_API_KEY")
-#OPENCORPORATES_API_KEY = os.getenv("OPENCORPORATES_API_KEY", "YOUR_OPENCORPORATES_API_KEY")
+OPENCORPORATES_API_KEY = os.getenv("OPENCORPORATES_API_KEY", "YOUR_OPENCORPORATES_API_KEY")
 
 # Constants
 DISPOSABLE_DOMAINS = {"mailinator.com", "temp-mail.org", "guerrillamail.com", "10minutemail.com", 
@@ -199,6 +199,24 @@ async def api_call_with_retry(session, url, params=None, max_retries=3, base_del
             delay = base_delay * (2**attempt)  # Exponential backoff
             await asyncio.sleep(delay)
 
+def extract_root_domain(website: str) -> str:
+    """Extract the root domain from a website URL, removing www. prefix"""
+    if not website:
+        return ""
+    
+    # Parse the URL to get the domain
+    if website.startswith(("http://", "https://")):
+        domain = urlparse(website).netloc
+    else:
+        # Handle bare domains like "firecrawl.dev" or "www.firecrawl.dev"
+        domain = website.strip("/")
+    
+    # Remove www. prefix if present
+    if domain.startswith("www."):
+        domain = domain[4:]  # Remove "www."
+    
+    return domain
+
 # Stage 0: Basic Hardcoded Checks
 
 async def check_email_regex(lead: dict) -> Tuple[bool, str]:
@@ -234,13 +252,7 @@ async def check_domain_age(lead: dict) -> Tuple[bool, str]:
     if not website:
         return False, "No website provided"
     
-    # More flexible domain extraction
-    if website.startswith(("http://", "https://")):
-        domain = urlparse(website).netloc
-    else:
-        # Handle bare domains like "firecrawl.dev" or "www.firecrawl.dev"
-        domain = website.strip("/")
-    
+    domain = extract_root_domain(website)
     if not domain:
         return False, "Invalid website format"
     
@@ -294,13 +306,7 @@ async def check_mx_record(lead: dict) -> Tuple[bool, str]:
     if not website:
         return False, "No website provided"
     
-    # More flexible domain extraction
-    if website.startswith(("http://", "https://")):
-        domain = urlparse(website).netloc
-    else:
-        # Handle bare domains like "firecrawl.dev" or "www.firecrawl.dev"
-        domain = website.strip("/")
-    
+    domain = extract_root_domain(website)
     if not domain:
         return False, "Invalid website format"
     
@@ -323,13 +329,7 @@ async def check_head_request(lead: dict) -> Tuple[bool, str]:
     if not website:
         return False, "No website provided"
     
-    # More flexible domain extraction
-    if website.startswith(("http://", "https://")):
-        domain = urlparse(website).netloc
-    else:
-        # Handle bare domains like "firecrawl.dev" or "www.firecrawl.dev"
-        domain = website.strip("/")
-    
+    domain = extract_root_domain(website)
     if not domain:
         return False, "Invalid website format"
     
@@ -376,13 +376,7 @@ async def check_opencorporates_status(lead: dict) -> Tuple[bool, str]:
     if not website:
         return False, "No website provided"
     
-    # More flexible domain extraction
-    if website.startswith(("http://", "https://")):
-        domain = urlparse(website).netloc
-    else:
-        # Handle bare domains like "firecrawl.dev" or "www.firecrawl.dev"
-        domain = website.strip("/")
-    
+    domain = extract_root_domain(website)
     if not domain:
         return False, "Invalid website format"
     
@@ -440,13 +434,7 @@ async def check_industry_location_match(lead: dict) -> Tuple[bool, str]:
     if not website:
         return False, "No website provided"
     
-    # More flexible domain extraction
-    if website.startswith(("http://", "https://")):
-        domain = urlparse(website).netloc
-    else:
-        # Handle bare domains like "firecrawl.dev" or "www.firecrawl.dev"
-        domain = website.strip("/")
-    
+    domain = extract_root_domain(website)
     if not domain:
         return False, "Invalid website format"
     
@@ -489,49 +477,53 @@ async def check_industry_location_match(lead: dict) -> Tuple[bool, str]:
 # Stage 2: ZeroBounce Check
 
 async def check_zerobounce_email(lead: dict) -> Tuple[bool, str]:
-    """Check email validity using ZeroBounce API"""
+    """Check email validity **and AI-score** using ZeroBounce API"""
     email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
     if not email:
         return False, "No email provided"
-    
+
     cache_key = f"zerobounce:{email}"
     if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["hunter_apollo_zerobounce"]):
         return validation_cache[cache_key]
-    
+
     try:
-        # Mock mode fallback
+        # Mock-mode fallback
         if "YOUR_ZEROBOUNCE_API_KEY" in ZEROBOUNCE_API_KEY:
             result = (True, "Mock pass - ZeroBounce check")
             validation_cache[cache_key] = result
             return result
-        
-        # Implement actual ZeroBounce API call
-        url = "https://api.zerobounce.net/v2/validate"
-        params = {
-            "api_key": ZEROBOUNCE_API_KEY,
-            "email": email,
-            "ip_address": "",  # Optional
-        }
-        
+
         async with API_SEMAPHORE:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        status = data.get("status", "unknown")
-                        
-                        if status in ["valid", "catch-all"]:
-                            result = (True, f"Email validated: {status}")
-                        elif status == "invalid":
-                            result = (False, "Email marked as invalid")
-                        else:
-                            result = (True, f"Email status: {status} (assumed valid)")
-                    else:
-                        result = (True, "ZeroBounce API unavailable (assumed valid)")
-                        
+                # 1️⃣ standard validation
+                url_validate = "https://api.zerobounce.net/v2/validate"
+                params_val   = {"api_key": ZEROBOUNCE_API_KEY, "email": email}
+                async with session.get(url_validate, params=params_val, timeout=10) as resp_val:
+                    data_val  = await resp_val.json()
+                    status    = data_val.get("status", "unknown")
+
+                # 2️⃣ A.I. email score
+                url_score  = "https://api-us.zerobounce.net/v2/scoring"
+                params_scr = {"api_key": ZEROBOUNCE_API_KEY, "email": email}
+                async with session.get(url_score, params=params_scr, timeout=10) as resp_scr:
+                    data_scr = await resp_scr.json()
+                    score    = float(data_scr.get("score", -1))   # 0-10 or -1 on error
+
+        # Store score directly on the lead so downstream code can use it
+        lead["email_score"] = score
+        print(f"📊 ZeroBounce AI score for {email}: {score}")
+
+        # Decide pass/fail using the original validation status
+        if status in ["valid", "catch-all"]:
+            result = (True, f"Email validated ({status}), score={score}")
+        elif status == "invalid":
+            result = (False, f"Email marked invalid, score={score}")
+        else:
+            result = (True, f"Email status {status}, score={score} (assumed valid)")
+
         validation_cache[cache_key] = result
         return result
-        
+
     except Exception as e:
         result = (False, f"ZeroBounce check failed: {str(e)}")
         validation_cache[cache_key] = result
@@ -539,13 +531,13 @@ async def check_zerobounce_email(lead: dict) -> Tuple[bool, str]:
 
 # Stage 3: Apollo Check
 
-async def check_apollo_contact_match(lead: dict) -> Tuple[bool, str]:
+async def check_apollo_contact_match(lead: dict) -> tuple[bool, str]:
     """Check contact data consistency using Apollo API"""
-    # Extract lead details for Apollo query - prioritize Email 1
-    first_name = lead.get("First Name", "")
-    last_name = lead.get("Last Name", "")
-    company_name = lead.get("Company", "")
-    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    # Extract lead details for Apollo query - map to Lead Sorcerer field names
+    first_name = lead.get("First", lead.get("First Name", ""))
+    last_name = lead.get("Last", lead.get("Last Name", ""))
+    company_name = lead.get("Business", lead.get("Company", ""))
+    email = lead.get("Owner(s) Email", lead.get("Email 1", lead.get("email", "")))
     
     if not email:
         return False, "No email provided"
@@ -572,8 +564,8 @@ async def check_apollo_contact_match(lead: dict) -> Tuple[bool, str]:
         
         # Add search filters based on available data
         if first_name and last_name and company_name:
-            # NEW STRATEGY: Search by "Company (lastname)" for better targeting
-            body["q_keywords"] = f"{company_name} {last_name}"
+            # Search by "Company FirstName LastName" for better targeting
+            body["q_keywords"] = f"{company_name} {first_name} {last_name}"
         elif email and company_name:
             # Fallback: search by company name if we have email
             domain = email.split("@")[1].lower() if "@" in email else ""
@@ -597,10 +589,15 @@ async def check_apollo_contact_match(lead: dict) -> Tuple[bool, str]:
                         data = await response.json()
                         
                         found_match = False
-                        # Apollo API returns people in a 'people' array
-                        if isinstance(data, dict) and data.get("people"):
-                            people = data["people"]
-                            
+                        # Apollo API returns people in a 'people' array OR 'contacts' array
+                        people = []
+                        if isinstance(data, dict):
+                            if data.get("people"):
+                                people = data["people"]
+                            elif data.get("contacts"):
+                                people = data["contacts"]
+                        
+                        if people:
                             for person in people:
                                 # Extract person details from Apollo response - handle None values safely
                                 person_name = person.get("name") or ""
@@ -657,7 +654,6 @@ async def check_apollo_contact_match(lead: dict) -> Tuple[bool, str]:
                                                 )
                                                 
                                                 if not email_matches_name:
-                                                    print(f"⚠️ Contact found but email prefix '{email_prefix}' doesn't match name '{first_name} {last_name}'")
                                                     continue  # Skip this match, try next person
                                             
                                             found_match = True
@@ -681,12 +677,15 @@ async def check_apollo_contact_match(lead: dict) -> Tuple[bool, str]:
                         else:
                             result = (False, f"Contact match check failed: API returned status {response.status} - {response_text[:100]}")
                     else:
+                        response_text = await response.text()
+                        print(f"🔍 Apollo error response: {response_text[:200]}")
                         result = (False, f"Contact match check failed: API returned status {response.status}")
                         
         validation_cache[cache_key] = result
         return result
         
     except Exception as e:
+        print(f"🔍 Apollo exception: {str(e)}")
         result = (False, f"Contact match failed: {str(e)}")
         validation_cache[cache_key] = result
         return result

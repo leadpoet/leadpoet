@@ -1,0 +1,39 @@
+# Apollo API Default Configuration
+# This file contains default technical parameters for Apollo integration
+# All business parameters (industries, sizes, titles) must be loaded from icp_config.json
+# NO hardcoded business logic constants allowed
+
+# Default search parameters (business filters will be loaded from ICP config)
+search:
+  strategy: "company_first"  # "company_first" or "person_first"
+  company_filters:
+    industry: []              # Load from icp_config.validation_config.industry_keywords
+    size: []                  # Load from icp_config.company_size_criteria
+    location: []              # Load from icp_config.location_criteria
+    technologies: []          # Load from icp_config.tech_stack_criteria
+    funding_stage: []         # Load from icp_config.funding_criteria
+  person_filters:
+    job_titles: []            # Load from icp_config.role_priority keys
+    seniority: []             # Load from icp_config.seniority_criteria
+    departments: []           # Load from icp_config.department_criteria
+  max_results: 1000
+  use_pagination: true
+
+# Default enrichment parameters
+enrich:
+  enabled: true
+  use_bulk: true
+  batch_size: 25
+  required_fields: ["email", "phone", "linkedin_url"]
+
+# Fallback configuration
+fallback:
+  to_traditional_flow: false
+  max_retries: 3
+
+# API configuration
+api:
+  timeout_seconds: 30
+  max_retries: 3
+  backoff_factor: 2
+  rate_limit_delay_ms: 100

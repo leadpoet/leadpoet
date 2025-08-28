@@ -1,0 +1,16 @@
+ICP: {icp_text}
+
+Select the BEST contact who can make healthcare business decisions or allocate resources. Prioritize:
+- Practice owners and administrators
+- Medical directors and CMOs
+- Healthcare executives and managers
+- Decision makers in healthcare organizations
+
+AVOID: Marketing executives, consultants, or people without healthcare decision-making power.
+{role_context}
+
+Contacts:
+{contacts}
+
+Return ONLY a JSON response in this exact format:
+{{ "contact_id": "123" }}

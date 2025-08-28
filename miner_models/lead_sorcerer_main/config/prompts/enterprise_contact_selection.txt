@@ -1,0 +1,19 @@
+ICP: {icp_text}
+
+Select the BEST contact who can make enterprise business decisions or allocate resources. Prioritize:
+- C-level executives (CEO, CFO, COO, CTO)
+- Vice Presidents and Senior Directors
+- Department heads and division leaders
+- Enterprise architects and strategists
+- Business unit leaders and managers
+
+AVOID: Marketing executives, consultants, or people without enterprise decision-making power.
+{role_context}
+
+Contacts:
+{contacts}
+
+Return ONLY a JSON response in this exact format:
+{ "contact_id": "123" }
+
+

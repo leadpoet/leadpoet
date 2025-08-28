@@ -1,0 +1,16 @@
+ICP: {icp_text}
+
+Select the BEST contact who can actually make business decisions or allocate resources. Prioritize:
+- Decision makers and executives
+- People with budget authority
+- Senior managers and directors
+- Business owners and founders
+
+AVOID: Marketing executives, consultants, or people without decision-making power.
+{role_context}
+
+Contacts:
+{contacts}
+
+Return ONLY a JSON response in this exact format:
+{{ "contact_id": "123" }}

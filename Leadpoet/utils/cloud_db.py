@@ -129,15 +129,29 @@ def fetch_prospects_from_cloud(wallet: bt.wallet, limit: int = 100) -> List[Dict
 
 # ---- Curations -------------------------------------------------------
 def push_curation_request(payload: dict) -> str:
-    r = requests.post(f"{API_URL}/curate", json=payload, timeout=10)
-    r.raise_for_status(); return r.json()["request_id"]
+    try:
+        r = requests.post(f"{API_URL}/curate", json=payload, timeout=10)
+        r.raise_for_status()
+        return r.json()["request_id"]
+    except requests.exceptions.RequestException as e:
+        bt.logging.error(f"push_curation_request failed: {e}")
+        raise  # Re-raise to be handled by caller
 
 def fetch_curation_requests() -> dict:
-    r = requests.post(f"{API_URL}/curate/fetch", timeout=10); r.raise_for_status()
-    return r.json()
+    try:
+        r = requests.post(f"{API_URL}/curate/fetch", timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        bt.logging.warning(f"fetch_curation_requests failed: {e}")
+        return None  # Return None instead of raising
 
 def push_curation_result(result: dict):
-    requests.post(f"{API_URL}/curate/result", json=result, timeout=30).raise_for_status()
+    try:
+        requests.post(f"{API_URL}/curate/result", json=result, timeout=30).raise_for_status()
+    except requests.exceptions.RequestException as e:
+        bt.logging.error(f"push_curation_result failed: {e}")
+        # Don't raise - just log and continue
 
 def fetch_curation_result(request_id: str) -> dict:
     try:

@@ -1,0 +1,87 @@
+{
+  "name": "Dental Practice Example",
+  "icp_text": "Dental practices and healthcare providers looking to sell or acquire practices",
+  "site_type": "information_database",
+  "specific_urls": [
+    "https://www.usdentalpractices.com/dental-practice-for-sale/northwest-washington-general-dentist-practice",
+    "https://www.usdentalpractices.com/dental-practice-for-sale/greater-philadelphia-pa-endodontic-practice",
+    "https://www.usdentalpractices.com/dental-practice-for-sale/oral-surgeon-practice-philadelphia"
+  ],
+  "validation_config": {
+    "industry_keywords": ["dental", "healthcare", "medical"],
+    "company_name_keywords": ["dentist", "orthodont", "oral", "surgeon", "endodont"]
+  },
+  "domain_discovery": {
+    "url_patterns": ["/listing/", "/practice-for-sale/", "/property/", "/opportunity/"],
+    "exclude_patterns": ["/admin", "/login", "/search", "/contact", "/about"],
+    "url_templates": [
+      "https://{domain}/dental-practice-for-sale/location-{n}",
+      "https://{domain}/listings/practice-{n}"
+    ]
+  },
+  "path_keyword_mappings": {
+    "northwest-washington": ["northwest", "washington"],
+    "philadelphia": ["philadelphia"],
+    "oral-surgeon": ["oral", "surgeon"],
+    "endodontic": ["endodont"],
+    "south-central-pennsylvania": ["south", "central", "pennsylvania"]
+  },
+  "demo_urls": {
+    "usdentalpractices.com": [
+      "https://www.usdentalpractices.com/dental-practice-for-sale/northwest-washington-general-dentist-practice",
+      "https://www.usdentalpractices.com/dental-practice-for-sale/greater-philadelphia-pa-endodontic-practice",
+      "https://www.usdentalpractices.com/dental-practice-for-sale/oral-surgeon-practice-philadelphia"
+    ]
+  },
+  "queries": [
+    "dental practice for sale",
+    "dentist practice acquisition",
+    "orthodontic practice listings"
+  ],
+  "required_fields": {
+    "company": ["name", "industry", "location"],
+    "contact": ["name", "title", "email"]
+  },
+  "threshold": 0.7,
+  "filtering_strict": true,
+  "default_country": "US",
+  "concurrency": {
+    "max_concurrent_requests": 5
+  },
+  "caps": {
+    "run_usd_max": 100.0,
+    "company_usd": 0.02,
+    "contact_usd": 0.05
+  },
+  "enrichment_providers": {
+    "snovio": {
+      "enabled": true,
+      "priority": 1
+    },
+    "coresignal": {
+      "enabled": true,
+      "priority": 2
+    }
+  },
+  "role_priority": {
+    "owner": 1,
+    "dentist": 2,
+    "orthodontist": 3,
+    "oral_surgeon": 4
+  },
+  "refresh_policy": {
+    "domain_ttl_days": 30,
+    "contact_ttl_days": 7
+  },
+  "search": {
+    "max_pages": 10
+  },
+  "testing": {
+    "process_rejected": false,
+    "force_contact_discovery": false
+  },
+  "exports": {
+    "enabled": true,
+    "formats": ["jsonl", "csv"]
+  }
+}

@@ -1,0 +1,212 @@
+{
+  "name": "Tech Startup ICP - Apollo Mode",
+  "icp_text": "B2B SaaS companies in the technology sector with 10-500 employees, Series A+ funding, using modern tech stack",
+
+  "lead_generation_mode": "apollo",
+
+  "queries": [
+    "${industry} companies in ${region}",
+    "${tech_stack} companies in ${location}",
+    "${funding_stage} ${industry} companies"
+  ],
+
+  "required_fields": {
+    "company": ["name", "domain", "industry", "size", "location"],
+    "contact": ["first_name", "last_name", "title", "email"]
+  },
+
+  "optional_fields": {
+    "company": ["tech_stack", "funding_stage", "description", "website"],
+    "contact": ["phone", "linkedin", "department", "seniority"]
+  },
+
+  "threshold": 0.75,
+  "filtering_strict": true,
+  "mode": "thorough",
+
+  "apollo": {
+    "enabled": true,
+    "fallback_to_traditional": true,
+
+    "search": {
+      "strategy": "company_first",
+      "max_results": 150,
+
+      "company_filters": {
+        "industry": [
+          "Technology",
+          "SaaS",
+          "Software",
+          "Information Technology",
+          "Internet",
+          "Computer Software",
+          "Marketing",
+          "Sales",
+          "Business Services"
+        ],
+        "size": [
+          "11-50",
+          "51-200",
+          "201-500"
+        ],
+        "location": [
+          "United States",
+          "Canada",
+          "United Kingdom",
+          "Germany",
+          "Netherlands",
+          "Australia"
+        ],
+        "technologies": [
+          "Python",
+          "JavaScript",
+          "React",
+          "Node.js",
+          "AWS",
+          "Google Cloud",
+          "Azure",
+          "Docker",
+          "Kubernetes",
+          "PostgreSQL",
+          "MongoDB",
+          "Redis"
+        ],
+        "funding_stage": [
+          "Series A",
+          "Series B",
+          "Series C",
+          "Series D",
+          "IPO"
+        ]
+      },
+
+      "person_filters": {
+        "job_titles": [
+          "CEO",
+          "CTO",
+          "VP Engineering",
+          "VP Sales",
+          "VP Marketing",
+          "VP Product",
+          "Director of Engineering",
+          "Director of Sales",
+          "Head of Engineering",
+          "Head of Sales",
+          "Engineering Manager",
+          "Sales Manager",
+          "Product Manager"
+        ],
+        "seniority": [
+          "C-Level",
+          "VP",
+          "Director",
+          "Head",
+          "Manager"
+        ],
+        "departments": [
+          "Engineering",
+          "Sales",
+          "Marketing",
+          "Product",
+          "Business Development",
+          "Operations"
+        ]
+      }
+    },
+
+    "enrich": {
+      "enabled": true,
+      "quality_thresholds": {
+        "min_employee_count": 10,
+        "min_funding_stage": "Series A",
+        "required_technologies": ["Python", "JavaScript"],
+        "min_contact_quality": 0.8,
+        "required_contact_fields": ["email", "title"]
+      }
+    }
+  },
+
+  "refresh_policy": {
+    "revisit_after_days": 90,
+    "failure_revisit_days": 1,
+    "domain_serp_ttl_hours": 24,
+    "crawl_ttl_days": 14
+  },
+
+  "concurrency": {
+    "max_concurrent_requests": 5
+  },
+
+  "search": {
+    "max_pages": 5
+  },
+
+  "testing": {
+    "process_rejected": false,
+    "process_low_crawl": false
+  },
+
+  "caps": {
+    "company_usd": 0.02,
+    "contact_usd": 0.03,
+    "run_usd_max": 10.0,
+    "apollo_credits_max": 1000
+  },
+
+  "role_priority": {
+    "CEO": 1,
+    "CTO": 2,
+    "VP Engineering": 3,
+    "VP Sales": 4,
+    "VP Marketing": 5,
+    "Director": 6,
+    "Head": 7,
+    "Manager": 8,
+    "default": 99
+  },
+
+  "exports": {
+    "enabled": true,
+    "formats": ["csv", "json", "xlsx"],
+    "include_apollo_data": true
+  },
+
+  "default_country": "US",
+
+  "apollo_advanced": {
+    "rate_limiting": {
+      "requests_per_minute": 60,
+      "requests_per_hour": 1000,
+      "burst_limit": 10
+    },
+
+    "search_optimization": {
+      "use_boolean_queries": true,
+      "exclude_keywords": ["consulting", "agency", "freelance"],
+      "include_keywords": ["startup", "scaleup", "growth"],
+      "location_radius_miles": 50
+    },
+
+    "quality_scoring": {
+      "company_score_weights": {
+        "industry_match": 0.3,
+        "size_match": 0.2,
+        "tech_stack_match": 0.25,
+        "funding_match": 0.15,
+        "location_match": 0.1
+      },
+      "contact_score_weights": {
+        "title_match": 0.4,
+        "seniority_match": 0.3,
+        "department_match": 0.2,
+        "location_match": 0.1
+      }
+    },
+
+    "fallback_strategy": {
+      "enable_traditional_fallback": true,
+      "apollo_failure_threshold": 3,
+      "traditional_fallback_delay_minutes": 5
+    }
+  }
+}

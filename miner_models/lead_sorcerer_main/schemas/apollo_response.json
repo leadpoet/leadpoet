@@ -1,0 +1,506 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lead-sorcerer.com/schemas/apollo_response.json",
+  "title": "Apollo API Response Schema",
+  "description": "Schema for responses from Apollo API endpoints",
+  "type": "object",
+  "properties": {
+    "company_search_response": {
+      "type": "object",
+      "properties": {
+        "companies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Apollo company ID"
+              },
+              "name": {
+                "type": "string",
+                "description": "Company name"
+              },
+              "domain": {
+                "type": "string",
+                "description": "Company domain"
+              },
+              "description": {
+                "type": "string",
+                "description": "Company description"
+              },
+              "industry": {
+                "type": "string",
+                "description": "Primary industry"
+              },
+              "size": {
+                "type": "string",
+                "description": "Company size indicator"
+              },
+              "employee_count": {
+                "type": "string",
+                "description": "Number of employees or range"
+              },
+              "founded_year": {
+                "type": "integer",
+                "description": "Year company was founded"
+              },
+              "website": {
+                "type": "string",
+                "description": "Company website URL"
+              },
+              "linkedin_url": {
+                "type": "string",
+                "description": "LinkedIn company page URL"
+              },
+              "phone": {
+                "type": "string",
+                "description": "Company phone number"
+              },
+              "address": {
+                "type": "object",
+                "properties": {
+                  "street": {
+                    "type": "string"
+                  },
+                  "city": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "country": {
+                    "type": "string"
+                  },
+                  "zip": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "technologies": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Technology stack"
+              },
+              "funding_stage": {
+                "type": "string",
+                "description": "Funding stage"
+              },
+              "revenue_range": {
+                "type": "string",
+                "description": "Annual revenue range"
+              },
+              "locations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "city": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string"
+                    },
+                    "country": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "pagination": {
+          "type": "object",
+          "properties": {
+            "page": {
+              "type": "integer"
+            },
+            "per_page": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            },
+            "total_pages": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "person_search_response": {
+      "type": "object",
+      "properties": {
+        "people": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Apollo person ID"
+              },
+              "first_name": {
+                "type": "string",
+                "description": "First name"
+              },
+              "last_name": {
+                "type": "string",
+                "description": "Last name"
+              },
+              "full_name": {
+                "type": "string",
+                "description": "Full name"
+              },
+              "email": {
+                "type": "string",
+                "description": "Email address"
+              },
+              "job_title": {
+                "type": "string",
+                "description": "Job title"
+              },
+              "department": {
+                "type": "string",
+                "description": "Department"
+              },
+              "seniority_level": {
+                "type": "string",
+                "description": "Seniority level"
+              },
+              "linkedin_url": {
+                "type": "string",
+                "description": "LinkedIn profile URL"
+              },
+              "phone": {
+                "type": "string",
+                "description": "Phone number"
+              },
+              "location": {
+                "type": "string",
+                "description": "Location"
+              },
+              "company": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "domain": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "pagination": {
+          "type": "object",
+          "properties": {
+            "page": {
+              "type": "integer"
+            },
+            "per_page": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            },
+            "total_pages": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "company_enrichment_response": {
+      "type": "object",
+      "properties": {
+        "company": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "domain": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "industry": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string"
+            },
+            "employee_count": {
+              "type": "string"
+            },
+            "founded_year": {
+              "type": "integer"
+            },
+            "website": {
+              "type": "string"
+            },
+            "linkedin_url": {
+              "type": "string"
+            },
+            "phone": {
+              "type": "string"
+            },
+            "address": {
+              "type": "object",
+              "properties": {
+                "street": {
+                  "type": "string"
+                },
+                "city": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "country": {
+                  "type": "string"
+                },
+                "zip": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "technologies": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "funding_stage": {
+              "type": "string"
+            },
+            "revenue_range": {
+              "type": "string"
+            },
+            "locations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "string"
+                  },
+                  "city": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "country": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "person_enrichment_response": {
+      "type": "object",
+      "properties": {
+        "person": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "first_name": {
+              "type": "string"
+            },
+            "last_name": {
+              "type": "string"
+            },
+            "full_name": {
+              "type": "string"
+            },
+            "email": {
+              "type": "string"
+            },
+            "job_title": {
+              "type": "string"
+            },
+            "department": {
+              "type": "string"
+            },
+            "seniority_level": {
+              "type": "string"
+            },
+            "linkedin_url": {
+              "type": "string"
+            },
+            "phone": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            },
+            "company": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "domain": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "bulk_enrichment_response": {
+      "type": "object",
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/properties/company_enrichment_response"
+              },
+              {
+                "$ref": "#/properties/person_enrichment_response"
+              }
+            ]
+          }
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "total_requests": {
+              "type": "integer"
+            },
+            "successful": {
+              "type": "integer"
+            },
+            "failed": {
+              "type": "integer"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "credits_response": {
+      "type": "object",
+      "properties": {
+        "credits_remaining": {
+          "type": "integer",
+          "description": "Number of credits remaining"
+        },
+        "credits_used": {
+          "type": "integer",
+          "description": "Number of credits used in current period"
+        },
+        "period": {
+          "type": "string",
+          "description": "Billing period"
+        }
+      },
+      "additionalProperties": false
+    },
+    "usage_metrics_response": {
+      "type": "object",
+      "properties": {
+        "total_searches": {
+          "type": "integer",
+          "description": "Total number of searches performed"
+        },
+        "total_enrichments": {
+          "type": "integer",
+          "description": "Total number of enrichments performed"
+        },
+        "total_credits_used": {
+          "type": "integer",
+          "description": "Total credits used"
+        },
+        "period": {
+          "type": "string",
+          "description": "Reporting period"
+        }
+      },
+      "additionalProperties": false
+    },
+    "error_response": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string",
+          "description": "Error message"
+        },
+        "error_code": {
+          "type": "string",
+          "description": "Error code"
+        },
+        "details": {
+          "type": "string",
+          "description": "Additional error details"
+        },
+        "retry_after": {
+          "type": "integer",
+          "description": "Seconds to wait before retrying (for rate limits)"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

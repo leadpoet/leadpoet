@@ -19,7 +19,6 @@ from Leadpoet.base.utils import pool as lead_pool
 import asyncio
 from typing import List, Dict
 from aiohttp import web
-import socket
 from Leadpoet.utils.cloud_db import (
     save_leads_to_cloud,
     fetch_prospects_from_cloud,
@@ -80,7 +79,7 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
             "⚠️ Do not go outside the 0.0–0.5 range."
         )
 
- # Accept either camel-case or lower-case field names coming from the miner
+# Accept either camel-case or lower-case field names coming from the miner
     prompt_user = (
         f"BUYER:\n{description}\n\n"
         f"LEAD:\n"
@@ -144,32 +143,6 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
     return _heuristic()
 
 import os, grpc, asyncio
-os.environ.setdefault("GRPC_VERBOSITY", "DEBUG")
-os.environ.setdefault("GRPC_TRACE", "handshaker,tsi,security,api,transport,http,call_error")
-
-async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
-    try:
-        ch = grpc.aio.insecure_channel(addr)
-        await asyncio.wait_for(ch.channel_ready(), timeout=timeout)
-        await ch.close()
-        print(f"✅ gRPC preflight OK → {addr}")
-        return True
-    except Exception as e:
-        print(f"⚠️ aio preflight failed for {addr}: {e}")
-    # Fallback to sync probe, run in a thread so it doesn't require a Task
-    def _sync_probe() -> bool:
-        ch = grpc.insecure_channel(addr)
-        grpc.channel_ready_future(ch).result(timeout=timeout)
-        ch.close()
-        return True
-    try:
-        ok = await asyncio.get_running_loop().run_in_executor(None, _sync_probe)
-        if ok:
-            print(f"✅ gRPC preflight OK (sync) → {addr}")
-            return True
-    except Exception as e:
-        print(f"❌ gRPC preflight FAIL → {addr} | {e}")
-    return False            # ← requires google-cloud-firestore already in requirements
 
 # ──────────────────────────────────────────────────────────────────────────────
 def _store_weights_in_firestore(uid: int, hotkey: str, weights: dict):
@@ -433,17 +406,6 @@ class Validator(BaseValidatorNeuron):
                     print(f"🔧 Hairpin bypass for UID {uid}: {ax.ip} → 127.0.0.1")
                     ax.ip = "127.0.0.1"
 
-            # TCP + robust gRPC preflight
-            grpc_ready = {}
-            for uid, ep in zip(miner_uids, endpoints):
-                host, p = ep.split(":")
-                try:
-                    with socket.create_connection((host, int(p)), timeout=3):
-                        print(f"✅ TCP preflight OK → {host}:{p} (UID {uid})")
-                except Exception as e:
-                    print(f"❌ TCP preflight FAIL → {host}:{p} (UID {uid}) :: {e}")
-                grpc_ready[uid] = await _grpc_ready_check(ep, timeout=5.0)
-
         # Always start with an empty list so we never hit UnboundLocalError
         all_miner_leads: list = []
 
@@ -481,11 +443,18 @@ class Validator(BaseValidatorNeuron):
         # 3️⃣ If no leads from Bittensor, fallback to Cloud-Run
         if not all_miner_leads:
             print("⚠️  Axon unreachable – falling back to cloud broker")
-            req_id = push_miner_curation_request(
-                self.wallet,
-                {"num_leads": synapse.num_leads, "business_desc": synapse.business_desc}
-            )
-            print(f"📤 Sent curation request to Cloud-Run: {req_id}")
+            # Broadcast the same request to every currently-active miner so
+            # each one receives its own copy via the Cloud-Run queue.
+            for target_uid in miner_uids:
+                req_id = push_miner_curation_request(
+                    self.wallet,
+                    {
+                        "num_leads":      synapse.num_leads,
+                        "business_desc":  synapse.business_desc,
+                        "target_uid":     int(target_uid),          # optional
+                    },
+                )
+                print(f"📤 Sent curation request to Cloud-Run for UID {target_uid}: {req_id}")
 
             # ── Wait for miner response via Cloud-Run ─────────────────────
             MAX_ATTEMPTS = 40      # 40 × 5 s  = 200 s
@@ -493,13 +462,45 @@ class Validator(BaseValidatorNeuron):
             total_wait   = MAX_ATTEMPTS * SLEEP_SEC
             print(f"⏳ Waiting for miner response (up to {total_wait} s)…")
 
-            for _ in range(MAX_ATTEMPTS):
+            expected_miners = len(miner_uids)  # Number of miners we sent requests to
+            received_responses = 0
+            first_response_time = None
+            
+            for attempt in range(MAX_ATTEMPTS):
                 res = fetch_miner_curation_result(self.wallet)
                 if res and res.get("leads"):
-                    all_miner_leads = res["leads"]
-                    print(f"✅ Received {len(all_miner_leads)} leads from Cloud-Run")
-                    break
+                    # EXTEND instead of REPLACE to collect from multiple miners
+                    all_miner_leads.extend(res["leads"])
+                    received_responses += 1
+                    
+                    # Track when we got the first response
+                    if received_responses == 1:
+                        first_response_time = attempt
+                        print(f"✅ Received first response ({len(res['leads'])} leads) from Cloud-Run")
+                        
+                        # If expecting multiple miners, wait additional 30s for others
+                        if expected_miners > 1:
+                            print(f"⏳ Waiting additional 30s for {expected_miners - 1} more miners...")
+                    else:
+                        print(f"✅ Received response {received_responses}/{expected_miners} with {len(res['leads'])} leads")
+                    
+                    # Exit conditions:
+                    # 1. Got all expected responses
+                    if received_responses >= expected_miners:
+                        print(f"✅ Received all {expected_miners} responses from miners")
+                        break
+                    
+                    # 2. Got first response and waited 30s (6 attempts) for others
+                    elif first_response_time is not None and (attempt - first_response_time) >= 6:
+                        print(f"⏰ 30s timeout reached, proceeding with {received_responses}/{expected_miners} responses")
+                        break
+                
                 time.sleep(SLEEP_SEC)
+            
+            if received_responses > 0:
+                print(f"📊 Final collection: {len(all_miner_leads)} leads from {received_responses}/{expected_miners} miners")
+            else:
+                print("❌ No responses received from any miner via Cloud-Run")
 
         # 4️⃣ Rank leads using LLM scoring (TWO rounds as intended)
         if all_miner_leads:
@@ -560,7 +561,6 @@ class Validator(BaseValidatorNeuron):
                     # Log final weights and emissions
                     print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
                     print(f"   Final Curated List: {len(top_leads)} prospects")
-                    print(f"   K weights (Legitimacy): {rewards['K']}")
                     print(f"   S weights (Sourcing): {rewards['S']}")
                     print(f"   C weights (Curating): {rewards['C']}")
                     print(f"   Final weights (W): {rewards['W']}")
@@ -888,15 +888,6 @@ class Validator(BaseValidatorNeuron):
         print(f"🔍 Validator UID: {self.uid}")
         print(f"🔍 Validator hotkey: {self.wallet.hotkey.ss58_address}")
 
-        # Enable low-level gRPC logs (printed directly to console)
-        os.environ.setdefault("GRPC_VERBOSITY", "DEBUG")
-        os.environ.setdefault(
-            "GRPC_TRACE",
-            "handshaker,tsi,security,api,transport,http,call_error"
-        )
-        print(f"🧪 gRPC env → VERBOSITY={os.getenv('GRPC_VERBOSITY')} "
-              f"TRACE={os.getenv('GRPC_TRACE')}")
-
         # NOW build the axon with the **correct** port
         self.axon = bt.axon(
             wallet=self.wallet,
@@ -933,18 +924,31 @@ class Validator(BaseValidatorNeuron):
             # Keep the validator running and continuously process leads
             while not self.should_exit:
                 # Process any new leads that need validation (continuous)
-                self.process_sourced_leads_continuous()
-                self.process_curation_requests_continuous()
+                try:
+                    self.process_sourced_leads_continuous()
+                except Exception as e:
+                    bt.logging.warning(f"Error in process_sourced_leads_continuous: {e}")
+                    time.sleep(5)  # Wait before retrying
+                
+                try:
+                    self.process_curation_requests_continuous()
+                except Exception as e:
+                    bt.logging.warning(f"Error in process_curation_requests_continuous: {e}")
+                    time.sleep(5)  # Wait before retrying
 
                 self.sync()
+                time.sleep(1)  # Small delay to prevent tight loop
         except KeyboardInterrupt:
             self.axon.stop()
             bt.logging.success("Validator killed by keyboard interrupt.")
             exit()
         except Exception as e:
-            bt.logging.error(f"Error in validator: {e}")
+            bt.logging.error(f"Critical error in validator main loop: {e}")
             import traceback
             bt.logging.error(traceback.format_exc())
+            # Continue running instead of crashing
+            time.sleep(10)  # Wait longer before retrying main loop
+
 
     def show_available_miners(self):
         """Show all available miners on the network"""
@@ -1018,12 +1022,6 @@ class Validator(BaseValidatorNeuron):
                         # Run async validate_lead in sync context
                         result = asyncio.run(self.validate_lead(lead))
                         if result["is_legitimate"]:
-                            # ✅ V2: Set current K miner after automated checks pass
-                            from Leadpoet.validator.reward import set_current_K_miner
-                            set_current_K_miner(miner_hotkey)
-                            print(f"    ✅ Passed automated checks - K miner updated to {miner_hotkey}")
-                            print(f"    🔑 K miner allocation: {miner_hotkey} now has Kₘ = 1, all others have Kₘ = 0")
-
                             # Add prospect to pool after K miner update
                             self.move_to_validated_leads(lead, result["score"])
                         else:
@@ -1065,6 +1063,10 @@ class Validator(BaseValidatorNeuron):
         lead["validator_hotkey"] = self.wallet.hotkey.ss58_address
         # Use ISO format timestamp instead of Unix timestamp
         lead["validated_at"] = datetime.now(timezone.utc).isoformat()
+
+        # ➕ include the ZeroBounce AI score if present
+        if "email_score" in lead:
+            lead["email_score"] = lead["email_score"]
 
         try:
             stored = save_leads_to_cloud(self.wallet, [lead])   # True ↔ actually written
@@ -1123,7 +1125,12 @@ class Validator(BaseValidatorNeuron):
             
             # 3️⃣ Use automated_checks for comprehensive validation
             passed, reason = await run_automated_checks(mapped_lead)
-            
+
+            # ⬇️  grab ZeroBounce AI score (set in check_zerobounce_email)
+            email_score = mapped_lead.get("email_score", None)
+            if email_score is not None:
+                lead["email_score"] = email_score      # propagate to original lead
+
             return {
                 'is_legitimate': passed,
                 'reason': reason,
@@ -1484,6 +1491,12 @@ def main():
 
     ensure_data_files()
 
+    # Add this near the beginning of your validator startup, after imports
+    from Leadpoet.validator.reward import start_epoch_monitor, stop_epoch_monitor
+
+    # Start the background epoch monitor when validator starts
+    start_epoch_monitor()
+
     # Run the proper Bittensor validator
     config = bt.Config()
     config.wallet = bt.Config()
@@ -1502,6 +1515,9 @@ def main():
 
     # Run the validator on the Bittensor network
     validator.run()
+
+    # Add cleanup on shutdown (if you have a shutdown handler)
+    # stop_epoch_monitor()
 
 if __name__ == "__main__":
     main()

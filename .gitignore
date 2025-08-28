@@ -1,13 +1,21 @@
+# Project-specific
+.cursor/
+tests/
+scripts/
+path/
+validation_artifacts/
+data/
+logs/
+validator_weights/
 # macOS
 .DS_Store
 
 # Bittensor-specific
 *.log
-*.npz  # For validator state files (e.g., validator_state.npz)
-*.key  # For any stray key files
+*.npz   # Validator state files (e.g., validator_state.npz)
+*.key   # Stray key files
 
 # Leadpoet-specific
---wallet.hotkey/
 wallet.hotkey/
 lead_pool.json
 leadpoet_subnet.egg-info/
@@ -16,7 +24,9 @@ leadpoet_subnet.egg-info/
 *.pytest_cache/
 coverage/
 .coverage
-*.tox/# Python
+*.tox/
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -35,9 +45,3 @@ build/
 *.swp
 *.swo
 .history/
-# Leadpoet-specific
---wallet.hotkey/
-lead_pool.json/
-leadpoet_subnet.egg-info/
-.history/
-

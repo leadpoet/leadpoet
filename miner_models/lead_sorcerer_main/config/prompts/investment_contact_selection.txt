@@ -1,0 +1,17 @@
+ICP: {icp_text}
+
+Select the BEST contact who can actually allocate capital or make investment decisions. Prioritize:
+- Family office decision makers
+- Investment fund founders/managers
+- Capital allocators with crypto exposure
+- HNW individuals with investment capacity
+- Portfolio managers and analysts
+
+AVOID: Marketing executives, consultants, or people without investment decision-making power.
+{role_context}
+
+Contacts:
+{contacts}
+
+Return ONLY a JSON response in this exact format:
+{{ "contact_id": "123" }}

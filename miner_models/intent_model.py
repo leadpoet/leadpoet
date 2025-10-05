@@ -187,7 +187,7 @@ def _intent_score(business: str, website: str, industry: Optional[str]) -> float
 # ---------------------------------------------------------------------
 import asyncio, os, json, textwrap, requests
 
-OPENROUTER = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER = os.getenv("OPENROUTER_KEY")
 
 PROMPT_SYSTEM = (
     "You are a B2B lead-generation assistant.\n"

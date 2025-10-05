@@ -37,6 +37,8 @@ from Leadpoet.utils.cloud_db import (
     fetch_prospects_from_cloud,
     fetch_miner_curation_request,      # NEW
     push_miner_curation_result,        # NEW
+    fetch_broadcast_requests,          # NEW
+    mark_broadcast_processing,         # NEW
 )
 import logging
 import random
@@ -212,6 +214,158 @@ class Miner(BaseMinerNeuron):
             except Exception as e:
                 print(f"❌ Cloud-curation loop error: {e}")
                 await asyncio.sleep(10)
+
+    async def broadcast_curation_loop(self, miner_hotkey: str):
+        """
+        Poll Firestore for broadcast API requests and process them.
+        """
+        print("🟢 Miner broadcast polling loop initialized!")
+        print("📡 Polling for broadcast API requests... (will notify when requests are found)")
+        
+        # Local tracking to prevent re-processing
+        processed_requests = set()
+        
+        poll_count = 0
+        while True:
+            try:
+                poll_count += 1
+                
+                # Fetch broadcast API requests from Firestore
+                from Leadpoet.utils.cloud_db import fetch_broadcast_requests
+                requests = fetch_broadcast_requests(self.wallet, role="miner")
+                
+                # fetch_broadcast_requests() will print when requests are found
+                # No need to log anything here when empty
+                
+                if requests:
+                    print(f"🔔 Miner found {len(requests)} broadcast request(s) to process")
+                
+                for req in requests:
+                    request_id = req.get("request_id")
+                    
+                    # Skip if already processed locally
+                    if request_id in processed_requests:
+                        print(f"⏭️  Skipping locally processed request {request_id[:8]}...")
+                        continue
+                    
+                    print(f"🔍 Checking request {request_id[:8]}... (status={req.get('status')})")
+                    
+                    # Try to mark as processing (atomic operation in Firestore)
+                    from Leadpoet.utils.cloud_db import mark_broadcast_processing
+                    success = mark_broadcast_processing(self.wallet, request_id)
+                    
+                    if not success:
+                        # Another miner already claimed it - mark as processed locally
+                        print(f"⏭️  Request {request_id[:8]}... already claimed by another miner")
+                        processed_requests.add(request_id)  # ← ADD THIS LINE
+                        continue
+                    
+                    # Mark as processed locally
+                    processed_requests.add(request_id)
+                    
+                    num_leads = req.get("num_leads", 1)
+                    business_desc = req.get("business_desc", "")
+                    
+                    print(f"\n📨 Broadcast API request received {request_id[:8]}...")
+                    print(f"   Requested: {num_leads} leads")
+                    print(f"   Description: {business_desc[:50]}...")
+                    
+                    # Pause sourcing
+                    self.pause_sourcing()
+                    print("🟢 Processing broadcast request: {}…".format(business_desc[:20]))
+                    
+                    with self.sourcing_lock:
+                        print(f"🟢 Processing broadcast request: {business_desc[:40]}…")
+                        target_ind = classify_industry(business_desc)
+                        print(f"🔍 Target industry inferred: {target_ind or 'any'}")
+                    
+                    # Curation logic (same as cloud_curation_loop)
+                    desired_roles = classify_roles(business_desc)
+                    if desired_roles:
+                        print(f"🛈  Role filter active → {desired_roles}")
+                    
+                    pool_slice = get_leads_from_pool(
+                        1000, industry=target_ind, region=None, wallet=self.wallet
+                    )
+                    
+                    if desired_roles:
+                        pool_slice = [
+                            ld for ld in pool_slice
+                            if _role_match(ld.get("role", ""), desired_roles)
+                        ] or pool_slice
+                    
+                    curated_leads = random.sample(pool_slice, min(len(pool_slice), num_leads * 3))
+                    
+                    if not curated_leads:
+                        print("📝 No leads found in pool, generating new leads...")
+                        new_leads = await get_leads(num_leads * 2, target_ind, None)
+                        curated_leads = [sanitize_prospect(p, miner_hotkey) for p in new_leads]
+                    else:
+                        print(f"📊 Curated {len(curated_leads)} leads from pool")
+                    
+                    # Map leads to proper format
+                    mapped_leads = []
+                    for lead in curated_leads:
+                        m = {
+                            "email": lead.get("owner_email", ""),
+                            "Business": lead.get("business", ""),
+                            "Owner Full name": lead.get("owner_full_name", ""),
+                            "First": lead.get("first", ""),
+                            "Last": lead.get("last", ""),
+                            "LinkedIn": lead.get("linkedin", ""),
+                            "Website": lead.get("website", ""),
+                            "Industry": lead.get("industry", ""),
+                            "sub_industry": lead.get("sub_industry", ""),
+                            "Region": lead.get("region", ""),
+                            "role": lead.get("role", ""),
+                            "source": lead.get("source", ""),
+                            "curated_by": self.wallet.hotkey.ss58_address,
+                            "curated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        if all(m.get(f) for f in ["email", "Business"]):
+                            mapped_leads.append(m)
+                    
+                    print("🔄 Ranking leads by intent...")
+                    ranked = await rank_leads(mapped_leads, description=business_desc)
+                    top_leads = ranked[:num_leads]
+                    
+                    # Add request_id to track which broadcast this is for
+                    for lead in top_leads:
+                        lead["curated_at"] = datetime.now(timezone.utc).isoformat()
+                        lead["broadcast_request_id"] = request_id
+                    
+                    print(f"📤 SENDING {len(top_leads)} curated leads for broadcast:")
+                    for i, lead in enumerate(top_leads, 1):
+                        print(f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})")
+                    
+                    # NEW: Send leads to Firestore (not Cloud Run API)
+                    from Leadpoet.utils.cloud_db import push_miner_curated_leads
+                    success = push_miner_curated_leads(
+                        self.wallet,
+                        request_id,
+                        top_leads
+                    )
+                    
+                    if success:
+                        print(f"✅ Sent {len(top_leads)} leads to Firestore for request {request_id[:8]}...")
+                    else:
+                        print(f"❌ Failed to send leads to Firestore for request {request_id[:8]}...")
+                    
+                    # Resume sourcing
+                    self.resume_sourcing()
+                
+            except asyncio.CancelledError:
+                print("🛑 Broadcast-curation task cancelled")
+                break
+            except Exception as e:
+                print(f"❌ Broadcast-curation loop error: {e}")
+                print(f"Broadcast-curation loop error: {e}")
+                import traceback
+                print(traceback.format_exc())
+                await asyncio.sleep(5)  # Wait before retrying on error
+            
+            # Poll every 1 second for instant response
+            await asyncio.sleep(1)  # ← REDUCED from 5 to 1 second
 
     async def _forward_async(self, synapse: LeadRequest) -> LeadRequest:
         # ─────────────────────────────────────────────────────────────
@@ -672,14 +826,25 @@ async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
     miner._loop = asyncio.get_running_loop()
     miner._bg_interval = interval
     miner._miner_hotkey = miner_hotkey
-    # start both background tasks
+    
+    # Start all background tasks
     miner.sourcing_task = asyncio.create_task(
         miner.sourcing_loop(interval, miner_hotkey), name="sourcing_loop"
     )
     miner.cloud_task = asyncio.create_task(
         miner.cloud_curation_loop(miner_hotkey), name="cloud_curation_loop"
     )
-    # keep alive
+    # NEW: Start broadcast curation task
+    miner.broadcast_task = asyncio.create_task(
+        miner.broadcast_curation_loop(miner_hotkey), name="broadcast_curation_loop"
+    )
+    
+    print("✅ Started 3 background tasks:")
+    print("   1. sourcing_loop - Continuous lead sourcing")
+    print("   2. cloud_curation_loop - Cloud-Run curation requests")
+    print("   3. broadcast_curation_loop - Broadcast API requests")
+    
+    # Keep alive
     while True:
         await asyncio.sleep(1)
 

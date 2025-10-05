@@ -21,8 +21,25 @@ load_dotenv()
 # Environment variables for new APIs
 HUNTER_API_KEY = os.getenv("HUNTER_API_KEY", "YOUR_HUNTER_API_KEY")
 ZEROBOUNCE_API_KEY = os.getenv("ZEROBOUNCE_API_KEY", "YOUR_ZEROBOUNCE_API_KEY")
-APOLLO_API_KEY = os.getenv("APOLLO_API_KEY", "YOUR_APOLLO_API_KEY")
-OPENCORPORATES_API_KEY = os.getenv("OPENCORPORATES_API_KEY", "YOUR_OPENCORPORATES_API_KEY")
+
+GOOGLE_API_KEY = os.getenv("GSE_API_KEY", "YOUR_GOOGLE_API_KEY")
+GOOGLE_CSE_ID = os.getenv("GSE_CX", "YOUR_GOOGLE_CSE_ID")
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+
+# LLM Models for validation checks
+AVAILABLE_MODELS = [
+    "deepseek/deepseek-chat-v3-0324:free",
+    "deepseek/deepseek-r1:free",
+    "meta-llama/llama-3.1-405b-instruct:free",
+    "google/gemini-2.0-flash-exp:free",
+    "moonshotai/kimi-k2:free",
+    "mistralai/mistral-small-3.2-24b-instruct:free",
+    "meta-llama/llama-3.3-70b-instruct:free"
+]
+
+FALLBACK_MODELS = [
+    "mistralai/mistral-7b-instruct",
+]
 
 # Constants
 DISPOSABLE_DOMAINS = {"mailinator.com", "temp-mail.org", "guerrillamail.com", "10minutemail.com", 
@@ -33,8 +50,8 @@ VALIDATION_ARTIFACTS_DIR = "validation_artifacts"
 # Cache TTLs in hours
 CACHE_TTLS = {
     "dns_head": 24,
-    "whois_opencorporates": 90,
-    "hunter_apollo_zerobounce": 90,
+    "whois": 90,  # Used for WHOIS domain age lookups
+    "zerobounce": 90,  
 }
 
 # Rate limiting semaphore - limit concurrent API calls
@@ -257,16 +274,10 @@ async def check_domain_age(lead: dict) -> Tuple[bool, str]:
         return False, "Invalid website format"
     
     cache_key = f"domain_age:{domain}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["whois_opencorporates"]):
+    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["whois"]):
         return validation_cache[cache_key]
     
     try:
-        # Mock mode fallback
-        if "YOUR_OPENCORPORATES_API_KEY" in OPENCORPORATES_API_KEY:
-            result = (True, "Mock pass - domain age check")
-            validation_cache[cache_key] = result
-            return result
-        
         # Implement actual WHOIS lookup
         def get_domain_age_sync(domain_name):
             try:
@@ -278,7 +289,7 @@ async def check_domain_age(lead: dict) -> Tuple[bool, str]:
                         creation_date = w.creation_date
                     
                     age_days = (datetime.now() - creation_date).days
-                    min_age_days = 90  # 3 months minimum
+                    min_age_days = 7  # 7 days minimum
                     
                     if age_days >= min_age_days:
                         return (True, f"Domain age: {age_days} days (minimum: {min_age_days})")
@@ -322,6 +333,142 @@ async def check_mx_record(lead: dict) -> Tuple[bool, str]:
         result = (False, f"MX record check failed: {str(e)}")
         validation_cache[cache_key] = result
         return result
+
+async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
+    """
+    Check SPF and DMARC DNS records (SOFT check - always passes, appends data to lead)
+    
+    This is a SOFT check that:
+    - Checks DNS TXT record for v=spf1
+    - Checks DNS TXT record at _dmarc.{domain} for v=DMARC1
+    - Checks DMARC policy for p=quarantine or p=reject
+    - Appends results to lead but NEVER rejects
+    
+    Args:
+        lead: Dict containing email/website
+        
+    Returns:
+        (True, str): Always passes, with informational message
+    """
+    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    if not email:
+        # No email to check - append default values
+        lead["has_spf"] = False
+        lead["has_dmarc"] = False
+        lead["dmarc_policy_strict"] = False
+        return True, "No email provided for SPF/DMARC check (SOFT - passed)"
+    
+    # Extract domain from email
+    try:
+        domain = email.split("@")[1].lower() if "@" in email else ""
+        if not domain:
+            lead["has_spf"] = False
+            lead["has_dmarc"] = False
+            lead["dmarc_policy_strict"] = False
+            return True, "Invalid email format (SOFT - passed)"
+    except (IndexError, AttributeError):
+        lead["has_spf"] = False
+        lead["has_dmarc"] = False
+        lead["dmarc_policy_strict"] = False
+        return True, "Invalid email format (SOFT - passed)"
+    
+    cache_key = f"spf_dmarc:{domain}"
+    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
+        cached_data = validation_cache[cache_key]
+        # Apply cached values to lead
+        lead["has_spf"] = cached_data.get("has_spf", False)
+        lead["has_dmarc"] = cached_data.get("has_dmarc", False)
+        lead["dmarc_policy_strict"] = cached_data.get("dmarc_policy_strict", False)
+        return True, cached_data.get("message", "SPF/DMARC check (cached)")
+    
+    try:
+        # Initialize results
+        has_spf = False
+        has_dmarc = False
+        dmarc_policy_strict = False
+        
+        # Run DNS lookups in executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        
+        def check_spf_sync(domain_name):
+            """Check if domain has SPF record"""
+            try:
+                txt_records = dns.resolver.resolve(domain_name, "TXT")
+                for record in txt_records:
+                    txt_string = "".join([s.decode() if isinstance(s, bytes) else s for s in record.strings])
+                    if "v=spf1" in txt_string.lower():
+                        return True
+                return False
+            except Exception:
+                return False
+        
+        def check_dmarc_sync(domain_name):
+            """Check if domain has DMARC record and return policy strictness"""
+            try:
+                dmarc_domain = f"_dmarc.{domain_name}"
+                txt_records = dns.resolver.resolve(dmarc_domain, "TXT")
+                for record in txt_records:
+                    txt_string = "".join([s.decode() if isinstance(s, bytes) else s for s in record.strings])
+                    txt_lower = txt_string.lower()
+                    
+                    if "v=dmarc1" in txt_lower:
+                        # Check if policy is strict (quarantine or reject)
+                        is_strict = "p=quarantine" in txt_lower or "p=reject" in txt_lower
+                        return True, is_strict
+                return False, False
+            except Exception:
+                return False, False
+        
+        # Execute DNS checks
+        has_spf = await loop.run_in_executor(None, check_spf_sync, domain)
+        has_dmarc, dmarc_policy_strict = await loop.run_in_executor(None, check_dmarc_sync, domain)
+        
+        # Append results to lead (SOFT check data)
+        lead["has_spf"] = has_spf
+        lead["has_dmarc"] = has_dmarc
+        lead["dmarc_policy_strict"] = dmarc_policy_strict
+        
+        # Create informational message
+        spf_status = "✓" if has_spf else "✗"
+        dmarc_status = "✓" if has_dmarc else "✗"
+        policy_status = "✓ (strict)" if dmarc_policy_strict else ("✓ (permissive)" if has_dmarc else "✗")
+        
+        message = f"SPF: {spf_status}, DMARC: {dmarc_status}, Policy: {policy_status}"
+        
+        # Cache the results
+        cache_data = {
+            "has_spf": has_spf,
+            "has_dmarc": has_dmarc,
+            "dmarc_policy_strict": dmarc_policy_strict,
+            "message": message
+        }
+        validation_cache[cache_key] = cache_data
+        
+        print(f"📧 SPF/DMARC Check (SOFT): {domain} - {message}")
+        
+        # ALWAYS return True (SOFT check never fails)
+        return True, message
+        
+    except Exception as e:
+        # On any error, append False values and pass
+        lead["has_spf"] = False
+        lead["has_dmarc"] = False
+        lead["dmarc_policy_strict"] = False
+        
+        message = f"SPF/DMARC check error (SOFT - passed): {str(e)}"
+        print(f"⚠️ {message}")
+        
+        # Cache the error result
+        cache_data = {
+            "has_spf": False,
+            "has_dmarc": False,
+            "dmarc_policy_strict": False,
+            "message": message
+        }
+        validation_cache[cache_key] = cache_data
+        
+        # ALWAYS return True (SOFT check never fails)
+        return True, message
 
 async def check_head_request(lead: dict) -> Tuple[bool, str]:
     """Wrapper around existing verify_company function"""
@@ -368,110 +515,72 @@ async def check_disposable(lead: dict) -> Tuple[bool, str]:
         validation_cache[cache_key] = result
         return result
 
-# Stage 1: OpenCorporates Check
-
-async def check_opencorporates_status(lead: dict) -> Tuple[bool, str]:
-    """Check company status using OpenCorporates API"""
-    website = lead.get("Website", lead.get("website", ""))
-    if not website:
-        return False, "No website provided"
+async def check_dnsbl(lead: dict) -> Tuple[bool, str]:
+    """
+    Check if lead's email domain is listed in Spamhaus DBL.
     
-    domain = extract_root_domain(website)
-    if not domain:
-        return False, "Invalid website format"
+    Args:
+        lead: Dict containing email field
+        
+    Returns:
+        (bool, str): (is_valid, reason_if_invalid)
+    """
+    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    if not email:
+        return False, "No email provided"
     
-    cache_key = f"opencorporates:{domain}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["whois_opencorporates"]):
+    # Extract domain from email
+    try:
+        domain = email.split("@")[1].lower() if "@" in email else ""
+        if not domain:
+            return True, "Invalid email format - handled by other checks"
+    except (IndexError, AttributeError):
+        return True, "Invalid email format - handled by other checks"
+    
+    # Use root domain extraction helper
+    root_domain = extract_root_domain(domain)
+    if not root_domain:
+        return True, "Could not extract root domain"
+    
+    cache_key = f"dnsbl_{root_domain}"
+    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
         return validation_cache[cache_key]
     
     try:
-        # Mock mode fallback
-        if "YOUR_OPENCORPORATES_API_KEY" in OPENCORPORATES_API_KEY:
-            result = (True, "Mock pass - OpenCorporates check")
-            validation_cache[cache_key] = result
-            return result
-        
-        # Implement actual OpenCorporates API call
-        # Extract company name from domain (simplified approach)
-        company_name = domain.split(".")[0].replace("-", " ").title()
-        
-        # OpenCorporates API endpoint
-        url = "https://api.opencorporates.com/companies/search"
-        params = {"q": company_name, "api_token": OPENCORPORATES_API_KEY}
-        
         async with API_SEMAPHORE:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        companies = data.get("results", {}).get("companies", [])
-                        
-                        if companies:
-                            # Check if any company is inactive
-                            for company in companies[:5]:  # Check first 5 results
-                                if company.get("company", {}).get("inactive", False):
-                                    result = (False, f"Company marked as inactive: {company.get('company', {}).get('name', 'Unknown')}")
-                                    validation_cache[cache_key] = result
-                                    return result
-                            
-                            result = (True, "Company status verified via OpenCorporates")
-                        else:
-                            result = (True, "Company not found in OpenCorporates (assumed valid)")
-                    else:
-                        result = (True, "OpenCorporates API unavailable (assumed valid)")
-                        
-        validation_cache[cache_key] = result
-        return result
-        
-    except Exception as e:
-        result = (False, f"OpenCorporates check failed: {str(e)}")
-        validation_cache[cache_key] = result
-        return result
-
-async def check_industry_location_match(lead: dict) -> Tuple[bool, str]:
-    """Check if industry and location match company data"""
-    website = lead.get("Website", lead.get("website", ""))
-    if not website:
-        return False, "No website provided"
-    
-    domain = extract_root_domain(website)
-    if not domain:
-        return False, "Invalid website format"
-    
-    cache_key = f"industry_location:{domain}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["whois_opencorporates"]):
-        return validation_cache[cache_key]
-    
-    try:
-        # Mock mode fallback
-        if "YOUR_OPENCORPORATES_API_KEY" in OPENCORPORATES_API_KEY:
-            result = (True, "Mock pass - industry/location match")
+            # Perform Spamhaus DBL lookup
+            query = f"{root_domain}.dbl.spamhaus.org"
+            
+            # Run DNS lookup in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            def dns_lookup():
+                try:
+                    dns.resolver.resolve(query, "A")
+                    return True  # Record exists = domain is blacklisted
+                except dns.resolver.NXDOMAIN:
+                    return False  # No record = domain is clean
+                except Exception as e:
+                    # On any DNS error, default to valid (don't block on infrastructure issues)
+                    print(f"⚠️ DNS lookup error for {query}: {e}")
+                    return False
+            
+            is_blacklisted = await loop.run_in_executor(None, dns_lookup)
+            
+            if is_blacklisted:
+                result = (False, f"Domain {root_domain} blacklisted in Spamhaus DBL")
+                print(f"❌ DNSBL: Domain {root_domain} found in Spamhaus blacklist")
+            else:
+                result = (True, f"Domain {root_domain} not in Spamhaus DBL")
+                print(f"✅ DNSBL: Domain {root_domain} clean")
+            
             validation_cache[cache_key] = result
             return result
-        
-        # For now, implement basic keyword matching
-        # TODO: Implement LLM fallback for fuzzy matching
-        company_name = domain.split(".")[0].replace("-", " ").lower()
-        
-        # Basic industry keywords
-        tech_keywords = ["tech", "software", "ai", "ml", "data", "cloud", "digital"]
-        finance_keywords = ["finance", "bank", "insurance", "investment", "credit"]
-        healthcare_keywords = ["health", "medical", "pharma", "care", "bio"]
-        
-        # Check if company name contains industry keywords
-        industry_match = any(keyword in company_name for keyword in tech_keywords + finance_keywords + healthcare_keywords)
-        
-        if industry_match:
-            result = (True, "Industry keywords matched company name")
-        else:
-            result = (True, "Industry match check passed (no keywords found)")
-        
-        validation_cache[cache_key] = result
-        return result
-        
+            
     except Exception as e:
-        result = (False, f"Industry/location match failed: {str(e)}")
+        # On any unexpected error, default to valid and cache the result
+        result = (True, f"DNSBL check failed (defaulting to valid): {str(e)}")
         validation_cache[cache_key] = result
+        print(f"⚠️ DNSBL check error for {root_domain}: {e}")
         return result
 
 # Stage 2: ZeroBounce Check
@@ -483,7 +592,7 @@ async def check_zerobounce_email(lead: dict) -> Tuple[bool, str]:
         return False, "No email provided"
 
     cache_key = f"zerobounce:{email}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["hunter_apollo_zerobounce"]):
+    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["zerobounce"]):
         return validation_cache[cache_key]
 
     try:
@@ -537,8 +646,15 @@ async def check_zerobounce_email(lead: dict) -> Tuple[bool, str]:
                     score = -1  # Indicate no score was obtained
 
         # Decide pass/fail using the original validation status
-        if status in ["valid", "catch-all"]:
-            result = (True, f"Email validated ({status}), score={score}")
+        if status == "valid":
+            result = (True, f"Email validated (valid), score={score}")
+        elif status == "catch-all":
+            # BRD: IF catch-all, accept only IF DNS TXT record contains v=spf1
+            has_spf = lead.get("has_spf", False)
+            if has_spf:
+                result = (True, f"Email validated (catch-all with SPF), score={score}")
+            else:
+                result = (False, f"Email is catch-all without SPF record")
         elif status == "invalid":
             result = (False, f"Email marked invalid")
         else:
@@ -552,171 +668,490 @@ async def check_zerobounce_email(lead: dict) -> Tuple[bool, str]:
         validation_cache[cache_key] = result
         return result
 
-# Stage 3: Apollo Check
+# Stage 3: Google LLM Checks
 
-async def check_apollo_contact_match(lead: dict) -> tuple[bool, str]:
-    """Check contact data consistency using Apollo API"""
-    # Extract lead details for Apollo query - map to Lead Sorcerer field names
-    first_name = lead.get("First", lead.get("First Name", ""))
-    last_name = lead.get("Last", lead.get("Last Name", ""))
-    company_name = lead.get("Business", lead.get("Company", ""))
-    email = lead.get("Owner(s) Email", lead.get("Email 1", lead.get("email", "")))
+async def google_search(query: str, max_results=3) -> str:
+    """
+    Perform Google Custom Search and return concatenated snippets.
+    
+    Args:
+        query: Search query string
+        max_results: Number of results to fetch (default 3)
+        
+    Returns:
+        str: Concatenated snippet text from search results
+    """
+    # Check for required environment variables
+    if "YOUR_GOOGLE_API_KEY" in GOOGLE_API_KEY or "YOUR_GOOGLE_CSE_ID" in GOOGLE_CSE_ID:
+        print("⚠️ Google API credentials not configured - skipping search")
+        return ""
+    
+    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
+        print("⚠️ Google API credentials missing - skipping search")
+        return ""
+    
+    try:
+        async with API_SEMAPHORE:
+            # Use aiohttp for the API call
+            async with aiohttp.ClientSession() as session:
+                url = "https://www.googleapis.com/customsearch/v1"
+                params = {
+                    "key": GOOGLE_API_KEY,
+                    "cx": GOOGLE_CSE_ID,
+                    "q": query,
+                    "num": min(max_results, 10)  # Google API max is 10
+                }
+                
+                # Make the API call directly (don't use api_call_with_retry)
+                async with session.get(url, params=params, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        items = data.get("items", [])
+                        
+                        # Extract and concatenate snippets
+                        snippets = []
+                        for item in items[:max_results]:
+                            snippet = item.get("snippet", "")
+                            if snippet:
+                                snippets.append(snippet)
+                        
+                        result = " ".join(snippets)
+                        print(f"🔍 Google Search: Found {len(snippets)} snippets for query: {query[:50]}...")
+                        return result
+                    else:
+                        print(f"⚠️ Google Search API error: {response.status}")
+                        return ""
+                    
+    except Exception as e:
+        print(f"⚠️ Google Search error: {e}")
+        return ""
+
+async def call_llm(prompt: str) -> dict:
+    """
+    Call LLM with prompt and return parsed JSON response.
+    
+    Args:
+        prompt: LLM prompt string
+        
+    Returns:
+        dict: Parsed JSON response from LLM
+    """
+    if not OPENROUTER_KEY or "YOUR_OPENROUTER_API_KEY" in OPENROUTER_KEY:
+        print("⚠️ OpenRouter API key not configured - returning empty result")
+        return {}
+    
+    def _extract_json(response_text: str) -> dict:
+        """Extract JSON from LLM response text"""
+        try:
+            txt = response_text.strip()
+            if txt.startswith("```"):
+                txt = txt.strip("`").lstrip("json").strip()
+            
+            # Find JSON object
+            start = txt.find("{")
+            end = txt.rfind("}") + 1
+            if start == -1 or end == 0:
+                return {}
+            
+            json_str = txt[start:end]
+            return json.loads(json_str)
+        except Exception as e:
+            print(f"⚠️ JSON parsing error: {e}")
+            return {}
+    
+    def _try_model(model_name: str) -> dict:
+        """Try calling a specific model"""
+        try:
+            import requests
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model_name,
+                    "temperature": 0.2,
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful assistant. Always respond with valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ]
+                },
+                timeout=15
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            return _extract_json(content)
+        except Exception as e:
+            print(f"⚠️ LLM model {model_name} failed: {e}")
+            return {}
+    
+    # Try primary model (Gemini 2 Flash)
+    try:
+        result = _try_model("google/gemini-2.0-flash-exp:free")
+        if result:
+            return result
+    except Exception as e:
+        print(f"⚠️ Primary LLM model failed: {e}")
+    
+    # Try fallback models
+    import random
+    for fallback_model in random.sample(FALLBACK_MODELS, k=len(FALLBACK_MODELS)):
+        try:
+            result = _try_model(fallback_model)
+            if result:
+                print(f"🔄 LLM fallback model {fallback_model} succeeded")
+                return result
+        except Exception as e:
+            print(f"⚠️ LLM fallback {fallback_model} failed: {e}")
+    
+    # All models failed
+    print("⚠️ All LLM models failed - returning empty result")
+    return {}
+
+async def check_llm_contact_match(lead: dict) -> Tuple[bool, str]:
+    """
+    HARD: Verify contact works at company using Google search + LLM
+    SOFT: Add role & location alignment data to lead
+    
+    Args:
+        lead: Dict containing contact info (name, email, company, role, location)
+        
+    Returns:
+        (bool, str): (is_valid, reason_if_invalid)
+    """
+    # Extract contact information
+    first_name = lead.get("First", lead.get("First Name", lead.get("first", "")))
+    last_name = lead.get("Last", lead.get("Last Name", lead.get("last", "")))
+    company_name = lead.get("Business", lead.get("Company", lead.get("business", "")))
+    role = lead.get("role", lead.get("Role", ""))
+    location = lead.get("region", lead.get("Region", lead.get("location", "")))
+    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
     
     if not email:
         return False, "No email provided"
     
-    cache_key = f"apollo_contact:{email}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["hunter_apollo_zerobounce"]):
-        return validation_cache[cache_key]
+    # Build contact name
+    contact_name = f"{first_name} {last_name}".strip()
+    if not contact_name or not company_name:
+        return True, "Insufficient data for contact verification"
+    
+    cache_key = f"llm_contact:{email}"
+    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["zerobounce"]):
+        cached_result = validation_cache[cache_key]
+        # Apply cached soft annotations
+        if len(cached_result) > 2:
+            lead["llm_role_match"] = cached_result[2].get("role_match", False)
+            lead["llm_location_match"] = cached_result[2].get("location_match", False)
+        return cached_result[0], cached_result[1]
     
     try:
-        # Mock mode fallback - check if API key is placeholder or if we're on free plan
-        if "YOUR_APOLLO_API_KEY" in APOLLO_API_KEY or "free" in APOLLO_API_KEY.lower():
-            result = (True, "Mock pass - Apollo contact match")
+        # Build search query
+        search_query = f'"{contact_name}" "{company_name}"'
+        print(f"🔍 LLM Contact Search: {search_query}")
+        
+        # Get search snippets
+        snippets = await google_search(search_query)
+        if not snippets:
+            result = (True, "No search results - assuming valid")
             validation_cache[cache_key] = result
             return result
         
-        # Implement actual Apollo contacts search API
-        url = "https://api.apollo.io/api/v1/mixed_people/search"
+        # Build LLM prompt
+        prompt = f"""
+Based on the following search results, analyze if this contact works at the specified company and verify role/location alignment.
+
+CONTACT INFO:
+- Name: {contact_name}
+- Company: {company_name}
+- Role: {role}
+- Location: {location}
+
+SEARCH RESULTS:
+{snippets[:1500]}
+
+Please respond with ONLY a JSON object in this exact format:
+{{
+    "works_at_company": true or false,
+    "role_match": true or false,
+    "location_match": true or false
+}}
+
+Base your decision on:
+- works_at_company: Does the person appear to work at the specified company?
+- role_match: Does their role align with the provided role information?
+- location_match: Does their location align with the provided location?
+"""
         
-        # Build Apollo search request body
-        body = {
-            "page": 1,
-            "per_page": 100,  # Maximum per page to capture more results for better contact matching
-        }
+        # Call LLM
+        llm_result = await call_llm(prompt)
         
-        # Add search filters based on available data
-        if first_name and last_name and company_name:
-            # Search by "Company FirstName LastName" for better targeting
-            body["q_keywords"] = f"{company_name} {first_name} {last_name}"
-        elif email and company_name:
-            # Fallback: search by company name if we have email
-            domain = email.split("@")[1].lower() if "@" in email else ""
-            if domain:
-                body["q_keywords"] = company_name
+        # Extract results with defaults
+        works_at_company = llm_result.get("works_at_company", True)  # Default to valid
+        role_match = llm_result.get("role_match", False)
+        location_match = llm_result.get("location_match", False)
+        
+        # Apply SOFT annotations to lead
+        lead["llm_role_match"] = role_match
+        lead["llm_location_match"] = location_match
+        
+        # HARD decision
+        if not works_at_company:
+            result = (False, "Contact does not work at specified company")
         else:
-            result = (False, "Contact match check failed: Insufficient data (name+company or email+company required)")
-            validation_cache[cache_key] = result
-            return result
+            result = (True, "Contact verification passed")
         
-        # Set up headers for Apollo API
-        headers = {
-            "X-Api-Key": APOLLO_API_KEY,
-            "Content-Type": "application/json"
-        }
+        # Cache result with soft annotations
+        validation_cache[cache_key] = (result[0], result[1], {"role_match": role_match, "location_match": location_match})
         
-        async with API_SEMAPHORE:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=body, headers=headers, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        
-                        found_match = False
-                        # Apollo API returns people in a 'people' array OR 'contacts' array
-                        people = []
-                        if isinstance(data, dict):
-                            if data.get("people"):
-                                people = data["people"]
-                            elif data.get("contacts"):
-                                people = data["contacts"]
-                        
-                        if people:
-                            for person in people:
-                                # Extract person details from Apollo response - handle None values safely
-                                person_name = person.get("name") or ""
-                                person_first_name = person.get("first_name") or ""
-                                person_last_name = person.get("last_name") or ""
-                                person_title = person.get("title") or ""
-                                person_email = person.get("email") or ""
-                                
-                                # Get organization details
-                                organization = person.get("organization") or {}
-                                person_company = organization.get("name") or ""
-                                person_domain = organization.get("domain") or ""
-                                
-                                # Convert to lowercase safely
-                                person_name = person_name.lower()
-                                person_first_name = person_first_name.lower()
-                                person_last_name = person_last_name.lower()
-                                person_title = person_title.lower()
-                                person_email = person_email.lower()
-                                person_company = person_company.lower()
-                                person_domain = person_domain.lower()
-                                
-                                # Check for strong match on email
-                                if email and person_email == email.lower():
-                                    found_match = True
-                                    break
-                                
-                                # Check for name and company match
-                                elif first_name and last_name and company_name:
-                                    # Build full name from Apollo response
-                                    apollo_full_name = f"{person_first_name} {person_last_name}".strip().lower()
-                                    lead_full_name = f"{first_name} {last_name}".lower()
-                                    
-                                    # Use fuzzy matching for names
-                                    name_match_ratio = fuzz.ratio(apollo_full_name, lead_full_name)
-                                    company_match_ratio = fuzz.ratio(person_company, company_name.lower())
-                                    
-                                    # Consider it a match if name matches strongly
-                                    if name_match_ratio > 80:
-                                        if company_match_ratio > 80 or not person_company:  # Company matches OR no company data
-                                            # ADDITIONAL VALIDATION: Check email prefix consistency
-                                            if email:
-                                                email_prefix = email.split('@')[0].lower()
-                                                first_name_lower = first_name.lower()
-                                                last_name_lower = last_name.lower()
-                                                
-                                                # Check if email prefix matches the person's name
-                                                email_matches_name = (
-                                                    email_prefix.startswith(first_name_lower) or
-                                                    email_prefix.startswith(last_name_lower) or
-                                                    email_prefix == f"{first_name_lower[0]}{last_name_lower}" or  # jsmith
-                                                    email_prefix == f"{first_name_lower}.{last_name_lower}" or   # john.smith
-                                                    email_prefix == f"{first_name_lower}_{last_name_lower}"      # john_smith
-                                                )
-                                                
-                                                if not email_matches_name:
-                                                    continue  # Skip this match, try next person
-                                            
-                                            found_match = True
-                                            break
-                        
-                        if found_match:
-                            result = (True, "Contact match found")
-                        else:
-                            result = (False, "Contact match not found")
-                    elif response.status == 403:
-                        # API endpoint not accessible (likely due to plan restrictions)
-                        # Fall back to mock mode for testing
-                        print("⚠️ Contact search endpoint not accessible with current plan - using mock mode")
-                        result = (True, "Mock pass - Contact match (endpoint restricted)")
-                    elif response.status == 422:
-                        # Check if it's a credit limit error
-                        response_text = await response.text()
-                        if "insufficient credits" in response_text.lower():
-                            print("⚠️ Contact search credit limit reached - using mock mode")
-                            result = (True, "Mock pass - Contact match (credit limit reached)")
-                        else:
-                            result = (False, f"Contact match check failed: API returned status {response.status} - {response_text[:100]}")
-                    else:
-                        response_text = await response.text()
-                        print(f"🔍 Apollo error response: {response_text[:200]}")
-                        result = (False, f"Contact match check failed: API returned status {response.status}")
-                        
-        validation_cache[cache_key] = result
+        print(f"✅ LLM Contact Check: {contact_name} @ {company_name} - {result[1]}")
         return result
         
     except Exception as e:
-        print(f"🔍 Apollo exception: {str(e)}")
-        result = (False, f"Contact match failed: {str(e)}")
+        result = (True, f"LLM contact check failed (defaulting to valid): {str(e)}")
         validation_cache[cache_key] = result
+        print(f"⚠️ LLM contact check error: {e}")
         return result
 
-async def check_apollo_company_match(lead: dict) -> Tuple[bool, str]:
-    """Check company data consistency using Apollo API - TEMPORARILY DISABLED"""
-    # For now, return mock pass to keep pipeline working without company matching
-    return True, "Mock pass - Apollo company matching temporarily disabled"
+async def check_llm_company_match(lead: dict) -> Tuple[bool, str]:
+    """
+    HARD: Verify company details using Google search + LLM
+    SOFT: Add LinkedIn match data if available
+    
+    Args:
+        lead: Dict containing company info (company_name, industry, location, linkedin_url)
+        
+    Returns:
+        (bool, str): (is_valid, reason_if_invalid)
+    """
+    company_name = lead.get("Business", lead.get("Company", lead.get("business", "")))
+    industry = lead.get("Industry", lead.get("industry", ""))
+    location = lead.get("region", lead.get("Region", lead.get("location", "")))
+    website = lead.get("Website", lead.get("website", ""))
+    linkedin_url = lead.get("linkedin", lead.get("LinkedIn", ""))
+    
+    if not company_name:
+        return False, "No company name provided"
+    
+    cache_key = f"llm_company:{company_name.lower().replace(' ', '_')}"
+    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["zerobounce"]):
+        cached_result = validation_cache[cache_key]
+        # Apply cached soft annotations
+        if len(cached_result) > 2 and linkedin_url:
+            lead["llm_linkedin_match"] = cached_result[2].get("linkedin_match", False)
+        return cached_result[0], cached_result[1]
+    
+    try:
+        # Build search query
+        search_query = f'"{company_name}" {industry} {location}'.strip()
+        print(f"🔍 LLM Company Search: {search_query}")
+        
+        # Get search snippets
+        snippets = await google_search(search_query)
+        if not snippets:
+            result = (True, "No search results - assuming valid")
+            validation_cache[cache_key] = result
+            return result
+        
+        # Build LLM prompt
+        prompt = f"""
+Based on the following search results, verify if the company information matches what was found online.
+
+COMPANY INFO:
+- Company Name: {company_name}
+- Industry: {industry}
+- Location: {location}
+- Website: {website}
+- LinkedIn: {linkedin_url}
+
+SEARCH RESULTS:
+{snippets[:1500]}
+
+Please respond with ONLY a JSON object in this exact format:
+{{
+    "company_name_match": true or false,
+    "industry_match": true or false,
+    "location_match": true or false,
+    "linkedin_match": true or false
+}}
+
+Base your decision on:
+- company_name_match: Does the company name closely match what's found online? (Allow for minor variations)
+- industry_match: Does the industry classification align with the company's actual business?
+- location_match: Does the location align with where the company operates?
+- linkedin_match: If LinkedIn URL provided, does it match the first search result or company info?
+"""
+        
+        # Call LLM
+        llm_result = await call_llm(prompt)
+        
+        # Extract results with defaults
+        company_name_match = llm_result.get("company_name_match", True)  # Default to valid
+        industry_match = llm_result.get("industry_match", True)
+        location_match = llm_result.get("location_match", True)
+        linkedin_match = llm_result.get("linkedin_match", False)
+        
+        # Apply SOFT annotations to lead (only if LinkedIn URL exists)
+        if linkedin_url:
+            lead["llm_linkedin_match"] = linkedin_match
+        
+        # HARD decisions: ALL must be true
+        failed_checks = []
+        if not company_name_match:
+            failed_checks.append("company name")
+        if not industry_match:
+            failed_checks.append("industry")
+        if not location_match:
+            failed_checks.append("location")
+        
+        if failed_checks:
+            result = (False, f"Company details verification failed: {', '.join(failed_checks)}")
+        else:
+            result = (True, "Company verification passed")
+        
+        # Cache result with soft annotations
+        validation_cache[cache_key] = (result[0], result[1], {"linkedin_match": linkedin_match})
+        
+        print(f"✅ LLM Company Check: {company_name} - {result[1]}")
+        return result
+        
+    except Exception as e:
+        result = (True, f"LLM company check failed (defaulting to valid): {str(e)}")
+        validation_cache[cache_key] = result
+        print(f"⚠️ LLM company check error: {e}")
+        return result
+
+async def check_icp_evidence(lead: dict) -> Tuple[bool, str]:
+    """
+    ICP Evidence Check (SOFT) - Search for ICP evidence confirmation
+    
+    This is a SOFT check that:
+    - Searches (Company Name + ICP Evidence) using Google
+    - Uses LLM to analyze search results and identify sources confirming ICP evidence
+    - Appends results to lead but NEVER rejects
+    
+    Args:
+        lead: Dict containing company info and ICP evidence
+        
+    Returns:
+        (True, str): Always passes, with informational message
+    """
+    company_name = lead.get("Business", lead.get("Company", lead.get("business", "")))
+    icp_evidence = lead.get("icp_evidence", lead.get("ICP Evidence", ""))
+    
+    # Initialize result - will always be appended to lead
+    lead["icp_evidence_confirmed"] = False
+    lead["icp_evidence_sources"] = []
+    
+    if not company_name:
+        return True, "No company name for ICP evidence check (SOFT - passed)"
+    
+    if not icp_evidence:
+        return True, "No ICP evidence to verify (SOFT - passed)"
+    
+    cache_key = f"icp_evidence:{company_name.lower().replace(' ', '_')}"
+    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["zerobounce"]):
+        cached_data = validation_cache[cache_key]
+        # Apply cached values to lead
+        lead["icp_evidence_confirmed"] = cached_data.get("confirmed", False)
+        lead["icp_evidence_sources"] = cached_data.get("sources", [])
+        if "confidence" in cached_data:
+            lead["icp_evidence_confidence"] = cached_data["confidence"]
+        return True, cached_data.get("message", "ICP evidence check (cached)")
+    
+    try:
+        # Build search query
+        search_query = f'"{company_name}" {icp_evidence}'
+        print(f"🔍 ICP Evidence Search: {search_query[:80]}...")
+        
+        # Get search snippets
+        snippets = await google_search(search_query, max_results=5)
+        if not snippets:
+            message = "No search results for ICP evidence (SOFT - passed)"
+            cache_data = {
+                "confirmed": False,
+                "sources": [],
+                "message": message
+            }
+            validation_cache[cache_key] = cache_data
+            return True, message
+        
+        # Build LLM prompt
+        prompt = f"""
+Based on the following search results, determine if there are any sources that confirm the ICP (Ideal Customer Profile) evidence for this company.
+
+COMPANY: {company_name}
+ICP EVIDENCE: {icp_evidence}
+
+SEARCH RESULTS:
+{snippets[:2000]}
+
+Please respond with ONLY a JSON object in this exact format:
+{{
+    "evidence_confirmed": true or false,
+    "sources": ["source1", "source2", ...],
+    "confidence": "high" or "medium" or "low"
+}}
+
+Base your decision on:
+- evidence_confirmed: Are there credible sources in the search results that confirm the ICP evidence?
+- sources: List of specific sources/websites that confirm the evidence (max 3)
+- confidence: Your confidence level in the confirmation
+"""
+        
+        # Call LLM
+        llm_result = await call_llm(prompt)
+        
+        # Extract results with defaults
+        evidence_confirmed = llm_result.get("evidence_confirmed", False)
+        sources = llm_result.get("sources", [])
+        confidence = llm_result.get("confidence", "low")
+        
+        # Apply SOFT annotations to lead
+        lead["icp_evidence_confirmed"] = evidence_confirmed
+        lead["icp_evidence_sources"] = sources[:3]  # Limit to 3 sources
+        lead["icp_evidence_confidence"] = confidence
+        
+        # Create informational message
+        if evidence_confirmed:
+            message = f"ICP evidence confirmed ({confidence} confidence) - {len(sources)} sources"
+        else:
+            message = f"ICP evidence not confirmed ({confidence} confidence)"
+        
+        # Cache the results
+        cache_data = {
+            "confirmed": evidence_confirmed,
+            "sources": sources[:3],
+            "confidence": confidence,
+            "message": message
+        }
+        validation_cache[cache_key] = cache_data
+        
+        print(f"📊 ICP Evidence Check (SOFT): {company_name} - {message}")
+        
+        # ALWAYS return True (SOFT check never fails)
+        return True, message
+        
+    except Exception as e:
+        # On any error, append False values and pass
+        lead["icp_evidence_confirmed"] = False
+        lead["icp_evidence_sources"] = []
+        lead["icp_evidence_confidence"] = "error"
+        
+        message = f"ICP evidence check error (SOFT - passed): {str(e)}"
+        print(f"⚠️ {message}")
+        
+        # Cache the error result
+        cache_data = {
+            "confirmed": False,
+            "sources": [],
+            "confidence": "error",
+            "message": message
+        }
+        validation_cache[cache_key] = cache_data
+        
+        # ALWAYS return True (SOFT check never fails)
+        return True, message
 
 # Main validation pipeline
 
@@ -726,14 +1161,16 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
     company = lead.get("Company", "")
     
-    # Stage 0: Basic hardcoded checks
-    print(f"🔍 Stage 0: Basic checks for {email} @ {company}")
+    # ========================================================================
+    # Stage 0: Hardcoded Checks (MIXED)
+    # - Deduplication (handled in validate_lead_list)
+    # - Email Regex, Disposable, HEAD Request
+    # ========================================================================
+    print(f"🔍 Stage 0: Hardcoded checks for {email} @ {company}")
     checks_stage0 = [
-        check_email_regex,
-        check_domain_age,
-        check_mx_record,
-        check_head_request,
-        check_disposable,
+        check_email_regex,      # RFC-5322 regex validation (HARD)
+        check_disposable,       # Filter throwaway email providers (HARD)
+        check_head_request,     # Test website accessibility (HARD)
     ]
     
     for check_func in checks_stage0:
@@ -744,9 +1181,17 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     
     print(f"   ✅ Stage 0 passed")
     
-    # Stage 1: OpenCorporates checks
-    print(f"🔍 Stage 1: OpenCorporates checks for {email} @ {company}")
-    checks_stage1 = [check_opencorporates_status, check_industry_location_match]
+    # ========================================================================
+    # Stage 1: DNS Layer (MIXED)
+    # - Domain Age, MX Record (HARD)
+    # - SPF/DMARC (SOFT - always passes, appends data)
+    # ========================================================================
+    print(f"🔍 Stage 1: DNS layer checks for {email} @ {company}")
+    checks_stage1 = [
+        check_domain_age,       # WHOIS lookup, must be ≥7 days old (HARD)
+        check_mx_record,        # Verify email domain has mail server (HARD)
+        check_spf_dmarc,        # DNS TXT records for SPF/DMARC (SOFT)
+    ]
     
     for check_func in checks_stage1:
         passed, reason = await check_func(lead)
@@ -756,26 +1201,55 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     
     print(f"   ✅ Stage 1 passed")
     
-    # Stage 2: ZeroBounce check
-    print(f"🔍 Stage 2: Email validation for {email} @ {company}")
-    passed, reason = await check_zerobounce_email(lead)
+    # ========================================================================
+    # Stage 2: Lightweight Domain Reputation Checks (HARD)
+    # - DNSBL (Domain Block List) - Spamhaus DBL lookup
+    # ========================================================================
+    print(f"🔍 Stage 2: Domain reputation checks for {email} @ {company}")
+    passed, reason = await check_dnsbl(lead)
     if not passed:
         print(f"   ❌ Stage 2 failed: {reason}")
         return False, f"Stage 2 failed: {reason}"
     
     print(f"   ✅ Stage 2 passed")
     
-    # Stage 3: Apollo checks
-    print(f"🔍 Stage 3: Contact matching for {email} @ {company}")
-    checks_stage3 = [check_apollo_contact_match, check_apollo_company_match]
-    
-    for check_func in checks_stage3:
-        passed, reason = await check_func(lead)
-        if not passed:
-            print(f"   ❌ Stage 3 failed: {reason}")
-            return False, f"Stage 3 failed: {reason}"
+    # ========================================================================
+    # Stage 3: ZeroBounce Check (MIXED)
+    # - Email verification (HARD): Pass IF valid, IF catch-all accept only IF SPF
+    # - Email scoring (SOFT): Append score to lead
+    # ========================================================================
+    print(f"🔍 Stage 3: ZeroBounce email validation for {email} @ {company}")
+    passed, reason = await check_zerobounce_email(lead)
+    if not passed:
+        print(f"   ❌ Stage 3 failed: {reason}")
+        return False, f"Stage 3 failed: {reason}"
     
     print(f"   ✅ Stage 3 passed")
+    
+    # ========================================================================
+    # Stage 4: Google LLM Checks (MIXED)
+    # - Contact Fuzzy Match: Verify contact works at company (HARD) + role/location (SOFT)
+    # - Company Fuzzy Match: Verify company details (HARD) + LinkedIn (SOFT)
+    # - ICP Evidence: Search for ICP confirmation sources (SOFT)
+    # ========================================================================
+    print(f"🔍 Stage 4: Google LLM checks for {email} @ {company}")
+    
+    # HARD checks - must pass
+    checks_stage4_hard = [
+        check_llm_contact_match,   # Contact works at company (HARD), role/location (SOFT)
+        check_llm_company_match,   # Company name/industry/location match (HARD), LinkedIn (SOFT)
+    ]
+    
+    for check_func in checks_stage4_hard:
+        passed, reason = await check_func(lead)
+        if not passed:
+            print(f"   ❌ Stage 4 failed: {reason}")
+            return False, f"Stage 4 failed: {reason}"
+    
+    # SOFT check - always passes, just appends data
+    await check_icp_evidence(lead)  # ICP Evidence confirmation (SOFT - always passes)
+    
+    print(f"   ✅ Stage 4 passed")
     print(f"🎉 All stages passed for {email} @ {company}")
     
     return True, "All checks passed"

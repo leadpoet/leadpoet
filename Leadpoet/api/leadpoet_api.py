@@ -163,22 +163,27 @@ class LeadPoetAPI:
         self.metagraph = bt.metagraph(netuid=netuid, network=subtensor_network, subtensor=self.subtensor)
         bt.logging.info(f"Initialized LeadPoetAPI with netuid: {self.netuid}, subtensor_network: {self.subtensor_network}")
 
-    def find_validator_port(self) -> Optional[int]:
-        """Find the validator port by trying common ports."""
-        common_ports = [8093, 8101, 8094, 8095, 8096, 8097, 8098, 8099, 8100, 8102]
+    def find_validator_port(self, check_http=False):
+        """
+        Find which port the validator HTTP server is running on.
+        NOW OPTIONAL - only needed for legacy direct queries, not for broadcast flow.
+        
+        Args:
+            check_http: If True, verify HTTP server is responding
+        """
+        if not check_http:
+            # For broadcast flow, we don't need validator HTTP endpoints
+            return None
+            
+        # Common ports to check (prioritize higher ports to avoid gRPC)
+        common_ports = [8094, 8095, 8096, 8097, 8098, 8099, 8100, 8093]
         
         for port in common_ports:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(1)
-                    result = s.connect_ex(('localhost', port))
-                    if result == 0:
-                        bt.logging.info(f"Found validator on port {port}")
-                        return port
-            except Exception:
-                continue
+            if self.is_port_running_http(port):
+                bt.logging.info(f"✅ Found validator HTTP server on port {port}")
+                return port
         
-        bt.logging.warning("Could not find validator port automatically")
+        bt.logging.warning("⚠️  Could not find validator HTTP server port")
         return None
 
     def prepare_synapse(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None) -> LeadRequest:
@@ -203,31 +208,126 @@ class LeadPoetAPI:
 
     async def get_leads(self, num_leads: int, business_desc: str) -> List[Dict]:
         """
-        Submit the curation request to Cloud-Run and poll for the
-        validator’s response.  The Bittensor axon path is bypassed.
+        Submit API request using broadcast mechanism - DIRECTLY to Firestore.
+        
+        Flow:
+        1. Write request directly to Firestore (broadcasts to ALL validators and miners simultaneously)
+        2. Wait for validators to rank leads
+        3. Fetch validator rankings from Firestore
+        4. Calculate consensus client-side
+        5. Return top N leads
         """
-        bt.logging.info(f"Requesting {num_leads} leads, desc='{business_desc[:40]}…'")
-
-        # ── 1️⃣  push request to Cloud-Run
-        req_id = push_curation_request(
-            {"num_leads": num_leads, "business_desc": business_desc}
+        import time
+        import uuid
+        from datetime import datetime, timezone
+        
+        # Generate unique request ID
+        request_id = str(uuid.uuid4())[:16]
+        
+        print(f"🔴 Broadcasting request {request_id} to Firestore...")
+        print(f"   num_leads: {num_leads}")
+        print(f"   business_desc: {business_desc}")
+        
+        # Broadcast to ALL validators and miners via Firestore
+        from Leadpoet.utils.cloud_db import broadcast_api_request
+        success = broadcast_api_request(
+            wallet=self.wallet,
+            request_id=request_id,
+            num_leads=num_leads,
+            business_desc=business_desc,
+            client_id=self.wallet.hotkey.ss58_address
         )
-        bt.logging.info(f"Sent curation request to Cloud-Run: {req_id}")
+        
+        if not success:
+            bt.logging.error("❌ Failed to broadcast API request to Firestore!")
+            return []
+        
+        print(f"✅ Request {request_id} written to Firestore successfully!")
+        print(f"⏳ Waiting for validators to rank leads (up to 400s)...")
 
-        # ── 2️⃣  poll for validator result
-        MAX_ATTEMPTS = 80      # 80 × 5 s = 400 s
-        SLEEP_SEC    = 5
-        total_wait   = MAX_ATTEMPTS * SLEEP_SEC
-        print(f"⏳ Waiting for validator result (up to {total_wait} s)…")
-
-        for _ in range(MAX_ATTEMPTS):
-            res = fetch_curation_result(req_id)
-            if res.get("leads"):
-                return res["leads"]
-            time.sleep(SLEEP_SEC)
-
-        bt.logging.error("Timed-out waiting for validator result")
-        return []
+        try:
+            # ══════════════════════════════════════════════════════════
+            # STEP 2: Poll Firestore for validator rankings
+            # ══════════════════════════════════════════════════════════
+            from Leadpoet.utils.cloud_db import fetch_validator_rankings, get_broadcast_status
+            
+            MAX_ATTEMPTS = 80
+            SLEEP_SEC = 5
+            total_wait = MAX_ATTEMPTS * SLEEP_SEC
+            
+            print(f"📊 Multiple validators are independently ranking leads...")
+            
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                try:
+                    # Fetch validator rankings directly from Firestore
+                    validator_rankings = fetch_validator_rankings(request_id, timeout_sec=2)
+                    
+                    validators_submitted = len(validator_rankings)
+                    
+                    # Calculate elapsed time
+                    status_data = get_broadcast_status(request_id)
+                    
+                    request_time = status_data.get("created_at", "")
+                    timeout_reached = False
+                    elapsed = 0
+                    
+                    if request_time:
+                        try:
+                            req_dt = datetime.fromisoformat(request_time.replace('Z', '+00:00'))
+                            elapsed = (datetime.now(timezone.utc) - req_dt).total_seconds()
+                            timeout_reached = elapsed > 90
+                        except:
+                            pass
+                    
+                    # Check if we have enough validators to calculate consensus
+                    if validators_submitted > 0 and (timeout_reached or validators_submitted >= 2 or elapsed > 60):
+                        # ═══════════════════════════════════════════════════════
+                        # STEP 3: CONSENSUS CALCULATION (CLIENT-SIDE)
+                        # ═══════════════════════════════════════════════════════
+                        from Leadpoet.validator.consensus import calculate_consensus_ranking
+                        
+                        print(f"\n🔮 CALCULATING CONSENSUS from {validators_submitted} validator(s)...")
+                        
+                        final_leads, metadata = calculate_consensus_ranking(
+                            validator_rankings=validator_rankings,
+                            num_leads_requested=num_leads,
+                            min_validators=1
+                        )
+                        
+                        if final_leads:
+                            print(f"✅ CONSENSUS COMPLETE!")
+                            print(f"   📊 {metadata['num_validators']} validator(s) participated")
+                            print(f"   ⚖️  Total validator trust: {metadata['total_trust']:.4f}")
+                            print(f"   🎯 Received {len(final_leads)} consensus-ranked lead(s)")
+                            
+                            return final_leads
+                    
+                    elif timeout_reached and validators_submitted == 0:
+                        bt.logging.error("Request timed out with no validator responses")
+                        return []
+                    
+                    else:
+                        # Still waiting
+                        if attempt % 6 == 0:
+                            print(f"⏳ Still processing... ({validators_submitted} validators submitted, {elapsed:.0f}s elapsed)")
+                
+                except Exception as e:
+                    # Print full error with traceback
+                    import traceback
+                    error_details = traceback.format_exc()
+                    bt.logging.warning(f"Error polling status: {e}\n{error_details}")
+                    print(f"❌ Polling error: {e}")
+                
+                await asyncio.sleep(SLEEP_SEC)
+            
+            bt.logging.error(f"Timed out waiting for validators after {total_wait}s")
+            return []
+            
+        except Exception as e:
+            bt.logging.error(f"Error in broadcast request: {e}")
+            import traceback
+            bt.logging.error(traceback.format_exc())
+            return []
 
     async def _get_leads_via_http(self, num_leads: int, business_desc: str) -> List[Dict]:
         """Legacy HTTP server approach for mock mode"""

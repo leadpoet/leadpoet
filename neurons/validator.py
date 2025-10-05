@@ -27,9 +27,14 @@ from Leadpoet.utils.cloud_db import (
     push_miner_curation_request,     # ← NEW
     fetch_miner_curation_result,     # ← NEW
     push_validator_weights,
+    push_validator_ranking,  # ← NEW
+    fetch_validator_rankings,  # ← NEW
+    mark_consensus_complete,  # ← NEW
+    log_consensus_metrics  # ← NEW: Subtask 3
 )
 import uuid
 import grpc
+import socket  # ← ADD THIS
 from google.cloud import firestore
 from datetime import datetime, timezone
 from math import isclose
@@ -56,7 +61,7 @@ FALLBACK_MODELS = [
     #"qwen/qwen3-4b:free",
 ]
 
-OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
 def _llm_score_lead(lead: dict, description: str, model: str) -> float:
     """
@@ -98,16 +103,23 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
     def _extract(json_plus_reason: str) -> float:
         """Return score from first {...} block; raise if not parsable."""
         txt = json_plus_reason.strip()
+        
+        # Handle empty responses
+        if not txt:
+            print("🔍 DEBUG: Model returned empty response")
+            raise ValueError("Empty response from model")
+        
         if txt.startswith("```"):
             txt = txt.strip("`").lstrip("json").strip()
         start, end = txt.find("{"), txt.find("}")
         if start == -1 or end == -1:
+            print(f"🔍 DEBUG: Raw response that failed to parse: '{txt}'")
             raise ValueError("No JSON object found")
         payload = txt[start:end + 1]
         score = float(json.loads(payload).get("score", 0))
         score = max(0.0, min(score, 0.5))     # <= clamp every time
         print("🛈  VALIDATOR-LLM OUTPUT ↓")
-        print(textwrap.shorten(txt, width=250, placeholder=" …"))
+        print(textwrap.shorten(txt, width=250, placeholder="…"))
         return max(0.0, min(score, 0.5))
 
     def _try(model_name: str) -> float:
@@ -129,18 +141,6 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
         print(f"⚠️  Primary model failed ({model}): {e}")
         print("🛈  VALIDATOR-LLM OUTPUT ↓")
         print("<< no JSON response – using fallback >>")
-
-    # 2️⃣ fallback picked at random
-    for fb_model in random.sample(FALLBACK_MODELS, k=len(FALLBACK_MODELS)):
-        try:
-            print(f"🔄  Trying fallback model: {fb_model}")
-            return _try(fb_model)
-        except Exception as e:
-            print(f"⚠️  Fallback failed ({fb_model}): {e}")
-            print("<< fallback also failed – using heuristic >>")
-
-    # Last-ditch heuristic
-    return _heuristic()
 
 import os, grpc, asyncio
 
@@ -194,17 +194,38 @@ class Validator(BaseValidatorNeuron):
                     time.sleep(retry_delay)
         if self.uid is None:
             bt.logging.warning(f"Validator {self.config.wallet_name}/{self.config.wallet_hotkey} not registered on netuid {self.config.netuid} after {max_retries} attempts")
+        
+        # ════════════════════════════════════════════════════════════
+        # TASK 4.1: Initialize validator trust tracking
+        # ════════════════════════════════════════════════════════════
+        self.validator_trust = 0.0
+        if self.uid is not None:
+            try:
+                self.validator_trust = self.metagraph.validator_trust[self.uid].item()
+                bt.logging.info(f"📊 Validator trust initialized: {self.validator_trust:.4f}")
+            except Exception as e:
+                bt.logging.warning(f"Failed to get validator trust: {e}")
+                self.validator_trust = 0.0
 
         bt.logging.info("load_state()")
         self.load_state()
 
         # Add HTTP server for API requests
         self.app = web.Application()
-        self.app.add_routes([web.post('/api/leads', self.handle_api_request)])
+        self.app.add_routes([
+            web.post('/api/leads', self.handle_api_request),
+            web.get('/api/leads/status/{request_id}', self.handle_status_request),  # ← NEW
+        ])
         
         self.email_regex = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
         self.sample_ratio = 0.2
         self.use_open_source_model = config.get("neuron", {}).get("use_open_source_validator_model", True)
+        
+        # NEW: Add pause mechanism for sourced lead processing during broadcasts
+        self.processing_broadcast = False  # ← NEW FLAG
+        
+        # NEW: Track processed broadcast requests to prevent duplicate processing
+        self._processed_requests = set()  # ← ADD THIS LINE
         
         self.precision = 15.0 
         self.consistency = 1.0  
@@ -217,6 +238,10 @@ class Validator(BaseValidatorNeuron):
         
         from Leadpoet.base.utils.pool import initialize_pool
         initialize_pool()
+        
+        # NEW: Add broadcast mode flag to pause sourced lead processing
+        self.broadcast_mode = False
+        self.broadcast_lock = threading.Lock()
 
     def validate_email(self, email: str) -> bool:
         return bool(self.email_regex.match(email))
@@ -514,6 +539,10 @@ class Validator(BaseValidatorNeuron):
             print(f"🔄 LLM round 1/2 (model: deepseek/deepseek-chat-v3-0324:free)")
             for lead in all_miner_leads:
                 score = _llm_score_lead(lead, synapse.business_desc, "deepseek/deepseek-chat-v3-0324:free")
+                # Handle None scores (LLM failures) by using default of 0.5
+                if score is None:
+                    score = 0.5
+                    print(f"⚠️  LLM returned None for lead, using default score 0.5")
                 aggregated[id(lead)] += score
             
             # ROUND 2: Second LLM scoring (random model selection)
@@ -521,6 +550,10 @@ class Validator(BaseValidatorNeuron):
             print(f"🔄 LLM round 2/2 (model: {second_model})")
             for lead in all_miner_leads:
                 score = _llm_score_lead(lead, synapse.business_desc, second_model)
+                # Handle None scores (LLM failures) by using default of 0.5
+                if score is None:
+                    score = 0.5
+                    print(f"⚠️  LLM returned None for lead, using default score 0.5")
                 aggregated[id(lead)] += score
             
             # Apply aggregated scores to leads
@@ -729,129 +762,61 @@ class Validator(BaseValidatorNeuron):
         self.trusted_validator = False
 
     async def handle_api_request(self, request):
-        """Handle API requests from clients and broadcast to miners."""
+        """
+        Handle API requests from clients using broadcast mechanism.
+        
+        Flow:
+        1. Broadcast request to all validators/miners via Firestore
+        2. Return request_id immediately to client
+        3. Client polls /api/leads/status/{request_id} for results
+        """
         try:
             data = await request.json()
             num_leads     = data.get("num_leads", 1)
             business_desc = data.get("business_desc", "")
-            print(f"\n RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:50]}…'")
-            bt.logging.info(f" RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:50]}…'")
+            client_id     = data.get("client_id", "unknown")
+            
+            print(f"\n🔔 RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:10]}…'")
+            bt.logging.info(f"📡 Broadcasting to ALL validators and miners via Firestore...")
 
-            # Get available miners
-            from Leadpoet.api.get_query_axons import get_query_api_axons
-            axons = await get_query_api_axons(self.wallet, self.metagraph, n=0.1, timeout=5)
-
-            if not axons:
-                print("❌ No available miners to query.")
-                bt.logging.error("No available miners to query.")
+            # Broadcast the request to all validators and miners
+            try:
+                from Leadpoet.utils.cloud_db import broadcast_api_request
+                
+                # ═══════════════════════════════════════════════════════════
+                # FIX: Wrap synchronous broadcast call to prevent blocking
+                # ═══════════════════════════════════════════════════════════
+                request_id = await asyncio.to_thread(
+                    broadcast_api_request,
+                    wallet=self.wallet,
+                    num_leads=num_leads,
+                    business_desc=business_desc,
+                    client_id=client_id
+                )
+                
+                print(f"📡 Broadcast API request {request_id[:8]}... to subnet")
+                bt.logging.info(f"📡 Broadcast API request {request_id[:8]}... to subnet")
+                
+                # Return request_id immediately - client will poll for results
+                return web.json_response({
+                    "request_id": request_id,
+                    "status": "processing",
+                    "message": "Request broadcast to subnet. Poll /api/leads/status/{request_id} for results.",
+                    "poll_url": f"/api/leads/status/{request_id}",
+                    "status_code": 202,
+                }, status=202)
+                
+            except Exception as e:
+                print(f"❌ Failed to broadcast request: {e}")
+                bt.logging.error(f"Failed to broadcast request: {e}")
+                
+                # Fallback to old direct method if broadcast fails
                 return web.json_response({
                     "leads": [],
-                    "status_code": 503,
-                    "status_message": "No active miners available",
+                    "status_code": 500,
+                    "status_message": f"Failed to broadcast request: {str(e)}",
                     "process_time": "0"
-                }, status=503)
-
-            print(f" SENDING QUERY to {len(axons)} available miners...")
-            bt.logging.info(f" BROADCASTING QUERY to {len(axons)} miners")
-
-            # Prepare request
-            synapse = LeadRequest(num_leads=num_leads,
-                                   business_desc=business_desc)
-
-            # Send request to all miners
-            # give miners enough time to curate
-            responses = await self.dendrite(
-                axons=axons,
-                synapse=synapse,
-                timeout=60,           # ← was 30 s
-                deserialize=True
-            )
-
-            print(f" RECEIVED responses from {len(responses)} miners")
-
-            # Process responses and collect all leads
-            all_leads = []
-            for response in responses:
-                if isinstance(response, LeadRequest) and response.dendrite.status_code == 200 and response.leads:
-                    all_leads.extend(response.leads)
-
-            # miner may still be finishing – wait once more up to 90 s
-            if not all_leads:
-                print("⏳ No leads yet – waiting up to 60 s for miners to finish")
-                try:
-                    more_task = asyncio.create_task(
-                        self.dendrite(axons=axons,
-                                      synapse=synapse,
-                                      timeout=60,
-                                      deserialize=True),
-                    )
-                    more = await asyncio.wait_for(more_task, timeout=60)
-                    for r in more:
-                        if isinstance(r, LeadRequest) and r.dendrite.status_code == 200 and r.leads:
-                            all_leads.extend(r.leads)
-                except asyncio.TimeoutError:
-                    pass
-
-            if not all_leads:
-                print("❌ Still no leads – giving up")
-                bt.logging.warning("No valid leads received from miners")
-                return web.json_response(
-                    {"leads": [],
-                     "status_code": 504,
-                     "status_message":"Timeout waiting for miners",
-                     "process_time":"0"},
-                    status=504)
-
-            print(f"📊 RECEIVED {len(all_leads)} leads – running TWO LLM re-scoring rounds…")
-
-            aggregated = {id(ld): 0.0 for ld in all_leads}
-            for rnd in range(2):
-                mdl = random.choice(AVAILABLE_MODELS)
-                print(f"\n🔄  LLM round {rnd+1}/2  (model: {mdl})")
-                for ld in all_leads:
-                    aggregated[id(ld)] += _llm_score_lead(ld, business_desc, mdl)
-
-            for ld in all_leads:
-                ld["intent_score"] = round(aggregated[id(ld)], 3)
-
-            # Rank primarily by LLM aggregate, tie-break by miner's score.
-            #  -> always default to 0 so we never compare None with float.
-            all_leads.sort(
-                key=lambda x: (
-                    x.get("intent_score", 0.0),
-                    x.get("miner_intent_score", 0.0)
-                ),
-                reverse=True,
-            )
-
-            top_leads = all_leads[:num_leads]
-
-            print(f" TOP {len(top_leads)} RANKED LEADS:")
-            for i, lead in enumerate(top_leads, 1):
-                business    = lead.get('Business', lead.get('business', 'Unknown'))
-                score_llm   = lead.get('intent_score', 0)
-                score_miner = lead.get('miner_intent_score', 0)
-                source      = lead.get('source', 'Unknown')
-                curator     = lead.get('curated_by', 'Unknown')
-                print(
-                    f"  {i}. {business} "
-                    f"(LLM {score_llm:.3f} | Miner {score_miner:.3f}, "
-                    f"Source: {source}, Curator: {curator})"
-                )
-
-            # Add c_validator_hotkey to leads being sent to client
-            for lead in top_leads:
-                lead["c_validator_hotkey"] = self.wallet.hotkey.ss58_address
-
-            print(f"📤 SENDING top {len(top_leads)} leads to client")
-            bt.logging.info(f" RETURNING top {len(top_leads)} leads to client")
-
-            return web.json_response({
-                "leads": top_leads,
-                "status_code": 200,
-                "status_message": "OK",
-                "process_time": "0"
-            })
+                }, status=500)
 
         except Exception as e:
             print(f"❌ Error handling API request: {e}")
@@ -862,6 +827,84 @@ class Validator(BaseValidatorNeuron):
                 "status_message": f"Error: {str(e)}",
                 "process_time": "0"
             }, status=500)
+
+    async def handle_status_request(self, request):
+        """Handle status polling requests - returns quickly for test requests."""
+        try:
+            request_id = request.match_info.get('request_id')
+            
+            # Quick return for port discovery tests
+            if request_id == "test":
+                return web.json_response({
+                    "status": "ok",
+                    "request_id": "test"
+                })
+            
+            # Fetch validator rankings from Firestore
+            from Leadpoet.utils.cloud_db import fetch_validator_rankings, get_broadcast_status
+            
+            # Get broadcast request status
+            status_data = get_broadcast_status(request_id)
+            
+            # Fetch all validator rankings for this request
+            validator_rankings = fetch_validator_rankings(request_id, timeout_sec=2)
+            
+            # Determine if timeout reached (check if request is older than 90 seconds)
+            from datetime import datetime, timezone
+            request_time = status_data.get("created_at", "")
+            timeout_reached = False
+            if request_time:
+                try:
+                    # Parse ISO timestamp
+                    req_dt = datetime.fromisoformat(request_time.replace('Z', '+00:00'))
+                    elapsed = (datetime.now(timezone.utc) - req_dt).total_seconds()
+                    timeout_reached = elapsed > 90
+                except:
+                    pass
+            
+            # Return data matching API client's expected format
+            return web.json_response({
+                "request_id": request_id,
+                "status": status_data.get("status", "processing"),
+                "validator_rankings": validator_rankings,
+                "validators_submitted": len(validator_rankings),  # ← FIX: Use correct field name
+                "timeout_reached": timeout_reached,  # ← FIX: Add this field
+                "num_validators_responded": len(validator_rankings),  # Keep for backward compat
+                "leads": status_data.get("leads", []),
+                "metadata": status_data.get("metadata", {}),
+            })
+            
+        except Exception as e:
+            bt.logging.error(f"Error in handle_status_request: {e}")
+            import traceback
+            bt.logging.error(traceback.format_exc())
+            return web.json_response({
+                "request_id": request_id,
+                "status": "error",
+                "error": str(e),
+                "validator_rankings": [],
+                "validators_submitted": 0,
+                "timeout_reached": False,
+                "leads": [],
+            }, status=500)
+
+    def check_port_availability(self, port: int) -> bool:
+        """Check if a port is available for binding."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('0.0.0.0', port))
+                return True
+            except socket.error:
+                return False
+
+    def find_available_port(self, start_port: int, max_attempts: int = 10) -> int:
+        """Find an available port starting from start_port."""
+        port = start_port
+        for _ in range(max_attempts):
+            if self.check_port_availability(port):
+                return port
+            port += 1
+        raise RuntimeError(f"No available ports found between {start_port} and {start_port + max_attempts - 1}")
 
     async def start_http_server(self):
         """Start HTTP server for API requests."""
@@ -897,7 +940,7 @@ class Validator(BaseValidatorNeuron):
             external_port = self.config.axon.external_port,
         )
         # expose buyer-query endpoint (LeadRequest → LeadRequest)
-        self.axon.attach(self.forward)           # ← NEW
+        self.axon.attach(self.forward)
         # Defer on-chain publish/start to run() to avoid double-serve hangs.
         print("───────────────────────────────────────────")
         # publish endpoint as PLAINTEXT so validators use insecure gRPC
@@ -913,12 +956,108 @@ class Validator(BaseValidatorNeuron):
         print(f"🌐  External endpoint   : {self.config.axon.external_ip}:{self.config.axon.external_port}")
         print("───────────────────────────────────────────")
 
+        # ═══════════════════════════════════════════════════════════
+        # FIX: Start HTTP server in background thread with dedicated event loop
+        # ═══════════════════════════════════════════════════════════
+        print("🔴 Starting HTTP server for REST API...")
+        
+        http_port_container = [None]  # Use list to share value between threads
+        
+        def run_http_server():
+            """Run HTTP server in a dedicated event loop."""
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def start_and_serve():
+                """Start server and keep it alive."""
+                runner = web.AppRunner(self.app)
+                await runner.setup()
+                
+                # Find available port
+                port = self.find_available_port(8093)
+                site = web.TCPSite(runner, '0.0.0.0', port)
+                await site.start()
+                
+                http_port_container[0] = port  # Share port with main thread
+                
+                print(f"✅ HTTP server started on port {port}")
+                print(f"📡 API endpoint: http://localhost:{port}/api/leads")
+                print("───────────────────────────────────────────")
+                
+                # Keep the server running by awaiting an event that never completes
+                # This is the proper way to keep an aiohttp server alive
+                stop_event = asyncio.Event()
+                await stop_event.wait()  # Wait forever
+            
+            try:
+                # Run the server - this will block forever until KeyboardInterrupt
+                loop.run_until_complete(start_and_serve())
+            except KeyboardInterrupt:
+                print("🛑 HTTP server shutting down...")
+            except Exception as e:
+                print(f"❌ HTTP server error: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                loop.close()
+        
+        # Start HTTP server in background thread
+        http_thread = threading.Thread(target=run_http_server, daemon=True)
+        http_thread.start()
+        
+        # Wait for server to start and get port
+        for _ in range(50):  # Wait up to 5 seconds
+            if http_port_container[0] is not None:
+                break
+            time.sleep(0.1)
+        
+        if http_port_container[0] is None:
+            print("❌ HTTP server failed to start!")
+        else:
+            print(f"✅ HTTP server confirmed running on port {http_port_container[0]}")
+        
+        # ══════════════════════════════════════════════════════════════════
+        # Start broadcast polling loop in background thread
+        # ══════════════════════════════════════════════════════════════════
+        def run_broadcast_polling():
+            """Run broadcast polling in its own async event loop"""
+            print("🟢 Broadcast polling thread started!")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def polling_loop():
+                print("🟢 Broadcast polling loop initialized!")
+                while not self.should_exit:
+                    try:
+                        await self.process_broadcast_requests_continuous()
+                    except Exception as e:
+                        bt.logging.error(f"Error in broadcast polling: {e}")
+                        import traceback
+                        bt.logging.error(traceback.format_exc())
+                        await asyncio.sleep(5)  # Wait before retrying
+            
+            try:
+                loop.run_until_complete(polling_loop())
+            except KeyboardInterrupt:
+                bt.logging.info("🛑 Broadcast polling shutting down...")
+            except Exception as e:
+                print(f"❌ Broadcast polling error: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                loop.close()
+        
+        # Start broadcast polling in background thread
+        broadcast_thread = threading.Thread(target=run_broadcast_polling, daemon=True, name="BroadcastPolling")
+        broadcast_thread.start()
+        # ══════════════════════════════════════════════════════════════════
+
         print(f"Validator starting at block: {self.block}")
         print("✅ Validator is now serving on the Bittensor network")
         print("   Processing sourced leads and waiting for client requests...")
 
         # Show available miners
-        self.show_available_miners()
+        self.discover_miners()
 
         try:
             # Keep the validator running and continuously process leads
@@ -935,8 +1074,25 @@ class Validator(BaseValidatorNeuron):
                 except Exception as e:
                     bt.logging.warning(f"Error in process_curation_requests_continuous: {e}")
                     time.sleep(5)  # Wait before retrying
-
-                self.sync()
+                
+                # REMOVED: No longer calling process_broadcast_requests_continuous() here
+                # It now runs continuously in its own background thread
+                
+                # Sync less frequently to avoid websocket concurrency issues
+                # Only sync every 10 iterations (approx every 10 seconds)
+                if not hasattr(self, '_sync_counter'):
+                    self._sync_counter = 0
+                
+                self._sync_counter += 1
+                if self._sync_counter >= 10:
+                    try:
+                        self.sync()
+                        self._sync_counter = 0
+                    except Exception as e:
+                        bt.logging.warning(f"Sync error (will retry): {e}")
+                        # Don't crash on sync errors, just skip this sync
+                        self._sync_counter = 0
+                
                 time.sleep(1)  # Small delay to prevent tight loop
         except KeyboardInterrupt:
             self.axon.stop()
@@ -949,8 +1105,38 @@ class Validator(BaseValidatorNeuron):
             # Continue running instead of crashing
             time.sleep(10)  # Wait longer before retrying main loop
 
+    # Add this method after the run() method (around line 1195)
 
-    def show_available_miners(self):
+    def sync(self):
+        """
+        Override sync to refresh validator trust after metagraph sync.
+        
+        This ensures we always have up-to-date trust values for consensus weighting.
+        """
+        # Call parent sync to refresh metagraph
+        super().sync()
+        
+        # ════════════════════════════════════════════════════════════
+        # TASK 4.1: Refresh validator trust after metagraph sync
+        # ════════════════════════════════════════════════════════════
+        # Handle case where uid might not be set yet (during initialization)
+        if not hasattr(self, 'uid') or self.uid is None:
+            return
+        
+        try:
+            old_trust = getattr(self, 'validator_trust', 0.0)
+            self.validator_trust = self.metagraph.validator_trust[self.uid].item()
+            
+            # Log significant changes in trust
+            if abs(self.validator_trust - old_trust) > 0.01:
+                bt.logging.info(
+                    f"📊 Validator trust updated: {old_trust:.4f} → {self.validator_trust:.4f} "
+                    f"(Δ{self.validator_trust - old_trust:+.4f})"
+                )
+        except Exception as e:
+            bt.logging.warning(f"Failed to refresh validator trust: {e}")
+
+    def discover_miners(self):
         """Show all available miners on the network"""
         try:
             print("\n🔍 Discovering available miners on subnet 401...")
@@ -997,6 +1183,10 @@ class Validator(BaseValidatorNeuron):
         """
         Continuously pull un-validated prospects from Firestore and process them.
         """
+        # NEW: Skip if processing broadcast request
+        if self.processing_broadcast:
+            return  # Pause sourcing during broadcast processing
+        
         try:
             prospects_batch = fetch_prospects_from_cloud(self.wallet, limit=250)
 
@@ -1056,6 +1246,252 @@ class Validator(BaseValidatorNeuron):
 
         push_curation_result({"request_id": req["request_id"], "leads": leads})
         print(f"✅ Curated {len(leads)} leads for request {req['request_id']}")
+
+    # Add this function after process_curation_requests_continuous (around line 1069)
+
+    async def process_broadcast_requests_continuous(self):
+        """
+        Continuously poll for broadcast API requests from Firestore and process them.
+        """
+        await asyncio.sleep(2)
+        print("📡 Polling for broadcast API requests... (will notify when requests are found)")
+        
+        poll_count = 0
+        while True:
+            try:
+                poll_count += 1
+                
+                # Fetch pending broadcast requests from Firestore
+                from Leadpoet.utils.cloud_db import fetch_broadcast_requests
+                requests_list = fetch_broadcast_requests(self.wallet, role="validator")
+                
+                # fetch_broadcast_requests() will print when requests are found
+                # No need to log anything here when empty
+                
+                if requests_list:
+                    print(f"🔔 Found {len(requests_list)} NEW broadcast request(s) to process!")
+                
+                for req in requests_list:
+                    request_id = req.get("request_id")
+                    
+                    # Skip if already processed locally
+                    if request_id in self._processed_requests:
+                        print(f"⏭️  Skipping already processed request {request_id[:8]}...")
+                        continue
+                    
+                    # Mark as processed locally
+                    self._processed_requests.add(request_id)
+                    
+                    num_leads = req.get("num_leads", 1)
+                    business_desc = req.get("business_desc", "")
+                    
+                    print(f"\n📨 🔔 BROADCAST API REQUEST RECEIVED {request_id[:8]}...")
+                    print(f"   Requested: {num_leads} leads")
+                    print(f"   Description: {business_desc[:50]}...")
+                    print(f"   🕐 Request received at {time.strftime('%H:%M:%S')}")
+                    print(f"   ⏳ Waiting up to 180 seconds for miners to send curated leads...")
+                    
+                    # Set flag to pause sourced lead processing
+                    self.processing_broadcast = True
+                    
+                    try:
+                        # Wait for miners to send curated leads to Firestore
+                        from Leadpoet.utils.cloud_db import fetch_miner_leads_for_request
+                        
+                        MAX_WAIT = 180  # ← INCREASED from 60 to 180 seconds
+                        POLL_INTERVAL = 2  # Poll every 2 seconds
+                        
+                        miner_leads_collected = []
+                        start_time = time.time()
+                        polls_done = 0
+                        
+                        while time.time() - start_time < MAX_WAIT:
+                            submissions = fetch_miner_leads_for_request(request_id)
+                            
+                            if submissions:
+                                # Flatten all leads from all miners
+                                for submission in submissions:
+                                    leads = submission.get("leads", [])
+                                    miner_leads_collected.extend(leads)
+                                
+                                if miner_leads_collected:
+                                    elapsed = time.time() - start_time
+                                    bt.logging.info(f"📥 Received leads from {len(submissions)} miner(s) after {elapsed:.1f}s")
+                                    break
+                            
+                            # Progress update every 10 seconds
+                            polls_done += 1
+                            if polls_done % 5 == 0:  # Every 10 seconds (5 polls * 2 sec)
+                                elapsed = time.time() - start_time
+                                bt.logging.info(f"⏳ Still waiting for miners... ({elapsed:.0f}s / {MAX_WAIT}s elapsed)")
+                            
+                            await asyncio.sleep(POLL_INTERVAL)
+                        
+                        if not miner_leads_collected:
+                            bt.logging.warning(f"⚠️  No miner leads received after {MAX_WAIT}s, skipping ranking")
+                            continue
+                        
+                        bt.logging.info(f"📊 Received {len(miner_leads_collected)} total leads from miners")
+                        
+                        # Rank the leads
+                        bt.logging.info(f"🔍 Ranking {min(num_leads, len(miner_leads_collected))} leads with LLM...")
+                        
+                        # ══════════════════════════════════════════════════════════
+                        # RANK LEADS using LLM (same as before)
+                        # ══════════════════════════════════════════════════════════
+                        print(f"🔍 Ranking {len(miner_leads_collected)} leads with LLM...")
+                        
+                        import random
+                        scored_leads = []
+                        aggregated = {id(lead): 0.0 for lead in miner_leads_collected}
+                        
+                        # ROUND 1: First LLM scoring
+                        print(f"🔄 LLM round 1/2 (model: deepseek/deepseek-chat-v3-0324:free)")
+                        for lead in miner_leads_collected:
+                            score = _llm_score_lead(lead, business_desc, "deepseek/deepseek-chat-v3-0324:free")
+                            # Handle None scores (LLM failures) by using default of 0.5
+                            if score is None:
+                                score = 0.5
+                                print(f"⚠️  LLM returned None for lead, using default score 0.5")
+                            aggregated[id(lead)] += score
+                        
+                        # ROUND 2: Second LLM scoring
+                        second_model = random.choice(AVAILABLE_MODELS)
+                        print(f"🔄 LLM round 2/2 (model: {second_model})")
+                        for lead in miner_leads_collected:
+                            score = _llm_score_lead(lead, business_desc, second_model)
+                            # Handle None scores (LLM failures) by using default of 0.5
+                            if score is None:
+                                score = 0.5
+                                print(f"⚠️  LLM returned None for lead, using default score 0.5")
+                            aggregated[id(lead)] += score
+                        
+                        # Apply aggregated scores
+                        for lead in miner_leads_collected:
+                            lead["intent_score"] = round(aggregated[id(lead)], 3)
+                            scored_leads.append(lead)
+                        
+                        # Sort and take top N
+                        scored_leads.sort(key=lambda x: x["intent_score"], reverse=True)
+                        ranked_leads = scored_leads[:num_leads]
+                        
+                        print(f"✅ Ranked top {len(ranked_leads)} leads:")
+                        for i, lead in enumerate(ranked_leads, 1):
+                            business = lead.get('Business', lead.get('business', 'Unknown'))
+                            score = lead.get('intent_score', 0)
+                            print(f"  {i}. {business} (score={score:.3f})")
+                        
+                        # ══════════════════════════════════════════════════════════
+                        # SUBMIT VALIDATOR RANKING for consensus
+                        # ══════════════════════════════════════════════════════════
+                        try:
+                            validator_trust = self.metagraph.validator_trust[self.uid].item()
+                            
+                            ranking_submission = []
+                            for rank, lead in enumerate(ranked_leads, 1):
+                                ranking_submission.append({
+                                    "lead": lead,
+                                    "score": lead.get("intent_score", 0.0),
+                                    "rank": rank,
+                                })
+                            
+                            success = push_validator_ranking(
+                                wallet=self.wallet,
+                                request_id=request_id,
+                                ranked_leads=ranking_submission,
+                                validator_trust=validator_trust
+                            )
+                            
+                            if success:
+                                print(f"📊 Submitted ranking for consensus (trust={validator_trust:.4f})")
+                            else:
+                                print(f"⚠️  Failed to submit ranking for consensus")
+                        
+                        except Exception as e:
+                            print(f"⚠️  Error submitting validator ranking: {e}")
+                            bt.logging.error(f"Error submitting validator ranking: {e}")
+                        
+                        # ══════════════════════════════════════════════════════════
+                        # PUBLISH WEIGHTS for miners who provided leads
+                        # ══════════════════════════════════════════════════════════
+                        try:
+                            from Leadpoet.validator.reward import calculate_weights, record_event
+                            
+                            # Record events for each lead in the ranked list
+                            for lead in ranked_leads:
+                                if lead.get("source") and lead.get("curated_by"):
+                                    record_event(lead)
+                            
+                            # Calculate V2 weights and emissions
+                            rewards = calculate_weights(100.0)  # 100 Alpha total emission
+                            
+                            # Log final weights
+                            print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
+                            print(f"   Ranked leads: {len(ranked_leads)} prospects")
+                            print(f"   S weights (Sourcing): {rewards['S']}")
+                            print(f"   C weights (Curating): {rewards['C']}")
+                            print(f"   Final weights (W): {rewards['W']}")
+                            print(f"   Emissions: {rewards['E']}")
+                            
+                            weights_dict = rewards["W"]
+                            
+                            # Publish weights on-chain
+                            try:
+                                from math import isclose
+                                uids, weights = [], []
+                                for hk, w in weights_dict.items():
+                                    if hk in self.metagraph.hotkeys and w > 0:
+                                        uids.append(self.metagraph.hotkeys.index(hk))
+                                        weights.append(float(w))
+                                
+                                # Normalize to 1.0
+                                s = sum(weights)
+                                if not isclose(s, 1.0) and s > 0:
+                                    weights = [w / s for w in weights]
+                                
+                                self.subtensor.set_weights(
+                                    wallet=self.wallet,
+                                    netuid=self.config.netuid,
+                                    uids=uids,
+                                    weights=weights,
+                                    wait_for_inclusion=True,
+                                )
+                                print("✅ Published weights on-chain")
+                            except Exception as e:
+                                print(f"⚠️  Failed to publish weights on-chain: {e}")
+                            
+                            # Store in Firestore
+                            from Leadpoet.utils.cloud_db import push_validator_weights
+                            push_validator_weights(self.wallet, self.uid, weights_dict)
+                            
+                        except Exception as e:
+                            print(f"⚠️  V2 reward calculation failed: {e}")
+                        
+                        print(f"✅ Validator {self.wallet.hotkey.ss58_address[:10]}... completed processing broadcast {request_id[:8]}...")
+                        
+                    except Exception as e:
+                        print(f"❌ Error processing broadcast request {request_id[:8]}...: {e}")
+                        bt.logging.error(f"Error processing broadcast request: {e}")
+                        import traceback
+                        bt.logging.error(traceback.format_exc())
+                    
+                    finally:
+                        # Always resume sourcing after processing
+                        self.processing_broadcast = False
+            
+            except Exception as e:
+                # Catch any errors in the outer loop (fetching requests, etc.)
+                bt.logging.error(f"Error in broadcast polling loop: {e}")
+                import traceback
+                bt.logging.error(traceback.format_exc())
+            
+            # Clear old processed requests every 100 iterations to prevent memory buildup
+            if poll_count % 100 == 0:
+                bt.logging.info(f"🧹 Clearing old processed requests cache ({len(self._processed_requests)} entries)")
+                self._processed_requests.clear()
+            
+            # Sleep before next poll
+            await asyncio.sleep(1)  # ← REDUCED from 10 to 1 second
 
     def move_to_validated_leads(self, lead, score):
         """Write validated lead to Firestore; skip if it already exists."""

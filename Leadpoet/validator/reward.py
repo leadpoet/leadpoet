@@ -557,12 +557,10 @@ def _init_validator_weights_system():
     try:
         # Create validator_weights directory
         os.makedirs(VALIDATOR_WEIGHTS_DIR, exist_ok=True)
-        print(f"📁 Validator weights directory created/verified: {VALIDATOR_WEIGHTS_DIR}")
         
         # Initialize the file with empty structure if it doesn't exist
         if not os.path.exists(VALIDATOR_WEIGHTS_FILE):
             _reset_validator_weights_file()
-            print(f"📄 Validator weights file initialized: {VALIDATOR_WEIGHTS_FILE}")
         
     except Exception as e:
         print(f"❌ Error initializing validator weights system: {e}")
@@ -652,12 +650,6 @@ def record_curated_lead_event(curator_hotkey: str, sourcer_hotkey: str):
         
         # Write updated data
         _write_validator_weights_file(data)
-        
-        print(f"📝 EPOCH TRACKING UPDATED:")
-        print(f"   Curator added: {curator_hotkey}")
-        print(f"   Sourcer added: {sourcer_hotkey}")
-        print(f"   Total curators this epoch: {len(data['curators'])}")
-        print(f"   Total sourcers this epoch: {len(data['sourcers_of_curated'])}")
         
     except Exception as e:
         print(f"❌ Error recording curated lead event: {e}")

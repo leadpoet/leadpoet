@@ -243,7 +243,7 @@ Add your OpenRouter API key:
 
 ```bash
 # Add to your .env file
-OPENROUTER_API_KEY=your-api-key-here
+OPENROUTER_KEY=your-api-key-here
 ```
 
 ### Performance Benefits

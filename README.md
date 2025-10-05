@@ -35,7 +35,7 @@ export FIRECRAWL_API_KEY=your_firecrawl_api_key
 export  LEAD_API="https://leadpoet-api-511161415764.us-central1.run.app"
 
 # Required for miners using OpenRouter LLM classification
-export OPENROUTER_API_KEY=your_openrouter_api_key
+export OPENROUTER_KEY=your_openrouter_api_key
 
 # Required for validators using Hunter.io email verification
 export HUNTER_API_KEY=your_hunter_api_key
@@ -270,7 +270,7 @@ Post-validation checks ensure prospect quality:
 
 - **OpenRouter API Key**: Required for LLM-based industry classification
   - Get from: https://openrouter.ai/
-  - Set: `export OPENROUTER_API_KEY=your_key`
+  - Set: `export OPENROUTER_KEY=your_key`
 
 **For Validators**:
 
@@ -290,7 +290,7 @@ Post-validation checks ensure prospect quality:
 ```bash
 # Add to your ~/.bashrc or ~/.zshrc for persistence
 export FIRECRAWL_API_KEY=your_firecrawl_api_key
-export OPENROUTER_API_KEY=your_openrouter_api_key
+export OPENROUTER_KEY=your_openrouter_api_key
 export HUNTER_API_KEY=your_hunter_api_key
 export MAILGUN_API_KEY=your_mailgun_api_key
 export MAILGUN_DOMAIN=your_mailgun_domain

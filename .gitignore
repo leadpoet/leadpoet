@@ -1,16 +1,16 @@
 # Project-specific
 .cursor/
 tests/
-scripts/
 path/
 validation_artifacts/
 data/
 logs/
 validator_weights/
 env.txt
+.env
 
 # macOS
-.DS_Store
+.DS_Storez
 
 # Bittensor-specific
 *.log

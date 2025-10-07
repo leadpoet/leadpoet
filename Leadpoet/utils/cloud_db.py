@@ -255,6 +255,7 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
     """
     Fetch pending broadcast API requests for this validator/miner from Firestore.
     Returns list of pending requests that need processing.
+    Only returns requests created within the last 5 minutes.
     
     Args:
         wallet: Bittensor wallet
@@ -262,12 +263,16 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
     """
     try:
         from google.cloud import firestore
+        from datetime import datetime, timezone, timedelta
         import warnings
         
         # Suppress Firestore positional argument warnings
         warnings.filterwarnings("ignore", message=".*positional arguments.*")
         
         db = firestore.Client()
+        
+        # Calculate cutoff time (5 minutes ago)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=5)
         
         # BOTH validators and miners should ONLY fetch "pending" requests
         # Local tracking (processed_requests set) prevents re-processing
@@ -279,7 +284,28 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
         for doc in docs:
             data = doc.to_dict()
             data["request_id"] = doc.id  # Ensure request_id is set
-            requests_list.append(data)
+            
+            # Filter by timestamp in Python (avoids Firestore index requirement)
+            created_at_str = data.get("created_at", "")
+            if created_at_str:
+                try:
+                    # Parse ISO timestamp with 'Z' suffix
+                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                    
+                    # Only include requests from the last 5 minutes
+                    if created_at >= cutoff_time:
+                        requests_list.append(data)
+                    else:
+                        # Log that we're skipping an old request
+                        age_minutes = (datetime.now(timezone.utc) - created_at).total_seconds() / 60
+                        print(f"⏭️  Skipping old request {doc.id[:8]}... (age: {age_minutes:.1f} min)")
+                except Exception as e:
+                    # If timestamp parsing fails, include it anyway (safer)
+                    print(f"⚠️  Could not parse timestamp for {doc.id[:8]}..., including anyway")
+                    requests_list.append(data)
+            else:
+                # If no timestamp, include it (safer)
+                requests_list.append(data)
         
         # Only log when requests are found
         if requests_list:

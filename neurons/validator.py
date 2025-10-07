@@ -134,13 +134,22 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
         r.raise_for_status()
         return _extract(r.json()["choices"][0]["message"]["content"])
 
-    # 1️⃣ primary
+    # 1️⃣ Try primary model
     try:
         return _try(model)
     except Exception as e:
         print(f"⚠️  Primary model failed ({model}): {e}")
+        print("🔄 Trying fallback model: mistralai/mistral-7b-instruct")
+    
+    # 2️⃣ Try single fallback model
+    try:
+        time.sleep(1)  # Small delay before fallback
+        return _try("mistralai/mistral-7b-instruct")
+    except Exception as e:
+        print(f"⚠️  Fallback model failed: {e}")
         print("🛈  VALIDATOR-LLM OUTPUT ↓")
-        print("<< no JSON response – using fallback >>")
+        print("<< no JSON response – all models failed >>")
+        return None  # Signal total failure
 
 import os, grpc, asyncio
 
@@ -534,32 +543,43 @@ class Validator(BaseValidatorNeuron):
             
             # Initialize aggregation dictionary for each lead
             aggregated = {id(lead): 0.0 for lead in all_miner_leads}
+            failed_leads = set()  # Track leads that failed LLM scoring
             
             # ROUND 1: First LLM scoring
             print(f"🔄 LLM round 1/2 (model: deepseek/deepseek-chat-v3-0324:free)")
             for lead in all_miner_leads:
                 score = _llm_score_lead(lead, synapse.business_desc, "deepseek/deepseek-chat-v3-0324:free")
-                # Handle None scores (LLM failures) by using default of 0.5
                 if score is None:
-                    score = 0.5
-                    print(f"⚠️  LLM returned None for lead, using default score 0.5")
-                aggregated[id(lead)] += score
+                    failed_leads.add(id(lead))
+                    print(f"⚠️  LLM failed for lead, will skip this lead")
+                else:
+                    aggregated[id(lead)] += score
             
             # ROUND 2: Second LLM scoring (random model selection)
             second_model = random.choice(AVAILABLE_MODELS)
             print(f"🔄 LLM round 2/2 (model: {second_model})")
             for lead in all_miner_leads:
+                if id(lead) in failed_leads:
+                    continue  # Skip leads that already failed
                 score = _llm_score_lead(lead, synapse.business_desc, second_model)
-                # Handle None scores (LLM failures) by using default of 0.5
                 if score is None:
-                    score = 0.5
-                    print(f"⚠️  LLM returned None for lead, using default score 0.5")
-                aggregated[id(lead)] += score
+                    failed_leads.add(id(lead))
+                    print(f"⚠️  LLM failed for lead, will skip this lead")
+                else:
+                    aggregated[id(lead)] += score
             
-            # Apply aggregated scores to leads
+            # Apply aggregated scores to leads (skip failed ones)
             for lead in all_miner_leads:
-                lead["intent_score"] = round(aggregated[id(lead)], 3)  # Total of both rounds (0.0 - 1.0)
-                scored_leads.append(lead)
+                if id(lead) not in failed_leads:
+                    lead["intent_score"] = round(aggregated[id(lead)], 3)
+                    scored_leads.append(lead)
+            
+            if not scored_leads:
+                print("❌ All leads failed LLM scoring - check your OPENROUTER_KEY environment variable!")
+                print("   Set it with: export OPENROUTER_KEY='your-key-here'")
+                synapse.leads = []
+                synapse.dendrite.status_code = 500
+                return synapse
 
             # Sort by aggregated intent_score and take top N
             scored_leads.sort(key=lambda x: x["intent_score"], reverse=True)
@@ -1344,32 +1364,41 @@ class Validator(BaseValidatorNeuron):
                         import random
                         scored_leads = []
                         aggregated = {id(lead): 0.0 for lead in miner_leads_collected}
+                        failed_leads = set()  # Track leads that failed LLM scoring
                         
                         # ROUND 1: First LLM scoring
                         print(f"🔄 LLM round 1/2 (model: deepseek/deepseek-chat-v3-0324:free)")
                         for lead in miner_leads_collected:
                             score = _llm_score_lead(lead, business_desc, "deepseek/deepseek-chat-v3-0324:free")
-                            # Handle None scores (LLM failures) by using default of 0.5
                             if score is None:
-                                score = 0.5
-                                print(f"⚠️  LLM returned None for lead, using default score 0.5")
-                            aggregated[id(lead)] += score
+                                failed_leads.add(id(lead))
+                                print(f"⚠️  LLM failed for lead, will skip this lead")
+                            else:
+                                aggregated[id(lead)] += score
                         
                         # ROUND 2: Second LLM scoring
                         second_model = random.choice(AVAILABLE_MODELS)
                         print(f"🔄 LLM round 2/2 (model: {second_model})")
                         for lead in miner_leads_collected:
+                            if id(lead) in failed_leads:
+                                continue  # Skip leads that already failed
                             score = _llm_score_lead(lead, business_desc, second_model)
-                            # Handle None scores (LLM failures) by using default of 0.5
                             if score is None:
-                                score = 0.5
-                                print(f"⚠️  LLM returned None for lead, using default score 0.5")
-                            aggregated[id(lead)] += score
+                                failed_leads.add(id(lead))
+                                print(f"⚠️  LLM failed for lead, will skip this lead")
+                            else:
+                                aggregated[id(lead)] += score
                         
-                        # Apply aggregated scores
+                        # Apply aggregated scores (skip failed leads)
                         for lead in miner_leads_collected:
-                            lead["intent_score"] = round(aggregated[id(lead)], 3)
-                            scored_leads.append(lead)
+                            if id(lead) not in failed_leads:
+                                lead["intent_score"] = round(aggregated[id(lead)], 3)
+                                scored_leads.append(lead)
+                        
+                        if not scored_leads:
+                            print("❌ All leads failed LLM scoring - check your OPENROUTER_KEY environment variable!")
+                            print("   Set it with: export OPENROUTER_KEY='your-key-here'")
+                            continue  # Skip this broadcast request
                         
                         # Sort and take top N
                         scored_leads.sort(key=lambda x: x["intent_score"], reverse=True)

@@ -295,10 +295,64 @@ class LeadPoetAPI:
                         )
                         
                         if final_leads:
-                            print(f"✅ CONSENSUS COMPLETE!")
+                            print(f"\n✅ CONSENSUS COMPLETE!")
                             print(f"   📊 {metadata['num_validators']} validator(s) participated")
                             print(f"   ⚖️  Total validator trust: {metadata['total_trust']:.4f}")
-                            print(f"   🎯 Received {len(final_leads)} consensus-ranked lead(s)")
+                            
+                            # ═══════════════════════════════════════════════════════
+                            # NEW: Display validator trust scores
+                            # ═══════════════════════════════════════════════════════
+                            print(f"\n📋 VALIDATOR TRUST SCORES:")
+                            for rank_data in validator_rankings:
+                                val_hotkey = rank_data.get("validator_hotkey", "unknown")[:10]
+                                val_trust = rank_data.get("validator_trust", 0.0)
+                                num_leads_ranked = len(rank_data.get("ranked_leads", []))
+                                print(f"   • {val_hotkey}... trust={val_trust:.4f} ({num_leads_ranked} leads ranked)")
+                            
+                            # ═══════════════════════════════════════════════════════
+                            # NEW: Display detailed consensus breakdown for each lead
+                            # ═══════════════════════════════════════════════════════
+                            print(f"\n🎯 CONSENSUS BREAKDOWN FOR TOP {len(final_leads)} LEAD(S):")
+                            for i, lead in enumerate(final_leads, 1):
+                                business = lead.get("Business", lead.get("business", "Unknown"))[:30]
+                                consensus_score = lead.get("consensus_score", 0.0)
+                                normalized_score = lead.get("normalized_score", 0.0)
+                                
+                                print(f"\n   Lead #{i}: {business}")
+                                print(f"      Consensus Score: {consensus_score:.6f}")
+                                print(f"      Normalized Score: {normalized_score:.6f}")
+                                
+                                # Get detailed scoring from consensus calculation
+                                # We need to fetch this from the intermediate data
+                                # Let's recalculate just for this lead to show the breakdown
+                                print(f"      Calculation:")
+                                
+                                # Find this lead in validator rankings to show individual scores
+                                lead_email = lead.get("email", lead.get("Email 1", "")).lower().strip()
+                                lead_business = lead.get("Business", lead.get("business", "")).lower().strip()
+                                
+                                total_weighted = 0.0
+                                for rank_data in validator_rankings:
+                                    val_hotkey = rank_data.get("validator_hotkey", "unknown")[:10]
+                                    val_trust = rank_data.get("validator_trust", 0.0)
+                                    
+                                    # Find this lead in this validator's ranking
+                                    for lead_entry in rank_data.get("ranked_leads", []):
+                                        entry_lead = lead_entry.get("lead", lead_entry)
+                                        entry_email = entry_lead.get("email", entry_lead.get("Email 1", "")).lower().strip()
+                                        entry_business = entry_lead.get("Business", entry_lead.get("business", "")).lower().strip()
+                                        
+                                        if entry_email == lead_email and entry_business == lead_business:
+                                            score = lead_entry.get("score", lead_entry.get("intent_score", 0.0))
+                                            weighted = score * val_trust
+                                            total_weighted += weighted
+                                            print(f"         {val_hotkey}... S={score:.4f} × V={val_trust:.4f} = {weighted:.6f}")
+                                            break
+                                
+                                print(f"         ────────────────────────────────────────")
+                                print(f"         Total = {total_weighted:.6f}")
+                            
+                            print(f"\n   🎯 Returning {len(final_leads)} consensus-ranked lead(s)")
                             
                             return final_leads
                     
@@ -327,7 +381,7 @@ class LeadPoetAPI:
             bt.logging.error(f"Error in broadcast request: {e}")
             import traceback
             bt.logging.error(traceback.format_exc())
-            return []
+        return []
 
     async def _get_leads_via_http(self, num_leads: int, business_desc: str) -> List[Dict]:
         """Legacy HTTP server approach for mock mode"""

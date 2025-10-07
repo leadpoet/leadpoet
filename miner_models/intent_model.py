@@ -194,12 +194,16 @@ PROMPT_SYSTEM = (
     "FIRST LINE → JSON ONLY  {\"score\": <0-1 float>}  (0-0.8 bad ↔ 1 perfect)\n"
     "SECOND LINE → a brief explanation (max 40 words).\n")
 
+PROMPT_SYSTEM_BATCH = (
+    "You are a B2B lead-generation assistant.\n"
+    "Return JSON array with ONE score per lead: [{\"lead_index\": 0, \"score\": <0-1 float>}, {\"lead_index\": 1, \"score\": ...}, ...]\n"
+    "Score each lead on how well it matches the buyer description (0=bad match, 1=perfect match).\n")
+
 PRIMARY_MODEL   = "deepseek/deepseek-chat-v3-0324:free"
 FALLBACK_MODEL  = "mistralai/mistral-7b-instruct"
-# For backward-compat parts of the file (industry LLM)  
 MODEL_NAME      = PRIMARY_MODEL
 
-def _call(model: str, prompt_user: str):             # ← sync now
+def _call(model: str, prompt_user: str):
     return requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {OPENROUTER}",
@@ -212,6 +216,116 @@ def _call(model: str, prompt_user: str):             # ← sync now
                 {"role": "user",   "content": prompt_user}
             ]},
         timeout=15)
+
+def _call_batch(model: str, prompt_user: str):
+    return requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER}",
+                 "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": PROMPT_SYSTEM_BATCH},
+                {"role": "user",   "content": prompt_user}
+            ]},
+        timeout=20)
+
+async def _score_batch(leads: list[dict], description: str) -> list[float]:
+    if not leads:
+        return []
+    
+    def _heuristic(lead: dict) -> float:
+        desc_tokens = set(_norm(description).split())
+        lead_ind    = _norm(lead.get("Industry", ""))
+        match = 0.0
+        for bucket, kws in KEYWORDS.items():
+            if bucket in lead_ind:
+                for kw in kws:
+                    if kw in desc_tokens:
+                        match += 0.2
+        return min(match, 1.0) or 0.05
+    
+    if not OPENROUTER:
+        return [_heuristic(lead) for lead in leads]
+    
+    prompt_parts = [f"BUYER DESCRIPTION:\n{description}\n\nLEADS TO SCORE ({len(leads)} total):\n"]
+    for i, lead in enumerate(leads):
+        prompt_parts.append(
+            f"\nLead #{i}:\n"
+            f"  Company: {lead.get('Business', 'Unknown')}\n"
+            f"  Sub-industry: {lead.get('sub_industry', 'Unknown')}\n"
+            f"  Role: {lead.get('role', 'Unknown')}\n"
+            f"  Website: {lead.get('Website', 'Unknown')}\n"
+        )
+    
+    prompt_user = "".join(prompt_parts)
+    
+    print("\n🛈  INTENT-LLM BATCH INPUT ↓")
+    print(f"   Scoring {len(leads)} leads in single prompt")
+    print(textwrap.shorten(prompt_user, width=400, placeholder=" …"))
+    
+    try:
+        r = await asyncio.to_thread(_call_batch, PRIMARY_MODEL, prompt_user)
+        r.raise_for_status()
+        raw = r.json()["choices"][0]["message"]["content"].strip()
+        
+        print("🛈  INTENT-LLM BATCH OUTPUT ↓")
+        print(textwrap.shorten(raw, width=400, placeholder=" …"))
+        print(f"✅ Batch scoring succeeded (model: {PRIMARY_MODEL})")
+        
+        if raw.startswith("```"):
+            raw = raw.strip("`").lstrip("json").strip()
+        
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if start == -1 or end == -1:
+            raise ValueError("No JSON array in response")
+        
+        json_array = json.loads(raw[start:end + 1])
+        scores = [_heuristic(lead) for lead in leads]
+        for item in json_array:
+            idx = item.get("lead_index", -1)
+            score = item.get("score", 0.0)
+            if 0 <= idx < len(leads):
+                scores[idx] = float(score)
+        
+        return scores
+        
+    except Exception as e:
+        print(f"⚠️  Primary batch model failed ({e}) – trying fallback")
+        try:
+            import time
+            time.sleep(1)
+            r = await asyncio.to_thread(_call_batch, FALLBACK_MODEL, prompt_user)
+            r.raise_for_status()
+            raw = r.json()["choices"][0]["message"]["content"].strip()
+            
+            print("🛈  INTENT-LLM BATCH OUTPUT ↓")
+            print(textwrap.shorten(raw, width=400, placeholder=" …"))
+            print(f"✅ Batch scoring succeeded (model: {FALLBACK_MODEL})")
+            
+            if raw.startswith("```"):
+                raw = raw.strip("`").lstrip("json").strip()
+            
+            start = raw.find("[")
+            end = raw.rfind("]")
+            if start == -1 or end == -1:
+                raise ValueError("No JSON array in response")
+            
+            json_array = json.loads(raw[start:end + 1])
+            scores = [_heuristic(lead) for lead in leads]
+            for item in json_array:
+                idx = item.get("lead_index", -1)
+                score = item.get("score", 0.0)
+                if 0 <= idx < len(leads):
+                    scores[idx] = float(score)
+            
+            return scores
+            
+        except Exception as e2:
+            logging.warning(f"Fallback batch model failed: {e2}")
+            return [_heuristic(lead) for lead in leads]
 
 async def _score_one(lead: dict, description: str) -> float:
     """
@@ -309,7 +423,8 @@ async def rank_leads(leads: list[dict], description: str) -> list[dict]:
     else:
         filt = leads
 
-    intents = await asyncio.gather(*[_score_one(ld, description) for ld in filt])
+    intents = await _score_batch(filt, description)
+    
     for ld, sc in zip(filt, intents):
         ld["miner_intent_score"] = round(sc, 3)
 
@@ -317,7 +432,14 @@ async def rank_leads(leads: list[dict], description: str) -> list[dict]:
     for ld in leads:
         ld.setdefault("miner_intent_score", 0.0)
 
-    return sorted(filt, key=lambda x: x["miner_intent_score"], reverse=True) 
+    print(f"\n📊 RANKED LEADS (top {len(filt)}):")
+    sorted_leads = sorted(filt, key=lambda x: x["miner_intent_score"], reverse=True)
+    for i, lead in enumerate(sorted_leads[:10], 1):
+        company = lead.get('Business', 'Unknown')
+        score = lead.get('miner_intent_score', 0.0)
+        print(f"   {i}. {company[:40]:40s} score={score:.3f}")
+    
+    return sorted_leads
 
 # ─────────────────────────────────────────────────────────────────────
 # Role taxonomy & helpers

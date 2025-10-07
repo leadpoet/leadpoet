@@ -38,6 +38,7 @@ import socket  # ← ADD THIS
 from google.cloud import firestore
 from datetime import datetime, timezone
 from math import isclose
+from pathlib import Path
 
 # ─────────── LLM re-scoring helpers ────────────────────────────────
 AVAILABLE_MODELS = [
@@ -1967,6 +1968,10 @@ def main():
     config.wallet = bt.Config()
     config.wallet.name = args.wallet_name
     config.wallet.hotkey = args.wallet_hotkey
+    # Only set custom wallet path if default doesn't exist
+    default_wallet_path = Path.home() / ".bittensor" / "wallets"
+    if not default_wallet_path.exists():
+        config.wallet.path = str(Path.cwd() / ".bittensor" / "wallets") + "/"
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     config.subtensor.network = args.subtensor_network

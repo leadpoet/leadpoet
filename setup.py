@@ -54,7 +54,13 @@ requirements = [
     "pickle-mixin>=1.0.2",  # For caching in automated_checks.py
     "pygod>=1.1.0",  # For collusion detection in automated_checks.py
     "torch>=2.0.0",  # Required by pygod for deep learning models
-    "torch_geometric>=2.4.0"  # Required by pygod for graph-based models
+    "torch_geometric>=2.4.0",  # Required by pygod for graph-based models
+    "python-whois>=0.9.5",
+    "aiodns>=3.5.0",
+    "httpx>=0.28.1",
+    "openai>=2.1.0",
+    "jsonschema>=4.25.1",
+    "firecrawl-py>=4.3.6"
 ]
 
 setup(

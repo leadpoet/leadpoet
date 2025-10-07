@@ -121,9 +121,7 @@ def calculate_consensus_ranking(
     for item in final_leads:
         lead = item["lead"].copy()
         lead["consensus_score"] = item["consensus_score"]
-        lead["normalized_score"] = item["normalized_score"]
         lead["num_validators_ranked"] = item["num_validators"]
-        lead["c_validator_hotkey"] = "CONSENSUS"  # Mark as consensus result
         result_leads.append(lead)
     
     # Metadata about consensus
@@ -264,9 +262,7 @@ def get_direct_ranking(
             lead = lead.copy()
             # Use the validator's score as the consensus score
             lead["consensus_score"] = item.get("score", 0.0)
-            lead["normalized_score"] = item.get("score", 0.0)
             lead["num_validators_ranked"] = 1
-            lead["c_validator_hotkey"] = validator_hotkey[:10] + "..."  # Show which validator
             result_leads.append(lead)
     
     # Metadata

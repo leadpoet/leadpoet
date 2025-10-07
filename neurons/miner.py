@@ -44,7 +44,7 @@ import logging
 import random
 import socket, struct     # already have socket; add struct
 import grpc  # add near other imports
-
+from pathlib import Path
 # Remove this if you don't want to silence noisy "InvalidRequestNameError … Improperly formatted request" lines ──
 class _SilenceInvalidRequest(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
@@ -887,6 +887,10 @@ def main():
     config.wallet.hotkey = args.wallet_hotkey
     config.netuid = args.netuid
     config.subtensor = bt.Config()
+    # Only set custom wallet path if default doesn't exist
+    default_wallet_path = Path.home() / ".bittensor" / "wallets"
+    if not default_wallet_path.exists():
+        config.wallet.path = str(Path.cwd() / ".bittensor" / "wallets") + "/"
     config.subtensor.network = args.subtensor_network
     config.blacklist = bt.Config()
     config.blacklist.force_validator_permit = args.blacklist_force_validator_permit

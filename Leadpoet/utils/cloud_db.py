@@ -4,6 +4,10 @@ Miners = read-only, Validators = write-enabled (wallet-signed).
 """
 import os, json, time, base64, requests, bittensor as bt
 from typing import List, Dict
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 API_URL   = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
 SUBNET_ID = 401          # NetUID of your subnet
@@ -36,6 +40,10 @@ class _Verifier:
             return False
 
 _VERIFY = _Verifier()                       # singleton
+
+def _has_firestore_credentials() -> bool:
+    """Check if Google Cloud Firestore credentials are available."""
+    return os.path.exists("service_account_key.json") or bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
 
 # ─────────────────────────────── READ ────────────────────────────────
 def get_cloud_leads(wallet: bt.wallet, limit: int = 100) -> List[Dict]:
@@ -225,6 +233,10 @@ def broadcast_api_request(wallet: bt.wallet, request_id: str, num_leads: int, bu
         from datetime import datetime
         from google.cloud import firestore
         
+        if not _has_firestore_credentials():
+            bt.logging.warning("Firestore credentials not available, cannot broadcast request")
+            return False
+        
         db = firestore.Client()
         
         # Create broadcast request document
@@ -255,7 +267,6 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
     """
     Fetch pending broadcast API requests for this validator/miner from Firestore.
     Returns list of pending requests that need processing.
-    Only returns requests created within the last 5 minutes.
     
     Args:
         wallet: Bittensor wallet
@@ -263,16 +274,17 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
     """
     try:
         from google.cloud import firestore
-        from datetime import datetime, timezone, timedelta
         import warnings
         
         # Suppress Firestore positional argument warnings
         warnings.filterwarnings("ignore", message=".*positional arguments.*")
         
-        db = firestore.Client()
+        # Check if Google Cloud credentials exist
+        if not _has_firestore_credentials():
+            # Silently return empty list if no credentials (development mode)
+            return []
         
-        # Calculate cutoff time (5 minutes ago)
-        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=5)
+        db = firestore.Client()
         
         # BOTH validators and miners should ONLY fetch "pending" requests
         # Local tracking (processed_requests set) prevents re-processing
@@ -284,28 +296,7 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
         for doc in docs:
             data = doc.to_dict()
             data["request_id"] = doc.id  # Ensure request_id is set
-            
-            # Filter by timestamp in Python (avoids Firestore index requirement)
-            created_at_str = data.get("created_at", "")
-            if created_at_str:
-                try:
-                    # Parse ISO timestamp with 'Z' suffix
-                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
-                    
-                    # Only include requests from the last 5 minutes
-                    if created_at >= cutoff_time:
-                        requests_list.append(data)
-                    else:
-                        # Log that we're skipping an old request
-                        age_minutes = (datetime.now(timezone.utc) - created_at).total_seconds() / 60
-                        print(f"⏭️  Skipping old request {doc.id[:8]}... (age: {age_minutes:.1f} min)")
-                except Exception as e:
-                    # If timestamp parsing fails, include it anyway (safer)
-                    print(f"⚠️  Could not parse timestamp for {doc.id[:8]}..., including anyway")
-                    requests_list.append(data)
-            else:
-                # If no timestamp, include it (safer)
-                requests_list.append(data)
+            requests_list.append(data)
         
         # Only log when requests are found
         if requests_list:
@@ -330,6 +321,10 @@ def mark_broadcast_processing(wallet: bt.wallet, request_id: str) -> bool:
     """
     try:
         from google.cloud import firestore
+        
+        if not _has_firestore_credentials():
+            return False
+        
         db = firestore.Client()
         
         doc_ref = db.collection("api_requests").document(request_id)
@@ -379,6 +374,10 @@ def get_broadcast_status(request_id: str) -> Dict:
     """
     try:
         from google.cloud import firestore
+        
+        if not _has_firestore_credentials():
+            return {"status": "error", "leads": [], "error": "Firestore credentials not available"}
+        
         db = firestore.Client()
         
         doc_ref = db.collection("api_requests").document(request_id)
@@ -418,6 +417,10 @@ def push_validator_ranking(wallet: bt.wallet, request_id: str, ranked_leads: Lis
         validator_uid = -1  # Unknown UID
     
     try:
+        if not _has_firestore_credentials():
+            bt.logging.warning("Firestore credentials not available, cannot push ranking")
+            return False
+        
         db = firestore.Client()
         
         # Document ID: {request_id}_{validator_hotkey}
@@ -460,6 +463,9 @@ def fetch_validator_rankings(request_id: str, timeout_sec: int = 5) -> List[Dict
         
         # Suppress warnings
         warnings.filterwarnings("ignore", message=".*positional arguments.*")
+        
+        if not _has_firestore_credentials():
+            return []
         
         db = firestore.Client()
         
@@ -588,6 +594,10 @@ def push_miner_curated_leads(wallet: bt.wallet, request_id: str, leads: List[Dic
         from google.cloud import firestore
         from datetime import datetime
         
+        if not _has_firestore_credentials():
+            bt.logging.warning("Firestore credentials not available, cannot push miner leads")
+            return False
+        
         db = firestore.Client()
         
         # Document ID: {request_id}_{miner_hotkey}
@@ -626,6 +636,9 @@ def fetch_miner_leads_for_request(request_id: str) -> List[Dict]:
         
         # Suppress warnings
         warnings.filterwarnings("ignore", message=".*positional arguments.*")
+        
+        if not _has_firestore_credentials():
+            return []
         
         db = firestore.Client()
         

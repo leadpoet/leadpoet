@@ -1,10 +1,10 @@
 # LeadPoet | Premium Sales Leads Powered by Bittensor
 
-Welcome to LeadPoet, a decentralized prospect generation subnet built on Bittensor.
+Welcome to Leadpoet, a decentralized prospect generation subnet built on Bittensor.
 
 ## Overview
 
-LeadPoet leverages Bittensor's decentralized architecture to create a scalable marketplace for prospect generation. Miners source high-quality prospects, validators ensure quality through rigorous auditing, and buyers access curated, real-time prospects optimized for conversion. This eliminates reliance on static databases, ensuring fresher, more relevant prospects at lower costs.
+Leadpoet leverages Bittensor's decentralized architecture to create a scalable marketplace for prospect generation. Miners source high-quality prospects, validators ensure quality through rigorous auditing, and buyers access curated, real-time prospects optimized for conversion. This eliminates reliance on static databases, ensuring fresher, more relevant prospects at lower costs.
 
 ### Workflow
 
@@ -67,33 +67,27 @@ export GSE_CX=your_google_cse_id
 
 ### Google Cloud Firestore Setup
 
-1. **Create a Google Cloud Project**:
-   - Go to https://console.cloud.google.com
-   - Create a new project or select an existing one
+**For Miners/Validators** (Simple 3-step setup):
 
-2. **Enable Firestore**:
-   - Navigate to Firestore Database
-   - Click "Create Database"
-   - Choose "Native Mode"
-   - Select a location (e.g., `us-central1`)
+1. **Get Firebase Config from LeadPoet**:
+   - Contact team or check subnet documentation for public config values
 
-3. **Create Service Account**:
-   - Go to IAM & Admin → Service Accounts
-   - Click "Create Service Account"
-   - Grant role: "Cloud Datastore User"
-   - Create and download JSON key file
-
-4. **Set Environment Variable**:
+2. **Set Environment Variables**:
    ```bash
-   export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your-service-account-key.json"
+   export FIREBASE_API_KEY="AIza..."
+   export FIREBASE_PROJECT_ID="leadpoet-subnet"
+   export FIREBASE_AUTH_DOMAIN="leadpoet-subnet.firebaseapp.com"
    ```
 
-5. **Add to Shell Configuration** (for persistence):
+3. **Add to Shell Config** (for persistence):
    ```bash
-   # Add to ~/.bashrc or ~/.zshrc
-   echo 'export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your-service-account-key.json"' >> ~/.bashrc
+   echo 'export FIREBASE_API_KEY="AIza..."' >> ~/.bashrc
+   echo 'export FIREBASE_PROJECT_ID="leadpoet-subnet"' >> ~/.bashrc
+   echo 'export FIREBASE_AUTH_DOMAIN="leadpoet-subnet.firebaseapp.com"' >> ~/.bashrc
    source ~/.bashrc
    ```
+
+**No service account keys needed!** Authentication happens automatically using Firebase anonymous auth + your Bittensor wallet signature.
 
 ### Installation
 
@@ -154,7 +148,7 @@ python neurons/miner.py \
 
 #### Behavior
 
-- Continuously sources new leads from domains in `data/domains.csv`
+- Continuously sources new leads
 - Monitors Firestore for broadcast API requests (polls every 1 second)
 - When API request received:
   - Pauses sourcing
@@ -189,9 +183,10 @@ Prospects follow this JSON structure:
 Miners are rewarded based on two mechanisms:
 
 **V2 Reward System** (Current):
-- **Sourcing Rewards (S)**: 50% of emissions for discovering and validating prospects
-- **Curation Rewards (C)**: 50% of emissions for curating prospects that match client ICPs
-- Final weight: `W = 0.5 * S + 0.5 * C`
+- **Sourcing Rewards (S)**: 45% of emissions are provided to miners who source the prospects which are chosen by the validators.
+- **Curation Rewards (C)**: 45% of emissions are provided to miners who curate the prospects which are chosen by the validators.
+- **Baseline (B)**: 10% of emissions distributed equally to all miners who sourced leads in the last epoch
+- Final weight: `W = 0.45 * S + 0.45 * C + 0.10 * B`
 
 **Best Practices**:
 - Maintain diverse sourcing to maximize S rewards
@@ -251,8 +246,6 @@ python neurons/validator.py \
 
 - Uses OpenRouter LLM to score each lead (0-0.5 range)
 - Two-round scoring with different models for robustness
-- Primary model: `deepseek/deepseek-chat-v3-0324:free`
-- Fallback model: `mistralai/mistral-7b-instruct`
 - Publishes weights based on V2 reward calculation
 - Submits ranking with validator trust score for consensus
 
@@ -321,10 +314,8 @@ Where:
         "industry": "Tech & AI",
         "sub_industry": "",
         "region": "US",
-        "consensus_score": 0.425000,
-        "normalized_score": 0.850000,
-        "num_validators_ranked": 2,
-        "c_validator_hotkey": "CONSENSUS"
+        "consensus_score": 0.92,
+        "num_validators_ranked": 2
     }
 ]
 ```
@@ -387,7 +378,9 @@ Where:
 # ═══════════════════════════════════════════════════════════
 # REQUIRED FOR ALL NODES
 # ═══════════════════════════════════════════════════════════
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/firebase-credentials.json"
+export FIREBASE_API_KEY="AIza..."
+export FIREBASE_PROJECT_ID="leadpoet-subnet"
+export FIREBASE_AUTH_DOMAIN="leadpoet-subnet.firebaseapp.com"
 
 # ═══════════════════════════════════════════════════════════
 # REQUIRED FOR MINERS
@@ -414,9 +407,9 @@ export GSE_CX=your_google_cse_id
 
 ### Getting API Keys
 
-1. **Google Cloud Firestore** (REQUIRED):
-   - https://console.cloud.google.com
-   - Create project → Enable Firestore → Create service account → Download JSON key
+1. **Firebase Config** (REQUIRED):
+   - Contact LeadPoet team or check subnet documentation for public config values
+   - No service account keys needed
 
 2. **Firecrawl** (REQUIRED for miners):
    - https://firecrawl.dev/
@@ -426,17 +419,17 @@ export GSE_CX=your_google_cse_id
    - https://openrouter.ai/
    - Sign up → Get API key → Add credits for usage
 
-4. **Hunter.io** (OPTIONAL):
+4. **Hunter.io** (REQUIRED for validators):
    - https://hunter.io/
    - Sign up → Get API key from dashboard
    - Falls back to mock validation if not provided
 
-5. **ZeroBounce** (OPTIONAL):
+5. **ZeroBounce** (REQUIRED for validators):
    - https://zerobounce.net/
    - Sign up → Get API key from dashboard
    - Falls back to mock validation if not provided
 
-6. **Google Custom Search** (OPTIONAL):
+6. **Google Custom Search** (REQUIRED for miners & validators):
    - https://console.cloud.google.com
    - Enable Custom Search API
    - Create API key (`GSE_API_KEY`)
@@ -463,10 +456,9 @@ source ~/.bashrc  # or source ~/.zshrc
 
 ### Common Issues
 
-**"GOOGLE_APPLICATION_CREDENTIALS not set"**:
-- Verify environment variable is set: `echo $GOOGLE_APPLICATION_CREDENTIALS`
-- Check file exists: `ls -la /path/to/credentials.json`
-- Ensure service account has "Cloud Datastore User" role
+**"Firebase config not set"**:
+- Verify environment variables: `echo $FIREBASE_PROJECT_ID`
+- Contact LeadPoet team for correct Firebase config values
 
 **"429 Too Many Requests" from OpenRouter**:
 - Free tier models have strict rate limits (1-2 requests/minute)
@@ -475,7 +467,7 @@ source ~/.bashrc  # or source ~/.zshrc
 
 **"No validator responses" in API client**:
 - Verify validators are running: check their terminal output
-- Ensure Firestore credentials are valid on all nodes
+- Ensure Firebase config is correct on all nodes
 - Check request_id in Firestore console for debugging
 
 **Validator "ConcurrencyError" with subtensor**:

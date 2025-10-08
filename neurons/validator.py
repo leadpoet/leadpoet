@@ -1970,7 +1970,7 @@ def main():
     config.wallet.hotkey = args.wallet_hotkey
     # Only set custom wallet path if default doesn't exist
     default_wallet_path = Path.home() / ".bittensor" / "wallets"
-    if not os.path.exists(default_wallet_path):
+    if not default_wallet_path.exists() or not any(default_wallet_path.iterdir()):
         config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
     config.netuid = args.netuid
     config.subtensor = bt.Config()

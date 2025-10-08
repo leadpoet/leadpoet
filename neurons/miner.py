@@ -888,10 +888,8 @@ def main():
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     # Only set custom wallet path if default doesn't exist
-    default_wallet_path = str(Path.home() / ".bittensor" / "wallets")
-    print(default_wallet_path)
-    if not os.path.exists(default_wallet_path):
-        print("here")
+    default_wallet_path = Path.home() / ".bittensor" / "wallets"
+    if not default_wallet_path.exists() or not any(default_wallet_path.iterdir()):
         config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
     config.subtensor.network = args.subtensor_network
     config.blacklist = bt.Config()

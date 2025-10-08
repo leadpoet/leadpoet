@@ -14,13 +14,15 @@ import base64
 import json
 import time
 import os
-from Leadpoet.utils.cloud_db import (
-     push_curation_request, fetch_curation_result)
+from Leadpoet.utils.cloud_db import (push_curation_request,
+                                     fetch_curation_result)
 import uuid
 
 # Cloud API configuration
-CLOUD_API_URL = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
+CLOUD_API_URL = os.getenv(
+    "LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
 SUBNET_UID = 401  # Your subnet ID
+
 
 class CloudDatabase:
     """Centralized database operations for LeadPoet subnet"""
@@ -66,15 +68,14 @@ class CloudDatabase:
             raise ValueError("Wallet required for authenticated reads")
 
         # Verify miner registration
-        if not self._verify_miner_registration(self.wallet.hotkey.ss58_address):
+        if not self._verify_miner_registration(
+                self.wallet.hotkey.ss58_address):
             raise ValueError("Wallet not registered as miner on subnet")
 
         try:
-            response = requests.get(
-                f"{self.api_url}/leads",
-                params={"limit": limit},
-                timeout=10
-            )
+            response = requests.get(f"{self.api_url}/leads",
+                                    params={"limit": limit},
+                                    timeout=10)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -87,7 +88,8 @@ class CloudDatabase:
             raise ValueError("Wallet required for authenticated writes")
 
         # Verify validator registration
-        if not self._verify_validator_registration(self.wallet.hotkey.ss58_address):
+        if not self._verify_validator_registration(
+                self.wallet.hotkey.ss58_address):
             raise ValueError("Wallet not registered as validator on subnet")
 
         if not leads:
@@ -107,15 +109,15 @@ class CloudDatabase:
             }
 
             # Send to cloud API
-            response = requests.post(
-                f"{self.api_url}/leads",
-                json=body,
-                timeout=30
-            )
+            response = requests.post(f"{self.api_url}/leads",
+                                     json=body,
+                                     timeout=30)
             response.raise_for_status()
 
             result = response.json()
-            bt.logging.info(f"Successfully wrote {result.get('stored', 0)} leads to cloud database")
+            bt.logging.info(
+                f"Successfully wrote {result.get('stored', 0)} leads to cloud database"
+            )
             return True
 
         except requests.exceptions.RequestException as e:
@@ -125,18 +127,22 @@ class CloudDatabase:
             bt.logging.error(f"Error in write_leads: {e}")
             return False
 
+
 # Convenience functions for easy integration
 def get_cloud_leads(wallet: bt.wallet, limit: int = 100) -> List[Dict]:
     """Get leads from cloud database"""
     db = CloudDatabase(wallet)
     return db.read_leads(limit)
 
+
 def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
     """Save leads to cloud database"""
     db = CloudDatabase(wallet)
     return db.write_leads(leads)
 
+
 class LeadPoetAPI:
+
     def __init__(
         self,
         wallet: "bt.wallet",
@@ -149,19 +155,25 @@ class LeadPoetAPI:
         self.netuid = netuid
         self.subtensor_network = subtensor_network
         self.name = "leadpoet"
-        self.validator_host = validator_host   # may be None
-        self.validator_port = validator_port   # may be None
+        self.validator_host = validator_host  # may be None
+        self.validator_port = validator_port  # may be None
         self.dendrite = bt.dendrite(wallet=wallet)
-        bt.logging.debug(f"Initialized dendrite: {self.dendrite.__class__.__name__}")
-        bt.logging.debug(f"Initializing Subtensor with network: {subtensor_network}")
+        bt.logging.debug(
+            f"Initialized dendrite: {self.dendrite.__class__.__name__}")
+        bt.logging.debug(
+            f"Initializing Subtensor with network: {subtensor_network}")
         config = bt.config()
         # `bt.config()` may not contain a subtensor section yet.
         if not hasattr(config, "subtensor") or config.subtensor is None:
             config.subtensor = bt.Config()
         config.subtensor.network = subtensor_network
         self.subtensor = bt.subtensor(network=subtensor_network, config=config)
-        self.metagraph = bt.metagraph(netuid=netuid, network=subtensor_network, subtensor=self.subtensor)
-        bt.logging.info(f"Initialized LeadPoetAPI with netuid: {self.netuid}, subtensor_network: {self.subtensor_network}")
+        self.metagraph = bt.metagraph(netuid=netuid,
+                                      network=subtensor_network,
+                                      subtensor=self.subtensor)
+        bt.logging.info(
+            f"Initialized LeadPoetAPI with netuid: {self.netuid}, subtensor_network: {self.subtensor_network}"
+        )
 
     def find_validator_port(self, check_http=False):
         """
@@ -180,33 +192,48 @@ class LeadPoetAPI:
 
         for port in common_ports:
             if self.is_port_running_http(port):
-                bt.logging.info(f"✅ Found validator HTTP server on port {port}")
+                bt.logging.info(
+                    f"✅ Found validator HTTP server on port {port}")
                 return port
 
         bt.logging.warning("⚠️  Could not find validator HTTP server port")
         return None
 
-    def prepare_synapse(self, num_leads: int, industry: Optional[str] = None, region: Optional[str] = None) -> LeadRequest:
+    def prepare_synapse(self,
+                        num_leads: int,
+                        industry: Optional[str] = None,
+                        region: Optional[str] = None) -> LeadRequest:
         if not 1 <= num_leads <= 100:
             raise ValueError("num_leads must be between 1 and 100")
-        synapse = LeadRequest(num_leads=num_leads, industry=industry, region=region)
-        bt.logging.debug(f"Prepared LeadRequest: num_leads={num_leads}, industry={industry}, region={region}")
+        synapse = LeadRequest(num_leads=num_leads,
+                              industry=industry,
+                              region=region)
+        bt.logging.debug(
+            f"Prepared LeadRequest: num_leads={num_leads}, industry={industry}, region={region}"
+        )
         return synapse
 
-    def process_responses(self, responses: List[Union["bt.Synapse", Any]]) -> List[Dict]:
+    def process_responses(
+            self, responses: List[Union["bt.Synapse", Any]]) -> List[Dict]:
         leads = []
         for response in responses:
-            if not isinstance(response, LeadRequest) or response.dendrite.status_code != 200:
-                bt.logging.warning(f"Invalid response: {response.dendrite.status_message if hasattr(response, 'dendrite') else 'No dendrite'}")
+            if not isinstance(
+                    response,
+                    LeadRequest) or response.dendrite.status_code != 200:
+                bt.logging.warning(
+                    f"Invalid response: {response.dendrite.status_message if hasattr(response, 'dendrite') else 'No dendrite'}"
+                )
                 continue
             if response.leads:
                 leads.extend(response.leads)
             else:
                 bt.logging.debug("Response contained no leads")
-        bt.logging.info(f"Processed {len(leads)} leads from {len(responses)} responses")
+        bt.logging.info(
+            f"Processed {len(leads)} leads from {len(responses)} responses")
         return leads
 
-    async def get_leads(self, num_leads: int, business_desc: str) -> List[Dict]:
+    async def get_leads(self, num_leads: int,
+                        business_desc: str) -> List[Dict]:
         """
         Submit API request using broadcast mechanism - DIRECTLY to Firestore.
 
@@ -235,8 +262,7 @@ class LeadPoetAPI:
             request_id=request_id,
             num_leads=num_leads,
             business_desc=business_desc,
-            client_id=self.wallet.hotkey.ss58_address
-        )
+            client_id=self.wallet.hotkey.ss58_address)
 
         if not success:
             bt.logging.error("❌ Failed to broadcast API request to Firestore!")
@@ -260,7 +286,8 @@ class LeadPoetAPI:
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 try:
                     # Fetch validator rankings directly from Firestore
-                    validator_rankings = fetch_validator_rankings(request_id, timeout_sec=2)
+                    validator_rankings = fetch_validator_rankings(
+                        request_id, timeout_sec=2)
 
                     validators_submitted = len(validator_rankings)
 
@@ -273,54 +300,78 @@ class LeadPoetAPI:
 
                     if request_time:
                         try:
-                            req_dt = datetime.fromisoformat(request_time.replace('Z', '+00:00'))
-                            elapsed = (datetime.now(timezone.utc) - req_dt).total_seconds()
+                            req_dt = datetime.fromisoformat(
+                                request_time.replace('Z', '+00:00'))
+                            elapsed = (datetime.now(timezone.utc) -
+                                       req_dt).total_seconds()
                             timeout_reached = elapsed > 90
                         except:
                             pass
 
                     # Check if we have enough validators to calculate consensus
-                    if validators_submitted > 0 and (timeout_reached or validators_submitted >= 2 or elapsed > 60):
+                    if validators_submitted > 0 and (timeout_reached or
+                                                     validators_submitted >= 2
+                                                     or elapsed > 60):
                         # ═══════════════════════════════════════════════════════
                         # STEP 3: CONSENSUS CALCULATION (CLIENT-SIDE)
                         # ═══════════════════════════════════════════════════════
                         from Leadpoet.validator.consensus import calculate_consensus_ranking
 
-                        print(f"\n🔮 CALCULATING CONSENSUS from {validators_submitted} validator(s)...")
+                        print(
+                            f"\n🔮 CALCULATING CONSENSUS from {validators_submitted} validator(s)..."
+                        )
 
                         final_leads, metadata = calculate_consensus_ranking(
                             validator_rankings=validator_rankings,
                             num_leads_requested=num_leads,
-                            min_validators=1
-                        )
+                            min_validators=1)
 
                         if final_leads:
                             print(f"\n✅ CONSENSUS COMPLETE!")
-                            print(f"   📊 {metadata['num_validators']} validator(s) participated")
-                            print(f"   ⚖️  Total validator trust: {metadata['total_trust']:.4f}")
+                            print(
+                                f"   📊 {metadata['num_validators']} validator(s) participated"
+                            )
+                            print(
+                                f"   ⚖️  Total validator trust: {metadata['total_trust']:.4f}"
+                            )
 
                             # ═══════════════════════════════════════════════════════
                             # NEW: Display validator trust scores
                             # ═══════════════════════════════════════════════════════
                             print(f"\n📋 VALIDATOR TRUST SCORES:")
                             for rank_data in validator_rankings:
-                                val_hotkey = rank_data.get("validator_hotkey", "unknown")[:10]
-                                val_trust = rank_data.get("validator_trust", 0.0)
-                                num_leads_ranked = len(rank_data.get("ranked_leads", []))
-                                print(f"   • {val_hotkey}... trust={val_trust:.4f} ({num_leads_ranked} leads ranked)")
+                                val_hotkey = rank_data.get(
+                                    "validator_hotkey", "unknown")[:10]
+                                val_trust = rank_data.get(
+                                    "validator_trust", 0.0)
+                                num_leads_ranked = len(
+                                    rank_data.get("ranked_leads", []))
+                                print(
+                                    f"   • {val_hotkey}... trust={val_trust:.4f} ({num_leads_ranked} leads ranked)"
+                                )
 
                             # ═══════════════════════════════════════════════════════
                             # NEW: Display detailed consensus breakdown for each lead
                             # ═══════════════════════════════════════════════════════
-                            print(f"\n🎯 CONSENSUS BREAKDOWN FOR TOP {len(final_leads)} LEAD(S):")
+                            print(
+                                f"\n🎯 CONSENSUS BREAKDOWN FOR TOP {len(final_leads)} LEAD(S):"
+                            )
                             for i, lead in enumerate(final_leads, 1):
-                                business = lead.get("Business", lead.get("business", "Unknown"))[:30]
-                                consensus_score = lead.get("consensus_score", 0.0)
-                                normalized_score = lead.get("normalized_score", 0.0)
+                                business = lead.get(
+                                    "Business",
+                                    lead.get("business", "Unknown"))[:30]
+                                consensus_score = lead.get(
+                                    "consensus_score", 0.0)
+                                normalized_score = lead.get(
+                                    "normalized_score", 0.0)
 
                                 print(f"\n   Lead #{i}: {business}")
-                                print(f"      Consensus Score: {consensus_score:.6f}")
-                                print(f"      Normalized Score: {normalized_score:.6f}")
+                                print(
+                                    f"      Consensus Score: {consensus_score:.6f}"
+                                )
+                                print(
+                                    f"      Normalized Score: {normalized_score:.6f}"
+                                )
 
                                 # Get detailed scoring from consensus calculation
                                 # We need to fetch this from the intermediate data
@@ -328,53 +379,83 @@ class LeadPoetAPI:
                                 print(f"      Calculation:")
 
                                 # Find this lead in validator rankings to show individual scores
-                                lead_email = lead.get("email", lead.get("Email 1", "")).lower().strip()
-                                lead_business = lead.get("Business", lead.get("business", "")).lower().strip()
+                                lead_email = lead.get(
+                                    "email", lead.get("Email 1",
+                                                      "")).lower().strip()
+                                lead_business = lead.get(
+                                    "Business", lead.get("business",
+                                                         "")).lower().strip()
 
                                 total_weighted = 0.0
                                 for rank_data in validator_rankings:
-                                    val_hotkey = rank_data.get("validator_hotkey", "unknown")[:10]
-                                    val_trust = rank_data.get("validator_trust", 0.0)
+                                    val_hotkey = rank_data.get(
+                                        "validator_hotkey", "unknown")[:10]
+                                    val_trust = rank_data.get(
+                                        "validator_trust", 0.0)
 
                                     # Find this lead in this validator's ranking
-                                    for lead_entry in rank_data.get("ranked_leads", []):
-                                        entry_lead = lead_entry.get("lead", lead_entry)
-                                        entry_email = entry_lead.get("email", entry_lead.get("Email 1", "")).lower().strip()
-                                        entry_business = entry_lead.get("Business", entry_lead.get("business", "")).lower().strip()
+                                    for lead_entry in rank_data.get(
+                                            "ranked_leads", []):
+                                        entry_lead = lead_entry.get(
+                                            "lead", lead_entry)
+                                        entry_email = entry_lead.get(
+                                            "email",
+                                            entry_lead.get(
+                                                "Email 1",
+                                                "")).lower().strip()
+                                        entry_business = entry_lead.get(
+                                            "Business",
+                                            entry_lead.get(
+                                                "business",
+                                                "")).lower().strip()
 
                                         if entry_email == lead_email and entry_business == lead_business:
-                                            score = lead_entry.get("score", lead_entry.get("intent_score", 0.0))
+                                            score = lead_entry.get(
+                                                "score",
+                                                lead_entry.get(
+                                                    "intent_score", 0.0))
                                             weighted = score * val_trust
                                             total_weighted += weighted
-                                            print(f"         {val_hotkey}... S={score:.4f} × V={val_trust:.4f} = {weighted:.6f}")
+                                            print(
+                                                f"         {val_hotkey}... S={score:.4f} × V={val_trust:.4f} = {weighted:.6f}"
+                                            )
                                             break
 
-                                print(f"         ────────────────────────────────────────")
+                                print(
+                                    f"         ────────────────────────────────────────"
+                                )
                                 print(f"         Total = {total_weighted:.6f}")
 
-                            print(f"\n   🎯 Returning {len(final_leads)} consensus-ranked lead(s)")
+                            print(
+                                f"\n   🎯 Returning {len(final_leads)} consensus-ranked lead(s)"
+                            )
 
                             return final_leads
 
                     elif timeout_reached and validators_submitted == 0:
-                        bt.logging.error("Request timed out with no validator responses")
+                        bt.logging.error(
+                            "Request timed out with no validator responses")
                         return []
 
                     else:
                         # Still waiting
                         if attempt % 6 == 0:
-                            print(f"⏳ Still processing... ({validators_submitted} validators submitted, {elapsed:.0f}s elapsed)")
+                            print(
+                                f"⏳ Still processing... ({validators_submitted} validators submitted, {elapsed:.0f}s elapsed)"
+                            )
 
                 except Exception as e:
                     # Print full error with traceback
                     import traceback
                     error_details = traceback.format_exc()
-                    bt.logging.warning(f"Error polling status: {e}\n{error_details}")
+                    bt.logging.warning(
+                        f"Error polling status: {e}\n{error_details}")
                     print(f"❌ Polling error: {e}")
 
                 await asyncio.sleep(SLEEP_SEC)
 
-            bt.logging.error(f"Timed out waiting for validators after {total_wait}s")
+            bt.logging.error(
+                f"Timed out waiting for validators after {total_wait}s")
             return []
 
         except Exception as e:
@@ -383,7 +464,8 @@ class LeadPoetAPI:
             bt.logging.error(traceback.format_exc())
         return []
 
-    async def _get_leads_via_http(self, num_leads: int, business_desc: str) -> List[Dict]:
+    async def _get_leads_via_http(self, num_leads: int,
+                                  business_desc: str) -> List[Dict]:
         """Legacy HTTP server approach for mock mode"""
         max_retries = 3
         attempt = 1
@@ -398,20 +480,28 @@ class LeadPoetAPI:
                     continue
 
                 validator_url = f"http://localhost:{validator_port}/api/leads"
-                request_data = {"num_leads": num_leads, "business_desc": business_desc}
+                request_data = {
+                    "num_leads": num_leads,
+                    "business_desc": business_desc
+                }
 
                 bt.logging.info(f"Calling validator API at {validator_url}")
 
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(validator_url, json=request_data, timeout=90) as response:
+                    async with session.post(validator_url,
+                                            json=request_data,
+                                            timeout=90) as response:
                         if response.status == 200:
                             data = await response.json()
                             leads = data.get("leads", [])
-                            bt.logging.info(f"Received {len(leads)} leads from validator")
+                            bt.logging.info(
+                                f"Received {len(leads)} leads from validator")
                             return leads
                         else:
                             error_text = await response.text()
-                            bt.logging.error(f"Validator API error: {response.status} - {error_text}")
+                            bt.logging.error(
+                                f"Validator API error: {response.status} - {error_text}"
+                            )
                             attempt += 1
                             continue
 
@@ -423,20 +513,21 @@ class LeadPoetAPI:
                 bt.logging.error(f"Error calling validator API: {e}")
                 attempt += 1
                 if attempt > max_retries:
-                    bt.logging.error(f"Max retries ({max_retries}) reached, no valid leads found.")
+                    bt.logging.error(
+                        f"Max retries ({max_retries}) reached, no valid leads found."
+                    )
                     return []
                 continue
 
         return []
 
-    async def _get_leads_via_bittensor(self, num_leads: int, business_desc: str) -> List[Dict]:
+    async def _get_leads_via_bittensor(self, num_leads: int,
+                                       business_desc: str) -> List[Dict]:
         """Use the actual Bittensor network to get leads"""
         try:
             # Create synapse for the request
-            synapse = LeadRequest(
-                num_leads=num_leads,
-                business_desc=business_desc
-            )
+            synapse = LeadRequest(num_leads=num_leads,
+                                  business_desc=business_desc)
 
             # Get available validators from the metagraph
             self.metagraph.sync(subtensor=self.subtensor)
@@ -445,10 +536,15 @@ class LeadPoetAPI:
             print(f" Metagraph info:")
             print(f"   Total axons: {len(self.metagraph.axons)}")
             print(f"   Validator permits: {self.metagraph.validator_permit}")
-            print(f"   Axon serving status: {[axon.is_serving for axon in self.metagraph.axons]}")
+            print(
+                f"   Axon serving status: {[axon.is_serving for axon in self.metagraph.axons]}"
+            )
 
-            validator_uids = [uid for uid in range(len(self.metagraph.axons)) 
-                            if self.metagraph.validator_permit[uid] and self.metagraph.axons[uid].is_serving]
+            validator_uids = [
+                uid for uid in range(len(self.metagraph.axons))
+                if self.metagraph.validator_permit[uid]
+                and self.metagraph.axons[uid].is_serving
+            ]
 
             print(f"   Found validator UIDs: {validator_uids}")
 
@@ -458,7 +554,9 @@ class LeadPoetAPI:
 
             # Query the first available validator
             validator_axon = self.metagraph.axons[validator_uids[0]]
-            bt.logging.info(f"Querying validator {validator_uids[0]} at {validator_axon.ip}:{validator_axon.port}")
+            bt.logging.info(
+                f"Querying validator {validator_uids[0]} at {validator_axon.ip}:{validator_axon.port}"
+            )
 
             # Send request through Bittensor network  (auto-decode LeadRequest)
             responses = await self.dendrite(
@@ -472,7 +570,7 @@ class LeadPoetAPI:
                 first = responses[0]
                 # bittensor returns a “responses per axon” structure
                 if isinstance(first, list):
-                    if not first or first[0] is None:       # validator sent nothing
+                    if not first or first[0] is None:  # validator sent nothing
                         bt.logging.error("Validator sent no data")
                         return []
                     response = first[0]
@@ -480,10 +578,13 @@ class LeadPoetAPI:
                     response = first
 
                 if response and response.dendrite.status_code == 200 and response.leads:
-                    bt.logging.info(f"Received {len(response.leads)} leads from validator")
+                    bt.logging.info(
+                        f"Received {len(response.leads)} leads from validator")
                     return response.leads
                 else:
-                    bt.logging.error(f"Validator response error: {response.dendrite.status_message}")
+                    bt.logging.error(
+                        f"Validator response error: {response.dendrite.status_message}"
+                    )
             else:
                 bt.logging.error("No response from validator")
 
@@ -498,17 +599,33 @@ class LeadPoetAPI:
         await validator.handle_buyer_feedback(leads, feedback_score)
         bt.logging.info(f"Submitted feedback score {feedback_score} for leads")
 
+
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet API Client")
-    parser.add_argument("--wallet_name", type=str, required=True, help="Name of the wallet")
-    parser.add_argument("--wallet_hotkey", type=str, required=True, help="Hotkey of the wallet")
+    parser.add_argument("--wallet_name",
+                        type=str,
+                        required=True,
+                        help="Name of the wallet")
+    parser.add_argument("--wallet_hotkey",
+                        type=str,
+                        required=True,
+                        help="Hotkey of the wallet")
     parser.add_argument("--netuid", type=int, default=343, help="Network UID")
-    parser.add_argument("--subtensor_network", type=str, default="test", help="Subtensor network")
-    parser.add_argument("--validator_host", type=str,
-                        help="Public IP or DNS name of the validator (omit for localhost dev)")
-    parser.add_argument("--validator_port", type=int,
-                        help="Validator HTTP port (defaults to 8093 or auto-scan)")
-    parser.add_argument("--logging_trace", action="store_true", help="Enable trace-level logging")
+    parser.add_argument("--subtensor_network",
+                        type=str,
+                        default="test",
+                        help="Subtensor network")
+    parser.add_argument(
+        "--validator_host",
+        type=str,
+        help="Public IP or DNS name of the validator (omit for localhost dev)")
+    parser.add_argument(
+        "--validator_port",
+        type=int,
+        help="Validator HTTP port (defaults to 8093 or auto-scan)")
+    parser.add_argument("--logging_trace",
+                        action="store_true",
+                        help="Enable trace-level logging")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -523,9 +640,28 @@ def main():
             bt.logging.set_trace(False)
 
     if args.logging_trace:
-        bt.logging.set_trace(True)      # unchanged – trace beats quiet mode
+        bt.logging.set_trace(True)  # unchanged – trace beats quiet mode
 
-    wallet = bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
+    # ══════════════════════════════════════════════════════════════════
+    # FIX: Check for wallet location and set path if needed
+    # ══════════════════════════════════════════════════════════════════
+    from pathlib import Path
+    default_wallet_path = Path.home() / ".bittensor" / "wallets"
+
+    # Create config for wallet path
+    config = bt.Config()
+    config.wallet = bt.Config()
+
+    # Only use current directory if default location doesn't exist or is empty
+    if not default_wallet_path.exists() or not any(
+            default_wallet_path.iterdir()):
+        config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
+        wallet = bt.wallet(name=args.wallet_name,
+                           hotkey=args.wallet_hotkey,
+                           config=config)
+    else:
+        wallet = bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
+    # ══════════════════════════════════════════════════════════════════
 
     api = LeadPoetAPI(
         wallet=wallet,
@@ -536,12 +672,11 @@ def main():
     )
 
     print("Welcome to LeadPoet API")
-    num_leads     = int(input("Enter number of leads (1-100): "))
+    num_leads = int(input("Enter number of leads (1-100): "))
     business_desc = input("Describe your business & ideal customer: ").strip()
 
     # build new request
-    payload = {"num_leads": num_leads,
-               "business_desc": business_desc}
+    payload = {"num_leads": num_leads, "business_desc": business_desc}
 
     async def fetch_leads():
         try:
@@ -568,7 +703,9 @@ def main():
             await api.submit_feedback(leads, feedback)
         except Exception as e:
             print(f"❌ Error occurred: {e}")
-            print("This could be due to network connectivity issues or API unavailability.")
+            print(
+                "This could be due to network connectivity issues or API unavailability."
+            )
             print("Please check your connection and try again.")
             return  # Return gracefully instead of crashing
 
@@ -586,6 +723,7 @@ def main():
             if retry != 'y':
                 break
             print("Retrying...")
+
 
 if __name__ == "__main__":
     main()

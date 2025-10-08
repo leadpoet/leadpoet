@@ -1968,10 +1968,10 @@ def main():
     config.wallet = bt.Config()
     config.wallet.name = args.wallet_name
     config.wallet.hotkey = args.wallet_hotkey
-    # Use workspace wallet path (Replit requires absolute path in workspace)
-    workspace_wallet_path = "/home/runner/workspace/.bittensor/wallets"
-    if os.path.exists(workspace_wallet_path):
-        config.wallet.path = workspace_wallet_path
+    # Only set custom wallet path if default doesn't exist
+    default_wallet_path = Path.home() / ".bittensor" / "wallets"
+    if not os.path.exists(default_wallet_path):
+        config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     config.subtensor.network = args.subtensor_network

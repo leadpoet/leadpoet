@@ -60,7 +60,8 @@ requirements = [
     "httpx>=0.28.1",
     "openai>=2.1.0",
     "jsonschema>=4.25.1",
-    "firecrawl-py>=4.3.6"
+    "firecrawl-py>=4.3.6",
+    "disposable-email-domains>=0.0.138"
 ]
 
 setup(

@@ -88,3 +88,6 @@ publicsuffix2>=2.20191221
 # Schema validation and configuration
 jsonschema>=4.17.0
 PyYAML>=6.0
+
+# throwaway email blocklist
+disposable-email-domains>=0.0.138

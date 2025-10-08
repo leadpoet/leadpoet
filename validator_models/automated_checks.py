@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from typing import Dict, Any, List, Tuple
 from fuzzywuzzy import fuzz
 from dotenv import load_dotenv
+from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
 
 # Load environment variables from .env file
 load_dotenv()
@@ -42,8 +43,6 @@ FALLBACK_MODELS = [
 ]
 
 # Constants
-DISPOSABLE_DOMAINS = {"mailinator.com", "temp-mail.org", "guerrillamail.com", "10minutemail.com", 
-                      "yopmail.com", "getnada.com", "throwaway.email", "tempmail.com"}
 EMAIL_CACHE_FILE = "email_verification_cache.pkl"
 VALIDATION_ARTIFACTS_DIR = "validation_artifacts"
 

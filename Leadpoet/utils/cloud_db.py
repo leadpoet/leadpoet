@@ -18,7 +18,7 @@ class _Verifier:
     def __init__(self):
         self._network = NETWORK
         self._netuid = SUBNET_ID
-    
+
     def _get_fresh_metagraph(self):
         """Always get a fresh metagraph"""
         subtensor = bt.subtensor(network=self._network)
@@ -218,30 +218,30 @@ def push_validator_weights(wallet: bt.wallet, uid: int, weights: dict):
 def broadcast_api_request(wallet: bt.wallet, request_id: str, num_leads: int, business_desc: str, client_id: str = None) -> bool:
     """
     Broadcast an API request to Firestore for ALL validators and miners to process.
-    
+
     Args:
         wallet: Client's wallet
         request_id: Unique request ID
         num_leads: Number of leads requested
         business_desc: Business description
         client_id: Optional client identifier
-        
+
     Returns:
         bool: True if broadcast successful, False otherwise
     """
     try:
         from datetime import datetime
         from google.cloud import firestore
-        
+
         if not _has_firestore_credentials():
             bt.logging.warning("Firestore credentials not available, cannot broadcast request")
             return False
-        
+
         db = firestore.Client()
-        
+
         # Create broadcast request document
         doc_ref = db.collection("api_requests").document(request_id)
-        
+
         doc_ref.set({
             "request_id": request_id,
             "client_hotkey": wallet.hotkey.ss58_address,
@@ -252,10 +252,10 @@ def broadcast_api_request(wallet: bt.wallet, request_id: str, num_leads: int, bu
             "created_at": datetime.utcnow().isoformat() + "Z",
             "updated_at": datetime.utcnow().isoformat() + "Z",
         })
-        
+
         bt.logging.info(f"📡 Broadcast API request {request_id[:8]}... to Firestore")
         return True
-        
+
     except Exception as e:
         bt.logging.error(f"Failed to broadcast API request: {e}")
         import traceback
@@ -267,7 +267,7 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
     """
     Fetch pending broadcast API requests for this validator/miner from Firestore.
     Returns list of pending requests that need processing.
-    
+
     Args:
         wallet: Bittensor wallet
         role: "validator" or "miner" - determines which requests to fetch
@@ -275,37 +275,37 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
     try:
         from google.cloud import firestore
         import warnings
-        
+
         # Suppress Firestore positional argument warnings
         warnings.filterwarnings("ignore", message=".*positional arguments.*")
-        
+
         # Check if Google Cloud credentials exist
         if not _has_firestore_credentials():
             # Silently return empty list if no credentials (development mode)
             return []
-        
+
         db = firestore.Client()
-        
+
         # BOTH validators and miners should ONLY fetch "pending" requests
         # Local tracking (processed_requests set) prevents re-processing
         query = db.collection("api_requests").where("status", "==", "pending").limit(10)
-        
+
         docs = query.stream()
         requests_list = []
-        
+
         for doc in docs:
             data = doc.to_dict()
             data["request_id"] = doc.id  # Ensure request_id is set
             requests_list.append(data)
-        
+
         # Only log when requests are found
         if requests_list:
             print(f"\n🔔 [{role.upper()}] Found {len(requests_list)} NEW broadcast request(s)!")
             for req in requests_list:
                 print(f"   📨 Request {req['request_id'][:8]}... - {req.get('business_desc', '')[:30]}")
-        
+
         return requests_list
-        
+
     except Exception as e:
         print(f"❌ fetch_broadcast_requests ({role}) FAILED: {e}")
         import traceback
@@ -321,47 +321,47 @@ def mark_broadcast_processing(wallet: bt.wallet, request_id: str) -> bool:
     """
     try:
         from google.cloud import firestore
-        
+
         if not _has_firestore_credentials():
             return False
-        
+
         db = firestore.Client()
-        
+
         doc_ref = db.collection("api_requests").document(request_id)
-        
+
         # Use a transaction for atomic read-modify-write
         transaction = db.transaction()
-        
+
         @firestore.transactional
         def update_in_transaction(transaction, doc_ref):
             snapshot = doc_ref.get(transaction=transaction)
-            
+
             if not snapshot.exists:
                 return False
-            
+
             data = snapshot.to_dict()
             current_status = data.get("status")
-            
+
             # Only allow processing if status is "pending"
             if current_status != "pending":
                 return False
-            
+
             # Atomic update: only one miner wins
             transaction.update(doc_ref, {
                 "status": "processing",
                 "processing_by": wallet.hotkey.ss58_address,
             })
             return True
-        
+
         success = update_in_transaction(transaction, doc_ref)
-        
+
         if success:
             bt.logging.info(f"✅ Marked request {request_id[:8]}... as processing")
         else:
             bt.logging.debug(f"Request {request_id[:8]}... already being processed")
-        
+
         return success
-        
+
     except Exception as e:
         bt.logging.error(f"Failed to mark request as processing: {e}")
         return False
@@ -374,21 +374,21 @@ def get_broadcast_status(request_id: str) -> Dict:
     """
     try:
         from google.cloud import firestore
-        
+
         if not _has_firestore_credentials():
             return {"status": "error", "leads": [], "error": "Firestore credentials not available"}
-        
+
         db = firestore.Client()
-        
+
         doc_ref = db.collection("api_requests").document(request_id)
         doc = doc_ref.get()
-        
+
         if not doc.exists:
             return {"status": "not_found", "leads": [], "request_id": request_id}
-        
+
         data = doc.to_dict()
         return data
-        
+
     except Exception as e:
         bt.logging.error(f"Failed to get status for request {request_id[:8]}...: {e}")
         return {"status": "error", "leads": [], "error": str(e)}
@@ -396,37 +396,37 @@ def get_broadcast_status(request_id: str) -> Dict:
 def push_validator_ranking(wallet: bt.wallet, request_id: str, ranked_leads: List[Dict], validator_trust: float) -> bool:
     """
     Submit validator's ranking for a broadcast API request directly to Firestore.
-    
+
     Args:
         wallet: Validator's wallet
         request_id: Broadcast request ID
         ranked_leads: List of leads with scores and ranks
         validator_trust: Validator's trust value from metagraph
-        
+
     Returns:
         bool: Success status
     """
     from datetime import datetime
     from google.cloud import firestore
-    
+
     # Get validator UID from metagraph
     try:
         mg = _VERIFY._get_fresh_metagraph()
         validator_uid = mg.hotkeys.index(wallet.hotkey.ss58_address)
     except ValueError:
         validator_uid = -1  # Unknown UID
-    
+
     try:
         if not _has_firestore_credentials():
             bt.logging.warning("Firestore credentials not available, cannot push ranking")
             return False
-        
+
         db = firestore.Client()
-        
+
         # Document ID: {request_id}_{validator_hotkey}
         doc_id = f"{request_id}_{wallet.hotkey.ss58_address}"
         doc_ref = db.collection("validator_rankings").document(doc_id)
-        
+
         # Write ranking to Firestore
         doc_ref.set({
             "request_id": request_id,
@@ -437,10 +437,10 @@ def push_validator_ranking(wallet: bt.wallet, request_id: str, ranked_leads: Lis
             "num_leads_ranked": len(ranked_leads),
             "submitted_at": datetime.utcnow().isoformat() + "Z",
         })
-        
+
         bt.logging.info(f"📊 Submitted ranking for request {request_id[:8]}... ({len(ranked_leads)} leads)")
         return True
-        
+
     except Exception as e:
         bt.logging.error(f"Failed to submit validator ranking: {e}")
         return False
@@ -449,41 +449,41 @@ def push_validator_ranking(wallet: bt.wallet, request_id: str, ranked_leads: Lis
 def fetch_validator_rankings(request_id: str, timeout_sec: int = 5) -> List[Dict]:
     """
     Fetch all validator rankings for a broadcast request from Firestore.
-    
+
     Args:
         request_id: Broadcast request ID
         timeout_sec: Not used (kept for API compatibility)
-        
+
     Returns:
         List of validator ranking submissions
     """
     try:
         from google.cloud import firestore
         import warnings
-        
+
         # Suppress warnings
         warnings.filterwarnings("ignore", message=".*positional arguments.*")
-        
+
         if not _has_firestore_credentials():
             return []
-        
+
         db = firestore.Client()
-        
+
         # Query all validator rankings for this request
         query = db.collection("validator_rankings").where("request_id", "==", request_id)
-        
+
         docs = query.stream()
         rankings = []
-        
+
         for doc in docs:
             data = doc.to_dict()
             rankings.append(data)
-        
+
         if rankings:
             bt.logging.debug(f"📊 Fetched {len(rankings)} validator ranking(s) for request {request_id[:8]}...")
-        
+
         return rankings
-        
+
     except Exception as e:
         bt.logging.debug(f"Failed to fetch validator rankings: {e}")
         return []
@@ -492,11 +492,11 @@ def fetch_validator_rankings(request_id: str, timeout_sec: int = 5) -> List[Dict
 def mark_consensus_complete(request_id: str, final_leads: List[Dict]) -> bool:
     """
     Mark a broadcast request as complete with final consensus leads.
-    
+
     Args:
         request_id: Broadcast request ID
         final_leads: Final ranked leads after consensus
-        
+
     Returns:
         bool: Success status
     """
@@ -506,7 +506,7 @@ def mark_consensus_complete(request_id: str, final_leads: List[Dict]) -> bool:
         "leads": final_leads,
         "completed_at": time.time(),
     }
-    
+
     try:
         r = requests.post(f"{API_URL}/api_requests/complete", json=body, timeout=10)
         r.raise_for_status()
@@ -528,7 +528,7 @@ def log_consensus_metrics(
 ) -> bool:
     """
     Log consensus metrics to Firestore for monitoring and analytics.
-    
+
     Args:
         request_id: The broadcast request ID
         num_validators_participated: Number of validators who submitted rankings
@@ -538,12 +538,12 @@ def log_consensus_metrics(
         average_response_time: Average time for validators to respond (seconds)
         top_leads_summary: List of top lead summaries with scores
         calculation_time: Time taken to calculate consensus (seconds)
-        
+
     Returns:
         bool: Success status
     """
     from datetime import datetime
-    
+
     body = {
         "request_id": request_id,
         "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -568,7 +568,7 @@ def log_consensus_metrics(
             }
         }
     }
-    
+
     try:
         r = requests.post(f"{API_URL}/consensus_metrics/log", json=body, timeout=10)
         r.raise_for_status()
@@ -581,29 +581,29 @@ def log_consensus_metrics(
 def push_miner_curated_leads(wallet: bt.wallet, request_id: str, leads: List[Dict]) -> bool:
     """
     Push miner's curated leads to Firestore for validators to pick up.
-    
+
     Args:
         wallet: Miner's wallet
         request_id: Broadcast request ID
         leads: Curated leads from miner
-        
+
     Returns:
         bool: Success status
     """
     try:
         from google.cloud import firestore
         from datetime import datetime
-        
+
         if not _has_firestore_credentials():
             bt.logging.warning("Firestore credentials not available, cannot push miner leads")
             return False
-        
+
         db = firestore.Client()
-        
+
         # Document ID: {request_id}_{miner_hotkey}
         doc_id = f"{request_id}_{wallet.hotkey.ss58_address}"
         doc_ref = db.collection("miner_submissions").document(doc_id)
-        
+
         doc_ref.set({
             "request_id": request_id,
             "miner_hotkey": wallet.hotkey.ss58_address,
@@ -611,10 +611,10 @@ def push_miner_curated_leads(wallet: bt.wallet, request_id: str, leads: List[Dic
             "num_leads": len(leads),
             "submitted_at": datetime.utcnow().isoformat() + "Z",
         })
-        
+
         bt.logging.info(f"📤 Pushed {len(leads)} curated lead(s) to Firestore for request {request_id[:8]}...")
         return True
-        
+
     except Exception as e:
         bt.logging.error(f"Failed to push miner leads: {e}")
         return False
@@ -623,37 +623,37 @@ def push_miner_curated_leads(wallet: bt.wallet, request_id: str, leads: List[Dic
 def fetch_miner_leads_for_request(request_id: str) -> List[Dict]:
     """
     Fetch all miner submissions for a broadcast request.
-    
+
     Args:
         request_id: Broadcast request ID
-        
+
     Returns:
         List of miner submission dicts
     """
     try:
         from google.cloud import firestore
         import warnings
-        
+
         # Suppress warnings
         warnings.filterwarnings("ignore", message=".*positional arguments.*")
-        
+
         if not _has_firestore_credentials():
             return []
-        
+
         db = firestore.Client()
-        
+
         # Query all miner submissions for this request
         query = db.collection("miner_submissions").where("request_id", "==", request_id)
-        
+
         docs = query.stream()
         submissions = []
-        
+
         for doc in docs:
             data = doc.to_dict()
             submissions.append(data)
-        
+
         return submissions
-        
+
     except Exception as e:
         bt.logging.debug(f"Failed to fetch miner leads: {e}")
         return []

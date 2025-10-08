@@ -29,45 +29,55 @@ from miner_models.intent_model import (
 from Leadpoet.api.leadpoet_api import get_query_api_axons
 from collections import OrderedDict
 from Leadpoet.utils.cloud_db import get_cloud_leads
-from Leadpoet.utils.cloud_db import push_prospects_to_cloud         # NEW
-from Leadpoet.utils.cloud_db import fetch_prospects_from_cloud     # NEW
+from Leadpoet.utils.cloud_db import push_prospects_to_cloud  # NEW
+from Leadpoet.utils.cloud_db import fetch_prospects_from_cloud  # NEW
 from Leadpoet.utils.cloud_db import (
     get_cloud_leads,
     push_prospects_to_cloud,
     fetch_prospects_from_cloud,
-    fetch_miner_curation_request,      # NEW
-    push_miner_curation_result,        # NEW
-    fetch_broadcast_requests,          # NEW
-    mark_broadcast_processing,         # NEW
+    fetch_miner_curation_request,  # NEW
+    push_miner_curation_result,  # NEW
+    fetch_broadcast_requests,  # NEW
+    mark_broadcast_processing,  # NEW
 )
 import logging
 import random
-import socket, struct     # already have socket; add struct
+import socket, struct  # already have socket; add struct
 import grpc  # add near other imports
 from pathlib import Path
+
+
 # Remove this if you don't want to silence noisy "InvalidRequestNameError … Improperly formatted request" lines ──
 class _SilenceInvalidRequest(logging.Filter):
+
     def filter(self, record: logging.LogRecord) -> bool:
         # Drop only those specific ERROR messages – let everything else through.
-        if record.levelno >= logging.ERROR and "InvalidRequestNameError" in record.getMessage():
+        if record.levelno >= logging.ERROR and "InvalidRequestNameError" in record.getMessage(
+        ):
             return False
         return True
 
-root_logger       = logging.getLogger()            # root
-bittensor_logger  = logging.getLogger("bittensor") # axon middleware logs here
+
+root_logger = logging.getLogger()  # root
+bittensor_logger = logging.getLogger("bittensor")  # axon middleware logs here
 root_logger.addFilter(_SilenceInvalidRequest())
 bittensor_logger.addFilter(_SilenceInvalidRequest())
 # ────────────────────────────────────────────────────────────────────────────────
 
+
 class Miner(BaseMinerNeuron):
+
     def __init__(self, config=None):
         super().__init__(config=config)
-        self.use_open_source_lead_model = config.get("use_open_source_lead_model", True) if config else True
-        bt.logging.info(f"Using open-source lead model: {self.use_open_source_lead_model}")
+        self.use_open_source_lead_model = config.get(
+            "use_open_source_lead_model", True) if config else True
+        bt.logging.info(
+            f"Using open-source lead model: {self.use_open_source_lead_model}")
         self.app = web.Application()
-        self.app.add_routes([web.post('/lead_request', self.handle_lead_request)])
+        self.app.add_routes(
+            [web.post('/lead_request', self.handle_lead_request)])
         self.sourcing_mode = True
-        self.sourcing_lock = threading.Lock()   # thread-safe
+        self.sourcing_lock = threading.Lock()  # thread-safe
         # background loop orchestration
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.sourcing_task: Optional[asyncio.Task] = None
@@ -87,15 +97,16 @@ class Miner(BaseMinerNeuron):
     def resume_sourcing(self):
         if not self._loop or not self._miner_hotkey:
             return
+
         def _restart():
             if self.sourcing_task and not self.sourcing_task.done():
                 return
             print("▶️ Resuming sourcing (restart background task)…")
             self.sourcing_mode = True
-            self.sourcing_task = asyncio.create_task(
-                self.sourcing_loop(self._bg_interval, self._miner_hotkey),
-                name="sourcing_loop"
-            )
+            self.sourcing_task = asyncio.create_task(self.sourcing_loop(
+                self._bg_interval, self._miner_hotkey),
+                                                     name="sourcing_loop")
+
         try:
             self._loop.call_soon_threadsafe(_restart)
         except Exception as e:
@@ -115,7 +126,9 @@ class Miner(BaseMinerNeuron):
                     print(f"\n🔄 Sourcing new leads...")
                 # do network I/O OUTSIDE the lock so pause can cancel immediately
                 new_leads = await get_leads(1, industry=None, region=None)
-                sanitized = [sanitize_prospect(p, miner_hotkey) for p in new_leads]
+                sanitized = [
+                    sanitize_prospect(p, miner_hotkey) for p in new_leads
+                ]
                 print(f"🔄 Sourced {len(sanitized)} new leads:")
                 for i, lead in enumerate(sanitized, 1):
                     business = lead.get('business', 'Unknown')
@@ -124,8 +137,10 @@ class Miner(BaseMinerNeuron):
                     print(f"  {i}. {business} - {owner} ({email})")
                 try:
                     push_prospects_to_cloud(self.wallet, sanitized)
-                    print(f"✅ Pushed {len(sanitized)} prospects to cloud queue "
-                          f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+                    print(
+                        f"✅ Pushed {len(sanitized)} prospects to cloud queue "
+                        f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
+                    )
                 except Exception as e:
                     print(f"❌ Cloud push failed: {e}")
                 await asyncio.sleep(interval)
@@ -148,25 +163,36 @@ class Miner(BaseMinerNeuron):
                         print(f"🟢 Curation request pulled from cloud: "
                               f"{req.get('business_desc','')[:40]}…")
                         n = int(req.get("num_leads", 1))
-                        target_ind = classify_industry(req.get("business_desc", ""))
-                        print(f"🔍 Target industry inferred: {target_ind or 'any'}")
+                        target_ind = classify_industry(
+                            req.get("business_desc", ""))
+                        print(
+                            f"🔍 Target industry inferred: {target_ind or 'any'}"
+                        )
                     # rest of curation OUTSIDE lock
-                    desired_roles = classify_roles(req.get("business_desc", ""))
+                    desired_roles = classify_roles(req.get(
+                        "business_desc", ""))
                     if desired_roles:
                         print(f"🛈  Role filter active → {desired_roles}")
-                    pool_slice = get_leads_from_pool(
-                        1000, industry=target_ind, region=None, wallet=self.wallet
-                    )
+                    pool_slice = get_leads_from_pool(1000,
+                                                     industry=target_ind,
+                                                     region=None,
+                                                     wallet=self.wallet)
                     if desired_roles:
                         pool_slice = [
                             ld for ld in pool_slice
                             if _role_match(ld.get("role", ""), desired_roles)
                         ] or pool_slice
-                    curated_leads = random.sample(pool_slice, min(len(pool_slice), n * 3))
+                    curated_leads = random.sample(pool_slice,
+                                                  min(len(pool_slice), n * 3))
                     if not curated_leads:
-                        print("📝 No leads found in pool, generating new leads...")
+                        print(
+                            "📝 No leads found in pool, generating new leads..."
+                        )
                         new_leads = await get_leads(n * 2, target_ind, None)
-                        curated_leads = [sanitize_prospect(p, miner_hotkey) for p in new_leads]
+                        curated_leads = [
+                            sanitize_prospect(p, miner_hotkey)
+                            for p in new_leads
+                        ]
                     else:
                         print(f" Curated {len(curated_leads)} leads in pool")
                     mapped_leads = []
@@ -185,24 +211,35 @@ class Miner(BaseMinerNeuron):
                             "role": lead.get("role", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
-                            "curated_at": datetime.now(timezone.utc).isoformat(),
+                            "curated_at":
+                            datetime.now(timezone.utc).isoformat(),
                         }
                         if all(m.get(f) for f in ["email", "Business"]):
                             mapped_leads.append(m)
                     print(" Ranking leads by intent...")
-                    ranked = await rank_leads(mapped_leads, description=req.get("business_desc",""))
+                    ranked = await rank_leads(mapped_leads,
+                                              description=req.get(
+                                                  "business_desc", ""))
                     top_leads = ranked[:n]
 
                     # Add curated_at timestamp to each lead
                     for lead in top_leads:
-                        lead["curated_at"] = datetime.now(timezone.utc).isoformat()
+                        lead["curated_at"] = datetime.now(
+                            timezone.utc).isoformat()
 
-                    print(f"📤 SENDING {len(top_leads)} curated leads to validator:")
+                    print(
+                        f"📤 SENDING {len(top_leads)} curated leads to validator:"
+                    )
                     for i, lead in enumerate(top_leads, 1):
-                        print(f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})")
+                        print(
+                            f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})"
+                        )
                     push_miner_curation_result(
                         self.wallet,
-                        {"miner_request_id": req["miner_request_id"], "leads": top_leads},
+                        {
+                            "miner_request_id": req["miner_request_id"],
+                            "leads": top_leads
+                        },
                     )
                     print(f"✅ Returned {len(top_leads)} leads to cloud broker")
                     # resume sourcing after job
@@ -220,7 +257,9 @@ class Miner(BaseMinerNeuron):
         Poll Firestore for broadcast API requests and process them.
         """
         print("🟢 Miner broadcast polling loop initialized!")
-        print("📡 Polling for broadcast API requests... (will notify when requests are found)")
+        print(
+            "📡 Polling for broadcast API requests... (will notify when requests are found)"
+        )
 
         # Local tracking to prevent re-processing
         processed_requests = set()
@@ -238,25 +277,34 @@ class Miner(BaseMinerNeuron):
                 # No need to log anything here when empty
 
                 if requests:
-                    print(f"🔔 Miner found {len(requests)} broadcast request(s) to process")
+                    print(
+                        f"🔔 Miner found {len(requests)} broadcast request(s) to process"
+                    )
 
                 for req in requests:
                     request_id = req.get("request_id")
 
                     # Skip if already processed locally
                     if request_id in processed_requests:
-                        print(f"⏭️  Skipping locally processed request {request_id[:8]}...")
+                        print(
+                            f"⏭️  Skipping locally processed request {request_id[:8]}..."
+                        )
                         continue
 
-                    print(f"🔍 Checking request {request_id[:8]}... (status={req.get('status')})")
+                    print(
+                        f"🔍 Checking request {request_id[:8]}... (status={req.get('status')})"
+                    )
 
                     # Try to mark as processing (atomic operation in Firestore)
                     from Leadpoet.utils.cloud_db import mark_broadcast_processing
-                    success = mark_broadcast_processing(self.wallet, request_id)
+                    success = mark_broadcast_processing(
+                        self.wallet, request_id)
 
                     if not success:
                         # Another miner already claimed it - mark as processed locally
-                        print(f"⏭️  Request {request_id[:8]}... already claimed by another miner")
+                        print(
+                            f"⏭️  Request {request_id[:8]}... already claimed by another miner"
+                        )
                         processed_requests.add(request_id)  # ← ADD THIS LINE
                         continue
 
@@ -266,27 +314,35 @@ class Miner(BaseMinerNeuron):
                     num_leads = req.get("num_leads", 1)
                     business_desc = req.get("business_desc", "")
 
-                    print(f"\n📨 Broadcast API request received {request_id[:8]}...")
+                    print(
+                        f"\n📨 Broadcast API request received {request_id[:8]}..."
+                    )
                     print(f"   Requested: {num_leads} leads")
                     print(f"   Description: {business_desc[:50]}...")
 
                     # Pause sourcing
                     self.pause_sourcing()
-                    print("🟢 Processing broadcast request: {}…".format(business_desc[:20]))
+                    print("🟢 Processing broadcast request: {}…".format(
+                        business_desc[:20]))
 
                     with self.sourcing_lock:
-                        print(f"🟢 Processing broadcast request: {business_desc[:40]}…")
+                        print(
+                            f"🟢 Processing broadcast request: {business_desc[:40]}…"
+                        )
                         target_ind = classify_industry(business_desc)
-                        print(f"🔍 Target industry inferred: {target_ind or 'any'}")
+                        print(
+                            f"🔍 Target industry inferred: {target_ind or 'any'}"
+                        )
 
                     # Curation logic (same as cloud_curation_loop)
                     desired_roles = classify_roles(business_desc)
                     if desired_roles:
                         print(f"🛈  Role filter active → {desired_roles}")
 
-                    pool_slice = get_leads_from_pool(
-                        1000, industry=target_ind, region=None, wallet=self.wallet
-                    )
+                    pool_slice = get_leads_from_pool(1000,
+                                                     industry=target_ind,
+                                                     region=None,
+                                                     wallet=self.wallet)
 
                     if desired_roles:
                         pool_slice = [
@@ -294,14 +350,22 @@ class Miner(BaseMinerNeuron):
                             if _role_match(ld.get("role", ""), desired_roles)
                         ] or pool_slice
 
-                    curated_leads = random.sample(pool_slice, min(len(pool_slice), num_leads * 3))
+                    curated_leads = random.sample(
+                        pool_slice, min(len(pool_slice), num_leads * 3))
 
                     if not curated_leads:
-                        print("📝 No leads found in pool, generating new leads...")
-                        new_leads = await get_leads(num_leads * 2, target_ind, None)
-                        curated_leads = [sanitize_prospect(p, miner_hotkey) for p in new_leads]
+                        print(
+                            "📝 No leads found in pool, generating new leads..."
+                        )
+                        new_leads = await get_leads(num_leads * 2, target_ind,
+                                                    None)
+                        curated_leads = [
+                            sanitize_prospect(p, miner_hotkey)
+                            for p in new_leads
+                        ]
                     else:
-                        print(f"📊 Curated {len(curated_leads)} leads from pool")
+                        print(
+                            f"📊 Curated {len(curated_leads)} leads from pool")
 
                     # Map leads to proper format
                     mapped_leads = []
@@ -320,36 +384,44 @@ class Miner(BaseMinerNeuron):
                             "role": lead.get("role", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
-                            "curated_at": datetime.now(timezone.utc).isoformat(),
+                            "curated_at":
+                            datetime.now(timezone.utc).isoformat(),
                         }
                         if all(m.get(f) for f in ["email", "Business"]):
                             mapped_leads.append(m)
 
                     print("🔄 Ranking leads by intent...")
-                    ranked = await rank_leads(mapped_leads, description=business_desc)
+                    ranked = await rank_leads(mapped_leads,
+                                              description=business_desc)
                     top_leads = ranked[:num_leads]
 
                     # Add request_id to track which broadcast this is for
                     for lead in top_leads:
-                        lead["curated_at"] = datetime.now(timezone.utc).isoformat()
+                        lead["curated_at"] = datetime.now(
+                            timezone.utc).isoformat()
                         lead["broadcast_request_id"] = request_id
 
-                    print(f"📤 SENDING {len(top_leads)} curated leads for broadcast:")
+                    print(
+                        f"📤 SENDING {len(top_leads)} curated leads for broadcast:"
+                    )
                     for i, lead in enumerate(top_leads, 1):
-                        print(f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})")
+                        print(
+                            f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})"
+                        )
 
                     # NEW: Send leads to Firestore (not Cloud Run API)
                     from Leadpoet.utils.cloud_db import push_miner_curated_leads
-                    success = push_miner_curated_leads(
-                        self.wallet,
-                        request_id,
-                        top_leads
-                    )
+                    success = push_miner_curated_leads(self.wallet, request_id,
+                                                       top_leads)
 
                     if success:
-                        print(f"✅ Sent {len(top_leads)} leads to Firestore for request {request_id[:8]}...")
+                        print(
+                            f"✅ Sent {len(top_leads)} leads to Firestore for request {request_id[:8]}..."
+                        )
                     else:
-                        print(f"❌ Failed to send leads to Firestore for request {request_id[:8]}...")
+                        print(
+                            f"❌ Failed to send leads to Firestore for request {request_id[:8]}..."
+                        )
 
                     # Resume sourcing
                     self.resume_sourcing()
@@ -372,8 +444,10 @@ class Miner(BaseMinerNeuron):
         import time as _t
         _t0 = _t.time()
         print("\n─────────  AXON ➜ MINER  ─────────")
-        print(f"⚡  AXON call received  | leads={synapse.num_leads}"
-              f" industry={synapse.industry or '∅'} region={synapse.region or '∅'}")
+        print(
+            f"⚡  AXON call received  | leads={synapse.num_leads}"
+            f" industry={synapse.industry or '∅'} region={synapse.region or '∅'}"
+        )
         print(f"⏱️   at {datetime.utcnow().isoformat()} UTC")
         # ─────────────────────────────────────────────────────────────
         bt.logging.info(f" AXON CALL RECEIVED: {synapse}")
@@ -381,7 +455,9 @@ class Miner(BaseMinerNeuron):
         start_time = time.time()
 
         try:
-            print(f"\n🟡 RECEIVED QUERY from validator: {synapse.num_leads} leads, industry={synapse.industry}, region={synapse.region}")
+            print(
+                f"\n🟡 RECEIVED QUERY from validator: {synapse.num_leads} leads, industry={synapse.industry}, region={synapse.region}"
+            )
             print("⏸️  Stopping sourcing, switching to curation mode...")
 
             # Take the global lock so sourcing stays paused
@@ -389,7 +465,8 @@ class Miner(BaseMinerNeuron):
                 self.sourcing_mode = False
                 try:
                     # ── derive target industry from buyer description ───────────
-                    target_ind = classify_industry(synapse.business_desc) or synapse.industry
+                    target_ind = classify_industry(
+                        synapse.business_desc) or synapse.industry
                     print(f"🔍 Target industry inferred: {target_ind or 'any'}")
 
                     # 1️⃣ detect role keywords ONCE
@@ -399,10 +476,10 @@ class Miner(BaseMinerNeuron):
 
                     # 2️⃣ pull a LARGE slice of the pool for this industry
                     pool_slice = get_leads_from_pool(
-                        1000,                           # big number = “all we have”
+                        1000,  # big number = “all we have”
                         industry=target_ind,
                         region=synapse.region,
-                        wallet=self.wallet            # ensures cloud read
+                        wallet=self.wallet  # ensures cloud read
                     )
 
                     # 3️⃣ role-filter first, then random-sample down
@@ -414,15 +491,22 @@ class Miner(BaseMinerNeuron):
 
                     # finally down-sample to N×3 for ranking
                     curated_leads = random.sample(
-                        pool_slice,
-                        min(len(pool_slice), synapse.num_leads * 3)
-                    )
+                        pool_slice, min(len(pool_slice),
+                                        synapse.num_leads * 3))
 
                     if not curated_leads:
-                        print("📝 No leads found in pool, generating new leads...")
-                        bt.logging.info("No leads found in pool, generating new leads")
-                        new_leads = await get_leads(synapse.num_leads * 2, target_ind, synapse.region)
-                        sanitized = [sanitize_prospect(p, self.wallet.hotkey.ss58_address) for p in new_leads]
+                        print(
+                            "📝 No leads found in pool, generating new leads..."
+                        )
+                        bt.logging.info(
+                            "No leads found in pool, generating new leads")
+                        new_leads = await get_leads(synapse.num_leads * 2,
+                                                    target_ind, synapse.region)
+                        sanitized = [
+                            sanitize_prospect(p,
+                                              self.wallet.hotkey.ss58_address)
+                            for p in new_leads
+                        ]
                         curated_leads = sanitized
                     else:
                         print(f" Curated {len(curated_leads)} leads in pool")
@@ -442,43 +526,53 @@ class Miner(BaseMinerNeuron):
                             "sub_industry": lead.get("sub_industry", ""),
                             "Region": lead.get("region", ""),
                             "role": lead.get("role", ""),
-                            "source":       lead.get("source", ""),
-                            "curated_by":   self.wallet.hotkey.ss58_address,
-                            "curated_at":   datetime.now(timezone.utc).isoformat(),  # NEW: ISO timestamp
+                            "source": lead.get("source", ""),
+                            "curated_by": self.wallet.hotkey.ss58_address,
+                            "curated_at": datetime.now(timezone.utc).isoformat(
+                            ),  # NEW: ISO timestamp
                         }
                         # Only include leads that have all required fields
-                        if all(mapped_lead.get(field) for field in ["email", "Business"]):
+                        if all(
+                                mapped_lead.get(field)
+                                for field in ["email", "Business"]):
                             mapped_leads.append(mapped_lead)
 
                     # REMOVED: conversion_score calculation - no longer needed
                     # ── NEW: apply business-intent ranking ──────────────────────────
-                    ranked = await rank_leads(mapped_leads, description=synapse.business_desc)
+                    ranked = await rank_leads(
+                        mapped_leads, description=synapse.business_desc)
                     # ────────────────────────────────────────────────────────────────
-                    top_leads = ranked[: synapse.num_leads]
+                    top_leads = ranked[:synapse.num_leads]
 
                     if not top_leads:
                         print("❌ No valid leads found in pool after mapping")
-                        bt.logging.warning("No valid leads found in pool after mapping")
+                        bt.logging.warning(
+                            "No valid leads found in pool after mapping")
                         synapse.leads = []
                         synapse.dendrite.status_code = 404
                         synapse.dendrite.status_message = "No valid leads found matching criteria"
-                        synapse.dendrite.process_time = str(time.time() - start_time)
+                        synapse.dendrite.process_time = str(time.time() -
+                                                            start_time)
                         return synapse
 
-                    print(f"📤 SENDING {len(top_leads)} curated leads to validator:")
+                    print(
+                        f"📤 SENDING {len(top_leads)} curated leads to validator:"
+                    )
                     for i, lead in enumerate(top_leads, 1):
                         business = lead.get('Business', 'Unknown')
                         score = lead.get('miner_intent_score', 0)
                         print(f"  {i}. {business} (intent={score:.3f})")
 
                     print("🚚 Returning leads over AXON")
-                    print(f"✅  Prepared {len(top_leads)} leads in"
-                          f" {(_t.time()-_t0):.2f}s – sending back to validator")
+                    print(
+                        f"✅  Prepared {len(top_leads)} leads in"
+                        f" {(_t.time()-_t0):.2f}s – sending back to validator")
                     bt.logging.info(f"Returning {len(top_leads)} scored leads")
                     synapse.leads = top_leads
                     synapse.dendrite.status_code = 200
                     synapse.dendrite.status_message = "OK"
-                    synapse.dendrite.process_time = str(time.time() - start_time)
+                    synapse.dendrite.process_time = str(time.time() -
+                                                        start_time)
 
                 finally:
                     # Re-enable sourcing after curation
@@ -499,7 +593,7 @@ class Miner(BaseMinerNeuron):
         try:
             data = await request.json()
             num_leads = data.get("num_leads", 1)
-            industry = data.get("industry")      # legacy field – may be empty
+            industry = data.get("industry")  # legacy field – may be empty
             region = data.get("region")
             business_desc = data.get("business_desc", "")
 
@@ -516,10 +610,10 @@ class Miner(BaseMinerNeuron):
 
             # 2️⃣ pull a LARGE slice of the pool for this industry
             pool_slice = get_leads_from_pool(
-                1000,                           # big number = “all we have”
+                1000,  # big number = “all we have”
                 industry=target_ind,
                 region=region,
-                wallet=self.wallet               # <-- passes hotkey for auth
+                wallet=self.wallet  # <-- passes hotkey for auth
             )
 
             # 3️⃣ role-filter first, then random-sample down
@@ -530,16 +624,17 @@ class Miner(BaseMinerNeuron):
                 ] or pool_slice  # fall back if nothing matched
 
             # finally down-sample to N×3 for ranking
-            curated_leads = random.sample(
-                pool_slice,
-                min(len(pool_slice), num_leads * 3)
-            )
+            curated_leads = random.sample(pool_slice,
+                                          min(len(pool_slice), num_leads * 3))
 
             if not curated_leads:
                 print("📝 No leads found in pool, generating new leads...")
                 bt.logging.info("No leads found in pool, generating new leads")
                 new_leads = await get_leads(num_leads * 2, target_ind, region)
-                sanitized = [sanitize_prospect(p, self.wallet.hotkey.ss58_address) for p in new_leads]
+                sanitized = [
+                    sanitize_prospect(p, self.wallet.hotkey.ss58_address)
+                    for p in new_leads
+                ]
                 curated_leads = sanitized
             else:
                 print(f" Found {len(curated_leads)} leads in pool")
@@ -549,7 +644,7 @@ class Miner(BaseMinerNeuron):
             for lead in curated_leads:
                 # Map the fields correctly using the same keys as stored in pool
                 mapped_lead = {
-                    "email":       lead.get("owner_email", ""),
+                    "email": lead.get("owner_email", ""),
                     "owner_email": lead.get("owner_email", ""),
                     "Business": lead.get("business", ""),
                     "Owner Full name": lead.get("owner_full_name", ""),
@@ -561,8 +656,8 @@ class Miner(BaseMinerNeuron):
                     "sub_industry": lead.get("sub_industry", ""),
                     "role": lead.get("role", ""),
                     "Region": lead.get("region", ""),
-                    "source":       lead.get("source", ""),
-                    "curated_by":   self.wallet.hotkey.ss58_address,
+                    "source": lead.get("source", ""),
+                    "curated_by": self.wallet.hotkey.ss58_address,
                 }
 
                 # Debug log to see what's happening
@@ -570,20 +665,27 @@ class Miner(BaseMinerNeuron):
                 bt.logging.debug(f"Mapped lead: {mapped_lead}")
 
                 # Only include leads that have all required fields
-                if all(mapped_lead.get(field) for field in ["email", "Business"]):
+                if all(
+                        mapped_lead.get(field)
+                        for field in ["email", "Business"]):
                     mapped_leads.append(mapped_lead)
                 else:
-                    bt.logging.warning(f"Lead missing required fields: {mapped_lead}")
+                    bt.logging.warning(
+                        f"Lead missing required fields: {mapped_lead}")
 
             if not mapped_leads:
                 print("❌ No valid leads found in pool after mapping")
-                bt.logging.warning("No valid leads found in pool after mapping")
-                return web.json_response({
-                    "leads": [],
-                    "status_code": 404,
-                    "status_message": "No valid leads found matching criteria",
-                    "process_time": "0"
-                }, status=404)
+                bt.logging.warning(
+                    "No valid leads found in pool after mapping")
+                return web.json_response(
+                    {
+                        "leads": [],
+                        "status_code": 404,
+                        "status_message":
+                        "No valid leads found matching criteria",
+                        "process_time": "0"
+                    },
+                    status=404)
 
             # ── intent-rank ────────────────────────────────────────────
             print(" Ranking leads by intent...")
@@ -593,12 +695,13 @@ class Miner(BaseMinerNeuron):
             print(f"📤 SENDING {len(top_leads)} curated leads to validator:")
             for i, lead in enumerate(top_leads, 1):
                 business = lead.get('Business', 'Unknown')
-                score    = lead.get('miner_intent_score', 0)
+                score = lead.get('miner_intent_score', 0)
                 print(f"  {i}. {business}  (intent={score:.3f})")
 
             print("▶️  Resuming sourcing mode...")
 
-            bt.logging.info(f"Returning {len(top_leads)} leads to HTTP request")
+            bt.logging.info(
+                f"Returning {len(top_leads)} leads to HTTP request")
             # 🔄 send prospects to Firestore queue
             push_prospects_to_cloud(self.wallet, top_leads)
             return web.json_response({
@@ -610,12 +713,14 @@ class Miner(BaseMinerNeuron):
         except Exception as e:
             print(f"❌ Error curating leads: {e}")
             bt.logging.error(f"Error in HTTP lead request: {e}")
-            return web.json_response({
-                "leads": [],
-                "status_code": 500,
-                "status_message": f"Error: {str(e)}",
-                "process_time": "0"
-            }, status=500)
+            return web.json_response(
+                {
+                    "leads": [],
+                    "status_code": 500,
+                    "status_message": f"Error: {str(e)}",
+                    "process_time": "0"
+                },
+                status=500)
 
     # Pause sourcing at the earliest possible moment when any axon call arrives
     def blacklist(self, synapse: LeadRequest) -> Tuple[bool, str]:
@@ -631,7 +736,8 @@ class Miner(BaseMinerNeuron):
         if caller_hk in self.metagraph.hotkeys:
             caller_uid = self.metagraph.hotkeys.index(caller_hk)
         if getattr(self.config.blacklist, "force_validator_permit", False):
-            is_validator = (caller_uid is not None and bool(self.metagraph.validator_permit[caller_uid]))
+            is_validator = (caller_uid is not None and bool(
+                self.metagraph.validator_permit[caller_uid]))
             if not is_validator:
                 print(f"🛑 Blacklist: rejecting {caller_hk} (not a validator)")
                 return True, "Caller is not a validator"
@@ -653,13 +759,17 @@ class Miner(BaseMinerNeuron):
             except socket.error:
                 return False
 
-    def find_available_port(self, start_port: int, max_attempts: int = 10) -> int:
+    def find_available_port(self,
+                            start_port: int,
+                            max_attempts: int = 10) -> int:
         port = start_port
         for _ in range(max_attempts):
             if self.check_port_availability(port):
                 return port
             port += 1
-        raise RuntimeError(f"No available ports found between {start_port} and {start_port + max_attempts - 1}")
+        raise RuntimeError(
+            f"No available ports found between {start_port} and {start_port + max_attempts - 1}"
+        )
 
     async def start_http_server(self):
         runner = web.AppRunner(self.app)
@@ -675,20 +785,25 @@ class Miner(BaseMinerNeuron):
     # -------------------------------------------------------------------
     def forward(self, synapse: LeadRequest) -> LeadRequest:
         # 🔔 this fires only when the request arrives via AXON
-        print(f"🔔 AXON QUERY from {getattr(synapse.dendrite, 'hotkey', 'unknown')} | "
-              f"{synapse.num_leads} leads | desc='{(synapse.business_desc or '')[:40]}…'")
+        print(
+            f"🔔 AXON QUERY from {getattr(synapse.dendrite, 'hotkey', 'unknown')} | "
+            f"{synapse.num_leads} leads | desc='{(synapse.business_desc or '')[:40]}…'"
+        )
         # stop sourcing immediately
         self.pause_sourcing()
         result_holder = {}
         error_holder = {}
+
         def _runner():
             try:
-                result_holder["res"] = asyncio.run(self._forward_async(synapse))
+                result_holder["res"] = asyncio.run(
+                    self._forward_async(synapse))
             except Exception as e:
                 error_holder["err"] = e
+
         t = threading.Thread(target=_runner, daemon=True)
         t.start()
-        t.join(timeout=120)                          # <── was 90
+        t.join(timeout=120)  # <── was 90
         if t.is_alive():
             print("⏳ AXON forward timed out after 95 s")
             synapse.leads = []
@@ -733,10 +848,12 @@ class Miner(BaseMinerNeuron):
             bt.logging.error(traceback.format_exc())
             self.stop()
 
+
 DATA_DIR = "data"
 SOURCING_LOG = os.path.join(DATA_DIR, "sourcing_logs.json")
 MINERS_LOG = os.path.join(DATA_DIR, "miners.json")
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
+
 
 def ensure_data_files():
     """Ensure data directory and required JSON files exist."""
@@ -746,31 +863,46 @@ def ensure_data_files():
             with open(file, "w") as f:
                 json.dump([], f)
 
+
 def sanitize_prospect(prospect, miner_hotkey=None):
     """Sanitize and validate prospect fields."""
+
     def strip_html(s):
-        return re.sub('<.*?>', '', html.unescape(str(s))) if isinstance(s, str) else s
+        return re.sub('<.*?>', '', html.unescape(str(s))) if isinstance(
+            s, str) else s
+
     def valid_url(url):
         return bool(re.match(r"^https?://[^\s]+$", url))
 
     # Special handling for email field
     email = prospect.get("Owner(s) Email", "")
     sanitized = {
-        "business": strip_html(prospect.get("Business", "")),
-        "owner_full_name": strip_html(prospect.get("Owner Full name", "")),
-        "first": strip_html(prospect.get("First", "")),
-        "last": strip_html(prospect.get("Last", "")),
-        "owner_email": strip_html(email),  # Use consistent field name
-        "linkedin": strip_html(prospect.get("LinkedIn", "")),
-        "website": strip_html(prospect.get("Website", "")),
-        "industry": strip_html(prospect.get("Industry", "")),
-        "role": strip_html(prospect.get("role", "") or prospect.get("Title","")),
+        "business":
+        strip_html(prospect.get("Business", "")),
+        "owner_full_name":
+        strip_html(prospect.get("Owner Full name", "")),
+        "first":
+        strip_html(prospect.get("First", "")),
+        "last":
+        strip_html(prospect.get("Last", "")),
+        "owner_email":
+        strip_html(email),  # Use consistent field name
+        "linkedin":
+        strip_html(prospect.get("LinkedIn", "")),
+        "website":
+        strip_html(prospect.get("Website", "")),
+        "industry":
+        strip_html(prospect.get("Industry", "")),
+        "role":
+        strip_html(prospect.get("role", "") or prospect.get("Title", "")),
         # accept either spelling, but store lower-case
-        "sub_industry": strip_html(
-            prospect.get("sub_industry") or prospect.get("Sub Industry", "")
-        ),
-        "region": strip_html(prospect.get("Region", "")),
-        "source": miner_hotkey  # Add source field
+        "sub_industry":
+        strip_html(
+            prospect.get("sub_industry") or prospect.get("Sub Industry", "")),
+        "region":
+        strip_html(prospect.get("Region", "")),
+        "source":
+        miner_hotkey  # Add source field
     }
 
     if not valid_url(sanitized["linkedin"]):
@@ -781,9 +913,14 @@ def sanitize_prospect(prospect, miner_hotkey=None):
     # REMOVED: id, created_at, updated_at - these should only be added during curation
     return sanitized
 
+
 def log_sourcing(hotkey, num_prospects):
     """Log sourcing activity to sourcing_logs.json."""
-    entry = {"timestamp": datetime.now(timezone.utc).isoformat(), "hotkey": hotkey, "num_prospects": num_prospects}
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "hotkey": hotkey,
+        "num_prospects": num_prospects
+    }
 
     with open(SOURCING_LOG, "r+") as f:
         try:
@@ -793,6 +930,7 @@ def log_sourcing(hotkey, num_prospects):
         logs.append(entry)
         f.seek(0)
         json.dump(logs, f, indent=2)
+
 
 def update_miner_stats(hotkey, valid_count):
     with threading.Lock():
@@ -813,12 +951,16 @@ def update_miner_stats(hotkey, valid_count):
                 break
         if not found:
             miners.append({
-                "hotkey": hotkey,
-                "valid_prospects_count": valid_count,
-                "last_updated": datetime.now(timezone.utc).isoformat()
+                "hotkey":
+                hotkey,
+                "valid_prospects_count":
+                valid_count,
+                "last_updated":
+                datetime.now(timezone.utc).isoformat()
             })
         with open(MINERS_LOG, "w") as f:
             json.dump(miners, f, indent=2)
+
 
 async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
     logging.getLogger('bittensor.subtensor').setLevel(logging.WARNING)
@@ -828,16 +970,15 @@ async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
     miner._miner_hotkey = miner_hotkey
 
     # Start all background tasks
-    miner.sourcing_task = asyncio.create_task(
-        miner.sourcing_loop(interval, miner_hotkey), name="sourcing_loop"
-    )
+    miner.sourcing_task = asyncio.create_task(miner.sourcing_loop(
+        interval, miner_hotkey),
+                                              name="sourcing_loop")
     miner.cloud_task = asyncio.create_task(
-        miner.cloud_curation_loop(miner_hotkey), name="cloud_curation_loop"
-    )
+        miner.cloud_curation_loop(miner_hotkey), name="cloud_curation_loop")
     # NEW: Start broadcast curation task
     miner.broadcast_task = asyncio.create_task(
-        miner.broadcast_curation_loop(miner_hotkey), name="broadcast_curation_loop"
-    )
+        miner.broadcast_curation_loop(miner_hotkey),
+        name="broadcast_curation_loop")
 
     print("✅ Started 3 background tasks:")
     print("   1. sourcing_loop - Continuous lead sourcing")
@@ -847,6 +988,7 @@ async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
     # Keep alive
     while True:
         await asyncio.sleep(1)
+
 
 async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
     try:
@@ -863,8 +1005,10 @@ async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
         grpc.channel_ready_future(ch).result(timeout=timeout)
         ch.close()
         return True
+
     try:
-        ok = await asyncio.get_running_loop().run_in_executor(None, _sync_probe)
+        ok = await asyncio.get_running_loop().run_in_executor(
+            None, _sync_probe)
         if ok:
             print(f"✅ gRPC preflight OK (sync) → {addr}")
             return True
@@ -889,7 +1033,7 @@ def main():
     config.subtensor = bt.Config()
     # Only set custom wallet path if default doesn't exist
     default_wallet_path = Path.home() / ".bittensor" / "wallets"
-    if not default_wallet_path.exists() or not any(default_wallet_path.iterdir()):
+    if not default_wallet_path.exists():
         config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
     config.subtensor.network = args.subtensor_network
     config.blacklist = bt.Config()
@@ -903,10 +1047,10 @@ def main():
     # Bind locally on 0.0.0.0 but advertise the user-supplied external
     # IP/port on-chain so validators can connect over the Internet.
     config.axon = bt.Config()
-    config.axon.ip   = "0.0.0.0"                 # listen on all interfaces
-    config.axon.port = args.axon_port or 8091    # internal bind port
+    config.axon.ip = "0.0.0.0"  # listen on all interfaces
+    config.axon.port = args.axon_port or 8091  # internal bind port
     if args.axon_ip:
-        config.axon.external_ip = args.axon_ip   # public address
+        config.axon.external_ip = args.axon_ip  # public address
     if args.axon_port:
         config.axon.external_port = args.axon_port
         config.axon.port = args.axon_port
@@ -931,6 +1075,7 @@ def main():
 
     # Start the Bittensor miner in background thread (this will start the axon and connect to testnet)
     import threading
+
     def run_miner_safe():
         try:
             print(" Starting Bittensor miner axon...")
@@ -962,6 +1107,7 @@ def main():
 
     # Run the sourcing loop
     asyncio.run(run_sourcing())
+
 
 if __name__ == "__main__":
     main()

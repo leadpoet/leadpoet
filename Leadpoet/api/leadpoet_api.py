@@ -24,17 +24,17 @@ SUBNET_UID = 401  # Your subnet ID
 
 class CloudDatabase:
     """Centralized database operations for LeadPoet subnet"""
-    
+
     def __init__(self, wallet: bt.wallet = None):
         self.wallet = wallet
         self.api_url = CLOUD_API_URL
-        
+
     def _verify_miner_registration(self, hotkey: str) -> bool:
         """Verify if a hotkey is registered as a miner on the subnet"""
         try:
             subtensor = bt.subtensor(network="test")
             metagraph = subtensor.metagraph(netuid=SUBNET_UID)
-            
+
             # Check if hotkey exists in metagraph
             if hotkey in metagraph.hotkeys:
                 uid = metagraph.hotkeys.index(hotkey)
@@ -44,13 +44,13 @@ class CloudDatabase:
         except Exception as e:
             bt.logging.error(f"Error verifying miner registration: {e}")
             return False
-    
+
     def _verify_validator_registration(self, hotkey: str) -> bool:
         """Verify if a hotkey is registered as a validator on the subnet"""
         try:
             subtensor = bt.subtensor(network="test")
             metagraph = subtensor.metagraph(netuid=SUBNET_UID)
-            
+
             if hotkey in metagraph.hotkeys:
                 uid = metagraph.hotkeys.index(hotkey)
                 # Check if they have validator permit
@@ -59,16 +59,16 @@ class CloudDatabase:
         except Exception as e:
             bt.logging.error(f"Error verifying validator registration: {e}")
             return False
-    
+
     def read_leads(self, limit: int = 100) -> List[Dict]:
         """Read leads from cloud database (for miners)"""
         if not self.wallet:
             raise ValueError("Wallet required for authenticated reads")
-            
+
         # Verify miner registration
         if not self._verify_miner_registration(self.wallet.hotkey.ss58_address):
             raise ValueError("Wallet not registered as miner on subnet")
-        
+
         try:
             response = requests.get(
                 f"{self.api_url}/leads",
@@ -80,32 +80,32 @@ class CloudDatabase:
         except requests.exceptions.RequestException as e:
             bt.logging.error(f"Failed to read leads from cloud: {e}")
             return []
-    
+
     def write_leads(self, leads: List[Dict]) -> bool:
         """Write validated leads to cloud database (for validators only)"""
         if not self.wallet:
             raise ValueError("Wallet required for authenticated writes")
-            
+
         # Verify validator registration
         if not self._verify_validator_registration(self.wallet.hotkey.ss58_address):
             raise ValueError("Wallet not registered as validator on subnet")
-        
+
         if not leads:
             return True
-            
+
         try:
             # Create signed payload
             timestamp = str(int(time.time()) // 300)  # 5-min window
             payload = (timestamp + json.dumps(leads, sort_keys=True)).encode()
             signature = base64.b64encode(self.wallet.sign(payload)).decode()
-            
+
             # Prepare request
             body = {
                 "wallet": self.wallet.hotkey.ss58_address,
                 "signature": signature,
                 "leads": leads
             }
-            
+
             # Send to cloud API
             response = requests.post(
                 f"{self.api_url}/leads",
@@ -113,11 +113,11 @@ class CloudDatabase:
                 timeout=30
             )
             response.raise_for_status()
-            
+
             result = response.json()
             bt.logging.info(f"Successfully wrote {result.get('stored', 0)} leads to cloud database")
             return True
-            
+
         except requests.exceptions.RequestException as e:
             bt.logging.error(f"Failed to write leads to cloud: {e}")
             return False
@@ -167,22 +167,22 @@ class LeadPoetAPI:
         """
         Find which port the validator HTTP server is running on.
         NOW OPTIONAL - only needed for legacy direct queries, not for broadcast flow.
-        
+
         Args:
             check_http: If True, verify HTTP server is responding
         """
         if not check_http:
             # For broadcast flow, we don't need validator HTTP endpoints
             return None
-            
+
         # Common ports to check (prioritize higher ports to avoid gRPC)
         common_ports = [8094, 8095, 8096, 8097, 8098, 8099, 8100, 8093]
-        
+
         for port in common_ports:
             if self.is_port_running_http(port):
                 bt.logging.info(f"✅ Found validator HTTP server on port {port}")
                 return port
-        
+
         bt.logging.warning("⚠️  Could not find validator HTTP server port")
         return None
 
@@ -209,7 +209,7 @@ class LeadPoetAPI:
     async def get_leads(self, num_leads: int, business_desc: str) -> List[Dict]:
         """
         Submit API request using broadcast mechanism - DIRECTLY to Firestore.
-        
+
         Flow:
         1. Write request directly to Firestore (broadcasts to ALL validators and miners simultaneously)
         2. Wait for validators to rank leads
@@ -220,14 +220,14 @@ class LeadPoetAPI:
         import time
         import uuid
         from datetime import datetime, timezone
-        
+
         # Generate unique request ID
         request_id = str(uuid.uuid4())[:16]
-        
+
         print(f"🔴 Broadcasting request {request_id} to Firestore...")
         print(f"   num_leads: {num_leads}")
         print(f"   business_desc: {business_desc}")
-        
+
         # Broadcast to ALL validators and miners via Firestore
         from Leadpoet.utils.cloud_db import broadcast_api_request
         success = broadcast_api_request(
@@ -237,11 +237,11 @@ class LeadPoetAPI:
             business_desc=business_desc,
             client_id=self.wallet.hotkey.ss58_address
         )
-        
+
         if not success:
             bt.logging.error("❌ Failed to broadcast API request to Firestore!")
             return []
-        
+
         print(f"✅ Request {request_id} written to Firestore successfully!")
         print(f"⏳ Waiting for validators to rank leads (up to 400s)...")
 
@@ -250,27 +250,27 @@ class LeadPoetAPI:
             # STEP 2: Poll Firestore for validator rankings
             # ══════════════════════════════════════════════════════════
             from Leadpoet.utils.cloud_db import fetch_validator_rankings, get_broadcast_status
-            
+
             MAX_ATTEMPTS = 80
             SLEEP_SEC = 5
             total_wait = MAX_ATTEMPTS * SLEEP_SEC
-            
+
             print(f"📊 Multiple validators are independently ranking leads...")
-            
+
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 try:
                     # Fetch validator rankings directly from Firestore
                     validator_rankings = fetch_validator_rankings(request_id, timeout_sec=2)
-                    
+
                     validators_submitted = len(validator_rankings)
-                    
+
                     # Calculate elapsed time
                     status_data = get_broadcast_status(request_id)
-                    
+
                     request_time = status_data.get("created_at", "")
                     timeout_reached = False
                     elapsed = 0
-                    
+
                     if request_time:
                         try:
                             req_dt = datetime.fromisoformat(request_time.replace('Z', '+00:00'))
@@ -278,27 +278,27 @@ class LeadPoetAPI:
                             timeout_reached = elapsed > 90
                         except:
                             pass
-                    
+
                     # Check if we have enough validators to calculate consensus
                     if validators_submitted > 0 and (timeout_reached or validators_submitted >= 2 or elapsed > 60):
                         # ═══════════════════════════════════════════════════════
                         # STEP 3: CONSENSUS CALCULATION (CLIENT-SIDE)
                         # ═══════════════════════════════════════════════════════
                         from Leadpoet.validator.consensus import calculate_consensus_ranking
-                        
+
                         print(f"\n🔮 CALCULATING CONSENSUS from {validators_submitted} validator(s)...")
-                        
+
                         final_leads, metadata = calculate_consensus_ranking(
                             validator_rankings=validator_rankings,
                             num_leads_requested=num_leads,
                             min_validators=1
                         )
-                        
+
                         if final_leads:
                             print(f"\n✅ CONSENSUS COMPLETE!")
                             print(f"   📊 {metadata['num_validators']} validator(s) participated")
                             print(f"   ⚖️  Total validator trust: {metadata['total_trust']:.4f}")
-                            
+
                             # ═══════════════════════════════════════════════════════
                             # NEW: Display validator trust scores
                             # ═══════════════════════════════════════════════════════
@@ -308,7 +308,7 @@ class LeadPoetAPI:
                                 val_trust = rank_data.get("validator_trust", 0.0)
                                 num_leads_ranked = len(rank_data.get("ranked_leads", []))
                                 print(f"   • {val_hotkey}... trust={val_trust:.4f} ({num_leads_ranked} leads ranked)")
-                            
+
                             # ═══════════════════════════════════════════════════════
                             # NEW: Display detailed consensus breakdown for each lead
                             # ═══════════════════════════════════════════════════════
@@ -317,66 +317,66 @@ class LeadPoetAPI:
                                 business = lead.get("Business", lead.get("business", "Unknown"))[:30]
                                 consensus_score = lead.get("consensus_score", 0.0)
                                 normalized_score = lead.get("normalized_score", 0.0)
-                                
+
                                 print(f"\n   Lead #{i}: {business}")
                                 print(f"      Consensus Score: {consensus_score:.6f}")
                                 print(f"      Normalized Score: {normalized_score:.6f}")
-                                
+
                                 # Get detailed scoring from consensus calculation
                                 # We need to fetch this from the intermediate data
                                 # Let's recalculate just for this lead to show the breakdown
                                 print(f"      Calculation:")
-                                
+
                                 # Find this lead in validator rankings to show individual scores
                                 lead_email = lead.get("email", lead.get("Email 1", "")).lower().strip()
                                 lead_business = lead.get("Business", lead.get("business", "")).lower().strip()
-                                
+
                                 total_weighted = 0.0
                                 for rank_data in validator_rankings:
                                     val_hotkey = rank_data.get("validator_hotkey", "unknown")[:10]
                                     val_trust = rank_data.get("validator_trust", 0.0)
-                                    
+
                                     # Find this lead in this validator's ranking
                                     for lead_entry in rank_data.get("ranked_leads", []):
                                         entry_lead = lead_entry.get("lead", lead_entry)
                                         entry_email = entry_lead.get("email", entry_lead.get("Email 1", "")).lower().strip()
                                         entry_business = entry_lead.get("Business", entry_lead.get("business", "")).lower().strip()
-                                        
+
                                         if entry_email == lead_email and entry_business == lead_business:
                                             score = lead_entry.get("score", lead_entry.get("intent_score", 0.0))
                                             weighted = score * val_trust
                                             total_weighted += weighted
                                             print(f"         {val_hotkey}... S={score:.4f} × V={val_trust:.4f} = {weighted:.6f}")
                                             break
-                                
+
                                 print(f"         ────────────────────────────────────────")
                                 print(f"         Total = {total_weighted:.6f}")
-                            
+
                             print(f"\n   🎯 Returning {len(final_leads)} consensus-ranked lead(s)")
-                            
+
                             return final_leads
-                    
+
                     elif timeout_reached and validators_submitted == 0:
                         bt.logging.error("Request timed out with no validator responses")
                         return []
-                    
+
                     else:
                         # Still waiting
                         if attempt % 6 == 0:
                             print(f"⏳ Still processing... ({validators_submitted} validators submitted, {elapsed:.0f}s elapsed)")
-                
+
                 except Exception as e:
                     # Print full error with traceback
                     import traceback
                     error_details = traceback.format_exc()
                     bt.logging.warning(f"Error polling status: {e}\n{error_details}")
                     print(f"❌ Polling error: {e}")
-                
+
                 await asyncio.sleep(SLEEP_SEC)
-            
+
             bt.logging.error(f"Timed out waiting for validators after {total_wait}s")
             return []
-            
+
         except Exception as e:
             bt.logging.error(f"Error in broadcast request: {e}")
             import traceback
@@ -396,12 +396,12 @@ class LeadPoetAPI:
                     bt.logging.error("Could not find validator port")
                     attempt += 1
                     continue
-                
+
                 validator_url = f"http://localhost:{validator_port}/api/leads"
                 request_data = {"num_leads": num_leads, "business_desc": business_desc}
-                
+
                 bt.logging.info(f"Calling validator API at {validator_url}")
-                
+
                 async with aiohttp.ClientSession() as session:
                     async with session.post(validator_url, json=request_data, timeout=90) as response:
                         if response.status == 200:
@@ -437,29 +437,29 @@ class LeadPoetAPI:
                 num_leads=num_leads,
                 business_desc=business_desc
             )
-            
+
             # Get available validators from the metagraph
             self.metagraph.sync(subtensor=self.subtensor)
-            
+
             # Debug: Print metagraph info
             print(f" Metagraph info:")
             print(f"   Total axons: {len(self.metagraph.axons)}")
             print(f"   Validator permits: {self.metagraph.validator_permit}")
             print(f"   Axon serving status: {[axon.is_serving for axon in self.metagraph.axons]}")
-            
+
             validator_uids = [uid for uid in range(len(self.metagraph.axons)) 
                             if self.metagraph.validator_permit[uid] and self.metagraph.axons[uid].is_serving]
-            
+
             print(f"   Found validator UIDs: {validator_uids}")
-            
+
             if not validator_uids:
                 bt.logging.error("No active validators found on the network")
                 return []
-            
+
             # Query the first available validator
             validator_axon = self.metagraph.axons[validator_uids[0]]
             bt.logging.info(f"Querying validator {validator_uids[0]} at {validator_axon.ip}:{validator_axon.port}")
-            
+
             # Send request through Bittensor network  (auto-decode LeadRequest)
             responses = await self.dendrite(
                 axons=[validator_axon],
@@ -486,7 +486,7 @@ class LeadPoetAPI:
                     bt.logging.error(f"Validator response error: {response.dendrite.status_message}")
             else:
                 bt.logging.error("No response from validator")
-                
+
         except Exception as e:
             bt.logging.error(f"Error querying Bittensor network: {e}")
 
@@ -549,7 +549,7 @@ def main():
             print(f"Retrieved {len(leads)} leads:")
             for i, lead in enumerate(leads, 1):
                 print(f"Lead {i}: {lead}")
-            
+
             # Handle empty feedback input
             while True:
                 feedback_input = input("Enter feedback score (0-10): ").strip()
@@ -564,7 +564,7 @@ def main():
                         print("Feedback score must be between 0 and 10.")
                 except ValueError:
                     print("Please enter a valid number.")
-            
+
             await api.submit_feedback(leads, feedback)
         except Exception as e:
             print(f"❌ Error occurred: {e}")

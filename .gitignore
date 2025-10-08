@@ -1,4 +1,7 @@
 # Project-specific
+bittensor
+.replit
+replit.md
 .cursor/
 tests/
 path/
@@ -36,10 +39,25 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 *.egg-info/
 dist/
 build/
 *.egg
+.pythonlibs/
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+*.mo
+*.pot
+pip-log.txt
+pip-delete-this-directory.txt
 
 # IDEs and Editors
 .idea/
@@ -47,3 +65,5 @@ build/
 *.swp
 *.swo
 .history/
+
+service_account_key.json

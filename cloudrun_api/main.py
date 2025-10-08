@@ -1,9 +1,36 @@
 from fastapi import FastAPI, HTTPException, Request, status
-from google.cloud import firestore
 import bittensor as bt, time, base64, json, traceback
+import os
+import signal
 
 app = FastAPI()
-db  = firestore.Client()          # auto picks project from env
+
+DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
+
+db = None
+SERVER_TIMESTAMP = None  # Will be set if Firestore is available
+
+if not DEMO_MODE:
+    from google.cloud import firestore
+    try:
+        db = firestore.Client()
+        SERVER_TIMESTAMP = firestore.SERVER_TIMESTAMP
+        print("[INFO] Firestore client initialized successfully")
+    except Exception as e:
+        print(f"[ERROR] Database initialization failed in production mode: {e}")
+        raise
+else:
+    print("[INFO] Running in DEMO_MODE - Firestore not loaded, database operations will return 503")
+
+@app.get("/")
+async def root():
+    return {
+        "name": "LeadPoet API",
+        "version": "1.0.0",
+        "status": "running",
+        "database": "connected" if db else "demo_mode",
+        "mode": "demo" if DEMO_MODE else "production"
+    }
 
 # ------------ Firestore collections -------------
 COLLECTION_LEADS      = "leads"       # verified + client-visible
@@ -18,21 +45,41 @@ COLL_CURATE_RES  = "curation_results"
 COLL_MINER_REQ   = "curation_miner_requests"
 COLL_MINER_RES   = "curation_miner_results"
 
+# ---------- Helper: check database connection -------
+def check_db():
+    if db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not configured. This instance is running in demo mode."
+        )
+
 # ---------- Helper: role checks -----------------
 def is_miner(wallet_ss58: str) -> bool:
-    subtensor = bt.subtensor(network="test")
-    metagraph = subtensor.metagraph(netuid=401)
-    return wallet_ss58 in metagraph.hotkeys
+    try:
+        subtensor = bt.subtensor(network="test")
+        metagraph = subtensor.metagraph(netuid=401)
+        return wallet_ss58 in metagraph.hotkeys
+    except Exception as e:
+        print(f"[WARN] is_miner check failed: {e}")
+        if DEMO_MODE:
+            print("[WARN] DEMO_MODE - allowing request")
+            return True
+        return False
+        
 # ---------- Helper: verify validator ------------
 def is_validator(wallet_ss58: str) -> bool:
     # Light-weight on-chain check via Subtensor.
     # Uses default finney endpoint; tweak if needed.
-    subtensor = bt.subtensor(network="test")
-    metagraph = subtensor.metagraph(netuid=401)
     try:
+        subtensor = bt.subtensor(network="test")
+        metagraph = subtensor.metagraph(netuid=401)
         uid = metagraph.hotkeys.index(wallet_ss58)
         return metagraph.validator_permit[uid].item()   # True / False
-    except ValueError:
+    except Exception as e:
+        print(f"[WARN] is_validator check failed: {e}")
+        if DEMO_MODE:
+            print("[WARN] DEMO_MODE - allowing request")
+            return True
         return False
 # ---------- Helper: verify signature ------------
 def verify_sig(wallet_ss58: str, payload: bytes, signature_b64: str) -> bool:
@@ -53,6 +100,7 @@ def verify_sig(wallet_ss58: str, payload: bytes, signature_b64: str) -> bool:
 # ---------- Public READ (unchanged, but use new constant) -----------
 @app.get("/leads")
 async def get_leads(limit: int = 100):
+    check_db()
     try:
         docs = db.collection(COLLECTION_LEADS).limit(limit).stream()
         return [doc.to_dict() | {"id": doc.id} for doc in docs]
@@ -64,6 +112,7 @@ async def get_leads(limit: int = 100):
 # ---------- VALIDATED write (unchanged, but use new constant) -------
 @app.post("/leads")
 async def add_leads(request: Request):
+    check_db()
     body    = await request.json()
     wallet  = body.get("wallet")
     sig     = body.get("signature")
@@ -122,6 +171,7 @@ async def add_leads(request: Request):
 
 @app.post("/prospects")                     # miners push here
 async def enqueue_prospects(request: Request):
+    check_db()
     body      = await request.json()
     wallet_ss = body.get("wallet")
     sig       = body.get("signature")
@@ -144,7 +194,7 @@ async def enqueue_prospects(request: Request):
     doc = {
         "miner_hotkey": wallet_ss,
         "prospects":    prospects,
-        "created_at":   firestore.SERVER_TIMESTAMP,
+        "created_at":   SERVER_TIMESTAMP,
     }
     db.collection(COLLECTION_PROSPECTS).add(doc)
     return {"queued": len(prospects)}
@@ -152,6 +202,7 @@ async def enqueue_prospects(request: Request):
 
 @app.post("/prospects/fetch")               # validators pull + delete
 async def fetch_prospects(request: Request):
+    check_db()
     body      = await request.json()
     wallet_ss = body.get("wallet")
     sig       = body.get("signature")
@@ -183,10 +234,11 @@ async def fetch_prospects(request: Request):
 # ───────── buyer submits request ───────────
 @app.post("/curate")
 async def create_curation(request: Request):
+    check_db()
     body = await request.json()
     doc   = db.collection(COLL_CURATE_REQ).document()
     doc.set({
-        "created_at": firestore.SERVER_TIMESTAMP,
+        "created_at": SERVER_TIMESTAMP,
         **body               # num_leads, business_desc, maybe wallet
     })
     return {"request_id": doc.id}
@@ -194,6 +246,7 @@ async def create_curation(request: Request):
 # ───────── validator pulls next request ────
 @app.post("/curate/fetch")
 async def fetch_curation(request: Request):
+    check_db()
     docs = list(db.collection(COLL_CURATE_REQ).order_by("created_at")
                                    .limit(1).stream())
     if not docs:
@@ -205,6 +258,7 @@ async def fetch_curation(request: Request):
 # ───────── validator pushes result ─────────
 @app.post("/curate/result")
 async def push_curation_result(request: Request):
+    check_db()
     body = await request.json()          # {request_id, leads:[…]}
     req_id = body.get("request_id")
     if not req_id:
@@ -215,6 +269,7 @@ async def push_curation_result(request: Request):
 # ───────── buyer polls result ──────────────
 @app.get("/curate/result/{request_id}")
 async def get_curation_result(request_id: str):
+    check_db()
     doc = db.collection(COLL_CURATE_RES).document(request_id).get()
     if not doc.exists:
         return {}
@@ -223,14 +278,16 @@ async def get_curation_result(request_id: str):
 # ───────── validator → miner ------------------------------------------------
 @app.post("/curate/miner_request")
 async def create_miner_request(request: Request):
+    check_db()
     body = await request.json()                           # num_leads , business_desc , …
     doc  = db.collection(COLL_MINER_REQ).document()
-    doc.set({"created_at": firestore.SERVER_TIMESTAMP, **body})
+    doc.set({"created_at": SERVER_TIMESTAMP, **body})
     return {"miner_request_id": doc.id}
 
 # ───────── miner pulls next queued query ───────────────────────────
 @app.post("/curate/miner_request/fetch")
 async def fetch_miner_request(_: Request):
+    check_db()
     docs = list(db.collection(COLL_MINER_REQ).order_by("created_at").limit(1).stream())
     if not docs:
         return {}
@@ -241,18 +298,20 @@ async def fetch_miner_request(_: Request):
 # ───────── miner pushes curated leads back ─────────────────────────
 @app.post("/curate/miner_result")
 async def push_miner_result(request: Request):
+    check_db()
     body = await request.json()               # miner_request_id , leads
     rid  = body.get("miner_request_id")
     if not rid:
         raise HTTPException(status_code=400, detail="miner_request_id missing")
     db.collection(COLL_MINER_RES).document(rid).set(
-        {"created_at": firestore.SERVER_TIMESTAMP, **body}
+        {"created_at": SERVER_TIMESTAMP, **body}
     )
     return {"stored": True}
 
 # ───────── validator polls curated leads ───────────────────────────
 @app.post("/curate/miner_result/fetch")
 async def fetch_miner_result(_: Request):
+    check_db()
     docs = list(db.collection(COLL_MINER_RES).order_by("created_at").limit(1).stream())
     if not docs:
         return {}
@@ -262,6 +321,7 @@ async def fetch_miner_result(_: Request):
 
 @app.post("/validator_weights")
 async def validator_weights(request: Request):
+    check_db()
     body = await request.json()
     wallet_ss = body.get("wallet")
     sig       = body.get("signature")
@@ -283,7 +343,7 @@ async def validator_weights(request: Request):
     doc = {
         "hotkey":     wallet_ss,
         "weights":    weights,
-        "created_at": firestore.SERVER_TIMESTAMP,
+        "created_at": SERVER_TIMESTAMP,
     }
     db.collection("validator_weights").add(doc)
     return {"stored": True}

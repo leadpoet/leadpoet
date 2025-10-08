@@ -104,12 +104,12 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
     def _extract(json_plus_reason: str) -> float:
         """Return score from first {...} block; raise if not parsable."""
         txt = json_plus_reason.strip()
-        
+
         # Handle empty responses
         if not txt:
             print("🔍 DEBUG: Model returned empty response")
             raise ValueError("Empty response from model")
-        
+
         if txt.startswith("```"):
             txt = txt.strip("`").lstrip("json").strip()
         start, end = txt.find("{"), txt.find("}")
@@ -141,7 +141,7 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
     except Exception as e:
         print(f"⚠️  Primary model failed ({model}): {e}")
         print("🔄 Trying fallback model: mistralai/mistral-7b-instruct")
-    
+
     # 2️⃣ Try single fallback model
     try:
         time.sleep(1)  # Small delay before fallback
@@ -204,7 +204,7 @@ class Validator(BaseValidatorNeuron):
                     time.sleep(retry_delay)
         if self.uid is None:
             bt.logging.warning(f"Validator {self.config.wallet_name}/{self.config.wallet_hotkey} not registered on netuid {self.config.netuid} after {max_retries} attempts")
-        
+
         # ════════════════════════════════════════════════════════════
         # TASK 4.1: Initialize validator trust tracking
         # ════════════════════════════════════════════════════════════
@@ -226,17 +226,17 @@ class Validator(BaseValidatorNeuron):
             web.post('/api/leads', self.handle_api_request),
             web.get('/api/leads/status/{request_id}', self.handle_status_request),  # ← NEW
         ])
-        
+
         self.email_regex = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
         self.sample_ratio = 0.2
         self.use_open_source_model = config.get("neuron", {}).get("use_open_source_validator_model", True)
-        
+
         # NEW: Add pause mechanism for sourced lead processing during broadcasts
         self.processing_broadcast = False  # ← NEW FLAG
-        
+
         # NEW: Track processed broadcast requests to prevent duplicate processing
         self._processed_requests = set()  # ← ADD THIS LINE
-        
+
         self.precision = 15.0 
         self.consistency = 1.0  
         self.collusion_flag = 1
@@ -245,10 +245,10 @@ class Validator(BaseValidatorNeuron):
         self.trusted_validator = False  
         self.registration_time = datetime.now()  
         self.appeal_status = None  
-        
+
         from Leadpoet.base.utils.pool import initialize_pool
         initialize_pool()
-        
+
         # NEW: Add broadcast mode flag to pause sourced lead processing
         self.broadcast_mode = False
         self.broadcast_lock = threading.Lock()
@@ -316,7 +316,7 @@ class Validator(BaseValidatorNeuron):
                 continue
             correct = sum(1 for v in relevant_validations if abs(v["O_v"] - v["F"]) <= 0.1)
             J_v[period] = correct / len(relevant_validations)
-        
+
         self.consistency = 1 + (0.55 * J_v["14_days"] + 0.25 * J_v["30_days"] + 0.2 * J_v["90_days"])
         self.consistency = min(max(self.consistency, 1.0), 2.0)
         bt.logging.debug(f"Updated C_v: {self.consistency}, J_v: {J_v}")
@@ -500,38 +500,38 @@ class Validator(BaseValidatorNeuron):
             expected_miners = len(miner_uids)  # Number of miners we sent requests to
             received_responses = 0
             first_response_time = None
-            
+
             for attempt in range(MAX_ATTEMPTS):
                 res = fetch_miner_curation_result(self.wallet)
                 if res and res.get("leads"):
                     # EXTEND instead of REPLACE to collect from multiple miners
                     all_miner_leads.extend(res["leads"])
                     received_responses += 1
-                    
+
                     # Track when we got the first response
                     if received_responses == 1:
                         first_response_time = attempt
                         print(f"✅ Received first response ({len(res['leads'])} leads) from Cloud-Run")
-                        
+
                         # If expecting multiple miners, wait additional 30s for others
                         if expected_miners > 1:
                             print(f"⏳ Waiting additional 30s for {expected_miners - 1} more miners...")
                     else:
                         print(f"✅ Received response {received_responses}/{expected_miners} with {len(res['leads'])} leads")
-                    
+
                     # Exit conditions:
                     # 1. Got all expected responses
                     if received_responses >= expected_miners:
                         print(f"✅ Received all {expected_miners} responses from miners")
                         break
-                    
+
                     # 2. Got first response and waited 30s (6 attempts) for others
                     elif first_response_time is not None and (attempt - first_response_time) >= 6:
                         print(f"⏰ 30s timeout reached, proceeding with {received_responses}/{expected_miners} responses")
                         break
-                
+
                 time.sleep(SLEEP_SEC)
-            
+
             if received_responses > 0:
                 print(f"📊 Final collection: {len(all_miner_leads)} leads from {received_responses}/{expected_miners} miners")
             else:
@@ -541,11 +541,11 @@ class Validator(BaseValidatorNeuron):
         if all_miner_leads:
             print(f"🔍 Ranking {len(all_miner_leads)} leads with LLM...")
             scored_leads = []
-            
+
             # Initialize aggregation dictionary for each lead
             aggregated = {id(lead): 0.0 for lead in all_miner_leads}
             failed_leads = set()  # Track leads that failed LLM scoring
-            
+
             # ROUND 1: First LLM scoring
             print(f"🔄 LLM round 1/2 (model: deepseek/deepseek-chat-v3-0324:free)")
             for lead in all_miner_leads:
@@ -555,7 +555,7 @@ class Validator(BaseValidatorNeuron):
                     print(f"⚠️  LLM failed for lead, will skip this lead")
                 else:
                     aggregated[id(lead)] += score
-            
+
             # ROUND 2: Second LLM scoring (random model selection)
             second_model = random.choice(AVAILABLE_MODELS)
             print(f"🔄 LLM round 2/2 (model: {second_model})")
@@ -568,13 +568,13 @@ class Validator(BaseValidatorNeuron):
                     print(f"⚠️  LLM failed for lead, will skip this lead")
                 else:
                     aggregated[id(lead)] += score
-            
+
             # Apply aggregated scores to leads (skip failed ones)
             for lead in all_miner_leads:
                 if id(lead) not in failed_leads:
                     lead["intent_score"] = round(aggregated[id(lead)], 3)
                     scored_leads.append(lead)
-            
+
             if not scored_leads:
                 print("❌ All leads failed LLM scoring - check your OPENROUTER_KEY environment variable!")
                 print("   Set it with: export OPENROUTER_KEY='your-key-here'")
@@ -606,7 +606,7 @@ class Validator(BaseValidatorNeuron):
                     # Record events for each lead in the Final Curated List
                     for lead in top_leads:
                         if lead.get("source") and lead.get("curated_by"):
-                          
+
                             record_event(lead)
 
                     # Calculate V2 weights and emissions
@@ -666,7 +666,7 @@ class Validator(BaseValidatorNeuron):
         validators = [self]
         validator_scores = []
         trusted_validators = [v for v in validators if v.trusted_validator]
-        
+
         for i, response in enumerate(responses):
             if not isinstance(response, LeadRequest) or not response.leads:
                 bt.logging.warning(f"Skipping invalid response from UID {miner_uids[i]}")
@@ -674,33 +674,33 @@ class Validator(BaseValidatorNeuron):
             validation = await self.validate_leads(response.leads, industry=response.industry)
             O_v = validation["O_v"]
             validator_scores.append({"O_v": O_v, "R_v": self.reputation, "leads": response.leads})
-        
+
         trusted_low_scores = sum(1 for v in trusted_validators for s in validator_scores if v == self and s["O_v"] < 0.8)
         trusted_rejections = sum(1 for v in trusted_validators for s in validator_scores if v == self and s["O_v"] == 0)
         use_trusted = trusted_low_scores / len(trusted_validators) > 0.67 if trusted_validators else False
         reject = trusted_rejections / len(trusted_validators) > 0.5 if trusted_validators else False
-        
+
         if reject:
             bt.logging.info("Submission rejected by >50% trusted validators")
             return
-        
+
         Rs_total = sum(s["R_v"] for s in validator_scores if s["R_v"] > 15)
         F = sum(s["O_v"] * (s["R_v"] / Rs_total) for s in validator_scores if s["R_v"] > 15) if Rs_total > 0 else 0
         if use_trusted:
             trusted_scores = [s for s in validator_scores if any(v == self and v.trusted_validator for v in validators)]
             Rs_total_trusted = sum(s["R_v"] for s in trusted_scores if s["R_v"] > 15)
             F = sum(s["O_v"] * (s["R_v"] / Rs_total_trusted) for s in trusted_scores if s["R_v"] > 15) if Rs_total_trusted > 0 else 0
-        
+
         for s in validator_scores:
             if abs(s["O_v"] - F) <= 0.1:
                 self.precision = min(100, self.precision + 10)
             elif s["O_v"] > 0 and not await self.run_automated_checks(s["leads"]):
                 self.precision = max(0, self.precision - 15)
             self.validation_history.append({"O_v": s["O_v"], "F": F, "timestamp": datetime.now(), "leads": s["leads"]})
-        
+
         self.update_consistency()
         self.update_reputation()
-        
+
         for i, (reward, response) in enumerate(zip(rewards, responses)):
             if reward >= 0.9 and isinstance(response, LeadRequest) and response.leads:
                 if await self.run_automated_checks(response.leads):
@@ -722,7 +722,7 @@ class Validator(BaseValidatorNeuron):
                 else:
                     self.precision = max(0, self.precision - 15)
                     bt.logging.warning(f"Post-approval check failed for UID {miner_uids[i]}, P_v reduced: {self.precision}")
-        
+
         if random.random() < 0.1:
             await self.reputation_challenge()
 
@@ -785,7 +785,7 @@ class Validator(BaseValidatorNeuron):
     async def handle_api_request(self, request):
         """
         Handle API requests from clients using broadcast mechanism.
-        
+
         Flow:
         1. Broadcast request to all validators/miners via Firestore
         2. Return request_id immediately to client
@@ -796,14 +796,14 @@ class Validator(BaseValidatorNeuron):
             num_leads     = data.get("num_leads", 1)
             business_desc = data.get("business_desc", "")
             client_id     = data.get("client_id", "unknown")
-            
+
             print(f"\n🔔 RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:10]}…'")
             bt.logging.info(f"📡 Broadcasting to ALL validators and miners via Firestore...")
 
             # Broadcast the request to all validators and miners
             try:
                 from Leadpoet.utils.cloud_db import broadcast_api_request
-                
+
                 # ═══════════════════════════════════════════════════════════
                 # FIX: Wrap synchronous broadcast call to prevent blocking
                 # ═══════════════════════════════════════════════════════════
@@ -814,10 +814,10 @@ class Validator(BaseValidatorNeuron):
                     business_desc=business_desc,
                     client_id=client_id
                 )
-                
+
                 print(f"📡 Broadcast API request {request_id[:8]}... to subnet")
                 bt.logging.info(f"📡 Broadcast API request {request_id[:8]}... to subnet")
-                
+
                 # Return request_id immediately - client will poll for results
                 return web.json_response({
                     "request_id": request_id,
@@ -826,11 +826,11 @@ class Validator(BaseValidatorNeuron):
                     "poll_url": f"/api/leads/status/{request_id}",
                     "status_code": 202,
                 }, status=202)
-                
+
             except Exception as e:
                 print(f"❌ Failed to broadcast request: {e}")
                 bt.logging.error(f"Failed to broadcast request: {e}")
-                
+
                 # Fallback to old direct method if broadcast fails
                 return web.json_response({
                     "leads": [],
@@ -853,23 +853,23 @@ class Validator(BaseValidatorNeuron):
         """Handle status polling requests - returns quickly for test requests."""
         try:
             request_id = request.match_info.get('request_id')
-            
+
             # Quick return for port discovery tests
             if request_id == "test":
                 return web.json_response({
                     "status": "ok",
                     "request_id": "test"
                 })
-            
+
             # Fetch validator rankings from Firestore
             from Leadpoet.utils.cloud_db import fetch_validator_rankings, get_broadcast_status
-            
+
             # Get broadcast request status
             status_data = get_broadcast_status(request_id)
-            
+
             # Fetch all validator rankings for this request
             validator_rankings = fetch_validator_rankings(request_id, timeout_sec=2)
-            
+
             # Determine if timeout reached (check if request is older than 90 seconds)
             from datetime import datetime, timezone
             request_time = status_data.get("created_at", "")
@@ -882,7 +882,7 @@ class Validator(BaseValidatorNeuron):
                     timeout_reached = elapsed > 90
                 except:
                     pass
-            
+
             # Return data matching API client's expected format
             return web.json_response({
                 "request_id": request_id,
@@ -894,7 +894,7 @@ class Validator(BaseValidatorNeuron):
                 "leads": status_data.get("leads", []),
                 "metadata": status_data.get("metadata", {}),
             })
-            
+
         except Exception as e:
             bt.logging.error(f"Error in handle_status_request: {e}")
             import traceback
@@ -981,35 +981,35 @@ class Validator(BaseValidatorNeuron):
         # FIX: Start HTTP server in background thread with dedicated event loop
         # ═══════════════════════════════════════════════════════════
         print("🔴 Starting HTTP server for REST API...")
-        
+
         http_port_container = [None]  # Use list to share value between threads
-        
+
         def run_http_server():
             """Run HTTP server in a dedicated event loop."""
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
+
             async def start_and_serve():
                 """Start server and keep it alive."""
                 runner = web.AppRunner(self.app)
                 await runner.setup()
-                
+
                 # Find available port
                 port = self.find_available_port(8093)
                 site = web.TCPSite(runner, '0.0.0.0', port)
                 await site.start()
-                
+
                 http_port_container[0] = port  # Share port with main thread
-                
+
                 print(f"✅ HTTP server started on port {port}")
                 print(f"📡 API endpoint: http://localhost:{port}/api/leads")
                 print("───────────────────────────────────────────")
-                
+
                 # Keep the server running by awaiting an event that never completes
                 # This is the proper way to keep an aiohttp server alive
                 stop_event = asyncio.Event()
                 await stop_event.wait()  # Wait forever
-            
+
             try:
                 # Run the server - this will block forever until KeyboardInterrupt
                 loop.run_until_complete(start_and_serve())
@@ -1021,22 +1021,22 @@ class Validator(BaseValidatorNeuron):
                 traceback.print_exc()
             finally:
                 loop.close()
-        
+
         # Start HTTP server in background thread
         http_thread = threading.Thread(target=run_http_server, daemon=True)
         http_thread.start()
-        
+
         # Wait for server to start and get port
         for _ in range(50):  # Wait up to 5 seconds
             if http_port_container[0] is not None:
                 break
             time.sleep(0.1)
-        
+
         if http_port_container[0] is None:
             print("❌ HTTP server failed to start!")
         else:
             print(f"✅ HTTP server confirmed running on port {http_port_container[0]}")
-        
+
         # ══════════════════════════════════════════════════════════════════
         # Start broadcast polling loop in background thread
         # ══════════════════════════════════════════════════════════════════
@@ -1045,7 +1045,7 @@ class Validator(BaseValidatorNeuron):
             print("🟢 Broadcast polling thread started!")
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
+
             async def polling_loop():
                 print("🟢 Broadcast polling loop initialized!")
                 while not self.should_exit:
@@ -1056,7 +1056,7 @@ class Validator(BaseValidatorNeuron):
                         import traceback
                         bt.logging.error(traceback.format_exc())
                         await asyncio.sleep(5)  # Wait before retrying
-            
+
             try:
                 loop.run_until_complete(polling_loop())
             except KeyboardInterrupt:
@@ -1067,7 +1067,7 @@ class Validator(BaseValidatorNeuron):
                 traceback.print_exc()
             finally:
                 loop.close()
-        
+
         # Start broadcast polling in background thread
         broadcast_thread = threading.Thread(target=run_broadcast_polling, daemon=True, name="BroadcastPolling")
         broadcast_thread.start()
@@ -1089,21 +1089,21 @@ class Validator(BaseValidatorNeuron):
                 except Exception as e:
                     bt.logging.warning(f"Error in process_sourced_leads_continuous: {e}")
                     time.sleep(5)  # Wait before retrying
-                
+
                 try:
                     self.process_curation_requests_continuous()
                 except Exception as e:
                     bt.logging.warning(f"Error in process_curation_requests_continuous: {e}")
                     time.sleep(5)  # Wait before retrying
-                
+
                 # REMOVED: No longer calling process_broadcast_requests_continuous() here
                 # It now runs continuously in its own background thread
-                
+
                 # Sync less frequently to avoid websocket concurrency issues
                 # Only sync every 10 iterations (approx every 10 seconds)
                 if not hasattr(self, '_sync_counter'):
                     self._sync_counter = 0
-                
+
                 self._sync_counter += 1
                 if self._sync_counter >= 10:
                     try:
@@ -1113,7 +1113,7 @@ class Validator(BaseValidatorNeuron):
                         bt.logging.warning(f"Sync error (will retry): {e}")
                         # Don't crash on sync errors, just skip this sync
                         self._sync_counter = 0
-                
+
                 time.sleep(1)  # Small delay to prevent tight loop
         except KeyboardInterrupt:
             self.axon.stop()
@@ -1131,23 +1131,23 @@ class Validator(BaseValidatorNeuron):
     def sync(self):
         """
         Override sync to refresh validator trust after metagraph sync.
-        
+
         This ensures we always have up-to-date trust values for consensus weighting.
         """
         # Call parent sync to refresh metagraph
         super().sync()
-        
+
         # ════════════════════════════════════════════════════════════
         # TASK 4.1: Refresh validator trust after metagraph sync
         # ════════════════════════════════════════════════════════════
         # Handle case where uid might not be set yet (during initialization)
         if not hasattr(self, 'uid') or self.uid is None:
             return
-        
+
         try:
             old_trust = getattr(self, 'validator_trust', 0.0)
             self.validator_trust = self.metagraph.validator_trust[self.uid].item()
-            
+
             # Log significant changes in trust
             if abs(self.validator_trust - old_trust) > 0.01:
                 bt.logging.info(
@@ -1207,7 +1207,7 @@ class Validator(BaseValidatorNeuron):
         # NEW: Skip if processing broadcast request
         if self.processing_broadcast:
             return  # Pause sourcing during broadcast processing
-        
+
         try:
             prospects_batch = fetch_prospects_from_cloud(self.wallet, limit=250)
 
@@ -1262,7 +1262,7 @@ class Validator(BaseValidatorNeuron):
         # ── annotate each lead with the curation timestamp (seconds since epoch)
         curated_at = time.time()
         for lead in leads:
-         
+
             lead["created_at"]    = datetime.utcfromtimestamp(curated_at).isoformat() + "Z"
 
         push_curation_result({"request_id": req["request_id"], "leads": leads})
@@ -1276,97 +1276,97 @@ class Validator(BaseValidatorNeuron):
         """
         await asyncio.sleep(2)
         print("📡 Polling for broadcast API requests... (will notify when requests are found)")
-        
+
         poll_count = 0
         while True:
             try:
                 poll_count += 1
-                
+
                 # Fetch pending broadcast requests from Firestore
                 from Leadpoet.utils.cloud_db import fetch_broadcast_requests
                 requests_list = fetch_broadcast_requests(self.wallet, role="validator")
-                
+
                 # fetch_broadcast_requests() will print when requests are found
                 # No need to log anything here when empty
-                
+
                 if requests_list:
                     print(f"🔔 Found {len(requests_list)} NEW broadcast request(s) to process!")
-                
+
                 for req in requests_list:
                     request_id = req.get("request_id")
-                    
+
                     # Skip if already processed locally
                     if request_id in self._processed_requests:
                         print(f"⏭️  Skipping already processed request {request_id[:8]}...")
                         continue
-                    
+
                     # Mark as processed locally
                     self._processed_requests.add(request_id)
-                    
+
                     num_leads = req.get("num_leads", 1)
                     business_desc = req.get("business_desc", "")
-                    
+
                     print(f"\n📨 🔔 BROADCAST API REQUEST RECEIVED {request_id[:8]}...")
                     print(f"   Requested: {num_leads} leads")
                     print(f"   Description: {business_desc[:50]}...")
                     print(f"   🕐 Request received at {time.strftime('%H:%M:%S')}")
                     print(f"   ⏳ Waiting up to 180 seconds for miners to send curated leads...")
-                    
+
                     # Set flag to pause sourced lead processing
                     self.processing_broadcast = True
-                    
+
                     try:
                         # Wait for miners to send curated leads to Firestore
                         from Leadpoet.utils.cloud_db import fetch_miner_leads_for_request
-                        
+
                         MAX_WAIT = 180  # ← INCREASED from 60 to 180 seconds
                         POLL_INTERVAL = 2  # Poll every 2 seconds
-                        
+
                         miner_leads_collected = []
                         start_time = time.time()
                         polls_done = 0
-                        
+
                         while time.time() - start_time < MAX_WAIT:
                             submissions = fetch_miner_leads_for_request(request_id)
-                            
+
                             if submissions:
                                 # Flatten all leads from all miners
                                 for submission in submissions:
                                     leads = submission.get("leads", [])
                                     miner_leads_collected.extend(leads)
-                                
+
                                 if miner_leads_collected:
                                     elapsed = time.time() - start_time
                                     bt.logging.info(f"📥 Received leads from {len(submissions)} miner(s) after {elapsed:.1f}s")
                                     break
-                            
+
                             # Progress update every 10 seconds
                             polls_done += 1
                             if polls_done % 5 == 0:  # Every 10 seconds (5 polls * 2 sec)
                                 elapsed = time.time() - start_time
                                 bt.logging.info(f"⏳ Still waiting for miners... ({elapsed:.0f}s / {MAX_WAIT}s elapsed)")
-                            
+
                             await asyncio.sleep(POLL_INTERVAL)
-                        
+
                         if not miner_leads_collected:
                             bt.logging.warning(f"⚠️  No miner leads received after {MAX_WAIT}s, skipping ranking")
                             continue
-                        
+
                         bt.logging.info(f"📊 Received {len(miner_leads_collected)} total leads from miners")
-                        
+
                         # Rank the leads
                         bt.logging.info(f"🔍 Ranking {min(num_leads, len(miner_leads_collected))} leads with LLM...")
-                        
+
                         # ══════════════════════════════════════════════════════════
                         # RANK LEADS using LLM (same as before)
                         # ══════════════════════════════════════════════════════════
                         print(f"🔍 Ranking {len(miner_leads_collected)} leads with LLM...")
-                        
+
                         import random
                         scored_leads = []
                         aggregated = {id(lead): 0.0 for lead in miner_leads_collected}
                         failed_leads = set()  # Track leads that failed LLM scoring
-                        
+
                         # ROUND 1: First LLM scoring
                         print(f"🔄 LLM round 1/2 (model: deepseek/deepseek-chat-v3-0324:free)")
                         for lead in miner_leads_collected:
@@ -1376,7 +1376,7 @@ class Validator(BaseValidatorNeuron):
                                 print(f"⚠️  LLM failed for lead, will skip this lead")
                             else:
                                 aggregated[id(lead)] += score
-                        
+
                         # ROUND 2: Second LLM scoring
                         second_model = random.choice(AVAILABLE_MODELS)
                         print(f"🔄 LLM round 2/2 (model: {second_model})")
@@ -1389,34 +1389,34 @@ class Validator(BaseValidatorNeuron):
                                 print(f"⚠️  LLM failed for lead, will skip this lead")
                             else:
                                 aggregated[id(lead)] += score
-                        
+
                         # Apply aggregated scores (skip failed leads)
                         for lead in miner_leads_collected:
                             if id(lead) not in failed_leads:
                                 lead["intent_score"] = round(aggregated[id(lead)], 3)
                                 scored_leads.append(lead)
-                        
+
                         if not scored_leads:
                             print("❌ All leads failed LLM scoring - check your OPENROUTER_KEY environment variable!")
                             print("   Set it with: export OPENROUTER_KEY='your-key-here'")
                             continue  # Skip this broadcast request
-                        
+
                         # Sort and take top N
                         scored_leads.sort(key=lambda x: x["intent_score"], reverse=True)
                         ranked_leads = scored_leads[:num_leads]
-                        
+
                         print(f"✅ Ranked top {len(ranked_leads)} leads:")
                         for i, lead in enumerate(ranked_leads, 1):
                             business = lead.get('Business', lead.get('business', 'Unknown'))
                             score = lead.get('intent_score', 0)
                             print(f"  {i}. {business} (score={score:.3f})")
-                        
+
                         # ══════════════════════════════════════════════════════════
                         # SUBMIT VALIDATOR RANKING for consensus
                         # ══════════════════════════════════════════════════════════
                         try:
                             validator_trust = self.metagraph.validator_trust[self.uid].item()
-                            
+
                             ranking_submission = []
                             for rank, lead in enumerate(ranked_leads, 1):
                                 ranking_submission.append({
@@ -1424,37 +1424,37 @@ class Validator(BaseValidatorNeuron):
                                     "score": lead.get("intent_score", 0.0),
                                     "rank": rank,
                                 })
-                            
+
                             success = push_validator_ranking(
                                 wallet=self.wallet,
                                 request_id=request_id,
                                 ranked_leads=ranking_submission,
                                 validator_trust=validator_trust
                             )
-                            
+
                             if success:
                                 print(f"📊 Submitted ranking for consensus (trust={validator_trust:.4f})")
                             else:
                                 print(f"⚠️  Failed to submit ranking for consensus")
-                        
+
                         except Exception as e:
                             print(f"⚠️  Error submitting validator ranking: {e}")
                             bt.logging.error(f"Error submitting validator ranking: {e}")
-                        
+
                         # ══════════════════════════════════════════════════════════
                         # PUBLISH WEIGHTS for miners who provided leads
                         # ══════════════════════════════════════════════════════════
                         try:
                             from Leadpoet.validator.reward import calculate_weights, record_event
-                            
+
                             # Record events for each lead in the ranked list
                             for lead in ranked_leads:
                                 if lead.get("source") and lead.get("curated_by"):
                                     record_event(lead)
-                            
+
                             # Calculate V2 weights and emissions
                             rewards = calculate_weights(100.0)  # 100 Alpha total emission
-                            
+
                             # Log final weights
                             print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
                             print(f"   Ranked leads: {len(ranked_leads)} prospects")
@@ -1462,9 +1462,9 @@ class Validator(BaseValidatorNeuron):
                             print(f"   C weights (Curating): {rewards['C']}")
                             print(f"   Final weights (W): {rewards['W']}")
                             print(f"   Emissions: {rewards['E']}")
-                            
+
                             weights_dict = rewards["W"]
-                            
+
                             # Publish weights on-chain
                             try:
                                 from math import isclose
@@ -1473,12 +1473,12 @@ class Validator(BaseValidatorNeuron):
                                     if hk in self.metagraph.hotkeys and w > 0:
                                         uids.append(self.metagraph.hotkeys.index(hk))
                                         weights.append(float(w))
-                                
+
                                 # Normalize to 1.0
                                 s = sum(weights)
                                 if not isclose(s, 1.0) and s > 0:
                                     weights = [w / s for w in weights]
-                                
+
                                 self.subtensor.set_weights(
                                     wallet=self.wallet,
                                     netuid=self.config.netuid,
@@ -1489,37 +1489,37 @@ class Validator(BaseValidatorNeuron):
                                 print("✅ Published weights on-chain")
                             except Exception as e:
                                 print(f"⚠️  Failed to publish weights on-chain: {e}")
-                            
+
                             # Store in Firestore
                             from Leadpoet.utils.cloud_db import push_validator_weights
                             push_validator_weights(self.wallet, self.uid, weights_dict)
-                            
+
                         except Exception as e:
                             print(f"⚠️  V2 reward calculation failed: {e}")
-                        
+
                         print(f"✅ Validator {self.wallet.hotkey.ss58_address[:10]}... completed processing broadcast {request_id[:8]}...")
-                        
+
                     except Exception as e:
                         print(f"❌ Error processing broadcast request {request_id[:8]}...: {e}")
                         bt.logging.error(f"Error processing broadcast request: {e}")
                         import traceback
                         bt.logging.error(traceback.format_exc())
-                    
+
                     finally:
                         # Always resume sourcing after processing
                         self.processing_broadcast = False
-            
+
             except Exception as e:
                 # Catch any errors in the outer loop (fetching requests, etc.)
                 bt.logging.error(f"Error in broadcast polling loop: {e}")
                 import traceback
                 bt.logging.error(traceback.format_exc())
-            
+
             # Clear old processed requests every 100 iterations to prevent memory buildup
             if poll_count % 100 == 0:
                 bt.logging.info(f"🧹 Clearing old processed requests cache ({len(self._processed_requests)} entries)")
                 self._processed_requests.clear()
-            
+
             # Sleep before next poll
             await asyncio.sleep(1)  # ← REDUCED from 10 to 1 second
 
@@ -1575,7 +1575,7 @@ class Validator(BaseValidatorNeuron):
                 return {'is_legitimate': False,
                         'reason': 'Missing email',
                         'score': 0.0}
-            
+
             # 2️⃣ Map your field names to what automated_checks expects
             mapped_lead = {
                 "email": email,  # Map to "email" field
@@ -1588,7 +1588,7 @@ class Validator(BaseValidatorNeuron):
                 # Include any other fields that might be useful
                 **lead  # Include all original fields too
             }
-            
+
             # 3️⃣ Use automated_checks for comprehensive validation
             passed, reason = await run_automated_checks(mapped_lead)
 
@@ -1602,7 +1602,7 @@ class Validator(BaseValidatorNeuron):
                 'reason': reason,
                 'score': 1.0 if passed else 0.0
             }
-            
+
         except Exception as e:
             bt.logging.error(f"Error in validate_lead: {e}")
             return {'is_legitimate': False,
@@ -1971,7 +1971,7 @@ def main():
     # Only set custom wallet path if default doesn't exist
     default_wallet_path = Path.home() / ".bittensor" / "wallets"
     if not default_wallet_path.exists():
-        config.wallet.path = str(Path.cwd() / ".bittensor" / "wallets") + "/"
+        config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     config.subtensor.network = args.subtensor_network

@@ -67,3 +67,6 @@ pip-delete-this-directory.txt
 .history/
 
 service_account_key.json
+
+.DS_Store
+start_server.sh

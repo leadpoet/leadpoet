@@ -130,9 +130,9 @@ def classify_industry(description: str) -> Optional[str]:
             return ind.lower()
         return None
 
-    # 1️⃣ Primary
+    # 1️⃣ Primary - use simple classification model
     try:
-        result = _try_model(PRIMARY_MODEL)
+        result = _try_model(CLASSIFICATION_MODEL)
         if result:
             return result
     except Exception as e:
@@ -223,6 +223,9 @@ PRIMARY_MODEL   = "openai/o3-mini:online"          # Best reasoning + web search
 FALLBACK_MODEL  = "deepseek/deepseek-r1:online"    # Competitive reasoning, reliable fallback
 MODEL_NAME      = PRIMARY_MODEL
 
+# Simple classification model (no reasoning needed)
+CLASSIFICATION_MODEL = "openai/gpt-4o-mini"  # Fast, cheap, no online needed
+
 def _call(model: str, prompt_user: str):
     return requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -298,12 +301,10 @@ async def _score_batch(leads: list[dict], description: str) -> list[float]:
         if raw.startswith("```"):
             raw = raw.strip("`").lstrip("json").strip()
 
-        start = raw.find("[")
-        end = raw.rfind("]")
-        if start == -1 or end == -1:
-            raise ValueError("No JSON array in response")
+        # Use robust extraction (same as fallback)
+        json_str = _extract_first_json_array(raw)
+        json_array = json.loads(json_str)
 
-        json_array = json.loads(raw[start:end + 1])
         scores = [_heuristic(lead) for lead in leads]
         for item in json_array:
             idx = item.get("lead_index", -1)
@@ -329,12 +330,9 @@ async def _score_batch(leads: list[dict], description: str) -> list[float]:
             if raw.startswith("```"):
                 raw = raw.strip("`").lstrip("json").strip()
 
-            start = raw.find("[")
-            end = raw.rfind("]")
-            if start == -1 or end == -1:
-                raise ValueError("No JSON array in response")
+            json_str = _extract_first_json_array(raw)
+            json_array = json.loads(json_str)
 
-            json_array = json.loads(raw[start:end + 1])
             scores = [_heuristic(lead) for lead in leads]
             for item in json_array:
                 idx = item.get("lead_index", -1)
@@ -347,6 +345,27 @@ async def _score_batch(leads: list[dict], description: str) -> list[float]:
         except Exception as e2:
             logging.warning(f"Fallback batch model failed: {e2}")
             return [_heuristic(lead) for lead in leads]
+
+def _extract_first_json_array(text: str) -> str:
+    """Extract the first complete JSON array from text, ignoring extra content."""
+    import json
+    from json.decoder import JSONDecodeError
+
+    start = text.find("[")
+    if start == -1:
+        raise ValueError("No JSON array found")
+
+    # Try to find where the first complete JSON array ends
+    decoder = json.JSONDecoder()
+    try:
+        obj, end_idx = decoder.raw_decode(text, start)
+        return json.dumps(obj)  # Return clean JSON string
+    except JSONDecodeError:
+        # Fallback to old method
+        end = text.rfind("]")
+        if end == -1:
+            raise ValueError("No JSON array found")
+        return text[start:end+1]
 
 async def _score_one(lead: dict, description: str) -> float:
     """
@@ -583,9 +602,9 @@ def classify_roles(description: str) -> list[str]:
                 pass
         return []
 
-    # 1️⃣ Primary
+    # 1️⃣ Primary - use simple classification model
     try:
-        result = _try_model(PRIMARY_MODEL)
+        result = _try_model(CLASSIFICATION_MODEL)
         if result:
             return result
     except Exception as e:

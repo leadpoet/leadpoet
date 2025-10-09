@@ -1,11 +1,14 @@
 # Leadpoet/validator/reward.py
 
-import json, os, threading
+import json
+import os
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List
 import numpy as np
 from validator_models.automated_checks import validate_lead_list as auto_check_leads
+import threading
+import time
 
 # ===== STEP 5: EPOCH TIMING AND INTEGRATION =====
 
@@ -70,9 +73,6 @@ def _get_epoch_boundaries(epoch_number: int) -> tuple:
     start_block = epoch_number * EPOCH_DURATION_BLOCKS
     end_block = start_block + EPOCH_DURATION_BLOCKS - 1
     return start_block, end_block
-
-import threading
-import time
 
 # ===== BACKGROUND EPOCH MONITORING =====
 
@@ -236,23 +236,6 @@ def _get_epoch_status() -> Dict:
         
     except Exception as e:
         return {"error": str(e)}
-
-def print_epoch_status():
-    """
-    Print current epoch status for debugging and monitoring.
-    """
-    status = _get_epoch_status()
-    
-    if "error" in status:
-        print(f"❌ Error getting epoch status: {status['error']}")
-        return
-    
-    print(f"\n⏰ EPOCH STATUS:")
-    print(f"   Current epoch: {status['current_epoch']}")
-    print(f"   Current block: {status['current_block']}")
-    print(f"   Progress: {status['blocks_elapsed']}/{EPOCH_DURATION_BLOCKS} blocks ({status['progress_percentage']:.1f}%)")
-    print(f"   Remaining: ~{status['estimated_minutes_remaining']:.1f} minutes")
-    print(f"   Epoch range: {status['epoch_start_block']} → {status['epoch_end_block']}")
 
 # ===== STEP 5: INTEGRATION WITH EXISTING WEIGHT CALCULATION =====
 
@@ -492,24 +475,13 @@ def get_firestore_connection_status() -> Dict:
     Returns:
         Dict with connection status, error messages, and configuration info
     """
-    status = {
+    return {
         "firestore_available": False, # This function is no longer used for Firestore
         "client_initialized": False,
         "connection_healthy": False,
         "collection_accessible": False,
-        "error_message": None
+        "error_message": "Firestore client is no longer initialized"
     }
-    
-    try:
-        # Test client initialization
-        # This function is no longer used for Firestore
-        status["error_message"] = "Firestore client is no longer initialized"
-        return status
-        
-    except Exception as e:
-        status["error_message"] = str(e)
-    
-    return status
 
 def test_firestore_leads_query():
     """

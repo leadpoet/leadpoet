@@ -69,5 +69,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as err:
-        bt.logging.error(err)
+        bt.logging.error(str(err))
         sys.exit(1)

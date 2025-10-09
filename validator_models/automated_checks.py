@@ -196,13 +196,11 @@ async def log_validation_metrics(lead_data: dict, validation_result: dict, stage
 
 async def api_call_with_retry(session, url, params=None, max_retries=3, base_delay=1):
     """Make API call with exponential backoff retry logic"""
-    last_exception = None
     for attempt in range(max_retries):
         try:
             async with session.get(url, params=params, timeout=10) as response:
                 return response
         except Exception as e:
-            last_exception = e
             if attempt == max_retries - 1:
                 # All retries exhausted, raise descriptive exception
                 context_info = f"URL: {url}"
@@ -236,7 +234,6 @@ def extract_root_domain(website: str) -> str:
 
 async def check_email_regex(lead: dict) -> Tuple[bool, str]:
     """Check email format using RFC-5322 simplified regex"""
-    start_time = datetime.now()
     try:
         email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
         if not email:
@@ -252,12 +249,10 @@ async def check_email_regex(lead: dict) -> Tuple[bool, str]:
         validation_cache[cache_key] = (is_valid, reason)
 
         # Log metrics
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
         await log_validation_metrics(lead, {"passed": is_valid, "reason": reason}, "email_regex")
 
         return is_valid, reason
     except Exception as e:
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
         await log_validation_metrics(lead, {"passed": False, "reason": str(e)}, "email_regex")
         raise e
 
@@ -348,26 +343,26 @@ async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
     Returns:
         (True, str): Always passes, with informational message
     """
-    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
-    if not email:
-        # No email to check - append default values
+    def fail_lead(lead):
         lead["has_spf"] = False
         lead["has_dmarc"] = False
         lead["dmarc_policy_strict"] = False
+        return lead
+        
+    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    if not email:
+        # No email to check - append default values
+        lead = fail_lead(lead)
         return True, "No email provided for SPF/DMARC check (SOFT - passed)"
 
     # Extract domain from email
     try:
         domain = email.split("@")[1].lower() if "@" in email else ""
         if not domain:
-            lead["has_spf"] = False
-            lead["has_dmarc"] = False
-            lead["dmarc_policy_strict"] = False
+            lead = fail_lead(lead)
             return True, "Invalid email format (SOFT - passed)"
     except (IndexError, AttributeError):
-        lead["has_spf"] = False
-        lead["has_dmarc"] = False
-        lead["dmarc_policy_strict"] = False
+        lead = fail_lead(lead)
         return True, "Invalid email format (SOFT - passed)"
 
     cache_key = f"spf_dmarc:{domain}"

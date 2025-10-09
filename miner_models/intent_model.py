@@ -14,6 +14,7 @@ validator.  We add:
 Weights come from IntentModel-main settings (≈ 0.6 / 0.4 blend).
 """
 from __future__ import annotations
+from miner_models.taxonomy import KEYWORDS, ALLOWED_INDUSTRIES as INDUSTRIES
 import re, math, asyncio
 from typing import List, Dict, Optional
 import logging
@@ -27,22 +28,7 @@ FINAL_SCORE_FIT_W   = 0.6
 FINAL_SCORE_INT_W   = 0.4
 
 # ---------------------------------------------------------------------
-# New 11-sector taxonomy  ─────────────────────────────────────────────
-KEYWORDS = {
-    "marketing":      ["marketing", "advertising", "seo", "content", "campaign"],
-    "technology":     ["software", "saas", "cloud", "ai", "machine learning"],
-    "finance":        ["fintech", "payments", "bank", "crypto", "lending"],
-    "healthcare":     ["health", "clinic", "medical", "pharma", "hospital"],
-    "manufacturing":  ["manufacturing", "industrial", "factory", "automation"],
-    "retail":         ["retail", "e-commerce", "store", "consumer"],
-    "education":      ["edtech", "school", "university", "training", "course"],
-    "real estate":    ["real estate", "proptech", "property", "broker"],
-    "energy & utilities": ["energy", "solar", "utility", "renewable", "power"],
-    "transportation & logistics": ["logistics", "shipping", "transport", "automotive"],
-    "media & entertainment": ["media", "gaming", "music", "streaming", "content"],
-}
 
-# ---------------------------------------------------------------------
 # Fast heuristic to map buyer description → high-level industry
 def infer_industry(description: str) -> Optional[str]:
     d = _norm(description)
@@ -52,21 +38,6 @@ def infer_industry(description: str) -> Optional[str]:
     return None
 
 # ------------- LLM industry classifier ---------------------------------
-INDUSTRIES = [
-    "Marketing",
-    "Technology",
-    "Finance",
-    "Healthcare",
-    "Manufacturing",
-    "Retail",
-    "Education",
-    "Real Estate",
-    "Energy & Utilities",
-    "Transportation & Logistics",
-    "Media & Entertainment",
-]
-
-
 def classify_industry(description: str) -> Optional[str]:
     """
     Use OpenRouter to map free-form buyer text → one of the 5 umbrella

@@ -45,6 +45,11 @@ COLL_CURATE_RES  = "curation_results"
 COLL_MINER_REQ   = "curation_miner_requests"
 COLL_MINER_RES   = "curation_miner_results"
 
+# ---------- Helper: timestamp generator ------------
+def generate_timestamp(payload: str):
+    timestamp = str(int(time.time()) // 300)  # 5-min windows
+    return (timestamp + payload).encode()
+
 # ---------- Helper: check database connection -------
 def check_db():
     if db is None:
@@ -124,8 +129,7 @@ async def add_leads(request: Request):
                             detail="wallet, signature, leads required")
 
     # 2. freshness: include timestamp in signed payload
-    timestamp = str(int(time.time()) // 300)            # 5-min windows
-    payload   = (timestamp + json.dumps(leads, sort_keys=True)).encode()
+    payload = generate_timestamp(json.dumps(leads, sort_keys=True))
 
     if not verify_sig(wallet, payload, sig):
         print("[WARN] bad signature – continuing (DEV mode)")
@@ -181,8 +185,7 @@ async def enqueue_prospects(request: Request):
         raise HTTPException(status_code=400, detail="wallet, signature, prospects required")
 
     # time-boxed payload identical to miners’ signing scheme
-    timestamp = str(int(time.time()) // 300)
-    payload   = (timestamp + json.dumps(prospects, sort_keys=True)).encode()
+    payload   = generate_timestamp(json.dumps(prospects, sort_keys=True))
 
     # soft-fail on bad sig / permit
     if not verify_sig(wallet_ss, payload, sig):
@@ -208,8 +211,7 @@ async def fetch_prospects(request: Request):
     sig       = body.get("signature")
     limit     = int(body.get("limit", 100))
 
-    timestamp = str(int(time.time()) // 300)
-    payload   = (timestamp + str(limit)).encode()
+    payload   = generate_timestamp(str(limit))
 
     # soft-fail on bad sig / permit
     if not verify_sig(wallet_ss, payload, sig):
@@ -331,8 +333,7 @@ async def validator_weights(request: Request):
         raise HTTPException(status_code=400, detail="wallet, signature, weights required")
 
     # time-boxed payload identical to miners’ signing scheme
-    timestamp = str(int(time.time()) // 300)
-    payload   = (timestamp + json.dumps(weights, sort_keys=True)).encode()
+    payload   = generate_timestamp(json.dumps(weights, sort_keys=True))
 
     # soft-fail on bad sig / permit
     if not verify_sig(wallet_ss, payload, sig):

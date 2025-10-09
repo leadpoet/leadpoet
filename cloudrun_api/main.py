@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, status
+from Leadpoet.utils.misc import generate_timestamp
 import bittensor as bt, time, base64, json, traceback
 import os
-import signal
 
 app = FastAPI()
 
@@ -44,11 +44,6 @@ COLL_CURATE_RES  = "curation_results"
 # NEW: collections for validator↔miner fallback ----------------------
 COLL_MINER_REQ   = "curation_miner_requests"
 COLL_MINER_RES   = "curation_miner_results"
-
-# ---------- Helper: timestamp generator ------------
-def generate_timestamp(payload: str):
-    timestamp = str(int(time.time()) // 300)  # 5-min windows
-    return (timestamp + payload).encode()
 
 # ---------- Helper: check database connection -------
 def check_db():

@@ -2,6 +2,7 @@ import bittensor as bt
 import os
 import sys
 import argparse
+import asyncio
 
 class BaseNeuron:
     @classmethod
@@ -27,6 +28,27 @@ class BaseNeuron:
         self.metagraph = bt.metagraph(netuid=self.config.netuid, subtensor=self.subtensor)
         self.step = 0
         self.block = self.subtensor.get_current_block()
+        self.should_exit = False
+        self.is_running = False
+        self.thread = None
+        self.lock = asyncio.Lock()
+
+    def config_neuron(self, path: str):
+        if not hasattr(self.config, 'neuron') or self.config.neuron is None:
+            self.config.neuron = bt.Config()
+            self.config.neuron.axon_off = False
+            self.config.neuron.num_concurrent_forwards = 1
+            self.config.neuron.full_path = path
+            self.config.neuron.moving_average_alpha = 0.1
+            self.config.neuron.sample_size = 5
+            bt.logging.debug("Initialized config.neuron with defaults")
+
+    def config_axon(self, port: int):
+        if not hasattr(self.config, 'axon') or self.config.axon is None:
+            self.config.axon = bt.Config()
+            self.config.axon.ip = "0.0.0.0"
+            self.config.axon.port = port
+            bt.logging.debug("Initialized config.axon with default values")
 
     def sync(self):
         self.metagraph.sync(subtensor=self.subtensor)

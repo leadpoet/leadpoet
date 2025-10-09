@@ -26,20 +26,9 @@ class BaseValidatorNeuron(BaseNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
-        if not hasattr(self.config, 'neuron') or self.config.neuron is None:
-            self.config.neuron = bt.Config()
-            self.config.neuron.axon_off = False
-            self.config.neuron.num_concurrent_forwards = 1
-            self.config.neuron.full_path = "./validator_state"
-            self.config.neuron.moving_average_alpha = 0.1
-            self.config.neuron.sample_size = 5
-            bt.logging.debug("Initialized config.neuron with defaults")
 
-        if not hasattr(self.config, 'axon') or self.config.axon is None:
-            self.config.axon = bt.Config()
-            self.config.axon.ip = "0.0.0.0"
-            self.config.axon.port = 8093
-            bt.logging.debug("Initialized config.axon with default values")
+        self.config_neuron("./validator_state")
+        self.config_axon(8093)
 
         self.dendrite = bt.dendrite(wallet=self.wallet)
         bt.logging.info(f"Dendrite: {self.dendrite}")
@@ -48,10 +37,7 @@ class BaseValidatorNeuron(BaseNeuron):
         self.sync()
         if not self.config.neuron.axon_off:
             self.serve_axon()
-        self.should_exit = False
-        self.is_running = False
-        self.thread = None
-        self.lock = asyncio.Lock()
+        
         self.total_emissions = 1000.0  # Default emissions value for subnet
 
     def serve_axon(self):

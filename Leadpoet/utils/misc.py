@@ -57,3 +57,8 @@ def ttl_get_block(self) -> int:
 def get_block_time() -> float:
 
     return floor(time.time())
+
+# ---------- Helper: timestamp generator ------------
+def generate_timestamp(payload: str):
+    timestamp = str(int(time.time()) // 300)  # 5-min windows
+    return (timestamp + payload).encode()

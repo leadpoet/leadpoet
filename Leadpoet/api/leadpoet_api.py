@@ -3,20 +3,14 @@ from typing import List, Optional, Union, Any, Dict
 import asyncio
 import argparse
 from Leadpoet.protocol import LeadRequest
-from Leadpoet.api.get_query_axons import get_query_api_axons
-from validator_models.automated_checks import validate_lead_list as auto_check_leads
-from miner_models.get_leads import VALID_INDUSTRIES
+from Leadpoet.utils.misc import generate_timestamp
 import logging as _py_logging
 import aiohttp
-import socket
 import requests
 import base64
 import json
 import time
 import os
-from Leadpoet.utils.cloud_db import (
-     push_curation_request, fetch_curation_result)
-import uuid
 
 # Cloud API configuration
 CLOUD_API_URL = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
@@ -95,8 +89,7 @@ class CloudDatabase:
 
         try:
             # Create signed payload
-            timestamp = str(int(time.time()) // 300)  # 5-min window
-            payload = (timestamp + json.dumps(leads, sort_keys=True)).encode()
+            payload = generate_timestamp(json.dumps(leads, sort_keys=True))
             signature = base64.b64encode(self.wallet.sign(payload)).decode()
 
             # Prepare request
@@ -217,7 +210,6 @@ class LeadPoetAPI:
         4. Calculate consensus client-side
         5. Return top N leads
         """
-        import time
         import uuid
         from datetime import datetime, timezone
 

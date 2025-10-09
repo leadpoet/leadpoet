@@ -106,9 +106,7 @@ def convert_weights_and_uids_for_emit(
         return [], []  # Nothing to set on chain.
     else:
         max_weight = float(np.max(weights))
-        weights = [
-            float(value) / max_weight for value in weights
-        ]  # max-upscale values (max_weight = 1).
+        weights = [float(value) / max_weight for value in weights]  # max-upscale values (max_weight = 1).
         bittensor.logging.debug(
             f"setting on chain max: {max_weight} and weights: {weights}"
         )

@@ -5,6 +5,7 @@ Miners = read-only, Validators = write-enabled (wallet-signed).
 import os, json, time, base64, requests, bittensor as bt
 from typing import List, Dict
 from dotenv import load_dotenv
+from Leadpoet.utils.misc import generate_timestamp
 
 # Load environment variables from .env file
 load_dotenv()
@@ -118,8 +119,7 @@ def fetch_prospects_from_cloud(wallet: bt.wallet, limit: int = 100) -> List[Dict
             "validator – pulling prospects anyway (DEV mode)"
         )
 
-    ts      = str(int(time.time()) // 300)
-    payload = (ts + str(limit)).encode()
+    payload = generate_timestamp(str(limit))
     sig     = base64.b64encode(wallet.hotkey.sign(payload)).decode()
 
     body = {
@@ -177,8 +177,7 @@ def fetch_curation_result(request_id: str) -> dict:
     return r.json()
 
 def _signed_body(wallet: bt.wallet, extra: dict) -> dict:
-    ts       = str(int(time.time()) // 300)
-    payload  = (ts + json.dumps(extra, sort_keys=True)).encode()
+    payload  = generate_timestamp(json.dumps(extra, sort_keys=True))
     sig_b64  = base64.b64encode(wallet.hotkey.sign(payload)).decode()
     return {"wallet": wallet.hotkey.ss58_address,
             "signature": sig_b64, **extra}

@@ -26,7 +26,7 @@ from miner_models.intent_model import (
     classify_roles,
     _role_match,
 )
-from Leadpoet.api.leadpoet_api import get_query_api_axons
+
 from collections import OrderedDict
 from Leadpoet.utils.cloud_db import get_cloud_leads
 from Leadpoet.utils.cloud_db import push_prospects_to_cloud  # NEW
@@ -1032,7 +1032,7 @@ def main():
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     # Only set custom wallet path if default doesn't exist
-    default_wallet_path = Path.home() / ".bittensor" / "wallets"
+    default_wallet_path = Path.home() / ".bittensor" / "wallets" / "miner"
     if not default_wallet_path.exists():
         config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
     config.subtensor.network = args.subtensor_network

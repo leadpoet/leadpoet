@@ -1,5 +1,4 @@
 import numpy as np
-import random
 import bittensor as bt
 from Leadpoet.protocol import LeadRequest
 

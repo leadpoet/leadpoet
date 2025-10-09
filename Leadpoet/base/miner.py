@@ -35,23 +35,11 @@ class BaseMinerNeuron(BaseNeuron):
 
     def __init__(self, config=None):
         super().__init__(config=config)
-        if config.logging_trace:
+        if self.config.logging_trace:
             bt.logging.set_trace(True)
 
-        if not hasattr(self.config, 'neuron') or self.config.neuron is None:
-            self.config.neuron = bt.Config()
-            self.config.neuron.axon_off = False
-            self.config.neuron.num_concurrent_forwards = 1
-            self.config.neuron.full_path = "./miner_state"
-            self.config.neuron.moving_average_alpha = 0.1
-            self.config.neuron.sample_size = 5
-            bt.logging.debug("Initialized config.neuron with defaults")
-
-        if not hasattr(self.config, 'axon') or self.config.axon is None:
-            self.config.axon = bt.Config()
-            self.config.axon.ip = "0.0.0.0"
-            self.config.axon.port = 8091
-            bt.logging.debug("Initialized config.axon with default values")
+        self.config_neuron("./miner_state")
+        self.config_axon(8091)
 
         # ─── Override with CLI-supplied public address ───
         if getattr(self.config, "axon_ip", None):
@@ -149,11 +137,6 @@ class BaseMinerNeuron(BaseNeuron):
 
         # Defer on-chain publish/start to run() to avoid double-serve hangs.
         print("───────────────────────────────────────────")
-
-        self.should_exit: bool = False
-        self.is_running: bool = False
-        self.thread: Union[threading.Thread, None] = None
-        self.lock = asyncio.Lock()
 
     def run(self):
         self.sync()

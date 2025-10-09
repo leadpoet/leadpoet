@@ -32,8 +32,7 @@ def check_uid_availability(
     bt.logging.debug(f"UID {uid} accepted: Axon serving, stake {metagraph.S[uid]}")
     return True
 
-def get_random_uids(self, k: int, exclude: List[int] = None) -> np.ndarray:
-    exclude = [] if exclude is None else exclude
+def get_random_uids(self, k: int, exclude: List[int] = []) -> np.ndarray:
     vpermit_tao_limit = 20
 
     self.metagraph.sync(subtensor=self.subtensor)

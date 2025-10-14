@@ -12,7 +12,8 @@ validator_weights/
 env.txt
 .env
 .test_supabase_connection.py
-.tasks.md
+tasks.md
+tasks copy.md
 # macOS
 .DS_Storez
 

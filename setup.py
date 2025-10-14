@@ -56,7 +56,18 @@ requirements = [
     "openai>=2.1.0",
     "jsonschema>=4.25.1",
     "firecrawl-py>=4.3.6",
-    "disposable-email-domains>=0.0.138"
+    "disposable-email-domains>=0.0.138",
+    "fuzzywuzzy>=0.18.0",
+    # Lead Sorcerer dependencies
+    "openrouter>=1.0.0",
+    "firecrawl>=2.16.0",
+    "mailgun>=1.1.0,<2.0.0",
+    "phonenumbers>=8.13.0",
+    "portalocker>=2.7.0",
+    "publicsuffix2>=2.20191221",
+    "python-dotenv>=1.0.0",
+    # gRPC communication
+    "grpcio>=1.60.0"
 ]
 
 setup(

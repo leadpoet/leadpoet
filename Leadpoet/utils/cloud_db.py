@@ -448,17 +448,17 @@ def fetch_prospects_from_cloud(wallet: bt.wallet, limit: int = 100) -> List[Dict
             # 2. Pull count is less than 3
             # 3. This validator hasn't pulled it yet
             # 4. Consensus status is pending
-            result = supabase.table("prospect_queue") \
-                .select("*") \
-                .eq("status", "pending") \
+        result = supabase.table("prospect_queue") \
+            .select("*") \
+            .eq("status", "pending") \
                 .lt("pull_count", 3) \
                 .eq("consensus_status", "pending") \
-                .order("created_at", desc=False) \
+            .order("created_at", desc=False) \
                 .limit(limit * 2).execute()  # Get more to filter in Python
-            
-            if not result.data:
-                return []
-            
+        
+        if not result.data:
+            return []
+        
             # Filter out prospects this validator has already pulled
             available_prospects = []
             for row in result.data:
@@ -480,13 +480,13 @@ def fetch_prospects_from_cloud(wallet: bt.wallet, limit: int = 100) -> List[Dict
                 
                 # Update the prospect to add this validator
                 update_result = supabase.table("prospect_queue") \
-                    .update({
+            .update({
                         "validators_pulled": current_validators + [validator_hotkey],
                         "pull_count": current_pull_count + 1
-                    }) \
+            }) \
                     .eq("id", prospect_id) \
-                    .execute()
-                
+            .execute()
+        
                 if update_result.data:
                     # Return prospect data with ID for tracking
                     # Include miner_hotkey from the prospect_queue row
@@ -647,6 +647,8 @@ def submit_validation_assessment(
         bt.logging.debug(traceback.format_exc())
         return False
 
+# DEPRECATED: This function is no longer used - consensus is handled by database triggers
+# Keeping for reference only
 def check_and_process_consensus(
     prospect_id: str, 
     lead_id: str, 
@@ -1221,7 +1223,7 @@ def push_miner_curated_leads(wallet: bt.wallet, request_id: str, leads: List[Dic
             "num_leads": len(leads),
             "submitted_at": datetime.now(timezone.utc).isoformat(),
         }
-        
+
         supabase.table("miner_submissions").insert(data)
 
         bt.logging.info(f"📤 Pushed {len(leads)} curated lead(s) to Supabase for request {request_id[:8]}...")
@@ -1261,6 +1263,8 @@ def fetch_miner_leads_for_request(request_id: str) -> List[Dict]:
 
 
 # ───────────────────────────── Metagraph Sync ─────────────────────────────
+# DEPRECATED: This function should not be used by validators - metagraph sync should be done server-side
+# Validators do NOT need service role keys
 def sync_metagraph_to_supabase(metagraph, netuid: int) -> bool:
     """
     Sync the current metagraph to Supabase for JWT verification.

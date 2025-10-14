@@ -98,3 +98,12 @@ requests>=2.31.0
 
 # Supabase (for future migration)
 supabase>=2.0.0
+
+# Lead Sorcerer additional dependencies (if not already listed above)
+# Note: Most Lead Sorcerer dependencies are already included above
+# These are additional ones that might be needed:
+nest-asyncio>=1.6.0
+websockets>=15.0.1
+
+# gRPC communication (for miner/validator nodes)
+grpcio>=1.60.0

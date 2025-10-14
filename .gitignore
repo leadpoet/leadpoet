@@ -71,3 +71,7 @@ service_account_key.json
 
 .DS_Store
 start_server.sh
+
+# Supabase Edge Functions - KEEP PRIVATE
+# These contain authentication logic that should not be public
+supabase/

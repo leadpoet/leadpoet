@@ -357,14 +357,8 @@ class Validator(BaseValidatorNeuron):
         self.broadcast_mode = False
         self.broadcast_lock = threading.Lock()
         
-        try:
-            from Leadpoet.utils.cloud_db import sync_metagraph_to_supabase
-            bt.logging.info("📊 Syncing metagraph to Supabase...")
-            sync_success = sync_metagraph_to_supabase(self.metagraph, self.config.netuid)
-            if not sync_success:
-                bt.logging.warning("⚠️ Metagraph sync failed - JWT issuance may not work")
-        except Exception as e:
-            bt.logging.error(f"❌ Failed to sync metagraph: {e}")
+        # Note: Metagraph sync removed - this should be handled server-side
+        # The metagraph_cache table is maintained separately and doesn't require validators to have service role keys
         
         try:
             self.token_manager = TokenManager(

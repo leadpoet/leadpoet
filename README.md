@@ -30,12 +30,6 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 
 ## 🔑 Required Credentials
 
-### For ALL Participants (Miners & Validators)
-
-```bash
-export SUPABASE_SERVICE_ROLE_KEY="your_service_role_key"  # Required for validators only (temporary - will be removed in next version)s
-```
-
 ### For Miners
 
 ```bash
@@ -65,7 +59,7 @@ export GSE_CX="your_search_engine_id"                # Custom search engine ID
 
 ```bash
 # Clone the repository
-git clone https://github.com/leadpoet/bittensor-subnet.git
+git clone https://github.com/leadpoet/Leadpoet.git
 cd bittensor-subnet
 
 # Install dependencies
@@ -284,7 +278,6 @@ Buyers:      Read leads only
 
 - **Discord**: [Join our community](https://discord.gg/leadpoet)
 - **Email**: hello@leadpoet.com
-- **Documentation**: [Full docs](https://docs.leadpoet.com)
 
 ## 📄 License
 

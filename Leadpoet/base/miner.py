@@ -23,9 +23,6 @@ class BaseMinerNeuron(BaseNeuron):
         parser.add_argument("--blacklist_allow_non_registered", action="store_true", help="Allow non-registered hotkeys to query the miner", default=False)
         parser.add_argument("--neuron_epoch_length", type=int, help="Number of blocks between metagraph syncs", default=1000)
         parser.add_argument("--logging_trace", action="store_true", help="Enable trace-level logging", default=False)
-        # ───────────────────────── NETWORKING ─────────────────────────
-        # Public address that will be advertised on-chain so validators
-        # can reach this miner directly (instead of Cloud-Run fallback).
         parser.add_argument("--axon_ip", type=str,
                             help="Public IP address that validators should use to reach this miner",
                             default=None)
@@ -41,7 +38,6 @@ class BaseMinerNeuron(BaseNeuron):
         self.config_neuron("./miner_state")
         self.config_axon(8091)
 
-        # ─── Override with CLI-supplied public address ───
         if getattr(self.config, "axon_ip", None):
             self.config.axon.external_ip = self.config.axon_ip
         if getattr(self.config, "axon_port", None):
@@ -106,14 +102,9 @@ class BaseMinerNeuron(BaseNeuron):
             except Exception as e:
                 bt.logging.warning(f"Could not read on-chain axon metadata: {e}")
 
-        # Enable low-level gRPC logs (printed directly to console)
-        os.environ.setdefault("GRPC_VERBOSITY", "DEBUG")
-        os.environ.setdefault(
-            "GRPC_TRACE",
-            "handshaker,tsi,security,api,transport,http,call_error"
-        )
-        print(f"🧪 gRPC env → VERBOSITY={os.getenv('GRPC_VERBOSITY')} "
-              f"TRACE={os.getenv('GRPC_TRACE')}")
+        # Enable low-level gRPC logs (silent - only for debugging)
+        os.environ.setdefault("GRPC_VERBOSITY", "ERROR")  # Changed from DEBUG to ERROR
+        os.environ.setdefault("GRPC_TRACE", "")
 
         # NOW build the axon with the **correct** port
         self.axon = bt.axon(
@@ -131,12 +122,8 @@ class BaseMinerNeuron(BaseNeuron):
         )
         bt.logging.info(f"Axon created: {self.axon}")
 
-        # Add debug for axon registration
-        print(f"🔧 Axon config: ip={self.config.axon.ip}, port={self.config.axon.port}")
-        print(f"🔧 Axon external: {self.config.axon.external_ip}:{self.config.axon.external_port}")
-
-        # Defer on-chain publish/start to run() to avoid double-serve hangs.
-        print("───────────────────────────────────────────")
+        # Axon configured - logging reduced for cleaner output
+        bt.logging.info(f"Axon ready: {self.config.axon.external_ip or '0.0.0.0'}:{self.config.axon.external_port or self.config.axon.port}")
 
     def run(self):
         self.sync()

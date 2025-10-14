@@ -1,5 +1,3 @@
-# validator_models/automated_checks.py
-
 import aiohttp
 import asyncio
 import dns.resolver
@@ -18,10 +16,7 @@ from fuzzywuzzy import fuzz
 from dotenv import load_dotenv
 from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
 
-# Load environment variables from .env file
 load_dotenv()
-
-# Environment variables for new APIs
 HUNTER_API_KEY = os.getenv("HUNTER_API_KEY", "YOUR_HUNTER_API_KEY")
 ZEROBOUNCE_API_KEY = os.getenv("ZEROBOUNCE_API_KEY", "YOUR_ZEROBOUNCE_API_KEY")
 
@@ -29,33 +24,28 @@ GOOGLE_API_KEY = os.getenv("GSE_API_KEY", "YOUR_GOOGLE_API_KEY")
 GOOGLE_CSE_ID = os.getenv("GSE_CX", "YOUR_GOOGLE_CSE_ID")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
-# REQUIREMENTS: Native structured output support, fast inference, JSON reliability, cost efficiency
 AVAILABLE_MODELS = [
-    "google/gemini-2.5-flash",                   # $0.10/$0.40 - BEST: Fast, native structured outputs, built-in thinking
-    "openai/gpt-4o-mini",                        # $0.15/$0.60 - Excellent JSON reliability, very fast
-    "google/gemini-2.0-flash-exp",               # $0.075/$0.30 - Ultra-fast TTFT, experimental
+    "google/gemini-2.5-flash",
+    "openai/gpt-4o-mini",
+    "google/gemini-2.0-flash-exp",
 ]
 
 
 FALLBACK_MODELS = [
-    "anthropic/claude-3.7-sonnet",               # $3/$15 - Reliable, improved reasoning (if primaries fail)
+    "anthropic/claude-3.7-sonnet",
 ]
 
-# Constants
 EMAIL_CACHE_FILE = "email_verification_cache.pkl"
 VALIDATION_ARTIFACTS_DIR = "validation_artifacts"
 
-# Cache TTLs in hours
 CACHE_TTLS = {
     "dns_head": 24,
-    "whois": 90,  # Used for WHOIS domain age lookups
+    "whois": 90,
     "zerobounce": 90,  
 }
 
-# Rate limiting semaphore - limit concurrent API calls
-API_SEMAPHORE = asyncio.Semaphore(10)  # Max 10 concurrent API calls
+API_SEMAPHORE = asyncio.Semaphore(10)
 
-# Create validation artifacts directory if it doesn't exist
 os.makedirs(VALIDATION_ARTIFACTS_DIR, exist_ok=True)
 
 class LRUCache:

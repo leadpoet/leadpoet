@@ -1,215 +1,150 @@
-# LeadPoet | Premium Sales Leads Powered by Bittensor
+# Leadpoet | Premium B2B Leads Powered by Bittensor
 
-Welcome to Leadpoet, a decentralized prospect generation subnet built on Bittensor.
+A decentralized B2B lead generation subnet built on Bittensor that delivers fresh, validated prospects through a consensus-driven marketplace.
 
-## Overview
+## 🚀 Overview
 
-Leadpoet leverages Bittensor's decentralized architecture to create a scalable marketplace for prospect generation. Miners source high-quality prospects, validators ensure quality through rigorous auditing, and buyers access curated, real-time prospects optimized for conversion. This eliminates reliance on static databases, ensuring fresher, more relevant prospects at lower costs.
+Leadpoet transforms B2B lead generation by creating a decentralized marketplace where:
+- **Miners** source high-quality prospects using web scraping and AI
+- **Validators** ensure quality through consensus-based validation (3+ validators per lead)
+- **Buyers** access curated, real-time prospects optimized for their ICP (Ideal Customer Profile)
 
-### Workflow
+### Key Innovation: Consensus Validation
 
-1. Miners continuously source high-quality prospects using Firecrawl web scraping and LLM classification
-2. Validators check legitimacy of sourced prospects; legitimate prospects enter the Prospect Pool
-3. Buyers submit API requests that are broadcast to ALL validators and miners simultaneously via Firestore
-4. Miners pause sourcing, curate prospect lists from the Prospect Pool, and submit them to ALL validators
-5. ALL validators independently rank the prospects using LLM-based intent scoring
-6. API client calculates consensus ranking from all validators (weighted by validator trust)
-7. Buyers receive the Final Curated List—consensus-ranked, highest-scoring ICP prospects
+Unlike traditional lead databases, Leadpoet requires **consensus from multiple validators** before a lead is accepted:
+- Each prospect must be validated by 3 independent validators
+- 2+ validators must agree (valid/invalid) for consensus
+- Prevents gaming and ensures higher quality leads
+- Validators must participate in ≥10% of consensus decisions to earn rewards
 
-**Data Flow**: Buyer submits query → Broadcast to ALL miners & validators → Miners curate prospects → ALL validators independently rank prospects → Client-side consensus calculation → Top N prospects delivered to buyer.
+## 📋 Prerequisites
 
-**Token**: TAO is used for staking, rewards, and (future) prospect purchases.
+### Hardware Requirements
+- **Miners/Validators**: 16GB RAM, 4-core CPU, 100GB SSD
+- **Network**: Stable internet connection with open ports for axon communication
 
-## Getting Started
+### Software Requirements
+- Python 3.8+
+- Bittensor CLI: `pip install bittensor>=6.9.3`
+- TAO Wallet: Create with `btcli wallet create`
 
-### Prerequisites
+## 🔑 Required Credentials
 
-- **Hardware**: 16GB RAM, 4-core CPU, 100GB SSD
-- **Software**: Python 3.8+, Bittensor CLI (`pip install bittensor>=6.9.3`)
-- **TAO Wallet**: Required for staking and rewards. Create with `btcli wallet create`
-- **Google Cloud Credentials**: Required for Firestore database access (all nodes)
-
-### Required API Keys & Credentials
-
-#### For ALL Nodes (Miners, Validators, API Clients)
-
-```bash
-# Google Cloud Firestore credentials (REQUIRED)
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your-firebase-credentials.json"
-```
-
-#### For Miners
+### For ALL Participants (Miners & Validators)
 
 ```bash
-# REQUIRED: Web scraping and contact extraction
-export FIRECRAWL_API_KEY=your_firecrawl_api_key
-
-# REQUIRED: LLM-based industry classification and intent scoring
-export OPENROUTER_KEY=your_openrouter_api_key
+export SUPABASE_SERVICE_ROLE_KEY="your_service_role_key"  # Required for validators only (temporary - will be removed in next version)s
 ```
 
-#### For Validators
+### For Miners
 
 ```bash
-# REQUIRED: LLM-based lead ranking
-export OPENROUTER_KEY=your_openrouter_api_key
+# Web scraping and lead sourcing
+export FIRECRAWL_API_KEY="your_firecrawl_key"        # Required for web scraping
 
-# OPTIONAL: Email verification (falls back to mock if not provided)
-export HUNTER_API_KEY=your_hunter_api_key
-
-# OPTIONAL: Advanced email validation (falls back to mock if not provided)
-export ZEROBOUNCE_API_KEY=your_zerobounce_api_key
-
-# OPTIONAL: Google Custom Search for LLM validation checks
-export GSE_API_KEY=your_google_api_key
-export GSE_CX=your_google_cse_id
+# LLM for industry classification  
+export OPENROUTER_KEY="your_openrouter_key"          # Required for AI classification
 ```
 
-### Google Cloud Firestore Setup
+### For Validators
 
-**For Miners/Validators** (Simple 3-step setup):
-
-1. **Get Firebase Config from LeadPoet**:
-   - Contact team or check subnet documentation for public config values
-
-2. **Set Environment Variables**:
-   ```bash
-   export FIREBASE_API_KEY="AIza..."
-   export FIREBASE_PROJECT_ID="leadpoet-subnet"
-   export FIREBASE_AUTH_DOMAIN="leadpoet-subnet.firebaseapp.com"
-   ```
-
-3. **Add to Shell Config** (for persistence):
-   ```bash
-   echo 'export FIREBASE_API_KEY="AIza..."' >> ~/.bashrc
-   echo 'export FIREBASE_PROJECT_ID="leadpoet-subnet"' >> ~/.bashrc
-   echo 'export FIREBASE_AUTH_DOMAIN="leadpoet-subnet.firebaseapp.com"' >> ~/.bashrc
-   source ~/.bashrc
-   ```
-
-**No service account keys needed!** Authentication happens automatically using Firebase anonymous auth + your Bittensor wallet signature.
-
-### Installation
-
-**Clone the Repository**:
 ```bash
-git clone https://github.com/Pranav-create/Leadpoet.git
-cd Leadpoet
+# LLM for lead ranking and validation
+export OPENROUTER_KEY="your_openrouter_key"          # Required for intent scoring
+
+# Email validation services (Optional - falls back to basic checks)
+export ZEROBOUNCE_API_KEY="your_zerobounce_key"      # Advanced email validation
+export HUNTER_API_KEY="your_hunter_key"              # Email verification
+
+# Google Search for validation (Optional)
+export GSE_API_KEY="your_google_api_key"             # For company verification
+export GSE_CX="your_search_engine_id"                # Custom search engine ID
 ```
 
-**Install the LeadPoet Package**:
+## 🛠️ Installation
+
 ```bash
-pip install .
+# Clone the repository
+git clone https://github.com/leadpoet/bittensor-subnet.git
+cd bittensor-subnet
+
+# Install dependencies
+pip install -e .
+
+# Verify installation
+python -c "import Leadpoet; print('Leadpoet installed successfully')"
 ```
 
-This installs dependencies listed in `setup.py`, including bittensor, requests, numpy, google-cloud-firestore, and others.
+## ⛏️ For Miners
 
-**Configure Your Wallet**:
-1. Create a wallet if you haven't: `btcli wallet create`
-2. Stake TAO as needed (see participation requirements below)
-3. Verify wallet setup: `btcli wallet overview --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>`
+### Getting Started
 
-## For Miners
-
-### Participation Requirements
-
-**Register**: Burn a variable amount of TAO to register on the subnet (netuid 401):
+1. **Register on subnet** (netuid 401):
 ```bash
-btcli subnet register --netuid 401 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
+btcli subnet register \
+    --netuid 401 \
+    --subtensor.network test \
+    --wallet.name miner \
+    --wallet.hotkey default
 ```
 
-### One-time: Publish Your Miner's Public Address
-
-Forward a TCP port on your router / VPS (e.g. `18091`) **once**, then run:
-
+2. **Publish your IP** (one-time setup):
 ```bash
 python scripts/post_ip.py \
     --netuid 401 \
     --subtensor_network test \
-    --wallet_name <your_wallet> \
-    --wallet_hotkey <your_hotkey> \
-    --external_ip <your_public_ip> \
-    --external_port <forwarded_port>
+    --wallet_name miner \
+    --wallet_hotkey default \
+    --external_ip YOUR_PUBLIC_IP \
+    --external_port 18091
 ```
 
-This writes the `(ip,port)` to the subnet metagraph so validators can reach your axon. Re-run it only if your IP or port changes.
-
-### Running a Miner
-
-Run your miner to generate prospects:
+3. **Run the miner**:
 ```bash
 python neurons/miner.py \
     --wallet_name miner \
     --wallet_hotkey default \
     --netuid 401 \
-    --subtensor_network test \
-    --use_open_source_lead_model
+    --subtensor_network test
 ```
 
-#### Behavior
+### How Miners Work
 
-- Continuously sources new leads
-- Monitors Firestore for broadcast API requests (polls every 1 second)
-- When API request received:
-  - Pauses sourcing
-  - Curates prospects from pool using LLM intent scoring
-  - Submits curated leads to Firestore for ALL validators to rank
-  - Resumes sourcing after submission
-- Uses Firecrawl for web scraping and OpenRouter for LLM classification
-- Batches multiple leads into single LLM prompts to reduce API costs
+1. **Continuous Sourcing**: Actively search for new B2B prospects
+2. **Smart Submission**: Send prospects to Supabase `prospect_queue`
+3. **Consensus Validation**: Prospects validated by 3+ validators
+4. **Accepted Leads**: Only consensus-approved leads enter the main database
 
-### Prospect Format
+### Reward System (100% Sourcing-Based)
 
-Prospects follow this JSON structure:
-```json
-{
-    "business": "A Dozen Cousins",
-    "owner_full_name": "Ibraheem Basir",
-    "first": "Ibraheem",
-    "last": "Basir",
-    "owner_email": "ib@adozencousins.com",
-    "linkedin": "https://www.linkedin.com/in/ibraheembasir/",
-    "website": "https://adozencousins.com/",
-    "industry": "Tech & AI",
-    "sub_industry": "",
-    "region": "US",
-    "source": "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth",
-    "miner_intent_score": 0.850
-}
-```
+Miners earn rewards purely based on the leads they source that get accepted through consensus:
+- If you source 60% of accepted leads in an epoch → you get 60% of emissions
+- Simple, transparent, and directly tied to value creation
+- Epoch duration: 72 minutes (360 blocks)
 
-### Miner Incentives
+## 🛡️ For Validators
 
-Miners are rewarded based on two mechanisms:
+### Getting Started
 
-**V2 Reward System** (Current):
-- **Sourcing Rewards (S)**: 45% of emissions are provided to miners who source the prospects which are chosen by the validators.
-- **Curation Rewards (C)**: 45% of emissions are provided to miners who curate the prospects which are chosen by the validators.
-- **Baseline (B)**: 10% of emissions distributed equally to all miners who sourced leads in the last epoch
-- Final weight: `W = 0.45 * S + 0.45 * C + 0.10 * B`
-
-**Best Practices**:
-- Maintain diverse sourcing to maximize S rewards
-- Ensure accurate contact data (emails, LinkedIn URLs)
-- Curate high-quality prospects that match client descriptions
-- Maintain high uptime to receive API requests
-
-## For Validators
-
-### Participation Requirements
-
-- **Stake**: Minimum 20 TAO:
+1. **Stake TAO** (minimum 20 TAO):
 ```bash
-btcli stake --amount 20 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
+btcli stake add \
+    --amount 20 \
+    --subtensor.network test \
+    --wallet.name validator \
+    --wallet.hotkey default
 ```
-- **Register**: Register on the subnet (netuid 401):
+
+2. **Register on subnet**:
 ```bash
-btcli subnet register --netuid 401 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
+btcli subnet register \
+    --netuid 401 \
+    --subtensor.network test \
+    --wallet.name validator \
+    --wallet.hotkey default
 ```
 
-### Running a Validator
-
-Run your validator to audit prospects:
+3. **Run the validator**:
 ```bash
 python neurons/validator.py \
     --wallet_name validator \
@@ -218,267 +153,143 @@ python neurons/validator.py \
     --subtensor_network test
 ```
 
-#### Behavior
+### Consensus Validation System
 
-- Continuously validates sourced leads from Firestore
-- Monitors Firestore for broadcast API requests (polls every 1 second)
-- When API request received:
-  - Pauses sourced lead processing
-  - Waits up to 180 seconds for miner submissions
-  - Ranks ALL miner leads using LLM scoring (2 rounds per lead)
-  - Publishes weights on-chain
-  - Submits ranking to Firestore with validator trust score
-  - Resumes sourced lead processing
-- Runs HTTP server for status queries (auto-detects available port)
+**How it works:**
+1. Validators pull prospects from the queue (first-come, first-served)
+2. Each prospect gets a 15-second window for validation
+3. Need 3 validators to participate, 2+ must agree for consensus
+4. Accepted leads → main database, Rejected leads → discarded
 
-### Validation Process
+**Eligibility for Rewards:**
+- Must participate in ≥10% of consensus decisions per epoch
+- Checked via secure Edge Function (cannot be bypassed)
+- If eligible, validator can set miner weights on-chain
 
-#### Sourced Lead Validation
+### Validation Checks
 
-- Checks:
-  - Format: Email regex (`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`), no duplicates
-  - Accuracy: No disposable domains, basic domain/website reachability
-  - Relevance: Matches industry/region filters
-- Uses `automated_checks.py` for comprehensive validation
-- Approved prospects enter the prospect pool
+Validators perform multi-stage validation:
+1. **Email validation**: Format, domain, disposable check
+2. **DNS/SPF/DMARC**: Email deliverability verification  
+3. **Company verification**: Website, LinkedIn, Google search
+4. **LLM validation**: AI-powered legitimacy scoring
 
-#### API Request Lead Ranking
+## 💰 Reward Distribution
 
-- Uses OpenRouter LLM to score each lead (0-0.5 range)
-- Two-round scoring with different models for robustness
-- Publishes weights based on V2 reward calculation
-- Submits ranking with validator trust score for consensus
+### Current System (Epoch-based)
 
-### Validator Incentives
+Every 72 minutes (1 epoch):
+1. **Validators check eligibility**: Via Edge Function (≥10% consensus participation)
+2. **Calculate weights**: Based on which miners sourced accepted leads
+3. **Set weights on-chain**: Proportional to leads sourced
+4. **TAO distribution**: Automatic based on weights
 
-Validators earn emissions for accurate and consistent ranking.
+### Security Features
 
-**Best Practices**:
-- Maintain high uptime to process API requests
-- Ensure OpenRouter API key has sufficient credits
-- Monitor logs for validation/ranking failures
-- Keep Firestore credentials valid
+- **Edge Function enforcement**: 10% rule checked server-side
+- **No local calculations**: Validators can't manipulate weights
+- **JWT-based auth**: Validators only have limited database access
+- **Consensus requirement**: No single validator can accept/reject leads
 
-## For Buyers (API Clients)
+## 📊 For API Clients (Buyers)
 
-### Participation Requirements
+### Accessing Leads
 
-**Stake**: Minimum 50 TAO
-```bash
-btcli stake --amount 50 --subtensor.network test --wallet.name <your_wallet> --wallet.hotkey <your_hotkey>
-```
-
-### Accessing Prospects
-
-Buyers request prospects via the CLI API:
 ```bash
 python Leadpoet/api/leadpoet_api.py \
-    --wallet_name owner \
+    --wallet_name buyer \
     --wallet_hotkey default \
     --netuid 401 \
     --subtensor_network test
 ```
 
-#### Interactive CLI
+**Interactive Flow:**
+1. Specify number of leads needed (1-100)
+2. Describe your ideal customer profile
+3. Receive consensus-validated, AI-ranked leads
 
-1. Input number of prospects (1–100)
-2. Describe your business & ideal customer
-3. Request is broadcast to ALL validators and miners via Firestore
-4. Multiple validators independently rank prospects
-5. Client calculates consensus ranking weighted by validator trust
-6. Receive top N consensus-ranked prospects
+### Lead Quality Guarantees
 
-#### Consensus Calculation
+- ✅ Validated by 3+ independent validators
+- ✅ Consensus required (2+ validators must agree)
+- ✅ Fresh data (sourced in real-time, not from stale databases)
+- ✅ AI-scored for relevance to your ICP
 
-For each lead, the final consensus score is:
+## 🏗️ Architecture
+
+### Data Flow
+
 ```
-S_lead = (S_1 × V_1) + (S_2 × V_2) + ... + (S_N × V_N)
-```
-Where:
-- `S_v` = score from validator v for that lead
-- `V_v` = trust value for validator v from metagraph
-- `N` = total number of validators who submitted rankings
-
-#### Example Output
-
-```json
-[
-    {
-        "business": "A Dozen Cousins",
-        "owner_full_name": "Ibraheem Basir",
-        "first": "Ibraheem",
-        "last": "Basir",
-        "owner_email": "ib@adozencousins.com",
-        "linkedin": "https://www.linkedin.com/in/ibraheembasir/",
-        "website": "https://adozencousins.com/",
-        "industry": "Tech & AI",
-        "sub_industry": "",
-        "region": "US",
-        "consensus_score": 0.92,
-        "num_validators_ranked": 2
-    }
-]
+Miner sources lead → Prospect Queue → 3+ Validators validate → 
+Consensus (2+ agree) → Lead Database → Available to Buyers
 ```
 
-## Technical Details
+### Database Structure (Supabase)
 
-### Architecture
+- **`prospect_queue`**: Incoming prospects from miners
+- **`validation_tracking`**: Individual validator assessments
+- **`consensus_results`**: Aggregated consensus decisions
+- **`leads`**: Final accepted leads with consensus scores
+- **`members`**: Registered miners and validators
 
-#### Broadcast API Flow
+### Security Model
 
-1. **API Client** → Writes request to Firestore `api_requests` collection
-2. **ALL Miners** → Poll Firestore, detect request, curate leads, write to `miner_submissions`
-3. **ALL Validators** → Poll Firestore, detect request, fetch miner submissions, rank leads
-4. **ALL Validators** → Publish weights on-chain, write rankings to `validator_rankings`
-5. **API Client** → Poll Firestore for validator rankings, calculate consensus, return top N
-
-#### Components
-
-- **Miners**: `neurons/miner.py` sources leads and curates for API requests
-- **Validators**: `neurons/validator.py` validates sourced leads and ranks API request leads
-- **API Client**: `Leadpoet/api/leadpoet_api.py` broadcasts requests and calculates consensus
-- **Consensus**: `Leadpoet/validator/consensus.py` implements weighted consensus algorithm
-- **Database**: Google Cloud Firestore for real-time broadcast coordination
-
-#### Firestore Collections
-
-- `api_requests`: Broadcast API requests from clients
-- `miner_submissions`: Curated leads from miners for specific requests
-- `validator_rankings`: Independent rankings from each validator
-- `prospects`: Validated sourced leads in the prospect pool
-- `validator_weights`: Historical weight publications
-
-### LLM Integration
-
-#### Miner Intent Scoring
-
-- Batches multiple leads into single prompt for efficiency
-- Returns JSON array with individual scores per lead
-- Reduces API calls from N to 1 (where N = number of leads)
-
-#### Validator Lead Ranking
-
-- Two-round scoring with different models
-- Primary: DeepSeek Chat (free tier)
-- Fallback: Mistral 7B Instruct
-- Handles rate limiting with fallback models
-
-### Open-Source Frameworks
-
-- **Prospect Generation**: `miner_models/get_leads.py` uses Firecrawl API for contact extraction
-- **LLM Classification**: Uses OpenRouter API for industry classification and intent scoring
-- **Validation**: `validator_models/automated_checks.py` verifies email existence and company websites
-- **Consensus**: `Leadpoet/validator/consensus.py` implements weighted consensus ranking
-
-## API Key Setup Reference
-
-### Complete Environment Variables
-
-```bash
-# ═══════════════════════════════════════════════════════════
-# REQUIRED FOR ALL NODES
-# ═══════════════════════════════════════════════════════════
-export FIREBASE_API_KEY="AIza..."
-export FIREBASE_PROJECT_ID="leadpoet-subnet"
-export FIREBASE_AUTH_DOMAIN="leadpoet-subnet.firebaseapp.com"
-
-# ═══════════════════════════════════════════════════════════
-# REQUIRED FOR MINERS
-# ═══════════════════════════════════════════════════════════
-export FIRECRAWL_API_KEY=your_firecrawl_api_key
-export OPENROUTER_KEY=your_openrouter_api_key
-
-# ═══════════════════════════════════════════════════════════
-# REQUIRED FOR VALIDATORS
-# ═══════════════════════════════════════════════════════════
-export OPENROUTER_KEY=your_openrouter_api_key
-
-# ═══════════════════════════════════════════════════════════
-# OPTIONAL (falls back to mock if not provided)
-# ═══════════════════════════════════════════════════════════
-# Email verification
-export HUNTER_API_KEY=your_hunter_api_key
-export ZEROBOUNCE_API_KEY=your_zerobounce_api_key
-
-# Google Custom Search for LLM validation checks
-export GSE_API_KEY=your_google_api_key
-export GSE_CX=your_google_cse_id
+```
+Miners:      Write to prospect_queue only
+Validators:  Read prospect_queue, Write validation_tracking
+Edge Func:   Full access (calculates weights server-side)
+Buyers:      Read leads only
 ```
 
-### Getting API Keys
-
-1. **Firebase Config** (REQUIRED):
-   - Contact LeadPoet team or check subnet documentation for public config values
-   - No service account keys needed
-
-2. **Firecrawl** (REQUIRED for miners):
-   - https://firecrawl.dev/
-   - Sign up → Get API key from dashboard
-
-3. **OpenRouter** (REQUIRED for miners & validators):
-   - https://openrouter.ai/
-   - Sign up → Get API key → Add credits for usage
-
-4. **Hunter.io** (REQUIRED for validators):
-   - https://hunter.io/
-   - Sign up → Get API key from dashboard
-   - Falls back to mock validation if not provided
-
-5. **ZeroBounce** (REQUIRED for validators):
-   - https://zerobounce.net/
-   - Sign up → Get API key from dashboard
-   - Falls back to mock validation if not provided
-
-6. **Google Custom Search** (REQUIRED for miners & validators):
-   - https://console.cloud.google.com
-   - Enable Custom Search API
-   - Create API key (`GSE_API_KEY`)
-   - Create Custom Search Engine at https://programmablesearchengine.google.com
-   - Get Search Engine ID (`GSE_CX`)
-   - Falls back to skipping search if not provided
-
-### Persistent Configuration
-
-Add to your shell configuration file for automatic loading:
-
-```bash
-# For bash users
-nano ~/.bashrc
-
-# For zsh users
-nano ~/.zshrc
-
-# Add all export statements, then reload:
-source ~/.bashrc  # or source ~/.zshrc
-```
-
-## Troubleshooting
+## 🔧 Troubleshooting
 
 ### Common Issues
 
-**"Firebase config not set"**:
-- Verify environment variables: `echo $FIREBASE_PROJECT_ID`
-- Contact LeadPoet team for correct Firebase config values
+**"No JWT token available"**
+- Validators need to wait for token generation on first run
+- Token auto-refreshes every hour
 
-**"429 Too Many Requests" from OpenRouter**:
-- Free tier models have strict rate limits (1-2 requests/minute)
-- Upgrade to paid plan or add credits
-- Batch scoring reduces API calls significantly
+**"Not eligible - less than 10% consensus"**
+- Validator needs to validate more prospects
+- Check participation with Edge Function logs
 
-**"No validator responses" in API client**:
-- Verify validators are running: check their terminal output
-- Ensure Firebase config is correct on all nodes
-- Check request_id in Firestore console for debugging
+**"Prospect already in queue"**
+- Duplicate detection is working (this is good!)
+- Miner should source new, unique leads
 
-**Validator "ConcurrencyError" with subtensor**:
-- This is normal - validators sync metagraph less frequently to avoid conflicts
-- No action needed - validator continues operating
+**Consensus not reached after 15 seconds**
+- Need more validators online
+- With only 2 validators: both must agree
+- With 1 validator: prospect gets reset to queue
 
-## Support
+## 📚 Key Concepts
 
-- Email: [hello@leadpoet.com](mailto:hello@leadpoet.com)
-- Website: https://leadpoet.com
+### Consensus Rules
+- **3 validators**: 2+ must agree (standard case)
+- **2 validators**: Both must agree (degraded mode)
+- **1 validator**: No consensus, prospect reset
+- **15-second window**: From first pull to consensus deadline
 
-## License
+### Epoch Timing
+- **Duration**: 72 minutes (360 blocks)
+- **Weight calculation**: Blocks 80-120 (testing) or 355-360 (production)
+- **Automatic cleanup**: Old validation data removed each epoch
 
-MIT License - see LICENSE for details.
+### Quality Metrics
+- **Consensus score**: How many validators agreed
+- **Intent score**: AI-based relevance scoring
+- **Email score**: Deliverability confidence
+
+## 📞 Support
+
+- **Discord**: [Join our community](https://discord.gg/leadpoet)
+- **Email**: hello@leadpoet.com
+- **Documentation**: [Full docs](https://docs.leadpoet.com)
+
+## 📄 License
+
+MIT License - See LICENSE file for details
+
+---
+
+**Leadpoet** - Decentralized B2B lead generation powered by Bittensor 🚀

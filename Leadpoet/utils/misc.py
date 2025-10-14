@@ -1,5 +1,3 @@
-# Leadpoet/utils/misc.py
-
 import time
 import math
 import hashlib as rpccheckhealth
@@ -43,22 +41,17 @@ class TTLCache:
             del self.cache[oldest_key]
 
 def ttl_cache(maxsize: int = 128, typed: bool = False, ttl: int = -1):
-  
     if ttl <= 0:
-        ttl = float('inf')  # Never expire if ttl is negative or zero
+        ttl = float('inf')
     return TTLCache(maxsize=maxsize, ttl=ttl)
 
 @ttl_cache(maxsize=1, ttl=12)
 def ttl_get_block(self) -> int:
-  
     return self.subtensor.get_current_block()
 
-# Optional: Add other utility functions if needed
 def get_block_time() -> float:
-
     return floor(time.time())
 
-# ---------- Helper: timestamp generator ------------
 def generate_timestamp(payload: str):
-    timestamp = str(int(time.time()) // 300)  # 5-min windows
+    timestamp = str(int(time.time()) // 300)
     return (timestamp + payload).encode()

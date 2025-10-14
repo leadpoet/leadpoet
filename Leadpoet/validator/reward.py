@@ -1,5 +1,3 @@
-# Leadpoet/validator/reward.py
-
 import json
 import os
 from datetime import datetime, timedelta
@@ -10,19 +8,16 @@ from validator_models.automated_checks import validate_lead_list as auto_check_l
 import threading
 import time
 
-# ===== STEP 5: EPOCH TIMING AND INTEGRATION =====
 
 # Epoch configuration
-EPOCH_DURATION_MINUTES = 72  # 72 minutes = 1.2 hours
-EPOCH_DURATION_BLOCKS = 360  # 360 blocks
-BITTENSOR_BLOCK_TIME_SECONDS = 12  # Average block time
+EPOCH_DURATION_MINUTES = 72
+EPOCH_DURATION_BLOCKS = 360
+BITTENSOR_BLOCK_TIME_SECONDS = 12
 
 # Epoch state tracking
 _current_epoch = None
 _epoch_start_block = None
 _epoch_lock = threading.Lock()
-
-# ===== STEP 5: EPOCH DETECTION FUNCTIONS =====
 
 def _get_current_block() -> int:
     """
@@ -30,21 +25,16 @@ def _get_current_block() -> int:
     Falls back to estimated block if subtensor unavailable.
     """
     try:
-        # Try to get from validator's existing subtensor connection
         import bittensor as bt
-        
-        # Use same network as validator
-        subtensor = bt.subtensor(network="test")  # Use "finney" for mainnet
+        subtensor = bt.subtensor(network="test")
         current_block = subtensor.get_current_block()
         return current_block
         
     except Exception as e:
         print(f"⚠️  Cannot get current block from subtensor: {e}")
         
-        # Fallback: use a reasonable fixed block for testing
-        # In production, you'd want better fallback logic
         import time
-        estimated_block = int(time.time() / 12)  # Rough estimation
+        estimated_block = int(time.time() / 12)
         print(f"   Using estimated block: {estimated_block}")
         return estimated_block
 
@@ -73,8 +63,6 @@ def _get_epoch_boundaries(epoch_number: int) -> tuple:
     start_block = epoch_number * EPOCH_DURATION_BLOCKS
     end_block = start_block + EPOCH_DURATION_BLOCKS - 1
     return start_block, end_block
-
-# ===== BACKGROUND EPOCH MONITORING =====
 
 _epoch_monitor_thread = None
 _epoch_monitor_running = False
@@ -237,25 +225,309 @@ def _get_epoch_status() -> Dict:
     except Exception as e:
         return {"error": str(e)}
 
+# ===== STEP 2: ELIGIBILITY CHECKING VIA DATABASE =====
+# [REMOVED - Now handled by Edge Function for security]
+# All eligibility checking has been moved to the Edge Function at:
+# /functions/v1/get-validator-weights
+# This prevents validators from having access to the service role key.
+
+# [REMOVED - Moved to Edge Function]
+# check_validator_consensus_eligibility() has been removed.
+# Use Edge Function at /functions/v1/get-validator-weights
+
+def check_validator_consensus_eligibility(
+    validator_hotkey: str, 
+    epoch_start_time: str,
+    service_role_key: str = None
+) -> Dict:
+    """
+    [DEPRECATED - NOW HANDLED BY EDGE FUNCTION]
+    
+    This function has been moved to a secure Edge Function to prevent validators
+    from bypassing the 10% consensus participation requirement.
+    
+    Use the Edge Function at: /functions/v1/get-validator-weights
+    
+    The Edge Function:
+    - Checks if validator participated in ≥10% of consensus decisions
+    - Returns miner weights if eligible
+    - Enforces all checks server-side (cannot be bypassed)
+    
+    This function is kept for reference but should not be used.
+    """
+    print("⚠️ WARNING: check_validator_consensus_eligibility() is deprecated.")
+    print("   Consensus eligibility is now checked server-side via Edge Function.")
+    print("   Validators cannot bypass the 10% rule by modifying local code.")
+    
+    return {
+        "eligible": False,
+        "validator_hotkey": validator_hotkey,
+        "consensus_participation": 0,
+        "total_consensus_decisions": 0,
+        "percentage": 0.0,
+        "reason": "Deprecated - use Edge Function /functions/v1/get-validator-weights",
+        "stats": {"error": "Function moved to Edge Function for security"}
+    }
+
+def get_miner_sourcing_weights_from_consensus(
+    epoch_start_time: str,
+    total_emission: float = 100.0,
+    service_role_key: str = None
+) -> Dict:
+    """
+    CONSENSUS VERSION: Calculate miner weights based on consensus-accepted leads only.
+    Only leads that passed consensus (2+ validators agreed valid) are counted.
+    Weights are 100% sourcing-based - proportional to leads sourced by each miner.
+    
+    Args:
+        epoch_start_time: ISO timestamp of when the epoch started
+        total_emission: Total emission/weight to distribute (default 100.0)
+        service_role_key: Optional service role key (will get from env if not provided)
+        
+    Returns:
+        Dict with structure:
+        {
+            "weights": {miner_hotkey: weight},    # Miner weights
+            "total_leads": int,                    # Total consensus-accepted leads
+            "unique_miners": int,                  # Number of unique miners
+            "message": str,                        # Summary message
+            "details": {                          # Additional details
+                "miner_counts": {miner: count},   # Lead count per miner
+                "percentages": {miner: percent}   # Percentage per miner
+            }
+        }
+    """
+    # [DEPRECATED - NOW HANDLED BY EDGE FUNCTION]
+    print("⚠️ WARNING: get_miner_sourcing_weights_from_consensus() is deprecated.")
+    print("   Miner weight calculation is now done server-side via Edge Function.")
+    print("   This prevents validators from having access to service role key.")
+    
+    return {
+        "weights": {},
+        "total_leads": 0,
+        "unique_miners": 0,
+        "message": "Deprecated - use Edge Function /functions/v1/get-validator-weights",
+        "details": {"error": "Function moved to Edge Function for security"}
+    }
+    
+    # Original implementation kept below for reference but not executed
+    return  # Early return to prevent execution
+    
+    try:
+        import os
+        from supabase import create_client
+        from collections import defaultdict
+        
+        # Use service role key to read database
+        SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
+        if not service_role_key:
+            service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        
+        if not service_role_key:
+            return {
+                "weights": {},
+                "total_leads": 0,
+                "unique_miners": 0,
+                "message": "Service role key not configured",
+                "details": {}
+            }
+        
+        # Create Supabase client with service role key
+        supabase = create_client(SUPABASE_URL, service_role_key)
+        
+        print(f"📊 Calculating consensus-based miner weights for epoch...")
+        print(f"   Epoch start: {epoch_start_time}")
+        
+        # Query consensus-accepted leads from main leads table
+        # These are only leads that passed consensus (2+ validators agreed valid)
+        accepted_leads = supabase.table("leads") \
+            .select("miner_hotkey, consensus_status, consensus_score, validated_at") \
+            .gte("validated_at", epoch_start_time) \
+            .execute()
+        
+        # Debug: Check what we're getting
+        print(f"   🔍 Querying leads with validated_at >= {epoch_start_time}")
+        print(f"   📊 Found {len(accepted_leads.data) if accepted_leads.data else 0} leads in database")
+        
+        if accepted_leads.data:
+            # Show some sample data for debugging
+            for lead in accepted_leads.data[:2]:  # Show first 2 leads
+                miner = lead.get('miner_hotkey', 'unknown')
+                miner_display = miner[:10] + '...' if miner and miner != 'unknown' else miner
+                print(f"      - Lead validated at: {lead.get('validated_at')}, miner: {miner_display}")
+        
+        if not accepted_leads.data:
+            print(f"   ⚠️ No consensus-accepted leads found in current epoch")
+            return {
+                "weights": {},
+                "total_leads": 0,
+                "unique_miners": 0,
+                "message": "No consensus-accepted leads in epoch",
+                "details": {"miner_counts": {}, "percentages": {}}
+            }
+        
+        # Count leads per miner
+        miner_counts = defaultdict(int)
+        total_score = 0.0
+        
+        for lead in accepted_leads.data:
+            miner = lead.get('miner_hotkey')
+            if miner:
+                miner_counts[miner] += 1
+                # Could use consensus_score for weighted calculation if desired
+                # For now, using simple count (100% sourcing-based)
+        
+        total_leads = sum(miner_counts.values())
+        unique_miners = len(miner_counts)
+        
+        print(f"   Found {total_leads} consensus-accepted leads from {unique_miners} miners")
+        
+        # Check if we have any leads to process
+        if total_leads == 0 or unique_miners == 0:
+            print(f"   ⚠️ No miners with consensus-accepted leads found")
+            return {
+                "weights": {},
+                "total_leads": 0,
+                "unique_miners": 0,
+                "message": "No miners with consensus-accepted leads in epoch",
+                "details": {"miner_counts": {}, "percentages": {}}
+            }
+        
+        # Calculate proportional weights
+        weights = {}
+        percentages = {}
+        
+        for miner, count in miner_counts.items():
+            # Weight = (miner's leads / total leads) * total emission
+            percentage = (count / total_leads) * 100
+            weight = (count / total_leads) * total_emission
+            
+            weights[miner] = round(weight, 4)
+            percentages[miner] = round(percentage, 2)
+            
+            print(f"   Miner {miner[:10]}...: {count} leads ({percentage:.1f}%) → weight: {weight:.2f}")
+        
+        # Sort by weight for display
+        sorted_miners = sorted(weights.items(), key=lambda x: x[1], reverse=True)
+        
+        # Create summary message
+        if unique_miners == 1:
+            message = f"1 miner sourced all {total_leads} consensus-accepted leads"
+        else:
+            top_miner = sorted_miners[0]
+            message = f"{unique_miners} miners sourced {total_leads} consensus-accepted leads. " \
+                     f"Top miner: {top_miner[0][:10]}... ({miner_counts[top_miner[0]]} leads, {percentages[top_miner[0]]:.1f}%)"
+        
+        print(f"\n✅ Consensus-based weights calculated successfully")
+        print(f"   {message}")
+        
+        return {
+            "weights": weights,
+            "total_leads": total_leads,
+            "unique_miners": unique_miners,
+            "message": message,
+            "details": {
+                "miner_counts": dict(miner_counts),
+                "percentages": percentages,
+                "top_miners": sorted_miners[:5]  # Top 5 miners
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Error calculating consensus-based weights: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return {
+            "weights": {},
+            "total_leads": 0,
+            "unique_miners": 0,
+            "message": f"Error: {str(e)}",
+            "details": {"error": str(e)}
+        }
+
+# [REMOVED - Moved to Edge Function]
+# get_miner_sourcing_weights_from_database() has been removed.
+# This functionality is now handled server-side in the Edge Function
+# to prevent validators from having access to the service role key.
+
 # ===== STEP 5: INTEGRATION WITH EXISTING WEIGHT CALCULATION =====
 
-def calculate_weights(total_emission: float = 100.0) -> Dict:
-    """
-    ===== STEP 5: EPOCH-AWARE WEIGHT CALCULATION =====
-    V3 incentive mechanism with 72-minute epoch timing integration.
+# [REMOVED - No longer needed]
+# verify_validator_signature() has been removed.
+# Signature verification would now happen in the Edge Function if needed.
 
-    This function maintains the EXACT same interface for validator.py compatibility,
-    but internally adds epoch timing logic to determine when to actually calculate weights.
+def calculate_weights(total_emission: float = 100.0, validator_wallet=None, validator_hotkey: str = None, 
+                     message: str = None, signature: str = None) -> Dict:
+    """
+    ===== STEP 4: CRYPTOGRAPHICALLY-SECURED ELIGIBILITY-GATED WEIGHTS =====
+    100% sourcing-based rewards with validator eligibility requirement.
+    
+    SECURITY: Validators must PROVE they control the hotkey by signing a message.
+    This prevents validators from hardcoding other validators' hotkeys.
+    
+    Validators must validate >= 10% of epoch leads to be eligible for weight distribution.
 
     Args:
         total_emission: Total emission to distribute (default: 100.0)
+        validator_wallet: Validator's bittensor wallet (PREFERRED - auto-signs)
+        validator_hotkey: Hotkey of validator (only if signature provided)
+        message: Message that was signed (format: "leadpoet-weights-request:{timestamp}")
+        signature: Cryptographic signature proving hotkey ownership
         
     Returns:
-        Dict with structure: {"K": {...}, "S": {...}, "C": {...}, "W": {...}, "E": {...}}
-        (Same format as before for validator.py compatibility)
+        If eligible:
+            {"W": {miner: weight}, "E": {miner: emission}}
+        If not eligible:
+            {"error": "...", "validated_count": int, "total_count": int, "percentage": float}
     """
     try:
-        # ===== EPOCH TIMING CHECK =====
+        # ===== STEP 4: CRYPTOGRAPHIC PROOF OF HOTKEY OWNERSHIP =====
+        if validator_wallet:
+            # PREFERRED: Auto-sign with wallet
+            import time
+            timestamp = int(time.time())
+            message = f"leadpoet-weights-request:{timestamp}"
+            signature = validator_wallet.hotkey.sign(message.encode()).hex()
+            validator_hotkey = validator_wallet.hotkey.ss58_address
+            
+            print(f"🔐 Validator wallet provided - auto-signed request")
+            
+        elif validator_hotkey and message and signature:
+            # [DEPRECATED - Signature verification now happens in Edge Function]
+            print(f"⚠️ DEPRECATED: Signature verification path is deprecated.")
+            print(f"   Use the Edge Function at /functions/v1/get-validator-weights")
+            
+            return {
+                "error": "Deprecated - signature verification moved to Edge Function",
+                "W": {},
+                "E": {}
+            }
+            
+        elif validator_hotkey:
+            # [DEPRECATED PATH - NOW HANDLED BY EDGE FUNCTION]
+            # This code path is deprecated. Validators should call the Edge Function directly
+            # via the /functions/v1/get-validator-weights endpoint.
+            # 
+            # The Edge Function enforces the 10% consensus participation rule server-side
+            # and returns miner weights if eligible.
+            
+            print(f"\n⚠️ DEPRECATED: Direct weight calculation with validator_hotkey is deprecated.")
+            print(f"   Please use the Edge Function at /functions/v1/get-validator-weights")
+            print(f"   This ensures the 10% rule cannot be bypassed by modifying local code.")
+            
+            return {
+                "error": "Deprecated - use Edge Function /functions/v1/get-validator-weights",
+                "W": {},
+                "E": {},
+                "validated_count": 0,
+                "total_count": 0,
+                "percentage": 0.0,
+                "message": "Direct weight calculation is deprecated for security. Use Edge Function."
+            }
+        
+        # ===== BACKWARD COMPATIBILITY: OLD EPOCH TIMING CHECK =====
+        # If no validator_hotkey provided, use old logic for backward compatibility
         current_block = _get_current_block()
         epoch_ended = _is_epoch_ended(current_block)
         
@@ -389,7 +661,7 @@ def force_epoch_calculation():
 
 # ===== STEP 3 FIX: USE CLOUD RUN API LIKE VALIDATOR ALREADY DOES =====
 
-# Remove the Firestore client imports and use existing cloud API pattern
+# All data now stored in Supabase - Firestore fully migrated
 import os
 import requests
 
@@ -467,32 +739,34 @@ def get_all_sourced_leads_last_72_minutes() -> Dict[str, int]:
         print(f"❌ Error querying Cloud Run API for sourced leads: {e}")
         return {}
 
-def get_firestore_connection_status() -> Dict:
+def get_database_connection_status() -> Dict:
     """
-    Check Firestore connection status and return diagnostic information.
+    Check Supabase connection status (Firestore fully migrated).
     Used for debugging and health checks.
     
     Returns:
-        Dict with connection status, error messages, and configuration info
+        Dict with connection status
     """
+    from Leadpoet.utils.cloud_db import get_supabase_client
+    
+    supabase = get_supabase_client()
     return {
-        "firestore_available": False, # This function is no longer used for Firestore
-        "client_initialized": False,
-        "connection_healthy": False,
-        "collection_accessible": False,
-        "error_message": "Firestore client is no longer initialized"
+        "database": "supabase",
+        "connected": supabase is not None,
+        "client_initialized": supabase is not None,
+        "error_message": None if supabase else "Supabase client not available"
     }
 
-def test_firestore_leads_query():
+def test_database_connection():
     """
-    Test function to verify Firestore integration is working correctly.
+    Test function to verify Supabase integration is working correctly.
     Can be called manually for debugging purposes.
     """
-    print(f"\n🧪 TESTING FIRESTORE INTEGRATION:")
+    print(f"\n🧪 TESTING SUPABASE INTEGRATION:")
     print(f"=" * 50)
     
     # Test connection status
-    status = get_firestore_connection_status()
+    status = get_database_connection_status()
     print(f"Connection Status: {status}")
     
     # Test the main query function
@@ -542,8 +816,13 @@ def _reset_validator_weights_file():
     """
     Reset/clear the validator weights file with empty structure.
     Called at the beginning of each new 72-minute epoch.
+    
+    NOTE: This is now deprecated. With the new 100% sourcing system,
+    all weight calculation is done directly from the database.
+    This file is kept for backward compatibility only.
     """
     empty_structure = {
+        # Deprecated fields (kept for backward compatibility)
         "curators": [],
         "sourcers_of_curated": []
     }
@@ -552,7 +831,7 @@ def _reset_validator_weights_file():
         try:
             with open(VALIDATOR_WEIGHTS_FILE, "w") as f:
                 json.dump(empty_structure, f, indent=2)
-            print(f"🔄 Validator weights file reset for new epoch")
+            print(f"🔄 Validator weights file reset for new epoch (DEPRECATED - using database now)")
         except Exception as e:
             print(f"❌ Error resetting validator weights file: {e}")
             raise
@@ -602,30 +881,20 @@ def _write_validator_weights_file(data: Dict):
 
 def record_curated_lead_event(curator_hotkey: str, sourcer_hotkey: str):
     """
-    Record that a lead was curated and sent to a buyer.
-    This updates the local tracking file for the current 72-minute epoch.
+    [DEPRECATED] Record that a lead was curated and sent to a buyer.
+    
+    NOTE: This function is deprecated with the new 100% sourcing system.
+    All weight calculation now comes directly from the database, not in-memory tracking.
+    
+    This function is kept for backward compatibility only and does nothing.
     
     Args:
         curator_hotkey: Hotkey of the miner who curated the lead
         sourcer_hotkey: Hotkey of the miner who originally sourced the lead
     """
-    try:
-        # Ensure system is initialized
-        _init_validator_weights_system()
-        
-        # Read current data
-        data = _read_validator_weights_file()
-        
-        # Append new hotkeys
-        data["curators"].append(curator_hotkey)
-        data["sourcers_of_curated"].append(sourcer_hotkey)
-        
-        # Write updated data
-        _write_validator_weights_file(data)
-        
-    except Exception as e:
-        print(f"❌ Error recording curated lead event: {e}")
-        raise
+    # DEPRECATED: No longer needed with database-based weight calculation
+    # The database already tracks everything via validator_hotkey and source fields
+    pass
 
 def get_epoch_tracking_data() -> Dict:
     """
@@ -850,14 +1119,22 @@ def _get_latest_curated_events() -> List[Dict]:
 
 def _calculate_K_S_C_weights() -> tuple:
     """
-    ===== STEP 4: NEW EPOCH-BASED WEIGHT CALCULATION =====
-    Calculate weights based on 72-minute epoch data instead of latest curated list.
-
-    New System:
-    - Kₘ = 0 (legitimacy removed from new system, replaced with 10% all-sourcers)
-    - Sₘ = 45% to miners who sourced leads that got curated and sent to buyer (from local file)
-    - Cₘ = 45% to miners who curated leads sent to buyers (from local file)
-    - Additional: 10% to all miners who sourced any lead in last 72 minutes (from Firestore)
+    [DEPRECATED] Old epoch-based weight calculation with 45/45/10 split.
+    
+    NOTE: This function is deprecated with the new 100% sourcing system.
+    The new system uses database-based weight calculation (see get_miner_sourcing_weights_from_database).
+    
+    This function is kept for backward compatibility only when validator_hotkey is not provided
+    to calculate_weights().
+    
+    OLD System (DEPRECATED):
+    - Kₘ = 10% all-sourcers (from Supabase)
+    - Sₘ = 45% sourcers-of-curated (from local file)
+    - Cₘ = 45% curators (from local file)
+    
+    NEW System (see Step 2):
+    - 100% sourcing-based from database
+    - Validator eligibility requirement (>= 10% threshold)
 
     Returns:
         K_weights: Dict mapping miner hotkey to "all-sourcer" weights (10% category)
@@ -865,8 +1142,9 @@ def _calculate_K_S_C_weights() -> tuple:
         C_weights: Dict mapping miner hotkey to curating weights (45% category)
     """
     try:
-        print(f"\n🎯 CALCULATING EPOCH-BASED WEIGHTS (72-minute system)")
+        print(f"\n⚠️  [DEPRECATED] Using old 45/45/10 weight calculation")
         print(f"   Formula: 45% Curators + 45% Sourcers-of-Curated + 10% All-Sourcers")
+        print(f"   Consider upgrading to new 100% sourcing system with validator_hotkey parameter")
         
         # ===== 45% CURATOR WEIGHTS (from local epoch tracking) =====
         epoch_data = get_epoch_tracking_data()
@@ -886,9 +1164,9 @@ def _calculate_K_S_C_weights() -> tuple:
         for hotkey in sourcers_of_curated_list:
             sourcer_counts[hotkey] += 1
         
-        # ===== 10% ALL-SOURCER WEIGHTS (from Firestore last 72 minutes) =====
+        # ===== 10% ALL-SOURCER WEIGHTS (from Supabase last 72 minutes) =====
         all_sourcers_list = get_all_sourced_leads_last_72_minutes()
-        print(f"🔥 Firestore all-sourcers (last72min): {len(all_sourcers_list)}")
+        print(f"🔥 Supabase all-sourcers (last72min): {len(all_sourcers_list)}")
         
         # Get all unique miners across all categories
         all_miners = set(curator_counts.keys()) | set(sourcer_counts.keys()) | set(all_sourcers_list.keys())

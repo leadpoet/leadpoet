@@ -7,7 +7,7 @@ from Leadpoet.validator import reward as _reward
 import time
 import sys
 from Leadpoet.validator.reward import record_event as _rec
-from Leadpoet.utils.cloud_db import get_cloud_leads       # NEW
+from Leadpoet.utils.cloud_db import get_cloud_leads
 from Leadpoet.base.utils import safe_json_load
 
 DATA_DIR = "data"
@@ -15,9 +15,9 @@ LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
 CURATED_LEADS_FILE = os.path.join(DATA_DIR, "curated_leads.json")
 _leads_lock = threading.Lock()
 _curated_lock = threading.Lock()
-EMISSION_INTERVAL = 12      # seconds
+EMISSION_INTERVAL = 12
 state_lock = threading.Lock()
-scores_file  = os.path.join(DATA_DIR, "scores.json")   # persistent Σ's
+scores_file  = os.path.join(DATA_DIR, "scores.json")
 
 def initialize_pool():
     """Initialize the leads pool file if it doesn't exist."""
@@ -38,12 +38,11 @@ def add_to_pool(prospects):
             leads = safe_json_load(LEADS_FILE)
         existing_emails = {lead.get("owner_email", "").lower() for lead in leads}
 
-        # ‼️  NEVER store the curator field inside leads.json
         sanitised = []
         for p in prospects:
-            p = dict(p)                       # shallow-copy
+            p = dict(p)
             p.pop("curated_by", None)
-            p.pop("conversion_score", None)   # drop legacy field
+            p.pop("conversion_score", None)
             sanitised.append(p)
 
         new_prospects = [p for p in sanitised
@@ -52,7 +51,6 @@ def add_to_pool(prospects):
         with open(LEADS_FILE, "w") as f:
             json.dump(leads, f, indent=2)
 
-    # Note: Rewards are now recorded when leads are delivered to buyers, not when added to pool
 
 def get_leads_from_pool(num_leads, industry=None, region=None, wallet=None):
     """Return up-to-date leads from Firestore with local JSON as fallback."""
@@ -65,7 +63,6 @@ def get_leads_from_pool(num_leads, industry=None, region=None, wallet=None):
     else:
         leads = []
 
-    # Fallback to local JSON if cloud empty / errored
     if not leads:
         with _leads_lock:
             if not os.path.exists(LEADS_FILE):
@@ -73,7 +70,6 @@ def get_leads_from_pool(num_leads, industry=None, region=None, wallet=None):
 
             leads = safe_json_load(LEADS_FILE)
 
-    # ---------------- filtering & sampling stays unchanged ----------------
     filtered_leads = leads
     if industry:
         filtered_leads = [l for l in filtered_leads
@@ -96,7 +92,6 @@ def save_curated_leads(curated_leads):
     with _curated_lock:
         existing_curated = safe_json_load(CURATED_LEADS_FILE)
         
-        # Add new curated leads
         existing_curated.extend(curated_leads)
         
         with open(CURATED_LEADS_FILE, "w") as f:

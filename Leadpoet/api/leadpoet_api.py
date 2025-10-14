@@ -222,13 +222,19 @@ class LeadPoetAPI:
 
         # Broadcast to ALL validators and miners via Firestore
         from Leadpoet.utils.cloud_db import broadcast_api_request
-        success = broadcast_api_request(
+        returned_request_id = broadcast_api_request(
             wallet=self.wallet,
-            request_id=request_id,
             num_leads=num_leads,
             business_desc=business_desc,
             client_id=self.wallet.hotkey.ss58_address
         )
+        
+        # Use the request_id returned by the function
+        if returned_request_id:
+            request_id = returned_request_id
+            success = True
+        else:
+            success = False
 
         if not success:
             bt.logging.error("❌ Failed to broadcast API request to Firestore!")

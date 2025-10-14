@@ -1,7 +1,3 @@
-# IN PROGRESS FOR LEADPOET
-# The MIT License (MIT)
-# Copyright © 2025 Yuma Rao
-# Leadpoet
 # Copyright © 2025 Leadpoet
 
 import re
@@ -18,7 +14,6 @@ def read_requirements(path):
         requirements = f.read().splitlines()
         processed_requirements = []
         for req in requirements:
-            # Handle git or VCS links
             if req.startswith("git+") or "@" in req:
                 pkg_name = re.search(r"(#egg=)([\w\-_]+)", req)
                 if pkg_name:
@@ -44,17 +39,17 @@ with codecs.open(os.path.join(here, "Leadpoet/__init__.py"), encoding="utf-8") a
 
 requirements = [
     "bittensor>=6.9.3", 
-    "requests>=2.31.0",  # For API calls in get_leads.py and automated_checks.py
+    "requests>=2.31.0",
     "numpy>=1.24.0",  
-    "dnspython>=2.6.1",  # For DNS lookups in automated_checks.py
+    "dnspython>=2.6.1",
     "aiohttp>=3.9.5",  
     "asyncio>=3.4.3",  
     "pyyaml>=6.0.1",  
     "argparse>=1.4.0",  
-    "pickle-mixin>=1.0.2",  # For caching in automated_checks.py
-    "pygod>=1.1.0",  # For collusion detection in automated_checks.py
-    "torch>=2.0.0",  # Required by pygod for deep learning models
-    "torch_geometric>=2.4.0",  # Required by pygod for graph-based models
+    "pickle-mixin>=1.0.2",
+    "pygod>=1.1.0",
+    "torch>=2.0.0",
+    "torch_geometric>=2.4.0",
     "python-whois>=0.9.5",
     "aiodns>=3.5.0",
     "httpx>=0.28.1",
@@ -80,9 +75,9 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "leadpoet=neurons.miner:main",  # entry for miners
+            "leadpoet=neurons.miner:main",
             "leadpoet-validate=neurons.validator:main",  
-            "leadpoet-api=Leadpoet.api.leadpoet_api:main"  
+            "leadpoet-api=Leadpoet.api.leadpoet_api:main"
         ]
     },
     classifiers=[

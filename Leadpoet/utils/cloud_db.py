@@ -1,18 +1,253 @@
 """
-Centralised Firestore helper for the LeadPoet subnet.
-Miners = read-only, Validators = write-enabled (wallet-signed).
+Database helper for the LeadPoet subnet with Supabase integration.
+Miners = write-only to prospect_queue, Validators = read prospect_queue, write to leads.
 """
 import os, json, time, base64, requests, bittensor as bt
-from typing import List, Dict
+from typing import List, Dict, Optional
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from Leadpoet.utils.misc import generate_timestamp
 
-# Load environment variables from .env file
 load_dotenv()
 
 API_URL   = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
-SUBNET_ID = 401          # NetUID of your subnet
-NETWORK   = "test"       # Bittensor network (finney-test)
+SUBNET_ID = 401
+NETWORK   = "test"
+
+SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
+SUPABASE_JWT = os.getenv("SUPABASE_JWT")
+
+# Supabase anon key for API routing (public, safe to commit)
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDcwMDUsImV4cCI6MjA2MDQyMzAwNX0.5E0WjAthYDXaCWY6qjzXm2k20EhadWfigak9hleKZk8"
+
+class CustomSupabaseClient:
+    """
+    Custom Supabase client that uses direct HTTP requests to Postgrest API.
+    This ensures our custom JWT reaches the database for RLS policy evaluation.
+    """
+    def __init__(self, url: str, jwt: str, anon_key: str):
+        self.url = url
+        self.jwt = jwt
+        self.anon_key = anon_key
+        self.postgrest_url = f"{url}/rest/v1"
+        
+    def table(self, table_name: str):
+        """Return a table query builder."""
+        return CustomTableQuery(self.postgrest_url, table_name, self.jwt, self.anon_key)
+    
+    def rpc(self, function_name: str, params: dict = None):
+        """Call a PostgreSQL function via PostgREST RPC."""
+        import requests
+        url = f"{self.postgrest_url}/rpc/{function_name}"
+        headers = {
+            "Authorization": f"Bearer {self.jwt}",
+            "apikey": self.anon_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        try:
+            response = requests.post(url, json=params or {}, headers=headers)
+            response.raise_for_status()
+            
+            # Create a response object similar to what supabase-py returns
+            class RPCResponse:
+                def __init__(self, data):
+                    self.data = data
+                    
+                def execute(self):
+                    return self
+            
+            return RPCResponse(response.json() if response.text else [])
+        except requests.exceptions.HTTPError as e:
+            bt.logging.error(f"RPC call failed: {e.response.text if e.response else str(e)}")
+            # Return empty response on error
+            class RPCResponse:
+                def __init__(self):
+                    self.data = []
+                    
+                def execute(self):
+                    return self
+            
+            return RPCResponse()
+
+class CustomTableQuery:
+    """Query builder for table operations using direct HTTP requests."""
+    def __init__(self, postgrest_url: str, table_name: str, jwt: str, anon_key: str):
+        self.postgrest_url = postgrest_url
+        self.table_name = table_name
+        self.jwt = jwt
+        self.anon_key = anon_key
+        self._select_cols = "*"
+        self._filters = []
+        self._order = None
+        self._limit_val = None
+        
+    def select(self, cols: str = "*"):
+        """Set columns to select."""
+        self._select_cols = cols
+        return self
+    
+    def eq(self, column: str, value):
+        """Add equality filter."""
+        self._filters.append(f"{column}=eq.{value}")
+        return self
+    
+    def in_(self, column: str, values: list):
+        """Add IN filter."""
+        vals_str = ",".join(str(v) for v in values)
+        self._filters.append(f"{column}=in.({vals_str})")
+        return self
+    
+    def gte(self, column: str, value):
+        """Add greater than or equal filter."""
+        self._filters.append(f"{column}=gte.{value}")
+        return self
+    
+    def lt(self, column: str, value):
+        """Add less than filter."""
+        self._filters.append(f"{column}=lt.{value}")
+        return self
+    
+    def not_(self):
+        """Add NOT modifier - returns a NotFilter wrapper."""
+        return NotFilter(self)
+    
+    def order(self, column: str, desc: bool = False):
+        """Set order."""
+        self._order = f"{column}.{'desc' if desc else 'asc'}"
+        return self
+    
+    def limit(self, n: int):
+        """Set limit."""
+        self._limit_val = n
+        return self
+    
+    def insert(self, data):
+        """Execute INSERT with custom JWT."""
+        url = f"{self.postgrest_url}/{self.table_name}"
+        headers = {
+            "Authorization": f"Bearer {self.jwt}",
+            "apikey": self.anon_key,
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        response = requests.post(url, json=data, headers=headers, timeout=30)
+        
+        return CustomResponse(response)
+    
+    def update(self, data):
+        """Execute UPDATE with custom JWT."""
+        url = f"{self.postgrest_url}/{self.table_name}"
+        if self._filters:
+            url += "?" + "&".join(self._filters)
+        
+        headers = {
+            "Authorization": f"Bearer {self.jwt}",
+            "apikey": self.anon_key,
+            "Content-Type": "application/json",
+            "Prefer": "return=representation"
+        }
+        
+        response = requests.patch(url, json=data, headers=headers, timeout=30)
+        
+        return CustomResponse(response)
+    
+    def execute(self):
+        """Execute SELECT query."""
+        # Build query parameters
+        params = {"select": self._select_cols}
+        
+        # Add filters (they're already in the right format, e.g. "status=eq.pending")
+        if self._filters:
+            for filter_str in self._filters:
+                # Parse filter string "column=op.value" into param
+                parts = filter_str.split("=", 1)
+                if len(parts) == 2:
+                    params[parts[0]] = parts[1]
+        
+        if self._order:
+            params["order"] = self._order
+        if self._limit_val:
+            params["limit"] = str(self._limit_val)
+        
+        url = f"{self.postgrest_url}/{self.table_name}"
+        
+        headers = {
+            "Authorization": f"Bearer {self.jwt}",
+            "apikey": self.anon_key,
+            "Content-Type": "application/json"
+        }
+        
+        # Use params instead of building URL manually
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        
+        return CustomResponse(response)
+
+class CustomResponse:
+    """Response wrapper to match supabase-py API."""
+    def __init__(self, response: requests.Response):
+        self.response = response
+        if response.status_code >= 400:
+            # Parse error response
+            try:
+                error_data = response.json()
+                raise Exception(error_data)
+            except:
+                response.raise_for_status()
+        
+        # Parse success response
+        try:
+            self.data = response.json() if response.text else []
+        except:
+            self.data = []
+
+class NotFilter:
+    """Wrapper for NOT filters in PostgREST."""
+    def __init__(self, parent_query):
+        self.parent_query = parent_query
+    
+    def contains(self, column: str, values: list):
+        """Add NOT contains filter (for array columns)."""
+        # PostgREST syntax for NOT array contains
+        vals_str = ",".join(f'"{v}"' if isinstance(v, str) else str(v) for v in values)
+        self.parent_query._filters.append(f"{column}=not.cs.{{{vals_str}}}")
+        return self.parent_query
+
+def get_supabase_client():
+    """
+    Get custom Supabase client with JWT-based RLS support.
+    Uses direct HTTP requests to ensure JWT reaches database.
+    
+    Returns:
+        CustomSupabaseClient instance or None if not configured
+    """
+    try:
+        jwt = os.getenv("SUPABASE_JWT")
+        if not jwt:
+            bt.logging.warning("No SUPABASE_JWT found - Supabase client not available")
+            return None
+        
+        # Decode JWT to log role (minimal logging)
+        try:
+            import jwt as pyjwt
+            decoded = pyjwt.decode(jwt, options={"verify_signature": False})
+            role = decoded.get('app_role', 'unknown')
+            bt.logging.debug(f"Supabase client created - role: {role}")
+        except Exception:
+            pass
+        
+        # Create custom client that uses direct HTTP requests
+        client = CustomSupabaseClient(SUPABASE_URL, jwt, SUPABASE_ANON_KEY)
+        
+        bt.logging.debug(f"✅ Custom Supabase client created with direct HTTP + JWT")
+        return client
+        
+    except Exception as e:
+        bt.logging.error(f"Error creating Supabase client: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 class _Verifier:
     """Lightweight on-chain permission checks."""
@@ -87,60 +322,492 @@ def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
 # ───────────────────────────── Queued prospects ─────────────────────────────
 def push_prospects_to_cloud(wallet: bt.wallet, prospects: List[Dict]) -> bool:
     """
-    Miners call this to enqueue prospects for validation.
+    Miners call this to enqueue prospects for validation in Supabase prospect_queue.
     """
     if not prospects:
         return True
     if not _VERIFY.is_miner(wallet.hotkey.ss58_address):
         raise PermissionError("Hotkey not registered as miner on subnet")
-
-    ts      = str(int(time.time()) // 300)
-    payload = (ts + json.dumps(prospects, sort_keys=True)).encode()
-    sig     = base64.b64encode(wallet.hotkey.sign(payload)).decode()
-
-    body = {"wallet": wallet.hotkey.ss58_address,
-            "signature": sig,
-            "prospects": prospects}
-    r = requests.post(f"{API_URL}/prospects", json=body, timeout=30)
-    r.raise_for_status()
-    bt.logging.info(f"✅ Pushed {len(prospects)} prospects to cloud queue")
-    print(f"✅ Cloud-queue ACK: {len(prospects)} prospect(s)")
-    return True
+    
+    try:
+        # Get Supabase client with miner's JWT token
+        supabase = get_supabase_client()
+        if not supabase:
+            bt.logging.error("❌ Supabase client not available")
+            return False
+        
+        # Insert each prospect into the queue
+        records = []
+        for prospect in prospects:
+            records.append({
+                "miner_hotkey": wallet.hotkey.ss58_address,
+                "prospect": prospect,
+                "status": "pending"
+            })
+        
+        # Minimal logging
+        bt.logging.debug(f"Pushing {len(records)} prospects to Supabase queue")
+        
+        # Batch insert (CustomResponse already executes, no .execute() needed)
+        result = supabase.table("prospect_queue").insert(records)
+        
+        bt.logging.info(f"✅ Pushed {len(prospects)} prospects to Supabase queue")
+        print(f"✅ Supabase queue ACK: {len(prospects)} prospect(s)")
+        return True
+        
+    except Exception as e:
+        error_str = str(e)
+        
+        # Check if this is a duplicate lead error (409 Conflict or explicit message)
+        if "409" in error_str or "Conflict" in error_str or "Duplicate lead" in error_str or "already exists" in error_str:
+            # Try to extract email from error message or from prospects
+            duplicate_emails = []
+            
+            # First try to extract from error message
+            if "Email " in error_str and " already exists" in error_str:
+                try:
+                    email_start = error_str.find("Email ") + 6
+                    email_end = error_str.find(" already exists")
+                    duplicate_email = error_str[email_start:email_end] if email_start > 6 and email_end > email_start else None
+                    if duplicate_email:
+                        duplicate_emails.append(duplicate_email)
+                except:
+                    pass
+            
+            # If no email found in error, get from prospects
+            if not duplicate_emails:
+                for prospect in prospects:
+                    email = prospect.get('owner_email', prospect.get('email', ''))
+                    if email:
+                        duplicate_emails.append(email)
+            
+            # Display clear duplicate message
+            if duplicate_emails:
+                bt.logging.warning(f"⚠️ Duplicate lead(s) rejected: {', '.join(duplicate_emails)}")
+                print(f"\n{'='*60}")
+                print(f"⚠️  DUPLICATE LEAD DETECTED")
+                print(f"{'='*60}")
+                print(f"The following lead(s) have already been validated:")
+                for email in duplicate_emails:
+                    print(f"  • {email}")
+                print(f"\nPlease submit unique leads that haven't been validated yet.")
+                print(f"{'='*60}\n")
+            else:
+                bt.logging.warning(f"⚠️ Duplicate lead rejected (409 Conflict)")
+                print(f"\n⚠️  DUPLICATE LEAD - This lead has already been validated.")
+                print(f"   Please submit unique leads.\n")
+            return False
+        
+        # Check for RLS policy violations
+        elif "row-level security policy" in error_str.lower() or "policy" in error_str.lower():
+            bt.logging.error(f"❌ Access denied: Row-level security policy violation")
+            bt.logging.error(f"   Your JWT role may not have permission to insert prospects")
+            return False
+        
+        # Generic error
+        else:
+            bt.logging.error(f"❌ Failed to push prospects to Supabase: {e}")
+            return False
 
 
 def fetch_prospects_from_cloud(wallet: bt.wallet, limit: int = 100) -> List[Dict]:
     """
-    Validators call this to atomically fetch + delete a batch of prospects.
-    Returns an empty list when nothing is available or the endpoint is missing.
+    CONSENSUS VERSION: First-come-first-served prospect fetching.
+    Validators fetch prospects they haven't pulled yet, where pull_count < 3.
+    Each prospect can be pulled by up to 3 validators for consensus.
+    Returns a list of prospect data with their IDs for tracking.
     """
     if not _VERIFY.is_validator(wallet.hotkey.ss58_address):
         bt.logging.warning(
-            f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered "
-            "validator – pulling prospects anyway (DEV mode)"
+            f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered validator"
         )
-
-    payload = generate_timestamp(str(limit))
-    sig     = base64.b64encode(wallet.hotkey.sign(payload)).decode()
-
-    body = {
-        "wallet":    wallet.hotkey.ss58_address,
-        "signature": sig,
-        "limit":     limit,
-    }
-
-    try:
-        r = requests.post(f"{API_URL}/prospects/fetch", json=body, timeout=30)
-        if r.status_code == 404:                     # ← graceful fallback
-            bt.logging.error(
-                "Cloud API route /prospects/fetch not found -- did you "
-                "deploy the latest server?  Returning empty prospect list."
-            )
-            return []
-        r.raise_for_status()
-        return r.json()
-    except requests.exceptions.RequestException as e:
-        bt.logging.error(f"fetch_prospects_from_cloud: {e}")
         return []
+    
+    try:
+        # Get Supabase client with validator's JWT token
+        supabase = get_supabase_client()
+        if not supabase:
+            bt.logging.warning("⚠️ Supabase client not available")
+            return []
+        
+        validator_hotkey = wallet.hotkey.ss58_address
+        
+        # Use the SQL function for atomic pull operation to prevent race conditions
+        # This ensures true first-come-first-served behavior
+        result = supabase.rpc('pull_prospects_for_validator', {
+            'p_validator_hotkey': validator_hotkey,
+            'p_limit': limit
+        }).execute()
+        
+        if not result.data:
+            # Fallback to Python-based approach if SQL function doesn't exist
+            bt.logging.debug("SQL function not available, using Python-based approach")
+            
+            # Fetch prospects where:
+            # 1. Status is pending
+            # 2. Pull count is less than 3
+            # 3. This validator hasn't pulled it yet
+            # 4. Consensus status is pending
+            result = supabase.table("prospect_queue") \
+                .select("*") \
+                .eq("status", "pending") \
+                .lt("pull_count", 3) \
+                .eq("consensus_status", "pending") \
+                .order("created_at", desc=False) \
+                .limit(limit * 2).execute()  # Get more to filter in Python
+            
+            if not result.data:
+                return []
+            
+            # Filter out prospects this validator has already pulled
+            available_prospects = []
+            for row in result.data:
+                validators_pulled = row.get('validators_pulled', [])
+                if validator_hotkey not in validators_pulled:
+                    available_prospects.append(row)
+                    if len(available_prospects) >= limit:
+                        break
+            
+            if not available_prospects:
+                return []
+            
+            # Update each prospect to mark this validator has pulled it
+            prospects_with_ids = []
+            for prospect_row in available_prospects:
+                prospect_id = prospect_row['id']
+                current_validators = prospect_row.get('validators_pulled', [])
+                current_pull_count = prospect_row.get('pull_count', 0)
+                
+                # Update the prospect to add this validator
+                update_result = supabase.table("prospect_queue") \
+                    .update({
+                        "validators_pulled": current_validators + [validator_hotkey],
+                        "pull_count": current_pull_count + 1
+                    }) \
+                    .eq("id", prospect_id) \
+                    .execute()
+                
+                if update_result.data:
+                    # Return prospect data with ID for tracking
+                    # Include miner_hotkey from the prospect_queue row
+                    prospect_data = prospect_row.get('prospect', {})
+                    if prospect_data and isinstance(prospect_data, dict):
+                        prospect_data = prospect_data.copy()
+                        # Add miner_hotkey if available
+                        if prospect_row.get('miner_hotkey'):
+                            prospect_data['miner_hotkey'] = prospect_row['miner_hotkey']
+                    prospects_with_ids.append({
+                        'prospect_id': prospect_id,
+                        'data': prospect_data
+                    })
+            
+            bt.logging.info(f"✅ Pulled {len(prospects_with_ids)} prospects (first-come-first-served)")
+            return prospects_with_ids
+        
+        else:
+            # SQL function succeeded, format the response
+            prospects_with_ids = []
+            for row in result.data:
+                # Include miner_hotkey in the prospect data
+                prospect_data = row.get('prospect', {})
+                if prospect_data and isinstance(prospect_data, dict):
+                    prospect_data = prospect_data.copy()
+                    # Add miner_hotkey if available
+                    if row.get('miner_hotkey'):
+                        prospect_data['miner_hotkey'] = row['miner_hotkey']
+                prospects_with_ids.append({
+                    'prospect_id': row.get('prospect_id', row.get('id')),
+                    'data': prospect_data
+                })
+            
+            bt.logging.info(f"✅ Atomically pulled {len(prospects_with_ids)} prospects (first-come-first-served)")
+            return prospects_with_ids
+        
+    except Exception as e:
+        bt.logging.error(f"❌ Failed to fetch prospects from Supabase: {e}")
+        return []
+
+# ---- Consensus Validation Functions ---------------------------------
+def submit_validation_assessment(
+    wallet: bt.wallet, 
+    prospect_id: str,
+    lead_id: str,
+    lead_data: Dict,
+    score: float,
+    is_valid: bool
+) -> bool:
+    """
+    Submit validator's assessment to the validation tracking system.
+    This is called after a validator has evaluated a lead.
+    ALL validations go to validation_tracking table (both accepted and rejected).
+    
+    Args:
+        wallet: Validator's wallet
+        prospect_id: UUID of the prospect from prospect_queue
+        lead_id: UUID generated for this lead
+        lead_data: The full lead data dictionary
+        score: Validation score (0.0 to 1.0)
+        is_valid: Boolean indicating if validator considers lead valid
+    
+    Returns:
+        bool: True if submission successful, False otherwise
+    """
+    try:
+        # Verify this is a validator
+        if not _VERIFY.is_validator(wallet.hotkey.ss58_address):
+            bt.logging.warning(f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered validator")
+            return False
+        
+        # Get Supabase client
+        supabase = get_supabase_client()
+        if not supabase:
+            bt.logging.error("Supabase client not available")
+            return False
+        
+        # Get current epoch number
+        try:
+            from Leadpoet.validator.reward import _calculate_epoch_number, _get_current_block
+            current_block = _get_current_block()  # Function takes no arguments
+            epoch_number = _calculate_epoch_number(current_block)
+        except Exception as e:
+            bt.logging.warning(f"Could not get epoch number: {e}, using 0")
+            epoch_number = 0
+        
+        # Prepare validation data
+        validation_data = {
+            "lead_id": lead_id,
+            "prospect_id": prospect_id,
+            "validator_hotkey": wallet.hotkey.ss58_address,
+            "score": round(float(score), 2),  # Ensure it's a float with 2 decimal places
+            "is_valid": bool(is_valid),
+            "epoch_number": epoch_number
+        }
+        
+        # Debug: Log what we're trying to insert
+        bt.logging.info(f"🔍 DEBUG: Attempting to insert validation data:")
+        bt.logging.info(f"   - validator_hotkey: {wallet.hotkey.ss58_address}")
+        bt.logging.info(f"   - prospect_id: {prospect_id}")
+        bt.logging.info(f"   - lead_id: {lead_id}")
+        bt.logging.info(f"   - score: {validation_data['score']}")
+        bt.logging.info(f"   - is_valid: {validation_data['is_valid']}")
+        bt.logging.info(f"   - epoch_number: {validation_data['epoch_number']}")
+        
+        # Debug: Check what JWT we're using
+        if hasattr(supabase, 'jwt'):
+            import jwt as pyjwt
+            try:
+                decoded = pyjwt.decode(supabase.jwt, options={"verify_signature": False})
+                bt.logging.info(f"🔑 JWT Claims:")
+                bt.logging.info(f"   - role: {decoded.get('role', 'MISSING')}")
+                bt.logging.info(f"   - app_role: {decoded.get('app_role', 'MISSING')}")
+                bt.logging.info(f"   - hotkey: {decoded.get('hotkey', 'MISSING')}")
+                bt.logging.info(f"   - iss: {decoded.get('iss', 'MISSING')}")
+                bt.logging.info(f"   - aud: {decoded.get('aud', 'MISSING')}")
+            except Exception as e:
+                bt.logging.error(f"Failed to decode JWT: {e}")
+        
+        # Debug: Log the exact request being made
+        bt.logging.info(f"📤 Making INSERT request to: {supabase.postgrest_url}/validation_tracking")
+        
+        # Submit to validation_tracking table
+        try:
+            result = supabase.table("validation_tracking").insert([validation_data])
+            bt.logging.info(f"✅ INSERT response received")
+        except Exception as insert_error:
+            bt.logging.error(f"❌ INSERT failed with error: {insert_error}")
+            bt.logging.error(f"   Error type: {type(insert_error)}")
+            if hasattr(insert_error, 'response'):
+                bt.logging.error(f"   Response status: {insert_error.response.status_code}")
+                bt.logging.error(f"   Response body: {insert_error.response.text}")
+            raise
+        
+        # Check if insert was successful (status 201 or data present)
+        if result.response.status_code == 201 or result.data:
+            bt.logging.info(f"✅ Submitted validation for lead {lead_id[:8]}... (score: {score:.2f}, valid: {is_valid})")
+            
+            # Check if consensus has been reached
+            consensus_reached = check_and_process_consensus(
+                prospect_id=prospect_id,
+                lead_id=lead_id,
+                lead_data=lead_data,
+                wallet=wallet
+            )
+            
+            if consensus_reached:
+                bt.logging.info(f"🎯 Consensus reached for lead {lead_id[:8]}...")
+            
+            return True
+        else:
+            bt.logging.error(f"Failed to insert validation assessment - Status: {result.response.status_code}")
+            return False
+            
+    except Exception as e:
+        bt.logging.error(f"❌ Failed to submit validation assessment: {e}")
+        import traceback
+        bt.logging.debug(traceback.format_exc())
+        return False
+
+def check_and_process_consensus(
+    prospect_id: str, 
+    lead_id: str, 
+    lead_data: Dict,
+    wallet: bt.wallet = None
+) -> bool:
+    """
+    Check if consensus has been reached for a lead and process accordingly.
+    IMPORTANT: 
+    - All validations go to validation_tracking table
+    - Only ACCEPTED leads (2/3 valid) go to the main leads table
+    - Rejected leads stay only in validation_tracking
+    
+    Args:
+        prospect_id: UUID of the prospect from prospect_queue
+        lead_id: UUID of the lead being validated
+        lead_data: The full lead data to insert if accepted
+        wallet: Optional validator wallet for logging
+    
+    Returns:
+        bool: True if consensus was reached (3 validations), False otherwise
+    """
+    try:
+        # Get Supabase client with service role for reading validation_tracking
+        import os
+        from supabase import create_client
+        
+        SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
+        ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MjgzMjk0MzgsImV4cCI6MjA0MzkwNTQzOH0.2DhIHC_3XrLD6lxBQJV7nfKEGhXtoJZfMCXogTGEJXs"
+        service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        
+        if not service_role_key:
+            bt.logging.error("Service role key not available for consensus checking")
+            return False
+            
+        # Use service role client to read validation_tracking
+        service_supabase = create_client(SUPABASE_URL, service_role_key)
+        
+        # Get all validations for this PROSPECT (not lead_id, since each validator generates different lead_id)
+        validations = service_supabase.table("validation_tracking") \
+            .select("*") \
+            .eq("prospect_id", prospect_id) \
+            .execute()
+        
+        if not validations.data:
+            bt.logging.debug(f"No validations found for lead {lead_id[:8]}...")
+            return False
+        
+        validation_count = len(validations.data)
+        bt.logging.debug(f"Lead {lead_id[:8]}... has {validation_count}/3 validations")
+        
+        # Check if we have all 3 validations
+        if validation_count >= 3:
+            # Count valid and invalid votes
+            valid_count = sum(1 for v in validations.data if v['is_valid'])
+            invalid_count = validation_count - valid_count
+            
+            # Calculate average score
+            avg_score = sum(v['score'] for v in validations.data) / validation_count
+            
+            # Get list of validators who participated
+            validators = [v['validator_hotkey'] for v in validations.data]
+            
+            bt.logging.info(f"📊 Consensus check for lead {lead_id[:8]}...")
+            bt.logging.info(f"   Valid votes: {valid_count}/3")
+            bt.logging.info(f"   Invalid votes: {invalid_count}/3")
+            bt.logging.info(f"   Average score: {avg_score:.2f}")
+            
+            # Determine consensus decision
+            if valid_count >= 2:  # ACCEPTED - 2 or more validators said VALID
+                bt.logging.info(f"✅ Lead {lead_id[:8]}... ACCEPTED by consensus ({valid_count}/3 valid)")
+                
+                # Prepare lead data for insertion into main leads table
+                lead_data_for_insert = lead_data.copy()
+                
+                # Map owner_email to email (required field)
+                if 'owner_email' in lead_data_for_insert and 'email' not in lead_data_for_insert:
+                    lead_data_for_insert['email'] = lead_data_for_insert['owner_email']
+                
+                # Add consensus metadata
+                lead_data_for_insert['lead_id'] = lead_id
+                lead_data_for_insert['prospect_id'] = prospect_id
+                lead_data_for_insert['consensus_score'] = round(avg_score, 2)
+                lead_data_for_insert['validator_count'] = validation_count
+                lead_data_for_insert['consensus_validators'] = validators
+                lead_data_for_insert['consensus_status'] = 'accepted'
+                lead_data_for_insert['validated_at'] = datetime.now(timezone.utc).isoformat()
+                
+                # Insert into MAIN leads table using SERVICE ROLE (only service role has access)
+                try:
+                    # Need to use service role client for leads table access
+                    import os
+                    from supabase import create_client
+                    
+                    SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
+                    service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+                    
+                    if service_role_key:
+                        service_supabase = create_client(SUPABASE_URL, service_role_key)
+                        leads_result = service_supabase.table("leads").insert([lead_data_for_insert]).execute()
+                    else:
+                        bt.logging.error("Service role key not available for leads table insert")
+                        leads_result = None
+                    
+                    if leads_result and leads_result.data:
+                        bt.logging.info(f"✅ Lead {lead_id[:8]}... added to main leads database")
+                        bt.logging.info(f"   Email: {lead_data_for_insert.get('email', 'unknown')}")
+                        bt.logging.info(f"   Business: {lead_data_for_insert.get('business', 'unknown')}")
+                        bt.logging.info(f"   Consensus: {valid_count}/3 validators approved")
+                    else:
+                        bt.logging.error(f"Failed to insert accepted lead into leads table")
+                except Exception as e:
+                    bt.logging.error(f"Error inserting lead into main database: {e}")
+                
+                # Update prospect_queue status to accepted
+                try:
+                    queue_update = service_supabase.table("prospect_queue") \
+                        .update({
+                            "consensus_status": "accepted",
+                            "consensus_timestamp": datetime.now(timezone.utc).isoformat()
+                        }) \
+                        .eq("id", prospect_id) \
+                        .execute()
+                    
+                    if queue_update.data:
+                        bt.logging.debug(f"Updated prospect_queue status to accepted")
+                except Exception as e:
+                    bt.logging.error(f"Error updating prospect_queue status: {e}")
+                
+            else:  # REJECTED - 2 or more validators said INVALID
+                bt.logging.info(f"❌ Lead {lead_id[:8]}... REJECTED by consensus ({invalid_count}/3 invalid)")
+                
+                # DO NOT insert into main leads table
+                # Only update prospect_queue status to rejected
+                try:
+                    queue_update = service_supabase.table("prospect_queue") \
+                        .update({
+                            "consensus_status": "rejected",
+                            "consensus_timestamp": datetime.now(timezone.utc).isoformat()
+                        }) \
+                        .eq("id", prospect_id) \
+                        .execute()
+                    
+                    if queue_update.data:
+                        bt.logging.debug(f"Updated prospect_queue status to rejected")
+                except Exception as e:
+                    bt.logging.error(f"Error updating prospect_queue status: {e}")
+            
+            # Consensus was reached (whether accepted or rejected)
+            return True
+            
+        else:
+            # Not enough validations yet
+            bt.logging.debug(f"Waiting for more validations ({validation_count}/3)")
+            return False
+            
+    except Exception as e:
+        bt.logging.error(f"❌ Failed to check consensus: {e}")
+        import traceback
+        bt.logging.debug(traceback.format_exc())
+        return False
 
 # ---- Curations -------------------------------------------------------
 def push_curation_request(payload: dict) -> str:
@@ -214,34 +881,33 @@ def push_validator_weights(wallet: bt.wallet, uid: int, weights: dict):
 
 # ──────────────────── BROADCAST API REQUESTS ─────────────────────────────
 
-def broadcast_api_request(wallet: bt.wallet, request_id: str, num_leads: int, business_desc: str, client_id: str = None) -> bool:
+def broadcast_api_request(wallet: bt.wallet, num_leads: int, business_desc: str, client_id: str = None) -> str:
     """
-    Broadcast an API request to Firestore for ALL validators and miners to process.
+    Broadcast an API request to Supabase for ALL validators and miners to process.
 
     Args:
         wallet: Client's wallet
-        request_id: Unique request ID
         num_leads: Number of leads requested
         business_desc: Business description
         client_id: Optional client identifier
 
     Returns:
-        bool: True if broadcast successful, False otherwise
+        str: request_id if successful, None otherwise
     """
     try:
         from datetime import datetime
-        from google.cloud import firestore
+        import uuid
 
-        if not _has_firestore_credentials():
-            bt.logging.warning("Firestore credentials not available, cannot broadcast request")
-            return False
+        supabase = get_supabase_client()
+        if not supabase:
+            bt.logging.error("Supabase client not available")
+            return None
 
-        db = firestore.Client()
+        # Generate unique request ID
+        request_id = str(uuid.uuid4())
 
-        # Create broadcast request document
-        doc_ref = db.collection("api_requests").document(request_id)
-
-        doc_ref.set({
+        # Insert to Supabase api_requests table
+        data = {
             "request_id": request_id,
             "client_hotkey": wallet.hotkey.ss58_address,
             "client_id": client_id or "unknown",
@@ -250,21 +916,21 @@ def broadcast_api_request(wallet: bt.wallet, request_id: str, num_leads: int, bu
             "status": "pending",
             "created_at": datetime.utcnow().isoformat() + "Z",
             "updated_at": datetime.utcnow().isoformat() + "Z",
-        })
+        }
+        
+        supabase.table("api_requests").insert(data)
 
-        bt.logging.info(f"📡 Broadcast API request {request_id[:8]}... to Firestore")
-        return True
+        bt.logging.info(f"📡 Broadcast API request {request_id[:8]}... to Supabase")
+        return request_id
 
     except Exception as e:
         bt.logging.error(f"Failed to broadcast API request: {e}")
-        import traceback
-        bt.logging.error(traceback.format_exc())
-        return False
+        return None
 
 
 def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List[Dict]:
     """
-    Fetch pending broadcast API requests for this validator/miner from Firestore.
+    Fetch pending broadcast API requests from Supabase.
     Returns list of pending requests that need processing.
 
     Args:
@@ -272,87 +938,55 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
         role: "validator" or "miner" - determines which requests to fetch
     """
     try:
-        from google.cloud import firestore
-        import warnings
-
-        # Suppress Firestore positional argument warnings
-        warnings.filterwarnings("ignore", message=".*positional arguments.*")
-
-        # Check if Google Cloud credentials exist
-        if not _has_firestore_credentials():
-            # Silently return empty list if no credentials (development mode)
+        supabase = get_supabase_client()
+        if not supabase:
             return []
 
-        db = firestore.Client()
+        # Fetch pending requests
+        result = supabase.table("api_requests") \
+            .select("*") \
+            .eq("status", "pending") \
+            .order("created_at", desc=False) \
+            .limit(10) \
+            .execute()
 
-        # BOTH validators and miners should ONLY fetch "pending" requests
-        # Local tracking (processed_requests set) prevents re-processing
-        query = db.collection("api_requests").where("status", "==", "pending").limit(10)
-
-        docs = query.stream()
-        requests_list = []
-
-        for doc in docs:
-            data = doc.to_dict()
-            data["request_id"] = doc.id  # Ensure request_id is set
-            requests_list.append(data)
+        requests_list = result.data if result.data else []
 
         # Only log when requests are found
         if requests_list:
-            print(f"\n🔔 [{role.upper()}] Found {len(requests_list)} NEW broadcast request(s)!")
-            for req in requests_list:
-                print(f"   📨 Request {req['request_id'][:8]}... - {req.get('business_desc', '')[:30]}")
+            bt.logging.info(f"🔔 [{role.upper()}] Found {len(requests_list)} NEW broadcast request(s)!")
 
         return requests_list
 
     except Exception as e:
-        print(f"❌ fetch_broadcast_requests ({role}) FAILED: {e}")
-        import traceback
-        print(f"Traceback: {traceback.format_exc()}")
+        bt.logging.error(f"fetch_broadcast_requests ({role}) failed: {e}")
         return []
 
 
 def mark_broadcast_processing(wallet: bt.wallet, request_id: str) -> bool:
     """
     Mark a broadcast request as being processed to prevent duplicates.
-    Uses Firestore transaction for atomic update.
+    Uses conditional UPDATE for atomic operation.
     Only ONE miner will successfully mark it.
     """
     try:
-        from google.cloud import firestore
-
-        if not _has_firestore_credentials():
+        supabase = get_supabase_client()
+        if not supabase:
             return False
 
-        db = firestore.Client()
-
-        doc_ref = db.collection("api_requests").document(request_id)
-
-        # Use a transaction for atomic read-modify-write
-        transaction = db.transaction()
-
-        @firestore.transactional
-        def update_in_transaction(transaction, doc_ref):
-            snapshot = doc_ref.get(transaction=transaction)
-
-            if not snapshot.exists:
-                return False
-
-            data = snapshot.to_dict()
-            current_status = data.get("status")
-
-            # Only allow processing if status is "pending"
-            if current_status != "pending":
-                return False
-
-            # Atomic update: only one miner wins
-            transaction.update(doc_ref, {
+        # Try to update ONLY if status is still "pending" (atomic)
+        # This prevents race conditions - only one miner succeeds
+        result = supabase.table("api_requests") \
+            .eq("request_id", request_id) \
+            .eq("status", "pending") \
+            .update({
                 "status": "processing",
                 "processing_by": wallet.hotkey.ss58_address,
+                "updated_at": datetime.now(timezone.utc).isoformat()
             })
-            return True
 
-        success = update_in_transaction(transaction, doc_ref)
+        # If result.data is empty, another miner already claimed it
+        success = result.data and len(result.data) > 0
 
         if success:
             bt.logging.info(f"✅ Marked request {request_id[:8]}... as processing")
@@ -368,25 +1002,24 @@ def mark_broadcast_processing(wallet: bt.wallet, request_id: str) -> bool:
 
 def get_broadcast_status(request_id: str) -> Dict:
     """
-    Get the status of a broadcast API request from Firestore.
+    Get the status of a broadcast API request from Supabase.
     Used by validators and clients to check request status.
     """
     try:
-        from google.cloud import firestore
+        supabase = get_supabase_client()
+        if not supabase:
+            return {"status": "error", "leads": [], "error": "Supabase client not available"}
 
-        if not _has_firestore_credentials():
-            return {"status": "error", "leads": [], "error": "Firestore credentials not available"}
+        # Fetch request by ID
+        result = supabase.table("api_requests") \
+            .select("*") \
+            .eq("request_id", request_id) \
+            .execute()
 
-        db = firestore.Client()
-
-        doc_ref = db.collection("api_requests").document(request_id)
-        doc = doc_ref.get()
-
-        if not doc.exists:
+        if not result.data or len(result.data) == 0:
             return {"status": "not_found", "leads": [], "request_id": request_id}
 
-        data = doc.to_dict()
-        return data
+        return result.data[0]
 
     except Exception as e:
         bt.logging.error(f"Failed to get status for request {request_id[:8]}...: {e}")
@@ -394,7 +1027,7 @@ def get_broadcast_status(request_id: str) -> Dict:
 
 def push_validator_ranking(wallet: bt.wallet, request_id: str, ranked_leads: List[Dict], validator_trust: float) -> bool:
     """
-    Submit validator's ranking for a broadcast API request directly to Firestore.
+    Submit validator's ranking for a broadcast API request to Supabase.
 
     Args:
         wallet: Validator's wallet
@@ -405,9 +1038,6 @@ def push_validator_ranking(wallet: bt.wallet, request_id: str, ranked_leads: Lis
     Returns:
         bool: Success status
     """
-    from datetime import datetime
-    from google.cloud import firestore
-
     # Get validator UID from metagraph
     try:
         mg = _VERIFY._get_fresh_metagraph()
@@ -416,26 +1046,23 @@ def push_validator_ranking(wallet: bt.wallet, request_id: str, ranked_leads: Lis
         validator_uid = -1  # Unknown UID
 
     try:
-        if not _has_firestore_credentials():
-            bt.logging.warning("Firestore credentials not available, cannot push ranking")
+        supabase = get_supabase_client()
+        if not supabase:
+            bt.logging.warning("Supabase client not available, cannot push ranking")
             return False
 
-        db = firestore.Client()
-
-        # Document ID: {request_id}_{validator_hotkey}
-        doc_id = f"{request_id}_{wallet.hotkey.ss58_address}"
-        doc_ref = db.collection("validator_rankings").document(doc_id)
-
-        # Write ranking to Firestore
-        doc_ref.set({
+        # Insert/upsert ranking to Supabase
+        data = {
             "request_id": request_id,
             "validator_hotkey": wallet.hotkey.ss58_address,
             "validator_uid": validator_uid,
             "validator_trust": validator_trust,
             "ranked_leads": ranked_leads,
             "num_leads_ranked": len(ranked_leads),
-            "submitted_at": datetime.utcnow().isoformat() + "Z",
-        })
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        supabase.table("validator_rankings").insert(data)
 
         bt.logging.info(f"📊 Submitted ranking for request {request_id[:8]}... ({len(ranked_leads)} leads)")
         return True
@@ -447,7 +1074,7 @@ def push_validator_ranking(wallet: bt.wallet, request_id: str, ranked_leads: Lis
 
 def fetch_validator_rankings(request_id: str, timeout_sec: int = 5) -> List[Dict]:
     """
-    Fetch all validator rankings for a broadcast request from Firestore.
+    Fetch all validator rankings for a broadcast request from Supabase.
 
     Args:
         request_id: Broadcast request ID
@@ -457,26 +1084,17 @@ def fetch_validator_rankings(request_id: str, timeout_sec: int = 5) -> List[Dict
         List of validator ranking submissions
     """
     try:
-        from google.cloud import firestore
-        import warnings
-
-        # Suppress warnings
-        warnings.filterwarnings("ignore", message=".*positional arguments.*")
-
-        if not _has_firestore_credentials():
+        supabase = get_supabase_client()
+        if not supabase:
             return []
 
-        db = firestore.Client()
-
         # Query all validator rankings for this request
-        query = db.collection("validator_rankings").where("request_id", "==", request_id)
+        result = supabase.table("validator_rankings") \
+            .select("*") \
+            .eq("request_id", request_id) \
+            .execute()
 
-        docs = query.stream()
-        rankings = []
-
-        for doc in docs:
-            data = doc.to_dict()
-            rankings.append(data)
+        rankings = result.data if result.data else []
 
         if rankings:
             bt.logging.debug(f"📊 Fetched {len(rankings)} validator ranking(s) for request {request_id[:8]}...")
@@ -579,7 +1197,7 @@ def log_consensus_metrics(
 
 def push_miner_curated_leads(wallet: bt.wallet, request_id: str, leads: List[Dict]) -> bool:
     """
-    Push miner's curated leads to Firestore for validators to pick up.
+    Push miner's curated leads to Supabase for validators to pick up.
 
     Args:
         wallet: Miner's wallet
@@ -590,28 +1208,23 @@ def push_miner_curated_leads(wallet: bt.wallet, request_id: str, leads: List[Dic
         bool: Success status
     """
     try:
-        from google.cloud import firestore
-        from datetime import datetime
-
-        if not _has_firestore_credentials():
-            bt.logging.warning("Firestore credentials not available, cannot push miner leads")
+        supabase = get_supabase_client()
+        if not supabase:
+            bt.logging.warning("Supabase client not available, cannot push miner leads")
             return False
 
-        db = firestore.Client()
-
-        # Document ID: {request_id}_{miner_hotkey}
-        doc_id = f"{request_id}_{wallet.hotkey.ss58_address}"
-        doc_ref = db.collection("miner_submissions").document(doc_id)
-
-        doc_ref.set({
+        # Insert to Supabase
+        data = {
             "request_id": request_id,
             "miner_hotkey": wallet.hotkey.ss58_address,
             "leads": leads,
             "num_leads": len(leads),
-            "submitted_at": datetime.utcnow().isoformat() + "Z",
-        })
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        supabase.table("miner_submissions").insert(data)
 
-        bt.logging.info(f"📤 Pushed {len(leads)} curated lead(s) to Firestore for request {request_id[:8]}...")
+        bt.logging.info(f"📤 Pushed {len(leads)} curated lead(s) to Supabase for request {request_id[:8]}...")
         return True
 
     except Exception as e:
@@ -621,7 +1234,7 @@ def push_miner_curated_leads(wallet: bt.wallet, request_id: str, leads: List[Dic
 
 def fetch_miner_leads_for_request(request_id: str) -> List[Dict]:
     """
-    Fetch all miner submissions for a broadcast request.
+    Fetch all miner submissions for a broadcast request from Supabase.
 
     Args:
         request_id: Broadcast request ID
@@ -630,29 +1243,67 @@ def fetch_miner_leads_for_request(request_id: str) -> List[Dict]:
         List of miner submission dicts
     """
     try:
-        from google.cloud import firestore
-        import warnings
-
-        # Suppress warnings
-        warnings.filterwarnings("ignore", message=".*positional arguments.*")
-
-        if not _has_firestore_credentials():
+        supabase = get_supabase_client()
+        if not supabase:
             return []
 
-        db = firestore.Client()
-
         # Query all miner submissions for this request
-        query = db.collection("miner_submissions").where("request_id", "==", request_id)
+        result = supabase.table("miner_submissions") \
+            .select("*") \
+            .eq("request_id", request_id) \
+            .execute()
 
-        docs = query.stream()
-        submissions = []
-
-        for doc in docs:
-            data = doc.to_dict()
-            submissions.append(data)
-
-        return submissions
+        return result.data if result.data else []
 
     except Exception as e:
         bt.logging.debug(f"Failed to fetch miner leads: {e}")
         return []
+
+
+# ───────────────────────────── Metagraph Sync ─────────────────────────────
+def sync_metagraph_to_supabase(metagraph, netuid: int) -> bool:
+    """
+    Sync the current metagraph to Supabase for JWT verification.
+    This allows the Edge Function to verify hotkeys without direct RPC access.
+    
+    CRITICAL: Uses service role key (not JWT) to avoid chicken-and-egg problem.
+    Should be called by validators BEFORE requesting JWT.
+    """
+    try:
+        from supabase import create_client
+        
+        # CRITICAL: Use service role key directly (not JWT)
+        # This must work BEFORE the validator has a JWT token
+        service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not service_role_key:
+            bt.logging.error("❌ SUPABASE_SERVICE_ROLE_KEY not found in environment")
+            return False
+        
+        supabase = create_client(SUPABASE_URL, service_role_key)
+        
+        # Prepare records for all neurons in the metagraph
+        records = []
+        for uid in range(len(metagraph.hotkeys)):
+            records.append({
+                'netuid': netuid,
+                'uid': uid,
+                'hotkey': metagraph.hotkeys[uid],
+                'validator_permit': bool(metagraph.validator_permit[uid].item()),
+                'active': bool(metagraph.active[uid].item()),  # CRITICAL: Check if actively validating
+            })
+        
+        bt.logging.info(f"📊 Syncing {len(records)} neurons to metagraph cache...")
+        
+        # Upsert all records (insert or update if exists)
+        # Note: This uses service_role client (real supabase-py), so .execute() IS needed
+        for record in records:
+            supabase.table("metagraph_cache").upsert(record, on_conflict='netuid,hotkey').execute()
+        
+        bt.logging.info(f"✅ Synced {len(records)} neurons to metagraph cache")
+        return True
+        
+    except Exception as e:
+        bt.logging.error(f"❌ Failed to sync metagraph to Supabase: {e}")
+        import traceback
+        bt.logging.error(traceback.format_exc())
+        return False

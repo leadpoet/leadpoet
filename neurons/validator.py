@@ -1,11 +1,12 @@
 import re
 import time
 import random
-import requests, textwrap              # ← new deps
+import requests, textwrap
 import numpy as np
 import bittensor as bt
 import os
 import argparse
+import json
 from datetime import datetime, timedelta
 from Leadpoet.base.validator import BaseValidatorNeuron
 from Leadpoet.protocol import LeadRequest
@@ -17,36 +18,36 @@ import json
 from Leadpoet.base.utils import queue as lead_queue
 from Leadpoet.base.utils import pool as lead_pool
 import asyncio
-from typing import List, Dict
+from typing import List, Dict, Optional
 from aiohttp import web
 from Leadpoet.utils.cloud_db import (
     save_leads_to_cloud,
     fetch_prospects_from_cloud,
     fetch_curation_requests,
     push_curation_result,
-    push_miner_curation_request,     # ← NEW
-    fetch_miner_curation_result,     # ← NEW
+    push_miner_curation_request,
+    fetch_miner_curation_result,
     push_validator_weights,
-    push_validator_ranking,  # ← NEW
-    fetch_validator_rankings,  # ← NEW
-    mark_consensus_complete,  # ← NEW
-    log_consensus_metrics  # ← NEW: Subtask 3
+    push_validator_ranking,
+    fetch_validator_rankings,
+    mark_consensus_complete,
+    log_consensus_metrics
 )
+from Leadpoet.utils.token_manager import TokenManager
+from supabase import create_client, Client
 import uuid
 import grpc
-import socket  # ← ADD THIS
-from google.cloud import firestore
+import socket
 from datetime import datetime, timezone
 from math import isclose
 from pathlib import Path
 from json.decoder import JSONDecodeError
 
-# ─────────── LLM re-scoring helpers ────────────────────────────────
 AVAILABLE_MODELS = [
     "openai/o3-mini:online",                    
     "openai/gpt-4o-mini:online",                 
-    "google/gemini-2.5-flash:online",            
-    "anthropic/claude-3.5-sonnet:online",
+    "google/gemini-2.5-flash:online",
+    "openai/gpt-4o:online",            
 ]
 
 FALLBACK_MODEL = "openai/gpt-4o:online"   
@@ -54,10 +55,7 @@ FALLBACK_MODEL = "openai/gpt-4o:online"
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
 def _llm_score_lead(lead: dict, description: str, model: str) -> float:
-    """
-    Return a 0-0.5 score telling how well this lead fits the buyer
-    description.  Falls back to a tiny keyword heuristic on failure.
-    """
+    """Return a 0-0.5 score for how well this lead fits the buyer description."""
     def _heuristic() -> float:
         d  = description.lower()
         txt = (lead.get("Business","") + " " + lead.get("Industry","")).lower()
@@ -74,7 +72,6 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
             "⚠️ Do not go outside the 0.0–0.5 range."
         )
 
-# Accept either camel-case or lower-case field names coming from the miner
     prompt_user = (
         f"BUYER:\n{description}\n\n"
         f"LEAD:\n"
@@ -86,24 +83,19 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
 
 
 
-    # ─── debug: show what the model is judging ─────────────────────
     print("\n🛈  VALIDATOR-LLM INPUT ↓")
     print(textwrap.shorten(prompt_user, width=250, placeholder=" …"))
 
     def _extract(json_plus_reason: str) -> float:
         """Return score from first {...} block; raise if not parsable."""
         txt = json_plus_reason.strip()
-
-        # Handle empty responses
         if not txt:
-            print("🔍 DEBUG: Model returned empty response")
             raise ValueError("Empty response from model")
-
+        
         if txt.startswith("```"):
             txt = txt.strip("`").lstrip("json").strip()
         start, end = txt.find("{"), txt.find("}")
         if start == -1 or end == -1:
-            print(f"🔍 DEBUG: Raw response that failed to parse: '{txt}'")
             raise ValueError("No JSON object found")
         payload = txt[start:end + 1]
         score = float(json.loads(payload).get("score", 0))
@@ -124,25 +116,23 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
         r.raise_for_status()
         return _extract(r.json()["choices"][0]["message"]["content"])
 
-    # 1️⃣ Try primary model
     try:
         return _try(model)
     except Exception as e:
         print(f"⚠️  Primary model failed ({model}): {e}")
         print(f"🔄 Trying fallback model: {FALLBACK_MODEL}")
 
-    # 2️⃣ Try single fallback model
     try:
-        time.sleep(1)  # Small delay before fallback
+        time.sleep(1)
         return _try(FALLBACK_MODEL)
     except Exception as e:
         print(f"⚠️  Fallback model failed: {e}")
         print("🛈  VALIDATOR-LLM OUTPUT ↓")
         print("<< no JSON response – all models failed >>")
-        return None  # Signal total failure
+        return None
 
 def _extract_first_json_array(text: str) -> str:
-    """Extract the first complete JSON array from text, ignoring extra reasoning content."""
+    """Extract the first complete JSON array from text."""
     import json
     from json.decoder import JSONDecodeError
 
@@ -150,29 +140,22 @@ def _extract_first_json_array(text: str) -> str:
     if start == -1:
         raise ValueError("No JSON array found")
 
-    # Try to find where the first complete JSON array ends using JSONDecoder
     decoder = json.JSONDecoder()
     try:
         obj, end_idx = decoder.raw_decode(text, start)
-        return json.dumps(obj)  # Return clean JSON string
+        return json.dumps(obj)
     except JSONDecodeError:
-        # Fallback to old method if decoder fails
         end = text.rfind("]")
         if end == -1:
             raise ValueError("No JSON array found")
         return text[start:end+1]
 
 def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
-    """
-    Score ALL leads in a single LLM call (validator version).
-    Returns dict mapping lead id() -> score (0.0-0.5 range).
-    Failed leads return None in the dict.
-    """
+    """Score all leads in a single LLM call. Returns dict mapping lead id() -> score (0.0-0.5)."""
     if not leads:
         return {}
 
     if not OPENROUTER_KEY:
-        # Fallback to heuristic for each lead
         result = {}
         for lead in leads:
             d = description.lower()
@@ -181,7 +164,6 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
             result[id(lead)] = min(overlap * 0.05, 0.5)
         return result
 
-    # Build batch prompt
     prompt_system = (
         "You are an expert B2B lead validation specialist performing quality assurance.\n"
         "\n"
@@ -223,7 +205,6 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
 
     prompt_user = "\n".join(lines)
 
-    # Debug output
     print(f"\n🛈  VALIDATOR-LLM BATCH INPUT ↓")
     print(f"   Scoring {len(leads)} leads in single prompt")
     print(textwrap.shorten(prompt_user, width=300, placeholder=" …"))
@@ -243,12 +224,11 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
                     {"role": "user", "content": prompt_user}
                 ]
             },
-            timeout=30  # Longer timeout for batch
+            timeout=30
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
 
-    # Try primary model, then fallback
     try:
         response_text = _try_batch(model)
     except Exception as e:
@@ -310,34 +290,10 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
 
 import os, grpc, asyncio
 
-# ──────────────────────────────────────────────────────────────────────────────
-def _store_weights_in_firestore(uid: int, hotkey: str, weights: dict):
-    """
-    Persist the latest weight vector to Firestore.
-    Collection: validator_weights
-      • uid        – validator UID (int)
-      • hotkey     – SS58 hotkey string
-      • weights    – { miner_hotkey: share_float }
-      • created_at – server timestamp (UTC)
-    """
-    try:
-        db  = firestore.Client()
-        doc = {
-            "uid":        uid,
-            "hotkey":     hotkey,
-            "weights":    weights,
-            "created_at": datetime.utcnow()
-        }
-        db.collection("validator_weights").add(doc)
-        print("📝 Stored weights in Firestore (validator_weights)")
-    except Exception as e:
-        print(f"⚠️  Firestore write failed: {e}")
-# ───────────────────────────────────────────────────────
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
-        # Set validator UID
         bt.logging.info("Registering validator wallet on network...")
         max_retries = 3
         retry_delay = 5
@@ -361,9 +317,6 @@ class Validator(BaseValidatorNeuron):
         if self.uid is None:
             bt.logging.warning(f"Validator {self.config.wallet_name}/{self.config.wallet_hotkey} not registered on netuid {self.config.netuid} after {max_retries} attempts")
 
-        # ════════════════════════════════════════════════════════════
-        # TASK 4.1: Initialize validator trust tracking
-        # ════════════════════════════════════════════════════════════
         self.validator_trust = 0.0
         if self.uid is not None:
             try:
@@ -376,23 +329,19 @@ class Validator(BaseValidatorNeuron):
         bt.logging.info("load_state()")
         self.load_state()
 
-        # Add HTTP server for API requests
         self.app = web.Application()
         self.app.add_routes([
             web.post('/api/leads', self.handle_api_request),
             web.get('/api/leads/status/{request_id}', self.handle_status_request),  # ← NEW
         ])
-
+        
         self.email_regex = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
         self.sample_ratio = 0.2
         self.use_open_source_model = config.get("neuron", {}).get("use_open_source_validator_model", True)
 
-        # NEW: Add pause mechanism for sourced lead processing during broadcasts
-        self.processing_broadcast = False  # ← NEW FLAG
-
-        # NEW: Track processed broadcast requests to prevent duplicate processing
-        self._processed_requests = set()  # ← ADD THIS LINE
-
+        self.processing_broadcast = False
+        self._processed_requests = set()
+        
         self.precision = 15.0 
         self.consistency = 1.0  
         self.collusion_flag = 1
@@ -401,13 +350,69 @@ class Validator(BaseValidatorNeuron):
         self.trusted_validator = False  
         self.registration_time = datetime.now()  
         self.appeal_status = None  
-
+        
         from Leadpoet.base.utils.pool import initialize_pool
         initialize_pool()
 
-        # NEW: Add broadcast mode flag to pause sourced lead processing
         self.broadcast_mode = False
         self.broadcast_lock = threading.Lock()
+        
+        try:
+            from Leadpoet.utils.cloud_db import sync_metagraph_to_supabase
+            bt.logging.info("📊 Syncing metagraph to Supabase...")
+            sync_success = sync_metagraph_to_supabase(self.metagraph, self.config.netuid)
+            if not sync_success:
+                bt.logging.warning("⚠️ Metagraph sync failed - JWT issuance may not work")
+        except Exception as e:
+            bt.logging.error(f"❌ Failed to sync metagraph: {e}")
+        
+        try:
+            self.token_manager = TokenManager(
+                hotkey=self.wallet.hotkey.ss58_address,
+                wallet=self.wallet
+            )
+            bt.logging.info(f"🔑 TokenManager initialized")
+        except Exception as e:
+            bt.logging.error(f"Failed to initialize TokenManager: {e}")
+            raise
+        
+        status = self.token_manager.get_status()
+        
+        if status.get('valid'):
+            bt.logging.info(f"✅ Token valid - Role: {status['role']}, Hours remaining: {status.get('hours_remaining', 0):.1f}")
+        else:
+            bt.logging.warning(f"⚠️ Token invalid or missing - will attempt refresh")
+        
+        status = self.token_manager.get_status()
+        if status.get('needs_refresh') or not status.get('valid'):
+            success = self.token_manager.refresh_token()
+            if success:
+                bt.logging.info(f"✅ Token refreshed successfully")
+            else:
+                bt.logging.error(f"❌ Failed to refresh token")
+        else:
+            bt.logging.info(f"✅ Using existing valid token")
+        
+        self.supabase_url = "https://qplwoislplkcegvdmbim.supabase.co"
+        self.supabase_client: Optional[Client] = None
+        self._init_supabase_client()
+    
+    def _init_supabase_client(self):
+        """Initialize or refresh Supabase client with current JWT token."""
+        try:
+            from Leadpoet.utils.cloud_db import get_supabase_client
+            
+            # Use the centralized client creation function
+            # This ensures consistency with miner and other validator operations
+            self.supabase_client = get_supabase_client()
+            
+            if self.supabase_client:
+                bt.logging.info("✅ Supabase client initialized for validator")
+            else:
+                bt.logging.warning("⚠️ No JWT token available for Supabase client")
+        except Exception as e:
+            bt.logging.error(f"Failed to initialize Supabase client: {e}")
+            self.supabase_client = None
 
     def validate_email(self, email: str) -> bool:
         return bool(self.email_regex.match(email))
@@ -472,7 +477,7 @@ class Validator(BaseValidatorNeuron):
                 continue
             correct = sum(1 for v in relevant_validations if abs(v["O_v"] - v["F"]) <= 0.1)
             J_v[period] = correct / len(relevant_validations)
-
+        
         self.consistency = 1 + (0.55 * J_v["14_days"] + 0.25 * J_v["30_days"] + 0.2 * J_v["90_days"])
         self.consistency = min(max(self.consistency, 1.0), 2.0)
         bt.logging.debug(f"Updated C_v: {self.consistency}, J_v: {J_v}")
@@ -583,7 +588,6 @@ class Validator(BaseValidatorNeuron):
         if miner_uids:
             endpoints = [f"{self.metagraph.axons[uid].ip}:{self.metagraph.axons[uid].port}" for uid in miner_uids]
             print(f"🔍 Miner endpoints: {endpoints}")
-            # Hairpin NAT bypass: if miner ip == my public ip, use localhost
             my_pub_ip = None
             try:
                 if my_uid is not None:
@@ -597,28 +601,24 @@ class Validator(BaseValidatorNeuron):
                     print(f"🔧 Hairpin bypass for UID {uid}: {ax.ip} → 127.0.0.1")
                     ax.ip = "127.0.0.1"
 
-        # Always start with an empty list so we never hit UnboundLocalError
         all_miner_leads: list = []
 
-        # When dialing dendrite, wrap in a Task (prevents "Timeout context manager should be used inside a task")
         print("\n─────────  VALIDATOR ➜ DENDRITE  ─────────")
         print(f"📡  Dialing {len(axons)} miners: {[f'UID{u}' for u in miner_uids]}")
         print(f"⏱️   at {datetime.utcnow().isoformat()} UTC")
 
-        _t0 = time.time()            # <── fix NameError
+        _t0 = time.time()
         miner_req = LeadRequest(num_leads=synapse.num_leads,
                                 business_desc=synapse.business_desc)
 
-        # bump timeout to 85 s (miner will cut off at 90 s)
         responses_task = asyncio.create_task(self.dendrite(
             axons       = axons,
             synapse     = miner_req,
-            timeout     = 85,                   # <── was 60
+            timeout     = 85,
             deserialize = False,
         ))
         responses = await responses_task
         print(f"⏲️  Dendrite completed in {(time.time() - _t0):.2f}s, analysing responses…")
-        # Inspect each response with full status
         for uid, resp in zip(miner_uids, responses):
             if isinstance(resp, LeadRequest):
                 sc = getattr(resp.dendrite, "status_code", None)
@@ -631,18 +631,15 @@ class Validator(BaseValidatorNeuron):
                 print(f"❌ UID {uid}: unexpected response type {type(resp).__name__} → {repr(resp)[:80]}")
         print("─────────  END DENDRITE BLOCK  ─────────\n")
 
-        # 3️⃣ If no leads from Bittensor, fallback to Cloud-Run
         if not all_miner_leads:
             print("⚠️  Axon unreachable – falling back to cloud broker")
-            # Broadcast the same request to every currently-active miner so
-            # each one receives its own copy via the Cloud-Run queue.
             for target_uid in miner_uids:
                 req_id = push_miner_curation_request(
                     self.wallet,
                     {
                         "num_leads":      synapse.num_leads,
                         "business_desc":  synapse.business_desc,
-                        "target_uid":     int(target_uid),          # optional
+                        "target_uid":     int(target_uid),
                     },
                 )
                 print(f"📤 Sent curation request to Cloud-Run for UID {target_uid}: {req_id}")
@@ -656,38 +653,38 @@ class Validator(BaseValidatorNeuron):
             expected_miners = len(miner_uids)  # Number of miners we sent requests to
             received_responses = 0
             first_response_time = None
-
+            
             for attempt in range(MAX_ATTEMPTS):
                 res = fetch_miner_curation_result(self.wallet)
                 if res and res.get("leads"):
                     # EXTEND instead of REPLACE to collect from multiple miners
                     all_miner_leads.extend(res["leads"])
                     received_responses += 1
-
+                    
                     # Track when we got the first response
                     if received_responses == 1:
                         first_response_time = attempt
                         print(f"✅ Received first response ({len(res['leads'])} leads) from Cloud-Run")
-
+                        
                         # If expecting multiple miners, wait additional 30s for others
                         if expected_miners > 1:
                             print(f"⏳ Waiting additional 30s for {expected_miners - 1} more miners...")
                     else:
                         print(f"✅ Received response {received_responses}/{expected_miners} with {len(res['leads'])} leads")
-
+                    
                     # Exit conditions:
                     # 1. Got all expected responses
                     if received_responses >= expected_miners:
                         print(f"✅ Received all {expected_miners} responses from miners")
                         break
-
+                    
                     # 2. Got first response and waited 30s (6 attempts) for others
                     elif first_response_time is not None and (attempt - first_response_time) >= 6:
                         print(f"⏰ 30s timeout reached, proceeding with {received_responses}/{expected_miners} responses")
                         break
-
+                
                 time.sleep(SLEEP_SEC)
-
+            
             if received_responses > 0:
                 print(f"📊 Final collection: {len(all_miner_leads)} leads from {received_responses}/{expected_miners} miners")
             else:
@@ -697,12 +694,9 @@ class Validator(BaseValidatorNeuron):
         if all_miner_leads:
             print(f"🔍 Ranking {len(all_miner_leads)} leads with LLM...")
             scored_leads = []
-
-            # Initialize aggregation dictionary for each lead
+            
             aggregated = {id(lead): 0.0 for lead in all_miner_leads}
-            failed_leads = set()  # Track leads that failed LLM scoring
-
-            # ROUND 1: First LLM scoring (BATCHED)
+            failed_leads = set()
             first_model = random.choice(AVAILABLE_MODELS)
             print(f"🔄 LLM round 1/2 (model: {first_model})")
             batch_scores_r1 = _llm_score_batch(all_miner_leads, synapse.business_desc, first_model)
@@ -713,7 +707,7 @@ class Validator(BaseValidatorNeuron):
                     print(f"⚠️  LLM failed for lead, will skip this lead")
                 else:
                     aggregated[id(lead)] += score
-
+            
             # ROUND 2: Second LLM scoring (BATCHED, random model selection)
             # Only score leads that didn't fail in round 1
             leads_for_r2 = [lead for lead in all_miner_leads if id(lead) not in failed_leads]
@@ -728,7 +722,7 @@ class Validator(BaseValidatorNeuron):
                         print(f"⚠️  LLM failed for lead, will skip this lead")
                     else:
                         aggregated[id(lead)] += score
-
+            
             # Apply aggregated scores to leads (skip failed ones)
             for lead in all_miner_leads:
                 if id(lead) not in failed_leads:
@@ -766,50 +760,62 @@ class Validator(BaseValidatorNeuron):
                     # Record events for each lead in the Final Curated List
                     for lead in top_leads:
                         if lead.get("source") and lead.get("curated_by"):
-
+                          
                             record_event(lead)
 
-                    # Calculate V2 weights and emissions
-                    rewards = calculate_weights(100.0)  # 100 Alpha total emission
+                    # ===== STEP 4: CALCULATE WEIGHTS WITH CRYPTOGRAPHIC PROOF =====
+                    # Pass validator's wallet to prove hotkey ownership
+                    rewards = calculate_weights(
+                        total_emission=100.0,
+                        validator_wallet=self.wallet  # Proves we control this hotkey
+                    )
+                    
+                    # Check if we were eligible
+                    if "error" in rewards:
+                        print(f"\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
+                        print(f"   Reason: {rewards['error']}")
+                        print(f"   Validated: {rewards.get('validated_count', 0)}/{rewards.get('total_count', 0)} leads")
+                        print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 10.0%)")
+                        print(f"   No weights will be set this epoch - increase validation activity!")
+                    else:
+                        # Validator is eligible - set weights on-chain
+                        # Log final weights and emissions
+                        print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
+                        print(f"   ✅ Validator eligible - validated {rewards.get('percentage', 0):.1f}% of epoch leads")
+                        print(f"   Final Curated List: {len(top_leads)} prospects")
+                        print(f"   Final weights (W): {rewards['W']}")
+                        print(f"   Emissions: {rewards['E']}")
 
-                    # Log final weights and emissions
-                    print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
-                    print(f"   Final Curated List: {len(top_leads)} prospects")
-                    print(f"   S weights (Sourcing): {rewards['S']}")
-                    print(f"   C weights (Curating): {rewards['C']}")
-                    print(f"   Final weights (W): {rewards['W']}")
-                    print(f"   Emissions: {rewards['E']}")
+                        weights_dict = rewards["W"]                   # miner-hotkey ➜ share
+                        # ─── NEW: publish weights on-chain ─────────────────────────────────
+                        try:
+                            # map hotkeys → uids present in current metagraph
+                            uids, weights = [], []
+                            for hk, w in weights_dict.items():
+                                if hk in self.metagraph.hotkeys and w > 0:
+                                    uids.append(self.metagraph.hotkeys.index(hk))
+                                    weights.append(float(w))
 
-                    weights_dict = rewards["W"]                   # miner-hotkey ➜ share
-                    # ─── NEW: publish weights on-chain ─────────────────────────────────
-                    try:
-                        # map hotkeys → uids present in current metagraph
-                        uids, weights = [], []
-                        for hk, w in weights_dict.items():
-                            if hk in self.metagraph.hotkeys and w > 0:
-                                uids.append(self.metagraph.hotkeys.index(hk))
-                                weights.append(float(w))
+                            # normalise to 1.0 as required by bittensor
+                            s = sum(weights)
+                            if not isclose(s, 1.0) and s > 0:
+                                weights = [w / s for w in weights]
 
-                        # normalise to 1.0 as required by bittensor
-                        s = sum(weights)
-                        if not isclose(s, 1.0) and s > 0:
-                            weights = [w / s for w in weights]
+                            self.subtensor.set_weights(
+                                wallet             = self.wallet,
+                                netuid             = self.config.netuid,
+                                uids               = uids,
+                                weights            = weights,
+                                wait_for_inclusion = True,     # non-blocking
+                            )
+                            print(self.wallet, self.config.netuid, uids, weights)
+                            print("✅ Published new weights on-chain")
+                        except Exception as e:
+                            print(f"⚠️  Failed to publish weights on-chain: {e}")
 
-                        self.subtensor.set_weights(
-                            wallet             = self.wallet,
-                            netuid             = self.config.netuid,
-                            uids               = uids,
-                            weights            = weights,
-                            wait_for_inclusion = True,     # non-blocking
-                        )
-                        print(self.wallet, self.config.netuid, uids, weights)
-                        print("✅ Published new weights on-chain")
-                    except Exception as e:
-                        print(f"⚠️  Failed to publish weights on-chain: {e}")
-
-                    # SINGLE remaining Firestore write
-                    push_validator_weights(self.wallet, self.uid, weights_dict)
-                    # ───────────────────────────────────────────────────────────────────
+                        # SINGLE remaining Firestore write
+                        push_validator_weights(self.wallet, self.uid, weights_dict)
+                        # ───────────────────────────────────────────────────────────────────
 
                 except Exception as e:
                     print(f"⚠️  V2 reward calculation failed: {e}")
@@ -826,7 +832,7 @@ class Validator(BaseValidatorNeuron):
         validators = [self]
         validator_scores = []
         trusted_validators = [v for v in validators if v.trusted_validator]
-
+        
         for i, response in enumerate(responses):
             if not isinstance(response, LeadRequest) or not response.leads:
                 bt.logging.warning(f"Skipping invalid response from UID {miner_uids[i]}")
@@ -834,33 +840,33 @@ class Validator(BaseValidatorNeuron):
             validation = await self.validate_leads(response.leads, industry=response.industry)
             O_v = validation["O_v"]
             validator_scores.append({"O_v": O_v, "R_v": self.reputation, "leads": response.leads})
-
+        
         trusted_low_scores = sum(1 for v in trusted_validators for s in validator_scores if v == self and s["O_v"] < 0.8)
         trusted_rejections = sum(1 for v in trusted_validators for s in validator_scores if v == self and s["O_v"] == 0)
         use_trusted = trusted_low_scores / len(trusted_validators) > 0.67 if trusted_validators else False
         reject = trusted_rejections / len(trusted_validators) > 0.5 if trusted_validators else False
-
+        
         if reject:
             bt.logging.info("Submission rejected by >50% trusted validators")
             return
-
+        
         Rs_total = sum(s["R_v"] for s in validator_scores if s["R_v"] > 15)
         F = sum(s["O_v"] * (s["R_v"] / Rs_total) for s in validator_scores if s["R_v"] > 15) if Rs_total > 0 else 0
         if use_trusted:
             trusted_scores = [s for s in validator_scores if any(v == self and v.trusted_validator for v in validators)]
             Rs_total_trusted = sum(s["R_v"] for s in trusted_scores if s["R_v"] > 15)
             F = sum(s["O_v"] * (s["R_v"] / Rs_total_trusted) for s in trusted_scores if s["R_v"] > 15) if Rs_total_trusted > 0 else 0
-
+        
         for s in validator_scores:
             if abs(s["O_v"] - F) <= 0.1:
                 self.precision = min(100, self.precision + 10)
             elif s["O_v"] > 0 and not await self.run_automated_checks(s["leads"]):
                 self.precision = max(0, self.precision - 15)
             self.validation_history.append({"O_v": s["O_v"], "F": F, "timestamp": datetime.now(), "leads": s["leads"]})
-
+        
         self.update_consistency()
         self.update_reputation()
-
+        
         for i, (reward, response) in enumerate(zip(rewards, responses)):
             if reward >= 0.9 and isinstance(response, LeadRequest) and response.leads:
                 if await self.run_automated_checks(response.leads):
@@ -882,7 +888,7 @@ class Validator(BaseValidatorNeuron):
                 else:
                     self.precision = max(0, self.precision - 15)
                     bt.logging.warning(f"Post-approval check failed for UID {miner_uids[i]}, P_v reduced: {self.precision}")
-
+        
         if random.random() < 0.1:
             await self.reputation_challenge()
 
@@ -1243,13 +1249,195 @@ class Validator(BaseValidatorNeuron):
         try:
             # Keep the validator running and continuously process leads
             while not self.should_exit:
+                # ══════════════════════════════════════════════════════════════════
+                # AUTOMATIC WEIGHT CALCULATION NEAR EPOCH END
+                # ══════════════════════════════════════════════════════════════════
+                # Check if we're near the end of the epoch (blocks 355-360)
+                try:
+                    from Leadpoet.validator.reward import _get_epoch_status, calculate_weights
+                    
+                    # Check every 5 iterations (approx every 5 seconds) for faster response
+                    if not hasattr(self, '_epoch_check_counter'):
+                        self._epoch_check_counter = 0  
+                        self._last_weight_calc_block = 0
+                    
+                    self._epoch_check_counter += 1
+                    if self._epoch_check_counter >= 2:  # Check every 2 iterations
+                        self._epoch_check_counter = 0
+                        
+                        status = _get_epoch_status()
+                        blocks_remaining = status.get("blocks_remaining", 360)
+                        current_epoch = status.get("current_epoch", 0)
+                        current_block = 360 - blocks_remaining
+                        
+                        # Reset block counter when entering a new epoch
+                        if hasattr(self, '_last_tracked_epoch') and self._last_tracked_epoch != current_epoch:
+                            self._last_weight_calc_block = 0
+                        self._last_tracked_epoch = current_epoch
+                        
+                        # Debug output to see current status
+                        print(f"⏰ Epoch check: Block {current_block}/360, Blocks remaining: {blocks_remaining}, Epoch: {current_epoch}")
+                        
+                        # TESTING: Trigger between blocks 90-120 (blocks_remaining 270-240)
+                        # Normal: blocks_remaining <= 5 (blocks 355-360)
+                        if blocks_remaining <= 350 and blocks_remaining >= 1:  # Blocks 90-120 for testing
+                            # Check if 2 blocks have passed since last attempt (or first attempt)
+                            current_block = 360 - blocks_remaining
+                            should_attempt = (current_block - self._last_weight_calc_block >= 2 or self._last_weight_calc_block == 0)
+                            
+                            if should_attempt:
+                                print(f"\n🎯 AUTOMATIC WEIGHT CALCULATION TRIGGERED")
+                                print(f"   Epoch: {current_epoch}")
+                                print(f"   Block: {360 - blocks_remaining}/360")
+                                print(f"   Requesting weight calculation...")
+                                
+                                # Mark that we attempted at this block
+                                self._last_weight_calc_block = current_block
+                                
+                                # Get JWT token and call Edge Function for weights
+                                import requests
+                                jwt_token = self.token_manager.get_token()
+                                
+                                if not jwt_token:
+                                    print(f"❌ No JWT token available - cannot get weights")
+                                    continue
+                                
+                                # Call Edge Function to get weights (server-side eligibility check)
+                                try:
+                                    print(f"   Calling Edge Function with JWT token...")
+                                    response = requests.get(
+                                        "https://qplwoislplkcegvdmbim.supabase.co/functions/v1/get-validator-weights",
+                                        headers={"Authorization": f"Bearer {jwt_token}"},
+                                        timeout=30
+                                    )
+                                    
+                                    print(f"   Response status: {response.status_code}")
+                                    
+                                    # Try to parse JSON response
+                                    try:
+                                        weights_result = response.json()
+                                    except json.JSONDecodeError:
+                                        print(f"❌ Invalid JSON response from Edge Function")
+                                        print(f"   Response text: {response.text[:500]}")
+                                        continue
+                                    
+                                    # Edge Function returns 403 if not eligible
+                                    if response.status_code == 403:
+                                        print(f"❌ VALIDATOR NOT ELIGIBLE")
+                                        print(f"   Reason: {weights_result.get('error', 'Unknown')}")
+                                        print(f"   Validated: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)} leads")
+                                        print(f"   Percentage: {weights_result.get('percentage', 0):.1f}% (need >= 10.0%)")
+                                        # Don't mark as attempted - allow retry every 2 blocks
+                                        # self._last_epoch_weights_set = current_epoch  # Mark as attempted
+                                        continue
+                                    
+                                    if response.status_code == 404:
+                                        print(f"❌ Edge Function not found - it may not be deployed yet")
+                                        print(f"   Deploy with: supabase functions deploy get-validator-weights")
+                                        continue
+                                    
+                                    if response.status_code != 200:
+                                        print(f"❌ Error from Edge Function (status {response.status_code})")
+                                        print(f"   Error: {weights_result.get('error', 'Unknown error')}")
+                                        if 'details' in weights_result:
+                                            print(f"   Details: {weights_result['details']}")
+                                        # For 500 errors, also show the full response for debugging
+                                        if response.status_code == 500:
+                                            print(f"   Full response: {weights_result}")
+                                        continue
+                                        
+                                except requests.exceptions.RequestException as e:
+                                    print(f"❌ Network error calling Edge Function: {e}")
+                                    continue
+                                except Exception as e:
+                                    print(f"❌ Unexpected error calling Edge Function: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                                    continue
+                                
+                                # Check if validator is eligible (Edge Function already enforced this)
+                                # Note: weights can be empty dict if no leads accepted yet
+                                if weights_result.get("eligible") and weights_result.get("weights") is not None:
+                                    print(f"✅ VALIDATOR ELIGIBLE - Setting weights on chain")
+                                    print(f"   Consensus participation: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)} leads")
+                                    print(f"   Percentage: {weights_result.get('percentage', 0):.1f}%")
+                                    print(f"   Total leads in epoch: {weights_result.get('total_leads', 0)}")
+                                    
+                                    # Convert weights dict to format expected by set_weights
+                                    # Edge Function returns weights directly
+                                    weight_dict = weights_result["weights"]
+                                    
+                                    # Check if there are any weights to set
+                                    if not weight_dict:
+                                        print(f"   ℹ️ No leads accepted yet in epoch - no weights to set")
+                                        print(f"   (Validator is eligible but waiting for leads to be accepted)")
+                                        continue
+                                    
+                                    # Get UIDs for the hotkeys
+                                    uids_and_weights = []
+                                    for hotkey, weight in weight_dict.items():
+                                        # Find UID for this hotkey
+                                        try:
+                                            uid = self.metagraph.hotkeys.index(hotkey)
+                                            uids_and_weights.append((uid, weight))
+                                            print(f"     Miner {hotkey[:10]}... (UID {uid}): {weight:.4f}")
+                                        except ValueError:
+                                            print(f"     ⚠️ Hotkey {hotkey[:10]}... not found in metagraph")
+                                    
+                                    if uids_and_weights:
+                                        # Set weights on chain
+                                        try:
+                                            success = self.subtensor.set_weights(
+                                                netuid=self.config.netuid,
+                                                wallet=self.wallet,
+                                                uids=[uid for uid, _ in uids_and_weights],
+                                                weights=[weight for _, weight in uids_and_weights],
+                                                wait_for_inclusion=False,
+                                                wait_for_finalization=False
+                                            )
+                                            
+                                            if success:
+                                                print(f"✅ Weights successfully set on chain for epoch {current_epoch}")
+                                                # Don't mark epoch as done - allow continuous updates every 2 blocks
+                                                # self._last_epoch_weights_set = current_epoch
+                                            else:
+                                                print(f"❌ Failed to set weights on chain")
+                                        except Exception as e:
+                                            print(f"❌ Error setting weights on chain: {e}")
+                                    else:
+                                        print(f"❌ No valid UIDs found for weight setting")
+                                        
+                                else:
+                                    # Debug: Show what we actually got from Edge Function
+                                    print(f"⚠️ No weights returned from Edge Function")
+                                    print(f"   Debug - Eligible: {weights_result.get('eligible', 'missing')}")
+                                    print(f"   Debug - Weights: {weights_result.get('weights', 'missing')}")
+                                    print(f"   Debug - Validated: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)}")
+                                    print(f"   Debug - Percentage: {weights_result.get('percentage', 0):.1f}%")
+                                    # Don't mark as attempted - allow retry every 2 blocks
+                                    # self._last_epoch_weights_set = current_epoch  # Don't mark as attempted
+                                    
+                except Exception as e:
+                    bt.logging.warning(f"Error in automatic weight calculation: {e}")
+                # ══════════════════════════════════════════════════════════════════
+
+                # NEW: Check and refresh token every iteration
+                token_refreshed = self.token_manager.refresh_if_needed(threshold_hours=1)
+                if not token_refreshed and not self.token_manager.get_token():
+                    bt.logging.warning("⚠️ Token refresh failed, continuing with existing token...")
+                
+                # NEW: Refresh Supabase client if token was refreshed
+                if token_refreshed:
+                    bt.logging.info("🔄 Token was refreshed, reinitializing Supabase client...")
+                    self._init_supabase_client()
+                
                 # Process any new leads that need validation (continuous)
                 try:
                     self.process_sourced_leads_continuous()
                 except Exception as e:
                     bt.logging.warning(f"Error in process_sourced_leads_continuous: {e}")
                     time.sleep(5)  # Wait before retrying
-
+                
                 try:
                     self.process_curation_requests_continuous()
                 except Exception as e:
@@ -1362,47 +1550,106 @@ class Validator(BaseValidatorNeuron):
 
     def process_sourced_leads_continuous(self):
         """
-        Continuously pull un-validated prospects from Firestore and process them.
+        CONSENSUS VERSION: Process leads with consensus-based validation.
+        Pulls prospects using first-come-first-served, validates them,
+        and submits assessments to the consensus tracking system.
         """
-        # NEW: Skip if processing broadcast request
+        # Skip if processing broadcast request
         if self.processing_broadcast:
             return  # Pause sourcing during broadcast processing
 
         try:
-            prospects_batch = fetch_prospects_from_cloud(self.wallet, limit=250)
+            # Import consensus functions
+            from Leadpoet.utils.cloud_db import submit_validation_assessment
+            import uuid
+            
+            # Fetch prospects using the new consensus-aware function
+            # Returns list of {'prospect_id': UUID, 'data': lead_dict}
+            prospects_batch = fetch_prospects_from_cloud(self.wallet, limit=50)
 
             if not prospects_batch:
-                time.sleep(1)
+                time.sleep(5)  # Wait longer if no prospects available
                 return
 
-            print(f"🛎️  Pulled {len(prospects_batch)} prospect batch(es) from cloud")
-
-            for entry in prospects_batch:
-                # new format = list-of-leads under 'prospects'
-                # fallback = entry IS the lead (old one-row format)
-                miner_hotkey = entry.get("miner_hotkey", "unknown")[:10]
-                prospects    = entry.get("prospects") or [entry]
-                print(f"\n🟣 Processing sourced batch of {len(prospects)} prospects "
-                      f"from miner {miner_hotkey}...")
-
-                for lead in prospects:
-                    try:
-                        print(f"\n  Validating: {lead.get('business', lead.get('website',''))}")
-                        print(f"    Email: {lead.get('owner_email','?')}")
-
-                        # Run async validate_lead in sync context
-                        result = asyncio.run(self.validate_lead(lead))
-                        if result["is_legitimate"]:
-                            # Add prospect to pool after K miner update
-                            self.move_to_validated_leads(lead, result["score"])
-                        else:
-                            print(f"    ❌ Rejected: {result['reason']}")
-                    except Exception as e:
-                        print(f"    ❌ Error validating lead: {e}")
-
+            print(f"🛎️  Pulled {len(prospects_batch)} prospects from queue (consensus mode)")
+            
+            # Process each prospect
+            for prospect_item in prospects_batch:
+                try:
+                    # Extract prospect_id and lead data based on the new format
+                    if isinstance(prospect_item, dict) and 'prospect_id' in prospect_item:
+                        # New consensus format: {'prospect_id': UUID, 'data': lead_dict}
+                        prospect_id = prospect_item['prospect_id']
+                        lead = prospect_item['data']
+                    else:
+                        # Fallback for old format (direct lead data)
+                        prospect_id = str(uuid.uuid4())  # Generate one if not provided
+                        lead = prospect_item
+                    
+                    # Generate unique lead_id for this validation
+                    lead_id = str(uuid.uuid4())
+                    
+                    # Extract miner info for logging
+                    if not lead or not isinstance(lead, dict):
+                        bt.logging.error(f"Invalid lead data for prospect {prospect_id[:8]}: {type(lead)}")
+                        continue
+                        
+                    miner_hotkey = lead.get("miner_hotkey", "unknown")
+                    business_name = lead.get('business', lead.get('website', 'Unknown'))
+                    email = lead.get('owner_email', lead.get('email', '?'))
+                    
+                    print(f"\n🟣 Validating prospect {prospect_id[:8]}...")
+                    print(f"   Lead ID: {lead_id[:8]}...")
+                    print(f"   Business: {business_name}")
+                    print(f"   Email: {email}")
+                    print(f"   Miner: {miner_hotkey[:10] if miner_hotkey and miner_hotkey != 'unknown' else 'unknown'}...")
+                    
+                    # Run async validate_lead in sync context
+                    result = asyncio.run(self.validate_lead(lead))
+                    
+                    # Extract validation results
+                    is_valid = result.get("is_legitimate", False)
+                    score = result.get("score", 0.0)
+                    reason = result.get("reason", "Unknown")
+                    
+                    # Log validation result
+                    if is_valid:
+                        print(f"   ✅ Valid (score: {score:.2f})")
+                    else:
+                        print(f"   ❌ Invalid: {reason} (score: {score:.2f})")
+                    
+                    # Submit validation assessment to consensus system
+                    submission_success = submit_validation_assessment(
+                        wallet=self.wallet,
+                        prospect_id=prospect_id,
+                        lead_id=lead_id,
+                        lead_data=lead,
+                        score=score,
+                        is_valid=is_valid
+                    )
+                    
+                    if submission_success:
+                        print(f"   📤 Assessment submitted to consensus system")
+                    else:
+                        print(f"   ⚠️ Failed to submit assessment to consensus system")
+                    
+                    # Note: We do NOT directly save to leads table anymore
+                    # The consensus system will handle that when 3 validators agree
+                    
+                except Exception as e:
+                    print(f"   ❌ Error processing prospect: {e}")
+                    bt.logging.error(f"Error processing prospect: {e}")
+                    import traceback
+                    bt.logging.debug(traceback.format_exc())
+                    continue
+            
+            print(f"\n✅ Processed {len(prospects_batch)} prospects in consensus mode")
+            
         except Exception as e:
             bt.logging.error(f"process_sourced_leads_continuous failure: {e}")
-            time.sleep(1)
+            import traceback
+            bt.logging.debug(traceback.format_exc())
+            time.sleep(5)
 
 # ─────────────────────────────────────────────────────────
 #  NEW: handle buyer curation requests coming via Cloud Run
@@ -1422,7 +1669,7 @@ class Validator(BaseValidatorNeuron):
         # ── annotate each lead with the curation timestamp (seconds since epoch)
         curated_at = time.time()
         for lead in leads:
-
+         
             lead["created_at"]    = datetime.utcfromtimestamp(curated_at).isoformat() + "Z"
 
         push_curation_result({"request_id": req["request_id"], "leads": leads})
@@ -1613,47 +1860,59 @@ class Validator(BaseValidatorNeuron):
                                 if lead.get("source") and lead.get("curated_by"):
                                     record_event(lead)
 
-                            # Calculate V2 weights and emissions
-                            rewards = calculate_weights(100.0)  # 100 Alpha total emission
+                            # ===== STEP 4: CALCULATE WEIGHTS WITH CRYPTOGRAPHIC PROOF =====
+                            # Pass validator's wallet to prove hotkey ownership
+                            rewards = calculate_weights(
+                                total_emission=100.0,
+                                validator_wallet=self.wallet  # Proves we control this hotkey
+                            )
+                            
+                            # Check if we were eligible
+                            if "error" in rewards:
+                                print(f"\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
+                                print(f"   Reason: {rewards['error']}")
+                                print(f"   Validated: {rewards.get('validated_count', 0)}/{rewards.get('total_count', 0)} leads")
+                                print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 10.0%)")
+                                print(f"   No weights will be set this epoch - increase validation activity!")
+                            else:
+                                # Validator is eligible - set weights on-chain
+                                # Log final weights
+                                print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
+                                print(f"   ✅ Validator eligible - validated {rewards.get('percentage', 0):.1f}% of epoch leads")
+                                print(f"   Ranked leads: {len(top_leads)} prospects")
+                                print(f"   Final weights (W): {rewards['W']}")
+                                print(f"   Emissions: {rewards['E']}")
 
-                            # Log final weights
-                            print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
-                            print(f"   Ranked leads: {len(top_leads)} prospects")
-                            print(f"   S weights (Sourcing): {rewards['S']}")
-                            print(f"   C weights (Curating): {rewards['C']}")
-                            print(f"   Final weights (W): {rewards['W']}")
-                            print(f"   Emissions: {rewards['E']}")
+                                weights_dict = rewards["W"]
 
-                            weights_dict = rewards["W"]
+                                # Publish weights on-chain
+                                try:
+                                    from math import isclose
+                                    uids, weights = [], []
+                                    for hk, w in weights_dict.items():
+                                        if hk in self.metagraph.hotkeys and w > 0:
+                                            uids.append(self.metagraph.hotkeys.index(hk))
+                                            weights.append(float(w))
 
-                            # Publish weights on-chain
-                            try:
-                                from math import isclose
-                                uids, weights = [], []
-                                for hk, w in weights_dict.items():
-                                    if hk in self.metagraph.hotkeys and w > 0:
-                                        uids.append(self.metagraph.hotkeys.index(hk))
-                                        weights.append(float(w))
+                                    # Normalize to 1.0
+                                    s = sum(weights)
+                                    if not isclose(s, 1.0) and s > 0:
+                                        weights = [w / s for w in weights]
 
-                                # Normalize to 1.0
-                                s = sum(weights)
-                                if not isclose(s, 1.0) and s > 0:
-                                    weights = [w / s for w in weights]
+                                    self.subtensor.set_weights(
+                                        wallet=self.wallet,
+                                        netuid=self.config.netuid,
+                                        uids=uids,
+                                        weights=weights,
+                                        wait_for_inclusion=True,
+                                    )
+                                    print("✅ Published weights on-chain")
+                                except Exception as e:
+                                    print(f"⚠️  Failed to publish weights on-chain: {e}")
 
-                                self.subtensor.set_weights(
-                                    wallet=self.wallet,
-                                    netuid=self.config.netuid,
-                                    uids=uids,
-                                    weights=weights,
-                                    wait_for_inclusion=True,
-                                )
-                                print("✅ Published weights on-chain")
-                            except Exception as e:
-                                print(f"⚠️  Failed to publish weights on-chain: {e}")
-
-                            # Store in Firestore
-                            from Leadpoet.utils.cloud_db import push_validator_weights
-                            push_validator_weights(self.wallet, self.uid, weights_dict)
+                                # Store in Firestore
+                                from Leadpoet.utils.cloud_db import push_validator_weights
+                                push_validator_weights(self.wallet, self.uid, weights_dict)
 
                         except Exception as e:
                             print(f"⚠️  V2 reward calculation failed: {e}")
@@ -1685,27 +1944,38 @@ class Validator(BaseValidatorNeuron):
             await asyncio.sleep(1)  # ← REDUCED from 10 to 1 second
 
     def move_to_validated_leads(self, lead, score):
-        """Write validated lead to Firestore; skip if it already exists."""
-        # REMOVED: validation_score - this should only be added during curation
+        """
+        [DEPRECATED IN CONSENSUS MODE]
+        This function is no longer used when consensus validation is enabled.
+        Leads are now saved through the consensus system after 3 validators agree.
+        See submit_validation_assessment() in cloud_db.py instead.
+        """
+        # Prepare lead data
         lead["validator_hotkey"] = self.wallet.hotkey.ss58_address
-        # Use ISO format timestamp instead of Unix timestamp
         lead["validated_at"] = datetime.now(timezone.utc).isoformat()
 
-        # ➕ include the ZeroBounce AI score if present
+        # Include ZeroBounce AI score if present
         if "email_score" in lead:
             lead["email_score"] = lead["email_score"]
 
         try:
-            stored = save_leads_to_cloud(self.wallet, [lead])   # True ↔ actually written
-            email  = lead.get("owner_email", lead.get("email", "?"))
-            biz    = lead.get("business", lead.get("website", ""))
-
-            if stored:
-                print(f"✅ Added 1 verified lead to main DB → {biz} ({email})")
+            # Save to Supabase (write-only, no duplicate checking)
+            if not self.supabase_client:
+                bt.logging.error("❌ Supabase client not available - cannot save validated lead")
+                return
+                
+            success = self.save_validated_lead_to_supabase(lead)
+            email = lead.get("owner_email", lead.get("email", "?"))
+            biz = lead.get("business", lead.get("website", ""))
+            
+            if success:
+                print(f"✅ Added verified lead to Supabase → {biz} ({email})")
             else:
-                print(f"⚠️  Duplicate lead skipped → {biz} ({email})")
+                # Duplicate or error - already logged in save function
+                pass
+                
         except Exception as e:
-            bt.logging.error(f"Cloud save failed: {e}")
+            bt.logging.error(f"Failed to save lead to Supabase: {e}")
 
     # Local prospect queue no longer exists
     def remove_from_prospect_queue(self, lead):
@@ -1736,7 +2006,7 @@ class Validator(BaseValidatorNeuron):
                 return {'is_legitimate': False,
                         'reason': 'Missing email',
                         'score': 0.0}
-
+            
             # 2️⃣ Map your field names to what automated_checks expects
             mapped_lead = {
                 "email": email,  # Map to "email" field
@@ -1749,7 +2019,7 @@ class Validator(BaseValidatorNeuron):
                 # Include any other fields that might be useful
                 **lead  # Include all original fields too
             }
-
+            
             # 3️⃣ Use automated_checks for comprehensive validation
             passed, reason = await run_automated_checks(mapped_lead)
 
@@ -1763,7 +2033,7 @@ class Validator(BaseValidatorNeuron):
                 'reason': reason,
                 'score': 1.0 if passed else 0.0
             }
-
+            
         except Exception as e:
             bt.logging.error(f"Error in validate_lead: {e}")
             return {'is_legitimate': False,
@@ -1784,6 +2054,76 @@ class Validator(BaseValidatorNeuron):
             }
         except:
             return {'website_score': 0.0, 'industry_score': 0.0, 'region_score': 0.0}
+
+    def save_validated_lead_to_supabase(self, lead: Dict) -> bool:
+        """
+        Write validated lead directly to Supabase.
+        Validators have INSERT-only access (enforced by RLS).
+        Duplicates are handled by database unique constraint + trigger notification.
+        
+        Args:
+            lead: Lead dictionary with all required fields
+            
+        Returns:
+            bool: True if successfully inserted, False if duplicate or error
+        """
+        if not self.supabase_client:
+            bt.logging.error("❌ Supabase client not initialized, cannot save lead")
+            return False
+        
+        try:
+            # Prepare lead data for insertion
+            lead_data = {
+                "email": lead.get("owner_email", lead.get("email", "")),
+                "company": lead.get("business", lead.get("company", "")),
+                "validated_at": datetime.now(timezone.utc).isoformat(),
+                "validator_hotkey": self.wallet.hotkey.ss58_address,
+                "miner_hotkey": lead.get("source", lead.get("miner_hotkey")),
+                "score": lead.get("conversion_score", lead.get("score")),
+                "metadata": {
+                    "owner_full_name": lead.get("owner_full_name", ""),
+                    "first": lead.get("first", ""),
+                    "last": lead.get("last", ""),
+                    "linkedin": lead.get("linkedin", ""),
+                    "website": lead.get("website", ""),
+                    "industry": lead.get("industry", ""),
+                    "sub_industry": lead.get("sub_industry", ""),
+                    "region": lead.get("region", ""),
+                    "role": lead.get("role", ""),
+                    "email_score": lead.get("email_score"),
+                }
+            }
+            
+            # DEBUG: Log what we're trying to insert
+            bt.logging.debug(f"🔍 INSERT attempt - validator_hotkey: {lead_data['validator_hotkey'][:10]}...")
+            
+            # Insert into Supabase - database will enforce unique constraint
+            # Trigger will automatically notify miner if duplicate
+            # NOTE: Wrap in array to match how miner inserts to prospect_queue
+            response = self.supabase_client.table("leads").insert([lead_data])
+            
+            bt.logging.info(f"✅ Saved lead to Supabase: {lead_data['email']} ({lead_data['company']})")
+            return True
+            
+        except Exception as e:
+            error_str = str(e).lower()
+            
+            # Handle duplicate email (caught by unique constraint)
+            if "duplicate" in error_str or "unique" in error_str or "23505" in error_str:
+                bt.logging.debug(f"⏭️  Duplicate lead (trigger will notify miner): {lead.get('owner_email', lead.get('email', ''))}")
+                return False
+            
+            # Handle RLS policy violations
+            elif "row-level security" in error_str or "42501" in error_str:
+                bt.logging.error(f"❌ RLS policy violation - check JWT and validator_hotkey match")
+                bt.logging.error(f"   Validator hotkey in data: {lead_data.get('validator_hotkey', 'missing')[:10]}...")
+                bt.logging.error(f"   JWT should contain same hotkey in 'hotkey' claim")
+                return False
+            
+            # Other errors
+            else:
+                bt.logging.error(f"❌ Failed to save lead to Supabase: {e}")
+                return False
 
 DATA_DIR = "data"
 VALIDATION_LOG = os.path.join(DATA_DIR, "validation_logs.json")

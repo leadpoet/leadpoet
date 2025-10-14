@@ -28,41 +28,38 @@ from miner_models.intent_model import (
 )
 
 from collections import OrderedDict
-from Leadpoet.utils.cloud_db import get_cloud_leads
-from Leadpoet.utils.cloud_db import push_prospects_to_cloud  # NEW
-from Leadpoet.utils.cloud_db import fetch_prospects_from_cloud  # NEW
 from Leadpoet.utils.cloud_db import (
     get_cloud_leads,
     push_prospects_to_cloud,
     fetch_prospects_from_cloud,
-    fetch_miner_curation_request,  # NEW
-    push_miner_curation_result,  # NEW
-    fetch_broadcast_requests,  # NEW
-    mark_broadcast_processing,  # NEW
+    fetch_miner_curation_request,
+    push_miner_curation_result,
+    fetch_broadcast_requests,
+    mark_broadcast_processing,
 )
 import logging
 import random
-import socket, struct  # already have socket; add struct
-import grpc  # add near other imports
+import socket, struct
+import grpc
 from pathlib import Path
+from Leadpoet.utils.token_manager import TokenManager
+from supabase import create_client, Client
 
 
-# Remove this if you don't want to silence noisy "InvalidRequestNameError … Improperly formatted request" lines ──
 class _SilenceInvalidRequest(logging.Filter):
-
     def filter(self, record: logging.LogRecord) -> bool:
-        # Drop only those specific ERROR messages – let everything else through.
-        if record.levelno >= logging.ERROR and "InvalidRequestNameError" in record.getMessage(
-        ):
+        if record.levelno >= logging.ERROR and "InvalidRequestNameError" in record.getMessage():
             return False
         return True
 
 
-root_logger = logging.getLogger()  # root
-bittensor_logger = logging.getLogger("bittensor")  # axon middleware logs here
+root_logger = logging.getLogger()
+bittensor_logger = logging.getLogger("bittensor")
 root_logger.addFilter(_SilenceInvalidRequest())
 bittensor_logger.addFilter(_SilenceInvalidRequest())
-# ────────────────────────────────────────────────────────────────────────────────
+
+for logger_name in ['orchestrator', 'domain', 'crawl', 'enrich']:
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 class Miner(BaseMinerNeuron):
@@ -77,13 +74,115 @@ class Miner(BaseMinerNeuron):
         self.app.add_routes(
             [web.post('/lead_request', self.handle_lead_request)])
         self.sourcing_mode = True
-        self.sourcing_lock = threading.Lock()  # thread-safe
-        # background loop orchestration
+        self.sourcing_lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.sourcing_task: Optional[asyncio.Task] = None
         self.cloud_task: Optional[asyncio.Task] = None
         self._bg_interval: int = 60
         self._miner_hotkey: Optional[str] = None
+        
+        try:
+            self.token_manager = TokenManager(
+                hotkey=self.wallet.hotkey.ss58_address,
+                wallet=self.wallet
+            )
+            bt.logging.info(f"🔑 TokenManager initialized")
+        except Exception as e:
+            bt.logging.error(f"Failed to initialize TokenManager: {e}")
+            raise
+        
+        # Check token status on startup
+        status = self.token_manager.get_status()
+        
+        if status.get('valid'):
+            bt.logging.info(f"✅ Token valid - Role: {status['role']}, Hours remaining: {status.get('hours_remaining', 0):.1f}")
+        else:
+            bt.logging.warning(f"⚠️ Token invalid or missing - attempting refresh now...")
+        
+        # Only refresh if needed
+        status = self.token_manager.get_status()
+        if status.get('needs_refresh') or not status.get('valid'):
+            success = self.token_manager.refresh_token()
+            if success:
+                bt.logging.info(f"✅ Token refreshed successfully")
+            else:
+                bt.logging.error(f"❌ Failed to refresh token")
+        else:
+            bt.logging.info(f"✅ Using existing valid token")
+        
+        # NEW: Initialize Supabase client with JWT from TokenManager
+        self.supabase_url = "https://qplwoislplkcegvdmbim.supabase.co"
+        self.supabase_client: Optional[Client] = None
+        self._init_supabase_client()
+    
+    def _init_supabase_client(self):
+        """Initialize or refresh Supabase client with current JWT token."""
+        try:
+            jwt = self.token_manager.get_token()
+            if jwt:
+                self.supabase_client = create_client(self.supabase_url, jwt)
+                bt.logging.info("✅ Supabase client initialized")
+            else:
+                bt.logging.warning("⚠️ No JWT token available for Supabase client")
+                self.supabase_client = None
+        except Exception as e:
+            bt.logging.error(f"Failed to initialize Supabase client: {e}")
+            self.supabase_client = None
+    
+    def get_old_leads(self, limit: int = 100) -> List[Dict]:
+        """
+        Read leads from Supabase that are older than 72 minutes.
+        RLS policies automatically enforce this restriction.
+        
+        Args:
+            limit: Maximum number of leads to fetch
+            
+        Returns:
+            List of lead dictionaries
+        """
+        if not self.supabase_client:
+            bt.logging.warning("Supabase client not initialized, cannot fetch leads")
+            return []
+        
+        try:
+            response = self.supabase_client.table("leads").select("*").limit(limit).execute()
+            bt.logging.info(f"📥 Fetched {len(response.data)} leads from Supabase (>72 min old)")
+            return response.data
+        except Exception as e:
+            bt.logging.error(f"Failed to fetch leads from Supabase: {e}")
+            return []
+    
+    def fetch_leads_from_supabase_pool(self, industry: str = None, region: str = None, limit: int = 1000) -> List[Dict]:
+        """
+        Fetch leads from Supabase that match criteria.
+        Only returns leads >72 minutes old (enforced by RLS).
+        
+        Args:
+            industry: Filter by industry (optional)
+            region: Filter by region (optional)
+            limit: Maximum number of leads to fetch
+            
+        Returns:
+            List of lead dictionaries
+        """
+        if not self.supabase_client:
+            bt.logging.warning("Supabase client not available, using fallback")
+            return []
+        
+        try:
+            query = self.supabase_client.table("leads").select("*")
+            
+            if industry:
+                query = query.eq("industry", industry)
+            if region:
+                query = query.eq("region", region)
+            
+            response = query.limit(limit).execute()
+            bt.logging.debug(f"📥 Fetched {len(response.data)} leads from Supabase pool")
+            return response.data
+        except Exception as e:
+            bt.logging.error(f"Failed to fetch leads from Supabase pool: {e}")
+            return []
 
     def pause_sourcing(self):
         print("⏸️ Pausing sourcing (cancel background task)…")
@@ -136,13 +235,16 @@ class Miner(BaseMinerNeuron):
                     email = lead.get('owner_email', 'No email')
                     print(f"  {i}. {business} - {owner} ({email})")
                 try:
-                    push_prospects_to_cloud(self.wallet, sanitized)
-                    print(
-                        f"✅ Pushed {len(sanitized)} prospects to cloud queue "
-                        f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
-                    )
+                    success = push_prospects_to_cloud(self.wallet, sanitized)
+                    if success:
+                        print(
+                            f"✅ Pushed {len(sanitized)} prospects to Supabase queue "
+                            f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
+                        )
+                    else:
+                        print(f"❌ Failed to push prospects - Supabase client unavailable")
                 except Exception as e:
-                    print(f"❌ Cloud push failed: {e}")
+                    print(f"❌ Cloud push exception: {e}")
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 print("🛑 Sourcing task cancelled")
@@ -836,17 +938,35 @@ class Miner(BaseMinerNeuron):
             pass
 
     def run(self):
-        # Delegate to the base class run loop; avoids calling non-callable step() and missing stop().
-        bt.logging.info(f"Miner starting at block: {self.block}")
+        """
+        Start the miner and run until interrupted.
+        """
+        bt.logging.info("Starting miner...")
+        
+        # ... existing code ...
+        
         try:
-            return super().run()
+            while True:
+                # NEW: Check and refresh token every iteration (checks threshold internally)
+                token_refreshed = self.token_manager.refresh_if_needed(threshold_hours=1)
+                if not token_refreshed and not self.token_manager.get_token():
+                    bt.logging.warning("⚠️ Token refresh failed, continuing with existing token...")
+                
+                # NEW: Refresh Supabase client if token was refreshed
+                if token_refreshed:
+                    bt.logging.info("🔄 Token was refreshed, reinitializing Supabase client...")
+                    self._init_supabase_client()
+                
+                # ... existing code (sync, weight setting, etc.) ...
+                
+                time.sleep(12)
+                
         except KeyboardInterrupt:
-            self.stop()
             bt.logging.success("Miner killed by keyboard interrupt.")
+            exit()
         except Exception as e:
-            print(f"❌ Error in miner.run(): {e}")
+            bt.logging.error(f"Miner error: {e}")
             bt.logging.error(traceback.format_exc())
-            self.stop()
 
 
 DATA_DIR = "data"
@@ -1016,7 +1136,6 @@ async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
         print(f"❌ gRPC preflight FAIL → {addr} | {e}")
     return False
 
-
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
@@ -1111,3 +1230,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

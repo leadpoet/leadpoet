@@ -11,7 +11,8 @@ logs/
 validator_weights/
 env.txt
 .env
-
+.test_supabase_connection.py
+.tasks.md
 # macOS
 .DS_Storez
 

@@ -91,3 +91,10 @@ PyYAML>=6.0
 
 # throwaway email blocklist
 disposable-email-domains>=0.0.138
+
+# JWT Token Management
+pyjwt>=2.8.0
+requests>=2.31.0
+
+# Supabase (for future migration)
+supabase>=2.0.0

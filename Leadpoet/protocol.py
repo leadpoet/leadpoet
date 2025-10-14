@@ -1,6 +1,3 @@
-# The MIT License (MIT)
-# Copyright © 2025 Yuma Rao
-# Leadpoet
 # Copyright © 2025 Leadpoet
 
 import typing
@@ -9,9 +6,7 @@ import bittensor as bt
 class LeadRequest(bt.Synapse):
     
     num_leads: int
-    business_desc: str = ""          # NEW
-     # Legacy fields kept for backward-compatibility with miner / validator code.
-     # They default to empty strings when the client no longer supplies them.
+    business_desc: str = ""
     industry: typing.Optional[str] = ""
     region:   typing.Optional[str] = ""
     leads: typing.Optional[typing.List[dict]] = None

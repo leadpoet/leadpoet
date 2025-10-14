@@ -1,820 +1,569 @@
-# Migration Tasks: Firestore to Supabase with JWT-Based Access Control
+# Consensus-Based Lead Validation System Implementation
 
-## Summary of Context & Corrected Workflow
+## Overview
+Transform the current single-validator lead processing into a consensus-based system where each lead is evaluated by the first 3 validators who pull it from the prospect queue. Leads are only promoted to the main database when at least 2 out of 3 validators agree they are valid.
 
-**The Problem**: Validators could register as miners, read the entire database (including recent leads from the last 72 minutes), and game the system by publishing correct weights without doing validation work.
+## Process Flow
+1. **Miners** source leads and add to `prospect_queue`
+2. **First 3 validators** who pull each lead get a copy (first-come-first-served, NOT randomly assigned)
+3. Lead remains in `prospect_queue` until 3 validators have pulled it
+4. Each validator independently validates and scores the lead
+5. **Consensus Decision**:
+   - If 2/3 say **VALID** → Lead goes to BOTH `validation_tracking` table AND main `leads` DB
+   - If 2/3 say **INVALID** → Lead goes ONLY to `validation_tracking` table (NOT to main `leads` DB)
+6. **Reward Eligibility** (checked at end of epoch):
+   - Validators must be "in consensus" for ≥10% of leads they validated
+   - "In consensus" means their vote aligned with the majority decision
+   - Only validators meeting this threshold receive miner weight allocations
 
-**The Solution**: Migrate from Firestore to Supabase with JWT-based access control:
-- **Miners**: JWT with `app_role="miner"` → READ-only access to leads >72 minutes old (enforced by RLS)
-- **Validators**: JWT with `app_role="validator"` → WRITE-only access
-- **Automated Issuance**: When someone registers on the subnet, they call an API endpoint to automatically receive their JWT token based on their metagraph role
+## Task 1: Database Schema Design & Implementation
 
-**The Corrected Workflow**:
-1. Miner/validator registers on the Bittensor subnet
-2. They clone the repo
-3. They call your API endpoint: `curl https://your-issuer.com/issue-jwt --data '{"hotkey":"5ABC..."}'`
-4. Server checks metagraph, determines if they're a miner or validator, issues JWT automatically
-5. They receive JWT token in response
-6. They add `SUPABASE_JWT=<token>` to `.env`
-7. They run their node - done!
-
----
-
-## Phase 1: Supabase Setup & Schema Migration
-
-### Task 1.1: Use Your Existing Supabase Project
-**File**: N/A (already set up)
-
-**Your existing project details**:
-- Project ID: `qplwoislplkcegvdmbim`
-- Project URL: `https://qplwoislplkcegvdmbim.supabase.co`
-- Anon public key: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDcwMDUsImV4cCI6MjA2MDQyMzAwNX0.5E0WjAthYDXaCWY6qjzXm2k20EhadWfigak9hleKZk8`
-- Service role key (SECRET - never share): `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NDg0NzAwNSwiZXhwIjoyMDYwNDIzMDA1fQ.L3QKWAcZUC-D3-fN4ogueIAmQhuJEjZ2UpYfSlJPp_I`
-
-**Action items**:
-1. ✅ Project already exists - no new project creation needed
-2. Go to https://supabase.com/dashboard/project/qplwoislplkcegvdmbim
-3. Access your project's SQL Editor and Database settings
-4. Get your JWT Secret from Settings > API > JWT Settings (you'll need this for Task 2.3)
-
-**Important**: All subsequent tasks will use this existing project. We'll be adding new tables, Edge Functions, and RLS policies to this project.
-
-**Note on JWT Secret**: 
-To get your JWT Secret (needed for Task 2.3 Edge Function):
-1. Go to https://supabase.com/dashboard/project/qplwoislplkcegvdmbim/settings/api
-2. Scroll to "JWT Settings"
-3. Copy the "JWT Secret" value
-4. You'll use this when deploying the Edge Function in Task 2.3
-
-### Task 1.2: Create Database Schema
-**File**: Supabase Dashboard / SQL Editor
-
-Execute the following SQL to create the schema:
-
+### 1.1 Create Validation Tracking Table (72-minute rolling window)
+Create a new `validation_tracking` table to store each validator's assessment. This table stores ALL validation attempts (both accepted and rejected leads) and is cleared after each epoch:
 ```sql
--- Leads table (equivalent to Firestore collection)
-CREATE TABLE leads (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email TEXT NOT NULL,
-  company TEXT,
-  validated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  validator_hotkey TEXT NOT NULL,
-  miner_hotkey TEXT,
-  score FLOAT,
-  metadata JSONB,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE validation_tracking (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    lead_id UUID NOT NULL,
+    prospect_id UUID NOT NULL REFERENCES prospect_queue(id),
+    validator_hotkey TEXT NOT NULL,
+    score NUMERIC(3,2) NOT NULL,
+    is_valid BOOLEAN NOT NULL,
+    validation_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    epoch_number INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    -- Ensure a validator can only validate a lead once
+    UNIQUE(lead_id, validator_hotkey)
 );
 
-CREATE INDEX idx_leads_validated_at ON leads(validated_at);
-CREATE INDEX idx_leads_validator_hotkey ON leads(validator_hotkey);
-CREATE INDEX idx_leads_miner_hotkey ON leads(miner_hotkey);
+-- Index for efficient queries
+CREATE INDEX idx_validation_tracking_lead_id ON validation_tracking(lead_id);
+CREATE INDEX idx_validation_tracking_validator ON validation_tracking(validator_hotkey);
+CREATE INDEX idx_validation_tracking_epoch ON validation_tracking(epoch_number);
+CREATE INDEX idx_validation_tracking_timestamp ON validation_tracking(validation_timestamp);
 
--- Add other tables as needed...
-```
-
-### Task 1.3: Enable Row Level Security (RLS)
-**File**: Supabase Dashboard / SQL Editor
-
-Enable RLS on all tables:
-
-```sql
-ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
--- Repeat for all tables
-```
-
-### Task 1.4: Create RLS Policies
-**File**: Supabase Dashboard / SQL Editor
-
-Create policies for role-based access:
-
-```sql
--- Policy 1: Miners can READ leads older than 72 minutes
-CREATE POLICY "miner_read_old_leads" ON leads
-FOR SELECT
-TO authenticated
-USING (
-  (auth.jwt() ->> 'app_role') = 'miner'
-  AND validated_at < NOW() - INTERVAL '72 minutes'
-);
-
--- Policy 2: Validators can WRITE (INSERT only)
-CREATE POLICY "validator_write_access_leads" ON leads
-FOR INSERT
-TO authenticated
-WITH CHECK (
-  (auth.jwt() ->> 'app_role') = 'validator'
-);
-
--- Repeat similar policies for other tables...
-```
-
----
-
-## Phase 2: Automated JWT Token Issuance System
-
-### Task 2.1: Create Supabase Tables for Token Management
-**File**: Supabase Dashboard / SQL Editor
-
-Add these tables for token tracking, revocation, and rate limiting:
-
-```sql
--- Track all registered members and their roles
-CREATE TABLE members (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  hotkey TEXT UNIQUE NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('miner', 'validator')),
-  registered_at TIMESTAMPTZ DEFAULT NOW(),
-  approved BOOLEAN DEFAULT TRUE,
-  last_verified TIMESTAMPTZ
-);
-
-CREATE INDEX idx_members_hotkey ON members(hotkey);
-
--- Track all issued JWT tokens for audit and revocation
-CREATE TABLE token_issuances (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  token_id TEXT UNIQUE NOT NULL,
-  hotkey TEXT NOT NULL,
-  role TEXT NOT NULL,
-  issued_at TIMESTAMPTZ DEFAULT NOW(),
-  expires_at TIMESTAMPTZ NOT NULL,
-  revoked BOOLEAN DEFAULT FALSE,
-  revoked_at TIMESTAMPTZ,
-  revoked_by TEXT,
-  revoked_reason TEXT
-);
-
-CREATE INDEX idx_token_issuances_token_id ON token_issuances(token_id);
-CREATE INDEX idx_token_issuances_hotkey ON token_issuances(hotkey);
-CREATE INDEX idx_token_issuances_revoked ON token_issuances(revoked);
-
--- Track token issuance attempts for rate limiting
-CREATE TABLE token_issuance_attempts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  hotkey TEXT NOT NULL,
-  attempted_at TIMESTAMPTZ DEFAULT NOW(),
-  success BOOLEAN DEFAULT FALSE,
-  error_message TEXT
-);
-
-CREATE INDEX idx_token_issuance_attempts_hotkey ON token_issuance_attempts(hotkey);
-CREATE INDEX idx_token_issuance_attempts_attempted_at ON token_issuance_attempts(attempted_at);
-```
-
-### Task 2.2: Update RLS Policies to Check Token Revocation
-**File**: Supabase Dashboard / SQL Editor
-
-Add revocation checks to RLS policies:
-
-```sql
--- Function to check if token is valid (not revoked)
-CREATE OR REPLACE FUNCTION is_token_valid()
-RETURNS BOOLEAN AS $$
+-- Function to clear old epoch data (runs every 72 minutes)
+CREATE OR REPLACE FUNCTION clear_old_validation_tracking()
+RETURNS void AS $$
 BEGIN
-  RETURN NOT EXISTS (
-    SELECT 1 FROM token_issuances
-    WHERE token_id = (auth.jwt() ->> 'token_id')
-    AND revoked = TRUE
-  );
+    DELETE FROM validation_tracking 
+    WHERE epoch_number < (
+        SELECT MAX(epoch_number) - 1 
+        FROM validation_tracking
+    );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Update miner read policy to check revocation
-DROP POLICY IF EXISTS "miner_read_old_leads" ON leads;
-CREATE POLICY "miner_read_old_leads" ON leads
-FOR SELECT
-TO authenticated
-USING (
-  (auth.jwt() ->> 'app_role') = 'miner'
-  AND validated_at < NOW() - INTERVAL '72 minutes'
-  AND is_token_valid()
-);
-
--- Update validator policy to check revocation
-DROP POLICY IF EXISTS "validator_write_access_leads" ON leads;
-CREATE POLICY "validator_write_access_leads" ON leads
-FOR INSERT
-TO authenticated
-WITH CHECK (
-  (auth.jwt() ->> 'app_role') = 'validator'
-  AND is_token_valid()
-);
-
--- Repeat for all other tables...
+$$ LANGUAGE plpgsql;
 ```
 
-### Task 2.3: Create Automated JWT Issuer Edge Function
-**File**: Supabase Dashboard > Edge Functions > New Function: `issue-jwt`
+### 1.2 Modify Prospect Queue Table
+Update `prospect_queue` to track which validators have pulled each lead (first-come-first-served):
+```sql
+ALTER TABLE prospect_queue 
+ADD COLUMN validators_pulled TEXT[] DEFAULT '{}',  -- Track which validators have pulled this lead
+ADD COLUMN pull_count INTEGER DEFAULT 0,            -- Count of validators who have pulled (max 3)
+ADD COLUMN consensus_status TEXT DEFAULT 'pending', -- 'pending', 'accepted', 'rejected'
+ADD COLUMN consensus_timestamp TIMESTAMP WITH TIME ZONE;
 
-This Edge Function automatically issues JWT tokens when miners/validators request them, with rate limiting and optional approval flow.
-
-**Function code** (TypeScript):
-```typescript
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { create, verify } from 'https://deno.land/x/djwt@v2.8/mod.ts'
-
-const SUBNET_ID = 401
-const NETWORK = "test"
-const JWT_TTL_HOURS = 24 // Token expires in 24 hours
-const REQUIRE_APPROVAL = Deno.env.get('REQUIRE_APPROVAL') === 'true'
-const RATE_LIMIT_MAX = 10 // Max 10 requests per hour
-const RATE_LIMIT_WINDOW = 3600 // 1 hour in seconds
-
-// Helper: Verify hotkey is registered on Bittensor subnet and get role
-async function verifyHotkeyAndGetRole(hotkey: string): Promise<{valid: boolean, role?: string}> {
-  try {
-    // Query Bittensor subtensor directly
-    const response = await fetch(`https://test.finney.opentensor.ai/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'subnetwork_info',
-        params: [SUBNET_ID],
-        id: 1
-      })
-    })
-    
-    const data = await response.json()
-    const metagraph = data.result
-    
-    // Find the UID for this hotkey
-    const uid = metagraph.hotkeys.indexOf(hotkey)
-    if (uid === -1) {
-      return { valid: false }
-    }
-    
-    // Check if they have validator permit
-    const isValidator = metagraph.validator_permit[uid] === true
-    
-    return {
-      valid: true,
-      role: isValidator ? 'validator' : 'miner'
-    }
-    
-  } catch (error) {
-    console.error('Error verifying hotkey:', error)
-    return { valid: false }
-  }
-}
-
-serve(async (req) => {
-  try {
-    // Only allow POST requests
-    if (req.method !== 'POST') {
-      return new Response(
-        JSON.stringify({ error: 'Method not allowed' }),
-        { status: 405, headers: { 'Content-Type': 'application/json' } }
-      )
-    }
-    
-    const { hotkey } = await req.json()
-    
-    if (!hotkey || typeof hotkey !== 'string') {
-      return new Response(
-        JSON.stringify({ error: 'Invalid hotkey parameter' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      )
-    }
-    
-    // Initialize Supabase client with service role
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
-    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    const supabase = createClient(supabaseUrl, serviceRoleKey)
-    
-    // Check rate limit
-    const { data: recentAttempts } = await supabase
-      .from('token_issuance_attempts')
-      .select('*')
-      .eq('hotkey', hotkey)
-      .gte('attempted_at', new Date(Date.now() - RATE_LIMIT_WINDOW * 1000).toISOString())
-
-    if (recentAttempts && recentAttempts.length >= RATE_LIMIT_MAX) {
-      return new Response(
-        JSON.stringify({ 
-          error: 'Rate limit exceeded',
-          retry_after: RATE_LIMIT_WINDOW
-        }),
-        { status: 429, headers: { 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Log attempt
-    await supabase.from('token_issuance_attempts').insert({
-      hotkey: hotkey,
-      attempted_at: new Date().toISOString(),
-      success: false
-    })
-    
-    // Verify hotkey is registered on subnet and determine role
-    const verification = await verifyHotkeyAndGetRole(hotkey)
-    
-    if (!verification.valid) {
-      await supabase
-        .from('token_issuance_attempts')
-        .update({ error_message: 'Hotkey not registered on subnet' })
-        .eq('hotkey', hotkey)
-        .order('attempted_at', { ascending: false })
-        .limit(1)
-      
-      return new Response(
-        JSON.stringify({ 
-          error: 'Hotkey not registered on subnet 401',
-          subnet_id: SUBNET_ID,
-          network: NETWORK
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      )
-    }
-    
-    const role = verification.role!
-    
-    // Check if approval is required
-    if (REQUIRE_APPROVAL) {
-      const { data: member } = await supabase
-        .from('members')
-        .select('approved')
-        .eq('hotkey', hotkey)
-        .single()
-      
-      if (!member || !member.approved) {
-        await supabase
-          .from('token_issuance_attempts')
-          .update({ error_message: 'Hotkey not approved' })
-          .eq('hotkey', hotkey)
-          .order('attempted_at', { ascending: false })
-          .limit(1)
-        
-        return new Response(
-          JSON.stringify({ 
-            error: 'Hotkey not approved. Please contact subnet operator for approval.',
-            hotkey: hotkey
-          }),
-          { status: 403, headers: { 'Content-Type': 'application/json' } }
-        )
-      }
-    }
-    
-    // Check if member already exists, update last_verified
-    const { data: existingMember } = await supabase
-      .from('members')
-      .select('*')
-      .eq('hotkey', hotkey)
-      .single()
-    
-    if (existingMember) {
-      // Update last verified timestamp
-      await supabase
-        .from('members')
-        .update({ last_verified: new Date().toISOString(), role: role })
-        .eq('hotkey', hotkey)
-    } else {
-      // Insert new member
-      await supabase
-        .from('members')
-        .insert({
-          hotkey: hotkey,
-          role: role,
-          approved: true,
-          last_verified: new Date().toISOString()
-        })
-    }
-    
-    // Generate unique token ID for revocation tracking
-    const tokenId = crypto.randomUUID()
-    
-    // Create JWT with custom claims
-    const now = Math.floor(Date.now() / 1000)
-    const exp = now + (JWT_TTL_HOURS * 3600)
-    
-    const payload = {
-      iss: 'leadpoet-subnet',
-      sub: hotkey,
-      aud: 'authenticated',
-      exp: exp,
-      iat: now,
-      role: 'authenticated', // Supabase role
-      app_role: role, // Custom claim for RLS
-      token_id: tokenId, // For revocation
-      hotkey: hotkey,
-    }
-    
-    // Sign JWT with Supabase JWT secret
-    const jwtSecret = Deno.env.get('SUPABASE_JWT_SECRET')!
-    const key = await crypto.subtle.importKey(
-      'raw',
-      new TextEncoder().encode(jwtSecret),
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign']
-    )
-    
-    const jwt = await create({ alg: 'HS256', typ: 'JWT' }, payload, key)
-    
-    // Record token issuance for audit and revocation
-    await supabase
-      .from('token_issuances')
-      .insert({
-        token_id: tokenId,
-        hotkey: hotkey,
-        role: role,
-        expires_at: new Date(exp * 1000).toISOString()
-      })
-    
-    // Update attempt record as successful
-    await supabase
-      .from('token_issuance_attempts')
-      .update({ success: true })
-      .eq('hotkey', hotkey)
-      .order('attempted_at', { ascending: false })
-      .limit(1)
-    
-    // Return JWT to client
-    return new Response(
-      JSON.stringify({ 
-        success: true,
-        jwt: jwt,
-        role: role,
-        expires_in: JWT_TTL_HOURS * 3600,
-        expires_at: new Date(exp * 1000).toISOString(),
-        instructions: 'Add this token to your .env file as SUPABASE_JWT=<token>'
-      }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } }
-    )
-    
-  } catch (error) {
-    console.error('Error issuing JWT:', error)
-    return new Response(
-      JSON.stringify({ error: 'Internal server error', details: error.message }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
-    )
-  }
-})
+-- Index for efficient queries
+CREATE INDEX idx_prospect_queue_pull_count ON prospect_queue(pull_count);
+CREATE INDEX idx_prospect_queue_consensus_status ON prospect_queue(consensus_status);
 ```
 
-**Deploy the Edge Function**:
-```bash
-# Install Supabase CLI
-npm install -g supabase
+### 1.3 Create Consensus Results View
+Create a materialized view for efficient consensus queries:
+```sql
+CREATE MATERIALIZED VIEW consensus_results AS
+SELECT 
+    vt.lead_id,
+    vt.prospect_id,
+    COUNT(*) as total_validations,
+    SUM(CASE WHEN vt.is_valid THEN 1 ELSE 0 END) as valid_count,
+    SUM(CASE WHEN NOT vt.is_valid THEN 1 ELSE 0 END) as invalid_count,
+    ARRAY_AGG(vt.validator_hotkey) as validators,
+    AVG(vt.score) as avg_score,
+    MAX(vt.validation_timestamp) as last_validated
+FROM validation_tracking vt
+GROUP BY vt.lead_id, vt.prospect_id;
 
-# Login to Supabase
-supabase login
+-- Refresh trigger
+CREATE OR REPLACE FUNCTION refresh_consensus_results()
+RETURNS TRIGGER AS $$
+BEGIN
+    REFRESH MATERIALIZED VIEW CONCURRENTLY consensus_results;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
 
-# Deploy the function
-supabase functions deploy issue-jwt --project-ref qplwoislplkcegvdmbim
-
-# Set environment variables
-supabase secrets set SUPABASE_JWT_SECRET=<your_jwt_secret> --project-ref qplwoislplkcegvdmbim
-supabase secrets set REQUIRE_APPROVAL=false --project-ref qplwoislplkcegvdmbim
+CREATE TRIGGER refresh_consensus_after_validation
+AFTER INSERT OR UPDATE ON validation_tracking
+FOR EACH STATEMENT
+EXECUTE FUNCTION refresh_consensus_results();
 ```
 
-**Note**: Set `REQUIRE_APPROVAL=true` if you want to manually approve members before they can get tokens.
+## Task 2: Implement First-Come-First-Served Prospect Fetching
 
-### Task 2.4: Create Token Revocation Edge Function (Optional but Recommended)
-**File**: Supabase Dashboard > Edge Functions > New Function: `revoke-jwt`
-
-Admin-only function to revoke tokens:
-
-```typescript
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-
-serve(async (req) => {
-  try {
-    // Require admin authentication (implement your admin auth here)
-    const adminKey = req.headers.get('X-Admin-Key')
-    if (adminKey !== Deno.env.get('ADMIN_KEY')) {
-      return new Response(
-        JSON.stringify({ error: 'Unauthorized' }),
-        { status: 401, headers: { 'Content-Type': 'application/json' } }
-      )
-    }
-    
-    const { token_id, reason } = await req.json()
-    
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
-    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    const supabase = createClient(supabaseUrl, serviceRoleKey)
-    
-    // Revoke the token
-    const { error } = await supabase
-      .from('token_issuances')
-      .update({
-        revoked: true,
-        revoked_at: new Date().toISOString(),
-        revoked_reason: reason
-      })
-      .eq('token_id', token_id)
-    
-    if (error) throw error
-    
-    return new Response(
-      JSON.stringify({ success: true, message: 'Token revoked' }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } }
-    )
-    
-  } catch (error) {
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
-    )
-  }
-})
-```
-
-**Deploy the revocation function**:
-```bash
-supabase functions deploy revoke-jwt --project-ref qplwoislplkcegvdmbim
-supabase secrets set ADMIN_KEY=<your_secure_admin_key> --project-ref qplwoislplkcegvdmbim
-```
-
-### Task 2.5: Update Setup Instructions for Miners/Validators
-**File**: `README.md`
-
-Add clear instructions:
-
-```markdown
-## Setup for Miners/Validators
-
-### Prerequisites
-1. Register on Bittensor subnet 401
-2. Ensure your hotkey is registered and serving
-
-### Getting Your JWT Token
-
-Request your JWT token by calling the issuance endpoint:
-
-```bash
-curl -X POST https://qplwoislplkcegvdmbim.supabase.co/functions/v1/issue-jwt \
-  -H "Content-Type: application/json" \
-  -d '{"hotkey": "YOUR_HOTKEY_HERE"}'
-```
-
-**Response**:
-```json
-{
-  "success": true,
-  "jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "role": "miner",
-  "expires_in": 86400,
-  "expires_at": "2025-10-10T20:00:00.000Z",
-  "instructions": "Add this token to your .env file as SUPABASE_JWT=<token>"
-}
-```
-
-### Installation
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/yourusername/Bittensor-subnet.git
-   cd Bittensor-subnet
-   ```
-
-2. **Create `.env` file** with your JWT token:
-   ```bash
-   echo "SUPABASE_JWT=<your_jwt_token_from_above>" > .env
-   ```
-
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Run your node**:
-   ```bash
-   # For miners:
-   python neurons/miner.py --wallet_name miner --wallet_hotkey default --netuid 401 --subtensor_network test
-   
-   # For validators:
-   python neurons/validator.py --wallet_name validator --wallet_hotkey default --netuid 401 --subtensor_network test
-   ```
-
-That's it! Your node will automatically have the correct database permissions based on your role.
-
-### Token Expiration & Renewal
-
-Tokens expire after 24 hours. To renew:
-```bash
-curl -X POST https://qplwoislplkcegvdmbim.supabase.co/functions/v1/issue-jwt \
-  -H "Content-Type: application/json" \
-  -d '{"hotkey": "YOUR_HOTKEY_HERE"}'
-```
-
-Update your `.env` file with the new token and restart your node.
-
-### Troubleshooting
-
-**"Hotkey not registered" error**:
-- Verify your hotkey is registered on subnet 401: `btcli s metagraph --netuid 401 --subtensor.network test`
-- Ensure you're using the correct network (test vs mainnet)
-
-**"403 Forbidden" when reading/writing**:
-- Verify token is not expired: tokens last 24 hours
-- Check your role matches the operation (miners=read, validators=write)
-- Ensure token hasn't been revoked
-
-**"Rate limit exceeded" error**:
-- You can only request a token 10 times per hour
-- Wait for the cooldown period and try again
-
-**Token renewal failing**:
-- Check network connectivity to Supabase
-- Verify hotkey is still registered on subnet
-- Contact subnet operator if persistent issues
-```
-
-### Task 2.6: Set Up Automatic Token Renewal (Optional)
-**File**: Client code (`neurons/miner.py` and `neurons/validator.py`)
-
-Add automatic token refresh logic to prevent service interruption:
-
+### 2.1 Updated Fetch Function for Validators
+Modify the fetch function to implement first-come-first-served logic:
 ```python
-import os
-import time
-import requests
-import jwt as pyjwt
-from datetime import datetime, timedelta
+# In Leadpoet/utils/cloud_db.py
 
-class TokenManager:
-    def __init__(self, hotkey, token_endpoint):
-        self.hotkey = hotkey
-        self.token_endpoint = token_endpoint
-        self.jwt = os.getenv("SUPABASE_JWT")
-        self.token_expires = None
-        self._parse_expiry()
+def fetch_prospects_from_cloud(wallet: bt.wallet, limit: int = 100) -> List[Dict]:
+    """
+    Fetch prospects that this validator hasn't pulled yet.
+    Prospects remain available until 3 validators have pulled them.
+    First-come-first-served: first 3 validators to pull get the lead.
+    """
+    try:
+        supabase = get_supabase_client()
+        if not supabase:
+            return []
+        
+        validator_hotkey = wallet.hotkey.ss58_address
+        
+        # Get prospects where:
+        # 1. This validator hasn't pulled it yet
+        # 2. Less than 3 validators have pulled it
+        # 3. Still pending consensus
+        result = supabase.table("prospect_queue") \
+            .select("*") \
+            .eq("status", "pending") \
+            .lt("pull_count", 3) \
+            .not_.contains("validators_pulled", [validator_hotkey]) \
+            .eq("consensus_status", "pending") \
+            .order("created_at", desc=False) \
+            .limit(limit) \
+            .execute()
+        
+        if not result.data:
+            return []
+        
+        # Mark that this validator has pulled these prospects
+        prospects = []
+        for prospect in result.data:
+            # Update the prospect to add this validator to the pulled list
+            updated_validators = prospect.get('validators_pulled', []) + [validator_hotkey]
+            new_pull_count = prospect.get('pull_count', 0) + 1
+            
+            update_result = supabase.table("prospect_queue") \
+                .update({
+                    "validators_pulled": updated_validators,
+                    "pull_count": new_pull_count
+                }) \
+                .eq("id", prospect['id']) \
+                .execute()
+            
+            if update_result.data:
+                prospects.append(prospect['prospect'])  # Return the actual prospect data
+        
+        bt.logging.info(f"✅ Pulled {len(prospects)} prospects from queue (first-come-first-served)")
+        return prospects
+        
+    except Exception as e:
+        bt.logging.error(f"Failed to fetch prospects: {e}")
+        return []
+```
+
+### 2.2 Atomic Pull Operation
+Ensure the pull operation is atomic to prevent race conditions:
+```sql
+-- Function to atomically pull prospects for a validator
+CREATE OR REPLACE FUNCTION pull_prospects_for_validator(
+    p_validator_hotkey TEXT,
+    p_limit INTEGER DEFAULT 100
+)
+RETURNS TABLE(prospect_id UUID, prospect JSONB) AS $$
+DECLARE
+    v_prospect RECORD;
+BEGIN
+    -- Use FOR UPDATE SKIP LOCKED to prevent race conditions
+    FOR v_prospect IN
+        SELECT id, prospect
+        FROM prospect_queue
+        WHERE status = 'pending'
+        AND pull_count < 3
+        AND NOT (validators_pulled @> ARRAY[p_validator_hotkey])
+        AND consensus_status = 'pending'
+        ORDER BY created_at
+        LIMIT p_limit
+        FOR UPDATE SKIP LOCKED
+    LOOP
+        -- Update the prospect with this validator
+        UPDATE prospect_queue
+        SET validators_pulled = array_append(validators_pulled, p_validator_hotkey),
+            pull_count = pull_count + 1
+        WHERE id = v_prospect.id;
+        
+        -- Return the prospect
+        prospect_id := v_prospect.id;
+        prospect := v_prospect.prospect;
+        RETURN NEXT;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+## Task 3: Build Consensus Determination Logic
+
+### 3.1 Validator Submission Handler
+Update validator to submit assessments to tracking table:
+```python
+# In neurons/validator.py - modify save_lead_to_cloud function
+
+def submit_validation_assessment(
+    wallet: bt.wallet, 
+    prospect_id: str,
+    lead_id: str,
+    lead_data: Dict,
+    score: float,
+    is_valid: bool
+) -> bool:
+    """
+    Submit validator's assessment to the validation tracking system.
+    """
+    try:
+        supabase = get_supabase_client()
+        if not supabase:
+            return False
+        
+        # Get current epoch
+        from Leadpoet.validator.reward import _calculate_epoch_number, _get_current_block
+        current_block = _get_current_block(bt.subtensor(network=NETWORK))
+        epoch_number = _calculate_epoch_number(current_block)
+        
+        # Submit validation assessment
+        validation_data = {
+            "lead_id": lead_id,
+            "prospect_id": prospect_id,
+            "validator_hotkey": wallet.hotkey.ss58_address,
+            "score": score,
+            "is_valid": is_valid,
+            "epoch_number": epoch_number
+        }
+        
+        result = supabase.table("validation_tracking").insert([validation_data]).execute()
+        
+        if result.data:
+            bt.logging.info(f"✅ Submitted validation for lead {lead_id[:8]}...")
+            
+            # Check if consensus is reached
+            check_and_process_consensus(prospect_id, lead_id, lead_data)
+            
+            return True
+            
+    except Exception as e:
+        bt.logging.error(f"Failed to submit validation assessment: {e}")
+        return False
+
+def check_and_process_consensus(prospect_id: str, lead_id: str, lead_data: Dict) -> bool:
+    """
+    Check if consensus has been reached for a lead and process accordingly.
+    IMPORTANT: All validations go to validation_tracking table.
+    Only ACCEPTED leads (2/3 valid) also go to the main leads table.
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Get all validations for this lead
+        validations = supabase.table("validation_tracking") \
+            .select("*") \
+            .eq("lead_id", lead_id) \
+            .execute()
+        
+        if len(validations.data) >= 3:  # All 3 validators have submitted
+            valid_count = sum(1 for v in validations.data if v['is_valid'])
+            invalid_count = len(validations.data) - valid_count
+            
+            # Consensus reached
+            if valid_count >= 2:  # ACCEPTED - 2 or more validators said VALID
+                # Insert into MAIN leads table (only accepted leads go here)
+                lead_data['consensus_score'] = sum(v['score'] for v in validations.data) / len(validations.data)
+                lead_data['validator_count'] = len(validations.data)
+                lead_data['consensus_validators'] = [v['validator_hotkey'] for v in validations.data]
+                lead_data['consensus_status'] = 'accepted'
+                
+                supabase.table("leads").insert([lead_data]).execute()
+                
+                # Update prospect_queue status
+                supabase.table("prospect_queue") \
+                    .update({
+                        "consensus_status": "accepted",
+                        "consensus_timestamp": datetime.now(timezone.utc).isoformat(),
+                        "pull_count": len(validations.data)
+                    }) \
+                    .eq("id", prospect_id) \
+                    .execute()
+                
+                bt.logging.info(f"✅ Lead {lead_id[:8]}... ACCEPTED by consensus ({valid_count}/3) - Added to main DB")
+                
+            else:  # REJECTED - 2 or more validators said INVALID
+                # DO NOT insert into main leads table
+                # Only update prospect_queue status
+                supabase.table("prospect_queue") \
+                    .update({
+                        "consensus_status": "rejected",
+                        "consensus_timestamp": datetime.now(timezone.utc).isoformat(),
+                        "pull_count": len(validations.data)
+                    }) \
+                    .eq("id", prospect_id) \
+                    .execute()
+                
+                bt.logging.info(f"❌ Lead {lead_id[:8]}... REJECTED by consensus ({invalid_count}/3) - NOT added to main DB")
+            
+            return True
+            
+    except Exception as e:
+        bt.logging.error(f"Failed to check consensus: {e}")
+        return False
+```
+
+### 3.2 Modify Validator Processing Loop
+Update the validator's main processing loop:
+```python
+# In neurons/validator.py - modify process_sourced_leads_continuous
+
+async def process_sourced_leads_continuous(self):
+    """Process leads with consensus-based validation."""
     
-    def _parse_expiry(self):
-        """Decode JWT to get expiry timestamp"""
+    while not self.should_exit:
         try:
-            decoded = pyjwt.decode(self.jwt, options={"verify_signature": False})
-            self.token_expires = datetime.fromtimestamp(decoded['exp'])
+            # Fetch prospects assigned to this validator
+            prospects_batch = fetch_assigned_prospects(self.wallet, limit=50)
+            
+            if not prospects_batch:
+                await asyncio.sleep(5)
+                continue
+            
+            bt.logging.info(f"📥 Processing {len(prospects_batch)} assigned prospects")
+            
+            for prospect_row in prospects_batch:
+                prospect = prospect_row['prospect']
+                prospect_id = prospect_row['id']
+                
+                # Generate unique lead_id
+                lead_id = str(uuid.uuid4())
+                
+                # Perform validation (existing logic)
+                is_valid, score = self.validate_lead(prospect)  # Your existing validation logic
+                
+                # Submit assessment to tracking system
+                submit_validation_assessment(
+                    wallet=self.wallet,
+                    prospect_id=prospect_id,
+                    lead_id=lead_id,
+                    lead_data=prospect,
+                    score=score,
+                    is_valid=is_valid
+                )
+            
+            await asyncio.sleep(10)
+            
         except Exception as e:
-            print(f"Error parsing token expiry: {e}")
-            self.token_expires = datetime.now()
-    
-    def refresh_if_needed(self):
-        """Refresh token 1 hour before expiry"""
-        if datetime.now() >= self.token_expires - timedelta(hours=1):
-            print(f"Token expiring soon, refreshing...")
-            try:
-                response = requests.post(
-                    self.token_endpoint,
-                    json={'hotkey': self.hotkey},
-                    timeout=10
+            bt.logging.error(f"Error in consensus validation loop: {e}")
+            await asyncio.sleep(5)
+```
+
+## Task 4: Update Reward Calculation Logic
+
+### 4.1 Consensus Participation Tracking
+Modify the eligibility check to use consensus participation:
+```python
+# In Leadpoet/validator/reward.py
+
+def check_validator_consensus_eligibility(
+    validator_hotkey: str, 
+    epoch_start_time: str,
+    service_role_key: str = None
+) -> Dict:
+    """
+    Check if validator participated in enough consensus decisions.
+    Requirement: Validator must be "in consensus" for ≥10% of leads they validated.
+    "In consensus" = validator's vote aligned with the majority decision (2/3).
+    """
+    try:
+        supabase_client = get_supabase_service_client(service_role_key)
+        
+        # Get all validations by this validator in the epoch
+        validator_validations = supabase_client.table("validation_tracking") \
+            .select("*") \
+            .eq("validator_hotkey", validator_hotkey) \
+            .gte("validation_timestamp", epoch_start_time) \
+            .execute()
+        
+        if not validator_validations.data:
+            return {
+                "eligible": False,
+                "reason": "No validations in epoch",
+                "stats": {"total": 0, "consensus": 0, "percentage": 0}
+            }
+        
+        # Get consensus results for all leads this validator validated
+        lead_ids = [v['lead_id'] for v in validator_validations.data]
+        consensus_results = supabase_client.table("consensus_results") \
+            .select("*") \
+            .in_("lead_id", lead_ids) \
+            .execute()
+        
+        # Count how many times validator was in consensus
+        consensus_count = 0
+        for result in consensus_results.data:
+            if result['total_validations'] >= 3:  # Consensus reached
+                # Check if validator's vote aligned with consensus
+                validator_vote = next(
+                    (v for v in validator_validations.data 
+                     if v['lead_id'] == result['lead_id']), 
+                    None
                 )
                 
-                if response.status_code == 200:
-                    new_token = response.json()['jwt']
+                if validator_vote:
+                    consensus_accepted = result['valid_count'] >= 2
+                    validator_said_valid = validator_vote['is_valid']
                     
-                    # Update .env file
-                    self._update_env_file(new_token)
-                    
-                    # Update in-memory token
-                    self.jwt = new_token
-                    self._parse_expiry()
-                    
-                    print(f"Token refreshed successfully. New expiry: {self.token_expires}")
-                    return True
-                else:
-                    print(f"Token refresh failed: {response.status_code} - {response.text}")
-                    return False
-                    
-            except Exception as e:
-                print(f"Error refreshing token: {e}")
-                return False
-        return False
-    
-    def _update_env_file(self, new_token):
-        """Update .env file with new token"""
-        env_path = '.env'
+                    # Validator is in consensus if their vote matches the outcome
+                    if consensus_accepted == validator_said_valid:
+                        consensus_count += 1
         
-        # Read existing .env
-        if os.path.exists(env_path):
-            with open(env_path, 'r') as f:
-                lines = f.readlines()
+        # Calculate percentage
+        total_consensus_decisions = len([r for r in consensus_results.data 
+                                        if r['total_validations'] >= 3])
+        
+        if total_consensus_decisions == 0:
+            percentage = 0
         else:
-            lines = []
+            percentage = (consensus_count / total_consensus_decisions) * 100
         
-        # Update or add SUPABASE_JWT
-        updated = False
-        for i, line in enumerate(lines):
-            if line.startswith('SUPABASE_JWT='):
-                lines[i] = f'SUPABASE_JWT={new_token}\n'
-                updated = True
-                break
+        # Eligibility threshold: 10% of consensus decisions
+        eligible = percentage >= 10.0
         
-        if not updated:
-            lines.append(f'SUPABASE_JWT={new_token}\n')
+        return {
+            "eligible": eligible,
+            "validator_hotkey": validator_hotkey,
+            "consensus_participation": consensus_count,
+            "total_consensus_decisions": total_consensus_decisions,
+            "percentage": round(percentage, 2),
+            "reason": f"Participated in {consensus_count}/{total_consensus_decisions} consensus decisions ({percentage:.1f}%)"
+        }
         
-        # Write back to .env
-        with open(env_path, 'w') as f:
-            f.writelines(lines)
-
-# Usage in miner.py or validator.py
-token_manager = TokenManager(
-    hotkey="YOUR_HOTKEY",
-    token_endpoint="https://qplwoislplkcegvdmbim.supabase.co/functions/v1/issue-jwt"
-)
-
-# In your main loop
-while True:
-    # Check and refresh token if needed
-    token_manager.refresh_if_needed()
-    
-    # Your normal mining/validation logic
-    # ...
-    
-    time.sleep(60)  # Check every minute
+    except Exception as e:
+        bt.logging.error(f"Error checking consensus eligibility: {e}")
+        return {
+            "eligible": False,
+            "reason": f"Error: {str(e)}",
+            "stats": {}
+        }
 ```
 
----
-
-## Phase 3: Code Migration
-
-### Task 3.1: Update Miner Code to Use Supabase
-**File**: `neurons/miner.py`
-
-Replace Firestore client with Supabase:
-
+### 4.2 Update Weight Calculation
+Modify weight calculation to only count consensus-accepted leads:
 ```python
-from supabase import create_client, Client
-import os
-
-# Initialize Supabase client
-SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-SUPABASE_JWT = os.getenv("SUPABASE_JWT")  # From .env file
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_JWT)
-
-# Read leads (only >72 minutes old due to RLS)
-def get_old_leads():
-    response = supabase.table("leads").select("*").execute()
-    return response.data
+def get_miner_sourcing_weights_from_consensus(
+    epoch_start_time: str,
+    total_emission: float = 100.0,
+    service_role_key: str = None
+) -> Dict:
+    """
+    Calculate miner weights based on consensus-accepted leads only.
+    """
+    try:
+        supabase_client = get_supabase_service_client(service_role_key)
+        
+        # Get all consensus-accepted leads from this epoch
+        accepted_leads = supabase_client.table("leads") \
+            .select("miner_hotkey") \
+            .gte("validated_at", epoch_start_time) \
+            .execute()
+        
+        if not accepted_leads.data:
+            return {
+                "weights": {},
+                "total_leads": 0,
+                "message": "No consensus-accepted leads in epoch"
+            }
+        
+        # Count leads per miner
+        miner_counts = {}
+        for lead in accepted_leads.data:
+            miner = lead.get('miner_hotkey')
+            if miner:
+                miner_counts[miner] = miner_counts.get(miner, 0) + 1
+        
+        # Calculate proportional weights
+        total_leads = sum(miner_counts.values())
+        weights = {}
+        
+        for miner, count in miner_counts.items():
+            weight = (count / total_leads) * total_emission
+            weights[miner] = round(weight, 4)
+        
+        return {
+            "weights": weights,
+            "total_leads": total_leads,
+            "unique_miners": len(miner_counts),
+            "message": f"Calculated weights for {len(miner_counts)} miners based on {total_leads} consensus-accepted leads"
+        }
+        
+    except Exception as e:
+        bt.logging.error(f"Error calculating consensus-based weights: {e}")
+        return {
+            "weights": {},
+            "error": str(e)
+        }
 ```
 
-### Task 3.2: Update Validator Code to Use Supabase
-**File**: `neurons/validator.py`
+## Implementation Order
 
-Replace Firestore client with Supabase:
+1. **Phase 1: Database Setup**
+   - Create new tables and views
+   - Add columns to existing tables
+   - Set up triggers and functions
+   - Test with sample data
 
-```python
-from supabase import create_client, Client
-import os
+2. **Phase 2: Validator Assignment**
+   - Implement validator assignment logic
+   - Update prospect fetching to use assignments
+   - Test round-robin/random distribution
 
-# Initialize Supabase client
-SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-SUPABASE_JWT = os.getenv("SUPABASE_JWT")  # From .env file
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_JWT)
+3. **Phase 3: Consensus Processing**
+   - Implement validation tracking
+   - Add consensus checking logic
+   - Update lead promotion logic
+   - Test with 3 validators
 
-# Write validated leads
-def save_validated_lead(lead_data):
-    response = supabase.table("leads").insert(lead_data).execute()
-    return response.data
-```
+4. **Phase 4: Reward System**
+   - Update eligibility checks
+   - Modify weight calculations
+   - Test reward distribution
+   - Verify consensus participation metrics
 
----
+## Testing Strategy
 
-## Phase 4: Testing & Deployment
+1. **Unit Tests**
+   - Test validator assignment algorithm
+   - Test consensus determination logic
+   - Test eligibility calculations
 
-### Task 4.1: Test Miner Access
-Verify miners can only read old leads:
-```python
-# Should work: Reading leads >72 minutes old
-old_leads = supabase.table("leads").select("*").execute()
+2. **Integration Tests**
+   - Test full flow from prospect creation to consensus
+   - Test edge cases (< 3 validators, split decisions)
+   - Test reward calculation with various scenarios
 
-# Should fail: Writing leads
-supabase.table("leads").insert({"email": "test@test.com"}).execute()  # 403 Forbidden
-```
+3. **Load Testing**
+   - Test with high volume of prospects
+   - Test with many validators
+   - Monitor database performance
 
-### Task 4.2: Test Validator Access
-Verify validators can write:
-```python
-# Should work: Writing validated leads
-supabase.table("leads").insert({
-    "email": "test@test.com",
-    "validator_hotkey": "5ABC..."
-}).execute()
-```
+## Rollback Plan
 
-### Task 4.3: Test Token Revocation
-Revoke a token and verify access is denied:
-```bash
-curl -X POST https://qplwoislplkcegvdmbim.supabase.co/functions/v1/revoke-jwt \
-  -H "X-Admin-Key: YOUR_ADMIN_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"token_id": "TOKEN_ID", "reason": "Testing revocation"}'
-```
+If issues arise, the system can be rolled back by:
+1. Removing the new tables and columns
+2. Reverting code changes
+3. Restoring original prospect fetching logic
+4. The existing leads table remains unchanged, preserving data integrity
 
-### Task 4.4: Deploy to Production
-1. Update all environment variables in production
-2. Deploy updated code to miners and validators
-3. Monitor logs for any access issues
-4. Set up token renewal reminders (24-hour expiry)
----
+## Monitoring & Metrics
 
-## Notes
-- Validators have WRITE-only access to prevent gaming the system
-- Miners have READ-only access to leads older than 72 minutes
-- Tokens expire after 24 hours. Use the TokenManager class (Task 2.6) in your node code for automatic renewal, or manually request a new token before expiry
-- All access is enforced at the database level via RLS policies
-- Token revocation is instant and enforced by RLS policies
+Track these key metrics:
+- Average time to consensus per lead
+- Validator agreement rates
+- Distribution of work across validators
+- Consensus participation rates
+- False positive/negative rates in consensus decisions

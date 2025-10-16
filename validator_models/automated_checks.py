@@ -11,8 +11,7 @@ import numpy as np
 from pygod.detector import DOMINANT
 from datetime import datetime
 from urllib.parse import urlparse
-from typing import Dict, Any, List, Tuple
-from fuzzywuzzy import fuzz
+from typing import Dict, Any, Tuple
 from dotenv import load_dotenv
 from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
 
@@ -637,9 +636,9 @@ async def check_zerobounce_email(lead: dict) -> Tuple[bool, str]:
             if has_spf:
                 result = (True, f"Email validated (catch-all with SPF), score={score}")
             else:
-                result = (False, f"Email is catch-all without SPF record")
+                result = (False, "Email is catch-all without SPF record")
         elif status == "invalid":
-            result = (False, f"Email marked invalid")
+            result = (False, "Email marked invalid")
         else:
             result = (True, f"Email status {status}, score={score} (assumed valid)")
 
@@ -1162,7 +1161,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
             print(f"   ❌ Stage 0 failed: {reason}")
             return False, f"Stage 0 failed: {reason}"
 
-    print(f"   ✅ Stage 0 passed")
+    print("   ✅ Stage 0 passed")
 
     # ========================================================================
     # Stage 1: DNS Layer (MIXED)
@@ -1182,7 +1181,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
             print(f"   ❌ Stage 1 failed: {reason}")
             return False, f"Stage 1 failed: {reason}"
 
-    print(f"   ✅ Stage 1 passed")
+    print("   ✅ Stage 1 passed")
 
     # ========================================================================
     # Stage 2: Lightweight Domain Reputation Checks (HARD)
@@ -1194,7 +1193,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
         print(f"   ❌ Stage 2 failed: {reason}")
         return False, f"Stage 2 failed: {reason}"
 
-    print(f"   ✅ Stage 2 passed")
+    print("   ✅ Stage 2 passed")
 
     # ========================================================================
     # Stage 3: ZeroBounce Check (MIXED)
@@ -1207,7 +1206,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
         print(f"   ❌ Stage 3 failed: {reason}")
         return False, f"Stage 3 failed: {reason}"
 
-    print(f"   ✅ Stage 3 passed")
+    print("   ✅ Stage 3 passed")
 
     # ========================================================================
     # Stage 4: Google LLM Checks (MIXED)
@@ -1232,7 +1231,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     # SOFT check - always passes, just appends data
     await check_icp_evidence(lead)  # ICP Evidence confirmation (SOFT - always passes)
 
-    print(f"   ✅ Stage 4 passed")
+    print("   ✅ Stage 4 passed")
     print(f"🎉 All stages passed for {email} @ {company}")
 
     return True, "All checks passed"

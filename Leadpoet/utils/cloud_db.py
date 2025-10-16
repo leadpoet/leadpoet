@@ -2,8 +2,13 @@
 Database helper for the LeadPoet subnet with Supabase integration.
 Miners = write-only to prospect_queue, Validators = read prospect_queue, write to leads.
 """
-import os, json, time, base64, requests, bittensor as bt
-from typing import List, Dict, Optional
+import os
+import json
+import time
+import base64
+import requests
+import bittensor as bt
+from typing import List, Dict
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from Leadpoet.utils.misc import generate_timestamp
@@ -19,6 +24,14 @@ SUPABASE_JWT = os.getenv("SUPABASE_JWT")
 
 # Supabase anon key for API routing (public, safe to commit)
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDcwMDUsImV4cCI6MjA2MDQyMzAwNX0.5E0WjAthYDXaCWY6qjzXm2k20EhadWfigak9hleKZk8"
+
+# Create a response object similar to what supabase-py returns
+class RPCResponse:
+    def __init__(self, data):
+        self.data = data
+
+    def execute(self):
+        return self
 
 class CustomSupabaseClient:
     """
@@ -50,26 +63,11 @@ class CustomSupabaseClient:
             response = requests.post(url, json=params or {}, headers=headers)
             response.raise_for_status()
             
-            # Create a response object similar to what supabase-py returns
-            class RPCResponse:
-                def __init__(self, data):
-                    self.data = data
-                    
-                def execute(self):
-                    return self
-            
             return RPCResponse(response.json() if response.text else [])
         except requests.exceptions.HTTPError as e:
             bt.logging.error(f"RPC call failed: {e.response.text if e.response else str(e)}")
             # Return empty response on error
-            class RPCResponse:
-                def __init__(self):
-                    self.data = []
-                    
-                def execute(self):
-                    return self
-            
-            return RPCResponse()
+            return RPCResponse([])
 
 class CustomTableQuery:
     """Query builder for table operations using direct HTTP requests."""
@@ -193,13 +191,13 @@ class CustomResponse:
             try:
                 error_data = response.json()
                 raise Exception(error_data)
-            except:
+            except Exception:
                 response.raise_for_status()
         
         # Parse success response
         try:
             self.data = response.json() if response.text else []
-        except:
+        except Exception:
             self.data = []
 
 class NotFilter:
@@ -240,7 +238,7 @@ def get_supabase_client():
         # Create custom client that uses direct HTTP requests
         client = CustomSupabaseClient(SUPABASE_URL, jwt, SUPABASE_ANON_KEY)
         
-        bt.logging.debug(f"✅ Custom Supabase client created with direct HTTP + JWT")
+        bt.logging.debug("✅ Custom Supabase client created with direct HTTP + JWT")
         return client
         
     except Exception as e:
@@ -264,7 +262,7 @@ class _Verifier:
         try:
             mg = self._get_fresh_metagraph()
             return ss58 in mg.hotkeys
-        except:
+        except Exception:
             return False
 
     def is_validator(self, ss58: str) -> bool:
@@ -349,7 +347,7 @@ def push_prospects_to_cloud(wallet: bt.wallet, prospects: List[Dict]) -> bool:
         bt.logging.debug(f"Pushing {len(records)} prospects to Supabase queue")
         
         # Batch insert (CustomResponse already executes, no .execute() needed)
-        result = supabase.table("prospect_queue").insert(records)
+        supabase.table("prospect_queue").insert(records)
         
         bt.logging.info(f"✅ Pushed {len(prospects)} prospects to Supabase queue")
         print(f"✅ Supabase queue ACK: {len(prospects)} prospect(s)")
@@ -371,7 +369,7 @@ def push_prospects_to_cloud(wallet: bt.wallet, prospects: List[Dict]) -> bool:
                     duplicate_email = error_str[email_start:email_end] if email_start > 6 and email_end > email_start else None
                     if duplicate_email:
                         duplicate_emails.append(duplicate_email)
-                except:
+                except Exception:
                     pass
             
             # If no email found in error, get from prospects
@@ -385,23 +383,23 @@ def push_prospects_to_cloud(wallet: bt.wallet, prospects: List[Dict]) -> bool:
             if duplicate_emails:
                 bt.logging.warning(f"⚠️ Duplicate lead(s) rejected: {', '.join(duplicate_emails)}")
                 print(f"\n{'='*60}")
-                print(f"⚠️  DUPLICATE LEAD DETECTED")
+                print("⚠️  DUPLICATE LEAD DETECTED")
                 print(f"{'='*60}")
-                print(f"The following lead(s) have already been validated:")
+                print("The following lead(s) have already been validated:")
                 for email in duplicate_emails:
                     print(f"  • {email}")
-                print(f"\nPlease submit unique leads that haven't been validated yet.")
+                print("\nPlease submit unique leads that haven't been validated yet.")
                 print(f"{'='*60}\n")
             else:
-                bt.logging.warning(f"⚠️ Duplicate lead rejected (409 Conflict)")
-                print(f"\n⚠️  DUPLICATE LEAD - This lead has already been validated.")
-                print(f"   Please submit unique leads.\n")
+                bt.logging.warning("⚠️ Duplicate lead rejected (409 Conflict)")
+                print("\n⚠️  DUPLICATE LEAD - This lead has already been validated.")
+                print("   Please submit unique leads.\n")
             return False
         
         # Check for RLS policy violations
         elif "row-level security policy" in error_str.lower() or "policy" in error_str.lower():
-            bt.logging.error(f"❌ Access denied: Row-level security policy violation")
-            bt.logging.error(f"   Your JWT role may not have permission to insert prospects")
+            bt.logging.error("❌ Access denied: Row-level security policy violation")
+            bt.logging.error("   Your JWT role may not have permission to insert prospects")
             return False
         
         # Generic error
@@ -584,7 +582,7 @@ def submit_validation_assessment(
         }
         
         # Debug: Log what we're trying to insert
-        bt.logging.info(f"🔍 DEBUG: Attempting to insert validation data:")
+        bt.logging.info("🔍 DEBUG: Attempting to insert validation data:")
         bt.logging.info(f"   - validator_hotkey: {wallet.hotkey.ss58_address}")
         bt.logging.info(f"   - prospect_id: {prospect_id}")
         bt.logging.info(f"   - lead_id: {lead_id}")
@@ -597,7 +595,7 @@ def submit_validation_assessment(
             import jwt as pyjwt
             try:
                 decoded = pyjwt.decode(supabase.jwt, options={"verify_signature": False})
-                bt.logging.info(f"🔑 JWT Claims:")
+                bt.logging.info("🔑 JWT Claims:")
                 bt.logging.info(f"   - role: {decoded.get('role', 'MISSING')}")
                 bt.logging.info(f"   - app_role: {decoded.get('app_role', 'MISSING')}")
                 bt.logging.info(f"   - hotkey: {decoded.get('hotkey', 'MISSING')}")
@@ -612,7 +610,7 @@ def submit_validation_assessment(
         # Submit to validation_tracking table
         try:
             result = supabase.table("validation_tracking").insert([validation_data])
-            bt.logging.info(f"✅ INSERT response received")
+            bt.logging.info("✅ INSERT response received")
         except Exception as insert_error:
             bt.logging.error(f"❌ INSERT failed with error: {insert_error}")
             bt.logging.error(f"   Error type: {type(insert_error)}")
@@ -677,7 +675,6 @@ def check_and_process_consensus(
         from supabase import create_client
         
         SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-        ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MjgzMjk0MzgsImV4cCI6MjA0MzkwNTQzOH0.2DhIHC_3XrLD6lxBQJV7nfKEGhXtoJZfMCXogTGEJXs"
         service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         
         if not service_role_key:
@@ -759,7 +756,7 @@ def check_and_process_consensus(
                         bt.logging.info(f"   Business: {lead_data_for_insert.get('business', 'unknown')}")
                         bt.logging.info(f"   Consensus: {valid_count}/3 validators approved")
                     else:
-                        bt.logging.error(f"Failed to insert accepted lead into leads table")
+                        bt.logging.error("Failed to insert accepted lead into leads table")
                 except Exception as e:
                     bt.logging.error(f"Error inserting lead into main database: {e}")
                 
@@ -774,7 +771,7 @@ def check_and_process_consensus(
                         .execute()
                     
                     if queue_update.data:
-                        bt.logging.debug(f"Updated prospect_queue status to accepted")
+                        bt.logging.debug("Updated prospect_queue status to accepted")
                 except Exception as e:
                     bt.logging.error(f"Error updating prospect_queue status: {e}")
                 
@@ -793,7 +790,7 @@ def check_and_process_consensus(
                         .execute()
                     
                     if queue_update.data:
-                        bt.logging.debug(f"Updated prospect_queue status to rejected")
+                        bt.logging.debug("Updated prospect_queue status to rejected")
                 except Exception as e:
                     bt.logging.error(f"Error updating prospect_queue status: {e}")
             

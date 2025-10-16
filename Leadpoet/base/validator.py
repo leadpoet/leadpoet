@@ -4,8 +4,7 @@ import asyncio
 import argparse
 import threading
 import bittensor as bt
-import time
-from typing import List, Union
+from typing import List
 from traceback import print_exception
 from Leadpoet.base.neuron import BaseNeuron
 from Leadpoet.base.utils.weight_utils import (
@@ -214,3 +213,5 @@ class BaseValidatorNeuron(BaseNeuron):
         self.step = state["step"]
         self.scores = state["scores"]
         self.hotkeys = state["hotkeys"]
+
+    

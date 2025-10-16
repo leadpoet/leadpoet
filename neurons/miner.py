@@ -8,15 +8,12 @@ import socket
 from Leadpoet.base.miner import BaseMinerNeuron
 from Leadpoet.protocol import LeadRequest
 from miner_models.lead_sorcerer_main.main_leads import get_leads
-from typing import Union, Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional
 from aiohttp import web
 import os
 import re
 import html
-import uuid
 from datetime import datetime, timezone
-from Leadpoet.base.utils import queue as lead_queue
-from Leadpoet.base.utils import pool as lead_pool
 import json
 from Leadpoet.base.utils.pool import get_leads_from_pool
 
@@ -27,19 +24,13 @@ from miner_models.intent_model import (
     _role_match,
 )
 
-from collections import OrderedDict
 from Leadpoet.utils.cloud_db import (
-    get_cloud_leads,
     push_prospects_to_cloud,
-    fetch_prospects_from_cloud,
     fetch_miner_curation_request,
     push_miner_curation_result,
-    fetch_broadcast_requests,
-    mark_broadcast_processing,
 )
 import logging
 import random
-import socket, struct
 import grpc
 from pathlib import Path
 from Leadpoet.utils.token_manager import TokenManager
@@ -86,7 +77,7 @@ class Miner(BaseMinerNeuron):
                 hotkey=self.wallet.hotkey.ss58_address,
                 wallet=self.wallet
             )
-            bt.logging.info(f"🔑 TokenManager initialized")
+            bt.logging.info("🔑 TokenManager initialized")
         except Exception as e:
             bt.logging.error(f"Failed to initialize TokenManager: {e}")
             raise
@@ -97,18 +88,18 @@ class Miner(BaseMinerNeuron):
         if status.get('valid'):
             bt.logging.info(f"✅ Token valid - Role: {status['role']}, Hours remaining: {status.get('hours_remaining', 0):.1f}")
         else:
-            bt.logging.warning(f"⚠️ Token invalid or missing - attempting refresh now...")
+            bt.logging.warning("⚠️ Token invalid or missing - attempting refresh now...")
         
         # Only refresh if needed
         status = self.token_manager.get_status()
         if status.get('needs_refresh') or not status.get('valid'):
             success = self.token_manager.refresh_token()
             if success:
-                bt.logging.info(f"✅ Token refreshed successfully")
+                bt.logging.info("✅ Token refreshed successfully")
             else:
-                bt.logging.error(f"❌ Failed to refresh token")
+                bt.logging.error("❌ Failed to refresh token")
         else:
-            bt.logging.info(f"✅ Using existing valid token")
+            bt.logging.info("✅ Using existing valid token")
         
         # NEW: Initialize Supabase client with JWT from TokenManager
         self.supabase_url = "https://qplwoislplkcegvdmbim.supabase.co"
@@ -222,7 +213,7 @@ class Miner(BaseMinerNeuron):
                 with self.sourcing_lock:
                     if not self.sourcing_mode:
                         continue
-                    print(f"\n🔄 Sourcing new leads...")
+                    print("\n🔄 Sourcing new leads...")
                 # do network I/O OUTSIDE the lock so pause can cancel immediately
                 new_leads = await get_leads(1, industry=None, region=None)
                 sanitized = [
@@ -242,7 +233,7 @@ class Miner(BaseMinerNeuron):
                             f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
                         )
                     else:
-                        print(f"❌ Failed to push prospects - Supabase client unavailable")
+                        print("❌ Failed to push prospects - Supabase client unavailable")
                 except Exception as e:
                     print(f"❌ Cloud push exception: {e}")
                 await asyncio.sleep(interval)
@@ -699,7 +690,7 @@ class Miner(BaseMinerNeuron):
             region = data.get("region")
             business_desc = data.get("business_desc", "")
 
-            print(f"⏸️  Stopping sourcing, switching to curation mode...")
+            print("⏸️  Stopping sourcing, switching to curation mode...")
 
             # Get leads from pool first
             target_ind = classify_industry(business_desc) or industry
@@ -1180,7 +1171,7 @@ def main():
     miner = Miner(config=config)
 
     # Check if miner is properly registered
-    print(f"🔍 Checking miner registration...")
+    print("🔍 Checking miner registration...")
     print(f"   Wallet: {miner.wallet.hotkey.ss58_address}")
     print(f"   NetUID: {config.netuid}")
     print(f"   UID: {miner.uid}")

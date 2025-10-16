@@ -1,6 +1,4 @@
 import bittensor as bt
-import os
-import sys
 import argparse
 import asyncio
 

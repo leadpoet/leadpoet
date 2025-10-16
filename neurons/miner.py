@@ -39,7 +39,7 @@ from Leadpoet.utils.cloud_db import (
 )
 import logging
 import random
-import socket, struct
+import socket
 import grpc
 from pathlib import Path
 from Leadpoet.utils.token_manager import TokenManager

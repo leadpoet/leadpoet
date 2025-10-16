@@ -2,7 +2,12 @@
 Database helper for the LeadPoet subnet with Supabase integration.
 Miners = write-only to prospect_queue, Validators = read prospect_queue, write to leads.
 """
-import os, json, time, base64, requests, bittensor as bt
+import os
+import json
+import time
+import base64
+import requests
+import bittensor as bt
 from typing import List, Dict
 from datetime import datetime, timezone
 from dotenv import load_dotenv

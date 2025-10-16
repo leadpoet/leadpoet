@@ -1,12 +1,15 @@
 import re
 import time
 import random
-import requests, textwrap
+import requests
+import textwrap
 import numpy as np
 import bittensor as bt
 import os
 import argparse
 import json
+import grpc
+import asyncio
 from datetime import datetime, timedelta
 from Leadpoet.base.validator import BaseValidatorNeuron
 from Leadpoet.protocol import LeadRequest
@@ -288,7 +291,6 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
             result[id(lead)] = min(overlap * 0.05, 0.5)
         return result
 
-import os, grpc, asyncio
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):

@@ -1,39 +1,167 @@
+
+
 import re
 import time
 import random
-from redis.retry import E
-import requests
-import textwrap
+import requests, textwrap
 import numpy as np
 import bittensor as bt
-import os
 import argparse
 import json
-import asyncio
+from datetime import datetime, timedelta
 from Leadpoet.base.validator import BaseValidatorNeuron
 from Leadpoet.protocol import LeadRequest
 from validator_models.automated_checks import validate_lead_list as auto_check_leads, run_automated_checks
+from Leadpoet.validator.reward import post_approval_check
 from Leadpoet.base.utils.config import add_validator_args
 import threading
+import json
 from Leadpoet.base.utils import queue as lead_queue
 from Leadpoet.base.utils import pool as lead_pool
+import asyncio
 from typing import List, Dict, Optional
 from aiohttp import web
 from Leadpoet.utils.cloud_db import (
+    save_leads_to_cloud,
     fetch_prospects_from_cloud,
     fetch_curation_requests,
     push_curation_result,
     push_miner_curation_request,
     fetch_miner_curation_result,
     push_validator_weights,
-    push_validator_ranking
+    push_validator_ranking,
+    fetch_validator_rankings,
+    mark_consensus_complete,
+    log_consensus_metrics
 )
 from Leadpoet.utils.token_manager import TokenManager
-from supabase import Client
+from supabase import create_client, Client
+import uuid
+import grpc
 import socket
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from math import isclose
 from pathlib import Path
+from json.decoder import JSONDecodeError
+import os
+import sys
+
+# ════════════════════════════════════════════════════════════════════════════
+# AUTO-UPDATER: Automatically updates entire repo from GitHub for validators
+# ════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__" and os.environ.get("LEADPOET_WRAPPER_ACTIVE") != "1":
+    print("🔄 Leadpoet Validator: Activating auto-update wrapper...")
+    print("   Your validator will automatically stay up-to-date with the latest code")
+    print("")
+    
+    # Create wrapper script path (hidden file with dot prefix)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    wrapper_path = os.path.join(repo_root, ".auto_update_wrapper.sh") 
+    
+    # Inline wrapper script - simple and clean
+    wrapper_content = '''#!/bin/bash
+# Auto-generated wrapper for Leadpoet validator auto-updates
+set -e
+
+REPO_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$REPO_ROOT"
+
+echo "════════════════════════════════════════════════════════════════"
+echo "🚀 Leadpoet Auto-Updating Validator"
+echo "   Repository updates every 5 minutes"
+echo "   GitHub: github.com/leadpoet/Leadpoet"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+
+RESTART_COUNT=0
+MAX_RESTARTS=5
+
+while true; do
+    echo "────────────────────────────────────────────────────────────────"
+    echo "🔍 Checking for updates from GitHub..."
+    
+    # Stash any local changes and pull latest
+    if git stash 2>/dev/null; then
+        echo "   💾 Stashed local changes"
+    fi
+    
+    if git pull origin main 2>/dev/null; then
+        CURRENT_COMMIT=$(git rev-parse --short HEAD)
+        echo "✅ Repository updated"
+        echo "   Current commit: $CURRENT_COMMIT"
+    else
+        echo "⏭️  Could not update (offline or not a git repo)"
+        echo "   Continuing with current version..."
+    fi
+    
+    echo "────────────────────────────────────────────────────────────────"
+    echo "🟢 Starting validator (attempt $(($RESTART_COUNT + 1)))..."
+    echo ""
+    
+    # Run validator with environment flag to prevent wrapper re-execution
+    export LEADPOET_WRAPPER_ACTIVE=1
+    python3 neurons/validator.py "$@"
+    
+    EXIT_CODE=$?
+    
+    echo ""
+    echo "────────────────────────────────────────────────────────────────"
+    
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo "✅ Validator exited cleanly (exit code: 0)"
+        echo "   Shutting down auto-updater..."
+        break
+    else
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        echo "⚠️  Validator exited with error (exit code: $EXIT_CODE)"
+        
+        if [ $RESTART_COUNT -ge $MAX_RESTARTS ]; then
+            echo "❌ Maximum restart attempts ($MAX_RESTARTS) reached"
+            echo "   Please check logs and restart manually"
+            exit 1
+        fi
+        
+        echo "   Restarting in 10 seconds... (attempt $RESTART_COUNT/$MAX_RESTARTS)"
+        sleep 10
+    fi
+    
+    echo ""
+    echo "⏰ Next update check in 5 minutes..."
+    sleep 300
+    
+    # Reset restart counter after successful check
+    RESTART_COUNT=0
+done
+
+echo "════════════════════════════════════════════════════════════════"
+echo "🛑 Auto-updater stopped"
+'''
+    
+    # Write wrapper script
+    try:
+        with open(wrapper_path, 'w') as f:
+            f.write(wrapper_content)
+        os.chmod(wrapper_path, 0o755)
+        print(f"✅ Created auto-update wrapper: {wrapper_path}")
+    except Exception as e:
+        print(f"❌ Failed to create wrapper: {e}")
+        print("   Continuing without auto-updates...")
+        # Fall through to normal execution
+    else:
+        # Execute wrapper and replace current process
+        print(f"🚀 Launching auto-update wrapper...")
+        print("")
+        try:
+            env = os.environ.copy()
+            env["LEADPOET_WRAPPER_ACTIVE"] = "1"
+            os.execve(wrapper_path, [wrapper_path] + sys.argv[1:], env)
+        except Exception as e:
+            print(f"❌ Failed to execute wrapper: {e}")
+            print("   Continuing without auto-updates...")
+
+# normal validator code starts below
 
 AVAILABLE_MODELS = [
     "openai/o3-mini:online",                    
@@ -197,7 +325,7 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
 
     prompt_user = "\n".join(lines)
 
-    print("\n🛈  VALIDATOR-LLM BATCH INPUT ↓")
+    print(f"\n🛈  VALIDATOR-LLM BATCH INPUT ↓")
     print(f"   Scoring {len(leads)} leads in single prompt")
     print(textwrap.shorten(prompt_user, width=300, placeholder=" …"))
 
@@ -280,6 +408,7 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
             result[id(lead)] = min(overlap * 0.05, 0.5)
         return result
 
+import os, grpc, asyncio
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
@@ -356,7 +485,7 @@ class Validator(BaseValidatorNeuron):
                 hotkey=self.wallet.hotkey.ss58_address,
                 wallet=self.wallet
             )
-            bt.logging.info("🔑 TokenManager initialized")
+            bt.logging.info(f"🔑 TokenManager initialized")
         except Exception as e:
             bt.logging.error(f"Failed to initialize TokenManager: {e}")
             raise
@@ -366,17 +495,17 @@ class Validator(BaseValidatorNeuron):
         if status.get('valid'):
             bt.logging.info(f"✅ Token valid - Role: {status['role']}, Hours remaining: {status.get('hours_remaining', 0):.1f}")
         else:
-            bt.logging.warning("⚠️ Token invalid or missing - will attempt refresh")
+            bt.logging.warning(f"⚠️ Token invalid or missing - will attempt refresh")
         
         status = self.token_manager.get_status()
         if status.get('needs_refresh') or not status.get('valid'):
             success = self.token_manager.refresh_token()
             if success:
-                bt.logging.info("✅ Token refreshed successfully")
+                bt.logging.info(f"✅ Token refreshed successfully")
             else:
-                bt.logging.error("❌ Failed to refresh token")
+                bt.logging.error(f"❌ Failed to refresh token")
         else:
-            bt.logging.info("✅ Using existing valid token")
+            bt.logging.info(f"✅ Using existing valid token")
         
         self.supabase_url = "https://qplwoislplkcegvdmbim.supabase.co"
         self.supabase_client: Optional[Client] = None
@@ -537,7 +666,7 @@ class Validator(BaseValidatorNeuron):
         print(f"\n🟡 RECEIVED QUERY from buyer: {synapse.num_leads} leads | "
               f"desc='{synapse.business_desc[:40]}…'")
 
-        import time
+        import time, numpy as np
         from datetime import datetime
 
         # Always refresh metagraph just before selecting miners so we don't use stale flags.
@@ -689,7 +818,7 @@ class Validator(BaseValidatorNeuron):
                 score = batch_scores_r1.get(id(lead))
                 if score is None:
                     failed_leads.add(id(lead))
-                    print("⚠️  LLM failed for lead, will skip this lead")
+                    print(f"⚠️  LLM failed for lead, will skip this lead")
                 else:
                     aggregated[id(lead)] += score
             
@@ -704,7 +833,7 @@ class Validator(BaseValidatorNeuron):
                     score = batch_scores_r2.get(id(lead))
                     if score is None:
                         failed_leads.add(id(lead))
-                        print("⚠️  LLM failed for lead, will skip this lead")
+                        print(f"⚠️  LLM failed for lead, will skip this lead")
                     else:
                         aggregated[id(lead)] += score
             
@@ -757,15 +886,15 @@ class Validator(BaseValidatorNeuron):
                     
                     # Check if we were eligible
                     if "error" in rewards:
-                        print("\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
+                        print(f"\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
                         print(f"   Reason: {rewards['error']}")
                         print(f"   Validated: {rewards.get('validated_count', 0)}/{rewards.get('total_count', 0)} leads")
                         print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 10.0%)")
-                        print("   No weights will be set this epoch - increase validation activity!")
+                        print(f"   No weights will be set this epoch - increase validation activity!")
                     else:
                         # Validator is eligible - set weights on-chain
                         # Log final weights and emissions
-                        print("\n🎯 V2 REWARD CALCULATION COMPLETE:")
+                        print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
                         print(f"   ✅ Validator eligible - validated {rewards.get('percentage', 0):.1f}% of epoch leads")
                         print(f"   Final Curated List: {len(top_leads)} prospects")
                         print(f"   Final weights (W): {rewards['W']}")
@@ -949,7 +1078,7 @@ class Validator(BaseValidatorNeuron):
             client_id     = data.get("client_id", "unknown")
 
             print(f"\n🔔 RECEIVED API QUERY from client: {num_leads} leads | desc='{business_desc[:10]}…'")
-            bt.logging.info("📡 Broadcasting to ALL validators and miners via Firestore...")
+            bt.logging.info(f"📡 Broadcasting to ALL validators and miners via Firestore...")
 
             # Broadcast the request to all validators and miners
             try:
@@ -1031,7 +1160,7 @@ class Validator(BaseValidatorNeuron):
                     req_dt = datetime.fromisoformat(request_time.replace('Z', '+00:00'))
                     elapsed = (datetime.now(timezone.utc) - req_dt).total_seconds()
                     timeout_reached = elapsed > 90
-                except Exception:
+                except:
                     pass
 
             # Return data matching API client's expected format
@@ -1239,7 +1368,7 @@ class Validator(BaseValidatorNeuron):
                 # ══════════════════════════════════════════════════════════════════
                 # Check if we're near the end of the epoch (blocks 355-360)
                 try:
-                    from Leadpoet.validator.reward import _get_epoch_status
+                    from Leadpoet.validator.reward import _get_epoch_status, calculate_weights
                     
                     # Check every 5 iterations (approx every 5 seconds) for faster response
                     if not hasattr(self, '_epoch_check_counter'):
@@ -1271,10 +1400,10 @@ class Validator(BaseValidatorNeuron):
                             should_attempt = (current_block - self._last_weight_calc_block >= 2 or self._last_weight_calc_block == 0)
                             
                             if should_attempt:
-                                print("\n🎯 AUTOMATIC WEIGHT CALCULATION TRIGGERED")
+                                print(f"\n🎯 AUTOMATIC WEIGHT CALCULATION TRIGGERED")
                                 print(f"   Epoch: {current_epoch}")
                                 print(f"   Block: {360 - blocks_remaining}/360")
-                                print("   Requesting weight calculation...")
+                                print(f"   Requesting weight calculation...")
                                 
                                 # Mark that we attempted at this block
                                 self._last_weight_calc_block = current_block
@@ -1284,12 +1413,12 @@ class Validator(BaseValidatorNeuron):
                                 jwt_token = self.token_manager.get_token()
                                 
                                 if not jwt_token:
-                                    print("❌ No JWT token available - cannot get weights")
+                                    print(f"❌ No JWT token available - cannot get weights")
                                     continue
                                 
                                 # Call Edge Function to get weights (server-side eligibility check)
                                 try:
-                                    print("   Calling Edge Function with JWT token...")
+                                    print(f"   Calling Edge Function with JWT token...")
                                     response = requests.get(
                                         "https://qplwoislplkcegvdmbim.supabase.co/functions/v1/get-validator-weights",
                                         headers={"Authorization": f"Bearer {jwt_token}"},
@@ -1302,13 +1431,13 @@ class Validator(BaseValidatorNeuron):
                                     try:
                                         weights_result = response.json()
                                     except json.JSONDecodeError:
-                                        print("❌ Invalid JSON response from Edge Function")
+                                        print(f"❌ Invalid JSON response from Edge Function")
                                         print(f"   Response text: {response.text[:500]}")
                                         continue
                                     
                                     # Edge Function returns 403 if not eligible
                                     if response.status_code == 403:
-                                        print("❌ VALIDATOR NOT ELIGIBLE")
+                                        print(f"❌ VALIDATOR NOT ELIGIBLE")
                                         print(f"   Reason: {weights_result.get('error', 'Unknown')}")
                                         print(f"   Validated: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)} leads")
                                         print(f"   Percentage: {weights_result.get('percentage', 0):.1f}% (need >= 10.0%)")
@@ -1317,8 +1446,8 @@ class Validator(BaseValidatorNeuron):
                                         continue
                                     
                                     if response.status_code == 404:
-                                        print("❌ Edge Function not found - it may not be deployed yet")
-                                        print("   Deploy with: supabase functions deploy get-validator-weights")
+                                        print(f"❌ Edge Function not found - it may not be deployed yet")
+                                        print(f"   Deploy with: supabase functions deploy get-validator-weights")
                                         continue
                                     
                                     if response.status_code != 200:
@@ -1343,7 +1472,7 @@ class Validator(BaseValidatorNeuron):
                                 # Check if validator is eligible (Edge Function already enforced this)
                                 # Note: weights can be empty dict if no leads accepted yet
                                 if weights_result.get("eligible") and weights_result.get("weights") is not None:
-                                    print("✅ VALIDATOR ELIGIBLE - Setting weights on chain")
+                                    print(f"✅ VALIDATOR ELIGIBLE - Setting weights on chain")
                                     print(f"   Consensus participation: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)} leads")
                                     print(f"   Percentage: {weights_result.get('percentage', 0):.1f}%")
                                     print(f"   Total leads in epoch: {weights_result.get('total_leads', 0)}")
@@ -1354,8 +1483,8 @@ class Validator(BaseValidatorNeuron):
                                     
                                     # Check if there are any weights to set
                                     if not weight_dict:
-                                        print("   ℹ️ No leads accepted yet in epoch - no weights to set")
-                                        print("   (Validator is eligible but waiting for leads to be accepted)")
+                                        print(f"   ℹ️ No leads accepted yet in epoch - no weights to set")
+                                        print(f"   (Validator is eligible but waiting for leads to be accepted)")
                                         continue
                                     
                                     # Get UIDs for the hotkeys
@@ -1386,15 +1515,15 @@ class Validator(BaseValidatorNeuron):
                                                 # Don't mark epoch as done - allow continuous updates every 2 blocks
                                                 # self._last_epoch_weights_set = current_epoch
                                             else:
-                                                print("❌ Failed to set weights on chain")
+                                                print(f"❌ Failed to set weights on chain")
                                         except Exception as e:
                                             print(f"❌ Error setting weights on chain: {e}")
                                     else:
-                                        print("❌ No valid UIDs found for weight setting")
+                                        print(f"❌ No valid UIDs found for weight setting")
                                         
                                 else:
                                     # Debug: Show what we actually got from Edge Function
-                                    print("⚠️ No weights returned from Edge Function")
+                                    print(f"⚠️ No weights returned from Edge Function")
                                     print(f"   Debug - Eligible: {weights_result.get('eligible', 'missing')}")
                                     print(f"   Debug - Weights: {weights_result.get('weights', 'missing')}")
                                     print(f"   Debug - Validated: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)}")
@@ -1614,9 +1743,9 @@ class Validator(BaseValidatorNeuron):
                     )
                     
                     if submission_success:
-                        print("   📤 Assessment submitted to consensus system")
+                        print(f"   📤 Assessment submitted to consensus system")
                     else:
-                        print("   ⚠️ Failed to submit assessment to consensus system")
+                        print(f"   ⚠️ Failed to submit assessment to consensus system")
                     
                     # Note: We do NOT directly save to leads table anymore
                     # The consensus system will handle that when 3 validators agree
@@ -1707,7 +1836,7 @@ class Validator(BaseValidatorNeuron):
                     print(f"   Requested: {num_leads} leads")
                     print(f"   Description: {business_desc[:50]}...")
                     print(f"   🕐 Request received at {time.strftime('%H:%M:%S')}")
-                    print("   ⏳ Waiting up to 180 seconds for miners to send curated leads...")
+                    print(f"   ⏳ Waiting up to 180 seconds for miners to send curated leads...")
 
                     try:
                         # Wait for miners to send curated leads to Firestore
@@ -1765,7 +1894,7 @@ class Validator(BaseValidatorNeuron):
                                 score = batch_scores_r1.get(id(lead))
                                 if score is None:
                                     failed_leads.add(id(lead))
-                                    print("⚠️  LLM failed for lead, will skip this lead")
+                                    print(f"⚠️  LLM failed for lead, will skip this lead")
                                 else:
                                     aggregated[id(lead)] += score
 
@@ -1780,7 +1909,7 @@ class Validator(BaseValidatorNeuron):
                                     score = batch_scores_r2.get(id(lead))
                                     if score is None:
                                         failed_leads.add(id(lead))
-                                        print("⚠️  LLM failed for lead, will skip this lead")
+                                        print(f"⚠️  LLM failed for lead, will skip this lead")
                                     else:
                                         aggregated[id(lead)] += score
 
@@ -1828,7 +1957,7 @@ class Validator(BaseValidatorNeuron):
                             if success:
                                 print(f"📊 Submitted ranking for consensus (trust={validator_trust:.4f})")
                             else:
-                                print("⚠️  Failed to submit ranking for consensus")
+                                print(f"⚠️  Failed to submit ranking for consensus")
 
                         except Exception as e:
                             print(f"⚠️  Error submitting validator ranking: {e}")
@@ -1854,15 +1983,15 @@ class Validator(BaseValidatorNeuron):
                             
                             # Check if we were eligible
                             if "error" in rewards:
-                                print("\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
+                                print(f"\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
                                 print(f"   Reason: {rewards['error']}")
                                 print(f"   Validated: {rewards.get('validated_count', 0)}/{rewards.get('total_count', 0)} leads")
                                 print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 10.0%)")
-                                print("   No weights will be set this epoch - increase validation activity!")
+                                print(f"   No weights will be set this epoch - increase validation activity!")
                             else:
                                 # Validator is eligible - set weights on-chain
                                 # Log final weights
-                                print("\n🎯 V2 REWARD CALCULATION COMPLETE:")
+                                print(f"\n🎯 V2 REWARD CALCULATION COMPLETE:")
                                 print(f"   ✅ Validator eligible - validated {rewards.get('percentage', 0):.1f}% of epoch leads")
                                 print(f"   Ranked leads: {len(top_leads)} prospects")
                                 print(f"   Final weights (W): {rewards['W']}")
@@ -2037,7 +2166,7 @@ class Validator(BaseValidatorNeuron):
                 'industry_score': industry_score,
                 'region_score': region_score
             }
-        except Exception:
+        except:
             return {'website_score': 0.0, 'industry_score': 0.0, 'region_score': 0.0}
 
     def save_validated_lead_to_supabase(self, lead: Dict) -> bool:
@@ -2085,7 +2214,7 @@ class Validator(BaseValidatorNeuron):
             # Insert into Supabase - database will enforce unique constraint
             # Trigger will automatically notify miner if duplicate
             # NOTE: Wrap in array to match how miner inserts to prospect_queue
-            self.supabase_client.table("leads").insert([lead_data])
+            response = self.supabase_client.table("leads").insert([lead_data])
             
             bt.logging.info(f"✅ Saved lead to Supabase: {lead_data['email']} ({lead_data['company']})")
             return True
@@ -2251,7 +2380,7 @@ async def run_validator(validator_hotkey, queue_maxsize):
     validator = Validator(config=config)
 
     # Start HTTP server
-    await validator.start_http_server()
+    http_port = await validator.start_http_server()
 
     # Track all delivered leads for this API query
     all_delivered_leads = []
@@ -2444,7 +2573,7 @@ def main():
     ensure_data_files()
 
     # Add this near the beginning of your validator startup, after imports
-    from Leadpoet.validator.reward import start_epoch_monitor
+    from Leadpoet.validator.reward import start_epoch_monitor, stop_epoch_monitor
 
     # Start the background epoch monitor when validator starts
     start_epoch_monitor()

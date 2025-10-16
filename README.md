@@ -170,7 +170,8 @@ Validators pull prospects from the queue (first-come, first-served) and have a 1
 
 ## Reward Distribution
 
-**Every epoch:**
+### Every epoch:
+
 1. Validators check eligibility (> 10% consensus participation requirement)
 2. Miner weights calculated based on sourced approved leads
 3. Weights set on-chain proportional to leads sourced

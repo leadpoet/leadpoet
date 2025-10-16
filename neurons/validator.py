@@ -1,4 +1,3 @@
-# THIS IS A TEST
 
 import re
 import time

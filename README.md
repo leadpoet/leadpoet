@@ -9,8 +9,6 @@ Leadpoet transforms lead generation by creating a decentralized marketplace wher
 - **Validators** ensure quality through consensus-based validation
 - **Buyers** access curated prospects optimized for their Ideal Customer Profile (ICP)
 
-### Consensus Validation
-
 Unlike traditional lead databases, Leadpoet requires **consensus from multiple validators** before a lead is approved:
 - Each prospect is validated by three independent validators
 - Prevents gaming and ensures the lead pool limited to **verified, highest quality** leads
@@ -161,8 +159,6 @@ Validators pull prospects from the queue (first-come, first-served) and have a 1
 - Verified server-side via Edge Function 
 - If eligible, validators receive miner weights at end of epoch to commit on-chain
 
-### Validation Checks
-
 **Validators perform multi-stage quality checks:**
 1. **Email validation**: Format, domain, disposable check, deliverability check
 2. **Company & Contact verification**: Website, LinkedIn, Google search
@@ -170,7 +166,7 @@ Validators pull prospects from the queue (first-come, first-served) and have a 1
 
 ## Reward Distribution
 
-### Every epoch:
+### Epoch-Based Rewards
 
 1. Validators check eligibility (> 10% consensus participation requirement)
 2. Miner weights calculated based on sourced approved leads
@@ -187,7 +183,7 @@ Validators pull prospects from the queue (first-come, first-served) and have a 1
 
 ```
 Miner Sources Leads → Prospect Queue → Validators Run Quality Checks → 
-Validator Consensus → Lead Pool → Curation for Buyer Requests (**Month 2**)
+Validator Consensus → Lead Pool → Curation for Buyer Requests (Month 2)
 ```
 
 ## Roadmap
@@ -231,7 +227,7 @@ Validator Consensus → Lead Pool → Curation for Buyer Requests (**Month 2**)
 ## Support
 
 For support and discussion:
-- **Leadpoet FAQ**: Check out our FAQ at leadpoet.com/faq to learn more about Leadpoet!
+- **Leadpoet FAQ**: Check out our FAQ at www.leadpoet.com/faq to learn more about Leadpoet!
 - **Bittensor Discord**: Join the Leadpoet SN71 channel and message us!
 - **Email**: hello@leadpoet.com
 

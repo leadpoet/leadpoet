@@ -1,10 +1,11 @@
+
+
 import re
 import time
 import random
 import requests, textwrap
 import numpy as np
 import bittensor as bt
-import os
 import argparse
 import json
 from datetime import datetime, timedelta
@@ -42,6 +43,125 @@ from datetime import datetime, timezone
 from math import isclose
 from pathlib import Path
 from json.decoder import JSONDecodeError
+import os
+import sys
+
+# ════════════════════════════════════════════════════════════════════════════
+# AUTO-UPDATER: Automatically updates entire repo from GitHub for validators
+# ════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__" and os.environ.get("LEADPOET_WRAPPER_ACTIVE") != "1":
+    print("🔄 Leadpoet Validator: Activating auto-update wrapper...")
+    print("   Your validator will automatically stay up-to-date with the latest code")
+    print("")
+    
+    # Create wrapper script path (hidden file with dot prefix)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    wrapper_path = os.path.join(repo_root, ".auto_update_wrapper.sh") 
+    
+    # Inline wrapper script - simple and clean
+    wrapper_content = '''#!/bin/bash
+# Auto-generated wrapper for Leadpoet validator auto-updates
+set -e
+
+REPO_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$REPO_ROOT"
+
+echo "════════════════════════════════════════════════════════════════"
+echo "🚀 Leadpoet Auto-Updating Validator"
+echo "   Repository updates every 5 minutes"
+echo "   GitHub: github.com/leadpoet/Leadpoet"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+
+RESTART_COUNT=0
+MAX_RESTARTS=5
+
+while true; do
+    echo "────────────────────────────────────────────────────────────────"
+    echo "🔍 Checking for updates from GitHub..."
+    
+    # Stash any local changes and pull latest
+    if git stash 2>/dev/null; then
+        echo "   💾 Stashed local changes"
+    fi
+    
+    if git pull origin main 2>/dev/null; then
+        CURRENT_COMMIT=$(git rev-parse --short HEAD)
+        echo "✅ Repository updated"
+        echo "   Current commit: $CURRENT_COMMIT"
+    else
+        echo "⏭️  Could not update (offline or not a git repo)"
+        echo "   Continuing with current version..."
+    fi
+    
+    echo "────────────────────────────────────────────────────────────────"
+    echo "🟢 Starting validator (attempt $(($RESTART_COUNT + 1)))..."
+    echo ""
+    
+    # Run validator with environment flag to prevent wrapper re-execution
+    export LEADPOET_WRAPPER_ACTIVE=1
+    python3 neurons/validator.py "$@"
+    
+    EXIT_CODE=$?
+    
+    echo ""
+    echo "────────────────────────────────────────────────────────────────"
+    
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo "✅ Validator exited cleanly (exit code: 0)"
+        echo "   Shutting down auto-updater..."
+        break
+    else
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        echo "⚠️  Validator exited with error (exit code: $EXIT_CODE)"
+        
+        if [ $RESTART_COUNT -ge $MAX_RESTARTS ]; then
+            echo "❌ Maximum restart attempts ($MAX_RESTARTS) reached"
+            echo "   Please check logs and restart manually"
+            exit 1
+        fi
+        
+        echo "   Restarting in 10 seconds... (attempt $RESTART_COUNT/$MAX_RESTARTS)"
+        sleep 10
+    fi
+    
+    echo ""
+    echo "⏰ Next update check in 5 minutes..."
+    sleep 300
+    
+    # Reset restart counter after successful check
+    RESTART_COUNT=0
+done
+
+echo "════════════════════════════════════════════════════════════════"
+echo "🛑 Auto-updater stopped"
+'''
+    
+    # Write wrapper script
+    try:
+        with open(wrapper_path, 'w') as f:
+            f.write(wrapper_content)
+        os.chmod(wrapper_path, 0o755)
+        print(f"✅ Created auto-update wrapper: {wrapper_path}")
+    except Exception as e:
+        print(f"❌ Failed to create wrapper: {e}")
+        print("   Continuing without auto-updates...")
+        # Fall through to normal execution
+    else:
+        # Execute wrapper and replace current process
+        print(f"🚀 Launching auto-update wrapper...")
+        print("")
+        try:
+            env = os.environ.copy()
+            env["LEADPOET_WRAPPER_ACTIVE"] = "1"
+            os.execve(wrapper_path, [wrapper_path] + sys.argv[1:], env)
+        except Exception as e:
+            print(f"❌ Failed to execute wrapper: {e}")
+            print("   Continuing without auto-updates...")
+
+# normal validator code starts below
 
 AVAILABLE_MODELS = [
     "openai/o3-mini:online",                    

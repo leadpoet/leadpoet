@@ -16,8 +16,10 @@ from Leadpoet.utils.misc import generate_timestamp
 load_dotenv()
 
 API_URL   = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
-SUBNET_ID = 71
-NETWORK   = "finney"
+
+# Network defaults - can be overridden via environment variables
+SUBNET_ID = int(os.getenv("NETUID", "71"))  # Default to mainnet subnet 71
+NETWORK   = os.getenv("SUBTENSOR_NETWORK", "finney")  # Default to mainnet
 
 SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
 SUPABASE_JWT = os.getenv("SUPABASE_JWT")
@@ -253,24 +255,33 @@ class _Verifier:
         self._network = NETWORK
         self._netuid = SUBNET_ID
 
-    def _get_fresh_metagraph(self):
-        """Always get a fresh metagraph"""
-        subtensor = bt.subtensor(network=self._network)
-        return subtensor.metagraph(netuid=self._netuid)
+    def _get_fresh_metagraph(self, network=None, netuid=None):
+        """
+        Always get a fresh metagraph.
+        If network/netuid not provided, use defaults from environment/config.
+        """
+        net = network or self._network
+        nid = netuid or self._netuid
+        subtensor = bt.subtensor(network=net)
+        return subtensor.metagraph(netuid=nid)
 
-    def is_miner(self, ss58: str) -> bool:
+    def is_miner(self, ss58: str, network=None, netuid=None) -> bool:
         try:
-            mg = self._get_fresh_metagraph()
+            mg = self._get_fresh_metagraph(network, netuid)
             return ss58 in mg.hotkeys
-        except Exception:
+        except Exception as e:
+            bt.logging.warning(f"Failed to verify miner registration: {e}")
             return False
 
-    def is_validator(self, ss58: str) -> bool:
+    def is_validator(self, ss58: str, network=None, netuid=None) -> bool:
         try:
-            mg = self._get_fresh_metagraph()
+            mg = self._get_fresh_metagraph(network, netuid)
             uid = mg.hotkeys.index(ss58)
             return mg.validator_permit[uid].item()
         except ValueError:
+            return False
+        except Exception as e:
+            bt.logging.warning(f"Failed to verify validator registration: {e}")
             return False
 
 _VERIFY = _Verifier()                       # singleton
@@ -318,14 +329,32 @@ def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
     return stored > 0
 
 # ───────────────────────────── Queued prospects ─────────────────────────────
-def push_prospects_to_cloud(wallet: bt.wallet, prospects: List[Dict]) -> bool:
+def push_prospects_to_cloud(
+    wallet: bt.wallet, 
+    prospects: List[Dict],
+    network: str = None,
+    netuid: int = None
+) -> bool:
     """
     Miners call this to enqueue prospects for validation in Supabase prospect_queue.
+    
+    Args:
+        wallet: Miner's Bittensor wallet
+        prospects: List of prospect dictionaries to push
+        network: Subtensor network (e.g., "test", "finney"). If None, uses NETWORK env var.
+        netuid: Subnet ID. If None, uses NETUID env var.
     """
     if not prospects:
         return True
-    if not _VERIFY.is_miner(wallet.hotkey.ss58_address):
-        raise PermissionError("Hotkey not registered as miner on subnet")
+    
+    # Use provided network/netuid or fall back to environment variables
+    check_network = network or NETWORK
+    check_netuid = netuid or SUBNET_ID
+    
+    if not _VERIFY.is_miner(wallet.hotkey.ss58_address, network=check_network, netuid=check_netuid):
+        raise PermissionError(
+            f"Hotkey not registered as miner on subnet (network={check_network}, netuid={check_netuid})"
+        )
     
     try:
         # Get Supabase client with miner's JWT token
@@ -623,16 +652,11 @@ def submit_validation_assessment(
         if result.response.status_code == 201 or result.data:
             bt.logging.info(f"✅ Submitted validation for lead {lead_id[:8]}... (score: {score:.2f}, valid: {is_valid})")
             
-            # Check if consensus has been reached
-            consensus_reached = check_and_process_consensus(
-                prospect_id=prospect_id,
-                lead_id=lead_id,
-                lead_data=lead_data,
-                wallet=wallet
-            )
-            
-            if consensus_reached:
-                bt.logging.info(f"🎯 Consensus reached for lead {lead_id[:8]}...")
+            # ══════════════════════════════════════════════════════════════════════════
+            # CONSENSUS IS NOW HANDLED SERVER-SIDE BY DATABASE TRIGGERS + EDGE FUNCTIONS
+            # Validators no longer need to check consensus locally - it's automatic!
+            # ══════════════════════════════════════════════════════════════════════════
+            bt.logging.debug("Consensus will be processed server-side by database triggers")
             
             return True
         else:

@@ -85,8 +85,7 @@ setup(
     entry_points={
         "console_scripts": [
             "leadpoet=neurons.miner:main",
-            "leadpoet-validate=neurons.validator:main",  
-            "leadpoet-api=Leadpoet.api.leadpoet_api:main"
+            "leadpoet-validate=neurons.validator:main"
         ]
     },
     classifiers=[

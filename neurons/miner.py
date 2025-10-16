@@ -226,14 +226,21 @@ class Miner(BaseMinerNeuron):
                     email = lead.get('owner_email', 'No email')
                     print(f"  {i}. {business} - {owner} ({email})")
                 try:
-                    success = push_prospects_to_cloud(self.wallet, sanitized)
+                    success = push_prospects_to_cloud(
+                        wallet=self.wallet,
+                        prospects=sanitized,
+                        network=self.config.subtensor.network,
+                        netuid=self.config.netuid
+                    )
                     if success:
                         print(
                             f"✅ Pushed {len(sanitized)} prospects to Supabase queue "
                             f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
                         )
                     else:
-                        print("❌ Failed to push prospects - Supabase client unavailable")
+                        # Detailed error already logged by push_prospects_to_cloud()
+                        # Could be: duplicate, RLS violation, or connection issue
+                        print("⚠️  Failed to push prospects (see detailed error above)")
                 except Exception as e:
                     print(f"❌ Cloud push exception: {e}")
                 await asyncio.sleep(interval)

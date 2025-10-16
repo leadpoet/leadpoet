@@ -191,13 +191,13 @@ class CustomResponse:
             try:
                 error_data = response.json()
                 raise Exception(error_data)
-            except:
+            except Exception:
                 response.raise_for_status()
         
         # Parse success response
         try:
             self.data = response.json() if response.text else []
-        except:
+        except Exception:
             self.data = []
 
 class NotFilter:

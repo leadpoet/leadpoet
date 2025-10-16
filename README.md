@@ -264,7 +264,7 @@ Note: Implementation details may evolve based on network performance and communi
 ## Support
 
 For support and discussion:
-- **Bittensor Discord**: Join the Leadpoet SN71 channel and message @medsage
+- **Bittensor Discord**: Join the Leadpoet SN71 channel and message us!
 - **Email**: hello@leadpoet.com
 
 ## License

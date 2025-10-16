@@ -77,5 +77,8 @@ start_server.sh
 # These contain authentication logic that should not be public
 supabase/
 
+# API code - KEEP PRIVATE (only for internal team use)
+Leadpoet/api/
+
 # Auto-generated validator wrapper
 .auto_update_wrapper.sh

@@ -1,7 +1,6 @@
 import json
 import os
 import threading
-from typing import List, Dict, Optional
 
 DATA_DIR = "data"
 QUEUE_FILE = os.path.join(DATA_DIR, "prospect_queue.json")

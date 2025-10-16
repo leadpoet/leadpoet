@@ -72,15 +72,15 @@ def get_leads_from_pool(num_leads, industry=None, region=None, wallet=None):
 
     filtered_leads = leads
     if industry:
-        filtered_leads = [l for l in filtered_leads
-                          if l.get("industry", "").lower() == industry.lower()]
+        filtered_leads = [lead for lead in filtered_leads
+                          if lead.get("industry", "").lower() == industry.lower()]
     if region:
-        filtered_leads = [l for l in filtered_leads
-                          if l.get("region", "").lower() == region.lower()]
+        filtered_leads = [lead for lead in filtered_leads
+                          if lead.get("region", "").lower() == region.lower()]
 
     required_fields = ["owner_email", "website", "business"]
-    filtered_leads = [l for l in filtered_leads
-                      if all(l.get(f) for f in required_fields)]
+    filtered_leads = [lead for lead in filtered_leads
+                      if all(lead.get(f) for f in required_fields)]
 
     import random
     if len(filtered_leads) <= num_leads:
@@ -102,7 +102,7 @@ def calculate_per_query_rewards(all_delivered_leads):
     Calculate rewards for the current API query only (no historical tracking).
     Implements proper proportional splitting when multiple miners curate the same lead.
     """
-    bt.logging.info(f"=== REWARD CALCULATION DEBUG ===")
+    bt.logging.info("=== REWARD CALCULATION DEBUG ===")
     bt.logging.info(f"Total delivered leads: {len(all_delivered_leads)}")
     
     # Group leads by email to find duplicates within this query
@@ -176,12 +176,12 @@ def calculate_per_query_rewards(all_delivered_leads):
         else:
             emissions[hotkey] = 0.0
     
-    bt.logging.info(f"Final scores:")
+    bt.logging.info("Final scores:")
     bt.logging.info(f"  Sourcing: {dict(sourcing_scores)}")
     bt.logging.info(f"  Curating: {dict(curating_scores)}")
     bt.logging.info(f"  Combined: {combined_weights}")
     bt.logging.info(f"  Emissions: {emissions}")
-    bt.logging.info(f"=== END REWARD CALCULATION ===")
+    bt.logging.info("=== END REWARD CALCULATION ===")
     
     return {
         "S": dict(sourcing_scores),

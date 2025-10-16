@@ -9,7 +9,6 @@ import aiohttp
 import requests
 import base64
 import json
-import time
 import os
 
 # Cloud API configuration
@@ -241,7 +240,7 @@ class LeadPoetAPI:
             return []
 
         print(f"✅ Request {request_id} written to Firestore successfully!")
-        print(f"⏳ Waiting for validators to rank leads (up to 400s)...")
+        print("⏳ Waiting for validators to rank leads (up to 400s)...")
 
         try:
             # ══════════════════════════════════════════════════════════
@@ -253,7 +252,7 @@ class LeadPoetAPI:
             SLEEP_SEC = 5
             total_wait = MAX_ATTEMPTS * SLEEP_SEC
 
-            print(f"📊 Multiple validators are independently ranking leads...")
+            print("📊 Multiple validators are independently ranking leads...")
 
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 try:
@@ -274,7 +273,7 @@ class LeadPoetAPI:
                             req_dt = datetime.fromisoformat(request_time.replace('Z', '+00:00'))
                             elapsed = (datetime.now(timezone.utc) - req_dt).total_seconds()
                             timeout_reached = elapsed > 90
-                        except:
+                        except Exception:
                             pass
 
                     # Check if we have enough validators to calculate consensus
@@ -293,14 +292,14 @@ class LeadPoetAPI:
                         )
 
                         if final_leads:
-                            print(f"\n✅ CONSENSUS COMPLETE!")
+                            print("\n✅ CONSENSUS COMPLETE!")
                             print(f"   📊 {metadata['num_validators']} validator(s) participated")
                             print(f"   ⚖️  Total validator trust: {metadata['total_trust']:.4f}")
 
                             # ═══════════════════════════════════════════════════════
                             # NEW: Display validator trust scores
                             # ═══════════════════════════════════════════════════════
-                            print(f"\n📋 VALIDATOR TRUST SCORES:")
+                            print("\n📋 VALIDATOR TRUST SCORES:")
                             for rank_data in validator_rankings:
                                 val_hotkey = rank_data.get("validator_hotkey", "unknown")[:10]
                                 val_trust = rank_data.get("validator_trust", 0.0)
@@ -321,7 +320,7 @@ class LeadPoetAPI:
                                 # Get detailed scoring from consensus calculation
                                 # We need to fetch this from the intermediate data
                                 # Let's recalculate just for this lead to show the breakdown
-                                print(f"      Calculation:")
+                                print("      Calculation:")
 
                                 # Find this lead in validator rankings to show individual scores
                                 lead_email = lead.get("email", lead.get("Email 1", "")).lower().strip()
@@ -345,7 +344,7 @@ class LeadPoetAPI:
                                             print(f"         {val_hotkey}... S={score:.4f} × V={val_trust:.4f} = {weighted:.6f}")
                                             break
 
-                                print(f"         ────────────────────────────────────────")
+                                print("         ────────────────────────────────────────")
                                 print(f"         Total = {total_weighted:.6f}")
 
                             print(f"\n   🎯 Returning {len(final_leads)} consensus-ranked lead(s)")
@@ -438,7 +437,7 @@ class LeadPoetAPI:
             self.metagraph.sync(subtensor=self.subtensor)
 
             # Debug: Print metagraph info
-            print(f" Metagraph info:")
+            print(" Metagraph info:")
             print(f"   Total axons: {len(self.metagraph.axons)}")
             print(f"   Validator permits: {self.metagraph.validator_permit}")
             print(f"   Axon serving status: {[axon.is_serving for axon in self.metagraph.axons]}")
@@ -550,10 +549,6 @@ def main():
     print("Welcome to LeadPoet API")
     num_leads     = int(input("Enter number of leads (1-100): "))
     business_desc = input("Describe your business & ideal customer: ").strip()
-
-    # build new request
-    payload = {"num_leads": num_leads,
-               "business_desc": business_desc}
 
     async def fetch_leads():
         try:

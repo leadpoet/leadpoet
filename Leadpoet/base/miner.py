@@ -1,13 +1,10 @@
 import time
-import asyncio
 import threading
 import argparse
 import traceback
 import bittensor as bt
 import os
 from Leadpoet.base.neuron import BaseNeuron
-from typing import Union
-import random
 
 class BaseMinerNeuron(BaseNeuron):
     neuron_type: str = "MinerNeuron"
@@ -114,7 +111,7 @@ class BaseMinerNeuron(BaseNeuron):
             external_ip   = self.config.axon.external_ip,
             external_port = self.config.axon.external_port,
         )
-        bt.logging.info(f"Attaching forward function to miner axon.")
+        bt.logging.info("Attaching forward function to miner axon.")
         self.axon.attach(
             forward_fn=self.forward,
             blacklist_fn=self.blacklist,
@@ -131,11 +128,11 @@ class BaseMinerNeuron(BaseNeuron):
             bt.logging.error("Cannot run miner: UID not set. Please register the wallet on the network.")
             return
 
-        print(f"   Starting axon serve...")
+        print("   Starting axon serve...")
         bt.logging.info(f"Running miner for subnet: {self.config.netuid} on network: {self.config.subtensor.chain_endpoint} with config: {self.config}")
         print("   [axon.serve] calling serve()")
         self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
-        print(f"   Axon serve completed, starting axon...")
+        print("   Axon serve completed, starting axon...")
         print("   [axon.start] starting gRPC server …")
         self.axon.start()
         print("   Axon started successfully!")

@@ -3,7 +3,7 @@ Database helper for the LeadPoet subnet with Supabase integration.
 Miners = write-only to prospect_queue, Validators = read prospect_queue, write to leads.
 """
 import os, json, time, base64, requests, bittensor as bt
-from typing import List, Dict, Optional
+from typing import List, Dict
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from Leadpoet.utils.misc import generate_timestamp
@@ -19,6 +19,14 @@ SUPABASE_JWT = os.getenv("SUPABASE_JWT")
 
 # Supabase anon key for API routing (public, safe to commit)
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDcwMDUsImV4cCI6MjA2MDQyMzAwNX0.5E0WjAthYDXaCWY6qjzXm2k20EhadWfigak9hleKZk8"
+
+# Create a response object similar to what supabase-py returns
+class RPCResponse:
+    def __init__(self, data):
+        self.data = data
+
+    def execute(self):
+        return self
 
 class CustomSupabaseClient:
     """
@@ -50,26 +58,11 @@ class CustomSupabaseClient:
             response = requests.post(url, json=params or {}, headers=headers)
             response.raise_for_status()
             
-            # Create a response object similar to what supabase-py returns
-            class RPCResponse:
-                def __init__(self, data):
-                    self.data = data
-                    
-                def execute(self):
-                    return self
-            
             return RPCResponse(response.json() if response.text else [])
         except requests.exceptions.HTTPError as e:
             bt.logging.error(f"RPC call failed: {e.response.text if e.response else str(e)}")
             # Return empty response on error
-            class RPCResponse:
-                def __init__(self):
-                    self.data = []
-                    
-                def execute(self):
-                    return self
-            
-            return RPCResponse()
+            return RPCResponse([])
 
 class CustomTableQuery:
     """Query builder for table operations using direct HTTP requests."""

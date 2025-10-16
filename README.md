@@ -209,7 +209,7 @@ Validator Consensus → Lead Pool → Curation for Buyer Requests (Month 2)
 
 ## Troubleshooting
 
-### Common Errors
+Common Errors:
 
 **"No JWT token available"**
 - Validators need to wait for token generation on first run

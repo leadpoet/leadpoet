@@ -111,6 +111,26 @@ python neurons/miner.py \
 3. **Consensus Validation**: Prospects validated by validators
 4. **Approved Leads**: Only consensus-approved leads enter the main lead pool
 
+### Lead JSON Structure
+
+Miners must submit prospects with the following structure:
+
+```json
+{
+  "business": "Acme Dental Group",
+  "owner_full_name": "Dr. Sarah Johnson",
+  "owner_email": "sarah.johnson@acmedental.com",
+  "website": "https://acmedental.com",
+  "phone": "+1-555-123-4567",
+  "linkedin": "https://linkedin.com/in/sarahjohnson",
+  "industry": "Healthcare - Dental",
+  "location": "Austin, TX",
+  "employee_count": "15-25",
+  "founded_year": 2015,
+  "description": "Multi-location dental practice specializing in cosmetic dentistry"
+}
+```
+
 ### Reward System
 
 Miners earn rewards **proportional to approved leads** they source:

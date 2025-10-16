@@ -1,23 +1,22 @@
-# Leadpoet | Premium B2B Leads Powered by Bittensor
+# Leadpoet | Premium Lead Generation Powered by Bittensor
 
-A decentralized B2B lead generation subnet built on Bittensor that delivers fresh, validated prospects through a consensus-driven marketplace.
+Leadpoet is a decentralized lead generation subnet built on Bittensor that delivers fresh, validated prospects through a consensus-driven marketplace. Starting with high-quality lead sourcing today, our vision is to evolve Leadpoet into a fully automated sales engine where qualified meetings with prospects seamlessly appear on your calendar.
 
-## 🚀 Overview
+## Overview
 
-Leadpoet transforms B2B lead generation by creating a decentralized marketplace where:
+Leadpoet transforms lead generation by creating a decentralized marketplace where:
 - **Miners** source high-quality prospects using web scraping and AI
-- **Validators** ensure quality through consensus-based validation (3+ validators per lead)
-- **Buyers** access curated, real-time prospects optimized for their ICP (Ideal Customer Profile)
+- **Validators** ensure quality through consensus-based validation (2-3 validators per lead)
+- **Buyers** access curated, real-time prospects optimized for their Ideal Customer Profile (ICP)
 
-### Key Innovation: Consensus Validation
+### Consensus Validation
 
 Unlike traditional lead databases, Leadpoet requires **consensus from multiple validators** before a lead is accepted:
-- Each prospect must be validated by 3 independent validators
-- 2+ validators must agree (valid/invalid) for consensus
+- Each prospect must be validated by 2-3 independent validators
+- Validators must agree (valid/invalid) for consensus
 - Prevents gaming and ensures higher quality leads
-- Validators must participate in ≥10% of consensus decisions to earn rewards
 
-## 📋 Prerequisites
+## Prerequisites
 
 ### Hardware Requirements
 - **Miners/Validators**: 16GB RAM, 4-core CPU, 100GB SSD
@@ -28,7 +27,7 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 - Bittensor CLI: `pip install bittensor>=6.9.3`
 - TAO Wallet: Create with `btcli wallet create`
 
-## 🔑 Required Credentials
+## Required Credentials
 
 ### For Miners
 
@@ -66,12 +65,12 @@ export GSE_API_KEY="your_google_api_key"             # For company verification
 export GSE_CX="your_search_engine_id"                # Custom search engine ID
 ```
 
-## 🛠️ Installation
+## Installation
 
 ```bash
 # Clone the repository
 git clone https://github.com/leadpoet/Leadpoet.git
-cd bittensor-subnet
+cd Leadpoet
 
 # Install dependencies
 pip install -e .
@@ -80,7 +79,7 @@ pip install -e .
 python -c "import Leadpoet; print('Leadpoet installed successfully')"
 ```
 
-## ⛏️ For Miners
+## For Miners
 
 ### Getting Started
 
@@ -115,26 +114,26 @@ python neurons/miner.py \
 
 ### How Miners Work
 
-1. **Continuous Sourcing**: Actively search for new B2B prospects
+1. **Continuous Sourcing**: Actively search for new prospects
 2. **Smart Submission**: Send prospects to Supabase `prospect_queue`
-3. **Consensus Validation**: Prospects validated by 3+ validators
+3. **Consensus Validation**: Prospects validated by 2-3 validators
 4. **Accepted Leads**: Only consensus-approved leads enter the main database
 
-### Reward System (100% Sourcing-Based)
+### Reward System
 
-Miners earn rewards purely based on the leads they source that get accepted through consensus:
-- If you source 60% of accepted leads in an epoch → you get 60% of emissions
+Miners earn rewards based on the leads they source that get accepted through consensus:
+- If you source 60% of accepted leads in an epoch, you receive 60% of emissions
 - Simple, transparent, and directly tied to value creation
 - Epoch duration: 72 minutes (360 blocks)
 
-## 🛡️ For Validators
+## For Validators
 
 ### Getting Started
 
-1. **Stake TAO** (minimum 20 TAO):
+1. **Stake TAO** (meet base Bittensor validator requirements):
 ```bash
 btcli stake add \
-    --amount 20 \
+    --amount <amount> \
     --subtensor.network finney \
     --wallet.name validator \
     --wallet.hotkey default
@@ -149,7 +148,7 @@ btcli subnet register \
     --wallet.hotkey default
 ```
 
-3. **Run the validator**:
+3. **Run the validator** (includes automatic code updates):
 ```bash
 python neurons/validator.py \
     --wallet_name validator \
@@ -158,18 +157,16 @@ python neurons/validator.py \
     --subtensor_network finney
 ```
 
+Note: Validators automatically update from GitHub every 5 minutes to ensure they're running the latest code.
+
 ### Consensus Validation System
 
-**How it works:**
-1. Validators pull prospects from the queue (first-come, first-served)
-2. Each prospect gets a 15-second window for validation
-3. Need 3 validators to participate, 2+ must agree for consensus
-4. Accepted leads → main database, Rejected leads → discarded
+Validators pull prospects from the queue (first-come, first-served) and have a 15-second window to validate. With 2-3 validators participating, agreement is required for consensus. Accepted leads move to the main database, rejected leads are discarded.
 
 **Eligibility for Rewards:**
-- Must participate in ≥10% of consensus decisions per epoch
-- Checked via secure Edge Function (cannot be bypassed)
-- If eligible, validator can set miner weights on-chain
+- Must participate in at least 10% of consensus decisions per epoch
+- Verified server-side via Edge Function 
+- If eligible, validators receive miner weights to set on-chain
 
 ### Validation Checks
 
@@ -179,54 +176,29 @@ Validators perform multi-stage validation:
 3. **Company verification**: Website, LinkedIn, Google search
 4. **LLM validation**: AI-powered legitimacy scoring
 
-## 💰 Reward Distribution
+## Reward Distribution
 
-### Current System (Epoch-based)
+### Epoch-Based Distribution
 
 Every 72 minutes (1 epoch):
-1. **Validators check eligibility**: Via Edge Function (≥10% consensus participation)
-2. **Calculate weights**: Based on which miners sourced accepted leads
-3. **Set weights on-chain**: Proportional to leads sourced
-4. **TAO distribution**: Automatic based on weights
+1. Validators check eligibility (10% consensus participation requirement)
+2. Weights calculated based on which miners sourced accepted leads
+3. Weights set on-chain proportional to leads sourced
 
 ### Security Features
 
-- **Edge Function enforcement**: 10% rule checked server-side
+- **Edge Function enforcement**: Eligibility checked server-side, cannot be bypassed
 - **No local calculations**: Validators can't manipulate weights
 - **JWT-based auth**: Validators only have limited database access
 - **Consensus requirement**: No single validator can accept/reject leads
 
-## 📊 For API Clients (Buyers)
-
-### Accessing Leads
-
-```bash
-python Leadpoet/api/leadpoet_api.py \
-    --wallet_name buyer \
-    --wallet_hotkey default \
-    --netuid 71 \
-    --subtensor_network finney
-```
-
-**Interactive Flow:**
-1. Specify number of leads needed (1-100)
-2. Describe your ideal customer profile
-3. Receive consensus-validated, AI-ranked leads
-
-### Lead Quality Guarantees
-
-- ✅ Validated by 3+ independent validators
-- ✅ Consensus required (2+ validators must agree)
-- ✅ Fresh data (sourced in real-time, not from stale databases)
-- ✅ AI-scored for relevance to your ICP
-
-## 🏗️ Architecture
+## Architecture
 
 ### Data Flow
 
 ```
-Miner sources lead → Prospect Queue → 3+ Validators validate → 
-Consensus (2+ agree) → Lead Database → Available to Buyers
+Miner sources lead → Prospect Queue → 2-3 Validators validate → 
+Consensus (validators agree) → Lead Database → Available to Buyers
 ```
 
 ### Database Structure (Supabase)
@@ -246,7 +218,30 @@ Edge Func:   Full access (calculates weights server-side)
 Buyers:      Read leads only
 ```
 
-## 🔧 Troubleshooting
+## Roadmap
+
+### Month 1: Launch & Foundation (Current)
+- Codebase goes live on SN71
+- Launch and refine the sourcing mechanism, ensuring only high-quality leads enter the lead DB
+- Establish stable miner and validator operations
+- Monitor and optimize consensus validation system
+
+### Month 2: Curation & Beta Users
+- Implement curation rewards into the incentive mechanism
+- Miners begin curating leads for beta users based on Ideal Customer Profiles (ICPs)
+- Refine LLM-based lead ranking and scoring
+- Onboard initial beta customers for feedback
+
+### Month 3: Product Launch & Growth
+- Full product launch with marketing and sales campaigns
+- Open Leadpoet platform to paying customers
+- Scale miner curation and sourcing capabilities
+- Introduce weekly ICP themes to incentivize sourcing leads in specific industries
+- Optimize end-to-end lead generation pipeline
+
+Note: Implementation details may evolve based on network performance and community feedback.
+
+## Troubleshooting
 
 ### Common Issues
 
@@ -255,11 +250,10 @@ Buyers:      Read leads only
 - Token auto-refreshes every hour
 
 **"Not eligible - less than 10% consensus"**
-- Validator needs to validate more prospects
-- Check participation with Edge Function logs
+- Validator needs to validate more prospects to meet eligibility threshold
 
 **"Prospect already in queue"**
-- Duplicate detection is working (this is good!)
+- Duplicate detection is working correctly
 - Miner should source new, unique leads
 
 **Consensus not reached after 15 seconds**
@@ -267,33 +261,16 @@ Buyers:      Read leads only
 - With only 2 validators: both must agree
 - With 1 validator: prospect gets reset to queue
 
-## 📚 Key Concepts
+## Support
 
-### Consensus Rules
-- **3 validators**: 2+ must agree (standard case)
-- **2 validators**: Both must agree (degraded mode)
-- **1 validator**: No consensus, prospect reset
-- **15-second window**: From first pull to consensus deadline
-
-### Epoch Timing
-- **Duration**: 72 minutes (360 blocks)
-- **Weight calculation**: Blocks 80-120 (testing) or 355-360 (production)
-- **Automatic cleanup**: Old validation data removed each epoch
-
-### Quality Metrics
-- **Consensus score**: How many validators agreed
-- **Intent score**: AI-based relevance scoring
-- **Email score**: Deliverability confidence
-
-## 📞 Support
-
-- **Discord**: [Join our community](https://discord.gg/leadpoet)
+For support and discussion:
+- **Bittensor Discord**: Join the Leadpoet SN71 channel and message @medsage
 - **Email**: hello@leadpoet.com
 
-## 📄 License
+## License
 
 MIT License - See LICENSE file for details
 
 ---
 
-**Leadpoet** - Decentralized B2B lead generation powered by Bittensor 🚀
+**Leadpoet** - Decentralized lead generation powered by Bittensor

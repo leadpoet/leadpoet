@@ -1621,7 +1621,7 @@ class Validator(BaseValidatorNeuron):
     def discover_miners(self):
         """Show all available miners on the network"""
         try:
-            print("\n🔍 Discovering available miners on subnet 71...")
+            print(f"\n🔍 Discovering available miners on subnet {self.config.netuid}...")
             self.sync()  # Sync metagraph to get latest data
 
             available_miners = []
@@ -1678,7 +1678,12 @@ class Validator(BaseValidatorNeuron):
             
             # Fetch prospects using the new consensus-aware function
             # Returns list of {'prospect_id': UUID, 'data': lead_dict}
-            prospects_batch = fetch_prospects_from_cloud(self.wallet, limit=50)
+            prospects_batch = fetch_prospects_from_cloud(
+                wallet=self.wallet,
+                limit=50,
+                network=self.config.subtensor.network,
+                netuid=self.config.netuid
+            )
 
             if not prospects_batch:
                 time.sleep(5)  # Wait longer if no prospects available
@@ -1738,7 +1743,9 @@ class Validator(BaseValidatorNeuron):
                         lead_id=lead_id,
                         lead_data=lead,
                         score=score,
-                        is_valid=is_valid
+                        is_valid=is_valid,
+                        network=self.config.subtensor.network,
+                        netuid=self.config.netuid
                     )
                     
                     if submission_success:

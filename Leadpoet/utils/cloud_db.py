@@ -437,16 +437,31 @@ def push_prospects_to_cloud(
             return False
 
 
-def fetch_prospects_from_cloud(wallet: bt.wallet, limit: int = 100) -> List[Dict]:
+def fetch_prospects_from_cloud(
+    wallet: bt.wallet, 
+    limit: int = 100,
+    network: str = None,
+    netuid: int = None
+) -> List[Dict]:
     """
     CONSENSUS VERSION: First-come-first-served prospect fetching.
     Validators fetch prospects they haven't pulled yet, where pull_count < 3.
     Each prospect can be pulled by up to 3 validators for consensus.
     Returns a list of prospect data with their IDs for tracking.
+    
+    Args:
+        wallet: Validator's Bittensor wallet
+        limit: Maximum number of prospects to fetch
+        network: Subtensor network (e.g., "test", "finney"). If None, uses NETWORK env var.
+        netuid: Subnet ID. If None, uses NETUID env var.
     """
-    if not _VERIFY.is_validator(wallet.hotkey.ss58_address):
+    check_network = network or NETWORK
+    check_netuid = netuid or SUBNET_ID
+    
+    if not _VERIFY.is_validator(wallet.hotkey.ss58_address, network=check_network, netuid=check_netuid):
         bt.logging.warning(
-            f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered validator"
+            f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered validator "
+            f"(network={check_network}, netuid={check_netuid})"
         )
         return []
     
@@ -561,7 +576,9 @@ def submit_validation_assessment(
     lead_id: str,
     lead_data: Dict,
     score: float,
-    is_valid: bool
+    is_valid: bool,
+    network: str = None,
+    netuid: int = None
 ) -> bool:
     """
     Submit validator's assessment to the validation tracking system.
@@ -575,14 +592,22 @@ def submit_validation_assessment(
         lead_data: The full lead data dictionary
         score: Validation score (0.0 to 1.0)
         is_valid: Boolean indicating if validator considers lead valid
+        network: Subtensor network (e.g., "test", "finney"). If None, uses NETWORK env var.
+        netuid: Subnet ID. If None, uses NETUID env var.
     
     Returns:
         bool: True if submission successful, False otherwise
     """
     try:
+        check_network = network or NETWORK
+        check_netuid = netuid or SUBNET_ID
+        
         # Verify this is a validator
-        if not _VERIFY.is_validator(wallet.hotkey.ss58_address):
-            bt.logging.warning(f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered validator")
+        if not _VERIFY.is_validator(wallet.hotkey.ss58_address, network=check_network, netuid=check_netuid):
+            bt.logging.warning(
+                f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered validator "
+                f"(network={check_network}, netuid={check_netuid})"
+            )
             return False
         
         # Get Supabase client

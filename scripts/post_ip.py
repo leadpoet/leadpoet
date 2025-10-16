@@ -15,7 +15,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Publish your miner's public (IP, port) to the subnet metagraph"
     )
-    parser.add_argument("--netuid", type=int, required=True, help="Subnet id (e.g. 401)")
+    parser.add_argument("--netuid", type=int, required=True, help="Subnet id (e.g. 71)")
     parser.add_argument(
         "--subtensor_network",
         type=str,

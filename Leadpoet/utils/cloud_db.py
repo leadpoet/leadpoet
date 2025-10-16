@@ -16,8 +16,8 @@ from Leadpoet.utils.misc import generate_timestamp
 load_dotenv()
 
 API_URL   = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
-SUBNET_ID = 401
-NETWORK   = "test"
+SUBNET_ID = 71
+NETWORK   = "finney"
 
 SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
 SUPABASE_JWT = os.getenv("SUPABASE_JWT")

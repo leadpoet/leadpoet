@@ -1178,7 +1178,7 @@ def main():
 
     if miner.uid is None:
         print("❌ Miner is not registered on the network!")
-        print("   Please register your wallet on subnet 401 first.")
+        print("   Please register your wallet on subnet 71 first.")
         return
 
     print(f"✅ Miner registered with UID: {miner.uid}")

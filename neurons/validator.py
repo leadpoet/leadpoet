@@ -1622,7 +1622,7 @@ class Validator(BaseValidatorNeuron):
     def discover_miners(self):
         """Show all available miners on the network"""
         try:
-            print("\n🔍 Discovering available miners on subnet 401...")
+            print("\n🔍 Discovering available miners on subnet 71...")
             self.sync()  # Sync metagraph to get latest data
 
             available_miners = []
@@ -2562,8 +2562,8 @@ def main():
     add_validator_args(None, parser)
     parser.add_argument("--wallet_name", type=str, help="Wallet name")
     parser.add_argument("--wallet_hotkey", type=str, help="Wallet hotkey")
-    parser.add_argument("--netuid", type=int, default=401, help="Network UID")
-    parser.add_argument("--subtensor_network", type=str, default="test", help="Subtensor network")
+    parser.add_argument("--netuid", type=int, default=71, help="Network UID")
+    parser.add_argument("--subtensor_network", type=str, default="finney", help="Subtensor network")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
     args = parser.parse_args()
 

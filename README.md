@@ -19,7 +19,7 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 ## Prerequisites
 
 ### Hardware Requirements
-- **Miners/Validators**: 16GB RAM, 4-core CPU, 100GB SSD
+- **Miners/Validators**: 16GB RAM, 8-core CPU, 100GB SSD
 - **Network**: Stable internet connection with open ports for axon communication
 
 ### Software Requirements

@@ -126,7 +126,7 @@ class TokenManager:
                     self.token = new_token
                     self._parse_token()
                     
-                    bt.logging.info(f"✅ Token refreshed successfully")
+                    bt.logging.info("✅ Token refreshed successfully")
                     bt.logging.info(f"   Role: {self.role}")
                     bt.logging.info(f"   Expires: {self.token_expires}")
                     if self.token_expires:
@@ -284,8 +284,8 @@ class TokenManager:
             message = f"leadpoet-jwt-request:{timestamp}"
             
             # Sign message with hotkey private key
-            print(f"🔐 Signing request with hotkey...")
-            bt.logging.info(f"🔐 Signing request with hotkey...")
+            print("🔐 Signing request with hotkey...")
+            bt.logging.info("🔐 Signing request with hotkey...")
             signature = self.wallet.hotkey.sign(message.encode())
             
             # Prepare request payload
@@ -335,7 +335,7 @@ class TokenManager:
                     print(f"   Full response: {error_data}")
                     bt.logging.error(f"❌ Authentication failed: {error_msg}")
                     bt.logging.error(f"   Full response: {error_data}")
-                except:
+                except Exception:
                     print(f"❌ Authentication failed: {response.text[:300]}")
                     bt.logging.error(f"❌ Authentication failed: {response.text[:300]}")
                 return None
@@ -382,7 +382,7 @@ if __name__ == "__main__":
     
     # Check status
     status = manager.get_status()
-    print(f"\n📊 Token Status:")
+    print("\n📊 Token Status:")
     for key, value in status.items():
         print(f"  {key}: {value}")
     

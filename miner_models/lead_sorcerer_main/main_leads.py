@@ -12,7 +12,7 @@ import sys
 import tempfile
 import shutil
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import logging
 from dotenv import load_dotenv
 

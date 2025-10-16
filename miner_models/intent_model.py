@@ -16,13 +16,12 @@ Weights come from IntentModel-main settings (≈ 0.6 / 0.4 blend).
 from __future__ import annotations
 from miner_models.taxonomy import KEYWORDS, ALLOWED_INDUSTRIES as INDUSTRIES
 import re
-import math
 import asyncio
 import os
 import json
 import textwrap
 import requests
-from typing import List, Dict, Optional
+from typing import Optional
 import logging
 logging.basicConfig(level=logging.WARNING)
 
@@ -290,7 +289,7 @@ async def _score_batch(leads: list[dict], description: str) -> list[float]:
 
         return scores
 
-    except Exception as e:
+    except Exception:
         print(f"⚠️  Primary batch model failed ({PRIMARY_MODEL}) – trying fallback")
         try:
             import time
@@ -397,7 +396,7 @@ async def _score_one(lead: dict, description: str) -> float:
             logging.warning(f"LLM non-JSON response: {raw[:100]}…")
             score = _heuristic()
         return score
-    except Exception as e:
+    except Exception:
         print(f"⚠️  Primary model failed ({PRIMARY_MODEL}) – trying fallback")
         try:
             r = await asyncio.to_thread(_call, FALLBACK_MODEL, prompt_user)

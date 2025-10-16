@@ -183,7 +183,7 @@ def get_active_validators() -> List[Dict]:
                     ) - seconds_since_update
                     last_seen_iso = datetime.fromtimestamp(
                         last_seen).isoformat() + "Z"
-                except:
+                except Exception:
                     # Fallback if we can't determine last_seen
                     last_seen_iso = datetime.utcnow().isoformat() + "Z"
 

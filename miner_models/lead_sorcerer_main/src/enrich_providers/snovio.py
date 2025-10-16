@@ -141,7 +141,7 @@ class SnovioProvider(BaseEnrichmentProvider):
 
         except Exception as exc:
             await self._handle_generic_error(exc, "contact enrichment")
-        raise
+
         latency_ms = (time.time() - start_time) * 1000
         self.update_metrics(False, cost=0.0, latency_ms=latency_ms)
 
@@ -204,7 +204,7 @@ class SnovioProvider(BaseEnrichmentProvider):
 
         except Exception as exc:
             await self._handle_generic_error(exc, "finding email")
-            raise
+
         latency_ms = (time.time() - start_time) * 1000
         self.update_metrics(False, cost=0.0, latency_ms=latency_ms)
 
@@ -266,7 +266,6 @@ class SnovioProvider(BaseEnrichmentProvider):
         except Exception as exc:
             await self._handle_generic_error(exc, "email validation")
 
-        raise
         latency_ms = (time.time() - start_time) * 1000
         self.update_metrics(False, cost=0.0, latency_ms=latency_ms)
 

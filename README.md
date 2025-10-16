@@ -33,11 +33,22 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 ### For Miners
 
 ```bash
-# Web scraping and lead sourcing
-export FIRECRAWL_API_KEY="your_firecrawl_key"        # Required for web scraping
+# Required for basic mining
+export FIRECRAWL_API_KEY="your_firecrawl_key"        # Web scraping
+export OPENROUTER_KEY="your_openrouter_key"          # AI classification
 
-# LLM for industry classification  
-export OPENROUTER_KEY="your_openrouter_key"          # Required for AI classification
+# Required for Lead Sorcerer (advanced lead generation)
+export GSE_API_KEY="your_google_api_key"             # Google Search
+export GSE_CX="your_search_engine_id"                # Custom Search ID
+
+# Optional Enrichment APIs (for enhanced lead quality)
+export CORESIGNAL_API_TOKEN="your_coresignal_token"      # Company data enrichment
+export COMPANY_ENRICH_API_KEY="your_company_enrich_key"  # Additional company enrichment
+export ANYMAIL_FINDER_API_KEY="your_anymail_key"         # Email discovery
+export SNOVIO_CLIENT_ID="your_snovio_id"                 # Snov.io email finder
+export SNOVIO_CLIENT_SECRET="your_snovio_secret"         # Snov.io secret
+export MAILGUN_SMTP_LOGIN="your_mailgun_login"           # Email validation
+export MAILGUN_SMTP_PW="your_mailgun_password"           # Mailgun password
 ```
 
 ### For Validators
@@ -73,11 +84,11 @@ python -c "import Leadpoet; print('Leadpoet installed successfully')"
 
 ### Getting Started
 
-1. **Register on subnet** (netuid 401):
+1. **Register on subnet** (netuid 71):
 ```bash
 btcli subnet register \
-    --netuid 401 \
-    --subtensor.network test \
+    --netuid 71 \
+    --subtensor.network finney \
     --wallet.name miner \
     --wallet.hotkey default
 ```
@@ -85,8 +96,8 @@ btcli subnet register \
 2. **Publish your IP** (one-time setup):
 ```bash
 python scripts/post_ip.py \
-    --netuid 401 \
-    --subtensor_network test \
+    --netuid 71 \
+    --subtensor_network finney \
     --wallet_name miner \
     --wallet_hotkey default \
     --external_ip YOUR_PUBLIC_IP \
@@ -98,8 +109,8 @@ python scripts/post_ip.py \
 python neurons/miner.py \
     --wallet_name miner \
     --wallet_hotkey default \
-    --netuid 401 \
-    --subtensor_network test
+    --netuid 71 \
+    --subtensor_network finney
 ```
 
 ### How Miners Work
@@ -124,7 +135,7 @@ Miners earn rewards purely based on the leads they source that get accepted thro
 ```bash
 btcli stake add \
     --amount 20 \
-    --subtensor.network test \
+    --subtensor.network finney \
     --wallet.name validator \
     --wallet.hotkey default
 ```
@@ -132,8 +143,8 @@ btcli stake add \
 2. **Register on subnet**:
 ```bash
 btcli subnet register \
-    --netuid 401 \
-    --subtensor.network test \
+    --netuid 71 \
+    --subtensor.network finney \
     --wallet.name validator \
     --wallet.hotkey default
 ```
@@ -143,8 +154,8 @@ btcli subnet register \
 python neurons/validator.py \
     --wallet_name validator \
     --wallet_hotkey default \
-    --netuid 401 \
-    --subtensor_network test
+    --netuid 71 \
+    --subtensor_network finney
 ```
 
 ### Consensus Validation System
@@ -193,8 +204,8 @@ Every 72 minutes (1 epoch):
 python Leadpoet/api/leadpoet_api.py \
     --wallet_name buyer \
     --wallet_hotkey default \
-    --netuid 401 \
-    --subtensor_network test
+    --netuid 71 \
+    --subtensor_network finney
 ```
 
 **Interactive Flow:**

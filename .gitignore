@@ -76,3 +76,6 @@ start_server.sh
 # Supabase Edge Functions - KEEP PRIVATE
 # These contain authentication logic that should not be public
 supabase/
+
+# Auto-generated validator wrapper
+.auto_update_wrapper.sh

@@ -1,10 +1,10 @@
 {
-  "name": "Dental Practice Acquisition - Optimized ICP",
-  "icp_text": "Independent and regional dental practice groups in the United States with 5+ locations that are not private equity backed and not part of large national franchises. Focus on practices showing potential for acquisition or transition.",
+  "name": "Technology Company Leadership - Test ICP",
+  "icp_text": "Large technology companies and e-commerce platforms seeking executive leadership contacts for business development and partnerships.",
   "queries": [
-    "family owned dental practices multiple offices New England"
+    "technology company executive leadership contacts"
   ],
-  "specific_urls": ["https://www.dentalfone.com/"],
+  "specific_urls": ["https://www.amazon.com/"],
   "required_fields": {
     "company": ["name", "hq_location", "number_of_locations", "ownership_type", "industry"],
     "contact": ["email", "job_title", "full_name"]
@@ -45,13 +45,13 @@
   },
   "role_priority": {
     "ceo": 1,
-    "owner": 1,
     "founder": 1,
+    "cto": 1,
     "president": 1,
-    "vp operations": 2,
-    "practice administrator": 3,
-    "office manager": 4,
-    "director": 5,
+    "vp engineering": 2,
+    "vp business development": 2,
+    "director": 3,
+    "manager": 4,
     "default": 99
   },
   "exports": {

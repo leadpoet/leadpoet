@@ -2267,7 +2267,8 @@ Remember: Extract unique, valuable information about each individual business op
             decision_maker = member.get("decision_maker", False)
             location = member.get("location")
 
-            if not full_name or not role:
+            # Skip invalid or placeholder contacts
+            if not full_name or not role or full_name == "not specified" or role == "not specified":
                 continue
 
             # Normalize name and role

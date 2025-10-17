@@ -112,6 +112,26 @@ while true; do
         echo "✅ Validator exited cleanly (exit code: 0)"
         echo "   Shutting down auto-updater..."
         break
+    elif [ $EXIT_CODE -eq 137 ] || [ $EXIT_CODE -eq 9 ]; then
+        echo "⚠️  Validator was killed (exit code: $EXIT_CODE) - likely Out of Memory"
+        echo "   Cleaning up resources before restart..."
+        
+        # Clean up any leaked resources
+        pkill -f "python3 neurons/validator.py" 2>/dev/null || true
+        sleep 5  # Give system time to clean up
+        
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        if [ $RESTART_COUNT -ge $MAX_RESTARTS ]; then
+            echo "❌ Maximum restart attempts ($MAX_RESTARTS) reached"
+            echo "   Your system may not have enough RAM. Consider:"
+            echo "   1. Increasing server RAM"
+            echo "   2. Reducing batch sizes in validator config"
+            echo "   3. Monitoring memory usage with 'htop'"
+            exit 1
+        fi
+        
+        echo "   Restarting in 30 seconds... (attempt $RESTART_COUNT/$MAX_RESTARTS)"
+        sleep 30
     else
         RESTART_COUNT=$((RESTART_COUNT + 1))
         echo "⚠️  Validator exited with error (exit code: $EXIT_CODE)"
@@ -2611,4 +2631,38 @@ def main():
     # stop_epoch_monitor()
 
 if __name__ == "__main__":
-    main()
+    import signal
+    import atexit
+    from multiprocessing import resource_tracker
+    
+    def cleanup_handler(signum=None, frame=None):
+        """Clean up resources on shutdown"""
+        try:
+            print("\n🛑 Shutting down validator...")
+            from Leadpoet.validator.reward import stop_epoch_monitor
+            stop_epoch_monitor()
+            
+            # Give threads time to clean up
+            import time
+            time.sleep(1)
+            
+            print("✅ Cleanup complete")
+        except Exception as e:
+            print(f"⚠️  Cleanup error: {e}")
+        finally:
+            if signum is not None:
+                sys.exit(0)
+    
+    # Register cleanup handlers
+    signal.signal(signal.SIGTERM, cleanup_handler)
+    signal.signal(signal.SIGINT, cleanup_handler)
+    atexit.register(cleanup_handler)
+    
+    try:
+        main()
+    except KeyboardInterrupt:
+        cleanup_handler()
+    except Exception as e:
+        print(f"❌ Validator crashed: {e}")
+        cleanup_handler()
+        raise

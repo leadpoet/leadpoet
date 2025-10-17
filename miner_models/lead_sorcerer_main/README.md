@@ -232,7 +232,3 @@ Required environment variables:
 - `GSE_CX`: Google Search Engine ID
 - `OPENROUTER_KEY`: OpenRouter API key for LLM-based classification
 - `FIRECRAWL_KEY`: Firecrawl API key for web scraping
-
-## License
-
-[Leadpoet License]

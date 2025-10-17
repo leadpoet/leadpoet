@@ -1372,7 +1372,7 @@ IMPORTANT: If no clear intent signals are found, set business_intent_score to {i
                             }
                         ],
                         # Performance & cost optimization (HIGH PRIORITY)
-                        "wait_for": 5000,  # 5-second wait for JavaScript content
+                        "wait_for": 15000,  # 5-second wait for JavaScript content
                         "only_main_content": False,
                         "max_age": 172800,  # 2 days cache - reduces API calls by ~50%
                         "block_ads": True,  # Faster loading, cleaner content

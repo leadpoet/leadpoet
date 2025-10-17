@@ -235,7 +235,7 @@ async def _score_batch(leads: list[dict], description: str) -> list[float]:
 
     def _heuristic(lead: dict) -> float:
         desc_tokens = set(_norm(description).split())
-        lead_ind    = _norm(lead.get("Industry", ""))
+        lead_ind    = _norm(lead.get("industry", lead.get("Industry", "")))
         match = 0.0
         for bucket, kws in KEYWORDS.items():
             if bucket in lead_ind:
@@ -251,11 +251,11 @@ async def _score_batch(leads: list[dict], description: str) -> list[float]:
     for i, lead in enumerate(leads):
         prompt_parts.append(
             f"\nLead #{i}:\n"
-            f"  Company: {lead.get('Business', 'Unknown')}\n"
-            f"  Industry: {lead.get('Industry', 'Unknown')}\n"
+            f"  Company: {lead.get('business', 'Unknown')}\n"
+            f"  Industry: {lead.get('industry', 'Unknown')}\n"
             f"  Sub-industry: {lead.get('sub_industry', 'Unknown')}\n"
             f"  Contact Role: {lead.get('role', 'Unknown')}\n"
-            f"  Website: {lead.get('Website', 'Unknown')}\n"
+            f"  Website: {lead.get('website', 'Unknown')}\n"
         )
 
     prompt_user = "".join(prompt_parts)
@@ -352,7 +352,7 @@ async def _score_one(lead: dict, description: str) -> float:
     # ---------------- heuristic fallback -----------------
     def _heuristic() -> float:
         desc_tokens = set(_norm(description).split())
-        lead_ind    = _norm(lead.get("Industry", ""))
+        lead_ind    = _norm(lead.get("industry", lead.get("Industry", "")))
         match = 0.0
         for bucket, kws in KEYWORDS.items():
             if bucket in lead_ind:
@@ -367,10 +367,10 @@ async def _score_one(lead: dict, description: str) -> float:
     prompt_user = (
         f"BUYER:\n{description}\n\n"
         f"LEAD:\n"
-        f"Company: {lead.get('Business')}\n"
+        f"Company: {lead.get('business')}\n"
         f"Sub-industry: {lead.get('sub_industry')}\n"
         f"Role: {lead.get('role','')}\n"
-        f"Website: {lead.get('Website')}"
+        f"Website: {lead.get('website')}"
     )
     # ─── debug ─────────────────────────────────────────────────────
     print("\n🛈  INTENT-LLM  INPUT ↓")
@@ -451,7 +451,7 @@ async def rank_leads(leads: list[dict], description: str) -> list[dict]:
     sorted_leads = sorted(filt, key=lambda x: x["miner_intent_score"], reverse=True)
     # Show all leads, not just top 10
     for i, lead in enumerate(sorted_leads, 1):
-        company = lead.get('Business', 'Unknown')
+        company = lead.get('business', 'Unknown')
         score = lead.get('miner_intent_score', 0.0)
         print(f"   {i}. {company[:40]:40s} score={score:.3f}")
 

@@ -2,7 +2,7 @@
 Lead field extraction utilities.
 
 This module provides helper functions to extract fields from lead dictionaries
-that may have inconsistent key naming (e.g., "Email 1" vs "email" vs "Owner(s) Email").
+that may have inconsistent key naming (e.g., "Email 1" vs "email").
 
 Instead of nested .get() calls throughout the codebase, use these standardized extractors.
 """
@@ -57,7 +57,7 @@ def get_email(lead: Dict[str, Any], default: str = "") -> str:
     """
     Extract email from lead with standard key priority.
     
-    Tries: "Email 1" → "Owner(s) Email" → "email"
+    Tries: "email" → "Email 1"
     
     Args:
         lead: Lead dictionary
@@ -66,14 +66,30 @@ def get_email(lead: Dict[str, Any], default: str = "") -> str:
     Returns:
         Email address or default
     """
-    return get_field(lead, "Email 1", "Owner(s) Email", "email", "owner_email", default=default)
+    return get_field(lead, "email", "Email 1", default=default)
+
+
+def get_full_name(lead: Dict[str, Any], default: str = "") -> str:
+    """
+    Extract full name from lead with standard key priority.
+    
+    Tries: "full_name"
+    
+    Args:
+        lead: Lead dictionary
+        default: Default value if no name found
+    
+    Returns:
+        Full name or default
+    """
+    return get_field(lead, "full_name", default=default)
 
 
 def get_website(lead: Dict[str, Any], default: str = "") -> str:
     """
     Extract website from lead.
     
-    Tries: "Website" → "website"
+    Tries: "website" → "Website"
     
     Args:
         lead: Lead dictionary
@@ -82,14 +98,14 @@ def get_website(lead: Dict[str, Any], default: str = "") -> str:
     Returns:
         Website URL or default
     """
-    return get_field(lead, "Website", "website", default=default)
+    return get_field(lead, "website", "Website", default=default)
 
 
 def get_company(lead: Dict[str, Any], default: str = "") -> str:
     """
     Extract company/business name from lead.
     
-    Tries: "Business" → "Company" → "business"
+    Tries: "business" → "Business" → "Company"
     
     Args:
         lead: Lead dictionary
@@ -98,14 +114,14 @@ def get_company(lead: Dict[str, Any], default: str = "") -> str:
     Returns:
         Company name or default
     """
-    return get_field(lead, "Business", "Company", "business", default=default)
+    return get_field(lead, "business", "Business", "Company", default=default)
 
 
 def get_first_name(lead: Dict[str, Any], default: str = "") -> str:
     """
     Extract first name from lead.
     
-    Tries: "First" → "First Name" → "first"
+    Tries: "first" → "First" → "First Name"
     
     Args:
         lead: Lead dictionary
@@ -114,14 +130,14 @@ def get_first_name(lead: Dict[str, Any], default: str = "") -> str:
     Returns:
         First name or default
     """
-    return get_field(lead, "First", "First Name", "first", default=default)
+    return get_field(lead, "first", "First", "First Name", default=default)
 
 
 def get_last_name(lead: Dict[str, Any], default: str = "") -> str:
     """
     Extract last name from lead.
     
-    Tries: "Last" → "Last Name" → "last"
+    Tries: "last" → "Last" → "Last Name"
     
     Args:
         lead: Lead dictionary
@@ -130,7 +146,7 @@ def get_last_name(lead: Dict[str, Any], default: str = "") -> str:
     Returns:
         Last name or default
     """
-    return get_field(lead, "Last", "Last Name", "last", default=default)
+    return get_field(lead, "last", "Last", "Last Name", default=default)
 
 
 def get_location(lead: Dict[str, Any], default: str = "") -> str:
@@ -153,7 +169,7 @@ def get_industry(lead: Dict[str, Any], default: str = "") -> str:
     """
     Extract industry from lead.
     
-    Tries: "Industry" → "industry"
+    Tries: "industry" → "Industry"
     
     Args:
         lead: Lead dictionary
@@ -162,7 +178,7 @@ def get_industry(lead: Dict[str, Any], default: str = "") -> str:
     Returns:
         Industry or default
     """
-    return get_field(lead, "Industry", "industry", default=default)
+    return get_field(lead, "industry", "Industry", default=default)
 
 
 def get_role(lead: Dict[str, Any], default: str = "") -> str:

@@ -222,38 +222,38 @@ else:
 
         # Build the enhanced format with all requested fields
         legacy_lead = {
-            "Business":
+            "business":
             safe_str(company.get("name")),
             "description":
             safe_str(company.get("description")),
-            "Owner Full name":
+            "full_name":
             full_name,
-            "First":
+            "first":
             first_name,
-            "Last":
+            "last":
             last_name,
-            "Owner(s) Email":
+            "email":
             email,
             "phone_numbers":
             company.get("phone_numbers", []),
-            "Website":
+            "website":
             f"https://{safe_str(lead_record.get('domain'))}"
             if lead_record.get('domain') else "",
-            "Industry":
+            "industry":
             safe_str(company.get("industry")),
             "sub_industry":
             safe_str(company.get("sector")),
             "role":
             job_title,
-            "Region":
+            "region":
             safe_str(company.get("hq_location")),
-            "Founded Year":
+            "founded_year":
             safe_str(company.get("founded_year")),
-            "Ownership Type":
+            "ownership_type":
             safe_str(company.get("ownership_type")),
-            "Company Type":
+            "company_type":
             safe_str(company.get("company_type")),
-            "Number of Locations":
+            "number_of_locations":
             safe_str(company.get("number_of_locations")),
             "ids":
             company.get("ids", {}),
@@ -442,8 +442,7 @@ else:
                     legacy_lead = convert_lead_record_to_legacy_format(record)
 
                     # Only include leads with valid email and business name
-                    if legacy_lead.get("Owner(s) Email") and legacy_lead.get(
-                            "Business"):
+                    if legacy_lead.get("email") and legacy_lead.get("business"):
                         legacy_leads.append(legacy_lead)
 
                 except Exception as e:
@@ -487,11 +486,11 @@ if __name__ == "__main__":
         )
 
         for i, lead in enumerate(test_leads, 1):
-            print(f"\n{i}. {lead.get('Business', 'Unknown')}")
+            print(f"\n{i}. {lead.get('business', 'Unknown')}")
             print(
-                f"   Contact: {lead.get('Owner Full name', 'Unknown')} ({lead.get('Owner(s) Email', 'No email')})"
+                f"   Contact: {lead.get('full_name', 'Unknown')} ({lead.get('email', 'No email')})"
             )
-            print(f"   Industry: {lead.get('Industry', 'Unknown')}")
-            print(f"   Website: {lead.get('Website', 'No website')}")
+            print(f"   Industry: {lead.get('industry', 'Unknown')}")
+            print(f"   Website: {lead.get('website', 'No website')}")
 
     asyncio.run(test_async())

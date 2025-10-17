@@ -31,13 +31,13 @@ def initialize_pool():
             json.dump([], f)
 
 def add_to_pool(prospects):
-    """Add valid prospects to leads.json, ensuring no duplicates by owner_email."""
+    """Add valid prospects to leads.json, ensuring no duplicates by email."""
     with _leads_lock:
         if not os.path.exists(LEADS_FILE):
             leads = []
         else:
             leads = safe_json_load(LEADS_FILE)
-        existing_emails = {lead.get("owner_email", "").lower() for lead in leads}
+        existing_emails = {lead.get("email", "").lower() for lead in leads}
 
         sanitised = []
         for p in prospects:
@@ -47,7 +47,7 @@ def add_to_pool(prospects):
             sanitised.append(p)
 
         new_prospects = [p for p in sanitised
-                         if p.get("owner_email", "").lower() not in existing_emails]
+                         if p.get("email", "").lower() not in existing_emails]
         leads.extend(new_prospects)
         with open(LEADS_FILE, "w") as f:
             json.dump(leads, f, indent=2)
@@ -79,7 +79,7 @@ def get_leads_from_pool(num_leads, industry=None, region=None, wallet=None):
         filtered_leads = [lead for lead in filtered_leads
                           if lead.get("region", "").lower() == region.lower()]
 
-    required_fields = ["owner_email", "website", "business"]
+    required_fields = ["email", "website", "business"]
     filtered_leads = [lead for lead in filtered_leads
                       if all(lead.get(f) for f in required_fields)]
 
@@ -234,7 +234,7 @@ def record_delivery_rewards(delivered):
     _print_emission_table(scores)
 
 def check_duplicates(email: str) -> bool:
-    """Check if owner_email exists in leads.json."""
+    """Check if email exists in leads.json."""
     with _leads_lock:
         if not os.path.exists(LEADS_FILE):
             return False
@@ -243,7 +243,7 @@ def check_duplicates(email: str) -> bool:
                 leads = json.load(f)
             except Exception:
                 return False
-        return any(lead.get("owner_email", "").lower() == email.lower() for lead in leads)
+        return any(lead.get("email", "").lower() == email.lower() for lead in leads)
 
 def _load_scores():
     if not os.path.exists(scores_file):

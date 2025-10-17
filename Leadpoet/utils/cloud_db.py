@@ -633,7 +633,8 @@ def submit_validation_assessment(
             "validator_hotkey": wallet.hotkey.ss58_address,
             "score": round(float(score), 2),  # Ensure it's a float with 2 decimal places
             "is_valid": bool(is_valid),
-            "epoch_number": epoch_number
+            "epoch_number": epoch_number,
+            "prospect": lead_data  # Include the full lead data for database triggers
         }
         
         # Debug: Log what we're trying to insert
@@ -770,10 +771,6 @@ def check_and_process_consensus(
                 
                 # Prepare lead data for insertion into main leads table
                 lead_data_for_insert = lead_data.copy()
-                
-                # Map owner_email to email (required field)
-                if 'owner_email' in lead_data_for_insert and 'email' not in lead_data_for_insert:
-                    lead_data_for_insert['email'] = lead_data_for_insert['owner_email']
                 
                 # Add consensus metadata
                 lead_data_for_insert['lead_id'] = lead_id

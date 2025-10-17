@@ -44,6 +44,10 @@ from pathlib import Path
 from json.decoder import JSONDecodeError
 import os
 import sys
+import warnings
+
+# Suppress multiprocessing semaphore warnings
+warnings.filterwarnings("ignore", message=".*leaked semaphore objects.*")
 
 # ════════════════════════════════════════════════════════════════════════════
 # AUTO-UPDATER: Automatically updates entire repo from GitHub for validators

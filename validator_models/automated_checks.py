@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from typing import Dict, Any, Tuple
 from dotenv import load_dotenv
 from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
-from Leadpoet.utils.lead_utils import (
+from utils_lead_extraction import (
     get_email,
     get_website,
     get_company,

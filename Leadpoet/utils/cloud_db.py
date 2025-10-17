@@ -12,7 +12,7 @@ from typing import List, Dict
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from Leadpoet.utils.misc import generate_timestamp
-from Leadpoet.utils.lead_utils import get_email, get_field
+from utils_lead_extraction import get_email, get_field
 
 load_dotenv()
 

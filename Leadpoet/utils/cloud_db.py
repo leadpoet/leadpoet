@@ -12,6 +12,7 @@ from typing import List, Dict
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from Leadpoet.utils.misc import generate_timestamp
+from Leadpoet.utils.lead_utils import get_email, get_field
 
 load_dotenv()
 
@@ -404,7 +405,7 @@ def push_prospects_to_cloud(
             # If no email found in error, get from prospects
             if not duplicate_emails:
                 for prospect in prospects:
-                    email = prospect.get('owner_email', prospect.get('email', ''))
+                    email = get_email(prospect)
                     if email:
                         duplicate_emails.append(email)
             
@@ -558,7 +559,7 @@ def fetch_prospects_from_cloud(
                     if row.get('miner_hotkey'):
                         prospect_data['miner_hotkey'] = row['miner_hotkey']
                 prospects_with_ids.append({
-                    'prospect_id': row.get('prospect_id', row.get('id')),
+                    'prospect_id': get_field(row, 'prospect_id', 'id'),
                     'data': prospect_data
                 })
             

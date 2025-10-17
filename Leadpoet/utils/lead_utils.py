@@ -12,18 +12,23 @@ from typing import Dict, Any
 
 def get_field(data: Dict[str, Any], *keys: str, default: str = "") -> str:
     """
-    Try multiple keys in priority order, return first non-empty value.
+    Try multiple keys in priority order, return first found value.
     
     This is the base function for all field extraction. It tries each key
-    in order and returns the first non-empty value found.
+    in order and returns the value from the first key that EXISTS in the dict.
+    
+    IMPORTANT: This preserves the exact behavior of nested .get() calls:
+    - If a key exists (even with empty string value), return that value
+    - Only try the next key if the current key doesn't exist
+    - Return default only if none of the keys exist
     
     Args:
         data: Dictionary to search (typically a lead dict)
         *keys: Keys to try in priority order
-        default: Default value if all keys fail or return empty values
+        default: Default value if all keys are missing
     
     Returns:
-        First non-empty value found, or default
+        Value from first existing key, or default if none exist
     
     Example:
         >>> lead = {"Email 1": "test@example.com", "website": "example.com"}
@@ -31,11 +36,16 @@ def get_field(data: Dict[str, Any], *keys: str, default: str = "") -> str:
         "test@example.com"
         >>> get_field(lead, "missing_key", "also_missing", default="N/A")
         "N/A"
+        >>> lead = {"Email 1": ""}  # Empty string
+        >>> get_field(lead, "Email 1", "email")
+        ""  # Returns empty string, does NOT try "email"
     """
     for key in keys:
-        value = data.get(key)
-        if value:  # Non-empty check (excludes None, "", [], {}, etc.)
-            return str(value).strip()
+        if key in data:
+            value = data[key]
+            if value is None:
+                return ""
+            return str(value).strip() if isinstance(value, str) else str(value)
     return default
 
 

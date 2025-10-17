@@ -58,7 +58,8 @@ def test_field_extractors():
         get_website,
         get_company,
         get_first_name,
-        get_last_name
+        get_last_name,
+        get_field
     )
     
     # Test lead with old-style keys
@@ -86,6 +87,17 @@ def test_field_extractors():
         "Company": "Example Corp 3"
     }
     
+    # CRITICAL: Test empty string behavior - must match original .get() behavior
+    lead4 = {
+        "Email 1": "",  # Empty string - should return "", NOT try next key
+        "email": "should_not_use@example.com"
+    }
+    
+    lead5 = {
+        "Business": "",  # Empty business - should return "", NOT try "Company"
+        "Company": "Should Not Use This"
+    }
+    
     tests = [
         (get_email(lead1), "test@example.com", "Old-style email"),
         (get_email(lead2), "test2@example.com", "New-style email"),
@@ -95,12 +107,16 @@ def test_field_extractors():
         (get_company(lead3), "Example Corp 3", "Company key"),
         (get_first_name(lead1), "John", "Old-style first name"),
         (get_last_name(lead2), "Smith", "New-style last name"),
+        # CRITICAL TESTS: Empty string preservation
+        (get_email(lead4), "", "Empty Email 1 returns empty (NOT next key)"),
+        (get_company(lead5), "", "Empty Business returns empty (NOT Company)"),
+        (get_field(lead4, "Email 1", "email"), "", "get_field with empty first key"),
     ]
     
     all_passed = True
     for actual, expected, description in tests:
         if actual == expected:
-            print(f"  ✅ {description}: {actual}")
+            print(f"  ✅ {description}: '{actual}'")
         else:
             print(f"  ❌ {description}: expected '{expected}', got '{actual}'")
             all_passed = False

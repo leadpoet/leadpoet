@@ -81,7 +81,7 @@ cd "$REPO_ROOT"
 echo "════════════════════════════════════════════════════════════════"
 echo "🚀 Leadpoet Auto-Updating Validator"
 echo "   Repository updates every 5 minutes"
-echo "   GitHub: github.com/leadpoet/Leadpoet"
+echo "   GitHub: github.com/leadpoet/leadpoet"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
 

@@ -167,38 +167,36 @@ else:
         company = lead_record.get("company", {})
         contacts = lead_record.get("contacts", [])
         
-        # Get the best contact (prefer one with a name, then any contact with an email)
+        # Get the best contact (prefer one with an email, then any contact)
         best_contact = None
         if contacts:
-            # Look for a contact with both first and last name
-            named_contacts = [c for c in contacts if c.get("first_name") and c.get("last_name")]
-            if named_contacts:
-                best_contact = named_contacts[0]
+            # Prefer contacts with email addresses
+            email_contacts = [c for c in contacts if c.get("email")]
+            if email_contacts:
+                best_contact = email_contacts[0]
             else:
-                # Otherwise use the first contact that has an email
-                email_contacts = [c for c in contacts if c.get("email")]
-                if email_contacts:
-                    best_contact = email_contacts[0]
-                elif contacts:
-                    # Finally, just use the first contact
-                    best_contact = contacts[0]
+                # Otherwise use the first contact
+                best_contact = contacts[0]
         
         # Extract contact information
         if best_contact:
+            # Handle both full_name (from crawl tool) and first_name/last_name (legacy)
+            full_name = best_contact.get("full_name") or ""
             first_name = best_contact.get("first_name") or ""
             last_name = best_contact.get("last_name") or ""
-            email = best_contact.get("email") or ""
-            job_title = best_contact.get("job_title") or ""
             
-            # Create full name from first and last name
-            if first_name and last_name:
-                full_name = f"{first_name} {last_name}"
-            elif first_name:
-                full_name = first_name
-            elif last_name:
-                full_name = last_name
-            else:
-                full_name = ""
+            # If we have full_name but not first/last, try to split
+            if full_name and not (first_name or last_name):
+                name_parts = full_name.split(maxsplit=1)
+                first_name = name_parts[0] if len(name_parts) > 0 else ""
+                last_name = name_parts[1] if len(name_parts) > 1 else ""
+            # If we have first/last but not full_name, combine them
+            elif not full_name and (first_name or last_name):
+                full_name = f"{first_name} {last_name}".strip()
+            
+            email = best_contact.get("email") or ""
+            # Handle both 'role' (from crawl tool) and 'job_title' (legacy)
+            job_title = best_contact.get("role") or best_contact.get("job_title") or ""
         else:
             first_name = ""
             last_name = ""

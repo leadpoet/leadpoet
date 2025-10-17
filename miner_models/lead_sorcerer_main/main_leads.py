@@ -322,8 +322,6 @@ else:
                             )
                             return []
 
-                        print(result)
-
                         # Extract leads from the result - look in exports directory
                         leads = []
 

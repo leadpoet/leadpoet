@@ -833,17 +833,11 @@ class LeadSorcererOrchestrator:
         crawl_count = (len(
             crawl_result.get("data", {}).get("lead_records", []))
                        if crawl_result else 0)
-        print("here")
-        print(domain_result.get("metrics", {}))
-        print(crawl_result.get("metrics", {}))
 
         # Calculate pass rates
         domain_pass_rate = domain_result.get("metrics", {}).get("pass_rate")
         crawl_pass_rate = (crawl_result.get("metrics", {}).get("pass_rate")
                            if crawl_result else None)
-        print(domain_pass_rate)
-        print(crawl_pass_rate)
-
         return {
             "duration_ms": duration_ms,
             "lead_counts": {

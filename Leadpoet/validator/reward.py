@@ -448,7 +448,7 @@ def get_miner_sourcing_weights_from_consensus(
 
 # [REMOVED - Moved to Edge Function]
 # get_miner_sourcing_weights_from_database() has been removed.
-# This functionality is now handled server-side in the Edge Function
+# Functionality now handled server-side in the Edge Function
 # to prevent validators from having access to the service role key.
 
 # ===== STEP 5: INTEGRATION WITH EXISTING WEIGHT CALCULATION =====
@@ -506,7 +506,7 @@ def calculate_weights(total_emission: float = 100.0, validator_wallet=None, vali
             
         elif validator_hotkey:
             # [DEPRECATED PATH - NOW HANDLED BY EDGE FUNCTION]
-            # This code path is deprecated. Validators should call the Edge Function directly
+            # Code path is deprecated. Validators should call the Edge Function directly
             # via the /functions/v1/get-validator-weights endpoint.
             # 
             # The Edge Function enforces the 10% consensus participation rule server-side
@@ -892,7 +892,7 @@ def record_curated_lead_event(curator_hotkey: str, sourcer_hotkey: str):
         curator_hotkey: Hotkey of the miner who curated the lead
         sourcer_hotkey: Hotkey of the miner who originally sourced the lead
     """
-    # DEPRECATED: No longer needed with database-based weight calculation
+    # No longer needed with database-based weight calculation
     # The database already tracks everything via validator_hotkey and source fields
     pass
 
@@ -1087,7 +1087,7 @@ def record_event(prospect: Dict):
         with open(EVENTS_FILE, "w") as f:
             json.dump(events, f, indent=2)
 
-        # Print reward event for debugging
+        # Print reward event
         print(f"\n🎯 REWARD EVENT RECORDED:")
         print(f"   Source: {prospect['source']}")
         print(f"   Curator: {prospect['curated_by']}")

@@ -305,7 +305,7 @@ def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
         return True
 
     if not _VERIFY.is_validator(wallet.hotkey.ss58_address):
-        bt.logging.warning(           # ← NEW: soft-fail instead of raise
+        bt.logging.warning(           
             f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered "
             "validator – storing leads anyway (DEV mode)"
         )
@@ -694,7 +694,7 @@ def submit_validation_assessment(
         bt.logging.debug(traceback.format_exc())
         return False
 
-# DEPRECATED: This function is no longer used - consensus is handled by database triggers
+# This function is no longer used - consensus is handled by database triggers
 # Keeping for reference only
 def check_and_process_consensus(
     prospect_id: str, 
@@ -1309,7 +1309,7 @@ def fetch_miner_leads_for_request(request_id: str) -> List[Dict]:
 
 
 # ───────────────────────────── Metagraph Sync ─────────────────────────────
-# DEPRECATED: This function should not be used by validators - metagraph sync should be done server-side
+# This function should not be used by validators - metagraph sync should be done server-side
 # Validators do NOT need service role keys
 def sync_metagraph_to_supabase(metagraph, netuid: int) -> bool:
     """

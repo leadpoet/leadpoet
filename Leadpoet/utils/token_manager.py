@@ -296,7 +296,7 @@ class TokenManager:
                 "timestamp": timestamp
             }
             
-            # NEW: Include Supabase anon key for Edge Function authentication
+            # Include Supabase anon key for Edge Function authentication
             anon_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDcwMDUsImV4cCI6MjA2MDQyMzAwNX0.5E0WjAthYDXaCWY6qjzXm2k20EhadWfigak9hleKZk8"
             
             print(f"📤 Requesting new JWT token for {self.hotkey[:10]}...")

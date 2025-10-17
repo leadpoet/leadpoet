@@ -167,9 +167,7 @@ def get_active_validators() -> List[Dict]:
         validators = []
         for uid in range(mg.n):
             if mg.validator_permit[uid].item():
-                # ════════════════════════════════════════════════════════════
-                # TASK 4.2: Enhanced validator status monitoring
-                # ════════════════════════════════════════════════════════════
+                # Enhanced validator status monitoring
 
                 # Calculate last_seen based on block activity
                 # If validator is serving, they're currently active
@@ -199,7 +197,7 @@ def get_active_validators() -> List[Dict]:
                     "stake":
                     mg.S[uid].item(),
                     "last_seen":
-                    last_seen_iso,  # ← NEW: Task 4.2
+                    last_seen_iso,
                     "blocks_since_update":
                     blocks_since_update
                     if 'blocks_since_update' in locals() else 0,

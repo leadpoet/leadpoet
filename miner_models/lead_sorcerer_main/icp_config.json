@@ -16,19 +16,6 @@
   "threshold": 0.5,
   "filtering_strict": false,
   "mode": "fast",
-  "apollo": {
-    "enrich": {
-      "enabled": true
-    }
-  },
-  "enrichment_providers": {
-    "anymail_finder": {
-      "enabled": true
-    },
-    "apollo": {
-      "enabled": true
-    }
-  },
   "refresh_policy": {
     "revisit_after_days": 90,
     "failure_revisit_days": 7,

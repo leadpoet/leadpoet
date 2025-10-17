@@ -101,7 +101,7 @@ class Miner(BaseMinerNeuron):
         else:
             bt.logging.info("✅ Using existing valid token")
         
-        # NEW: Initialize Supabase client with JWT from TokenManager
+        # Initialize Supabase client with JWT from TokenManager
         self.supabase_url = "https://qplwoislplkcegvdmbim.supabase.co"
         self.supabase_client: Optional[Client] = None
         self._init_supabase_client()
@@ -206,7 +206,6 @@ class Miner(BaseMinerNeuron):
         print(f"🔄 Starting continuous sourcing loop (interval: {interval}s)")
         while True:
             try:
-                # cooperative pause: don’t hold the lock during network I/O
                 if not self.sourcing_mode:
                     await asyncio.sleep(1)
                     continue
@@ -214,7 +213,6 @@ class Miner(BaseMinerNeuron):
                     if not self.sourcing_mode:
                         continue
                     print("\n🔄 Sourcing new leads...")
-                # do network I/O OUTSIDE the lock so pause can cancel immediately
                 new_leads = await get_leads(1, industry=None, region=None)
                 sanitized = [
                     sanitize_prospect(p, miner_hotkey) for p in new_leads
@@ -238,8 +236,6 @@ class Miner(BaseMinerNeuron):
                             f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
                         )
                     else:
-                        # Detailed error already logged by push_prospects_to_cloud()
-                        # Could be: duplicate, RLS violation, or connection issue
                         print("⚠️  Failed to push prospects (see detailed error above)")
                 except Exception as e:
                     print(f"❌ Cloud push exception: {e}")
@@ -268,7 +264,6 @@ class Miner(BaseMinerNeuron):
                         print(
                             f"🔍 Target industry inferred: {target_ind or 'any'}"
                         )
-                    # rest of curation OUTSIDE lock
                     desired_roles = classify_roles(req.get(
                         "business_desc", ""))
                     if desired_roles:
@@ -405,7 +400,7 @@ class Miner(BaseMinerNeuron):
                         print(
                             f"⏭️  Request {request_id[:8]}... already claimed by another miner"
                         )
-                        processed_requests.add(request_id)  # ← ADD THIS LINE
+                        processed_requests.add(request_id)
                         continue
 
                     # Mark as processed locally
@@ -509,7 +504,6 @@ class Miner(BaseMinerNeuron):
                             f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})"
                         )
 
-                    # NEW: Send leads to Firestore (not Cloud Run API)
                     from Leadpoet.utils.cloud_db import push_miner_curated_leads
                     success = push_miner_curated_leads(self.wallet, request_id,
                                                        top_leads)
@@ -537,10 +531,9 @@ class Miner(BaseMinerNeuron):
                 await asyncio.sleep(5)  # Wait before retrying on error
 
             # Poll every 1 second for instant response
-            await asyncio.sleep(1)  # ← REDUCED from 5 to 1 second
+            await asyncio.sleep(1)
 
     async def _forward_async(self, synapse: LeadRequest) -> LeadRequest:
-        # ─────────────────────────────────────────────────────────────
         import time as _t
         _t0 = _t.time()
         print("\n─────────  AXON ➜ MINER  ─────────")
@@ -549,7 +542,6 @@ class Miner(BaseMinerNeuron):
             f" industry={synapse.industry or '∅'} region={synapse.region or '∅'}"
         )
         print(f"⏱️   at {datetime.utcnow().isoformat()} UTC")
-        # ─────────────────────────────────────────────────────────────
         bt.logging.info(f" AXON CALL RECEIVED: {synapse}")
 
         start_time = time.time()
@@ -564,25 +556,24 @@ class Miner(BaseMinerNeuron):
             with self.sourcing_lock:
                 self.sourcing_mode = False
                 try:
-                    # ── derive target industry from buyer description ───────────
                     target_ind = classify_industry(
                         synapse.business_desc) or synapse.industry
                     print(f"🔍 Target industry inferred: {target_ind or 'any'}")
 
-                    # 1️⃣ detect role keywords ONCE
+                    # detect role keywords ONCE
                     desired_roles = classify_roles(synapse.business_desc)
                     if desired_roles:
                         print(f"🛈  Role filter active → {desired_roles}")
 
-                    # 2️⃣ pull a LARGE slice of the pool for this industry
+                    # pull a LARGE slice of the pool for this industry
                     pool_slice = get_leads_from_pool(
-                        1000,  # big number = “all we have”
+                        1000,  # big number = "all we have"
                         industry=target_ind,
                         region=synapse.region,
                         wallet=self.wallet  # ensures cloud read
                     )
 
-                    # 3️⃣ role-filter first, then random-sample down
+                    # role-filter first, then random-sample down
                     if desired_roles:
                         pool_slice = [
                             ld for ld in pool_slice
@@ -628,8 +619,7 @@ class Miner(BaseMinerNeuron):
                             "role": lead.get("role", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
-                            "curated_at": datetime.now(timezone.utc).isoformat(
-                            ),  # NEW: ISO timestamp
+                            "curated_at": datetime.now(timezone.utc).isoformat(),
                         }
                         # Only include leads that have all required fields
                         if all(
@@ -637,11 +627,9 @@ class Miner(BaseMinerNeuron):
                                 for field in ["email", "Business"]):
                             mapped_leads.append(mapped_lead)
 
-                    # REMOVED: conversion_score calculation - no longer needed
-                    # ── NEW: apply business-intent ranking ──────────────────────────
+                    # apply business-intent ranking
                     ranked = await rank_leads(
                         mapped_leads, description=synapse.business_desc)
-                    # ────────────────────────────────────────────────────────────────
                     top_leads = ranked[:synapse.num_leads]
 
                     if not top_leads:
@@ -703,20 +691,20 @@ class Miner(BaseMinerNeuron):
             target_ind = classify_industry(business_desc) or industry
             print(f"🔍 Target industry inferred: {target_ind or 'any'}")
 
-            # 1️⃣ detect role keywords ONCE
+            # detect role keywords ONCE
             desired_roles = classify_roles(business_desc)
             if desired_roles:
                 print(f"🛈  Role filter active → {desired_roles}")
 
-            # 2️⃣ pull a LARGE slice of the pool for this industry
+            # pull a LARGE slice of the pool for this industry
             pool_slice = get_leads_from_pool(
-                1000,  # big number = “all we have”
+                1000,  # big number = "all we have"
                 industry=target_ind,
                 region=region,
                 wallet=self.wallet  # <-- passes hotkey for auth
             )
 
-            # 3️⃣ role-filter first, then random-sample down
+            # role-filter first, then random-sample down
             if desired_roles:
                 pool_slice = [
                     ld for ld in pool_slice
@@ -787,7 +775,7 @@ class Miner(BaseMinerNeuron):
                     },
                     status=404)
 
-            # ── intent-rank ────────────────────────────────────────────
+            # intent-rank
             print(" Ranking leads by intent...")
             ranked = await rank_leads(mapped_leads, description=business_desc)
             top_leads = ranked[:num_leads]
@@ -802,7 +790,7 @@ class Miner(BaseMinerNeuron):
 
             bt.logging.info(
                 f"Returning {len(top_leads)} leads to HTTP request")
-            # 🔄 send prospects to Firestore queue
+            # send prospects to Firestore queue
             push_prospects_to_cloud(self.wallet, top_leads)
             return web.json_response({
                 "leads": top_leads,
@@ -884,7 +872,7 @@ class Miner(BaseMinerNeuron):
     #  Wrapper the axon actually calls (sync)
     # -------------------------------------------------------------------
     def forward(self, synapse: LeadRequest) -> LeadRequest:
-        # 🔔 this fires only when the request arrives via AXON
+        # this fires only when the request arrives via AXON
         print(
             f"🔔 AXON QUERY from {getattr(synapse.dendrite, 'hotkey', 'unknown')} | "
             f"{synapse.num_leads} leads | desc='{(synapse.business_desc or '')[:40]}…'"
@@ -903,7 +891,7 @@ class Miner(BaseMinerNeuron):
 
         t = threading.Thread(target=_runner, daemon=True)
         t.start()
-        t.join(timeout=120)  # <── was 90
+        t.join(timeout=120)
         if t.is_alive():
             print("⏳ AXON forward timed out after 95 s")
             synapse.leads = []
@@ -945,12 +933,12 @@ class Miner(BaseMinerNeuron):
         
         try:
             while True:
-                # NEW: Check and refresh token every iteration (checks threshold internally)
+                # Check and refresh token every iteration (checks threshold internally)
                 token_refreshed = self.token_manager.refresh_if_needed(threshold_hours=1)
                 if not token_refreshed and not self.token_manager.get_token():
                     bt.logging.warning("⚠️ Token refresh failed, continuing with existing token...")
                 
-                # NEW: Refresh Supabase client if token was refreshed
+                # Refresh Supabase client if token was refreshed
                 if token_refreshed:
                     bt.logging.info("🔄 Token was refreshed, reinitializing Supabase client...")
                     self._init_supabase_client()
@@ -1028,7 +1016,6 @@ def sanitize_prospect(prospect, miner_hotkey=None):
     if not valid_url(sanitized["website"]):
         sanitized["website"] = ""
 
-    # REMOVED: id, created_at, updated_at - these should only be added during curation
     return sanitized
 
 
@@ -1093,7 +1080,6 @@ async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
                                               name="sourcing_loop")
     miner.cloud_task = asyncio.create_task(
         miner.cloud_curation_loop(miner_hotkey), name="cloud_curation_loop")
-    # NEW: Start broadcast curation task
     miner.broadcast_task = asyncio.create_task(
         miner.broadcast_curation_loop(miner_hotkey),
         name="broadcast_curation_loop")
@@ -1148,7 +1134,6 @@ def main():
     config.wallet.hotkey = args.wallet_hotkey
     config.netuid = args.netuid
     config.subtensor = bt.Config()
-    # Only set custom wallet path if default doesn't exist
     default_wallet_path = Path.home() / ".bittensor" / "wallets" / "miner"
     if not default_wallet_path.exists():
         config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
@@ -1160,7 +1145,7 @@ def main():
     config.neuron.epoch_length = args.neuron_epoch_length or 1000
     config.use_open_source_lead_model = args.use_open_source_lead_model
 
-    # ──────────────────────── AXON NETWORKING ──────────────────────────
+    # AXON NETWORKING
     # Bind locally on 0.0.0.0 but advertise the user-supplied external
     # IP/port on-chain so validators can connect over the Internet.
     config.axon = bt.Config()

@@ -59,7 +59,6 @@ requirements = [
     # Lead Sorcerer dependencies
     "openrouter>=1.0.0",
     "firecrawl>=2.16.0",
-    "mailgun>=1.1.0,<2.0.0",
     "phonenumbers>=8.13.0",
     "portalocker>=2.7.0",
     "publicsuffix2>=2.20191221",

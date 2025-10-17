@@ -34,15 +34,7 @@ export FIRECRAWL_API_KEY="your_firecrawl_key"        # Web scraping
 export OPENROUTER_KEY="your_openrouter_key"          # AI classification
 export GSE_API_KEY="your_google_api_key"             # Google Search
 export GSE_CX="your_search_engine_id"                # Custom Search ID
-export ANYMAIL_FINDER_API_KEY="your_anymail_key"     # Email discovery
 
-# Optional Enrichment APIs For Enhanced Lead Quality
-export CORESIGNAL_API_TOKEN="your_coresignal_token"      # Company data enrichment
-export COMPANY_ENRICH_API_KEY="your_company_enrich_key"  # Additional company enrichment
-export SNOVIO_CLIENT_ID="your_snovio_id"                 # Snov.io email finder
-export SNOVIO_CLIENT_SECRET="your_snovio_secret"         # Snov.io secret
-export MAILGUN_SMTP_LOGIN="your_mailgun_login"           # Email validation
-export MAILGUN_SMTP_PW="your_mailgun_password"           # Mailgun password
 ```
 
 ### For Validators

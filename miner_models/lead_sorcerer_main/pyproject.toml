@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "lead-sorcerer"
 version = "0.1.0"
-description = "Comprehensive lead generation and enrichment system"
+description = "Comprehensive lead generation system"
 authors = ["Lead Sorcerer Team"]
 readme = "README.md"
 packages = [{include = "src"}]
@@ -13,12 +13,9 @@ openrouter = "^0.1.0"
 firecrawl = "^0.1.0"
 openai = "^1.0.0"
 
-mailgun = "^1.1.0"
 phonenumbers = "^8.13.0"
 portalocker = "^2.7.0"
 publicsuffix2 = "^2.20191221"
-
-# Note: Snov.io package not available on PyPI - will implement custom client using httpx
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
@@ -34,7 +31,6 @@ jsonschema = "^4.17.0"
 [tool.poetry.scripts]
 domain = "src.domain:main"
 crawl = "src.crawl:main"
-enrich = "src.enrich:main"
 orchestrator = "src.orchestrator:main"
 
 [build-system]

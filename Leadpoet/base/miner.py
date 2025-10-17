@@ -82,7 +82,7 @@ class BaseMinerNeuron(BaseNeuron):
         if self.config.blacklist_allow_non_registered:
             bt.logging.info("Testnet mode: Allowing non-registered entities to send requests (normal for testnet)")
 
-        # ─── Auto-adopt previously-published axon address (before we build the axon) ───
+        # Auto-adopt previously-published axon address (before we build the axon)
         if (
             not getattr(self.config.axon, "external_ip", None)
             or not getattr(self.config.axon, "external_port", None)
@@ -103,7 +103,7 @@ class BaseMinerNeuron(BaseNeuron):
         os.environ.setdefault("GRPC_VERBOSITY", "ERROR")  # Changed from DEBUG to ERROR
         os.environ.setdefault("GRPC_TRACE", "")
 
-        # NOW build the axon with the **correct** port
+        # NOW build the axon with the correct port
         self.axon = bt.axon(
             wallet=self.wallet,
             ip      = "0.0.0.0",

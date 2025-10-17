@@ -53,16 +53,6 @@
     "company_usd": 0.02,
     "contact_usd": 0.05
   },
-  "enrichment_providers": {
-    "snovio": {
-      "enabled": true,
-      "priority": 1
-    },
-    "coresignal": {
-      "enabled": true,
-      "priority": 2
-    }
-  },
   "role_priority": {
     "owner": 1,
     "dentist": 2,

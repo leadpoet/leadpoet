@@ -141,11 +141,6 @@ else:
         if costs_file.exists():
             shutil.copy2(costs_file, temp_config_dir / "costs.yaml")
         
-        # Copy any other config files that might be needed
-        for config_file in ["apollo_defaults.yaml"]:
-            source_file = source_config_dir / config_file
-            if source_file.exists():
-                shutil.copy2(source_file, temp_config_dir / config_file)
         
         # Copy prompts directory if it exists
         source_prompts = source_config_dir / "prompts"
@@ -276,7 +271,6 @@ else:
                 # Adjust caps based on number of requested leads
                 config["caps"]["max_domains_per_run"] = min(max(num_leads * 2, 5), 20)
                 config["caps"]["max_crawl_per_run"] = min(max(num_leads * 2, 5), 20)
-                config["caps"]["max_enrich_per_run"] = min(max(num_leads, 5), 15)
                 
                 # Save config to temporary file
                 config_file = Path(temp_dir) / "icp_config.json"
@@ -312,7 +306,7 @@ else:
                                             if line.strip():
                                                 try:
                                                     lead_record = json.loads(line)
-                                                    # Include leads that have contacts (successful enrichment)
+                                                    # Include leads that have contacts
                                                     if (lead_record.get("contacts") and 
                                                         len(lead_record.get("contacts", [])) > 0 and
                                                         len(leads) < num_leads):
@@ -323,26 +317,21 @@ else:
                         # Fallback: also check the traditional locations
                         if not leads:
                             domain_pass_file = Path(temp_dir) / "domain_pass.jsonl"
-                            apollo_pass_file = Path(temp_dir) / "apollo_pass.jsonl"
                             
-                            # Try to read from apollo results first, then domain results
-                            for results_file in [apollo_pass_file, domain_pass_file]:
-                                if results_file.exists():
-                                    with open(results_file, "r") as f:
-                                        for line in f:
-                                            if line.strip():
-                                                try:
-                                                    lead_record = json.loads(line)
-                                                    # Only include leads that passed ICP checks and have contacts
-                                                    if (lead_record.get("icp", {}).get("pre_pass") and 
-                                                        lead_record.get("contacts") and
-                                                        len(leads) < num_leads):
-                                                        leads.append(lead_record)
-                                                except json.JSONDecodeError:
-                                                    continue
-                                    
-                                    if leads:
-                                        break  # Found leads, don't need to check other files
+                            # Try to read from domain results
+                            if domain_pass_file.exists():
+                                with open(domain_pass_file, "r") as f:
+                                    for line in f:
+                                        if line.strip():
+                                            try:
+                                                lead_record = json.loads(line)
+                                                # Only include leads that passed ICP checks and have contacts
+                                                if (lead_record.get("icp", {}).get("pre_pass") and 
+                                                    lead_record.get("contacts") and
+                                                    len(leads) < num_leads):
+                                                    leads.append(lead_record)
+                                            except json.JSONDecodeError:
+                                                continue
                         
                         return leads[:num_leads]  # Return only the requested number
                         

@@ -216,14 +216,12 @@ def record_delivery_rewards(delivered):
             scores[hk] = scores.get(hk, 0) + w     # accumulate
         _save_scores(scores)
 
-    # ────────────────────────────────────────────────────────────────
     # ALSO persist each delivered lead into reward_events.json so that
     # the 14 / 30 / 90-day weighting in
     #     Leadpoet.validator.reward.calculate_miner_emissions(...)
     # has the correct, up-to-date history.
     # This keeps the fast 'block-emission' table and the periodic weight
     # calculator perfectly in sync.
-    # ────────────────────────────────────────────────────────────────
     for lead in delivered:
         try:
             _rec(lead)          # source, curated_by, conversion_score

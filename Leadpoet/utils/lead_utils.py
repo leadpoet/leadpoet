@@ -7,7 +7,7 @@ that may have inconsistent key naming (e.g., "Email 1" vs "email" vs "Owner(s) E
 Instead of nested .get() calls throughout the codebase, use these standardized extractors.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 
 def get_field(data: Dict[str, Any], *keys: str, default: str = "") -> str:

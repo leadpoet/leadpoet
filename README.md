@@ -111,6 +111,26 @@ python neurons/miner.py \
 3. **Consensus Validation**: Prospects validated by validators
 4. **Approved Leads**: Only consensus-approved leads enter the main lead pool
 
+### Lead JSON Structure
+
+Miners must submit prospects with the following structure:
+
+```json
+{
+  "business": "SpaceX",
+  "owner_full_name": "Elon Musk",
+  "owner_email": "elon@spacex.com",
+  "website": "https://spacex.com",
+  "phone": "+1-310-363-6000",
+  "linkedin": "https://linkedin.com/in/elonmusk",
+  "industry": "Aerospace Manufacturing",
+  "location": "Hawthorne, CA",
+  "employee_count": "10000+",
+  "founded_year": 2002,
+  "description": "Aerospace manufacturer and space transportation company focused on reducing space transportation costs"
+}
+```
+
 ### Reward System
 
 Miners earn rewards **proportional to approved leads** they source:

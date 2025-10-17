@@ -1,18 +1,18 @@
 {
-  "name": "Digital Marketing Agency - Test ICP",
-  "icp_text": "Digital marketing agencies and tech startups seeking executive leadership contacts for partnerships and business development.",
+  "name": "Startup Advisory Services - Test ICP",
+  "icp_text": "Small startup advisory and consulting firms with founder and advisor contact information for business development and partnership opportunities.",
   "queries": [
-    "digital marketing agency executive contacts",
-    "tech startup founder contacts"
+    "startup advisory services founder contact",
+    "business consulting firm advisor email"
   ],
-  "specific_urls": ["https://www.octivdigital.com/about"],
+  "specific_urls": ["https://www.founderadvisors.tech/"],
   "required_fields": {
     "company": ["name", "industry"],
-    "contact": ["job_title", "full_name"]
+    "contact": ["email", "job_title", "full_name"]
   },
   "optional_fields": {
     "company": ["hq_location", "revenue_range", "employee_count", "specialties", "founded_year", "company_type", "number_of_locations", "ownership_type"],
-    "contact": ["email", "phone", "linkedin_url", "decision_maker", "department", "seniority"]
+    "contact": ["phone", "linkedin_url", "decision_maker", "department", "seniority"]
   },
   "threshold": 0.3,
   "filtering_strict": false,
@@ -45,14 +45,14 @@
     "max_enrich_per_run": 20
   },
   "role_priority": {
-    "ceo": 1,
     "founder": 1,
-    "president": 1,
     "owner": 1,
-    "managing director": 2,
-    "vp": 2,
+    "ceo": 1,
+    "president": 1,
+    "advisor": 2,
+    "partner": 2,
     "director": 3,
-    "manager": 4,
+    "consultant": 4,
     "default": 99
   },
   "exports": {
@@ -71,29 +71,42 @@
     "geographic_focus": ["North America", "United States"]
   },
   "intent_config": {
-    "purpose": "digital_marketing",
+    "purpose": "startup_advisory",
     "target_action": "business_development",
     "intent_signals": {
       "high_intent": [
-        "digital marketing",
-        "SEO services",
-        "web development",
-        "marketing agency",
-        "consulting services"
+        "startup advisory",
+        "business consulting",
+        "founder coaching",
+        "mentoring services",
+        "advisory board",
+        "startup support",
+        "entrepreneur guidance",
+        "business development",
+        "strategic planning",
+        "coaching services"
       ],
       "medium_intent": [
-        "client services",
-        "project work",
-        "consulting"
+        "business services",
+        "consulting",
+        "advisory services",
+        "professional services",
+        "business support",
+        "strategic advice",
+        "mentoring",
+        "coaching"
       ],
       "low_intent": [
-        "not accepting clients"
+        "not accepting clients",
+        "fully booked",
+        "no availability"
       ]
     },
     "intent_sources": [
       "about_pages",
       "team_pages",
-      "contact_pages"
+      "contact_pages",
+      "services_pages"
     ],
     "scoring_rules": {
       "high_intent_weight": 0.8,

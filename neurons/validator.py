@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# Suppress multiprocessing warnings BEFORE any imports
+import os
+import sys
+os.environ["PYTHONWARNINGS"] = "ignore::UserWarning"
 
 import re
 import time
@@ -42,11 +47,9 @@ from datetime import datetime, timezone
 from math import isclose
 from pathlib import Path
 from json.decoder import JSONDecodeError
-import os
-import sys
 import warnings
 
-# Suppress multiprocessing semaphore warnings
+# Additional warning suppression
 warnings.filterwarnings("ignore", message=".*leaked semaphore objects.*")
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -7,7 +7,7 @@ by their trust value: S_lead = Σ(S_v * V_v) for all validators
 import bittensor as bt
 from typing import List, Dict, Tuple
 from collections import defaultdict
-from utils_lead_extraction import get_company, get_email, get_field
+from Leadpoet.utils.utils_lead_extraction import get_company, get_email, get_field
 
 
 def calculate_consensus_ranking(

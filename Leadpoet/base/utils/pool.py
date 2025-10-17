@@ -9,7 +9,7 @@ import sys
 from Leadpoet.validator.reward import record_event as _rec
 from Leadpoet.utils.cloud_db import get_cloud_leads
 from Leadpoet.base.utils import safe_json_load
-from utils_lead_extraction import get_email
+from Leadpoet.utils.utils_lead_extraction import get_email
 
 DATA_DIR = "data"
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")

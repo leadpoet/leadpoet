@@ -34,7 +34,7 @@ from Leadpoet.utils.cloud_db import (
     push_validator_ranking,
 )
 from Leadpoet.utils.token_manager import TokenManager
-from utils_lead_extraction import (
+from Leadpoet.utils.utils_lead_extraction import (
     get_email,
     get_website,
     get_company,

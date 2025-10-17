@@ -34,6 +34,14 @@ from Leadpoet.utils.cloud_db import (
     push_validator_ranking,
 )
 from Leadpoet.utils.token_manager import TokenManager
+from Leadpoet.utils.lead_utils import (
+    get_email,
+    get_website,
+    get_company,
+    get_industry,
+    get_role,
+    get_sub_industry
+)
 from supabase import Client
 import socket
 from math import isclose
@@ -196,7 +204,7 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
     """Return a 0-0.5 score for how well this lead fits the buyer description."""
     def _heuristic() -> float:
         d  = description.lower()
-        txt = (lead.get("Business","") + " " + lead.get("Industry","")).lower()
+        txt = (get_company(lead) + " " + get_industry(lead)).lower()
         overlap = len(set(d.split()) & set(txt.split()))
         return min(overlap * 0.05, 0.5)
 
@@ -213,10 +221,10 @@ def _llm_score_lead(lead: dict, description: str, model: str) -> float:
     prompt_user = (
         f"BUYER:\n{description}\n\n"
         f"LEAD:\n"
-        f"Company:  {lead.get('Business',  lead.get('business',  ''))}\n"
-        f"Industry: {lead.get('Industry', lead.get('industry', ''))}\n"
-        f"Role:     {lead.get('role',     lead.get('Role', ''))}\n"
-        f"Website:  {lead.get('Website',  lead.get('website',  ''))}"
+        f"Company:  {get_company(lead)}\n"
+        f"Industry: {get_industry(lead)}\n"
+        f"Role:     {get_role(lead)}\n"
+        f"Website:  {get_website(lead)}"
     )
 
 
@@ -297,7 +305,7 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
         result = {}
         for lead in leads:
             d = description.lower()
-            txt = (lead.get("Business","") + " " + lead.get("Industry","")).lower()
+            txt = (get_company(lead) + " " + get_industry(lead)).lower()
             overlap = len(set(d.split()) & set(txt.split()))
             result[id(lead)] = min(overlap * 0.05, 0.5)
         return result
@@ -334,11 +342,11 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
     for idx, lead in enumerate(leads):
         lines.append(
             f"\nLead #{idx}:\n"
-            f"  Company: {lead.get('Business', lead.get('business', 'Unknown'))}\n"
-            f"  Industry: {lead.get('Industry', lead.get('industry', 'Unknown'))}\n"
-            f"  Sub-industry: {lead.get('sub_industry', lead.get('Sub-industry', 'Unknown'))}\n"
-            f"  Contact Role: {lead.get('role', lead.get('Role', 'Unknown'))}\n"
-            f"  Website: {lead.get('Website', lead.get('website', 'Unknown'))}"
+            f"  Company: {get_company(lead, default='Unknown')}\n"
+            f"  Industry: {get_industry(lead, default='Unknown')}\n"
+            f"  Sub-industry: {get_sub_industry(lead, default='Unknown')}\n"
+            f"  Contact Role: {get_role(lead, default='Unknown')}\n"
+            f"  Website: {get_website(lead, default='Unknown')}"
         )
 
     prompt_user = "\n".join(lines)
@@ -420,7 +428,7 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
         result = {}
         for lead in leads:
             d = description.lower()
-            txt = (lead.get("Business","") + " " + lead.get("Industry","")).lower()
+            txt = (get_company(lead) + " " + get_industry(lead)).lower()
             overlap = len(set(d.split()) & set(txt.split()))
             result[id(lead)] = min(overlap * 0.05, 0.5)
         return result

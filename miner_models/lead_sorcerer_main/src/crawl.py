@@ -1395,7 +1395,8 @@ IMPORTANT: If no clear intent signals are found, set business_intent_score to {i
 
                     # Execute single scrape operation
                     response = self.firecrawl_client.scrape(**scrape_params)
-
+                    print(response)
+    
                     # Handle different response structures from Firecrawl v2
                     if response:
                         self.logger.info(

@@ -31,4 +31,3 @@ __spec_version__ = (
 from . import protocol
 from . import base
 from . import validator
-from .subnet_links import SUBNET_LINKS

@@ -40,7 +40,12 @@ from Leadpoet.utils.lead_utils import (
     get_company,
     get_industry,
     get_role,
-    get_sub_industry
+    get_sub_industry,
+    get_first_name,
+    get_last_name,
+    get_linkedin,
+    get_location,
+    get_field
 )
 from supabase import Client
 import socket
@@ -875,7 +880,7 @@ class Validator(BaseValidatorNeuron):
 
             print(f"✅ Ranked top {len(top_leads)} leads:")
             for i, lead in enumerate(top_leads, 1):
-                business = lead.get('Business', lead.get('business', 'Unknown'))
+                business = get_company(lead, default='Unknown')
                 score = lead.get('intent_score', 0)
                 print(f"  {i}. {business} (score={score:.3f})")
 
@@ -1720,8 +1725,8 @@ class Validator(BaseValidatorNeuron):
                         continue
                         
                     miner_hotkey = lead.get("miner_hotkey", "unknown")
-                    business_name = lead.get('business', lead.get('website', 'Unknown'))
-                    email = lead.get('owner_email', lead.get('email', '?'))
+                    business_name = get_field(lead, 'business', 'website', default='Unknown')
+                    email = get_email(lead, default='?')
                     
                     print(f"\n🟣 Validating prospect {prospect_id[:8]}...")
                     print(f"   Lead ID: {lead_id[:8]}...")
@@ -1939,7 +1944,7 @@ class Validator(BaseValidatorNeuron):
 
                             print(f"✅ Ranked top {len(top_leads)} leads:")
                             for i, lead in enumerate(top_leads, 1):
-                                business = lead.get('Business', lead.get('business', 'Unknown'))[:30]
+                                business = get_company(lead, default='Unknown')[:30]
                                 score = lead.get('intent_score', 0)
                                 print(f"  {i}. {business} (score={score:.3f})")
 
@@ -2085,8 +2090,8 @@ class Validator(BaseValidatorNeuron):
                 return
                 
             success = self.save_validated_lead_to_supabase(lead)
-            email = lead.get("owner_email", lead.get("email", "?"))
-            biz = lead.get("business", lead.get("website", ""))
+            email = get_email(lead, default='?')
+            biz = get_field(lead, "business", "website")
             
             if success:
                 print(f"✅ Added verified lead to Supabase → {biz} ({email})")
@@ -2121,7 +2126,7 @@ class Validator(BaseValidatorNeuron):
         """Validate a single lead using automated_checks. Returns pass/fail."""
         try:
             # Check for required email field first
-            email = lead.get('owner_email', lead.get('email', ''))
+            email = get_email(lead)
             if not email:
                 return {'is_legitimate': False,
                         'reason': 'Missing email',
@@ -2131,9 +2136,9 @@ class Validator(BaseValidatorNeuron):
             mapped_lead = {
                 "email": email,  # Map to "email" field
                 "Email 1": email,  # Also map to "Email 1" as backup
-                "Company": lead.get('business', lead.get('website', '')),  # Map business -> Company
-                "Website": lead.get('website', lead.get('business', '')),  # Map to Website
-                "website": lead.get('website', lead.get('business', '')),  # Also lowercase
+                "Company": get_field(lead, 'business', 'website'),  # Map business -> Company
+                "Website": get_field(lead, 'website', 'business'),  # Map to Website
+                "website": get_field(lead, 'website', 'business'),  # Also lowercase
                 "First Name": lead.get('first', ''),
                 "Last Name": lead.get('last', ''),
                 # Include any other fields that might be useful
@@ -2194,12 +2199,12 @@ class Validator(BaseValidatorNeuron):
         try:
             # Prepare lead data for insertion
             lead_data = {
-                "email": lead.get("owner_email", lead.get("email", "")),
-                "company": lead.get("business", lead.get("company", "")),
+                "email": get_email(lead),
+                "company": get_field(lead, "business", "company"),
                 "validated_at": datetime.now(timezone.utc).isoformat(),
                 "validator_hotkey": self.wallet.hotkey.ss58_address,
-                "miner_hotkey": lead.get("source", lead.get("miner_hotkey")),
-                "score": lead.get("conversion_score", lead.get("score")),
+                "miner_hotkey": get_field(lead, "source", "miner_hotkey"),
+                "score": get_field(lead, "conversion_score", "score"),
                 "metadata": {
                     "owner_full_name": lead.get("owner_full_name", ""),
                     "first": lead.get("first", ""),
@@ -2230,7 +2235,7 @@ class Validator(BaseValidatorNeuron):
             
             # Handle duplicate email (caught by unique constraint)
             if "duplicate" in error_str or "unique" in error_str or "23505" in error_str:
-                bt.logging.debug(f"⏭️  Duplicate lead (trigger will notify miner): {lead.get('owner_email', lead.get('email', ''))}")
+                bt.logging.debug(f"⏭️  Duplicate lead (trigger will notify miner): {get_email(lead)}")
                 return False
             
             # Handle RLS policy violations
@@ -2423,9 +2428,9 @@ async def run_validator(validator_hotkey, queue_maxsize):
                 ranked = sorted(prospects, key=lambda x: x["conversion_score"], reverse=True)
                 print(f"\n Curated leads from {miner_hotkey[:20]} (ranked by score):")
                 for idx, lead in enumerate(ranked, 1):
-                    business = lead.get('business', 'Unknown')[:30]
+                    business = get_company(lead, default='Unknown')[:30]
                     # accept either lowercase or capitalised field
-                    business = lead.get('business') or lead.get('Business', 'Unknown')
+                    business = get_company(lead, default='Unknown')
                     business = business[:30]
                     score = lead['conversion_score']
                     print(f"  {idx:2d}. {business:30s}  score={score:.3f}")
@@ -2530,16 +2535,16 @@ def add_validated_leads_to_pool(leads):
         validation_score = lead.get("conversion_score", 1.0)  # Use existing score or default to 1.0
 
         mapped_lead = {
-            "business": lead.get("business", lead.get("Business", "")),
-            "owner_full_name": lead.get("owner_full_name", lead.get("Owner Full name", "")),
-            "first": lead.get("first", lead.get("First", "")),
-            "last": lead.get("last", lead.get("Last", "")),
-            "owner_email": lead.get("owner_email", lead.get("Owner(s) Email", "")),
-            "linkedin": lead.get("linkedin", lead.get("LinkedIn", "")),
-            "website": lead.get("website", lead.get("Website", "")),
-            "industry": lead.get("industry", lead.get("Industry", "")),
-            "sub_industry": lead.get("sub_industry", lead.get("Sub Industry", "")),
-            "region": lead.get("region", lead.get("Region", "")),
+            "business": get_company(lead),
+            "owner_full_name": get_field(lead, "owner_full_name", "Owner Full name"),
+            "first": get_first_name(lead),
+            "last": get_last_name(lead),
+            "owner_email": get_email(lead),
+            "linkedin": get_linkedin(lead),
+            "website": get_website(lead),
+            "industry": get_industry(lead),
+            "sub_industry": get_sub_industry(lead),
+            "region": get_location(lead),
             "source":     lead.get("source", ""),
             "curated_by": lead.get("curated_by", ""),
         }

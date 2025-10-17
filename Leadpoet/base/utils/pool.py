@@ -9,6 +9,7 @@ import sys
 from Leadpoet.validator.reward import record_event as _rec
 from Leadpoet.utils.cloud_db import get_cloud_leads
 from Leadpoet.base.utils import safe_json_load
+from Leadpoet.utils.lead_utils import get_email
 
 DATA_DIR = "data"
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
@@ -108,7 +109,7 @@ def calculate_per_query_rewards(all_delivered_leads):
     # Group leads by email to find duplicates within this query
     lead_groups = defaultdict(list)
     for lead in all_delivered_leads:
-        email = lead.get('owner_email') or lead.get('email', '').lower()
+        email = get_email(lead).lower()
         lead_groups[email].append(lead)
     
     bt.logging.info(f"Unique leads (by email): {len(lead_groups)}")

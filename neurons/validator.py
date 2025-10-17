@@ -559,7 +559,7 @@ class Validator(BaseValidatorNeuron):
         return bool(self.email_regex.match(email))
 
     def check_duplicates(self, leads: list) -> set:
-        emails = [lead.get('Owner(s) Email', '') for lead in leads]
+        emails = [lead.get('email', '') for lead in leads]
         seen = set()
         duplicates = set(email for email in emails if email in seen or seen.add(email))
         return duplicates
@@ -589,7 +589,7 @@ class Validator(BaseValidatorNeuron):
 
     async def reputation_challenge(self):
         dummy_leads = [
-            {"Business": f"Test Business {i}", "Owner(s) Email": f"owner{i}@testleadpoet.com", "Website": f"https://business{i}.com", "Industry": "Tech & AI"}
+            {"business": f"Test Business {i}", "email": f"owner{i}@testleadpoet.com", "website": f"https://business{i}.com", "industry": "Tech & AI"}
             for i in range(10)
         ]
         known_score = random.uniform(0.8, 1.0)
@@ -1015,7 +1015,7 @@ class Validator(BaseValidatorNeuron):
                         for lead in response.leads:
                             if lead.get("source") and lead.get("curated_by") and lead.get("conversion_score"):
                                 record_event(lead)
-                                print(f"🎯 V2: Recorded event for lead {lead.get('owner_email', 'unknown')} "
+                                print(f"🎯 V2: Recorded event for lead {lead.get('email', 'unknown')} "
                                       f"(source: {lead['source']}, curator: {lead['curated_by']})")
                     except Exception as e:
                         print(f"⚠️  V2: Failed to record events: {e}")
@@ -1434,9 +1434,13 @@ class Validator(BaseValidatorNeuron):
                                 # Call Edge Function to get weights (server-side eligibility check)
                                 try:
                                     print("   Calling Edge Function with JWT token...")
-                                    response = requests.get(
+                                    response = requests.post(
                                         "https://qplwoislplkcegvdmbim.supabase.co/functions/v1/get-validator-weights",
-                                        headers={"Authorization": f"Bearer {jwt_token}"},
+                                        headers={
+                                            "Authorization": f"Bearer {jwt_token}",
+                                            "Content-Type": "application/json"
+                                        },
+                                        json={"epoch_number": current_epoch},
                                         timeout=30
                                     )
                                     
@@ -1657,13 +1661,8 @@ class Validator(BaseValidatorNeuron):
                     if axon_info.ip != '0.0.0.0' and axon_info.port != 0:
                         running_miners.append(miner_info)
 
-            print(f"📊 Found {len(available_miners)} registered miners:")
-            for miner in available_miners:
-                print(f"   UID {miner['uid']}: {miner['hotkey'][:10]}... (stake: {miner['stake']:.2f})")
-
-            print(f"\n🔍 Found {len(running_miners)} currently running miners:")
-            for miner in running_miners:
-                print(f"   UID {miner['uid']}: {miner['hotkey'][:10]}... (IP: {miner['ip']}:{miner['port']})")
+            # Miner discovery completed - details logged in debug mode if needed
+            bt.logging.debug(f"Found {len(available_miners)} registered miners, {len(running_miners)} currently running")
 
             if not available_miners:
                 print("   ⚠️  No miners found on the network")
@@ -2206,7 +2205,7 @@ class Validator(BaseValidatorNeuron):
                 "miner_hotkey": get_field(lead, "source", "miner_hotkey"),
                 "score": get_field(lead, "conversion_score", "score"),
                 "metadata": {
-                    "owner_full_name": lead.get("owner_full_name", ""),
+                    "full_name": lead.get("full_name", ""),
                     "first": lead.get("first", ""),
                     "last": lead.get("last", ""),
                     "linkedin": lead.get("linkedin", ""),
@@ -2215,6 +2214,14 @@ class Validator(BaseValidatorNeuron):
                     "sub_industry": lead.get("sub_industry", ""),
                     "region": lead.get("region", ""),
                     "role": lead.get("role", ""),
+                    "description": lead.get("description", ""),
+                    "phone_numbers": lead.get("phone_numbers", []),
+                    "founded_year": lead.get("founded_year", ""),
+                    "ownership_type": lead.get("ownership_type", ""),
+                    "company_type": lead.get("company_type", ""),
+                    "number_of_locations": lead.get("number_of_locations", ""),
+                    "ids": lead.get("ids", {}),
+                    "socials": lead.get("socials", {}),
                     "email_score": lead.get("email_score"),
                 }
             }
@@ -2475,8 +2482,8 @@ async def run_validator(validator_hotkey, queue_maxsize):
                 business = prospect.get('business', 'Unknown Business')
                 print(f"\n  Validating: {business}")
 
-                # Get email from either field name
-                email = prospect.get("owner_email", prospect.get("Owner(s) Email", ""))
+                # Get email
+                email = prospect.get("email", "")
                 print(f"    Email: {email}")
 
                 if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
@@ -2536,15 +2543,24 @@ def add_validated_leads_to_pool(leads):
 
         mapped_lead = {
             "business": get_company(lead),
-            "owner_full_name": get_field(lead, "owner_full_name", "Owner Full name"),
+            "full_name": get_field(lead, "full_name"),
             "first": get_first_name(lead),
             "last": get_last_name(lead),
-            "owner_email": get_email(lead),
+            "email": get_email(lead),
             "linkedin": get_linkedin(lead),
             "website": get_website(lead),
             "industry": get_industry(lead),
             "sub_industry": get_sub_industry(lead),
             "region": get_location(lead),
+            "role": lead.get("role", ""),
+            "description": lead.get("description", ""),
+            "phone_numbers": lead.get("phone_numbers", []),
+            "founded_year": lead.get("founded_year", ""),
+            "ownership_type": lead.get("ownership_type", ""),
+            "company_type": lead.get("company_type", ""),
+            "number_of_locations": lead.get("number_of_locations", ""),
+            "ids": lead.get("ids", {}),
+            "socials": lead.get("socials", {}),
             "source":     lead.get("source", ""),
             "curated_by": lead.get("curated_by", ""),
         }
@@ -2560,7 +2576,7 @@ def add_validated_leads_to_pool(leads):
         for lead in leads:
             if lead.get("source") and lead.get("curated_by") and lead.get("conversion_score"):
                 record_event(lead)
-                print(f"🎯 V2: Recorded event for lead {lead.get('owner_email', 'unknown')} "
+                print(f"🎯 V2: Recorded event for lead {lead.get('email', 'unknown')} "
                       f"(source: {lead['source']}, curator: {lead['curated_by']})")
     except Exception as e:
         print(f"⚠️  V2: Failed to record events: {e}")

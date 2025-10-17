@@ -220,8 +220,8 @@ class Miner(BaseMinerNeuron):
                 print(f"🔄 Sourced {len(sanitized)} new leads:")
                 for i, lead in enumerate(sanitized, 1):
                     business = lead.get('business', 'Unknown')
-                    owner = lead.get('owner_full_name', 'Unknown')
-                    email = lead.get('owner_email', 'No email')
+                    owner = lead.get('full_name', 'Unknown')
+                    email = lead.get('email', 'No email')
                     print(f"  {i}. {business} - {owner} ({email})")
                 try:
                     success = push_prospects_to_cloud(
@@ -293,23 +293,23 @@ class Miner(BaseMinerNeuron):
                     mapped_leads = []
                     for lead in curated_leads:
                         m = {
-                            "email": lead.get("owner_email", ""),
-                            "Business": lead.get("business", ""),
-                            "Owner Full name": lead.get("owner_full_name", ""),
-                            "First": lead.get("first", ""),
-                            "Last": lead.get("last", ""),
-                            "LinkedIn": lead.get("linkedin", ""),
-                            "Website": lead.get("website", ""),
-                            "Industry": lead.get("industry", ""),
+                            "email": lead.get("email", ""),
+                            "business": lead.get("business", ""),
+                            "full_name": lead.get("full_name", ""),
+                            "first": lead.get("first", ""),
+                            "last": lead.get("last", ""),
+                            "linkedin": lead.get("linkedin", ""),
+                            "website": lead.get("website", ""),
+                            "industry": lead.get("industry", ""),
                             "sub_industry": lead.get("sub_industry", ""),
-                            "Region": lead.get("region", ""),
+                            "region": lead.get("region", ""),
                             "role": lead.get("role", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
                             "curated_at":
                             datetime.now(timezone.utc).isoformat(),
                         }
-                        if all(m.get(f) for f in ["email", "Business"]):
+                        if all(m.get(f) for f in ["email", "business"]):
                             mapped_leads.append(m)
                     print(" Ranking leads by intent...")
                     ranked = await rank_leads(mapped_leads,
@@ -327,7 +327,7 @@ class Miner(BaseMinerNeuron):
                     )
                     for i, lead in enumerate(top_leads, 1):
                         print(
-                            f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})"
+                            f"  {i}. {lead.get('business','?')} (intent={lead.get('miner_intent_score',0):.3f})"
                         )
                     push_miner_curation_result(
                         self.wallet,
@@ -466,23 +466,23 @@ class Miner(BaseMinerNeuron):
                     mapped_leads = []
                     for lead in curated_leads:
                         m = {
-                            "email": lead.get("owner_email", ""),
-                            "Business": lead.get("business", ""),
-                            "Owner Full name": lead.get("owner_full_name", ""),
-                            "First": lead.get("first", ""),
-                            "Last": lead.get("last", ""),
-                            "LinkedIn": lead.get("linkedin", ""),
-                            "Website": lead.get("website", ""),
-                            "Industry": lead.get("industry", ""),
+                            "email": lead.get("email", ""),
+                            "business": lead.get("business", ""),
+                            "full_name": lead.get("full_name", ""),
+                            "first": lead.get("first", ""),
+                            "last": lead.get("last", ""),
+                            "linkedin": lead.get("linkedin", ""),
+                            "website": lead.get("website", ""),
+                            "industry": lead.get("industry", ""),
                             "sub_industry": lead.get("sub_industry", ""),
-                            "Region": lead.get("region", ""),
+                            "region": lead.get("region", ""),
                             "role": lead.get("role", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
                             "curated_at":
                             datetime.now(timezone.utc).isoformat(),
                         }
-                        if all(m.get(f) for f in ["email", "Business"]):
+                        if all(m.get(f) for f in ["email", "business"]):
                             mapped_leads.append(m)
 
                     print("🔄 Ranking leads by intent...")
@@ -501,7 +501,7 @@ class Miner(BaseMinerNeuron):
                     )
                     for i, lead in enumerate(top_leads, 1):
                         print(
-                            f"  {i}. {lead.get('Business','?')} (intent={lead.get('miner_intent_score',0):.3f})"
+                            f"  {i}. {lead.get('business','?')} (intent={lead.get('miner_intent_score',0):.3f})"
                         )
 
                     from Leadpoet.utils.cloud_db import push_miner_curated_leads
@@ -606,16 +606,16 @@ class Miner(BaseMinerNeuron):
                     mapped_leads = []
                     for lead in curated_leads:
                         mapped_lead = {
-                            "email": lead.get("owner_email", ""),
-                            "Business": lead.get("business", ""),
-                            "Owner Full name": lead.get("owner_full_name", ""),
-                            "First": lead.get("first", ""),
-                            "Last": lead.get("last", ""),
-                            "LinkedIn": lead.get("linkedin", ""),
-                            "Website": lead.get("website", ""),
-                            "Industry": lead.get("industry", ""),
+                            "email": lead.get("email", ""),
+                            "business": lead.get("business", ""),
+                            "full_name": lead.get("full_name", ""),
+                            "first": lead.get("first", ""),
+                            "last": lead.get("last", ""),
+                            "linkedin": lead.get("linkedin", ""),
+                            "website": lead.get("website", ""),
+                            "industry": lead.get("industry", ""),
                             "sub_industry": lead.get("sub_industry", ""),
-                            "Region": lead.get("region", ""),
+                            "region": lead.get("region", ""),
                             "role": lead.get("role", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
@@ -624,7 +624,7 @@ class Miner(BaseMinerNeuron):
                         # Only include leads that have all required fields
                         if all(
                                 mapped_lead.get(field)
-                                for field in ["email", "Business"]):
+                                for field in ["email", "business"]):
                             mapped_leads.append(mapped_lead)
 
                     # apply business-intent ranking
@@ -647,7 +647,7 @@ class Miner(BaseMinerNeuron):
                         f"📤 SENDING {len(top_leads)} curated leads to validator:"
                     )
                     for i, lead in enumerate(top_leads, 1):
-                        business = lead.get('Business', 'Unknown')
+                        business = lead.get('business', 'Unknown')
                         score = lead.get('miner_intent_score', 0)
                         print(f"  {i}. {business} (intent={score:.3f})")
 
@@ -732,18 +732,17 @@ class Miner(BaseMinerNeuron):
             for lead in curated_leads:
                 # Map the fields correctly using the same keys as stored in pool
                 mapped_lead = {
-                    "email": lead.get("owner_email", ""),
-                    "owner_email": lead.get("owner_email", ""),
-                    "Business": lead.get("business", ""),
-                    "Owner Full name": lead.get("owner_full_name", ""),
-                    "First": lead.get("first", ""),
-                    "Last": lead.get("last", ""),
-                    "LinkedIn": lead.get("linkedin", ""),
-                    "Website": lead.get("website", ""),
-                    "Industry": lead.get("industry", ""),
+                    "email": lead.get("email", ""),
+                    "business": lead.get("business", ""),
+                    "full_name": lead.get("full_name", ""),
+                    "first": lead.get("first", ""),
+                    "last": lead.get("last", ""),
+                    "linkedin": lead.get("linkedin", ""),
+                    "website": lead.get("website", ""),
+                    "industry": lead.get("industry", ""),
                     "sub_industry": lead.get("sub_industry", ""),
                     "role": lead.get("role", ""),
-                    "Region": lead.get("region", ""),
+                    "region": lead.get("region", ""),
                     "source": lead.get("source", ""),
                     "curated_by": self.wallet.hotkey.ss58_address,
                 }
@@ -755,7 +754,7 @@ class Miner(BaseMinerNeuron):
                 # Only include leads that have all required fields
                 if all(
                         mapped_lead.get(field)
-                        for field in ["email", "Business"]):
+                        for field in ["email", "business"]):
                     mapped_leads.append(mapped_lead)
                 else:
                     bt.logging.warning(
@@ -782,7 +781,7 @@ class Miner(BaseMinerNeuron):
 
             print(f"📤 SENDING {len(top_leads)} curated leads to validator:")
             for i, lead in enumerate(top_leads, 1):
-                business = lead.get('Business', 'Unknown')
+                business = lead.get('business', 'Unknown')
                 score = lead.get('miner_intent_score', 0)
                 print(f"  {i}. {business}  (intent={score:.3f})")
 
@@ -980,33 +979,50 @@ def sanitize_prospect(prospect, miner_hotkey=None):
     def valid_url(url):
         return bool(re.match(r"^https?://[^\s]+$", url))
 
-    # Special handling for email field
-    email = prospect.get("Owner(s) Email", "")
+    # Get email and full_name with fallback to legacy names for backward compatibility
+    email = prospect.get("email", prospect.get("Owner(s) Email", ""))
+    full_name = prospect.get("full_name", prospect.get("Owner Full name", ""))
+    
     sanitized = {
         "business":
-        strip_html(prospect.get("Business", "")),
-        "owner_full_name":
-        strip_html(prospect.get("Owner Full name", "")),
+        strip_html(prospect.get("business", prospect.get("Business", ""))),
+        "full_name":
+        strip_html(full_name),
         "first":
-        strip_html(prospect.get("First", "")),
+        strip_html(prospect.get("first", prospect.get("First", ""))),
         "last":
-        strip_html(prospect.get("Last", "")),
-        "owner_email":
+        strip_html(prospect.get("last", prospect.get("Last", ""))),
+        "email":
         strip_html(email),  # Use consistent field name
         "linkedin":
-        strip_html(prospect.get("LinkedIn", "")),
+        strip_html(prospect.get("linkedin", prospect.get("LinkedIn", ""))),
         "website":
-        strip_html(prospect.get("Website", "")),
+        strip_html(prospect.get("website", prospect.get("Website", ""))),
         "industry":
-        strip_html(prospect.get("Industry", "")),
+        strip_html(prospect.get("industry", prospect.get("Industry", ""))),
         "role":
-        strip_html(prospect.get("role", "") or prospect.get("Title", "")),
-        # accept either spelling, but store lower-case
+        strip_html(prospect.get("role", prospect.get("Title", ""))),
         "sub_industry":
         strip_html(
-            prospect.get("sub_industry") or prospect.get("Sub Industry", "")),
+            prospect.get("sub_industry", prospect.get("Sub Industry", ""))),
         "region":
-        strip_html(prospect.get("Region", "")),
+        strip_html(prospect.get("region", prospect.get("Region", ""))),
+        "description":
+        strip_html(prospect.get("description", "")),
+        "phone_numbers":
+        prospect.get("phone_numbers", []),
+        "founded_year":
+        prospect.get("founded_year", prospect.get("Founded Year", "")),
+        "ownership_type":
+        strip_html(prospect.get("ownership_type", prospect.get("Ownership Type", ""))),
+        "company_type":
+        strip_html(prospect.get("company_type", prospect.get("Company Type", ""))),
+        "number_of_locations":
+        prospect.get("number_of_locations", prospect.get("Number of Locations", "")),
+        "ids":
+        prospect.get("ids", {}),
+        "socials":
+        prospect.get("socials", {}),
         "source":
         miner_hotkey  # Add source field
     }

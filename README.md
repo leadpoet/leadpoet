@@ -110,16 +110,24 @@ Miners must submit prospects with the following structure:
 ```json
 {
   "business": "SpaceX",
-  "owner_full_name": "Elon Musk",
+  "full_name": "Elon Musk",
   "first": "Elon",
   "last": "Musk",
-  "owner_email": "elon@spacex.com",
+  "email": "elon@spacex.com",
   "role": "CEO",
   "website": "https://spacex.com",
   "linkedin": "https://linkedin.com/in/elonmusk",
   "industry": "Aerospace Manufacturing",
   "sub_industry": "Space Transportation",
-  "region": "Hawthorne, CA"
+  "region": "Hawthorne, CA",
+  "description": "Aerospace manufacturer and space transportation company focused on reducing space transportation costs",
+  "phone_numbers": ["+1-310-363-6000"],
+  "founded_year": 2002,
+  "ownership_type": "Private",
+  "company_type": "Corporation",
+  "number_of_locations": 5,
+  "ids": {"crunchbase": "spacex"},
+  "socials": {"twitter": "spacex"}
 }
 ```
 

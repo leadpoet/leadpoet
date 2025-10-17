@@ -10,42 +10,46 @@ Instead of nested .get() calls throughout the codebase, use these standardized e
 from typing import Dict, Any
 
 
-def get_field(data: Dict[str, Any], *keys: str, default: str = "") -> str:
+def get_field(data: Dict[str, Any], *keys: str, default: Any = ""):
     """
     Try multiple keys in priority order, return first found value.
     
-    This is the base function for all field extraction. It tries each key
-    in order and returns the value from the first key that EXISTS in the dict.
+    This EXACTLY replicates nested dict.get() behavior:
+    - Returns the EXACT value from the first key that exists (no transformations!)
+    - Only tries the next key if the current key doesn't exist in the dict
+    - Returns default only if none of the keys exist
     
-    IMPORTANT: This preserves the exact behavior of nested .get() calls:
-    - If a key exists (even with empty string value), return that value
-    - Only try the next key if the current key doesn't exist
-    - Return default only if none of the keys exist
+    IMPORTANT: This returns values UNCHANGED (preserves type, whitespace, etc.)
+    Just like: data.get(key1, data.get(key2, data.get(key3, default)))
     
     Args:
         data: Dictionary to search (typically a lead dict)
         *keys: Keys to try in priority order
-        default: Default value if all keys are missing
+        default: Default value if all keys are missing (can be any type)
     
     Returns:
-        Value from first existing key, or default if none exist
+        Exact value from first existing key, or default if none exist
     
-    Example:
-        >>> lead = {"Email 1": "test@example.com", "website": "example.com"}
-        >>> get_field(lead, "Email 1", "email", "Owner(s) Email")
+    Examples:
+        >>> lead = {"Email 1": "test@example.com"}
+        >>> get_field(lead, "Email 1", "email")
         "test@example.com"
-        >>> get_field(lead, "missing_key", "also_missing", default="N/A")
-        "N/A"
+        
         >>> lead = {"Email 1": ""}  # Empty string
         >>> get_field(lead, "Email 1", "email")
         ""  # Returns empty string, does NOT try "email"
+        
+        >>> lead = {"Email 1": "  spaces  "}  # With whitespace
+        >>> get_field(lead, "Email 1", "email")
+        "  spaces  "  # Preserves whitespace!
+        
+        >>> lead = {"score": 0.95}  # Float value
+        >>> get_field(lead, "score", "backup_score")
+        0.95  # Returns as float, NOT string!
     """
     for key in keys:
         if key in data:
-            value = data[key]
-            if value is None:
-                return ""
-            return str(value).strip() if isinstance(value, str) else str(value)
+            return data[key]
     return default
 
 

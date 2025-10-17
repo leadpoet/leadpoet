@@ -8,7 +8,7 @@ def test_imports():
     print("Testing imports...")
     
     try:
-        from Leadpoet.utils.lead_utils import (
+        from utils_lead_extraction import (
             get_field,
             get_email,
             get_website,
@@ -21,7 +21,7 @@ def test_imports():
             get_linkedin,
             get_sub_industry
         )
-        print("✅ lead_utils imports successful")
+        print("✅ utils_lead_extraction imports successful")
     except Exception as e:
         print(f"❌ lead_utils import failed: {e}")
         return False
@@ -53,7 +53,7 @@ def test_field_extractors():
     """Test that field extractors work correctly."""
     print("\nTesting field extractors...")
     
-    from Leadpoet.utils.lead_utils import (
+    from utils_lead_extraction import (
         get_email,
         get_website,
         get_company,

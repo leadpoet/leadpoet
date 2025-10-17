@@ -104,7 +104,9 @@ while true; do
     echo ""
     
     # Run validator with environment flag to prevent wrapper re-execution
+    # Suppress multiprocessing semaphore warnings by setting PYTHONWARNINGS
     export LEADPOET_WRAPPER_ACTIVE=1
+    export PYTHONWARNINGS="ignore::UserWarning"
     python3 neurons/validator.py "$@"
     
     EXIT_CODE=$?

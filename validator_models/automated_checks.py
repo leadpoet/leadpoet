@@ -14,6 +14,18 @@ from urllib.parse import urlparse
 from typing import Dict, Any, Tuple
 from dotenv import load_dotenv
 from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
+from Leadpoet.utils.lead_utils import (
+    get_email,
+    get_website,
+    get_company,
+    get_first_name,
+    get_last_name,
+    get_location,
+    get_industry,
+    get_role,
+    get_linkedin,
+    get_field
+)
 
 load_dotenv()
 HUNTER_API_KEY = os.getenv("HUNTER_API_KEY", "YOUR_HUNTER_API_KEY")
@@ -141,8 +153,8 @@ async def log_validation_metrics(lead_data: dict, validation_result: dict, stage
     """Log validation metrics for monitoring and analysis"""
     try:
         # Extract key metrics
-        email = lead_data.get("Email 1", lead_data.get("email", ""))
-        company = lead_data.get("Company", lead_data.get("company", ""))
+        email = get_email(lead_data)
+        company = get_company(lead_data)
         passed = validation_result.get("passed", False)
         reason = validation_result.get("reason", "Unknown")
 
@@ -170,8 +182,8 @@ async def log_validation_metrics(lead_data: dict, validation_result: dict, stage
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "stage": stage,
-            "email": lead_data.get("Email 1", lead_data.get("email", "")),
-            "company": lead_data.get("Company", lead_data.get("company", "")),
+            "email": get_email(lead_data),
+            "company": get_company(lead_data),
             "passed": validation_result.get("passed", False),
             "reason": validation_result.get("reason", "Unknown"),
         }
@@ -224,7 +236,7 @@ def extract_root_domain(website: str) -> str:
 async def check_email_regex(lead: dict) -> Tuple[bool, str]:
     """Check email format using RFC-5322 simplified regex"""
     try:
-        email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+        email = get_email(lead)
         if not email:
             return False, "No email provided"
 
@@ -247,7 +259,7 @@ async def check_email_regex(lead: dict) -> Tuple[bool, str]:
 
 async def check_domain_age(lead: dict) -> Tuple[bool, str]:
     """Check domain age using WHOIS lookup"""
-    website = lead.get("Website", lead.get("website", ""))
+    website = get_website(lead)
     if not website:
         return False, "No website provided"
 
@@ -295,7 +307,7 @@ async def check_domain_age(lead: dict) -> Tuple[bool, str]:
 
 async def check_mx_record(lead: dict) -> Tuple[bool, str]:
     """Check if domain has MX records"""
-    website = lead.get("Website", lead.get("website", ""))
+    website = get_website(lead)
     if not website:
         return False, "No website provided"
 
@@ -338,7 +350,7 @@ async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
         lead["dmarc_policy_strict"] = False
         return lead
         
-    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    email = get_email(lead)
     if not email:
         # No email to check - append default values
         lead = fail_lead(lead)
@@ -454,7 +466,7 @@ async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
 
 async def check_head_request(lead: dict) -> Tuple[bool, str]:
     """Wrapper around existing verify_company function"""
-    website = lead.get("Website", lead.get("website", ""))
+    website = get_website(lead)
     if not website:
         return False, "No website provided"
 
@@ -477,7 +489,7 @@ async def check_head_request(lead: dict) -> Tuple[bool, str]:
 
 async def check_disposable(lead: dict) -> Tuple[bool, str]:
     """Check if email domain is disposable"""
-    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    email = get_email(lead)
     if not email:
         return False, "No email provided"
 
@@ -507,7 +519,7 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, str]:
     Returns:
         (bool, str): (is_valid, reason_if_invalid)
     """
-    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    email = get_email(lead)
     if not email:
         return False, "No email provided"
 
@@ -569,7 +581,7 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, str]:
 
 async def check_zerobounce_email(lead: dict) -> Tuple[bool, str]:
     """Check email validity **and AI-score** using ZeroBounce API"""
-    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    email = get_email(lead)
     if not email:
         return False, "No email provided"
 
@@ -803,12 +815,12 @@ async def check_llm_contact_match(lead: dict) -> Tuple[bool, str]:
         (bool, str): (is_valid, reason_if_invalid)
     """
     # Extract contact information
-    first_name = lead.get("First", lead.get("First Name", lead.get("first", "")))
-    last_name = lead.get("Last", lead.get("Last Name", lead.get("last", "")))
-    company_name = lead.get("Business", lead.get("Company", lead.get("business", "")))
-    role = lead.get("role", lead.get("Role", ""))
-    location = lead.get("region", lead.get("Region", lead.get("location", "")))
-    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    first_name = get_first_name(lead)
+    last_name = get_last_name(lead)
+    company_name = get_company(lead)
+    role = get_role(lead)
+    location = get_location(lead)
+    email = get_email(lead)
 
     if not email:
         return False, "No email provided"
@@ -906,11 +918,11 @@ async def check_llm_company_match(lead: dict) -> Tuple[bool, str]:
     Returns:
         (bool, str): (is_valid, reason_if_invalid)
     """
-    company_name = lead.get("Business", lead.get("Company", lead.get("business", "")))
-    industry = lead.get("Industry", lead.get("industry", ""))
-    location = lead.get("region", lead.get("Region", lead.get("location", "")))
-    website = lead.get("Website", lead.get("website", ""))
-    linkedin_url = lead.get("linkedin", lead.get("LinkedIn", ""))
+    company_name = get_company(lead)
+    industry = get_industry(lead)
+    location = get_location(lead)
+    website = get_website(lead)
+    linkedin_url = get_linkedin(lead)
 
     if not company_name:
         return False, "No company name provided"
@@ -1018,8 +1030,8 @@ async def check_icp_evidence(lead: dict) -> Tuple[bool, str]:
     Returns:
         (True, str): Always passes, with informational message
     """
-    company_name = lead.get("Business", lead.get("Company", lead.get("business", "")))
-    icp_evidence = lead.get("icp_evidence", lead.get("ICP Evidence", ""))
+    company_name = get_company(lead)
+    icp_evidence = get_field(lead, "icp_evidence", "ICP Evidence")
 
     # Initialize result - will always be appended to lead
     lead["icp_evidence_confirmed"] = False
@@ -1140,7 +1152,7 @@ Base your decision on:
 async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     """Run all automated checks in stages, returning (passed, reason)"""
 
-    email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+    email = get_email(lead)
     company = lead.get("Company", "")
 
     # ========================================================================
@@ -1313,7 +1325,7 @@ async def check_duplicates(leads: list) -> Tuple[bool, dict]:
     duplicate_leads = {}  # Track which lead indices are duplicates
 
     for i, lead in enumerate(leads):
-        email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
+        email = get_email(lead)
 
         if email in email_first_occurrence:
             # This is a duplicate - mark this lead index as duplicate
@@ -1332,8 +1344,8 @@ async def validate_lead_list(leads: list) -> list:
         print("Mock mode: Assuming all leads pass automated checks")
         return [{
             "lead_index": i,
-            "email": lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", ""))),
-            "company_domain": urlparse(lead.get("Website", lead.get("website", ""))).netloc,
+            "email": get_email(lead),
+            "company_domain": urlparse(get_website(lead)).netloc,
             "status": "Valid",
             "reason": "Mock pass"
         } for i, lead in enumerate(leads)]
@@ -1348,8 +1360,9 @@ async def validate_lead_list(leads: list) -> list:
         # Process all leads, but mark duplicates as invalid
         report = []
         for i, lead in enumerate(leads):
-            email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
-            domain = urlparse(lead.get("Website", lead.get("website", ""))).netloc if lead.get("Website") or lead.get("website") else ""
+            email = get_email(lead)
+            website = get_website(lead)
+            domain = urlparse(website).netloc if website else ""
 
             if i in duplicate_leads:
                 # Mark duplicate lead as invalid
@@ -1377,8 +1390,9 @@ async def validate_lead_list(leads: list) -> list:
     # Process each lead through the new validation pipeline
     report = []
     for i, lead in enumerate(leads):
-        email = lead.get("Email 1", lead.get("Owner(s) Email", lead.get("email", "")))
-        domain = urlparse(lead.get("Website", lead.get("website", ""))).netloc if lead.get("Website") or lead.get("website") else ""
+        email = get_email(lead)
+        website = get_website(lead)
+        domain = urlparse(website).netloc if website else ""
 
         # Run new automated checks
         passed, reason = await run_automated_checks(lead)

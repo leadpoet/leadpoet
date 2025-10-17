@@ -66,7 +66,7 @@ def get_email(lead: Dict[str, Any], default: str = "") -> str:
     Returns:
         Email address or default
     """
-    return get_field(lead, "Email 1", "Owner(s) Email", "email", default=default)
+    return get_field(lead, "Email 1", "Owner(s) Email", "email", "owner_email", default=default)
 
 
 def get_website(lead: Dict[str, Any], default: str = "") -> str:

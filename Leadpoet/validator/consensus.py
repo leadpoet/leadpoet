@@ -7,6 +7,7 @@ by their trust value: S_lead = Σ(S_v * V_v) for all validators
 import bittensor as bt
 from typing import List, Dict, Tuple
 from collections import defaultdict
+from Leadpoet.utils.lead_utils import get_company, get_email, get_field
 
 
 def calculate_consensus_ranking(
@@ -70,14 +71,14 @@ def calculate_consensus_ranking(
 
             # Extract lead data
             lead_data = lead.get("lead", lead)
-            business = lead_data.get("Business", lead_data.get("business", ""))
-            email = lead_data.get("email", lead_data.get("Email 1", ""))
+            business = get_company(lead_data)
+            email = get_email(lead_data)
 
             # Use (business, email) as unique identifier
             lead_id = (business.lower().strip(), email.lower().strip())
 
             # Get validator's score for this lead
-            score = float(lead.get("score", lead.get("intent_score", 0.0)))
+            score = float(get_field(lead, "score", "intent_score", default=0.0))
 
             # Store this validator's score and trust for this lead
             lead_scores[lead_id]["scores"].append(score)

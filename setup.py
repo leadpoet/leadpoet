@@ -64,7 +64,11 @@ requirements = [
     "publicsuffix2>=2.20191221",
     "python-dotenv>=1.0.0",
     # gRPC communication
-    "grpcio>=1.60.0"
+    "grpcio>=1.60.0",
+    # JWT token management
+    "pyjwt>=2.0.0",
+    # Supabase client
+    "supabase>=2.0.0"
 ]
 
 setup(
@@ -73,11 +77,11 @@ setup(
     description="A Bittensor subnet for decentralized lead generation and validation",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/Pranav-create/Leadpoet",  
+    url="https://github.com/leadpoet/leadpoet",  
     author="Leadpoet",  
     author_email="hello@leadpoet.com",  
     license="MIT",
-    packages=find_packages(exclude=["tests", "*.tests", "*.tests.*", "tests.*"]),
+    packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'miner_models', 'miner_models.*', 'neurons', 'neurons.*', 'validator_models', 'validator_models.*']),
     include_package_data=True,
     python_requires=">=3.8",
     install_requires=requirements,

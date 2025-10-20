@@ -42,7 +42,7 @@ export GSE_CX="your_search_engine_id"                # Custom Search ID
 ```bash
 # Email, LLM, and Google Search Validation Tools
 export OPENROUTER_KEY="your_openrouter_key"          # Required for lead validation
-export ZEROBOUNCE_API_KEY="your_zerobounce_key"      # Primary email validation
+export MYEMAILVERIFIER_API_KEY="your_mev_key"        # Primary email validation
 export HUNTER_API_KEY="your_hunter_key"              # Fallback email verification
 export GSE_API_KEY="your_google_api_key"             # For company verification
 export GSE_CX="your_search_engine_id"                # Custom search engine ID

@@ -29,22 +29,7 @@ from Leadpoet.utils.utils_lead_extraction import (
 
 load_dotenv()
 HUNTER_API_KEY = os.getenv("HUNTER_API_KEY", "YOUR_HUNTER_API_KEY")
-ZEROBOUNCE_API_KEY = os.getenv("ZEROBOUNCE_API_KEY", "YOUR_ZEROBOUNCE_API_KEY")
-
-GOOGLE_API_KEY = os.getenv("GSE_API_KEY", "YOUR_GOOGLE_API_KEY")
-GOOGLE_CSE_ID = os.getenv("GSE_CX", "YOUR_GOOGLE_CSE_ID")
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
-
-AVAILABLE_MODELS = [
-    "google/gemini-2.5-flash",
-    "openai/gpt-4o-mini",
-    "google/gemini-2.0-flash-exp",
-]
-
-
-FALLBACK_MODELS = [
-    "anthropic/claude-3.7-sonnet",
-]
+MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "YOUR_MYEMAILVERIFIER_API_KEY")
 
 EMAIL_CACHE_FILE = "email_verification_cache.pkl"
 VALIDATION_ARTIFACTS_DIR = "validation_artifacts"
@@ -52,7 +37,7 @@ VALIDATION_ARTIFACTS_DIR = "validation_artifacts"
 CACHE_TTLS = {
     "dns_head": 24,
     "whois": 90,
-    "zerobounce": 90,  
+    "myemailverifier": 90,  
 }
 
 API_SEMAPHORE = asyncio.Semaphore(10)
@@ -281,6 +266,10 @@ async def check_domain_age(lead: dict) -> Tuple[bool, str]:
                         creation_date = w.creation_date[0]
                     else:
                         creation_date = w.creation_date
+                    
+                    # Make creation_date timezone-naive if it's timezone-aware
+                    if creation_date.tzinfo is not None:
+                        creation_date = creation_date.replace(tzinfo=None)
 
                     age_days = (datetime.now() - creation_date).days
                     min_age_days = 7  # 7 days minimum
@@ -577,575 +566,259 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, str]:
         print(f"⚠️ DNSBL check error for {root_domain}: {e}")
         return result
 
-# Stage 2: ZeroBounce Check
+# Stage 3: MyEmailVerifier Check
 
-async def check_zerobounce_email(lead: dict) -> Tuple[bool, str]:
-    """Check email validity **and AI-score** using ZeroBounce API"""
+async def check_myemailverifier_email(lead: dict) -> Tuple[bool, str]:
+    """
+    Check email validity using MyEmailVerifier API
+    
+    MyEmailVerifier provides real-time email verification with:
+    - Syntax validation
+    - Domain/MX record checks
+    - Catch-all detection
+    - Disposable email detection
+    - Spam trap detection
+    - Role account detection
+    
+    API Documentation: https://myemailverifier.com/real-time-email-verification
+    """
     email = get_email(lead)
     if not email:
         return False, "No email provided"
 
-    cache_key = f"zerobounce:{email}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["zerobounce"]):
+    cache_key = f"myemailverifier:{email}"
+    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["myemailverifier"]):
+        print(f"   💾 Using cached MyEmailVerifier result for: {email}")
         return validation_cache[cache_key]
 
     try:
-        # Mock-mode fallback - both validation and scoring work
-        if "YOUR_ZEROBOUNCE_API_KEY" in ZEROBOUNCE_API_KEY:
-            # Mock both API calls
-            score = -1  # Mock AI score if no API key
-            lead["email_score"] = score
-            print(f"📊 ZeroBounce AI score for {email}: {score} (MOCK)")
-            result = (True, f"Mock pass - ZeroBounce check, score={score}")
+        # Mock-mode fallback
+        if "YOUR_MYEMAILVERIFIER_API_KEY" in MYEMAILVERIFIER_API_KEY:
+            print(f"   🔧 MOCK MODE: Using mock validation (no real API call)")
+            result = (True, "Mock pass - MyEmailVerifier check")
             validation_cache[cache_key] = result
             return result
 
         async with API_SEMAPHORE:
             async with aiohttp.ClientSession() as session:
-                # 1️⃣ standard validation FIRST
-                url_validate = "https://api.zerobounce.net/v2/validate"
-                params_val   = {"api_key": ZEROBOUNCE_API_KEY, "email": email}
-                async with session.get(url_validate, params=params_val, timeout=10) as resp_val:
-                    data_val  = await resp_val.json()
-                    status    = data_val.get("status", "unknown")
-
-                # Check for problematic email statuses and fail immediately
-                problematic_statuses = ["do_not_mail", "spamtrap", "abuse"]
-                if status in problematic_statuses:
-                    status_messages = {
-                        "do_not_mail": "Email marked as do_not_mail",
-                        "spamtrap": "Email is a spamtrap/honeypot - do not mail",
-                        "abuse": "Email marked as abuse"
-                    }
-                    result = (False, status_messages.get(status, f"Email has problematic status: {status}"))
+                # MyEmailVerifier API endpoint
+                # Correct endpoint format: https://client.myemailverifier.com/verifier/validate_single/{email}/{API_KEY}
+                url = f"https://client.myemailverifier.com/verifier/validate_single/{email}/{MYEMAILVERIFIER_API_KEY}"
+                
+                print(f"   📞 Calling MyEmailVerifier API for: {email}")
+                
+                async with session.get(url, timeout=15) as response:
+                    data = await response.json()
+                    
+                    # Log the actual API response to prove it's not mock mode
+                    print(f"   📥 MyEmailVerifier Response: {data}")
+                    
+                    # Parse MyEmailVerifier response
+                    # API response fields (as per official docs):
+                    # - Address: the email address
+                    # - Status: "Valid", "Invalid", "Unknown", "Catch All", "Grey-listed"
+                    # - Disposable_Domain: "true" or "false" (string)
+                    # - catch_all: "true" or "false" (string)
+                    # - Role_Based: "true" or "false" (string)
+                    # - Free_Domain: "true" or "false" (string)
+                    # - Greylisted: "true" or "false" (string)
+                    # - Diagnosis: description (e.g., "Mailbox Exists and Active")
+                    
+                    status = data.get("Status", "Unknown")
+                    
+                    # Check for disposable domains
+                    is_disposable = data.get("Disposable_Domain", "false") == "true"
+                    if is_disposable:
+                        result = (False, "Email is from a disposable/temporary email provider")
+                        validation_cache[cache_key] = result
+                        return result
+                    
+                    # Handle validation results based on Status field
+                    if status == "Valid":
+                        result = (True, "Email validated (valid)")
+                    elif status == "Catch All":
+                        # BRD: IF catch-all, accept only IF DNS TXT record contains v=spf1
+                        has_spf = lead.get("has_spf", False)
+                        if has_spf:
+                            result = (True, "Email validated (catch-all with SPF)")
+                        else:
+                            result = (False, "Email is catch-all without SPF record")
+                    elif status == "Invalid":
+                        result = (False, "Email marked invalid")
+                    elif status == "Grey-listed":
+                        # Greylisted - retry recommended after 5-10 hours, but for now pass
+                        result = (True, "Email greylisted (assumed valid)")
+                    elif status == "Unknown":
+                        # For unknown status, default to passing to avoid false negatives
+                        result = (True, "Email status unknown (assumed valid)")
+                    else:
+                        # Any other status, log and assume valid
+                        result = (True, f"Email status {status} (assumed valid)")
+                    
                     validation_cache[cache_key] = result
                     return result
 
-                # Check if validation passed
-                validation_passed = status in ["valid", "catch-all"]
-
-                if validation_passed:
-                    # 2️⃣ A.I. email score - ONLY if validation passed
-                    url_score  = "https://api-us.zerobounce.net/v2/scoring"
-                    params_scr = {"api_key": ZEROBOUNCE_API_KEY, "email": email}
-                    async with session.get(url_score, params=params_scr, timeout=10) as resp_scr:
-                        data_scr = await resp_scr.json()
-                        score    = float(data_scr.get("score", -1))   # 0-10 or -1 on error
-
-                    # Store score directly on the lead so downstream code can use it
-                    lead["email_score"] = score
-                    print(f"📊 ZeroBounce AI score for {email}: {score}")
-                else:
-                    # Validation failed - don't make scoring API call
-                    score = -1  # Indicate no score was obtained
-
-        # Decide pass/fail using the original validation status
-        if status == "valid":
-            result = (True, f"Email validated (valid), score={score}")
-        elif status == "catch-all":
-            # BRD: IF catch-all, accept only IF DNS TXT record contains v=spf1
-            has_spf = lead.get("has_spf", False)
-            if has_spf:
-                result = (True, f"Email validated (catch-all with SPF), score={score}")
-            else:
-                result = (False, "Email is catch-all without SPF record")
-        elif status == "invalid":
-            result = (False, "Email marked invalid")
-        else:
-            result = (True, f"Email status {status}, score={score} (assumed valid)")
-
+    except Exception as e:
+        result = (False, f"MyEmailVerifier check failed: {str(e)}")
         validation_cache[cache_key] = result
         return result
 
-    except Exception as e:
-        result = (False, f"ZeroBounce check failed: {str(e)}")
-        validation_cache[cache_key] = result
-        return result
-
-# Stage 3: Google LLM Checks
-
-async def google_search(query: str, max_results=3) -> str:
+async def check_terms_attestation(lead: dict) -> Tuple[bool, str]:
     """
-    Perform Google Custom Search and return concatenated snippets.
-
-    Args:
-        query: Search query string
-        max_results: Number of results to fetch (default 3)
-
-    Returns:
-        str: Concatenated snippet text from search results
+    Verify miner's attestation metadata against Supabase database (SOURCE OF TRUTH).
+    
+    Security Checks:
+    1. Query contributor_attestations table for wallet's attestation record
+    2. Reject if no valid attestation exists (prevents local file manipulation)
+    3. Verify lead metadata matches Supabase attestation record
+    4. Validate terms version and boolean attestations
+    
+    This is Stage -1 (runs BEFORE all other checks) to ensure regulatory compliance.
     """
-    # Check for required environment variables
-    if "YOUR_GOOGLE_API_KEY" in GOOGLE_API_KEY or "YOUR_GOOGLE_CSE_ID" in GOOGLE_CSE_ID:
-        print("⚠️ Google API credentials not configured - skipping search")
-        return ""
-
-    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
-        print("⚠️ Google API credentials missing - skipping search")
-        return ""
-
+    from Leadpoet.utils.contributor_terms import TERMS_VERSION_HASH
+    from Leadpoet.utils.cloud_db import get_supabase_client
+    
+    # Check required attestation fields in lead
+    required_fields = ["wallet_ss58", "terms_version_hash", "lawful_collection", 
+                      "no_restricted_sources", "license_granted"]
+    
+    missing = [f for f in required_fields if f not in lead]
+    if missing:
+        return False, f"Missing attestation fields: {', '.join(missing)}"
+    
+    wallet_ss58 = lead.get("wallet_ss58")
+    lead_terms_hash = lead.get("terms_version_hash")
+    
+    # SECURITY CHECK 1: Query Supabase for authoritative attestation record
     try:
-        async with API_SEMAPHORE:
-            # Use aiohttp for the API call
-            async with aiohttp.ClientSession() as session:
-                url = "https://www.googleapis.com/customsearch/v1"
-                params = {
-                    "key": GOOGLE_API_KEY,
-                    "cx": GOOGLE_CSE_ID,
-                    "q": query,
-                    "num": min(max_results, 10)  # Google API max is 10
-                }
-
-                # Make the API call directly (don't use api_call_with_retry)
-                async with session.get(url, params=params, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        items = data.get("items", [])
-
-                        # Extract and concatenate snippets
-                        snippets = []
-                        for item in items[:max_results]:
-                            snippet = item.get("snippet", "")
-                            if snippet:
-                                snippets.append(snippet)
-
-                        result = " ".join(snippets)
-                        print(f"🔍 Google Search: Found {len(snippets)} snippets for query: {query[:50]}...")
-                        return result
-                    else:
-                        print(f"⚠️ Google Search API error: {response.status}")
-                        return ""
-
+        supabase = get_supabase_client()
+        if not supabase:
+            # If Supabase not available, log warning but don't fail validation
+            # This prevents breaking validators during network issues
+            print(f"   ⚠️  Supabase client not available - skipping attestation verification")
+            return True, "Attestation check skipped (Supabase unavailable)"
+        
+        result = supabase.table("contributor_attestations")\
+            .select("*")\
+            .eq("wallet_ss58", wallet_ss58)\
+            .eq("terms_version_hash", TERMS_VERSION_HASH)\
+            .eq("accepted", True)\
+            .execute()
+        
+        # SECURITY CHECK 2: Reject if no valid attestation in database
+        if not result.data or len(result.data) == 0:
+            return False, f"No valid attestation found in database for wallet {wallet_ss58[:10]}..."
+        
+        # Attestation exists in Supabase - miner has legitimately accepted terms
+        supabase_attestation = result.data[0]
+        
     except Exception as e:
-        print(f"⚠️ Google Search error: {e}")
-        return ""
+        # Log error but don't fail validation - prevents breaking validators
+        print(f"   ⚠️  Failed to verify attestation in database: {str(e)}")
+        return True, "Attestation check skipped (database error)"
+    
+    # SECURITY CHECK 3: Verify lead metadata matches Supabase record
+    if lead_terms_hash != supabase_attestation.get("terms_version_hash"):
+        return False, f"Lead attestation hash mismatch (lead: {lead_terms_hash[:8]}, db: {supabase_attestation.get('terms_version_hash', '')[:8]})"
+    
+    # Check: Verify terms version is current
+    if lead_terms_hash != TERMS_VERSION_HASH:
+        return False, f"Outdated terms version (lead: {lead_terms_hash[:8]}, current: {TERMS_VERSION_HASH[:8]})"
+    
+    # Check: Verify boolean attestations in lead
+    if not all([lead.get("lawful_collection"), 
+                lead.get("no_restricted_sources"), 
+                lead.get("license_granted")]):
+        return False, "Incomplete attestations"
+    
+    return True, "Terms attestation valid (verified against database)"
 
-async def call_llm(prompt: str) -> dict:
+
+async def check_source_provenance(lead: dict) -> Tuple[bool, str]:
     """
-    Call LLM with prompt and return parsed JSON response.
-
-    Args:
-        prompt: LLM prompt string
-
-    Returns:
-        dict: Parsed JSON response from LLM
+    Verify source provenance metadata.
+    
+    Validates:
+    - source_url is present and valid
+    - source_type is in allowed list
+    - Domain not in restricted sources denylist
+    - Domain age ≥ 7 days (reuses existing check)
+    
+    This ensures miners are providing valid source information and not using
+    prohibited data brokers without proper authorization.
     """
-    if not OPENROUTER_KEY or "YOUR_OPENROUTER_API_KEY" in OPENROUTER_KEY:
-        print("⚠️ OpenRouter API key not configured - returning empty result")
-        return {}
-
-    def _extract_json(response_text: str) -> dict:
-        """Extract JSON from LLM response text"""
-        try:
-            txt = response_text.strip()
-            if txt.startswith("```"):
-                txt = txt.strip("`").lstrip("json").strip()
-
-            # Find JSON object
-            start = txt.find("{")
-            end = txt.rfind("}") + 1
-            if start == -1 or end == 0:
-                return {}
-
-            json_str = txt[start:end]
-            return json.loads(json_str)
-        except Exception as e:
-            print(f"⚠️ JSON parsing error: {e}")
-            return {}
-
-    def _try_model(model_name: str) -> dict:
-        """Try calling a specific model"""
-        try:
-            import requests
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": model_name,
-                    "temperature": 0.2,
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful assistant. Always respond with valid JSON."},
-                        {"role": "user", "content": prompt}
-                    ]
-                },
-                timeout=15
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            return _extract_json(content)
-        except Exception as e:
-            print(f"⚠️ LLM model {model_name} failed: {e}")
-            return {}
-
-    # Try primary model (use first from AVAILABLE_MODELS)
+    from Leadpoet.utils.source_provenance import (
+        validate_source_url,
+        is_restricted_source,
+        extract_domain_from_url
+    )
+    
+    # Check required fields
+    source_url = lead.get("source_url")
+    source_type = lead.get("source_type")
+    
+    if not source_url:
+        return False, "Missing source_url"
+    
+    if not source_type:
+        return False, "Missing source_type"
+    
+    # Validate source_type against allowed list
+    valid_types = ["public_registry", "company_site", "first_party_form", 
+                   "licensed_resale", "proprietary_database"]
+    if source_type not in valid_types:
+        return False, f"Invalid source_type: {source_type}"
+    
+    # Validate source URL (checks denylist, domain age, reachability)
     try:
-        result = _try_model(AVAILABLE_MODELS[0])
-        if result:
-            return result
+        is_valid, reason = await validate_source_url(source_url)
+        if not is_valid:
+            return False, f"Source URL validation failed: {reason}"
     except Exception as e:
-        print(f"⚠️ Primary LLM model failed: {e}")
+        return False, f"Error validating source URL: {str(e)}"
+    
+    # Additional check: Extract domain and verify not restricted
+    # (This is redundant with validate_source_url but provides explicit feedback)
+    domain = extract_domain_from_url(source_url)
+    if domain and is_restricted_source(domain):
+        # Only fail if NOT a licensed resale (those are handled in next check)
+        if source_type != "licensed_resale":
+            return False, f"Source domain {domain} is in restricted denylist"
+    
+    return True, "Source provenance verified"
 
-    # Try fallback models
-    import random
-    for fallback_model in random.sample(FALLBACK_MODELS, k=len(FALLBACK_MODELS)):
-        try:
-            result = _try_model(fallback_model)
-            if result:
-                print(f"🔄 LLM fallback model {fallback_model} succeeded")
-                return result
-        except Exception as e:
-            print(f"⚠️ LLM fallback {fallback_model} failed: {e}")
 
-    # All models failed
-    print("⚠️ All LLM models failed - returning empty result")
-    return {}
-
-async def check_llm_contact_match(lead: dict) -> Tuple[bool, str]:
+async def check_licensed_resale_proof(lead: dict) -> Tuple[bool, str]:
     """
-    HARD: Verify contact works at company using Google search + LLM
-    SOFT: Add role & location alignment data to lead
-
-    Args:
-        lead: Dict containing contact info (name, email, company, role, location)
-
-    Returns:
-        (bool, str): (is_valid, reason_if_invalid)
+    Validate license document proof for licensed resale submissions.
+    
+    If source_type = "licensed_resale", validates that:
+    - license_doc_hash is present
+    - license_doc_hash is valid SHA-256 format
+    
+    This allows miners to use restricted data brokers (ZoomInfo, Apollo, etc.)
+    IF they have a valid resale agreement and provide cryptographic proof.
     """
-    # Extract contact information
-    first_name = get_first_name(lead)
-    last_name = get_last_name(lead)
-    company_name = get_company(lead)
-    role = get_role(lead)
-    location = get_location(lead)
-    email = get_email(lead)
+    from Leadpoet.utils.source_provenance import validate_licensed_resale
+    
+    source_type = lead.get("source_type")
+    
+    # Only validate if this is a licensed resale submission
+    if source_type != "licensed_resale":
+        return True, "Not a licensed resale submission"
+    
+    # Validate license proof
+    is_valid, reason = validate_licensed_resale(lead)
+    
+    if not is_valid:
+        return False, reason
+    
+    # Log for audit trail
+    license_hash = lead.get("license_doc_hash", "")
+    print(f"   📄 Licensed resale detected: hash={license_hash[:16]}...")
+    
+    return True, "Licensed resale proof verified"
 
-    if not email:
-        return False, "No email provided"
-
-    # Build contact name
-    contact_name = f"{first_name} {last_name}".strip()
-    if not contact_name or not company_name:
-        return True, "Insufficient data for contact verification"
-
-    cache_key = f"llm_contact:{email}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["zerobounce"]):
-        cached_result = validation_cache[cache_key]
-        # Apply cached soft annotations
-        if len(cached_result) > 2:
-            lead["llm_role_match"] = cached_result[2].get("role_match", False)
-            lead["llm_location_match"] = cached_result[2].get("location_match", False)
-        return cached_result[0], cached_result[1]
-
-    try:
-        # Build search query
-        search_query = f'"{contact_name}" "{company_name}"'
-        print(f"🔍 LLM Contact Search: {search_query}")
-
-        # Get search snippets
-        snippets = await google_search(search_query)
-        if not snippets:
-            result = (True, "No search results - assuming valid")
-            validation_cache[cache_key] = result
-            return result
-
-        # Build LLM prompt
-        prompt = f"""
-Based on the following search results, analyze if this contact works at the specified company and verify role/location alignment.
-
-CONTACT INFO:
-- Name: {contact_name}
-- Company: {company_name}
-- Role: {role}
-- Location: {location}
-
-SEARCH RESULTS:
-{snippets[:1500]}
-
-Please respond with ONLY a JSON object in this exact format:
-{{
-    "works_at_company": true or false,
-    "role_match": true or false,
-    "location_match": true or false
-}}
-
-Base your decision on:
-- works_at_company: Does the person appear to work at the specified company?
-- role_match: Does their role align with the provided role information?
-- location_match: Does their location align with the provided location?
-"""
-
-        # Call LLM
-        llm_result = await call_llm(prompt)
-
-        # Extract results with defaults
-        works_at_company = llm_result.get("works_at_company", True)  # Default to valid
-        role_match = llm_result.get("role_match", False)
-        location_match = llm_result.get("location_match", False)
-
-        # Apply SOFT annotations to lead
-        lead["llm_role_match"] = role_match
-        lead["llm_location_match"] = location_match
-
-        # HARD decision
-        if not works_at_company:
-            result = (False, "Contact does not work at specified company")
-        else:
-            result = (True, "Contact verification passed")
-
-        # Cache result with soft annotations
-        validation_cache[cache_key] = (result[0], result[1], {"role_match": role_match, "location_match": location_match})
-
-        print(f"✅ LLM Contact Check: {contact_name} @ {company_name} - {result[1]}")
-        return result
-
-    except Exception as e:
-        result = (True, f"LLM contact check failed (defaulting to valid): {str(e)}")
-        validation_cache[cache_key] = result
-        print(f"⚠️ LLM contact check error: {e}")
-        return result
-
-async def check_llm_company_match(lead: dict) -> Tuple[bool, str]:
-    """
-    HARD: Verify company details using Google search + LLM
-    SOFT: Add LinkedIn match data if available
-
-    Args:
-        lead: Dict containing company info (company_name, industry, location, linkedin_url)
-
-    Returns:
-        (bool, str): (is_valid, reason_if_invalid)
-    """
-    company_name = get_company(lead)
-    industry = get_industry(lead)
-    location = get_location(lead)
-    website = get_website(lead)
-    linkedin_url = get_linkedin(lead)
-
-    if not company_name:
-        return False, "No company name provided"
-
-    cache_key = f"llm_company:{company_name.lower().replace(' ', '_')}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["zerobounce"]):
-        cached_result = validation_cache[cache_key]
-        # Apply cached soft annotations
-        if len(cached_result) > 2 and linkedin_url:
-            lead["llm_linkedin_match"] = cached_result[2].get("linkedin_match", False)
-        return cached_result[0], cached_result[1]
-
-    try:
-        # Build search query
-        search_query = f'"{company_name}" {industry} {location}'.strip()
-        print(f"🔍 LLM Company Search: {search_query}")
-
-        # Get search snippets
-        snippets = await google_search(search_query)
-        if not snippets:
-            result = (True, "No search results - assuming valid")
-            validation_cache[cache_key] = result
-            return result
-
-        # Build LLM prompt
-        prompt = f"""
-Based on the following search results, verify if the company information matches what was found online.
-
-COMPANY INFO:
-- Company Name: {company_name}
-- Industry: {industry}
-- Location: {location}
-- Website: {website}
-- LinkedIn: {linkedin_url}
-
-SEARCH RESULTS:
-{snippets[:1500]}
-
-Please respond with ONLY a JSON object in this exact format:
-{{
-    "company_name_match": true or false,
-    "industry_match": true or false,
-    "location_match": true or false,
-    "linkedin_match": true or false
-}}
-
-Base your decision on:
-- company_name_match: Does the company name closely match what's found online? (Allow for minor variations)
-- industry_match: Does the industry classification align with the company's actual business?
-- location_match: Does the location align with where the company operates?
-- linkedin_match: If LinkedIn URL provided, does it match the first search result or company info?
-"""
-
-        # Call LLM
-        llm_result = await call_llm(prompt)
-
-        # Extract results with defaults
-        company_name_match = llm_result.get("company_name_match", True)  # Default to valid
-        industry_match = llm_result.get("industry_match", True)
-        location_match = llm_result.get("location_match", True)
-        linkedin_match = llm_result.get("linkedin_match", False)
-
-        # Apply SOFT annotations to lead (only if LinkedIn URL exists)
-        if linkedin_url:
-            lead["llm_linkedin_match"] = linkedin_match
-
-        # HARD decisions: ALL must be true
-        failed_checks = []
-        if not company_name_match:
-            failed_checks.append("company name")
-        if not industry_match:
-            failed_checks.append("industry")
-        if not location_match:
-            failed_checks.append("location")
-
-        if failed_checks:
-            result = (False, f"Company details verification failed: {', '.join(failed_checks)}")
-        else:
-            result = (True, "Company verification passed")
-
-        # Cache result with soft annotations
-        validation_cache[cache_key] = (result[0], result[1], {"linkedin_match": linkedin_match})
-
-        print(f"✅ LLM Company Check: {company_name} - {result[1]}")
-        return result
-
-    except Exception as e:
-        result = (True, f"LLM company check failed (defaulting to valid): {str(e)}")
-        validation_cache[cache_key] = result
-        print(f"⚠️ LLM company check error: {e}")
-        return result
-
-async def check_icp_evidence(lead: dict) -> Tuple[bool, str]:
-    """
-    ICP Evidence Check (SOFT) - Search for ICP evidence confirmation
-
-    This is a SOFT check that:
-    - Searches (Company Name + ICP Evidence) using Google
-    - Uses LLM to analyze search results and identify sources confirming ICP evidence
-    - Appends results to lead but NEVER rejects
-
-    Args:
-        lead: Dict containing company info and ICP evidence
-
-    Returns:
-        (True, str): Always passes, with informational message
-    """
-    company_name = get_company(lead)
-    icp_evidence = get_field(lead, "icp_evidence", "ICP Evidence")
-
-    # Initialize result - will always be appended to lead
-    lead["icp_evidence_confirmed"] = False
-    lead["icp_evidence_sources"] = []
-
-    if not company_name:
-        return True, "No company name for ICP evidence check (SOFT - passed)"
-
-    if not icp_evidence:
-        return True, "No ICP evidence to verify (SOFT - passed)"
-
-    cache_key = f"icp_evidence:{company_name.lower().replace(' ', '_')}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["zerobounce"]):
-        cached_data = validation_cache[cache_key]
-        # Apply cached values to lead
-        lead["icp_evidence_confirmed"] = cached_data.get("confirmed", False)
-        lead["icp_evidence_sources"] = cached_data.get("sources", [])
-        if "confidence" in cached_data:
-            lead["icp_evidence_confidence"] = cached_data["confidence"]
-        return True, cached_data.get("message", "ICP evidence check (cached)")
-
-    try:
-        # Build search query
-        search_query = f'"{company_name}" {icp_evidence}'
-        print(f"🔍 ICP Evidence Search: {search_query[:80]}...")
-
-        # Get search snippets
-        snippets = await google_search(search_query, max_results=5)
-        if not snippets:
-            message = "No search results for ICP evidence (SOFT - passed)"
-            cache_data = {
-                "confirmed": False,
-                "sources": [],
-                "message": message
-            }
-            validation_cache[cache_key] = cache_data
-            return True, message
-
-        # Build LLM prompt
-        prompt = f"""
-Based on the following search results, determine if there are any sources that confirm the ICP (Ideal Customer Profile) evidence for this company.
-
-COMPANY: {company_name}
-ICP EVIDENCE: {icp_evidence}
-
-SEARCH RESULTS:
-{snippets[:2000]}
-
-Please respond with ONLY a JSON object in this exact format:
-{{
-    "evidence_confirmed": true or false,
-    "sources": ["source1", "source2", ...],
-    "confidence": "high" or "medium" or "low"
-}}
-
-Base your decision on:
-- evidence_confirmed: Are there credible sources in the search results that confirm the ICP evidence?
-- sources: List of specific sources/websites that confirm the evidence (max 3)
-- confidence: Your confidence level in the confirmation
-"""
-
-        # Call LLM
-        llm_result = await call_llm(prompt)
-
-        # Extract results with defaults
-        evidence_confirmed = llm_result.get("evidence_confirmed", False)
-        sources = llm_result.get("sources", [])
-        confidence = llm_result.get("confidence", "low")
-
-        # Apply SOFT annotations to lead
-        lead["icp_evidence_confirmed"] = evidence_confirmed
-        lead["icp_evidence_sources"] = sources[:3]  # Limit to 3 sources
-        lead["icp_evidence_confidence"] = confidence
-
-        # Create informational message
-        if evidence_confirmed:
-            message = f"ICP evidence confirmed ({confidence} confidence) - {len(sources)} sources"
-        else:
-            message = f"ICP evidence not confirmed ({confidence} confidence)"
-
-        # Cache the results
-        cache_data = {
-            "confirmed": evidence_confirmed,
-            "sources": sources[:3],
-            "confidence": confidence,
-            "message": message
-        }
-        validation_cache[cache_key] = cache_data
-
-        print(f"📊 ICP Evidence Check (SOFT): {company_name} - {message}")
-
-        # ALWAYS return True (SOFT check never fails)
-        return True, message
-
-    except Exception as e:
-        # On any error, append False values and pass
-        lead["icp_evidence_confirmed"] = False
-        lead["icp_evidence_sources"] = []
-        lead["icp_evidence_confidence"] = "error"
-
-        message = f"ICP evidence check error (SOFT - passed): {str(e)}"
-        print(f"⚠️ {message}")
-
-        # Cache the error result
-        cache_data = {
-            "confirmed": False,
-            "sources": [],
-            "confidence": "error",
-            "message": message
-        }
-        validation_cache[cache_key] = cache_data
-
-        # ALWAYS return True (SOFT check never fails)
-        return True, message
 
 # Main validation pipeline
 
@@ -1154,6 +827,38 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
 
     email = get_email(lead)
     company = lead.get("Company", "")
+
+    # ========================================================================
+    # Stage -1: Terms Attestation Verification (HARD)
+    # Verifies miner attestation against Supabase database (source of truth)
+    # ========================================================================
+    print(f"🔍 Stage -1: Terms attestation check for {email} @ {company}")
+    
+    passed, reason = await check_terms_attestation(lead)
+    if not passed:
+        print(f"   ❌ Stage -1 failed: {reason}")
+        return False, f"Stage -1 failed: {reason}"
+    
+    print("   ✅ Stage -1 passed")
+
+    # ========================================================================
+    # Stage 0.5: Source Provenance Verification (HARD)
+    # Validates source_url, source_type, denylist, and licensed resale proof
+    # ========================================================================
+    print(f"🔍 Stage 0.5: Source provenance verification for {email} @ {company}")
+    
+    checks_stage0_5 = [
+        check_source_provenance,       # Validate source URL, type, denylist
+        check_licensed_resale_proof,   # Validate license hash if applicable
+    ]
+    
+    for check_func in checks_stage0_5:
+        passed, reason = await check_func(lead)
+        if not passed:
+            print(f"   ❌ Stage 0.5 failed: {reason}")
+            return False, f"Stage 0.5 failed: {reason}"
+    
+    print("   ✅ Stage 0.5 passed")
 
     # ========================================================================
     # Stage 0: Hardcoded Checks (MIXED)
@@ -1208,42 +913,16 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     print("   ✅ Stage 2 passed")
 
     # ========================================================================
-    # Stage 3: ZeroBounce Check (MIXED)
-    # - Email verification (HARD): Pass IF valid, IF catch-all accept only IF SPF
-    # - Email scoring (SOFT): Append score to lead
+    # Stage 3: MyEmailVerifier Check (HARD)
+    # - Email verification: Pass IF valid, IF catch-all accept only IF SPF
     # ========================================================================
-    print(f"🔍 Stage 3: ZeroBounce email validation for {email} @ {company}")
-    passed, reason = await check_zerobounce_email(lead)
+    print(f"🔍 Stage 3: MyEmailVerifier email validation for {email} @ {company}")
+    passed, reason = await check_myemailverifier_email(lead)
     if not passed:
         print(f"   ❌ Stage 3 failed: {reason}")
         return False, f"Stage 3 failed: {reason}"
 
     print("   ✅ Stage 3 passed")
-
-    # ========================================================================
-    # Stage 4: Google LLM Checks (MIXED)
-    # - Contact Fuzzy Match: Verify contact works at company (HARD) + role/location (SOFT)
-    # - Company Fuzzy Match: Verify company details (HARD) + LinkedIn (SOFT)
-    # - ICP Evidence: Search for ICP confirmation sources (SOFT)
-    # ========================================================================
-    print(f"🔍 Stage 4: Google LLM checks for {email} @ {company}")
-
-    # HARD checks - must pass
-    checks_stage4_hard = [
-        check_llm_contact_match,   # Contact works at company (HARD), role/location (SOFT)
-        check_llm_company_match,   # Company name/industry/location match (HARD), LinkedIn (SOFT)
-    ]
-
-    for check_func in checks_stage4_hard:
-        passed, reason = await check_func(lead)
-        if not passed:
-            print(f"   ❌ Stage 4 failed: {reason}")
-            return False, f"Stage 4 failed: {reason}"
-
-    # SOFT check - always passes, just appends data
-    await check_icp_evidence(lead)  # ICP Evidence confirmation (SOFT - always passes)
-
-    print("   ✅ Stage 4 passed")
     print(f"🎉 All stages passed for {email} @ {company}")
 
     return True, "All checks passed"

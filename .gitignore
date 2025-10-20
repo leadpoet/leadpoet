@@ -14,6 +14,9 @@ env.txt
 .test_supabase_connection.py
 tasks.md
 tasks copy.md
+
+# Regulatory attestation files (contain wallet addresses)
+data/regulatory/miner_attestation.json
 # macOS
 .DS_Storez
 

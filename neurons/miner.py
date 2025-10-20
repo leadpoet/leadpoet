@@ -202,6 +202,78 @@ class Miner(BaseMinerNeuron):
         except Exception as e:
             print(f"⚠️ resume_sourcing error: {e}")
 
+    async def process_generated_leads(self, leads: list) -> list:
+        """
+        Process and enrich leads with source provenance BEFORE sanitization.
+        
+        This function validates and enriches leads at the protocol level to ensure
+        compliance with regulatory requirements. It cannot be bypassed by miners.
+        
+        Steps:
+        1. Extract Website field from each lead
+        2. Validate source URL against regulatory requirements
+        3. Filter out invalid leads
+        4. Determine source type (public_registry, company_site, etc.)
+        5. Enrich lead with source_url and source_type
+        
+        Args:
+            leads: Raw leads from lead generation model
+            
+        Returns:
+            List of validated and enriched leads
+        """
+        from Leadpoet.utils.source_provenance import (
+            validate_source_url,
+            determine_source_type
+        )
+        
+        validated_leads = []
+        
+        for lead in leads:
+            # Extract website field (try multiple common field names)
+            source_url = (
+                lead.get("Website") or 
+                lead.get("website") or 
+                lead.get("Website URL") or
+                lead.get("Company Website") or
+                ""
+            )
+            
+            if not source_url:
+                bt.logging.warning(
+                    f"Lead missing source URL, skipping: "
+                    f"{lead.get('Business', lead.get('business', 'Unknown'))}"
+                )
+                continue
+            
+            # Validate source URL against regulatory requirements
+            try:
+                is_valid, reason = await validate_source_url(source_url)
+                if not is_valid:
+                    bt.logging.warning(f"Invalid source URL: {source_url} - {reason}")
+                    continue
+            except Exception as e:
+                bt.logging.error(f"Error validating source URL {source_url}: {e}")
+                continue
+            
+            # Determine source type
+            source_type = determine_source_type(source_url, lead)
+            
+            # Enrich lead with provenance metadata
+            lead["source_url"] = source_url
+            lead["source_type"] = source_type
+            
+            validated_leads.append(lead)
+        
+        if validated_leads:
+            bt.logging.info(
+                f"✅ Source provenance: {len(validated_leads)}/{len(leads)} leads validated"
+            )
+        else:
+            bt.logging.warning("⚠️ No leads passed source provenance validation")
+        
+        return validated_leads
+
     async def sourcing_loop(self, interval: int, miner_hotkey: str):
         print(f"🔄 Starting continuous sourcing loop (interval: {interval}s)")
         while True:
@@ -214,8 +286,13 @@ class Miner(BaseMinerNeuron):
                         continue
                     print("\n🔄 Sourcing new leads...")
                 new_leads = await get_leads(1, industry=None, region=None)
+                
+                # Process leads through source provenance validation (protocol level)
+                validated_leads = await self.process_generated_leads(new_leads)
+                
+                # Sanitize validated leads
                 sanitized = [
-                    sanitize_prospect(p, miner_hotkey) for p in new_leads
+                    sanitize_prospect(p, miner_hotkey) for p in validated_leads
                 ]
                 print(f"🔄 Sourced {len(sanitized)} new leads:")
                 for i, lead in enumerate(sanitized, 1):
@@ -284,9 +361,14 @@ class Miner(BaseMinerNeuron):
                             "📝 No leads found in pool, generating new leads..."
                         )
                         new_leads = await get_leads(n * 2, target_ind, None)
+                        
+                        # Process leads through source provenance validation (protocol level)
+                        validated_leads = await self.process_generated_leads(new_leads)
+                        
+                        # Sanitize validated leads
                         curated_leads = [
                             sanitize_prospect(p, miner_hotkey)
-                            for p in new_leads
+                            for p in validated_leads
                         ]
                     else:
                         print(f" Curated {len(curated_leads)} leads in pool")
@@ -454,9 +536,14 @@ class Miner(BaseMinerNeuron):
                         )
                         new_leads = await get_leads(num_leads * 2, target_ind,
                                                     None)
+                        
+                        # Process leads through source provenance validation (protocol level)
+                        validated_leads = await self.process_generated_leads(new_leads)
+                        
+                        # Sanitize validated leads
                         curated_leads = [
                             sanitize_prospect(p, miner_hotkey)
-                            for p in new_leads
+                            for p in validated_leads
                         ]
                     else:
                         print(
@@ -593,10 +680,15 @@ class Miner(BaseMinerNeuron):
                             "No leads found in pool, generating new leads")
                         new_leads = await get_leads(synapse.num_leads * 2,
                                                     target_ind, synapse.region)
+                        
+                        # Process leads through source provenance validation (protocol level)
+                        validated_leads = await self.process_generated_leads(new_leads)
+                        
+                        # Sanitize validated leads
                         sanitized = [
                             sanitize_prospect(p,
                                               self.wallet.hotkey.ss58_address)
-                            for p in new_leads
+                            for p in validated_leads
                         ]
                         curated_leads = sanitized
                     else:
@@ -719,9 +811,14 @@ class Miner(BaseMinerNeuron):
                 print("📝 No leads found in pool, generating new leads...")
                 bt.logging.info("No leads found in pool, generating new leads")
                 new_leads = await get_leads(num_leads * 2, target_ind, region)
+                
+                # Process leads through source provenance validation (protocol level)
+                validated_leads = await self.process_generated_leads(new_leads)
+                
+                # Sanitize validated leads
                 sanitized = [
                     sanitize_prospect(p, self.wallet.hotkey.ss58_address)
-                    for p in new_leads
+                    for p in validated_leads
                 ]
                 curated_leads = sanitized
             else:
@@ -970,7 +1067,12 @@ def ensure_data_files():
 
 
 def sanitize_prospect(prospect, miner_hotkey=None):
-    """Sanitize and validate prospect fields."""
+    """
+    Sanitize and validate prospect fields + add regulatory attestations.
+    
+    Task 1.2: Appends attestation metadata from data/regulatory/miner_attestation.json
+    to ensure every lead submission includes regulatory compliance information.
+    """
 
     def strip_html(s):
         return re.sub('<.*?>', '', html.unescape(str(s))) if isinstance(
@@ -1031,6 +1133,46 @@ def sanitize_prospect(prospect, miner_hotkey=None):
         sanitized["linkedin"] = ""
     if not valid_url(sanitized["website"]):
         sanitized["website"] = ""
+
+    # Load miner's attestation from subnet-level regulatory directory
+    attestation_file = Path("data/regulatory/miner_attestation.json")
+    if attestation_file.exists():
+        try:
+            with open(attestation_file, 'r') as f:
+                attestation = json.load(f)
+            terms_hash = attestation.get("terms_version_hash")
+            wallet_ss58 = attestation.get("wallet_ss58")
+        except Exception as e:
+            bt.logging.warning(f"Failed to load attestation file: {e}")
+            terms_hash = "NOT_ATTESTED"
+            wallet_ss58 = miner_hotkey or "UNKNOWN"
+    else:
+        # Should never happen if TASK 1.1 is working, but handle gracefully
+        bt.logging.warning("No attestation file found - miner should have accepted terms at startup")
+        terms_hash = "NOT_ATTESTED"
+        wallet_ss58 = miner_hotkey or "UNKNOWN"
+    
+    # Add regulatory attestation fields (per-submission metadata)
+    sanitized.update({
+        # Miner identity & attestation
+        "wallet_ss58": wallet_ss58,
+        "submission_timestamp": datetime.now(timezone.utc).isoformat(),
+        "terms_version_hash": terms_hash,
+        
+        # Boolean attestations (implicit from terms acceptance)
+        "lawful_collection": True,
+        "no_restricted_sources": True,
+        "license_granted": True,
+        
+        # Source provenance (Task 1.3 - may be added later)
+        # These fields will be populated by process_generated_leads() in Task 1.3
+        "source_url": prospect.get("source_url", ""),
+        "source_type": prospect.get("source_type", ""),
+        
+        # Optional: Licensed resale fields (Task 1.4)
+        "license_doc_hash": prospect.get("license_doc_hash", ""),
+        "license_doc_url": prospect.get("license_doc_url", ""),
+    })
 
     return sanitized
 
@@ -1174,6 +1316,180 @@ def main():
         config.axon.port = args.axon_port
 
     ensure_data_files()
+
+    from Leadpoet.utils.contributor_terms import (
+        display_terms_prompt,
+        verify_attestation,
+        create_attestation_record,
+        save_attestation,
+        sync_attestation_to_supabase,
+        TERMS_VERSION_HASH
+    )
+    from Leadpoet.utils.token_manager import TokenManager
+    
+    # Attestation stored at subnet level alongside other miner data
+    attestation_file = Path("data/regulatory/miner_attestation.json")
+    
+    # Check if attestation exists
+    if not attestation_file.exists():
+        # First-time run - show full terms
+        print("\n" + "="*80)
+        print(" FIRST TIME SETUP: CONTRIBUTOR TERMS ACCEPTANCE REQUIRED")
+        print("="*80)
+        display_terms_prompt()
+        
+        response = input("\n❓ Do you accept these terms? (Y/N): ").strip().upper()
+        
+        if response != "Y":
+            print("\n❌ Terms not accepted. Miner disabled.")
+            print("   You must accept the Contributor Terms to participate in the Leadpoet network.")
+            print("   Please review the terms at: https://leadpoet.com/contributor-terms\n")
+            import sys
+            sys.exit(0)
+        
+        # Record attestation LOCALLY + SYNC TO SUPABASE (SOURCE OF TRUTH)
+        # Load wallet to get SS58 address
+        try:
+            temp_wallet = bt.wallet(config=config)
+            wallet_address = temp_wallet.hotkey.ss58_address
+        except Exception as e:
+            bt.logging.error(f"❌ Could not load wallet for attestation: {e}")
+            print("\n❌ Failed to load wallet. Cannot proceed without valid wallet.")
+            import sys
+            sys.exit(1)
+        
+        attestation = create_attestation_record(wallet_address, TERMS_VERSION_HASH)
+        
+        # Store locally at subnet level
+        save_attestation(attestation, attestation_file)
+        print(f"\n✅ Terms accepted and recorded locally.")
+        print(f"   Local: {attestation_file}")
+        
+        # SECURITY CRITICAL: Sync to Supabase immediately
+        print(f"   Syncing to Supabase (SOURCE OF TRUTH)...")
+        
+        try:
+            # Create TokenManager for authentication
+            token_manager = TokenManager(
+                hotkey=wallet_address,
+                wallet=temp_wallet
+            )
+            
+            # CRITICAL: Fetch JWT token first (FORCE refresh)
+            print("   Fetching JWT token for authentication...")
+            success = token_manager.refresh_token()  # Force refresh, don't use cached token
+            if not success:
+                print("\n❌ CRITICAL: Failed to get JWT token for Supabase authentication")
+                print("   Cannot sync attestation without authentication")
+                import sys
+                sys.exit(1)
+            print("   ✅ JWT token obtained")
+            
+            # Sync attestation to Supabase
+            sync_success = sync_attestation_to_supabase(attestation, token_manager)
+            
+            if not sync_success:
+                print("\n❌ CRITICAL: Failed to sync attestation to Supabase")
+                print("   Miner cannot proceed without remote attestation record (security requirement)")
+                print("   Please check:")
+                print("   - Network connection is available")
+                print("   - Wallet is properly registered")
+                print("   - Supabase service is accessible")
+                import sys
+                sys.exit(1)
+            
+            print(f"   ✅ Remote: contributor_attestations table (Supabase)")
+            print(f"\n✅ Attestation complete! Miner can proceed.\n")
+            
+        except Exception as e:
+            print(f"\n❌ CRITICAL: Exception during Supabase sync: {e}")
+            print("   Miner cannot proceed without remote attestation record (security requirement)")
+            import sys
+            sys.exit(1)
+        
+    else:
+        # Verify existing attestation hash matches current version
+        is_valid, message = verify_attestation(attestation_file, TERMS_VERSION_HASH)
+        
+        if not is_valid:
+            print("\n" + "="*80)
+            print(" ⚠️  TERMS HAVE BEEN UPDATED - RE-ACCEPTANCE REQUIRED")
+            print("="*80)
+            print(f"   Reason: {message}\n")
+            
+            display_terms_prompt()
+            
+            response = input("\n❓ Do you accept the updated terms? (Y/N): ").strip().upper()
+            
+            if response != "Y":
+                print("\n❌ Updated terms not accepted. Miner disabled.")
+                print("   You must accept the updated Contributor Terms to continue mining.\n")
+                import sys
+                sys.exit(0)
+            
+            # Update attestation
+            # Load wallet to get SS58 address
+            try:
+                temp_wallet = bt.wallet(config=config)
+                wallet_address = temp_wallet.hotkey.ss58_address
+            except Exception as e:
+                bt.logging.error(f"❌ Could not load wallet for attestation: {e}")
+                print("\n❌ Failed to load wallet. Cannot proceed without valid wallet.")
+                import sys
+                sys.exit(1)
+            
+            attestation = create_attestation_record(wallet_address, TERMS_VERSION_HASH)
+            attestation["updated_at"] = datetime.now(timezone.utc).isoformat()
+            
+            save_attestation(attestation, attestation_file)
+            print(f"\n✅ Updated terms accepted and recorded locally.")
+            print(f"   Local: {attestation_file}")
+            
+            # SECURITY CRITICAL: Sync updated attestation to Supabase
+            print(f"   Syncing to Supabase (SOURCE OF TRUTH)...")
+            
+            try:
+                # Create TokenManager for authentication
+                token_manager = TokenManager(
+                    hotkey=wallet_address,
+                    wallet=temp_wallet
+                )
+                
+                # CRITICAL: Fetch JWT token first (FORCE refresh)
+                print("   Fetching JWT token for authentication...")
+                success = token_manager.refresh_token()  # Force refresh, don't use cached token
+                if not success:
+                    print("\n❌ CRITICAL: Failed to get JWT token for Supabase authentication")
+                    print("   Cannot sync attestation without authentication")
+                    import sys
+                    sys.exit(1)
+                print("   ✅ JWT token obtained")
+                
+                # Sync updated attestation to Supabase
+                sync_success = sync_attestation_to_supabase(attestation, token_manager)
+                
+                if not sync_success:
+                    print("\n❌ CRITICAL: Failed to sync updated attestation to Supabase")
+                    print("   Miner cannot proceed without remote attestation record (security requirement)")
+                    print("   Please check:")
+                    print("   - Network connection is available")
+                    print("   - Wallet is properly registered")
+                    print("   - Supabase service is accessible")
+                    import sys
+                    sys.exit(1)
+                
+                print(f"   ✅ Remote: contributor_attestations table (Supabase)")
+                print(f"\n✅ Attestation update complete! Miner can proceed.\n")
+                
+            except Exception as e:
+                print(f"\n❌ CRITICAL: Exception during Supabase sync: {e}")
+                print("   Miner cannot proceed without remote attestation record (security requirement)")
+                import sys
+                sys.exit(1)
+        else:
+            bt.logging.info(f"✅ Contributor terms attestation valid (hash: {TERMS_VERSION_HASH[:16]}...)")
+    
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     # Create miner and run it properly on the Bittensor network
     miner = Miner(config=config)

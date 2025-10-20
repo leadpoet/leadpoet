@@ -137,6 +137,34 @@ class CustomTableQuery:
         
         return CustomResponse(response)
     
+    def upsert(self, data, on_conflict=None):
+        """
+        Execute UPSERT (INSERT with conflict resolution) with custom JWT.
+        
+        Args:
+            data: Data to upsert (dict or list of dicts)
+            on_conflict: Comma-separated list of column names for conflict resolution
+        
+        Returns:
+            CustomResponse with upserted data
+        """
+        url = f"{self.postgrest_url}/{self.table_name}"
+        
+        headers = {
+            "Authorization": f"Bearer {self.jwt}",
+            "apikey": self.anon_key,
+            "Content-Type": "application/json",
+            "Prefer": "return=representation,resolution=merge-duplicates"
+        }
+        
+        # If on_conflict specified, add it as query parameter
+        if on_conflict:
+            url += f"?on_conflict={on_conflict}"
+        
+        response = requests.post(url, json=data, headers=headers, timeout=30)
+        
+        return CustomResponse(response)
+    
     def update(self, data):
         """Execute UPDATE with custom JWT."""
         url = f"{self.postgrest_url}/{self.table_name}"
@@ -364,14 +392,55 @@ def push_prospects_to_cloud(
             bt.logging.error("❌ Supabase client not available")
             return False
         
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # REGULATORY: Verify attestation fields are present (Task 1.2)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        required_fields = ["wallet_ss58", "terms_version_hash", "lawful_collection"]
+        skipped_prospects = []
+        
+        for i, prospect in enumerate(prospects):
+            missing = [f for f in required_fields if f not in prospect]
+            
+            if missing:
+                bt.logging.error(f"❌ Prospect {i+1} missing regulatory fields: {missing}")
+                skipped_prospects.append(i)
+        
+        if skipped_prospects:
+            bt.logging.error(f"❌ Skipping {len(skipped_prospects)} prospects with missing attestation fields")
+            bt.logging.error("   Ensure sanitize_prospect() is adding regulatory metadata (Task 1.2)")
+            # Filter out invalid prospects
+            prospects = [p for i, p in enumerate(prospects) if i not in skipped_prospects]
+            
+            if not prospects:
+                bt.logging.error("❌ No valid prospects to push after regulatory validation")
+                return False
+        
         # Insert each prospect into the queue
+        # Extract regulatory fields as top-level columns (Task 1.2)
         records = []
         for prospect in prospects:
-            records.append({
+            record = {
                 "miner_hotkey": wallet.hotkey.ss58_address,
                 "prospect": prospect,
-                "status": "pending"
-            })
+                "status": "pending",
+                
+                # Regulatory attestation fields (extracted to top-level for SQL queries)
+                "wallet_ss58": prospect.get("wallet_ss58"),
+                "terms_version_hash": prospect.get("terms_version_hash"),
+                "lawful_collection": prospect.get("lawful_collection", False),
+                "no_restricted_sources": prospect.get("no_restricted_sources", False),
+                "license_granted": prospect.get("license_granted", False),
+                
+                # Source provenance fields (Task 1.3)
+                "source_url": prospect.get("source_url"),
+                "source_type": prospect.get("source_type"),
+                "license_doc_hash": prospect.get("license_doc_hash"),
+                "license_doc_url": prospect.get("license_doc_url"),
+                
+                # Submission timestamp
+                "submission_timestamp": prospect.get("submission_timestamp"),
+            }
+            records.append(record)
         
         # Minimal logging
         bt.logging.debug(f"Pushing {len(records)} prospects to Supabase queue")
@@ -381,6 +450,22 @@ def push_prospects_to_cloud(
         
         bt.logging.info(f"✅ Pushed {len(prospects)} prospects to Supabase queue")
         print(f"✅ Supabase queue ACK: {len(prospects)} prospect(s)")
+        
+        # Log submission to audit trail (Task 2.5)
+        from Leadpoet.utils.audit_log import log_submission_audit
+        
+        audit_count = 0
+        for prospect in prospects:
+            if log_submission_audit(
+                lead=prospect,
+                wallet=wallet.hotkey.ss58_address,
+                event_type="submission"
+            ):
+                audit_count += 1
+        
+        if audit_count == len(prospects):
+            print(f"✅ Audit trail logged ({audit_count} submission(s))")
+        
         return True
         
     except Exception as e:
@@ -692,165 +777,6 @@ def submit_validation_assessment(
             
     except Exception as e:
         bt.logging.error(f"❌ Failed to submit validation assessment: {e}")
-        import traceback
-        bt.logging.debug(traceback.format_exc())
-        return False
-
-# This function is no longer used - consensus is handled by database triggers
-# Keeping for reference only
-def check_and_process_consensus(
-    prospect_id: str, 
-    lead_id: str, 
-    lead_data: Dict,
-    wallet: bt.wallet = None
-) -> bool:
-    """
-    Check if consensus has been reached for a lead and process accordingly.
-    IMPORTANT: 
-    - All validations go to validation_tracking table
-    - Only ACCEPTED leads (2/3 valid) go to the main leads table
-    - Rejected leads stay only in validation_tracking
-    
-    Args:
-        prospect_id: UUID of the prospect from prospect_queue
-        lead_id: UUID of the lead being validated
-        lead_data: The full lead data to insert if accepted
-        wallet: Optional validator wallet for logging
-    
-    Returns:
-        bool: True if consensus was reached (3 validations), False otherwise
-    """
-    try:
-        # Get Supabase client with service role for reading validation_tracking
-        import os
-        from supabase import create_client
-        
-        SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-        service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        
-        if not service_role_key:
-            bt.logging.error("Service role key not available for consensus checking")
-            return False
-            
-        # Use service role client to read validation_tracking
-        service_supabase = create_client(SUPABASE_URL, service_role_key)
-        
-        # Get all validations for this PROSPECT (not lead_id, since each validator generates different lead_id)
-        validations = service_supabase.table("validation_tracking") \
-            .select("*") \
-            .eq("prospect_id", prospect_id) \
-            .execute()
-        
-        if not validations.data:
-            bt.logging.debug(f"No validations found for lead {lead_id[:8]}...")
-            return False
-        
-        validation_count = len(validations.data)
-        bt.logging.debug(f"Lead {lead_id[:8]}... has {validation_count}/3 validations")
-        
-        # Check if we have all 3 validations
-        if validation_count >= 3:
-            # Count valid and invalid votes
-            valid_count = sum(1 for v in validations.data if v['is_valid'])
-            invalid_count = validation_count - valid_count
-            
-            # Calculate average score
-            avg_score = sum(v['score'] for v in validations.data) / validation_count
-            
-            # Get list of validators who participated
-            validators = [v['validator_hotkey'] for v in validations.data]
-            
-            bt.logging.info(f"📊 Consensus check for lead {lead_id[:8]}...")
-            bt.logging.info(f"   Valid votes: {valid_count}/3")
-            bt.logging.info(f"   Invalid votes: {invalid_count}/3")
-            bt.logging.info(f"   Average score: {avg_score:.2f}")
-            
-            # Determine consensus decision
-            if valid_count >= 2:  # ACCEPTED - 2 or more validators said VALID
-                bt.logging.info(f"✅ Lead {lead_id[:8]}... ACCEPTED by consensus ({valid_count}/3 valid)")
-                
-                # Prepare lead data for insertion into main leads table
-                lead_data_for_insert = lead_data.copy()
-                
-                # Add consensus metadata
-                lead_data_for_insert['lead_id'] = lead_id
-                lead_data_for_insert['prospect_id'] = prospect_id
-                lead_data_for_insert['consensus_score'] = round(avg_score, 2)
-                lead_data_for_insert['validator_count'] = validation_count
-                lead_data_for_insert['consensus_validators'] = validators
-                lead_data_for_insert['consensus_status'] = 'accepted'
-                lead_data_for_insert['validated_at'] = datetime.now(timezone.utc).isoformat()
-                
-                # Insert into MAIN leads table using SERVICE ROLE (only service role has access)
-                try:
-                    # Need to use service role client for leads table access
-                    import os
-                    from supabase import create_client
-                    
-                    SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-                    service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-                    
-                    if service_role_key:
-                        service_supabase = create_client(SUPABASE_URL, service_role_key)
-                        leads_result = service_supabase.table("leads").insert([lead_data_for_insert]).execute()
-                    else:
-                        bt.logging.error("Service role key not available for leads table insert")
-                        leads_result = None
-                    
-                    if leads_result and leads_result.data:
-                        bt.logging.info(f"✅ Lead {lead_id[:8]}... added to main leads database")
-                        bt.logging.info(f"   Email: {lead_data_for_insert.get('email', 'unknown')}")
-                        bt.logging.info(f"   Business: {lead_data_for_insert.get('business', 'unknown')}")
-                        bt.logging.info(f"   Consensus: {valid_count}/3 validators approved")
-                    else:
-                        bt.logging.error("Failed to insert accepted lead into leads table")
-                except Exception as e:
-                    bt.logging.error(f"Error inserting lead into main database: {e}")
-                
-                # Update prospect_queue status to accepted
-                try:
-                    queue_update = service_supabase.table("prospect_queue") \
-                        .update({
-                            "consensus_status": "accepted",
-                            "consensus_timestamp": datetime.now(timezone.utc).isoformat()
-                        }) \
-                        .eq("id", prospect_id) \
-                        .execute()
-                    
-                    if queue_update.data:
-                        bt.logging.debug("Updated prospect_queue status to accepted")
-                except Exception as e:
-                    bt.logging.error(f"Error updating prospect_queue status: {e}")
-                
-            else:  # REJECTED - 2 or more validators said INVALID
-                bt.logging.info(f"❌ Lead {lead_id[:8]}... REJECTED by consensus ({invalid_count}/3 invalid)")
-                
-                # DO NOT insert into main leads table
-                # Only update prospect_queue status to rejected
-                try:
-                    queue_update = service_supabase.table("prospect_queue") \
-                        .update({
-                            "consensus_status": "rejected",
-                            "consensus_timestamp": datetime.now(timezone.utc).isoformat()
-                        }) \
-                        .eq("id", prospect_id) \
-                        .execute()
-                    
-                    if queue_update.data:
-                        bt.logging.debug("Updated prospect_queue status to rejected")
-                except Exception as e:
-                    bt.logging.error(f"Error updating prospect_queue status: {e}")
-            
-            # Consensus was reached (whether accepted or rejected)
-            return True
-            
-        else:
-            # Not enough validations yet
-            bt.logging.debug(f"Waiting for more validations ({validation_count}/3)")
-            return False
-            
-    except Exception as e:
-        bt.logging.error(f"❌ Failed to check consensus: {e}")
         import traceback
         bt.logging.debug(traceback.format_exc())
         return False

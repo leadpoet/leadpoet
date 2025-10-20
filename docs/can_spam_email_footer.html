@@ -1,0 +1,165 @@
+<!-- 
+  CAN-SPAM Compliant Email Footer Template
+  
+  This template ensures compliance with the CAN-SPAM Act (15 U.S.C. § 7701).
+  
+  REQUIRED ELEMENTS:
+  1. Physical postal address of sender
+  2. Clear and conspicuous unsubscribe link
+  3. Identification as advertisement (if applicable)
+  
+  USAGE:
+  Replace {{variables}} with actual values before sending.
+  
+  VARIABLES:
+  - {{company_name}}: Your company name
+  - {{physical_address_line1}}: Street address
+  - {{physical_address_line2}}: City, State, ZIP
+  - {{opt_in_source}}: Where recipient opted in (e.g., "our website", "trade show")
+  - {{opt_in_date}}: Date of opt-in (e.g., "January 15, 2025")
+  - {{unsubscribe_link}}: Unique unsubscribe URL
+  - {{preferences_link}}: Email preferences URL
+  - {{contact_reason}}: Why you're contacting them (optional)
+-->
+
+<div style="font-family: Arial, sans-serif; font-size: 11px; color: #666666; background-color: #f8f8f8; padding: 20px; margin-top: 30px; border-top: 1px solid #dddddd;">
+  
+  <!-- Company Information -->
+  <p style="margin: 0 0 10px 0;">
+    <strong style="color: #333333;">{{company_name}}</strong><br>
+    {{physical_address_line1}}<br>
+    {{physical_address_line2}}
+  </p>
+  
+  <!-- Opt-In Reminder -->
+  <p style="margin: 10px 0; line-height: 1.5;">
+    You received this email because you {{contact_reason}} and provided your contact information at <strong>{{opt_in_source}}</strong> on {{opt_in_date}}.
+  </p>
+  
+  <!-- Unsubscribe Section -->
+  <p style="margin: 10px 0; line-height: 1.5;">
+    <a href="{{unsubscribe_link}}" style="color: #0066cc; text-decoration: underline;">Unsubscribe</a> from future emails | 
+    <a href="{{preferences_link}}" style="color: #0066cc; text-decoration: underline;">Update Email Preferences</a>
+  </p>
+  
+  <!-- Privacy Policy Link -->
+  <p style="margin: 10px 0;">
+    <a href="https://leadpoet.com/privacy" style="color: #0066cc; text-decoration: underline;">Privacy Policy</a> | 
+    <a href="https://leadpoet.com/terms" style="color: #0066cc; text-decoration: underline;">Terms of Service</a>
+  </p>
+  
+  <!-- Legal Notice -->
+  <p style="margin: 10px 0; font-size: 10px; color: #999999; line-height: 1.4;">
+    This email was sent in compliance with the CAN-SPAM Act. If you believe you received this email in error or wish to report abuse, please contact us at abuse@{{company_domain}}.
+  </p>
+
+</div>
+
+<!-- 
+  PLAIN TEXT VERSION (for email clients that don't support HTML):
+  
+  {{company_name}}
+  {{physical_address_line1}}
+  {{physical_address_line2}}
+  
+  You received this email because you {{contact_reason}} and provided your contact information at {{opt_in_source}} on {{opt_in_date}}.
+  
+  Unsubscribe: {{unsubscribe_link}}
+  Update Preferences: {{preferences_link}}
+  Privacy Policy: https://leadpoet.com/privacy
+  
+  This email was sent in compliance with the CAN-SPAM Act.
+-->
+
+
+<!-- 
+  ALTERNATIVE VERSION: Minimal Footer
+  (Use this if space is tight, but still CAN-SPAM compliant)
+-->
+
+<div style="font-size: 10px; color: #888; padding: 15px; border-top: 1px solid #ddd; margin-top: 20px;">
+  <p><strong>{{company_name}}</strong> | {{physical_address_line1}}, {{physical_address_line2}}</p>
+  <p>
+    <a href="{{unsubscribe_link}}" style="color: #0066cc;">Unsubscribe</a> | 
+    <a href="{{preferences_link}}" style="color: #0066cc;">Preferences</a> | 
+    <a href="https://leadpoet.com/privacy" style="color: #0066cc;">Privacy</a>
+  </p>
+</div>
+
+
+<!-- 
+  BEST PRACTICES FOR CAN-SPAM COMPLIANCE:
+  
+  1. UNSUBSCRIBE LINK:
+     - Must be visible and conspicuous
+     - Must work for at least 30 days after email sent
+     - Must process opt-out within 10 business days
+     - Cannot require login or payment
+     - Should be one-click (two-click at most)
+  
+  2. PHYSICAL ADDRESS:
+     - Must be current physical postal address
+     - P.O. boxes are acceptable
+     - Must be sender's actual location (or registered agent)
+  
+  3. SENDER IDENTIFICATION:
+     - "From" name must accurately represent sender
+     - Subject line must be relevant (not deceptive)
+     - "Reply-to" address must be valid
+  
+  4. OPT-IN DOCUMENTATION:
+     - Keep records of when/where recipient opted in
+     - Maintain for at least 3 years
+     - Include timestamp, IP address, opt-in method
+  
+  5. HEADER INFORMATION:
+     - Routing info must be accurate (From, To, Reply-To)
+     - Domain authentication (SPF, DKIM, DMARC) recommended
+  
+  6. TRANSACTIONAL VS. COMMERCIAL:
+     - If primarily commercial, must have unsubscribe
+     - Transactional emails (receipts, shipping) exempt
+     - "Mixed content" follows commercial email rules
+  
+  PENALTIES FOR VIOLATION:
+  - Up to $46,517 per violation (FTC)
+  - State attorneys general can also enforce
+  - ISPs can sue for damages
+  
+  MORE INFO:
+  https://www.ftc.gov/tips-advice/business-center/guidance/can-spam-act-compliance-guide-business
+-->
+
+
+<!-- 
+  EXAMPLE WITH REAL DATA:
+-->
+
+<div style="font-family: Arial, sans-serif; font-size: 11px; color: #666666; background-color: #f8f8f8; padding: 20px; margin-top: 30px; border-top: 1px solid #dddddd;">
+  
+  <p style="margin: 0 0 10px 0;">
+    <strong style="color: #333333;">Acme Marketing Solutions</strong><br>
+    123 Business Street, Suite 100<br>
+    San Francisco, CA 94105
+  </p>
+  
+  <p style="margin: 10px 0; line-height: 1.5;">
+    You received this email because you requested information about our services and provided your contact information at <strong>our website</strong> on January 15, 2025.
+  </p>
+  
+  <p style="margin: 10px 0; line-height: 1.5;">
+    <a href="https://example.com/unsubscribe?email=john@company.com&token=abc123" style="color: #0066cc; text-decoration: underline;">Unsubscribe</a> from future emails | 
+    <a href="https://example.com/preferences?email=john@company.com" style="color: #0066cc; text-decoration: underline;">Update Email Preferences</a>
+  </p>
+  
+  <p style="margin: 10px 0;">
+    <a href="https://example.com/privacy" style="color: #0066cc; text-decoration: underline;">Privacy Policy</a> | 
+    <a href="https://example.com/terms" style="color: #0066cc; text-decoration: underline;">Terms of Service</a>
+  </p>
+  
+  <p style="margin: 10px 0; font-size: 10px; color: #999999; line-height: 1.4;">
+    This email was sent in compliance with the CAN-SPAM Act. If you believe you received this email in error or wish to report abuse, please contact us at abuse@example.com.
+  </p>
+
+</div>
+

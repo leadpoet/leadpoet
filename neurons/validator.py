@@ -2078,10 +2078,6 @@ class Validator(BaseValidatorNeuron):
         lead["validator_hotkey"] = self.wallet.hotkey.ss58_address
         lead["validated_at"] = datetime.now(timezone.utc).isoformat()
 
-        # Include ZeroBounce AI score if present
-        if "email_score" in lead:
-            lead["email_score"] = lead["email_score"]
-
         try:
             # Save to Supabase (write-only, no duplicate checking)
             if not self.supabase_client:
@@ -2121,6 +2117,365 @@ class Validator(BaseValidatorNeuron):
         except Exception:
             return False
 
+    def should_run_deep_verification(self, lead: Dict) -> bool:
+        """
+        Determine if lead should undergo deep verification.
+        
+        Returns True for:
+        - 100% of licensed_resale submissions
+        - 5% random sample of other submissions
+        
+        Deep verification includes:
+        - License OCR validation (for licensed_resale)
+        - Cross-domain authenticity checks
+        - Behavioral anomaly scoring
+        """
+        source_type = lead.get("source_type", "")
+        
+        # Always verify licensed resale
+        if source_type == "licensed_resale":
+            bt.logging.info(f"🔬 Deep verification triggered: licensed_resale source")
+            return True
+        
+        # 5% random sample for others
+        if random.random() < 0.05:
+            bt.logging.info(f"🔬 Deep verification triggered: random 5% sample")
+            return True
+        
+        return False
+
+    async def run_deep_verification(self, lead: Dict) -> Dict:
+        """
+        Execute deep verification checks.
+        
+        Returns dict with:
+        - passed: bool (overall pass/fail)
+        - checks: list of individual check results
+        - manual_review_required: bool (if flagged for admin review)
+        """
+        results = {
+            "passed": True,
+            "checks": [],
+            "manual_review_required": False
+        }
+        
+        # Check 1: License OCR validation (if applicable)
+        if lead.get("source_type") == "licensed_resale":
+            bt.logging.info("   🔍 Deep Check 1: License OCR validation")
+            ocr_result = await self.verify_license_ocr(lead)
+            results["checks"].append(ocr_result)
+            
+            if not ocr_result["passed"]:
+                results["passed"] = False
+                bt.logging.warning(f"   ❌ License OCR failed: {ocr_result['reason']}")
+            else:
+                bt.logging.info(f"   ✅ License OCR: {ocr_result['reason']}")
+            
+            if ocr_result.get("manual_review_required"):
+                results["manual_review_required"] = True
+        
+        # Check 2: Cross-domain authenticity
+        bt.logging.info("   🔍 Deep Check 2: Cross-domain authenticity")
+        domain_result = await self.verify_cross_domain_authenticity(lead)
+        results["checks"].append(domain_result)
+        
+        if not domain_result["passed"]:
+            results["passed"] = False
+            bt.logging.warning(f"   ❌ Cross-domain check failed: {domain_result['reason']}")
+        else:
+            bt.logging.info(f"   ✅ Cross-domain: {domain_result['reason']}")
+        
+        # Check 3: Behavioral anomaly scoring
+        bt.logging.info("   🔍 Deep Check 3: Behavioral anomaly scoring")
+        anomaly_result = await self.score_behavioral_anomalies(lead)
+        results["checks"].append(anomaly_result)
+        
+        if not anomaly_result["passed"]:
+            results["passed"] = False
+            bt.logging.warning(f"   ❌ Anomaly check failed: {anomaly_result['reason']}")
+        else:
+            bt.logging.info(f"   ✅ Anomaly scoring: {anomaly_result['reason']}")
+        
+        return results
+
+    async def verify_license_ocr(self, lead: Dict) -> Dict:
+        """
+        Validate license document via hash verification.
+        
+        Steps:
+        1. Download document from license_doc_url
+        2. Verify hash matches license_doc_hash (SHA-256)
+        3. Flag for manual OCR review
+        
+        Future enhancement: Implement OCR text extraction to search for
+        key terms (resale, redistribute, transfer, sub-license).
+        
+        Returns dict with:
+        - passed: bool
+        - check: str (check name)
+        - reason: str (result description)
+        - manual_review_required: bool (optional)
+        """
+        import hashlib
+        import aiohttp
+        
+        license_url = lead.get("license_doc_url")
+        license_hash = lead.get("license_doc_hash")
+        
+        if not license_url:
+            return {
+                "passed": False,
+                "check": "license_ocr",
+                "reason": "No license_doc_url provided for OCR verification"
+            }
+        
+        if not license_hash:
+            return {
+                "passed": False,
+                "check": "license_ocr",
+                "reason": "No license_doc_hash provided"
+            }
+        
+        try:
+            # Download document
+            bt.logging.info(f"   📥 Downloading license doc from: {license_url[:50]}...")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(license_url, timeout=30) as response:
+                    if response.status != 200:
+                        return {
+                            "passed": False,
+                            "check": "license_ocr",
+                            "reason": f"License doc unreachable: HTTP {response.status}"
+                        }
+                    
+                    doc_content = await response.read()
+            
+            # Verify hash matches
+            computed_hash = hashlib.sha256(doc_content).hexdigest()
+            
+            if computed_hash != license_hash:
+                return {
+                    "passed": False,
+                    "check": "license_ocr",
+                    "reason": f"License doc hash mismatch (expected: {license_hash[:8]}..., got: {computed_hash[:8]}...)"
+                }
+            
+            bt.logging.info(f"   ✅ License hash verified: {computed_hash[:16]}...")
+            
+            # TODO: Implement OCR text extraction (requires pytesseract or cloud OCR API)
+            # For now, flag for manual review
+            return {
+                "passed": True,
+                "check": "license_ocr",
+                "reason": "Hash verified - flagged for manual OCR review",
+                "manual_review_required": True,
+                "license_hash": computed_hash,
+                "license_url": license_url
+            }
+            
+        except asyncio.TimeoutError:
+            return {
+                "passed": False,
+                "check": "license_ocr",
+                "reason": "License doc download timeout (>30s)"
+            }
+        except Exception as e:
+            return {
+                "passed": False,
+                "check": "license_ocr",
+                "reason": f"License verification error: {str(e)}"
+            }
+
+    async def verify_cross_domain_authenticity(self, lead: Dict) -> Dict:
+        """
+        Verify entity-domain relationship authenticity.
+        
+        Checks:
+        - Email domain should match company domain
+        - Detects throwaway/temporary domains
+        - Validates domain relationships
+        
+        This helps detect:
+        - Spoofed email addresses
+        - Temporary/disposable domains
+        - Mismatched company-email relationships
+        
+        Returns dict with:
+        - passed: bool
+        - check: str (check name)
+        - reason: str (result description)
+        - severity: str (optional - "high" for critical mismatches)
+        """
+        from urllib.parse import urlparse
+        
+        email = get_email(lead)
+        website = get_website(lead)
+        company = get_company(lead)
+        
+        # If insufficient data, pass through (can't verify)
+        if not email or not website:
+            return {
+                "passed": True,
+                "check": "cross_domain",
+                "reason": "Insufficient data for cross-domain verification"
+            }
+        
+        # Extract domains
+        email_domain = email.split("@")[1].lower() if "@" in email else ""
+        
+        # Parse website domain
+        try:
+            parsed_website = urlparse(website if website.startswith(('http://', 'https://')) else f'https://{website}')
+            website_domain = parsed_website.netloc.lower()
+            
+            # Remove www. prefix for comparison
+            if website_domain.startswith("www."):
+                website_domain = website_domain[4:]
+            if email_domain.startswith("www."):
+                email_domain = email_domain[4:]
+                
+        except Exception as e:
+            bt.logging.warning(f"   Failed to parse website domain: {website} - {e}")
+            return {
+                "passed": True,
+                "check": "cross_domain",
+                "reason": "Could not parse website domain"
+            }
+        
+        # Check for throwaway/temporary domain indicators
+        throwaway_indicators = [
+            "-sales", "-marketing", "-temp", "tempmail", "guerrilla",
+            "throwaway", "disposable", "fake", "test", "temporary"
+        ]
+        
+        for indicator in throwaway_indicators:
+            if indicator in email_domain:
+                return {
+                    "passed": False,
+                    "check": "cross_domain",
+                    "reason": f"Email domain appears to be temporary: {email_domain}",
+                    "severity": "high"
+                }
+        
+        # Check if domains match
+        if email_domain == website_domain:
+            return {
+                "passed": True,
+                "check": "cross_domain",
+                "reason": "Email domain matches website domain"
+            }
+        
+        # Check if they're related (subdomain or parent domain)
+        if website_domain in email_domain or email_domain in website_domain:
+            return {
+                "passed": True,
+                "check": "cross_domain",
+                "reason": f"Related domains (email: {email_domain}, website: {website_domain})"
+            }
+        
+        # Domains don't match - this could be legitimate (e.g., gmail.com for small business)
+        # or could be suspicious. We'll flag but not fail for now.
+        # In a stricter implementation, this could be a failure.
+        return {
+            "passed": True,  # Pass but log warning
+            "check": "cross_domain",
+            "reason": f"Email domain ({email_domain}) differs from website ({website_domain})",
+            "severity": "low",
+            "warning": True
+        }
+
+    async def score_behavioral_anomalies(self, lead: Dict) -> Dict:
+        """
+        Score lead for behavioral anomalies.
+        
+        Checks for:
+        - Excessive use of same source_url (possible scraping/automation)
+        - Unlikely role-industry combinations
+        - Statistical outliers
+        
+        Returns dict with:
+        - passed: bool (True if anomaly_score < 0.7)
+        - check: str (check name)
+        - score: float (0-1, where 0=normal, 1=highly anomalous)
+        - flags: list (descriptions of detected anomalies)
+        - reason: str (summary)
+        """
+        anomaly_score = 0.0
+        flags = []
+        
+        # Check 1: Duplicate source_url usage
+        source_url = lead.get("source_url", "")
+        if source_url:
+            try:
+                from Leadpoet.utils.cloud_db import get_supabase_client
+                supabase = get_supabase_client()
+                
+                if supabase:
+                    # Query recent submissions with same source_url
+                    recent_cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                    result = supabase.table("prospect_queue")\
+                        .select("miner_hotkey, source_url")\
+                        .eq("source_url", source_url)\
+                        .gte("created_at", recent_cutoff)\
+                        .execute()
+                    
+                    if result.data and len(result.data) > 10:
+                        anomaly_score += 0.3
+                        flags.append(f"Source URL used {len(result.data)} times in 24h")
+                        bt.logging.warning(f"   ⚠️  High source_url reuse: {len(result.data)} times")
+            except Exception as e:
+                bt.logging.debug(f"   Could not check source_url duplicates: {e}")
+        
+        # Check 2: Role-industry mismatch
+        # This is a simplified check - in production, use ML model or extensive mapping
+        role = get_role(lead)
+        industry = get_industry(lead)
+        
+        if role and industry:
+            # Define obviously unlikely combinations
+            unlikely_combinations = [
+                ("Doctor", "Technology"),
+                ("Doctor", "Software"),
+                ("CTO", "Healthcare"),
+                ("CTO", "Medical"),
+                ("Nurse", "Finance"),
+                ("Engineer", "Healthcare"),
+                ("Surgeon", "Retail"),
+            ]
+            
+            # Normalize for comparison
+            role_normalized = role.upper()
+            industry_normalized = industry.upper()
+            
+            for unlikely_role, unlikely_industry in unlikely_combinations:
+                if unlikely_role.upper() in role_normalized and unlikely_industry.upper() in industry_normalized:
+                    anomaly_score += 0.2
+                    flags.append(f"Unlikely role-industry: {role} in {industry}")
+                    bt.logging.warning(f"   ⚠️  Unlikely combination: {role} in {industry}")
+                    break
+        
+        # Check 3: Missing critical fields (possible data quality issue)
+        critical_fields = ["email", "company", "website"]
+        missing_fields = [field for field in critical_fields if not lead.get(field)]
+        
+        if len(missing_fields) >= 2:
+            anomaly_score += 0.1
+            flags.append(f"Missing {len(missing_fields)} critical fields: {', '.join(missing_fields)}")
+        
+        # Determine pass/fail based on threshold
+        threshold = 0.7
+        passed = anomaly_score < threshold
+        
+        return {
+            "passed": passed,
+            "check": "anomaly_scoring",
+            "score": anomaly_score,
+            "flags": flags,
+            "reason": f"Anomaly score: {anomaly_score:.2f} (threshold: {threshold})",
+            "threshold": threshold
+        }
+
     async def validate_lead(self, lead):
         """Validate a single lead using automated_checks. Returns pass/fail."""
         try:
@@ -2147,19 +2502,86 @@ class Validator(BaseValidatorNeuron):
             # Use automated_checks for comprehensive validation
             passed, reason = await run_automated_checks(mapped_lead)
 
-            # grab ZeroBounce AI score (set in check_zerobounce_email)
-            email_score = mapped_lead.get("email_score", None)
-            if email_score is not None:
-                lead["email_score"] = email_score      # propagate to original lead
+            # If standard validation passed, check if deep verification is needed
+            if passed and self.should_run_deep_verification(mapped_lead):
+                bt.logging.info(f"🔬 Running deep verification on {email}")
+                
+                deep_results = await self.run_deep_verification(mapped_lead)
+                
+                if not deep_results["passed"]:
+                    bt.logging.warning(f"❌ Deep verification failed: {deep_results}")
+                    # Mark lead for manual review or reject
+                    lead["deep_verification_failed"] = True
+                    lead["deep_verification_results"] = deep_results
+                    
+                    # Fail the lead if deep verification fails
+                    return {
+                        'is_legitimate': False,
+                        'reason': f'Deep verification failed: {deep_results["checks"][0]["reason"] if deep_results["checks"] else "unknown"}',
+                        'score': 0.0,
+                        'deep_verification_results': deep_results
+                    }
+                else:
+                    bt.logging.info(f"✅ Deep verification passed")
+                    lead["deep_verification_passed"] = True
+                    lead["deep_verification_results"] = deep_results
+                    
+                    # If manual review required, flag it but don't fail
+                    if deep_results.get("manual_review_required"):
+                        lead["manual_review_required"] = True
+                        bt.logging.info(f"📋 Lead flagged for manual review")
 
-            return {
+            # Prepare validation result
+            validation_result = {
                 'is_legitimate': passed,
                 'reason': reason,
                 'score': 1.0 if passed else 0.0
             }
             
+            # Log validation to audit trail (Task 2.5)
+            try:
+                from Leadpoet.utils.audit_log import log_validation_audit
+                
+                audit_logged = log_validation_audit(
+                    lead=mapped_lead,
+                    validator_wallet=self.wallet.hotkey.ss58_address,
+                    validation_result={
+                        'passed': passed,
+                        'reason': reason,
+                        'score': validation_result['score']
+                    }
+                )
+                if audit_logged:
+                    print(f"   ✅ Audit trail logged (validation: {'passed' if passed else 'rejected'})")
+                    bt.logging.info(f"✅ Audit trail logged (validation: {'passed' if passed else 'rejected'})")
+            except Exception as audit_error:
+                bt.logging.debug(f"Failed to log validation audit: {audit_error}")
+                # Don't fail validation if audit logging fails
+            
+            return validation_result
+            
         except Exception as e:
             bt.logging.error(f"Error in validate_lead: {e}")
+            
+            # Log failed validation to audit trail
+            try:
+                from Leadpoet.utils.audit_log import log_validation_audit
+                
+                audit_logged = log_validation_audit(
+                    lead=lead,
+                    validator_wallet=self.wallet.hotkey.ss58_address,
+                    validation_result={
+                        'passed': False,
+                        'reason': f'Validation error: {e}',
+                        'score': 0.0
+                    }
+                )
+                if audit_logged:
+                    print(f"   ✅ Audit trail logged (validation: error)")
+                    bt.logging.info(f"✅ Audit trail logged (validation: error)")
+            except Exception as audit_error:
+                bt.logging.debug(f"Failed to log validation audit: {audit_error}")
+            
             return {'is_legitimate': False,
                     'reason': f'Validation error: {e}',
                     'score': 0.0}
@@ -2222,7 +2644,6 @@ class Validator(BaseValidatorNeuron):
                     "number_of_locations": lead.get("number_of_locations", ""),
                     "ids": lead.get("ids", {}),
                     "socials": lead.get("socials", {}),
-                    "email_score": lead.get("email_score"),
                 }
             }
             

@@ -446,7 +446,22 @@ def push_prospects_to_cloud(
         bt.logging.debug(f"Pushing {len(records)} prospects to Supabase queue")
         
         # Batch insert (CustomResponse already executes, no .execute() needed)
-        supabase.table("prospect_queue").insert(records)
+        try:
+            response = supabase.table("prospect_queue").insert(records)
+            # Check if response indicates an error
+            if hasattr(response, 'error') and response.error:
+                bt.logging.error(f"❌ Supabase insert error: {response.error}")
+                return False
+        except Exception as insert_error:
+            bt.logging.error(f"❌ Failed to insert prospects: {insert_error}")
+            # Try to get more details from the error
+            if hasattr(insert_error, 'response'):
+                try:
+                    error_detail = insert_error.response.json()
+                    bt.logging.error(f"   Error details: {error_detail}")
+                except:
+                    bt.logging.error(f"   Raw error: {insert_error}")
+            return False
         
         bt.logging.info(f"✅ Pushed {len(prospects)} prospects to Supabase queue")
         print(f"✅ Supabase queue ACK: {len(prospects)} prospect(s)")
@@ -558,98 +573,29 @@ def fetch_prospects_from_cloud(
             bt.logging.warning("⚠️ Supabase client not available")
             return []
         
-        validator_hotkey = wallet.hotkey.ss58_address
-        
-        # Use the SQL function for atomic pull operation to prevent race conditions
-        # This ensures true first-come-first-served behavior
-        result = supabase.rpc('pull_prospects_for_validator', {
-            'p_validator_hotkey': validator_hotkey,
-            'p_limit': limit
-        }).execute()
+        result = supabase.rpc('pull_prospects_for_validator').execute()
         
         if not result.data:
-            # Fallback to Python-based approach if SQL function doesn't exist
-            bt.logging.debug("SQL function not available, using Python-based approach")
-            
-            # Fetch prospects where:
-            # 1. Status is pending
-            # 2. Pull count is less than 3
-            # 3. This validator hasn't pulled it yet
-            # 4. Consensus status is pending
-        result = supabase.table("prospect_queue") \
-            .select("*") \
-            .eq("status", "pending") \
-                .lt("pull_count", 3) \
-                .eq("consensus_status", "pending") \
-            .order("created_at", desc=False) \
-                .limit(limit * 2).execute()  # Get more to filter in Python
-        
-        if not result.data:
+            bt.logging.debug("No prospects available for this validator")
             return []
         
-            # Filter out prospects this validator has already pulled
-            available_prospects = []
-            for row in result.data:
-                validators_pulled = row.get('validators_pulled', [])
-                if validator_hotkey not in validators_pulled:
-                    available_prospects.append(row)
-                    if len(available_prospects) >= limit:
-                        break
-            
-            if not available_prospects:
-                return []
-            
-            # Update each prospect to mark this validator has pulled it
-            prospects_with_ids = []
-            for prospect_row in available_prospects:
-                prospect_id = prospect_row['id']
-                current_validators = prospect_row.get('validators_pulled', [])
-                current_pull_count = prospect_row.get('pull_count', 0)
-                
-                # Update the prospect to add this validator
-                update_result = supabase.table("prospect_queue") \
-            .update({
-                        "validators_pulled": current_validators + [validator_hotkey],
-                        "pull_count": current_pull_count + 1
-            }) \
-                    .eq("id", prospect_id) \
-            .execute()
+        # SQL function succeeded, format the response
+        prospects_with_ids = []
+        for row in result.data:
+            # Include miner_hotkey in the prospect data
+            prospect_data = row.get('prospect', {})
+            if prospect_data and isinstance(prospect_data, dict):
+                prospect_data = prospect_data.copy()
+                # Add miner_hotkey if available
+                if row.get('miner_hotkey'):
+                    prospect_data['miner_hotkey'] = row['miner_hotkey']
+            prospects_with_ids.append({
+                'prospect_id': get_field(row, 'prospect_id', 'id'),
+                'data': prospect_data
+            })
         
-                if update_result.data:
-                    # Return prospect data with ID for tracking
-                    # Include miner_hotkey from the prospect_queue row
-                    prospect_data = prospect_row.get('prospect', {})
-                    if prospect_data and isinstance(prospect_data, dict):
-                        prospect_data = prospect_data.copy()
-                        # Add miner_hotkey if available
-                        if prospect_row.get('miner_hotkey'):
-                            prospect_data['miner_hotkey'] = prospect_row['miner_hotkey']
-                    prospects_with_ids.append({
-                        'prospect_id': prospect_id,
-                        'data': prospect_data
-                    })
-            
-            bt.logging.info(f"✅ Pulled {len(prospects_with_ids)} prospects (first-come-first-served)")
-            return prospects_with_ids
-        
-        else:
-            # SQL function succeeded, format the response
-            prospects_with_ids = []
-            for row in result.data:
-                # Include miner_hotkey in the prospect data
-                prospect_data = row.get('prospect', {})
-                if prospect_data and isinstance(prospect_data, dict):
-                    prospect_data = prospect_data.copy()
-                    # Add miner_hotkey if available
-                    if row.get('miner_hotkey'):
-                        prospect_data['miner_hotkey'] = row['miner_hotkey']
-                prospects_with_ids.append({
-                    'prospect_id': get_field(row, 'prospect_id', 'id'),
-                    'data': prospect_data
-                })
-            
-            bt.logging.info(f"✅ Atomically pulled {len(prospects_with_ids)} prospects (first-come-first-served)")
-            return prospects_with_ids
+        bt.logging.info(f"✅ Atomically pulled {len(prospects_with_ids)} prospects via server-side function")
+        return prospects_with_ids
         
     except Exception as e:
         bt.logging.error(f"❌ Failed to fetch prospects from Supabase: {e}")
@@ -657,12 +603,12 @@ def fetch_prospects_from_cloud(
 
 # ---- Consensus Validation Functions ---------------------------------
 def submit_validation_assessment(
-    wallet: bt.wallet, 
+    wallet: bt.wallet,
     prospect_id: str,
     lead_id: str,
     lead_data: Dict,
-    score: float,
     is_valid: bool,
+    rejection_reason: Dict = None,
     network: str = None,
     netuid: int = None
 ) -> bool:
@@ -676,8 +622,9 @@ def submit_validation_assessment(
         prospect_id: UUID of the prospect from prospect_queue
         lead_id: UUID generated for this lead
         lead_data: The full lead data dictionary
-        score: Validation score (0.0 to 1.0)
         is_valid: Boolean indicating if validator considers lead valid
+        rejection_reason: Structured rejection reason dict (required if is_valid=False, None if is_valid=True)
+                         Format: {"stage": ..., "check_name": ..., "message": ..., "failed_fields": [...]}
         network: Subtensor network (e.g., "test", "finney"). If None, uses NETWORK env var.
         netuid: Subnet ID. If None, uses NETUID env var.
     
@@ -716,18 +663,29 @@ def submit_validation_assessment(
             "lead_id": lead_id,
             "prospect_id": prospect_id,
             "validator_hotkey": wallet.hotkey.ss58_address,
-            "score": round(float(score), 2),  # Ensure it's a float with 2 decimal places
             "is_valid": bool(is_valid),
+            "rejection_reason": rejection_reason if not is_valid else None,  # Structured rejection dict
             "epoch_number": epoch_number,
             "prospect": lead_data  # Include the full lead data for database triggers
         }
+        
+        # Validation: Ensure rejection_reason is not null when is_valid=False
+        if not is_valid and not rejection_reason:
+            bt.logging.warning("⚠️ rejection_reason is None for invalid lead - this should not happen")
+            # Create a fallback rejection reason to ensure data integrity
+            rejection_reason = {
+                "stage": "Unknown",
+                "check_name": "unknown",
+                "message": "No rejection reason provided",
+                "failed_fields": []
+            }
+            validation_data["rejection_reason"] = rejection_reason
         
         # Debug: Log what we're trying to insert
         bt.logging.info("🔍 DEBUG: Attempting to insert validation data:")
         bt.logging.info(f"   - validator_hotkey: {wallet.hotkey.ss58_address}")
         bt.logging.info(f"   - prospect_id: {prospect_id}")
         bt.logging.info(f"   - lead_id: {lead_id}")
-        bt.logging.info(f"   - score: {validation_data['score']}")
         bt.logging.info(f"   - is_valid: {validation_data['is_valid']}")
         bt.logging.info(f"   - epoch_number: {validation_data['epoch_number']}")
         
@@ -762,7 +720,7 @@ def submit_validation_assessment(
         
         # Check if insert was successful (status 201 or data present)
         if result.response.status_code == 201 or result.data:
-            bt.logging.info(f"✅ Submitted validation for lead {lead_id[:8]}... (score: {score:.2f}, valid: {is_valid})")
+            bt.logging.info(f"✅ Submitted validation for lead {lead_id[:8]}... (valid: {is_valid})")
             
             # ══════════════════════════════════════════════════════════════════════════
             # CONSENSUS IS NOW HANDLED SERVER-SIDE BY DATABASE TRIGGERS + EDGE FUNCTIONS
@@ -780,6 +738,117 @@ def submit_validation_assessment(
         import traceback
         bt.logging.debug(traceback.format_exc())
         return False
+
+
+def get_rejection_feedback(
+    wallet: bt.wallet,
+    limit: int = 50,
+    network: str = None,
+    netuid: int = None
+) -> List[Dict]:
+    """
+    Query rejection feedback for miner's rejected leads.
+    
+    This function allows miners to retrieve detailed feedback about leads that were
+    rejected by consensus (2+ validators rejected). The feedback includes:
+    - Which checks failed (stage, check name, message)
+    - How many validators rejected the lead
+    - A snapshot of the lead data at time of rejection
+    - Consensus timestamp and epoch information
+    
+    Security: RLS policies ensure miners can only see their own rejection feedback.
+    The query is filtered server-side by the miner's hotkey from their JWT token.
+    
+    Args:
+        wallet: Miner's Bittensor wallet (for hotkey identification)
+        limit: Maximum number of rejection records to return (default: 50)
+        network: Subtensor network (e.g., "test", "finney"). If None, uses NETWORK env var.
+        netuid: Subnet ID. If None, uses NETUID env var.
+    
+    Returns:
+        List[Dict]: List of rejection feedback records, ordered by most recent first.
+                    Each record contains:
+                    - id: UUID of the feedback record
+                    - prospect_id: UUID of the rejected prospect
+                    - miner_hotkey: Miner's hotkey (always matches caller)
+                    - rejection_summary: JSONB with detailed rejection reasons
+                    - validator_count: Number of validators who assessed the lead
+                    - consensus_timestamp: When consensus was reached
+                    - epoch_number: Epoch in which rejection occurred
+                    - lead_snapshot: JSONB snapshot of the lead data
+                    - created_at: Timestamp when feedback was created
+                    
+                    Returns empty list if:
+                    - No rejection feedback exists for this miner
+                    - Supabase client unavailable
+                    - Error occurs during query
+    
+    Example:
+        >>> feedback = get_rejection_feedback(wallet, limit=10)
+        >>> if feedback:
+        ...     for record in feedback:
+        ...         print(f"Lead rejected at {record['consensus_timestamp']}")
+        ...         summary = record['rejection_summary']
+        ...         print(f"  Rejected by {summary['rejected_by']}/{summary['total_validators']} validators")
+        ...         for failure in summary['common_failures']:
+        ...             print(f"  - {failure['check_name']}: {failure['message']}")
+    """
+    try:
+        check_network = network or NETWORK
+        check_netuid = netuid or SUBNET_ID
+        
+        # Verify this is a miner (optional - RLS will enforce this anyway)
+        if not _VERIFY.is_miner(wallet.hotkey.ss58_address, network=check_network, netuid=check_netuid):
+            bt.logging.warning(
+                f"Hotkey {wallet.hotkey.ss58_address[:10]}… is NOT a registered miner "
+                f"(network={check_network}, netuid={check_netuid})"
+            )
+            return []
+        
+        # Get Supabase client with miner's JWT token
+        supabase = get_supabase_client()
+        if not supabase:
+            bt.logging.error("Supabase client not available - cannot fetch rejection feedback")
+            return []
+        
+        bt.logging.debug(f"Querying rejection feedback for miner {wallet.hotkey.ss58_address[:10]}...")
+        
+        # Query rejection_feedback table
+        # RLS policy ensures we only get feedback for this miner's hotkey
+        result = supabase.table("rejection_feedback") \
+            .select("*") \
+            .eq("miner_hotkey", wallet.hotkey.ss58_address) \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        
+        # Extract data from response
+        feedback_records = result.data if result.data else []
+        
+        if feedback_records:
+            bt.logging.info(f"✅ Retrieved {len(feedback_records)} rejection feedback record(s)")
+            
+            # Log summary for first record (most recent)
+            if len(feedback_records) > 0:
+                latest = feedback_records[0]
+                summary = latest.get('rejection_summary', {})
+                rejected_by = summary.get('rejected_by', 0)
+                total_validators = summary.get('total_validators', 0)
+                bt.logging.debug(
+                    f"   Most recent: {rejected_by}/{total_validators} validators rejected "
+                    f"(epoch {latest.get('epoch_number', 'unknown')})"
+                )
+        else:
+            bt.logging.debug("No rejection feedback found for this miner")
+        
+        return feedback_records
+        
+    except Exception as e:
+        bt.logging.error(f"❌ Failed to fetch rejection feedback: {e}")
+        import traceback
+        bt.logging.debug(traceback.format_exc())
+        return []
+
 
 # ---- Curations -------------------------------------------------------
 def push_curation_request(payload: dict) -> str:

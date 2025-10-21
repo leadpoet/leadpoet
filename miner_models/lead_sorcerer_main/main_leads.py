@@ -242,7 +242,7 @@ else:
             "industry":
             safe_str(company.get("industry")),
             "sub_industry":
-            safe_str(company.get("sector")),
+            safe_str(company.get("sub_industry")),
             "role":
             job_title,
             "region":

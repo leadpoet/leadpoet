@@ -145,13 +145,12 @@ def log_validation_audit(
     Records the validator's assessment of a lead, including:
     - Whether it passed or failed
     - Validation reason
-    - Validation score (if available)
     - All attestation and provenance metadata
     
     Args:
         lead: Lead data dict
         validator_wallet: Validator wallet address (SS58)
-        validation_result: Dict with 'passed', 'reason', 'score'
+        validation_result: Dict with 'passed', 'reason'
         
     Returns:
         bool: True if logged successfully, False otherwise
@@ -194,7 +193,6 @@ def log_validation_audit(
             # Validation metadata (from validation_result)
             "validation_passed": validation_result.get("passed"),
             "validation_reason": validation_result.get("reason"),
-            "validation_score": validation_result.get("score"),
             
             # Anonymized lead data (no PII)
             "company": get_company(lead),

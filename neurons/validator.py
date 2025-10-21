@@ -1738,14 +1738,18 @@ class Validator(BaseValidatorNeuron):
                     
                     # Extract validation results
                     is_valid = result.get("is_legitimate", False)
-                    score = result.get("score", 0.0)
-                    reason = result.get("reason", "Unknown")
+                    rejection_reason = result.get("reason", None)  # Now a structured dict from Task 3.1
                     
                     # Log validation result
                     if is_valid:
-                        print(f"   ✅ Valid (score: {score:.2f})")
+                        print(f"   ✅ Valid")
                     else:
-                        print(f"   ❌ Invalid: {reason} (score: {score:.2f})")
+                        # Extract message from rejection_reason dict for logging
+                        if isinstance(rejection_reason, dict):
+                            reason_msg = rejection_reason.get("message", "Unknown error")
+                        else:
+                            reason_msg = str(rejection_reason) if rejection_reason else "Unknown error"
+                        print(f"   ❌ Invalid: {reason_msg}")
                     
                     # Submit validation assessment to consensus system
                     submission_success = submit_validation_assessment(
@@ -1753,8 +1757,8 @@ class Validator(BaseValidatorNeuron):
                         prospect_id=prospect_id,
                         lead_id=lead_id,
                         lead_data=lead,
-                        score=score,
                         is_valid=is_valid,
+                        rejection_reason=rejection_reason if not is_valid else None,  # Pass structured rejection
                         network=self.config.subtensor.network,
                         netuid=self.config.netuid
                     )
@@ -2482,9 +2486,15 @@ class Validator(BaseValidatorNeuron):
             # Check for required email field first
             email = get_email(lead)
             if not email:
-                return {'is_legitimate': False,
-                        'reason': 'Missing email',
-                        'score': 0.0}
+                return {
+                    'is_legitimate': False,
+                    'reason': {
+                        "stage": "Pre-validation",
+                        "check_name": "email_check",
+                        "message": "Missing email",
+                        "failed_fields": ["email"]
+                    }
+                }
             
             # Map your field names to what automated_checks expects
             mapped_lead = {
@@ -2513,12 +2523,17 @@ class Validator(BaseValidatorNeuron):
                     # Mark lead for manual review or reject
                     lead["deep_verification_failed"] = True
                     lead["deep_verification_results"] = deep_results
-                    
-                    # Fail the lead if deep verification fails
+                
+                    # Return structured rejection reason 
+                    deep_reason = deep_results["checks"][0]["reason"] if deep_results.get("checks") else "unknown"
                     return {
                         'is_legitimate': False,
-                        'reason': f'Deep verification failed: {deep_results["checks"][0]["reason"] if deep_results["checks"] else "unknown"}',
-                        'score': 0.0,
+                        'reason': {
+                            "stage": "Deep Verification",
+                            "check_name": "deep_verification",
+                            "message": f"Deep verification failed: {deep_reason}",
+                            "failed_fields": []
+                        },
                         'deep_verification_results': deep_results
                     }
                 else:
@@ -2534,8 +2549,7 @@ class Validator(BaseValidatorNeuron):
             # Prepare validation result
             validation_result = {
                 'is_legitimate': passed,
-                'reason': reason,
-                'score': 1.0 if passed else 0.0
+                'reason': reason
             }
             
             # Log validation to audit trail (Task 2.5)
@@ -2547,8 +2561,7 @@ class Validator(BaseValidatorNeuron):
                     validator_wallet=self.wallet.hotkey.ss58_address,
                     validation_result={
                         'passed': passed,
-                        'reason': reason,
-                        'score': validation_result['score']
+                        'reason': reason
                     }
                 )
                 if audit_logged:
@@ -2563,6 +2576,14 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.error(f"Error in validate_lead: {e}")
             
+            # Create structured rejection reason for error case
+            error_rejection = {
+                "stage": "Validation Error",
+                "check_name": "exception",
+                "message": f"Validation error: {str(e)}",
+                "failed_fields": []
+            }
+            
             # Log failed validation to audit trail
             try:
                 from Leadpoet.utils.audit_log import log_validation_audit
@@ -2572,8 +2593,7 @@ class Validator(BaseValidatorNeuron):
                     validator_wallet=self.wallet.hotkey.ss58_address,
                     validation_result={
                         'passed': False,
-                        'reason': f'Validation error: {e}',
-                        'score': 0.0
+                        'reason': error_rejection
                     }
                 )
                 if audit_logged:
@@ -2582,9 +2602,10 @@ class Validator(BaseValidatorNeuron):
             except Exception as audit_error:
                 bt.logging.debug(f"Failed to log validation audit: {audit_error}")
             
-            return {'is_legitimate': False,
-                    'reason': f'Validation error: {e}',
-                    'score': 0.0}
+            return {
+                'is_legitimate': False,
+                'reason': error_rejection
+            }
 
     def calculate_validation_score_breakdown(self, lead):
         """Calculate validation score with detailed breakdown"""

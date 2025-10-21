@@ -7,7 +7,7 @@
   ],
   "specific_urls": ["https://www.founderadvisors.tech/"],
   "required_fields": {
-    "company": ["name", "industry"],
+    "company": ["name", "industry", "sub_industry"],
     "contact": ["email", "job_title", "full_name"]
   },
   "optional_fields": {

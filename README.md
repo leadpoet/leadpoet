@@ -40,12 +40,9 @@ export GSE_CX="your_search_engine_id"                # Custom Search ID
 ### For Validators
 
 ```bash
-# Email, LLM, and Google Search Validation Tools
+# Email and LLM Validation Tools
 export OPENROUTER_KEY="your_openrouter_key"          # Required for lead validation
-export MYEMAILVERIFIER_API_KEY="your_mev_key"        # Primary email validation
-export HUNTER_API_KEY="your_hunter_key"              # Fallback email verification
-export GSE_API_KEY="your_google_api_key"             # For company verification
-export GSE_CX="your_search_engine_id"                # Custom search engine ID
+export MYEMAILVERIFIER_API_KEY="your_mev_key"        # Email validation
 
 ```
 
@@ -107,19 +104,20 @@ python neurons/miner.py \
 
 Miners must submit prospects with the following structure:
 
+
 ```json
 {
-  "business": "SpaceX",
-  "full_name": "Elon Musk",
-  "first": "Elon",
-  "last": "Musk",
-  "email": "elon@spacex.com",
-  "role": "CEO",
-  "website": "https://spacex.com",
+  "business": "SpaceX",                    # REQUIRED
+  "full_name": "Elon Musk",                # REQUIRED
+  "first": "Elon",                         # REQUIRED
+  "last": "Musk",                          # REQUIRED
+  "email": "elon@spacex.com",              # REQUIRED
+  "role": "CEO",                           # REQUIRED
+  "website": "https://spacex.com",         # REQUIRED
+  "industry": "Aerospace Manufacturing",   # REQUIRED
+  "sub_industry": "Space Transportation",  # REQUIRED
+  "region": "Hawthorne, CA",               # REQUIRED
   "linkedin": "https://linkedin.com/in/elonmusk",
-  "industry": "Aerospace Manufacturing",
-  "sub_industry": "Space Transportation",
-  "region": "Hawthorne, CA",
   "description": "Aerospace manufacturer and space transportation company focused on reducing space transportation costs",
   "phone_numbers": ["+1-310-363-6000"],
   "founded_year": 2002,
@@ -136,6 +134,45 @@ Miners must submit prospects with the following structure:
 Miners earn rewards **proportional to approved leads** they source:
 - If a miner sources 60% of approved leads in an epoch, they receive 60% of miner emissions for the following epoch
 - Simple, transparent, and directly tied to value creation
+
+### Rejection Feedback
+
+When 2+ validators reject your lead, you'll receive detailed feedback explaining why. This helps you improve lead quality and increase approval rates.
+
+**Query Your Rejections:**
+
+```python
+python3 - <<EOF
+from Leadpoet.utils.cloud_db import get_rejection_feedback
+import bittensor as bt
+
+wallet = bt.wallet(name="miner", hotkey="default")
+feedback = get_rejection_feedback(wallet, limit=10, network="finney", netuid=71)
+
+print(f"\nFound {len(feedback)} rejection(s)\n")
+for idx, record in enumerate(feedback, 1):
+    summary = record['rejection_summary']
+    print(f"[{idx}] Epoch {record['epoch_number']} - Rejected by {summary['rejected_by']}/{summary['total_validators']} validators")
+    for failure in summary['common_failures']:
+        print(f"    • {failure.get('check_name')}: {failure.get('message')}")
+    print()
+EOF
+```
+
+**Common Rejections & Fixes:**
+
+| Issue | Fix |
+|-------|-----|
+| Invalid email format | Verify email follows `name@domain.com` format |
+| Email from disposable provider | Use business emails only (no tempmail, 10minutemail, etc.) |
+| Domain too new (< 7 days) | Wait for domain to age or verify legitimacy |
+| Email marked invalid | Check for typos, verify email exists |
+| Website not accessible | Verify website is online and accessible |
+| Domain blacklisted | Avoid domains flagged for spam/abuse |
+
+**Validation Pipeline:** Leads are validated in 6 stages by validators - Terms Attestation → Source Provenance → Required Fields → DNS/Domain → Reputation → Email Deliverability. Validation stops at first failure.
+
+**Security:** You can only see your own rejections (RLS enforced). Feedback only created when 2+ validators reject, preventing single bad-actor manipulation.
 
 ## For Validators
 

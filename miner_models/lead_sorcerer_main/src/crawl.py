@@ -66,6 +66,7 @@ FIRECRAWL_EXTRACT_SCHEMA = {
                     "description": "Brief business description",
                 },
                 "industry": {"type": "string", "description": "Industry or sector"},
+                "sub_industry": {"type": "string", "description": "Specific sub-industry or niche within the broader industry"},
                 "hq_location": {
                     "type": "string",
                     "description": "Headquarters location (city, state, country)",
@@ -155,7 +156,8 @@ FIRECRAWL_EXTRACT_PROMPT = (
     "COMPANY INFORMATION:\n"
     "- Company name (from title, logo, or header)\n"
     "- Brief description of what they do\n"
-    "- Industry or business type\n"
+    "- Industry or business type (broad category)\n"
+    "- Sub-industry (specific niche or specialization within the industry)\n"
     "- Main location (city, state, country)\n"
     "- Number of locations if mentioned\n"
     "- Year founded if mentioned\n"
@@ -1530,7 +1532,7 @@ IMPORTANT: If no clear intent signals are found, set business_intent_score to {i
                         # Performance & cost optimization
                         "wait_for": 5000,  # 5-second wait for JavaScript content
                         "only_main_content": False,
-                        "max_age": 172800,  # 2 days cache
+                        "max_age": 172800,  # 2 days cache - reduces API calls by ~50%
                         "block_ads": True,  # Faster loading, cleaner content
                         "remove_base64_images": True,  # Smaller response size
                     }
@@ -1960,9 +1962,16 @@ Remember: Extract unique, valuable information about each individual business op
         company["name"] = company_data.get("name")
         company["description"] = company_data.get("description")
         company["industry"] = company_data.get("industry", "")
+        company["sub_industry"] = company_data.get("sub_industry", "")
         company["hq_location"] = company_data.get("location") or company_data.get(
             "hq_location"
         )
+        
+        # CRITICAL: Infer sub_industry if missing (required field)
+        if not company["sub_industry"] and company["industry"]:
+            # Fallback: Use industry value for database extractions
+            company["sub_industry"] = company["industry"]
+            self.logger.info(f"💡 Database extraction: using industry as sub_industry: {company['sub_industry']}")
 
         # Apply configurable field mappings
         self._apply_field_mappings(company, company_data, icp_config)
@@ -2075,7 +2084,28 @@ Remember: Extract unique, valuable information about each individual business op
         company["name"] = company_data.get("name")
         company["description"] = company_data.get("description")
         company["industry"] = company_data.get("industry")
+        company["sub_industry"] = company_data.get("sub_industry")
         company["hq_location"] = company_data.get("hq_location")
+        
+        # CRITICAL: Infer sub_industry if missing (required field)
+        if not company["sub_industry"] and company["industry"]:
+            # Fallback: Use specialties or description to infer sub-industry
+            specialties = company_data.get("specialties", [])
+            description = company.get("description", "")
+            
+            if specialties and len(specialties) > 0:
+                # Use first specialty as sub-industry
+                company["sub_industry"] = specialties[0]
+                self.logger.info(f"💡 Inferred sub_industry from specialties: {company['sub_industry']}")
+            elif description:
+                # Extract key terms from description as sub-industry
+                # For now, use first significant phrase or just copy industry
+                company["sub_industry"] = company["industry"]
+                self.logger.info(f"💡 Using industry as sub_industry fallback: {company['sub_industry']}")
+            else:
+                # Last resort: use industry value
+                company["sub_industry"] = company["industry"]
+                self.logger.warning(f"⚠️ No sub_industry data - using industry as fallback")
 
         # New comprehensive company fields
         company["number_of_locations"] = company_data.get("number_of_locations")

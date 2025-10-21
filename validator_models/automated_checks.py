@@ -28,7 +28,6 @@ from Leadpoet.utils.utils_lead_extraction import (
 )
 
 load_dotenv()
-HUNTER_API_KEY = os.getenv("HUNTER_API_KEY", "YOUR_HUNTER_API_KEY")
 MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "YOUR_MYEMAILVERIFIER_API_KEY")
 
 EMAIL_CACHE_FILE = "email_verification_cache.pkl"
@@ -218,39 +217,118 @@ def extract_root_domain(website: str) -> str:
 
 # Stage 0: Basic Hardcoded Checks
 
-async def check_email_regex(lead: dict) -> Tuple[bool, str]:
+async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
+    """Check that all required fields are present and non-empty"""
+    required_fields = {
+        "industry": ["industry", "Industry"],
+        "sub_industry": ["sub_industry", "sub-industry", "Sub-industry", "Sub_industry"],
+        "role": ["role", "Role"],
+        "region": ["region", "Region", "location", "Location"],
+    }
+    
+    missing_fields = []
+    
+    # Check for name (either full_name OR both first + last)
+    full_name = lead.get("full_name") or lead.get("Full_name") or lead.get("Full Name")
+    first_name = lead.get("first") or lead.get("First") or lead.get("first_name")
+    last_name = lead.get("last") or lead.get("Last") or lead.get("last_name")
+    
+    has_name = bool(full_name) or (bool(first_name) and bool(last_name))
+    if not has_name:
+        missing_fields.append("contact_name")
+    
+    # Check other required fields
+    for field_name, possible_keys in required_fields.items():
+        found = False
+        for key in possible_keys:
+            value = lead.get(key)
+            if value and str(value).strip():  # Check for non-empty string
+                found = True
+                break
+        
+        if not found:
+            missing_fields.append(field_name)
+    
+    # Return structured rejection if any fields are missing
+    if missing_fields:
+        return False, {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_required_fields",
+            "message": f"Missing required fields: {', '.join(missing_fields)}",
+            "failed_fields": missing_fields
+        }
+    
+    return True, {}
+
+async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
     """Check email format using RFC-5322 simplified regex"""
     try:
         email = get_email(lead)
         if not email:
-            return False, "No email provided"
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_email_regex",
+                "message": "No email provided",
+                "failed_fields": ["email"]
+            }
+            # Cache result
+            cache_key = f"email_regex:no_email"
+            validation_cache[cache_key] = (False, rejection_reason)
+            await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
+            return False, rejection_reason
 
         # RFC-5322 simplified regex
         pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         is_valid = bool(re.match(pattern, email))
-        reason = "Valid email format" if is_valid else "Invalid email format"
+
+        if not is_valid:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_email_regex",
+                "message": f"Invalid email format: {email}",
+                "failed_fields": ["email"]
+            }
+            # Cache result
+            cache_key = f"email_regex:{email}"
+            validation_cache[cache_key] = (False, rejection_reason)
+            await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
+            return False, rejection_reason
 
         # Cache result
         cache_key = f"email_regex:{email}"
-        validation_cache[cache_key] = (is_valid, reason)
+        validation_cache[cache_key] = (True, {})
+        await log_validation_metrics(lead, {"passed": True, "reason": "Valid email format"}, "email_regex")
 
-        # Log metrics
-        await log_validation_metrics(lead, {"passed": is_valid, "reason": reason}, "email_regex")
-
-        return is_valid, reason
+        return True, {}
     except Exception as e:
+        rejection_reason = {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_email_regex",
+            "message": f"Email regex check failed: {str(e)}",
+            "failed_fields": ["email"]
+        }
         await log_validation_metrics(lead, {"passed": False, "reason": str(e)}, "email_regex")
-        raise e
+        return False, rejection_reason
 
-async def check_domain_age(lead: dict) -> Tuple[bool, str]:
+async def check_domain_age(lead: dict) -> Tuple[bool, dict]:
     """Check domain age using WHOIS lookup"""
     website = get_website(lead)
     if not website:
-        return False, "No website provided"
+        return False, {
+            "stage": "Stage 1: DNS Layer",
+            "check_name": "check_domain_age",
+            "message": "No website provided",
+            "failed_fields": ["website"]
+        }
 
     domain = extract_root_domain(website)
     if not domain:
-        return False, "Invalid website format"
+        return False, {
+            "stage": "Stage 1: DNS Layer",
+            "check_name": "check_domain_age",
+            "message": f"Invalid website format: {website}",
+            "failed_fields": ["website"]
+        }
 
     cache_key = f"domain_age:{domain}"
     if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["whois"]):
@@ -275,13 +353,28 @@ async def check_domain_age(lead: dict) -> Tuple[bool, str]:
                     min_age_days = 7  # 7 days minimum
 
                     if age_days >= min_age_days:
-                        return (True, f"Domain age: {age_days} days (minimum: {min_age_days})")
+                        return (True, {})
                     else:
-                        return (False, f"Domain too new: {age_days} days (minimum: {min_age_days})")
+                        return (False, {
+                            "stage": "Stage 1: DNS Layer",
+                            "check_name": "check_domain_age",
+                            "message": f"Domain too new: {age_days} days (minimum: {min_age_days})",
+                            "failed_fields": ["website"]
+                        })
                 else:
-                    return False, "Could not determine domain creation date"
+                    return False, {
+                        "stage": "Stage 1: DNS Layer",
+                        "check_name": "check_domain_age",
+                        "message": "Could not determine domain creation date",
+                        "failed_fields": ["website"]
+                    }
             except Exception as e:
-                return False, f"WHOIS lookup failed: {str(e)}"
+                return False, {
+                    "stage": "Stage 1: DNS Layer",
+                    "check_name": "check_domain_age",
+                    "message": f"WHOIS lookup failed: {str(e)}",
+                    "failed_fields": ["website"]
+                }
 
         # Run WHOIS lookup in executor to avoid blocking
         loop = asyncio.get_event_loop()
@@ -290,34 +383,63 @@ async def check_domain_age(lead: dict) -> Tuple[bool, str]:
         return result
 
     except Exception as e:
-        result = (False, f"Domain age check failed: {str(e)}")
+        result = (False, {
+            "stage": "Stage 1: DNS Layer",
+            "check_name": "check_domain_age",
+            "message": f"Domain age check failed: {str(e)}",
+            "failed_fields": ["website"]
+        })
         validation_cache[cache_key] = result
         return result
 
-async def check_mx_record(lead: dict) -> Tuple[bool, str]:
+async def check_mx_record(lead: dict) -> Tuple[bool, dict]:
     """Check if domain has MX records"""
     website = get_website(lead)
     if not website:
-        return False, "No website provided"
+        return False, {
+            "stage": "Stage 1: DNS Layer",
+            "check_name": "check_mx_record",
+            "message": "No website provided",
+            "failed_fields": ["website"]
+        }
 
     domain = extract_root_domain(website)
     if not domain:
-        return False, "Invalid website format"
+        return False, {
+            "stage": "Stage 1: DNS Layer",
+            "check_name": "check_mx_record",
+            "message": f"Invalid website format: {website}",
+            "failed_fields": ["website"]
+        }
 
     cache_key = f"mx_record:{domain}"
     if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
         return validation_cache[cache_key]
 
     try:
-        result = await check_domain_existence(domain)
+        passed, msg = await check_domain_existence(domain)
+        if passed:
+            result = (True, {})
+        else:
+            result = (False, {
+                "stage": "Stage 1: DNS Layer",
+                "check_name": "check_mx_record",
+                "message": msg,
+                "failed_fields": ["website"]
+            })
         validation_cache[cache_key] = result
         return result
     except Exception as e:
-        result = (False, f"MX record check failed: {str(e)}")
+        result = (False, {
+            "stage": "Stage 1: DNS Layer",
+            "check_name": "check_mx_record",
+            "message": f"MX record check failed: {str(e)}",
+            "failed_fields": ["website"]
+        })
         validation_cache[cache_key] = result
         return result
 
-async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
+async def check_spf_dmarc(lead: dict) -> Tuple[bool, dict]:
     """
     Check SPF and DMARC DNS records (SOFT check - always passes, appends data to lead)
 
@@ -331,7 +453,7 @@ async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
         lead: Dict containing email/website
 
     Returns:
-        (True, str): Always passes, with informational message
+        (True, dict): Always passes with empty dict (SOFT check)
     """
     def fail_lead(lead):
         lead["has_spf"] = False
@@ -343,17 +465,17 @@ async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
     if not email:
         # No email to check - append default values
         lead = fail_lead(lead)
-        return True, "No email provided for SPF/DMARC check (SOFT - passed)"
+        return True, {}
 
     # Extract domain from email
     try:
         domain = email.split("@")[1].lower() if "@" in email else ""
         if not domain:
             lead = fail_lead(lead)
-            return True, "Invalid email format (SOFT - passed)"
+            return True, {}
     except (IndexError, AttributeError):
         lead = fail_lead(lead)
-        return True, "Invalid email format (SOFT - passed)"
+        return True, {}
 
     cache_key = f"spf_dmarc:{domain}"
     if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
@@ -362,7 +484,7 @@ async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
         lead["has_spf"] = cached_data.get("has_spf", False)
         lead["has_dmarc"] = cached_data.get("has_dmarc", False)
         lead["dmarc_policy_strict"] = cached_data.get("dmarc_policy_strict", False)
-        return True, cached_data.get("message", "SPF/DMARC check (cached)")
+        return True, {}
 
     try:
         # Initialize results
@@ -430,7 +552,7 @@ async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
         print(f"📧 SPF/DMARC Check (SOFT): {domain} - {message}")
 
         # ALWAYS return True (SOFT check never fails)
-        return True, message
+        return True, {}
 
     except Exception as e:
         # On any error, append False values and pass
@@ -451,36 +573,66 @@ async def check_spf_dmarc(lead: dict) -> Tuple[bool, str]:
         validation_cache[cache_key] = cache_data
 
         # ALWAYS return True (SOFT check never fails)
-        return True, message
+        return True, {}
 
-async def check_head_request(lead: dict) -> Tuple[bool, str]:
+async def check_head_request(lead: dict) -> Tuple[bool, dict]:
     """Wrapper around existing verify_company function"""
     website = get_website(lead)
     if not website:
-        return False, "No website provided"
+        return False, {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_head_request",
+            "message": "No website provided",
+            "failed_fields": ["website"]
+        }
 
     domain = extract_root_domain(website)
     if not domain:
-        return False, "Invalid website format"
+        return False, {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_head_request",
+            "message": f"Invalid website format: {website}",
+            "failed_fields": ["website"]
+        }
 
     cache_key = f"head_request:{domain}"
     if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
         return validation_cache[cache_key]
 
     try:
-        result = await verify_company(domain)
+        passed, msg = await verify_company(domain)
+        if passed:
+            result = (True, {})
+        else:
+            result = (False, {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_head_request",
+                "message": f"Website not accessible: {msg}",
+                "failed_fields": ["website"]
+            })
         validation_cache[cache_key] = result
         return result
     except Exception as e:
-        result = (False, f"HEAD request check failed: {str(e)}")
+        result = (False, {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_head_request",
+            "message": f"HEAD request check failed: {str(e)}",
+            "failed_fields": ["website"]
+        })
         validation_cache[cache_key] = result
         return result
 
-async def check_disposable(lead: dict) -> Tuple[bool, str]:
+async def check_disposable(lead: dict) -> Tuple[bool, dict]:
     """Check if email domain is disposable"""
     email = get_email(lead)
     if not email:
-        return False, "No email provided"
+        rejection_reason = {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_disposable",
+            "message": "No email provided",
+            "failed_fields": ["email"]
+        }
+        return False, rejection_reason
 
     cache_key = f"disposable:{email}"
     if cache_key in validation_cache:
@@ -490,15 +642,29 @@ async def check_disposable(lead: dict) -> Tuple[bool, str]:
         is_disposable, reason = await is_disposable_email(email)
         # For validation pipeline: return True if check PASSES (email is NOT disposable)
         # return False if check FAILS (email IS disposable)
-        passed = not is_disposable
-        validation_cache[cache_key] = (passed, reason)
-        return passed, reason
+        if is_disposable:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_disposable",
+                "message": f"Disposable email domain detected: {email}",
+                "failed_fields": ["email"]
+            }
+            validation_cache[cache_key] = (False, rejection_reason)
+            return False, rejection_reason
+        else:
+            validation_cache[cache_key] = (True, {})
+            return True, {}
     except Exception as e:
-        result = (False, f"Disposable check failed: {str(e)}")
-        validation_cache[cache_key] = result
-        return result
+        rejection_reason = {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_disposable",
+            "message": f"Disposable check failed: {str(e)}",
+            "failed_fields": ["email"]
+        }
+        validation_cache[cache_key] = (False, rejection_reason)
+        return False, rejection_reason
 
-async def check_dnsbl(lead: dict) -> Tuple[bool, str]:
+async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
     """
     Check if lead's email domain is listed in Spamhaus DBL.
 
@@ -506,24 +672,29 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, str]:
         lead: Dict containing email field
 
     Returns:
-        (bool, str): (is_valid, reason_if_invalid)
+        (bool, dict): (is_valid, rejection_reason_dict)
     """
     email = get_email(lead)
     if not email:
-        return False, "No email provided"
+        return False, {
+            "stage": "Stage 2: Domain Reputation",
+            "check_name": "check_dnsbl",
+            "message": "No email provided",
+            "failed_fields": ["email"]
+        }
 
     # Extract domain from email
     try:
         domain = email.split("@")[1].lower() if "@" in email else ""
         if not domain:
-            return True, "Invalid email format - handled by other checks"
+            return True, {}  # Invalid format handled by other checks
     except (IndexError, AttributeError):
-        return True, "Invalid email format - handled by other checks"
+        return True, {}  # Invalid format handled by other checks
 
     # Use root domain extraction helper
     root_domain = extract_root_domain(domain)
     if not root_domain:
-        return True, "Could not extract root domain"
+        return True, {}  # Could not extract - handled by other checks
 
     cache_key = f"dnsbl_{root_domain}"
     if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
@@ -550,10 +721,15 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, str]:
             is_blacklisted = await loop.run_in_executor(None, dns_lookup)
 
             if is_blacklisted:
-                result = (False, f"Domain {root_domain} blacklisted in Spamhaus DBL")
+                result = (False, {
+                    "stage": "Stage 2: Domain Reputation",
+                    "check_name": "check_dnsbl",
+                    "message": f"Domain {root_domain} blacklisted in Spamhaus DBL",
+                    "failed_fields": ["email"]
+                })
                 print(f"❌ DNSBL: Domain {root_domain} found in Spamhaus blacklist")
             else:
-                result = (True, f"Domain {root_domain} not in Spamhaus DBL")
+                result = (True, {})
                 print(f"✅ DNSBL: Domain {root_domain} clean")
 
             validation_cache[cache_key] = result
@@ -561,14 +737,14 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, str]:
 
     except Exception as e:
         # On any unexpected error, default to valid and cache the result
-        result = (True, f"DNSBL check failed (defaulting to valid): {str(e)}")
+        result = (True, {})  # Don't block on infrastructure issues
         validation_cache[cache_key] = result
         print(f"⚠️ DNSBL check error for {root_domain}: {e}")
         return result
 
 # Stage 3: MyEmailVerifier Check
 
-async def check_myemailverifier_email(lead: dict) -> Tuple[bool, str]:
+async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
     """
     Check email validity using MyEmailVerifier API
     
@@ -584,7 +760,12 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, str]:
     """
     email = get_email(lead)
     if not email:
-        return False, "No email provided"
+        return False, {
+            "stage": "Stage 3: MyEmailVerifier",
+            "check_name": "check_myemailverifier_email",
+            "message": "No email provided",
+            "failed_fields": ["email"]
+        }
 
     cache_key = f"myemailverifier:{email}"
     if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["myemailverifier"]):
@@ -595,7 +776,7 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, str]:
         # Mock-mode fallback
         if "YOUR_MYEMAILVERIFIER_API_KEY" in MYEMAILVERIFIER_API_KEY:
             print(f"   🔧 MOCK MODE: Using mock validation (no real API call)")
-            result = (True, "Mock pass - MyEmailVerifier check")
+            result = (True, {})
             validation_cache[cache_key] = result
             return result
 
@@ -629,41 +810,61 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, str]:
                     # Check for disposable domains
                     is_disposable = data.get("Disposable_Domain", "false") == "true"
                     if is_disposable:
-                        result = (False, "Email is from a disposable/temporary email provider")
+                        result = (False, {
+                            "stage": "Stage 3: MyEmailVerifier",
+                            "check_name": "check_myemailverifier_email",
+                            "message": "Email is from a disposable/temporary email provider",
+                            "failed_fields": ["email"]
+                        })
                         validation_cache[cache_key] = result
                         return result
                     
                     # Handle validation results based on Status field
                     if status == "Valid":
-                        result = (True, "Email validated (valid)")
+                        result = (True, {})
                     elif status == "Catch All":
                         # BRD: IF catch-all, accept only IF DNS TXT record contains v=spf1
                         has_spf = lead.get("has_spf", False)
                         if has_spf:
-                            result = (True, "Email validated (catch-all with SPF)")
+                            result = (True, {})
                         else:
-                            result = (False, "Email is catch-all without SPF record")
+                            result = (False, {
+                                "stage": "Stage 3: MyEmailVerifier",
+                                "check_name": "check_myemailverifier_email",
+                                "message": "Email is catch-all without SPF record",
+                                "failed_fields": ["email"]
+                            })
                     elif status == "Invalid":
-                        result = (False, "Email marked invalid")
+                        result = (False, {
+                            "stage": "Stage 3: MyEmailVerifier",
+                            "check_name": "check_myemailverifier_email",
+                            "message": "Email marked invalid",
+                            "failed_fields": ["email"]
+                        })
                     elif status == "Grey-listed":
                         # Greylisted - retry recommended after 5-10 hours, but for now pass
-                        result = (True, "Email greylisted (assumed valid)")
+                        result = (True, {})
                     elif status == "Unknown":
                         # For unknown status, default to passing to avoid false negatives
-                        result = (True, "Email status unknown (assumed valid)")
+                        result = (True, {})
                     else:
                         # Any other status, log and assume valid
-                        result = (True, f"Email status {status} (assumed valid)")
+                        result = (True, {})
                     
                     validation_cache[cache_key] = result
                     return result
 
     except Exception as e:
-        result = (False, f"MyEmailVerifier check failed: {str(e)}")
+        result = (False, {
+            "stage": "Stage 3: MyEmailVerifier",
+            "check_name": "check_myemailverifier_email",
+            "message": f"MyEmailVerifier check failed: {str(e)}",
+            "failed_fields": ["email"]
+        })
         validation_cache[cache_key] = result
         return result
 
-async def check_terms_attestation(lead: dict) -> Tuple[bool, str]:
+async def check_terms_attestation(lead: dict) -> Tuple[bool, dict]:
     """
     Verify miner's attestation metadata against Supabase database (SOURCE OF TRUTH).
     
@@ -684,7 +885,12 @@ async def check_terms_attestation(lead: dict) -> Tuple[bool, str]:
     
     missing = [f for f in required_fields if f not in lead]
     if missing:
-        return False, f"Missing attestation fields: {', '.join(missing)}"
+        return False, {
+            "stage": "Stage -1: Terms Attestation",
+            "check_name": "check_terms_attestation",
+            "message": f"Missing attestation fields: {', '.join(missing)}",
+            "failed_fields": missing
+        }
     
     wallet_ss58 = lead.get("wallet_ss58")
     lead_terms_hash = lead.get("terms_version_hash")
@@ -696,7 +902,7 @@ async def check_terms_attestation(lead: dict) -> Tuple[bool, str]:
             # If Supabase not available, log warning but don't fail validation
             # This prevents breaking validators during network issues
             print(f"   ⚠️  Supabase client not available - skipping attestation verification")
-            return True, "Attestation check skipped (Supabase unavailable)"
+            return True, {}
         
         result = supabase.table("contributor_attestations")\
             .select("*")\
@@ -707,7 +913,12 @@ async def check_terms_attestation(lead: dict) -> Tuple[bool, str]:
         
         # SECURITY CHECK 2: Reject if no valid attestation in database
         if not result.data or len(result.data) == 0:
-            return False, f"No valid attestation found in database for wallet {wallet_ss58[:10]}..."
+            return False, {
+                "stage": "Stage -1: Terms Attestation",
+                "check_name": "check_terms_attestation",
+                "message": f"No valid attestation found in database for wallet {wallet_ss58[:10]}...",
+                "failed_fields": ["wallet_ss58"]
+            }
         
         # Attestation exists in Supabase - miner has legitimately accepted terms
         supabase_attestation = result.data[0]
@@ -715,26 +926,41 @@ async def check_terms_attestation(lead: dict) -> Tuple[bool, str]:
     except Exception as e:
         # Log error but don't fail validation - prevents breaking validators
         print(f"   ⚠️  Failed to verify attestation in database: {str(e)}")
-        return True, "Attestation check skipped (database error)"
+        return True, {}
     
     # SECURITY CHECK 3: Verify lead metadata matches Supabase record
     if lead_terms_hash != supabase_attestation.get("terms_version_hash"):
-        return False, f"Lead attestation hash mismatch (lead: {lead_terms_hash[:8]}, db: {supabase_attestation.get('terms_version_hash', '')[:8]})"
+        return False, {
+            "stage": "Stage -1: Terms Attestation",
+            "check_name": "check_terms_attestation",
+            "message": f"Lead attestation hash mismatch (lead: {lead_terms_hash[:8]}, db: {supabase_attestation.get('terms_version_hash', '')[:8]})",
+            "failed_fields": ["terms_version_hash"]
+        }
     
     # Check: Verify terms version is current
     if lead_terms_hash != TERMS_VERSION_HASH:
-        return False, f"Outdated terms version (lead: {lead_terms_hash[:8]}, current: {TERMS_VERSION_HASH[:8]})"
+        return False, {
+            "stage": "Stage -1: Terms Attestation",
+            "check_name": "check_terms_attestation",
+            "message": f"Outdated terms version (lead: {lead_terms_hash[:8]}, current: {TERMS_VERSION_HASH[:8]})",
+            "failed_fields": ["terms_version_hash"]
+        }
     
     # Check: Verify boolean attestations in lead
     if not all([lead.get("lawful_collection"), 
                 lead.get("no_restricted_sources"), 
                 lead.get("license_granted")]):
-        return False, "Incomplete attestations"
+        return False, {
+            "stage": "Stage -1: Terms Attestation",
+            "check_name": "check_terms_attestation",
+            "message": "Incomplete attestations",
+            "failed_fields": ["lawful_collection", "no_restricted_sources", "license_granted"]
+        }
     
-    return True, "Terms attestation valid (verified against database)"
+    return True, {}
 
 
-async def check_source_provenance(lead: dict) -> Tuple[bool, str]:
+async def check_source_provenance(lead: dict) -> Tuple[bool, dict]:
     """
     Verify source provenance metadata.
     
@@ -758,24 +984,49 @@ async def check_source_provenance(lead: dict) -> Tuple[bool, str]:
     source_type = lead.get("source_type")
     
     if not source_url:
-        return False, "Missing source_url"
+        return False, {
+            "stage": "Stage 0.5: Source Provenance",
+            "check_name": "check_source_provenance",
+            "message": "Missing source_url",
+            "failed_fields": ["source_url"]
+        }
     
     if not source_type:
-        return False, "Missing source_type"
+        return False, {
+            "stage": "Stage 0.5: Source Provenance",
+            "check_name": "check_source_provenance",
+            "message": "Missing source_type",
+            "failed_fields": ["source_type"]
+        }
     
     # Validate source_type against allowed list
     valid_types = ["public_registry", "company_site", "first_party_form", 
                    "licensed_resale", "proprietary_database"]
     if source_type not in valid_types:
-        return False, f"Invalid source_type: {source_type}"
+        return False, {
+            "stage": "Stage 0.5: Source Provenance",
+            "check_name": "check_source_provenance",
+            "message": f"Invalid source_type: {source_type}",
+            "failed_fields": ["source_type"]
+        }
     
     # Validate source URL (checks denylist, domain age, reachability)
     try:
         is_valid, reason = await validate_source_url(source_url)
         if not is_valid:
-            return False, f"Source URL validation failed: {reason}"
+            return False, {
+                "stage": "Stage 0.5: Source Provenance",
+                "check_name": "check_source_provenance",
+                "message": f"Source URL validation failed: {reason}",
+                "failed_fields": ["source_url"]
+            }
     except Exception as e:
-        return False, f"Error validating source URL: {str(e)}"
+        return False, {
+            "stage": "Stage 0.5: Source Provenance",
+            "check_name": "check_source_provenance",
+            "message": f"Error validating source URL: {str(e)}",
+            "failed_fields": ["source_url"]
+        }
     
     # Additional check: Extract domain and verify not restricted
     # (This is redundant with validate_source_url but provides explicit feedback)
@@ -783,12 +1034,17 @@ async def check_source_provenance(lead: dict) -> Tuple[bool, str]:
     if domain and is_restricted_source(domain):
         # Only fail if NOT a licensed resale (those are handled in next check)
         if source_type != "licensed_resale":
-            return False, f"Source domain {domain} is in restricted denylist"
+            return False, {
+                "stage": "Stage 0.5: Source Provenance",
+                "check_name": "check_source_provenance",
+                "message": f"Source domain {domain} is in restricted denylist",
+                "failed_fields": ["source_url"]
+            }
     
-    return True, "Source provenance verified"
+    return True, {}
 
 
-async def check_licensed_resale_proof(lead: dict) -> Tuple[bool, str]:
+async def check_licensed_resale_proof(lead: dict) -> Tuple[bool, dict]:
     """
     Validate license document proof for licensed resale submissions.
     
@@ -805,25 +1061,37 @@ async def check_licensed_resale_proof(lead: dict) -> Tuple[bool, str]:
     
     # Only validate if this is a licensed resale submission
     if source_type != "licensed_resale":
-        return True, "Not a licensed resale submission"
+        return True, {}
     
     # Validate license proof
     is_valid, reason = validate_licensed_resale(lead)
     
     if not is_valid:
-        return False, reason
+        return False, {
+            "stage": "Stage 0.5: Source Provenance",
+            "check_name": "check_licensed_resale_proof",
+            "message": reason,
+            "failed_fields": ["license_doc_hash"]
+        }
     
     # Log for audit trail
     license_hash = lead.get("license_doc_hash", "")
     print(f"   📄 Licensed resale detected: hash={license_hash[:16]}...")
     
-    return True, "Licensed resale proof verified"
+    return True, {}
 
 
 # Main validation pipeline
 
-async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
-    """Run all automated checks in stages, returning (passed, reason)"""
+async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
+    """
+    Run all automated checks in stages, returning (passed, rejection_reason_dict).
+    
+    Returns:
+        Tuple[bool, dict]: (passed, rejection_reason)
+            - If passed: (True, {})
+            - If failed: (False, {"stage": ..., "check_name": ..., "message": ..., "failed_fields": [...]})
+    """
 
     email = get_email(lead)
     company = lead.get("Company", "")
@@ -834,10 +1102,11 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     # ========================================================================
     print(f"🔍 Stage -1: Terms attestation check for {email} @ {company}")
     
-    passed, reason = await check_terms_attestation(lead)
+    passed, rejection_reason = await check_terms_attestation(lead)
     if not passed:
-        print(f"   ❌ Stage -1 failed: {reason}")
-        return False, f"Stage -1 failed: {reason}"
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage -1 failed: {msg}")
+        return False, rejection_reason
     
     print("   ✅ Stage -1 passed")
 
@@ -853,30 +1122,33 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     ]
     
     for check_func in checks_stage0_5:
-        passed, reason = await check_func(lead)
+        passed, rejection_reason = await check_func(lead)
         if not passed:
-            print(f"   ❌ Stage 0.5 failed: {reason}")
-            return False, f"Stage 0.5 failed: {reason}"
+            msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+            print(f"   ❌ Stage 0.5 failed: {msg}")
+            return False, rejection_reason
     
     print("   ✅ Stage 0.5 passed")
 
     # ========================================================================
     # Stage 0: Hardcoded Checks (MIXED)
+    # - Required Fields, Email Regex, Disposable, HEAD Request
     # - Deduplication (handled in validate_lead_list)
-    # - Email Regex, Disposable, HEAD Request
     # ========================================================================
     print(f"🔍 Stage 0: Hardcoded checks for {email} @ {company}")
     checks_stage0 = [
+        check_required_fields,  # Required fields validation (HARD)
         check_email_regex,      # RFC-5322 regex validation (HARD)
         check_disposable,       # Filter throwaway email providers (HARD)
         check_head_request,     # Test website accessibility (HARD)
     ]
 
     for check_func in checks_stage0:
-        passed, reason = await check_func(lead)
+        passed, rejection_reason = await check_func(lead)
         if not passed:
-            print(f"   ❌ Stage 0 failed: {reason}")
-            return False, f"Stage 0 failed: {reason}"
+            msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+            print(f"   ❌ Stage 0 failed: {msg}")
+            return False, rejection_reason
 
     print("   ✅ Stage 0 passed")
 
@@ -893,10 +1165,11 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     ]
 
     for check_func in checks_stage1:
-        passed, reason = await check_func(lead)
+        passed, rejection_reason = await check_func(lead)
         if not passed:
-            print(f"   ❌ Stage 1 failed: {reason}")
-            return False, f"Stage 1 failed: {reason}"
+            msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+            print(f"   ❌ Stage 1 failed: {msg}")
+            return False, rejection_reason
 
     print("   ✅ Stage 1 passed")
 
@@ -905,10 +1178,11 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     # - DNSBL (Domain Block List) - Spamhaus DBL lookup
     # ========================================================================
     print(f"🔍 Stage 2: Domain reputation checks for {email} @ {company}")
-    passed, reason = await check_dnsbl(lead)
+    passed, rejection_reason = await check_dnsbl(lead)
     if not passed:
-        print(f"   ❌ Stage 2 failed: {reason}")
-        return False, f"Stage 2 failed: {reason}"
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 2 failed: {msg}")
+        return False, rejection_reason
 
     print("   ✅ Stage 2 passed")
 
@@ -917,15 +1191,16 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, str]:
     # - Email verification: Pass IF valid, IF catch-all accept only IF SPF
     # ========================================================================
     print(f"🔍 Stage 3: MyEmailVerifier email validation for {email} @ {company}")
-    passed, reason = await check_myemailverifier_email(lead)
+    passed, rejection_reason = await check_myemailverifier_email(lead)
     if not passed:
-        print(f"   ❌ Stage 3 failed: {reason}")
-        return False, f"Stage 3 failed: {reason}"
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 3 failed: {msg}")
+        return False, rejection_reason
 
     print("   ✅ Stage 3 passed")
     print(f"🎉 All stages passed for {email} @ {company}")
 
-    return True, "All checks passed"
+    return True, {}
 
 # Existing functions - DO NOT TOUCH (maintained for backward compatibility)
 
@@ -959,23 +1234,6 @@ async def check_domain_existence(domain: str) -> Tuple[bool, str]:
         return True, "Domain has MX records"
     except Exception as e:
         return False, f"Domain check failed: {str(e)}"
-
-async def check_hunter_email(email: str) -> Tuple[bool, str]:
-    """Check email validity using Hunter API"""
-    if "YOUR_HUNTER_API_KEY" in HUNTER_API_KEY:
-        return True, "Mock pass"
-
-    url = f"https://api.hunter.io/v2/email-verifier?email={email}&api_key={HUNTER_API_KEY}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
-                data = await response.json()
-                status = data.get("data", {}).get("status", "unknown")
-                is_valid = status in ["valid", "accept_all"]
-                reason = data.get("data", {}).get("result", "unknown")
-                return is_valid, reason
-    except Exception as e:
-        return False, str(e)
 
 async def verify_company(company_domain: str) -> Tuple[bool, str]:
     if not company_domain:
@@ -1019,7 +1277,7 @@ async def validate_lead_list(leads: list) -> list:
     """Main validation function - maintains backward compatibility"""
 
     # Mock mode fallback
-    if "YOUR_HUNTER_API_KEY" in HUNTER_API_KEY:
+    if "YOUR_MYEMAILVERIFIER_API_KEY" in MYEMAILVERIFIER_API_KEY:
         print("Mock mode: Assuming all leads pass automated checks")
         return [{
             "lead_index": i,

@@ -197,21 +197,6 @@
           "maxLength": 2048,
           "description": "Business operational status (e.g., active, inactive, closed)"
         },
-        "ids": {
-          "type": "object",
-          "properties": {
-            "linkedin": {
-              "type": ["string", "null"],
-              "pattern": "^/company/[^/]+$",
-              "maxLength": 2048
-            },
-            "crunchbase": {
-              "type": ["string", "null"],
-              "maxLength": 2048
-            }
-          },
-          "additionalProperties": false
-        },
         "hq_country": {
           "type": ["string", "null"],
           "maxLength": 2048,

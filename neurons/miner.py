@@ -1121,8 +1121,6 @@ def sanitize_prospect(prospect, miner_hotkey=None):
         strip_html(prospect.get("company_type", prospect.get("Company Type", ""))),
         "number_of_locations":
         prospect.get("number_of_locations", prospect.get("Number of Locations", "")),
-        "ids":
-        prospect.get("ids", {}),
         "socials":
         prospect.get("socials", {}),
         "source":

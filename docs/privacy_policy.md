@@ -124,7 +124,7 @@ If you are located in the European Union, you have the right to:
 - **Portability:** Receive your data in a structured format
 - **Objection:** Object to processing based on legitimate interests
 
-**How to Exercise:** Email privacy@leadpoet.com with your wallet address and specific request.
+**How to Exercise:** Email hello@leadpoet.com with your wallet address and specific request.
 
 ### 5.2 Rights for California Residents (CCPA/CPRA)
 
@@ -135,7 +135,7 @@ If you are a California resident, you have the right to:
 - **Opt-Out:** Opt-out of "sale" or "sharing" of your data
 - **Non-Discrimination:** Not be discriminated against for exercising your rights
 
-**How to Exercise:** Email privacy@leadpoet.com or submit a request via our [Takedown Process](./takedown_process.md).
+**How to Exercise:** Email hello@leadpoet.com or submit a request via our [Takedown Process](./takedown_process.md).
 
 ### 5.3 Rights for Business Contacts in Our Database
 
@@ -249,7 +249,7 @@ We may update this Privacy Policy periodically. Changes will be posted with a ne
 
 For privacy inquiries, data subject requests, or complaints:
 
-**Email:** privacy@leadpoet.com  
+**Email:** hello@leadpoet.com  
 **Takedown Requests:** See our [Takedown Process](./takedown_process.md)  
 **Website:** https://leadpoet.com/privacy
 
@@ -261,7 +261,7 @@ For privacy inquiries, data subject requests, or complaints:
 
 For EU residents, our Data Protection Officer can be reached at:
 
-**Email:** dpo@leadpoet.com
+**Email:** hello@leadpoet.com
 
 ---
 

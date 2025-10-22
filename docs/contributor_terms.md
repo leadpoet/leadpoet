@@ -1,7 +1,7 @@
 # Leadpoet Contributor Terms of Service
 
-**Last Updated:** January 18, 2025  
-**Effective Date:** January 18, 2025  
+**Last Updated:** October 18, 2025  
+**Effective Date:** October 18, 2025  
 **Terms Version:** See hash below
 
 ---
@@ -225,8 +225,8 @@ This three-layer system prevents manipulation and ensures auditability.
 
 Every lead you submit goes through validation:
 
-1. **Stage -1:** Validators check that you have a valid attestation in the database
-2. **Stage 0.5:** Validators verify your source provenance (URL, type, denylist)
+1. **Pre-Attestation Check:** Validators check that you have a valid attestation in the database
+2. **Source Provenance Verification:** Validators verify your source provenance (URL, type, denylist)
 3. **Standard checks:** Email validation, domain age, etc.
 4. **Deep verification:** 5% random sample + 100% of licensed resale
 
@@ -255,7 +255,7 @@ Every lead you submit goes through validation:
 
 ### What if I made an honest mistake?
 
-Contact us immediately at compliance@leadpoet.com. Honest mistakes are handled differently than intentional fraud.
+Contact us immediately at hello@leadpoet.com. Honest mistakes are handled differently than intentional fraud.
 
 ### Can I revoke my acceptance?
 
@@ -265,9 +265,8 @@ No. Acceptance is irrevocable. However, you can stop mining at any time by not r
 
 ## Contact
 
-**Email:** contributor-support@leadpoet.com  
-**Website:** https://leadpoet.com/contributor-terms  
-**Discord:** https://discord.gg/leadpoet
+**Email:** hello@leadpoet.com  
+**Website:** https://leadpoet.com
 
 ---
 

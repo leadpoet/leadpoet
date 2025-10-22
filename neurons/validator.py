@@ -2663,7 +2663,6 @@ class Validator(BaseValidatorNeuron):
                     "ownership_type": lead.get("ownership_type", ""),
                     "company_type": lead.get("company_type", ""),
                     "number_of_locations": lead.get("number_of_locations", ""),
-                    "ids": lead.get("ids", {}),
                     "socials": lead.get("socials", {}),
                 }
             }
@@ -3001,7 +3000,6 @@ def add_validated_leads_to_pool(leads):
             "ownership_type": lead.get("ownership_type", ""),
             "company_type": lead.get("company_type", ""),
             "number_of_locations": lead.get("number_of_locations", ""),
-            "ids": lead.get("ids", {}),
             "socials": lead.get("socials", {}),
             "source":     lead.get("source", ""),
             "curated_by": lead.get("curated_by", ""),

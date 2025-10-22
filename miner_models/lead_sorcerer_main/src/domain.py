@@ -537,7 +537,6 @@ class DomainTool:
                 "blog_url": None,
                 "tech_stack": [],
                 "evidence_urls": [],
-                "ids": {"linkedin": None, "crunchbase": None},
             },
             "contacts": [],
             "icp": {

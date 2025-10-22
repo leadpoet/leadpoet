@@ -2231,8 +2231,6 @@ Remember: Extract unique, valuable information about each individual business op
         company["phone_numbers"] = company_data.get("phone_numbers", [])
 
         # Initialize company structures
-        if "ids" not in company:
-            company["ids"] = {"linkedin": None, "crunchbase": None}
         if "socials" not in company:
             company["socials"] = {
                 "linkedin": None,
@@ -2252,7 +2250,6 @@ Remember: Extract unique, valuable information about each individual business op
         if linkedin_url:
             link_type, slug = canonicalize_linkedin(linkedin_url)
             if link_type == "company":
-                company["ids"]["linkedin"] = f"/company/{slug}"
                 company["socials"]["linkedin"] = (
                     f"https://www.linkedin.com/company/{slug}"
                 )

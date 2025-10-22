@@ -288,13 +288,13 @@ async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
                 "message": f"Invalid email format: {email}",
                 "failed_fields": ["email"]
             }
-        # Cache result
-        cache_key = f"email_regex:{email}"
-        validation_cache[cache_key] = (False, rejection_reason)
-        await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
-        return False, rejection_reason
+            # Cache result
+            cache_key = f"email_regex:{email}"
+            validation_cache[cache_key] = (False, rejection_reason)
+            await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
+            return False, rejection_reason
 
-        # Cache result
+        # Valid email - cache success result
         cache_key = f"email_regex:{email}"
         validation_cache[cache_key] = (True, {})
         await log_validation_metrics(lead, {"passed": True, "reason": "Valid email format"}, "email_regex")

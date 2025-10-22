@@ -255,8 +255,6 @@ else:
             safe_str(company.get("company_type")),
             "number_of_locations":
             safe_str(company.get("number_of_locations")),
-            "ids":
-            company.get("ids", {}),
             "socials":
             company.get("socials", {}),
         }

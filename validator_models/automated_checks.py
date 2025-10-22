@@ -288,11 +288,11 @@ async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
                 "message": f"Invalid email format: {email}",
                 "failed_fields": ["email"]
             }
-            # Cache result
-            cache_key = f"email_regex:{email}"
-            validation_cache[cache_key] = (False, rejection_reason)
-            await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
-            return False, rejection_reason
+        # Cache result
+        cache_key = f"email_regex:{email}"
+        validation_cache[cache_key] = (False, rejection_reason)
+        await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
+        return False, rejection_reason
 
         # Cache result
         cache_key = f"email_regex:{email}"
@@ -850,7 +850,7 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                     else:
                         # Any other status, log and assume valid
                         result = (True, {})
-                    
+
                     validation_cache[cache_key] = result
                     return result
 
@@ -1086,7 +1086,7 @@ async def check_licensed_resale_proof(lead: dict) -> Tuple[bool, dict]:
 async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     """
     Run all automated checks in stages, returning (passed, rejection_reason_dict).
-    
+
     Returns:
         Tuple[bool, dict]: (passed, rejection_reason)
             - If passed: (True, {})
@@ -1097,24 +1097,24 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     company = lead.get("Company", "")
 
     # ========================================================================
-    # Stage -1: Terms Attestation Verification (HARD)
+    # Pre-Attestation Check: Terms Attestation Verification (HARD)
     # Verifies miner attestation against Supabase database (source of truth)
     # ========================================================================
-    print(f"🔍 Stage -1: Terms attestation check for {email} @ {company}")
+    print(f"🔍 Pre-Attestation Check: Terms attestation check for {email} @ {company}")
     
     passed, rejection_reason = await check_terms_attestation(lead)
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
-        print(f"   ❌ Stage -1 failed: {msg}")
+        print(f"   ❌ Pre-Attestation Check failed: {msg}")
         return False, rejection_reason
     
-    print("   ✅ Stage -1 passed")
+    print("   ✅ Pre-Attestation Check passed")
 
     # ========================================================================
-    # Stage 0.5: Source Provenance Verification (HARD)
+    # Source Provenance Verification: Source Validation (HARD)
     # Validates source_url, source_type, denylist, and licensed resale proof
     # ========================================================================
-    print(f"🔍 Stage 0.5: Source provenance verification for {email} @ {company}")
+    print(f"🔍 Source Provenance Verification: Source validation for {email} @ {company}")
     
     checks_stage0_5 = [
         check_source_provenance,       # Validate source URL, type, denylist
@@ -1125,10 +1125,10 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         passed, rejection_reason = await check_func(lead)
         if not passed:
             msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
-            print(f"   ❌ Stage 0.5 failed: {msg}")
+            print(f"   ❌ Source Provenance Verification failed: {msg}")
             return False, rejection_reason
     
-    print("   ✅ Stage 0.5 passed")
+    print("   ✅ Source Provenance Verification passed")
 
     # ========================================================================
     # Stage 0: Hardcoded Checks (MIXED)

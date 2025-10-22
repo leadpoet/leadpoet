@@ -485,9 +485,132 @@ def push_prospects_to_cloud(
         
     except Exception as e:
         error_str = str(e)
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 1. COOLDOWN ERROR (50 rejections reached - Error Code P0001)
+        # ─────────────────────────────────────────────────────────────────────
+        if "Rate limit exceeded" in error_str and ("50 rejected leads" in error_str or "Cooldown active" in error_str):
+            bt.logging.error("🚨 RATE LIMIT: COOLDOWN ACTIVE")
+            bt.logging.error("   You have reached 50 rejected leads today")
+            bt.logging.error("   Your account is temporarily suspended until 12:00 AM ET")
+            
+            print(f"\n{'='*70}")
+            print("🚨  DAILY REJECTION LIMIT REACHED")
+            print(f"{'='*70}")
+            print("\n⛔ Your mining account has been placed on cooldown")
+            print("\nReason: 50 consensus-rejected leads in the past 24 hours")
+            print("\nWhat happened:")
+            print("  • All your pending leads have been removed from the queue")
+            print("  • You cannot submit new leads until the daily reset")
+            
+            # Try to extract oldest removed lead info from error message
+            try:
+                if "Oldest removed lead:" in error_str:
+                    # Extract email/ID from error message
+                    import re
+                    email_match = re.search(r'Oldest removed lead: ([^\s]+)', error_str)
+                    id_match = re.search(r'\(ID: ([^\)]+)\)', error_str)
+                    if email_match or id_match:
+                        print("\nOldest removed lead:")
+                        if email_match:
+                            print(f"  • Email: {email_match.group(1)}")
+                        if id_match:
+                            print(f"  • Lead ID: {id_match.group(1)}")
+            except Exception:
+                pass
+            
+            print("\nNext steps:")
+            print("  1. Review your lead quality and sourcing methods")
+            print("  2. Check rejection feedback: query rejection_feedback table")
+            print("  3. Wait until 12:00 AM ET for automatic cooldown reset")
+            print("  4. Improve lead quality before resuming submissions")
+            print(f"\n{'='*70}\n")
+            return False
         
-        # Check if this is a duplicate lead error (409 Conflict or explicit message)
-        if "409" in error_str or "Conflict" in error_str or "Duplicate lead" in error_str or "already exists" in error_str:
+        # ─────────────────────────────────────────────────────────────────────
+        # 2. DAILY SUBMISSION LIMIT (1000 submissions reached - Error Code P0002)
+        # ─────────────────────────────────────────────────────────────────────
+        elif "Rate limit exceeded" in error_str and ("Maximum" in error_str and "submissions per day" in error_str):
+            # Extract current count if present
+            import re
+            count_match = re.search(r'Current count: (\d+)', error_str)
+            current_count = count_match.group(1) if count_match else "1000"
+            
+            bt.logging.error("🚨 RATE LIMIT: DAILY SUBMISSION LIMIT REACHED")
+            bt.logging.error(f"   You have submitted {current_count}/1000 leads today")
+            bt.logging.error("   Cannot submit more until 12:00 AM ET")
+            
+            print(f"\n{'='*70}")
+            print("🚨  DAILY SUBMISSION LIMIT REACHED")
+            print(f"{'='*70}")
+            print(f"\n⛔ You have reached the maximum daily submission limit")
+            print(f"\nSubmissions today: {current_count}/1000")
+            print("   (This includes all attempts, even duplicates)")
+            print("\nNext steps:")
+            print("  1. Wait until 12:00 AM ET for automatic reset")
+            print("  2. You will be able to submit 1000 new leads tomorrow")
+            print("  3. Consider spacing out submissions throughout the day")
+            print(f"\n{'='*70}\n")
+            return False
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # 3. HOTKEY MISMATCH ERROR (security validation - Error Code P0005)
+        # ─────────────────────────────────────────────────────────────────────
+        elif "Security violation" in error_str and "does not match" in error_str:
+            bt.logging.error("🚨 SECURITY ERROR: Hotkey mismatch detected")
+            bt.logging.error("   The hotkey in your submission does not match your JWT token")
+            
+            print(f"\n{'='*70}")
+            print("🚨  AUTHENTICATION ERROR")
+            print(f"{'='*70}")
+            print("\n⛔ Hotkey verification failed")
+            print("\nThis usually means:")
+            print("  • Your local code has been modified incorrectly")
+            print("  • JWT token is stale or corrupted")
+            print("\nNext steps:")
+            print("  1. Restart your miner to refresh JWT token")
+            print("  2. Ensure you're using the official subnet code")
+            print("  3. Do not manually modify hotkey fields in submissions")
+            print(f"\n{'='*70}\n")
+            return False
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # 4. REQUIRED FIELDS MISSING ERROR
+        # ─────────────────────────────────────────────────────────────────────
+        elif "Required fields missing" in error_str or "Required column not found" in error_str:
+            # Extract field names if present
+            import re
+            fields_match = re.search(r'Required fields missing: ([^\n]+)', error_str)
+            missing_fields = fields_match.group(1) if fields_match else "unknown"
+            
+            bt.logging.error("❌ VALIDATION ERROR: Required fields missing")
+            bt.logging.error(f"   Missing fields: {missing_fields}")
+            
+            print(f"\n{'='*70}")
+            print("❌  REQUIRED FIELDS MISSING")
+            print(f"{'='*70}")
+            print(f"\n⛔ Your lead is missing required fields: {missing_fields}")
+            print("\nAll leads must include:")
+            print("  • Email address")
+            print("  • Company name")
+            print("  • Company website")
+            print("  • Contact name (full_name or first + last)")
+            print("  • Industry")
+            print("  • Sub-industry")
+            print("  • Role/title")
+            print("  • Location/region")
+            print("  • Source type")
+            print("  • Source URL")
+            print("\nNext steps:")
+            print("  1. Update your lead extraction to include all required fields")
+            print("  2. Verify your data source provides complete information")
+            print(f"\n{'='*70}\n")
+            return False
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # 5. DUPLICATE LEAD ERROR (existing logic, preserved)
+        # ─────────────────────────────────────────────────────────────────────
+        elif "409" in error_str or "Conflict" in error_str or "Duplicate lead" in error_str or "already exists" in error_str:
             # Try to extract email from error message or from prospects
             duplicate_emails = []
             
@@ -526,15 +649,20 @@ def push_prospects_to_cloud(
                 print("   Please submit unique leads.\n")
             return False
         
-        # Check for RLS policy violations
+        # ─────────────────────────────────────────────────────────────────────
+        # 6. RLS POLICY VIOLATIONS (preserved)
+        # ─────────────────────────────────────────────────────────────────────
         elif "row-level security policy" in error_str.lower() or "policy" in error_str.lower():
             bt.logging.error("❌ Access denied: Row-level security policy violation")
             bt.logging.error("   Your JWT role may not have permission to insert prospects")
             return False
         
-        # Generic error
+        # ─────────────────────────────────────────────────────────────────────
+        # 7. GENERIC ERROR (fallback)
+        # ─────────────────────────────────────────────────────────────────────
         else:
             bt.logging.error(f"❌ Failed to push prospects to Supabase: {e}")
+            bt.logging.error(f"   Error details: {error_str}")
             return False
 
 

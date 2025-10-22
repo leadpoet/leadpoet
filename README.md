@@ -124,7 +124,6 @@ Miners must submit prospects with the following structure:
   "ownership_type": "Private",
   "company_type": "Corporation",
   "number_of_locations": 5,
-  "ids": {"crunchbase": "spacex"},
   "socials": {"twitter": "spacex"}
 }
 ```
@@ -137,7 +136,7 @@ Miners earn rewards **proportional to approved leads** they source:
 
 ### Rejection Feedback
 
-When 2+ validators reject your lead, you'll receive detailed feedback explaining why. This helps you improve lead quality and increase approval rates.
+If your lead is rejected by validator consensus, you're able to access the reject reason explaining why. This helps you improve lead quality and increase approval rates.
 
 **Query Your Rejections:**
 
@@ -159,20 +158,33 @@ for idx, record in enumerate(feedback, 1):
 EOF
 ```
 
-**Common Rejections & Fixes:**
+**Common Rejection Reasons & Fixes:**
 
 | Issue | Fix |
 |-------|-----|
 | Invalid email format | Verify email follows `name@domain.com` format |
 | Email from disposable provider | Use business emails only (no tempmail, 10minutemail, etc.) |
-| Domain too new (< 7 days) | Wait for domain to age or verify legitimacy |
+| Domain too new (< 7 days) | Wait for domain to age |
 | Email marked invalid | Check for typos, verify email exists |
 | Website not accessible | Verify website is online and accessible |
 | Domain blacklisted | Avoid domains flagged for spam/abuse |
 
-**Validation Pipeline:** Leads are validated in 6 stages by validators - Terms Attestation → Source Provenance → Required Fields → DNS/Domain → Reputation → Email Deliverability. Validation stops at first failure.
+### Rate Limits & Cooldown
 
-**Security:** You can only see your own rejections (RLS enforced). Feedback only created when 2+ validators reject, preventing single bad-actor manipulation.
+To maintain lead quality and prevent spam, we enforce daily submission limits server-side. Think of it as guardrails to keep the lead pool high-quality.
+
+**Daily Limits (Reset at 12:00 AM ET):**
+- **1000 submission attempts per day** - Counts all submission attempts
+- **50 consensus rejections per day** - Only rejections from 2+ validators count toward this limit
+
+**What Happens at 50 Rejections:**
+
+```
+50th Rejection → Cooldown Triggered → Your Pending Leads Deleted → Blocked Until 12 AM ET
+                                    
+```
+
+When you hit 50 rejected leads in a day, the system automatically removes all your pending leads from the validation queue and blocks new submissions until the daily reset at midnight. You'll get a notification showing which lead was oldest in the queue when this happened, so you know where validation stopped.
 
 ## For Validators
 
@@ -291,3 +303,5 @@ For support and discussion:
 ## License
 
 MIT License - See LICENSE file for details
+
+

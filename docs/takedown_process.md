@@ -45,7 +45,7 @@ Fill out the form with:
 
 ### Option 2: Email
 
-Send an email to: **privacy@leadpoet.com**
+Send an email to: **hello@leadpoet.com**
 
 Include:
 - Subject line: "Takedown Request"
@@ -115,7 +115,7 @@ curl -X POST "https://your-project.supabase.co/functions/v1/log-takedown-request
 ### How to Submit Identity Proof
 
 **Option 1:** Upload to secure form at https://leadpoet.com/verify  
-**Option 2:** Email encrypted PDF to privacy@leadpoet.com (use PGP key available at https://leadpoet.com/pgp)  
+**Option 2:** Email encrypted PDF to hello@leadpoet.com (use PGP key available at https://leadpoet.com/pgp)  
 **Option 3:** Send via secure file transfer (we'll provide link)
 
 ---
@@ -240,7 +240,7 @@ If Leadpoet sold your data to third parties who then resold it:
 
 ### Check Suppression Status
 
-Email privacy@leadpoet.com with your request ID to check status.
+Email hello@leadpoet.com with your request ID to check status.
 
 **Response includes:**
 - Current status (pending, verified, processed, completed)
@@ -275,7 +275,7 @@ You will receive an email explaining why, which may include:
 ### If You Believe We Missed Records
 
 After processing, if you still see your information in our system:
-1. Email privacy@leadpoet.com with specifics
+1. Email hello@leadpoet.com with specifics
 2. Include your original request ID
 3. Provide evidence (screenshot, lead ID, etc.)
 
@@ -355,10 +355,10 @@ Similar to GDPR, but:
 
 ## Contact Information
 
-**Privacy Team Email:** privacy@leadpoet.com  
-**Data Protection Officer:** dpo@leadpoet.com  
+**Privacy Team Email:** hello@leadpoet.com  
+**Data Protection Officer:** hello@leadpoet.com  
 **Takedown Portal:** https://leadpoet.com/takedown  
-**Support:** support@leadpoet.com
+**Support:** hello@leadpoet.com
 
 **Office Address (for certified mail):**  
 Leadpoet Compliance Department  
@@ -400,12 +400,12 @@ This takedown process complies with:
 
 ### Can I request data about who has my information?
 
-**Yes.** This is a "Right to Know" request (CCPA) or "Right of Access" (GDPR). Email privacy@leadpoet.com.
+**Yes.** This is a "Right to Know" request (CCPA) or "Right of Access" (GDPR). Email hello@leadpoet.com.
 
 ### What if I change my mind?
 
 **Before processing:** Contact us to cancel your request.  
-**After suppression:** We can reverse soft-deletes. Email privacy@leadpoet.com.  
+**After suppression:** We can reverse soft-deletes. Email hello@leadpoet.com.  
 **After hard delete:** Cannot be reversed.
 
 ### Do you charge buyers to honor suppressions?
@@ -416,5 +416,5 @@ This takedown process complies with:
 
 **END OF TAKEDOWN PROCESS DOCUMENTATION**
 
-*Questions? Email privacy@leadpoet.com*
+*Questions? Email hello@leadpoet.com*
 

@@ -1494,15 +1494,14 @@ class Validator(BaseValidatorNeuron):
                                     print("✅ VALIDATOR ELIGIBLE - Setting weights on chain")
                                     print(f"   Consensus participation: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)} leads")
                                     print(f"   Percentage: {weights_result.get('percentage', 0):.1f}%")
-                                    print(f"   Total leads in epoch: {weights_result.get('total_leads', 0)}")
                                     
                                     # Convert weights dict to format expected by set_weights
-                                    # Edge Function returns weights directly
+                                    # Edge Function returns weights directly (server-side calculated)
                                     weight_dict = weights_result["weights"]
                                     
                                     # Check if there are any weights to set
                                     if not weight_dict:
-                                        print("   ℹ️ No leads accepted yet in epoch - no weights to set")
+                                        print("   ℹ️ No leads accepted yet - no weights to set")
                                         print("   (Validator is eligible but waiting for leads to be accepted)")
                                         continue
                                     

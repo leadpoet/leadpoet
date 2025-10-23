@@ -130,9 +130,12 @@ Miners must submit prospects with the following structure:
 
 ### Reward System
 
-Miners earn rewards **proportional to approved leads** they source:
-- If a miner sources 60% of approved leads in an epoch, they receive 60% of miner emissions for the following epoch
-- Simple, transparent, and directly tied to value creation
+Miners earn rewards based on a **reputation-weighted formula** combining recent activity and historical performance:
+
+**Weight Calculation (20% Recent + 80% Historical):**
+- **20% from last 72 minutes**: Encourages consistent mining activity
+- **80% from last 3 days**: Rewards sustained quality over time
+
 
 ### Rejection Feedback
 
@@ -224,9 +227,9 @@ Note: Validators are configured to auto-update from GitHub on a 5-minute interva
 Validators pull prospects from the queue (first-come, first-served) and have a 15-second window to validate. With three validators participating, majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
 
 **Eligibility for Rewards:**
-- Must participate in at least 10% of consensus decisions per epoch
+- Must participate in at least 10% of consensus decisions for last 72 min
 - Verified server-side via Edge Function 
-- If eligible, validators receive miner weights at end of epoch to commit on-chain
+- If eligible, validators receive miner weights to commit on-chain
 
 **Validators perform multi-stage quality checks:**
 1. **Email validation**: Format, domain, disposable check, deliverability check
@@ -235,7 +238,7 @@ Validators pull prospects from the queue (first-come, first-served) and have a 1
 
 ## Reward Distribution
 
-### Epoch-Based Rewards
+### Consensus-Based Rewards
 
 1. Validators check eligibility (> 10% consensus participation requirement)
 2. Miner weights calculated based on sourced approved leads
@@ -243,7 +246,7 @@ Validators pull prospects from the queue (first-come, first-served) and have a 1
 
 ### Security Features
 
-- **Edge Function enforcement**: Eligibility checked server-side, cannot be bypassed
+- **Edge Function enforcement**: Eligibility checked server-side
 - **Server-side weight calculations**: Validators can't manipulate weights
 - **JWT-based auth**: Validators only have limited database access
 - **Consensus requirement**: No single validator can approve/reject leads

@@ -224,7 +224,7 @@ Note: Validators are configured to auto-update from GitHub on a 5-minute interva
 
 ### Consensus Validation System
 
-Validators pull prospects from the queue (first-come, first-served) and have a 15-second window to validate. With three validators participating, majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
+Validators pull prospects from the queue (first-come, first-served]. With upto three validators participating, majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
 
 **Eligibility for Rewards:**
 - Must participate in at least 10% of consensus decisions for last 72 min

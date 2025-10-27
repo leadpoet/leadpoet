@@ -510,9 +510,11 @@ class Validator(BaseValidatorNeuron):
         try:
             self.token_manager = TokenManager(
                 hotkey=self.wallet.hotkey.ss58_address,
-                wallet=self.wallet
+                wallet=self.wallet,
+                netuid=self.config.netuid,
+                network=self.config.subtensor.network
             )
-            bt.logging.info("🔑 TokenManager initialized")
+            bt.logging.info(f"🔑 TokenManager initialized for {self.config.subtensor.network} subnet {self.config.netuid}")
         except Exception as e:
             bt.logging.error(f"Failed to initialize TokenManager: {e}")
             raise
@@ -1735,9 +1737,10 @@ class Validator(BaseValidatorNeuron):
                     # Run async validate_lead in sync context
                     result = asyncio.run(self.validate_lead(lead))
                     
-                    # Extract validation results
+                    # Extract validation results and enhanced lead data
                     is_valid = result.get("is_legitimate", False)
                     rejection_reason = result.get("reason", None)  # Now a structured dict from Task 3.1
+                    enhanced_lead = result.get("enhanced_lead", lead)  # Get enhanced lead with DNSBL/WHOIS data
                     
                     # Log validation result
                     if is_valid:
@@ -1750,12 +1753,12 @@ class Validator(BaseValidatorNeuron):
                             reason_msg = str(rejection_reason) if rejection_reason else "Unknown error"
                         print(f"   ❌ Invalid: {reason_msg}")
                     
-                    # Submit validation assessment to consensus system
+                    # Submit validation assessment to consensus system with enhanced lead data
                     submission_success = submit_validation_assessment(
                         wallet=self.wallet,
                         prospect_id=prospect_id,
                         lead_id=lead_id,
-                        lead_data=lead,
+                        lead_data=enhanced_lead,  # Use enhanced lead with DNSBL/WHOIS data
                         is_valid=is_valid,
                         rejection_reason=rejection_reason if not is_valid else None,  # Pass structured rejection
                         network=self.config.subtensor.network,
@@ -2492,7 +2495,8 @@ class Validator(BaseValidatorNeuron):
                         "check_name": "email_check",
                         "message": "Missing email",
                         "failed_fields": ["email"]
-                    }
+                    },
+                    'enhanced_lead': lead  # Return original lead if no email
                 }
             
             # Map your field names to what automated_checks expects
@@ -2509,7 +2513,14 @@ class Validator(BaseValidatorNeuron):
             }
             
             # Use automated_checks for comprehensive validation
-            passed, reason = await run_automated_checks(mapped_lead)
+            # NEW: run_automated_checks returns (passed, automated_checks_data) with structured data
+            passed, automated_checks_data = await run_automated_checks(mapped_lead)
+            
+            # Extract rejection_reason from structured data for backwards compatibility
+            reason = automated_checks_data.get("rejection_reason") if not passed else None
+            
+            # Append automated_checks data to mapped_lead so it gets stored in validation_tracking
+            mapped_lead["automated_checks"] = automated_checks_data
 
             # If standard validation passed, check if deep verification is needed
             if passed and self.should_run_deep_verification(mapped_lead):
@@ -2533,7 +2544,8 @@ class Validator(BaseValidatorNeuron):
                             "message": f"Deep verification failed: {deep_reason}",
                             "failed_fields": []
                         },
-                        'deep_verification_results': deep_results
+                        'deep_verification_results': deep_results,
+                        'enhanced_lead': mapped_lead  # Include enhanced lead even on deep verification failure
                     }
                 else:
                     bt.logging.info(f"✅ Deep verification passed")
@@ -2545,10 +2557,11 @@ class Validator(BaseValidatorNeuron):
                         lead["manual_review_required"] = True
                         bt.logging.info(f"📋 Lead flagged for manual review")
 
-            # Prepare validation result
+            # Prepare validation result with enhanced lead data
             validation_result = {
                 'is_legitimate': passed,
-                'reason': reason
+                'reason': reason,
+                'enhanced_lead': mapped_lead  # Include enhanced lead with DNSBL/WHOIS data
             }
             
             # Log validation to audit trail (Task 2.5)
@@ -2603,7 +2616,8 @@ class Validator(BaseValidatorNeuron):
             
             return {
                 'is_legitimate': False,
-                'reason': error_rejection
+                'reason': error_rejection,
+                'enhanced_lead': lead  # Return original lead on error
             }
 
     def calculate_validation_score_breakdown(self, lead):

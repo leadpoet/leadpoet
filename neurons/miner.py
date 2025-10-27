@@ -75,9 +75,11 @@ class Miner(BaseMinerNeuron):
         try:
             self.token_manager = TokenManager(
                 hotkey=self.wallet.hotkey.ss58_address,
-                wallet=self.wallet
+                wallet=self.wallet,
+                netuid=self.config.netuid,
+                network=self.config.subtensor.network
             )
-            bt.logging.info("🔑 TokenManager initialized")
+            bt.logging.info(f"🔑 TokenManager initialized for {self.config.subtensor.network} subnet {self.config.netuid}")
         except Exception as e:
             bt.logging.error(f"Failed to initialize TokenManager: {e}")
             raise
@@ -246,18 +248,18 @@ class Miner(BaseMinerNeuron):
                 )
                 continue
             
+            # Determine source type FIRST (needed for validation)
+            source_type = determine_source_type(source_url, lead)
+            
             # Validate source URL against regulatory requirements
             try:
-                is_valid, reason = await validate_source_url(source_url)
+                is_valid, reason = await validate_source_url(source_url, source_type)
                 if not is_valid:
                     bt.logging.warning(f"Invalid source URL: {source_url} - {reason}")
                     continue
             except Exception as e:
                 bt.logging.error(f"Error validating source URL {source_url}: {e}")
                 continue
-            
-            # Determine source type
-            source_type = determine_source_type(source_url, lead)
             
             # Enrich lead with provenance metadata
             lead["source_url"] = source_url
@@ -1370,7 +1372,9 @@ def main():
             # Create TokenManager for authentication
             token_manager = TokenManager(
                 hotkey=wallet_address,
-                wallet=temp_wallet
+                wallet=temp_wallet,
+                netuid=config.netuid,
+                network=config.subtensor.network
             )
             
             # CRITICAL: Fetch JWT token first (FORCE refresh)
@@ -1450,7 +1454,9 @@ def main():
                 # Create TokenManager for authentication
                 token_manager = TokenManager(
                     hotkey=wallet_address,
-                    wallet=temp_wallet
+                    wallet=temp_wallet,
+                    netuid=config.netuid,
+                    network=config.subtensor.network
                 )
                 
                 # CRITICAL: Fetch JWT token first (FORCE refresh)

@@ -1735,7 +1735,17 @@ class Validator(BaseValidatorNeuron):
                     print(f"   Miner: {miner_hotkey[:10] if miner_hotkey and miner_hotkey != 'unknown' else 'unknown'}...")
                     
                     # Run async validate_lead in sync context
-                    result = asyncio.run(self.validate_lead(lead))
+                    try:
+                        result = asyncio.run(self.validate_lead(lead))
+                    except Exception as validation_error:
+                        # Check if this is an EmailVerificationUnavailableError
+                        from validator_models.automated_checks import EmailVerificationUnavailableError
+                        if isinstance(validation_error, EmailVerificationUnavailableError):
+                            print(f"❌ Lead not processed due to API error\n")
+                            continue  # Skip this lead entirely - don't submit anything
+                        else:
+                            # Some other error - re-raise it
+                            raise
                     
                     # Extract validation results and enhanced lead data
                     is_valid = result.get("is_legitimate", False)
@@ -1767,6 +1777,7 @@ class Validator(BaseValidatorNeuron):
                     
                     if submission_success:
                         print("   📤 Assessment submitted to consensus system")
+                        print(f"✅ Processed 1 prospect in consensus mode\n")
                     else:
                         print("   ⚠️ Failed to submit assessment to consensus system")
                     
@@ -1779,8 +1790,6 @@ class Validator(BaseValidatorNeuron):
                     import traceback
                     bt.logging.debug(traceback.format_exc())
                     continue
-            
-            print(f"\n✅ Processed {len(prospects_batch)} prospects in consensus mode")
             
         except Exception as e:
             bt.logging.error(f"process_sourced_leads_continuous failure: {e}")
@@ -2586,6 +2595,12 @@ class Validator(BaseValidatorNeuron):
             return validation_result
             
         except Exception as e:
+            # Check if this is an EmailVerificationUnavailableError - if so, re-raise it
+            from validator_models.automated_checks import EmailVerificationUnavailableError
+            if isinstance(e, EmailVerificationUnavailableError):
+                # Re-raise to propagate to process_sourced_leads_continuous
+                raise
+            
             bt.logging.error(f"Error in validate_lead: {e}")
             
             # Create structured rejection reason for error case

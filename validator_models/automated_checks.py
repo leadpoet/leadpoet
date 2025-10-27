@@ -27,6 +27,11 @@ from Leadpoet.utils.utils_lead_extraction import (
     get_field
 )
 
+# Custom exception for API infrastructure failures (should skip lead, not submit)
+class EmailVerificationUnavailableError(Exception):
+    """Raised when email verification API is unavailable (no credits, bad key, network error, etc.)"""
+    pass
+
 load_dotenv()
 MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "YOUR_MYEMAILVERIFIER_API_KEY")
 
@@ -1073,6 +1078,20 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                 print(f"   📞 Calling MyEmailVerifier API for: {email}")
                 
                 async with session.get(url, timeout=15) as response:
+                    # Check for API error responses (no credits, invalid key, etc.)
+                    # These should SKIP the lead entirely (not submit to Supabase)
+                    if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:
+                        if response.status == 402:
+                            print(f"   🚨 MyEmailVerifier API: No credits remaining")
+                        elif response.status == 401:
+                            print(f"   🚨 MyEmailVerifier API: Invalid API key")
+                        elif response.status == 429:
+                            print(f"   🚨 MyEmailVerifier API: Rate limit exceeded")
+                        else:
+                            print(f"   🚨 MyEmailVerifier API: Server error (HTTP {response.status})")
+                        # Raise exception to tell validator to SKIP this lead
+                        raise EmailVerificationUnavailableError(f"MyEmailVerifier API unavailable (HTTP {response.status})")
+                    
                     data = await response.json()
                     
                     # Log the actual API response to prove it's not mock mode
@@ -1156,15 +1175,21 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                     validation_cache[cache_key] = result
                     return result
 
+    except EmailVerificationUnavailableError:
+        # Re-raise to propagate up to validator
+        raise
+    except asyncio.TimeoutError:
+        # Timeout - SKIP the lead (API unavailable)
+        print(f"   🚨 MyEmailVerifier API: Timeout (>15s)")
+        raise EmailVerificationUnavailableError("MyEmailVerifier API timeout")
+    except aiohttp.ClientError as e:
+        # Network error - SKIP the lead (API unavailable)
+        print(f"   🚨 MyEmailVerifier API: Network error")
+        raise EmailVerificationUnavailableError(f"MyEmailVerifier API network error: {str(e)}")
     except Exception as e:
-        result = (False, {
-            "stage": "Stage 3: MyEmailVerifier",
-            "check_name": "check_myemailverifier_email",
-            "message": f"MyEmailVerifier check failed: {str(e)}",
-            "failed_fields": ["email"]
-        })
-        validation_cache[cache_key] = result
-        return result
+        # Any other error - SKIP the lead (API unavailable)
+        print(f"   🚨 MyEmailVerifier API: Unexpected error")
+        raise EmailVerificationUnavailableError(f"MyEmailVerifier API error: {str(e)}")
 
 async def check_terms_attestation(lead: dict) -> Tuple[bool, dict]:
     """

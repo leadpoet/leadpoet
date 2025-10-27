@@ -243,7 +243,7 @@ Every lead you submit goes through validation:
 
 ### Can I use my own proprietary database?
 
-**Yes**, if you collected the data lawfully and own it. Mark source_type as `proprietary_database`.
+**Yes**, if you collected the data lawfully and own it. Set both `source_url` and `source_type` to `proprietary_database` (both fields must match for validation to pass).
 
 ### Can I use LinkedIn Sales Navigator?
 

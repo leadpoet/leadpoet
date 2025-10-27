@@ -261,7 +261,7 @@ async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
     return True, {}
 
 async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
-    """Check email format using RFC-5322 simplified regex"""
+    """Check email format using RFC-5322 simplified regex with Unicode support (RFC 6531)"""
     try:
         email = get_email(lead)
         if not email:
@@ -277,9 +277,17 @@ async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
             await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
             return False, rejection_reason
 
-        # RFC-5322 simplified regex
-        pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        is_valid = bool(re.match(pattern, email))
+        # RFC-5322 simplified regex (original ASCII validation)
+        pattern_ascii = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+        is_valid_ascii = bool(re.match(pattern_ascii, email))
+        
+        # RFC-6531 - Internationalized Email (Unicode support for international characters)
+        # Allows emails like: anna.kosińska@cdprojekt.com, müller@siemens.de
+        pattern_unicode = r"^[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}$"
+        is_valid_unicode = bool(re.match(pattern_unicode, email, re.UNICODE))
+        
+        # Accept if EITHER pattern matches (ASCII OR Unicode)
+        is_valid = is_valid_ascii or is_valid_unicode
 
         if not is_valid:
             rejection_reason = {
@@ -310,10 +318,151 @@ async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
         await log_validation_metrics(lead, {"passed": False, "reason": str(e)}, "email_regex")
         return False, rejection_reason
 
+async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
+    """
+    Check if first name or last name appears in the email address.
+    This is a HARD check that prevents costly API calls for leads that will fail anyway.
+    
+    Returns:
+        (True, {}): If first OR last name found in email
+        (False, rejection_reason): If NO name found in email
+    """
+    try:
+        email = get_email(lead)
+        first_name = get_first_name(lead)
+        last_name = get_last_name(lead)
+        
+        if not email:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_name_email_match",
+                "message": "No email provided",
+                "failed_fields": ["email"]
+            }
+            return False, rejection_reason
+        
+        if not first_name or not last_name:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_name_email_match",
+                "message": "Missing first name or last name",
+                "failed_fields": ["first_name", "last_name"]
+            }
+            return False, rejection_reason
+        
+        # Extract local part of email (before @)
+        local_part = email.split("@")[0].lower() if "@" in email else email.lower()
+        
+        # Normalize names for comparison (lowercase, remove special chars)
+        first_normalized = re.sub(r'[^a-z0-9]', '', first_name.lower())
+        last_normalized = re.sub(r'[^a-z0-9]', '', last_name.lower())
+        local_normalized = re.sub(r'[^a-z0-9]', '', local_part)
+        
+        # Check if either first OR last name appears in email
+        # Pattern matching: full name, first initial + last, last + first initial, etc.
+        patterns = [
+            first_normalized,                           # john
+            last_normalized,                            # doe
+            f"{first_normalized}{last_normalized}",     # johndoe
+            f"{first_normalized[0]}{last_normalized}",  # jdoe
+            f"{last_normalized}{first_normalized[0]}",  # doej
+        ]
+        
+        name_match = any(pattern in local_normalized for pattern in patterns if pattern)
+        
+        if not name_match:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_name_email_match",
+                "message": f"Name '{first_name} {last_name}' does not match email pattern '{email}'",
+                "failed_fields": ["email", "first_name", "last_name"]
+            }
+            print(f"   ❌ Stage 0: {email} @ {get_company(lead)} - Name not found in email")
+            return False, rejection_reason
+        
+        print(f"   ✅ Stage 0: {email} @ {get_company(lead)} - Name found in email")
+        return True, {}
+        
+    except Exception as e:
+        rejection_reason = {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_name_email_match",
+            "message": f"Name-email match check failed: {str(e)}",
+            "failed_fields": ["email"]
+        }
+        return False, rejection_reason
+
+async def check_general_purpose_email(lead: dict) -> Tuple[bool, dict]:
+    """
+    Check if email is a general-purpose email address (instant fail).
+    
+    General-purpose emails are not personal contacts and should be rejected immediately
+    to save API costs and maintain lead quality.
+    
+    Returns:
+        (True, {}): If email is NOT general purpose (personal contact)
+        (False, rejection_reason): If email IS general purpose (instant fail)
+    """
+    try:
+        email = get_email(lead)
+        
+        if not email:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_general_purpose_email",
+                "message": "No email provided",
+                "failed_fields": ["email"]
+            }
+            return False, rejection_reason
+        
+        # Define general-purpose email prefixes (must match calculate-rep-score exactly)
+        general_purpose_prefixes = [
+            'info@', 'hello@', 'owner@', 'ceo@', 'founder@', 'contact@', 'support@',
+            'team@', 'admin@', 'office@', 'mail@', 'connect@', 'help@', 'hi@',
+            'welcome@', 'inquiries@', 'general@', 'feedback@', 'ask@', 'outreach@',
+            'communications@', 'crew@', 'staff@', 'community@', 'reachus@', 'talk@',
+            'service@'
+        ]
+        
+        email_lower = email.lower()
+        
+        # Check if email starts with any general-purpose prefix
+        matched_prefix = next((prefix for prefix in general_purpose_prefixes if email_lower.startswith(prefix)), None)
+        
+        if matched_prefix:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_general_purpose_email",
+                "message": f"Email '{email}' is a general purpose email (starts with {matched_prefix}) - not a personal contact",
+                "failed_fields": ["email"]
+            }
+            print(f"   ❌ Stage 0: {email} @ {get_company(lead)} - General purpose email detected: {matched_prefix}")
+            return False, rejection_reason
+        
+        # Not a general-purpose email - proceed
+        print(f"   ✅ Stage 0: {email} @ {get_company(lead)} - Personal email (not general purpose)")
+        return True, {}
+        
+    except Exception as e:
+        rejection_reason = {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_general_purpose_email",
+            "message": f"General purpose email check failed: {str(e)}",
+            "failed_fields": ["email"]
+        }
+        return False, rejection_reason
+
 async def check_domain_age(lead: dict) -> Tuple[bool, dict]:
-    """Check domain age using WHOIS lookup"""
+    """
+    Check domain age using WHOIS lookup.
+    Appends WHOIS data to lead object for reputation scoring.
+    """
     website = get_website(lead)
     if not website:
+        # Append default WHOIS data
+        lead["whois_checked"] = False
+        lead["domain_age_days"] = None
+        lead["domain_creation_date"] = None
         return False, {
             "stage": "Stage 1: DNS Layer",
             "check_name": "check_domain_age",
@@ -323,6 +472,9 @@ async def check_domain_age(lead: dict) -> Tuple[bool, dict]:
 
     domain = extract_root_domain(website)
     if not domain:
+        lead["whois_checked"] = False
+        lead["domain_age_days"] = None
+        lead["domain_creation_date"] = None
         return False, {
             "stage": "Stage 1: DNS Layer",
             "check_name": "check_domain_age",
@@ -332,13 +484,40 @@ async def check_domain_age(lead: dict) -> Tuple[bool, dict]:
 
     cache_key = f"domain_age:{domain}"
     if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["whois"]):
-        return validation_cache[cache_key]
+        cached_result = validation_cache[cache_key]
+        # Restore cached WHOIS data to lead
+        cached_data = validation_cache.get(f"{cache_key}_data")
+        if cached_data:
+            lead["whois_checked"] = cached_data.get("checked", True)
+            lead["domain_age_days"] = cached_data.get("age_days")
+            lead["domain_creation_date"] = cached_data.get("creation_date")
+            lead["domain_registrar"] = cached_data.get("registrar")
+            lead["domain_nameservers"] = cached_data.get("nameservers")
+            lead["whois_updated_date"] = cached_data.get("updated_date")
+            lead["whois_updated_days_ago"] = cached_data.get("whois_updated_days_ago")
+        return cached_result
 
     try:
         # Implement actual WHOIS lookup
         def get_domain_age_sync(domain_name):
             try:
                 w = whois.whois(domain_name)
+                
+                # Extract registrar, nameservers, and updated_date for reputation scoring
+                registrar = getattr(w, 'registrar', None)
+                nameservers = getattr(w, 'name_servers', None)
+                if isinstance(nameservers, list):
+                    nameservers = nameservers[:3]  # Limit to first 3 nameservers
+                
+                # Extract updated_date for WHOIS stability check
+                updated_date = getattr(w, 'updated_date', None)
+                if updated_date:
+                    if isinstance(updated_date, list):
+                        updated_date = updated_date[0]
+                    # Make timezone-naive if timezone-aware
+                    if hasattr(updated_date, 'tzinfo') and updated_date.tzinfo is not None:
+                        updated_date = updated_date.replace(tzinfo=None)
+                
                 if w.creation_date:
                     if isinstance(w.creation_date, list):
                         creation_date = w.creation_date[0]
@@ -352,37 +531,99 @@ async def check_domain_age(lead: dict) -> Tuple[bool, dict]:
                     age_days = (datetime.now() - creation_date).days
                     min_age_days = 7  # 7 days minimum
 
+                    # Calculate whois_updated_days_ago
+                    whois_updated_days_ago = None
+                    if updated_date:
+                        whois_updated_days_ago = (datetime.now() - updated_date).days
+
+                    # Return WHOIS data along with result
+                    whois_data = {
+                        "age_days": age_days,
+                        "creation_date": creation_date.isoformat(),
+                        "registrar": registrar,
+                        "nameservers": nameservers,
+                        "updated_date": updated_date.isoformat() if updated_date else None,
+                        "whois_updated_days_ago": whois_updated_days_ago,
+                        "checked": True
+                    }
+
                     if age_days >= min_age_days:
-                        return (True, {})
+                        return (True, {}, whois_data)
                     else:
                         return (False, {
                             "stage": "Stage 1: DNS Layer",
                             "check_name": "check_domain_age",
                             "message": f"Domain too new: {age_days} days (minimum: {min_age_days})",
                             "failed_fields": ["website"]
-                        })
+                        }, whois_data)
                 else:
+                    # Calculate whois_updated_days_ago even if creation_date is missing
+                    whois_updated_days_ago = None
+                    if updated_date:
+                        whois_updated_days_ago = (datetime.now() - updated_date).days
+                    
+                    whois_data = {
+                        "age_days": None,
+                        "creation_date": None,
+                        "registrar": registrar,
+                        "nameservers": nameservers,
+                        "updated_date": updated_date.isoformat() if updated_date else None,
+                        "whois_updated_days_ago": whois_updated_days_ago,
+                        "checked": True
+                    }
                     return False, {
                         "stage": "Stage 1: DNS Layer",
                         "check_name": "check_domain_age",
                         "message": "Could not determine domain creation date",
                         "failed_fields": ["website"]
-                    }
+                    }, whois_data
             except Exception as e:
+                whois_data = {
+                    "age_days": None,
+                    "creation_date": None,
+                    "registrar": None,
+                    "nameservers": None,
+                    "updated_date": None,
+                    "whois_updated_days_ago": None,
+                    "checked": False,
+                    "error": str(e)
+                }
                 return False, {
                     "stage": "Stage 1: DNS Layer",
                     "check_name": "check_domain_age",
                     "message": f"WHOIS lookup failed: {str(e)}",
                     "failed_fields": ["website"]
-                }
+                }, whois_data
 
         # Run WHOIS lookup in executor to avoid blocking
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, get_domain_age_sync, domain)
+        passed, rejection_reason, whois_data = await loop.run_in_executor(None, get_domain_age_sync, domain)
+        
+        # Append WHOIS data to lead
+        lead["whois_checked"] = whois_data.get("checked", True)
+        lead["domain_age_days"] = whois_data.get("age_days")
+        lead["domain_creation_date"] = whois_data.get("creation_date")
+        lead["domain_registrar"] = whois_data.get("registrar")
+        lead["domain_nameservers"] = whois_data.get("nameservers")
+        lead["whois_updated_date"] = whois_data.get("updated_date")
+        lead["whois_updated_days_ago"] = whois_data.get("whois_updated_days_ago")
+        if "error" in whois_data:
+            lead["whois_error"] = whois_data["error"]
+        
+        # Cache both result and data
+        result = (passed, rejection_reason)
         validation_cache[cache_key] = result
+        validation_cache[f"{cache_key}_data"] = whois_data
+        
         return result
 
     except Exception as e:
+        # Append error state
+        lead["whois_checked"] = False
+        lead["domain_age_days"] = None
+        lead["domain_creation_date"] = None
+        lead["whois_error"] = str(e)
+        
         result = (False, {
             "stage": "Stage 1: DNS Layer",
             "check_name": "check_domain_age",
@@ -667,6 +908,7 @@ async def check_disposable(lead: dict) -> Tuple[bool, dict]:
 async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
     """
     Check if lead's email domain is listed in Spamhaus DBL.
+    Appends DNSBL data to lead object for reputation scoring.
 
     Args:
         lead: Dict containing email field
@@ -676,6 +918,10 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
     """
     email = get_email(lead)
     if not email:
+        # Append default DNSBL data
+        lead["dnsbl_checked"] = False
+        lead["dnsbl_blacklisted"] = False
+        lead["dnsbl_list"] = None
         return False, {
             "stage": "Stage 2: Domain Reputation",
             "check_name": "check_dnsbl",
@@ -687,18 +933,35 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
     try:
         domain = email.split("@")[1].lower() if "@" in email else ""
         if not domain:
+            lead["dnsbl_checked"] = False
+            lead["dnsbl_blacklisted"] = False
+            lead["dnsbl_list"] = None
             return True, {}  # Invalid format handled by other checks
     except (IndexError, AttributeError):
+        lead["dnsbl_checked"] = False
+        lead["dnsbl_blacklisted"] = False
+        lead["dnsbl_list"] = None
         return True, {}  # Invalid format handled by other checks
 
     # Use root domain extraction helper
     root_domain = extract_root_domain(domain)
     if not root_domain:
+        lead["dnsbl_checked"] = False
+        lead["dnsbl_blacklisted"] = False
+        lead["dnsbl_list"] = None
         return True, {}  # Could not extract - handled by other checks
 
     cache_key = f"dnsbl_{root_domain}"
     if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
-        return validation_cache[cache_key]
+        cached_result = validation_cache[cache_key]
+        # Restore cached DNSBL data to lead
+        cached_data = validation_cache.get(f"{cache_key}_data")
+        if cached_data:
+            lead["dnsbl_checked"] = cached_data.get("checked", True)
+            lead["dnsbl_blacklisted"] = cached_data.get("blacklisted", False)
+            lead["dnsbl_list"] = cached_data.get("list", "spamhaus_dbl")
+            lead["dnsbl_domain"] = cached_data.get("domain", root_domain)
+        return cached_result
 
     try:
         async with API_SEMAPHORE:
@@ -720,6 +983,21 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
 
             is_blacklisted = await loop.run_in_executor(None, dns_lookup)
 
+            # Append DNSBL data to lead
+            lead["dnsbl_checked"] = True
+            lead["dnsbl_blacklisted"] = is_blacklisted
+            lead["dnsbl_list"] = "spamhaus_dbl"
+            lead["dnsbl_domain"] = root_domain
+
+            # Cache the data separately for restoration
+            dnsbl_data = {
+                "checked": True,
+                "blacklisted": is_blacklisted,
+                "list": "spamhaus_dbl",
+                "domain": root_domain
+            }
+            validation_cache[f"{cache_key}_data"] = dnsbl_data
+
             if is_blacklisted:
                 result = (False, {
                     "stage": "Stage 2: Domain Reputation",
@@ -736,7 +1014,13 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
             return result
 
     except Exception as e:
-        # On any unexpected error, default to valid and cache the result
+        # On any unexpected error, append error state
+        lead["dnsbl_checked"] = True
+        lead["dnsbl_blacklisted"] = False
+        lead["dnsbl_list"] = "spamhaus_dbl"
+        lead["dnsbl_domain"] = root_domain
+        lead["dnsbl_error"] = str(e)
+        
         result = (True, {})  # Don't block on infrastructure issues
         validation_cache[cache_key] = result
         print(f"⚠️ DNSBL check error for {root_domain}: {e}")
@@ -807,8 +1091,16 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                     
                     status = data.get("Status", "Unknown")
                     
+                    # Store email verification metadata in lead (for tasks2.md Phase 1)
+                    lead["email_verifier_status"] = status
+                    lead["email_verifier_disposable"] = data.get("Disposable_Domain", "false") == "true"
+                    lead["email_verifier_catch_all"] = data.get("catch_all", "false") == "true"
+                    lead["email_verifier_role_based"] = data.get("Role_Based", "false") == "true"
+                    lead["email_verifier_free"] = data.get("Free_Domain", "false") == "true"
+                    lead["email_verifier_diagnosis"] = data.get("Diagnosis", "")
+                    
                     # Check for disposable domains
-                    is_disposable = data.get("Disposable_Domain", "false") == "true"
+                    is_disposable = lead["email_verifier_disposable"]
                     if is_disposable:
                         result = (False, {
                             "stage": "Stage 3: MyEmailVerifier",
@@ -842,11 +1134,21 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                             "failed_fields": ["email"]
                         })
                     elif status == "Grey-listed":
-                        # Greylisted - retry recommended after 5-10 hours, but for now pass
-                        result = (True, {})
+                        # IMPORTANT: Treat grey-listed as invalid (as per tasks2.md Phase 1 requirement)
+                        result = (False, {
+                            "stage": "Stage 3: MyEmailVerifier",
+                            "check_name": "check_myemailverifier_email",
+                            "message": "Email is grey-listed (treated as invalid)",
+                            "failed_fields": ["email"]
+                        })
                     elif status == "Unknown":
-                        # For unknown status, default to passing to avoid false negatives
-                        result = (True, {})
+                        # IMPORTANT: Treat unknown as invalid (as per tasks2.md Phase 1 requirement)
+                        result = (False, {
+                            "stage": "Stage 3: MyEmailVerifier",
+                            "check_name": "check_myemailverifier_email",
+                            "message": "Email status unknown (treated as invalid)",
+                            "failed_fields": ["email"]
+                        })
                     else:
                         # Any other status, log and assume valid
                         result = (True, {})
@@ -1011,8 +1313,9 @@ async def check_source_provenance(lead: dict) -> Tuple[bool, dict]:
         }
     
     # Validate source URL (checks denylist, domain age, reachability)
+    # SECURITY: Pass source_type to prevent spoofing proprietary_database
     try:
-        is_valid, reason = await validate_source_url(source_url)
+        is_valid, reason = await validate_source_url(source_url, source_type)
         if not is_valid:
             return False, {
                 "stage": "Stage 0.5: Source Provenance",
@@ -1085,16 +1388,76 @@ async def check_licensed_resale_proof(lead: dict) -> Tuple[bool, dict]:
 
 async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     """
-    Run all automated checks in stages, returning (passed, rejection_reason_dict).
+    Run all automated checks in stages, returning (passed, structured_data).
 
     Returns:
-        Tuple[bool, dict]: (passed, rejection_reason)
-            - If passed: (True, {})
-            - If failed: (False, {"stage": ..., "check_name": ..., "message": ..., "failed_fields": [...]})
+        Tuple[bool, dict]: (passed, structured_automated_checks_data)
+            - If passed: (True, structured_data with stage_1_dns, stage_2_domain, stage_3_email)
+            - If failed: (False, structured_data with rejection_reason and partial check data)
+            
+    Structured data format (tasks2.md Phase 1):
+    {
+        "stage_1_dns": {
+            "has_mx": bool,
+            "has_spf": bool,
+            "has_dmarc": bool,
+            "dmarc_policy": str
+        },
+        "stage_2_domain": {
+            "dnsbl_checked": bool,
+            "dnsbl_blacklisted": bool,
+            "dnsbl_list": str,
+            "domain_age_days": int,
+            "domain_registrar": str,
+            "domain_nameservers": list,
+            "whois_updated_days_ago": int
+        },
+        "stage_3_email": {
+            "email_status": str,  # "valid", "catch-all", "invalid", "unknown"
+            "email_score": int,
+            "is_disposable": bool,
+            "is_role_based": bool,
+            "is_free": bool
+        },
+        "passed": bool,
+        "rejection_reason": dict or None
+    }
     """
 
     email = get_email(lead)
     company = lead.get("Company", "")
+    
+    # Initialize structured data collection
+    automated_checks_data = {
+        "stage_0_hardcoded": {
+            "name_in_email": False,
+            "is_general_purpose_email": False
+        },
+        "stage_1_dns": {
+            "has_mx": False,
+            "has_spf": False,
+            "has_dmarc": False,
+            "dmarc_policy": None
+        },
+        "stage_2_domain": {
+            "dnsbl_checked": False,
+            "dnsbl_blacklisted": False,
+            "dnsbl_list": None,
+            "domain_age_days": None,
+            "domain_registrar": None,
+            "domain_nameservers": None,
+            "whois_updated_days_ago": None
+        },
+        "stage_3_email": {
+            "email_status": "unknown",
+            "email_score": 0,
+            "is_disposable": False,
+            "is_role_based": False,
+            "is_free": False
+        },
+        "passed": False,
+        "rejection_reason": None
+    }
 
     # ========================================================================
     # Pre-Attestation Check: Terms Attestation Verification (HARD)
@@ -1106,7 +1469,9 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Pre-Attestation Check failed: {msg}")
-        return False, rejection_reason
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
     
     print("   ✅ Pre-Attestation Check passed")
 
@@ -1126,21 +1491,25 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         if not passed:
             msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
             print(f"   ❌ Source Provenance Verification failed: {msg}")
-            return False, rejection_reason
+            automated_checks_data["passed"] = False
+            automated_checks_data["rejection_reason"] = rejection_reason
+            return False, automated_checks_data
     
     print("   ✅ Source Provenance Verification passed")
 
     # ========================================================================
     # Stage 0: Hardcoded Checks (MIXED)
-    # - Required Fields, Email Regex, Disposable, HEAD Request
+    # - Required Fields, Email Regex, Name-Email Match, General Purpose Email, Disposable, HEAD Request
     # - Deduplication (handled in validate_lead_list)
     # ========================================================================
     print(f"🔍 Stage 0: Hardcoded checks for {email} @ {company}")
     checks_stage0 = [
-        check_required_fields,  # Required fields validation (HARD)
-        check_email_regex,      # RFC-5322 regex validation (HARD)
-        check_disposable,       # Filter throwaway email providers (HARD)
-        check_head_request,     # Test website accessibility (HARD)
+        check_required_fields,      # Required fields validation (HARD)
+        check_email_regex,          # RFC-5322 regex validation (HARD)
+        check_name_email_match,     # Name in email check (HARD) - NEW
+        check_general_purpose_email,# General purpose email filter (HARD) - NEW
+        check_disposable,           # Filter throwaway email providers (HARD)
+        check_head_request,         # Test website accessibility (HARD)
     ]
 
     for check_func in checks_stage0:
@@ -1148,8 +1517,14 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         if not passed:
             msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
             print(f"   ❌ Stage 0 failed: {msg}")
-            return False, rejection_reason
+            automated_checks_data["passed"] = False
+            automated_checks_data["rejection_reason"] = rejection_reason
+            return False, automated_checks_data
 
+    # Collect Stage 0 data after successful checks
+    automated_checks_data["stage_0_hardcoded"]["name_in_email"] = True  # Passed name-email match
+    automated_checks_data["stage_0_hardcoded"]["is_general_purpose_email"] = False  # Not general purpose
+    
     print("   ✅ Stage 0 passed")
 
     # ========================================================================
@@ -1169,8 +1544,26 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         if not passed:
             msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
             print(f"   ❌ Stage 1 failed: {msg}")
-            return False, rejection_reason
+            automated_checks_data["passed"] = False
+            automated_checks_data["rejection_reason"] = rejection_reason
+            # Collect partial Stage 1 data even on failure
+            automated_checks_data["stage_1_dns"]["has_mx"] = lead.get("has_mx", False)
+            automated_checks_data["stage_1_dns"]["has_spf"] = lead.get("has_spf", False)
+            automated_checks_data["stage_1_dns"]["has_dmarc"] = lead.get("has_dmarc", False)
+            automated_checks_data["stage_1_dns"]["dmarc_policy"] = "strict" if lead.get("dmarc_policy_strict") else "none"
+            # Collect partial Stage 2 data (WHOIS)
+            automated_checks_data["stage_2_domain"]["domain_age_days"] = lead.get("domain_age_days")
+            automated_checks_data["stage_2_domain"]["domain_registrar"] = lead.get("domain_registrar")
+            automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
+            automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
+            return False, automated_checks_data
 
+    # Collect Stage 1 DNS data after successful checks
+    automated_checks_data["stage_1_dns"]["has_mx"] = lead.get("has_mx", True)  # Passed MX check
+    automated_checks_data["stage_1_dns"]["has_spf"] = lead.get("has_spf", False)
+    automated_checks_data["stage_1_dns"]["has_dmarc"] = lead.get("has_dmarc", False)
+    automated_checks_data["stage_1_dns"]["dmarc_policy"] = "strict" if lead.get("dmarc_policy_strict") else "none"
+    
     print("   ✅ Stage 1 passed")
 
     # ========================================================================
@@ -1179,10 +1572,22 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # ========================================================================
     print(f"🔍 Stage 2: Domain reputation checks for {email} @ {company}")
     passed, rejection_reason = await check_dnsbl(lead)
+    
+    # Collect Stage 2 domain data (DNSBL + WHOIS from Stage 1)
+    automated_checks_data["stage_2_domain"]["dnsbl_checked"] = lead.get("dnsbl_checked", False)
+    automated_checks_data["stage_2_domain"]["dnsbl_blacklisted"] = lead.get("dnsbl_blacklisted", False)
+    automated_checks_data["stage_2_domain"]["dnsbl_list"] = lead.get("dnsbl_list")
+    automated_checks_data["stage_2_domain"]["domain_age_days"] = lead.get("domain_age_days")
+    automated_checks_data["stage_2_domain"]["domain_registrar"] = lead.get("domain_registrar")
+    automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
+    automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
+    
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 2 failed: {msg}")
-        return False, rejection_reason
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
 
     print("   ✅ Stage 2 passed")
 
@@ -1192,15 +1597,41 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # ========================================================================
     print(f"🔍 Stage 3: MyEmailVerifier email validation for {email} @ {company}")
     passed, rejection_reason = await check_myemailverifier_email(lead)
+    
+    # Collect Stage 3 email data
+    # Map MyEmailVerifier status to standard format: "valid", "catch-all", "invalid", "unknown"
+    raw_status = lead.get("email_verifier_status", "Unknown")
+    if raw_status == "Valid":
+        email_status = "valid"
+    elif raw_status == "Catch All":
+        email_status = "catch-all"
+    elif raw_status in ["Invalid", "Grey-listed", "Unknown"]:
+        # Grey-listed and Unknown are treated as invalid (tasks2.md Phase 1 requirement)
+        email_status = "invalid"
+    else:
+        email_status = "unknown"
+    
+    automated_checks_data["stage_3_email"]["email_status"] = email_status
+    automated_checks_data["stage_3_email"]["email_score"] = 10 if passed else 0
+    automated_checks_data["stage_3_email"]["is_disposable"] = lead.get("email_verifier_disposable", False)
+    automated_checks_data["stage_3_email"]["is_role_based"] = lead.get("email_verifier_role_based", False)
+    automated_checks_data["stage_3_email"]["is_free"] = lead.get("email_verifier_free", False)
+    
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 3 failed: {msg}")
-        return False, rejection_reason
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
 
     print("   ✅ Stage 3 passed")
     print(f"🎉 All stages passed for {email} @ {company}")
 
-    return True, {}
+    # All checks passed - return structured success data
+    automated_checks_data["passed"] = True
+    automated_checks_data["rejection_reason"] = None
+    
+    return True, automated_checks_data
 
 # Existing functions - DO NOT TOUCH (maintained for backward compatibility)
 
@@ -1253,6 +1684,13 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
                     return True, f"Website accessible (service available: {response.status})"
                 else:
                     return False, f"Website not accessible (status: {response.status})"
+    except aiohttp.ClientError as e:
+        error_msg = str(e)
+        # Handle large enterprise websites with massive headers (>8KB)
+        # This is common for major companies (e.g., Siemens, Microsoft, etc.)
+        if "Header value is too long" in error_msg or "Got more than" in error_msg:
+            return True, "Website accessible (large enterprise headers detected)"
+        return False, f"Website inaccessible: {error_msg}"
     except Exception as e:
         return False, f"Website inaccessible: {str(e)}"
 
@@ -1312,14 +1750,17 @@ async def validate_lead_list(leads: list) -> list:
                 })
             else:
                 # Process non-duplicate leads through automated checks
-                passed, reason = await run_automated_checks(lead)
+                passed, automated_checks_data = await run_automated_checks(lead)
                 status = "Valid" if passed else "Invalid"
+                # Extract rejection_reason for backwards compatibility
+                reason = automated_checks_data.get("rejection_reason", {}) if not passed else {}
                 report.append({
                     "lead_index": i,
                     "email": email,
                     "company_domain": domain,
                     "status": status,
-                    "reason": reason
+                    "reason": reason,
+                    "automated_checks": automated_checks_data  # NEW: Include full structured data
                 })
 
         return report
@@ -1332,15 +1773,18 @@ async def validate_lead_list(leads: list) -> list:
         domain = urlparse(website).netloc if website else ""
 
         # Run new automated checks
-        passed, reason = await run_automated_checks(lead)
+        passed, automated_checks_data = await run_automated_checks(lead)
 
         status = "Valid" if passed else "Invalid"
+        # Extract rejection_reason for backwards compatibility
+        reason = automated_checks_data.get("rejection_reason", {}) if not passed else {}
         report.append({
             "lead_index": i,
             "email": email,
             "company_domain": domain,
             "status": status,
-            "reason": reason
+            "reason": reason,
+            "automated_checks": automated_checks_data  # NEW: Include full structured data
         })
 
     return report

@@ -83,7 +83,7 @@ def get_denylist_info() -> dict:
     }
 
 
-async def validate_source_url(url: str) -> Tuple[bool, str]:
+async def validate_source_url(url: str, source_type: str) -> Tuple[bool, str]:
     """
     Validate source URL against regulatory requirements.
     
@@ -93,7 +93,8 @@ async def validate_source_url(url: str) -> Tuple[bool, str]:
     3. URL is reachable (HTTP HEAD = 200)
     
     Args:
-        url: Source URL to validate
+        url: Source URL to validate (REQUIRED)
+        source_type: Source type to verify against url - REQUIRED for security validation
         
     Returns:
         Tuple of (is_valid, reason)
@@ -105,9 +106,22 @@ async def validate_source_url(url: str) -> Tuple[bool, str]:
         - Restricted data brokers (without license)
         - Newly created/suspicious domains
         - Unreachable/fake URLs
+        - Spoofing proprietary_database to bypass validation
     """
     if not url:
         return False, "No source URL provided"
+    
+    if not source_type:
+        return False, "No source_type provided (required for validation)"
+    
+    # Special case: Only proprietary databases can skip URL validation
+    # SECURITY: Both source_url AND source_type must be "proprietary_database"
+    # This prevents miners from bypassing validation by just setting url="proprietary_database"
+    if url.lower() == "proprietary_database":
+        if source_type.lower() == "proprietary_database":
+            return True, "Valid source type: proprietary_database"
+        else:
+            return False, f"Security violation: source_url is 'proprietary_database' but source_type is '{source_type}'. Both must match."
     
     # Parse domain from URL
     from urllib.parse import urlparse

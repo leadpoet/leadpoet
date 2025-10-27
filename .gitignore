@@ -15,6 +15,9 @@ env.txt
 tasks.md
 tasks copy.md
 
+# Reputation scoring (keep local, do not commit)
+Rep_Score/
+
 # Regulatory attestation files (contain wallet addresses)
 data/regulatory/miner_attestation.json
 # macOS

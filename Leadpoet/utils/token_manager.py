@@ -16,7 +16,7 @@ class TokenManager:
     Automatically refreshes tokens before expiry to prevent service interruption.
     """
     
-    def __init__(self, hotkey: str, wallet=None, token_endpoint: str = None):
+    def __init__(self, hotkey: str, wallet=None, token_endpoint: str = None, netuid: int = None, network: str = None):
         """
         Initialize TokenManager
         
@@ -24,11 +24,15 @@ class TokenManager:
             hotkey: SS58 address of the hotkey
             wallet: Bittensor wallet instance (required for signing)
             token_endpoint: URL of JWT issuance endpoint
+            netuid: Subnet ID (e.g., 71 for mainnet, 401 for testnet)
+            network: Network name ('finney' for mainnet, 'test' for testnet)
         """
         self.hotkey = hotkey
         self.wallet = wallet
         self.token_endpoint = token_endpoint or \
             "https://qplwoislplkcegvdmbim.supabase.co/functions/v1/issue-jwt"
+        self.netuid = netuid
+        self.network = network
         
         self.env_var_name = f"SUPABASE_JWT_{hotkey[:8]}"
         self.token = os.getenv(self.env_var_name) or os.getenv("SUPABASE_JWT")
@@ -288,12 +292,20 @@ class TokenManager:
             bt.logging.info("🔐 Signing request with hotkey...")
             signature = self.wallet.hotkey.sign(message.encode())
             
+            # Validate required parameters
+            if not self.netuid or not self.network:
+                print("❌ Missing netuid or network - cannot request token")
+                bt.logging.error("❌ Missing netuid or network - cannot request token")
+                return None
+            
             # Prepare request payload
             payload = {
                 "hotkey": self.hotkey,
                 "message": message,
                 "signature": signature.hex(),
-                "timestamp": timestamp
+                "timestamp": timestamp,
+                "netuid": self.netuid,
+                "network": self.network
             }
             
             # Include Supabase anon key for Edge Function authentication

@@ -817,9 +817,9 @@ def _reset_validator_weights_file():
     Reset/clear the validator weights file with empty structure.
     Called at the beginning of each new 72-minute epoch.
     
-    NOTE: This is now deprecated. With the new 100% sourcing system,
+    NOTE: This is currently deprecated. With the new 100% sourcing system,
     all weight calculation is done directly from the database.
-    This file is kept for backward compatibility only.
+    This file is kept for compatibility for CURATION in the future.
     """
     empty_structure = {
         # Deprecated fields (kept for backward compatibility)
@@ -831,7 +831,6 @@ def _reset_validator_weights_file():
         try:
             with open(VALIDATOR_WEIGHTS_FILE, "w") as f:
                 json.dump(empty_structure, f, indent=2)
-            print(f"🔄 Validator weights file reset for new epoch (DEPRECATED - using database now)")
         except Exception as e:
             print(f"❌ Error resetting validator weights file: {e}")
             raise

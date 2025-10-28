@@ -88,6 +88,7 @@ python scripts/post_ip.py \
 python neurons/miner.py \
     --wallet_name miner \
     --wallet_hotkey default \
+    --wallet_path <your_wallet_path> \  # Optional: custom wallet directory (default: ~/.bittensor/wallets)
     --netuid 71 \
     --subtensor_network finney
 ```
@@ -247,6 +248,7 @@ btcli subnet register \
 python neurons/validator.py \
     --wallet_name validator \
     --wallet_hotkey default \
+    --wallet_path <your_wallet_path> \  # Optional: custom wallet directory (default: ~/.bittensor/wallets)
     --netuid 71 \
     --subtensor_network finney
 ```

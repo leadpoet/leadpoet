@@ -40,8 +40,7 @@ export GSE_CX="your_search_engine_id"                # Custom Search ID
 ### For Validators
 
 ```bash
-# Email and LLM Validation Tools
-export OPENROUTER_KEY="your_openrouter_key"          # Required for lead validation
+# Email Validation API
 export MYEMAILVERIFIER_API_KEY="your_mev_key"        # Email validation
 
 ```
@@ -117,7 +116,7 @@ Miners must submit prospects with the following structure:
   "industry": "Aerospace Manufacturing",   # REQUIRED
   "sub_industry": "Space Transportation",  # REQUIRED
   "region": "Hawthorne, CA",               # REQUIRED
-  "linkedin": "https://linkedin.com/in/elonmusk",
+  "linkedin": "https://linkedin.com/in/elonmusk", # REQUIRED
   "description": "Aerospace manufacturer and space transportation company focused on reducing space transportation costs",
   "phone_numbers": ["+1-310-363-6000"],
   "founded_year": 2002,
@@ -128,7 +127,37 @@ Miners must submit prospects with the following structure:
 }
 ```
 
-Leads that contain general purpose emails (hello@domain, team@domain, info@domain, etc.) will not be accepted.
+### Lead Requirements
+
+**Email Quality:**
+- **Only "Valid" emails accepted** - Catch-all, invalid, and unknown emails will be rejected
+- **No general purpose emails** - Addresses like hello@, info@, team@, support@, contact@ are not accepted
+- **Proper email format required** - Must follow standard `name@domain.com` structure
+
+**Name-Email Matching:**
+
+Contact's first or last name must appear in the email address. We accept 26 common patterns plus partial matches to ensure quality while capturing the majority of legitimate business emails:
+
+**Starting with first name:**
+```
+johndoe, john.doe, john_doe, john-doe
+johnd, john.d, john_d, john-d
+jdoe, j.doe, j_doe, j-doe
+```
+
+**Starting with last name:**
+```
+doejohn, doe.john, doe_john, doe-john
+doej, doe.j, doe_j, doe-j
+djohn, d.john, d_john, d-john
+```
+
+**Single tokens:**
+```
+john, doe
+```
+
+These strict requirements at initial go-live demonstrate our dedication to quality leads, while still capturing majority of good emails.
 
 ### Reward System
 
@@ -179,8 +208,8 @@ EOF
 To maintain lead quality and prevent spam, we enforce daily submission limits server-side. Think of it as guardrails to keep the lead pool high-quality.
 
 **Daily Limits (Reset at 12:00 AM ET):**
-- **1000 submission attempts per day** - Counts all submission attempts
-- **50 consensus rejections per day** - Only rejections from 2+ validators count toward this limit
+- **10 submission attempts per day** - Counts all submission attempts
+- **4 consensus rejections per day** - Only rejections from 2+ validators, or low reputation scores count toward this limit
 
 **What Happens at 50 Rejections:**
 
@@ -226,10 +255,10 @@ Note: Validators are configured to auto-update from GitHub on a 5-minute interva
 
 ### Consensus Validation System
 
-Validators pull prospects from the queue (first-come, first-served) and have a 15-second window to validate. With three validators participating, majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
+Validators pull prospects from the queue (first-come, first-served). With two - three validators participating, majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
 
 **Eligibility for Rewards:**
-- Must participate in at least 10% of consensus decisions for last 72 min
+- Must participate in at least 5% of consensus decisions for last 24 hours
 - Verified server-side via Edge Function 
 - If eligible, validators receive miner weights to commit on-chain
 
@@ -243,7 +272,7 @@ Validators must label leads with valid emails as "Valid" or "valid".
 
 ### Consensus-Based Rewards
 
-1. Validators check eligibility (> 10% consensus participation requirement)
+1. Validators check eligibility (≥ 5% consensus participation requirement for last 24 hours)
 2. Miner weights calculated based on sourced approved leads
 3. Weights set on-chain proportional to leads sourced
 
@@ -290,8 +319,8 @@ Common Errors:
 - Validators need to wait for token generation on first run
 - Token auto-refreshes every hour
 
-**"Not eligible - less than 10% consensus"**
-- Validator needs to validate more prospects to meet eligibility threshold
+**"Not eligible - less than 5% consensus"**
+- Validator needs to validate more prospects to meet eligibility threshold (5% of leads in last 24 hours)
 
 **"Prospect already in queue"**
 - The prospect attempted to be submitted is already in the prospect queue

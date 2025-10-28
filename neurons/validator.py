@@ -3057,6 +3057,7 @@ def main():
     add_validator_args(None, parser)
     parser.add_argument("--wallet_name", type=str, help="Wallet name")
     parser.add_argument("--wallet_hotkey", type=str, help="Wallet hotkey")
+    parser.add_argument("--wallet_path", type=str, default="~/.bittensor/wallets", help="Path to wallets directory (default: ~/.bittensor/wallets)")
     parser.add_argument("--netuid", type=int, default=71, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default="finney", help="Subtensor network")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
@@ -3079,9 +3080,11 @@ def main():
     config.wallet.name = args.wallet_name
     config.wallet.hotkey = args.wallet_hotkey
     # Only set custom wallet path if default doesn't exist
-    default_wallet_path = Path.home() / ".bittensor" / "wallets" / "validator"
-    if not default_wallet_path.exists():
-        config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
+    # Use wallet_path from args, or default to ~/.bittensor/wallets
+    if args.wallet_path:
+        config.wallet.path = str(Path(args.wallet_path).expanduser())
+    else:
+        config.wallet.path = str(Path.home() / ".bittensor" / "wallets")
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     config.subtensor.network = args.subtensor_network

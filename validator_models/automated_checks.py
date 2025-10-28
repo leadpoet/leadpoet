@@ -301,11 +301,11 @@ async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
                 "message": f"Invalid email format: {email}",
                 "failed_fields": ["email"]
             }
-            # Cache result
-            cache_key = f"email_regex:{email}"
-            validation_cache[cache_key] = (False, rejection_reason)
-            await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
-            return False, rejection_reason
+        # Cache result
+        cache_key = f"email_regex:{email}"
+        validation_cache[cache_key] = (False, rejection_reason)
+        await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
+        return False, rejection_reason
 
         # Valid email - cache success result
         cache_key = f"email_regex:{email}"
@@ -1129,7 +1129,7 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                         })
                         validation_cache[cache_key] = result
                         return result
-                    
+
                     # Handle validation results based on Status field
                     if status == "Valid":
                         result = (True, {})
@@ -1168,8 +1168,8 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                         # Any other status, log and assume valid
                         result = (True, {})
 
-                    validation_cache[cache_key] = result
-                    return result
+        validation_cache[cache_key] = result
+        return result
 
     except EmailVerificationUnavailableError:
         # Re-raise to propagate up to validator
@@ -1545,7 +1545,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # Collect Stage 0 data after successful checks
     automated_checks_data["stage_0_hardcoded"]["name_in_email"] = True  # Passed name-email match
     automated_checks_data["stage_0_hardcoded"]["is_general_purpose_email"] = False  # Not general purpose
-    
+
     print("   ✅ Stage 0 passed")
 
     # ========================================================================
@@ -1584,7 +1584,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     automated_checks_data["stage_1_dns"]["has_spf"] = lead.get("has_spf", False)
     automated_checks_data["stage_1_dns"]["has_dmarc"] = lead.get("has_dmarc", False)
     automated_checks_data["stage_1_dns"]["dmarc_policy"] = "strict" if lead.get("dmarc_policy_strict") else "none"
-    
+
     print("   ✅ Stage 1 passed")
 
     # ========================================================================

@@ -1281,6 +1281,7 @@ async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
+    parser.add_argument("--wallet_path", type=str, default="~/.bittensor/wallets", help="Path to wallets directory (default: ~/.bittensor/wallets)")
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -1292,9 +1293,11 @@ def main():
     config.wallet.hotkey = args.wallet_hotkey
     config.netuid = args.netuid
     config.subtensor = bt.Config()
-    default_wallet_path = Path.home() / ".bittensor" / "wallets" / "miner"
-    if not default_wallet_path.exists():
-        config.wallet.path = str(Path.cwd() / "bittensor" / "wallets") + "/"
+    # Use wallet_path from args, or default to ~/.bittensor/wallets
+    if args.wallet_path:
+        config.wallet.path = str(Path(args.wallet_path).expanduser())
+    else:
+        config.wallet.path = str(Path.home() / ".bittensor" / "wallets")
     config.subtensor.network = args.subtensor_network
     config.blacklist = bt.Config()
     config.blacklist.force_validator_permit = args.blacklist_force_validator_permit

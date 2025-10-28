@@ -1134,17 +1134,13 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                     if status == "Valid":
                         result = (True, {})
                     elif status == "Catch All":
-                        # BRD: IF catch-all, accept only IF DNS TXT record contains v=spf1
-                        has_spf = lead.get("has_spf", False)
-                        if has_spf:
-                            result = (True, {})
-                        else:
-                            result = (False, {
-                                "stage": "Stage 3: MyEmailVerifier",
-                                "check_name": "check_myemailverifier_email",
-                                "message": "Email is catch-all without SPF record",
-                                "failed_fields": ["email"]
-                            })
+                        # BRD: Reject ALL catch-all emails (no exceptions)
+                        result = (False, {
+                            "stage": "Stage 3: MyEmailVerifier",
+                            "check_name": "check_myemailverifier_email",
+                            "message": "Email is catch-all (instant rejection)",
+                            "failed_fields": ["email"]
+                        })
                     elif status == "Invalid":
                         result = (False, {
                             "stage": "Stage 3: MyEmailVerifier",

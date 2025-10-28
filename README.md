@@ -128,6 +128,8 @@ Miners must submit prospects with the following structure:
 }
 ```
 
+Leads that contain general purpose emails (hello@domain, team@domain, info@domain, etc.) will not be accepted.
+
 ### Reward System
 
 Miners earn rewards based on a **reputation-weighted formula** combining recent activity and historical performance:
@@ -234,7 +236,8 @@ Validators pull prospects from the queue (first-come, first-served) and have a 1
 **Validators perform multi-stage quality checks:**
 1. **Email validation**: Format, domain, disposable check, deliverability check
 2. **Company & Contact verification**: Website, LinkedIn, Google search
-3. **Reputation Score**: Coming soon
+
+Validators must label leads with valid emails as "Valid" or "valid".
 
 ## Reward Distribution
 

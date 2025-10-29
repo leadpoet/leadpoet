@@ -68,7 +68,11 @@ class CustomSupabaseClient:
             
             return RPCResponse(response.json() if response.text else [])
         except requests.exceptions.HTTPError as e:
-            bt.logging.error(f"RPC call failed: {e.response.text if e.response else str(e)}")
+            bt.logging.error(f"RPC call failed: {e}")
+            if e.response is not None:
+                bt.logging.error(f"Response status: {e.response.status_code}")
+                bt.logging.error(f"Response body: {e.response.text}")
+                bt.logging.error(f"Response headers: {dict(e.response.headers)}")
             # Return empty response on error
             return RPCResponse([])
 

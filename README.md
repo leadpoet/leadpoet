@@ -21,7 +21,7 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 
 ### Software Requirements
 - Python 3.8+
-- Bittensor CLI: `pip install bittensor>=6.9.3`
+- Bittensor CLI: `pip install bittensor>=9.10`
 - Bittensor Wallet: `btcli wallet create`
 
 ## Required Credentials

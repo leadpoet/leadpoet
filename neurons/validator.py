@@ -3071,9 +3071,6 @@ def main():
     # Add this near the beginning of your validator startup, after imports
     from Leadpoet.validator.reward import start_epoch_monitor
 
-    # Start the background epoch monitor when validator starts
-    start_epoch_monitor()
-
     # Run the proper Bittensor validator
     config = bt.Config()
     config.wallet = bt.Config()
@@ -3088,6 +3085,9 @@ def main():
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     config.subtensor.network = args.subtensor_network
+
+    # Start the background epoch monitor AFTER config is set (so network is correct)
+    start_epoch_monitor(network=args.subtensor_network)
 
     validator = Validator(config=config)
 

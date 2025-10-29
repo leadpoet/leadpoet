@@ -18,15 +18,17 @@ BITTENSOR_BLOCK_TIME_SECONDS = 12
 _current_epoch = None
 _epoch_start_block = None
 _epoch_lock = threading.Lock()
+_epoch_network = "finney"  # Default to mainnet
 
 def _get_current_block() -> int:
     """
     Get current block number from the validator's subtensor connection.
     Falls back to estimated block if subtensor unavailable.
     """
+    global _epoch_network
     try:
         import bittensor as bt
-        subtensor = bt.subtensor(network="test")
+        subtensor = bt.subtensor(network=_epoch_network)
         current_block = subtensor.get_current_block()
         return current_block
         
@@ -102,12 +104,18 @@ def _background_epoch_monitor():
     
     print("🕐 Background epoch monitor stopped")
 
-def start_epoch_monitor():
+def start_epoch_monitor(network: str = "finney"):
     """
     Start the background epoch monitoring thread.
     Should be called when the validator starts up.
+    
+    Args:
+        network: Bittensor network to connect to ("finney" for mainnet, "test" for testnet)
     """
-    global _epoch_monitor_thread, _epoch_monitor_running
+    global _epoch_monitor_thread, _epoch_monitor_running, _epoch_network
+    
+    # Set the network for epoch tracking
+    _epoch_network = network
     
     with _epoch_monitor_lock:
         if _epoch_monitor_running:

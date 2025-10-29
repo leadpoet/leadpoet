@@ -915,7 +915,7 @@ class Validator(BaseValidatorNeuron):
                         print("\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
                         print(f"   Reason: {rewards['error']}")
                         print(f"   Validated: {rewards.get('validated_count', 0)}/{rewards.get('total_count', 0)} leads")
-                        print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 10.0%)")
+                        print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 5.0%)")
                         print("   No weights will be set this epoch - increase validation activity!")
                     else:
                         # Validator is eligible - set weights on-chain
@@ -1461,7 +1461,7 @@ class Validator(BaseValidatorNeuron):
                                         print("❌ VALIDATOR NOT ELIGIBLE")
                                         print(f"   Reason: {weights_result.get('error', 'Unknown')}")
                                         print(f"   Validated: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)} leads")
-                                        print(f"   Percentage: {weights_result.get('percentage', 0):.1f}% (need >= 10.0%)")
+                                        print(f"   Percentage: {weights_result.get('percentage', 0):.1f}% (need >= 5.0%)")
                                         # Don't mark as attempted - allow retry every 2 blocks
                                         # self._last_epoch_weights_set = current_epoch  # Mark as attempted
                                         continue
@@ -2011,7 +2011,7 @@ class Validator(BaseValidatorNeuron):
                                 print("\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
                                 print(f"   Reason: {rewards['error']}")
                                 print(f"   Validated: {rewards.get('validated_count', 0)}/{rewards.get('total_count', 0)} leads")
-                                print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 10.0%)")
+                                print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 5.0%)")
                                 print("   No weights will be set this epoch - increase validation activity!")
                             else:
                                 # Validator is eligible - set weights on-chain

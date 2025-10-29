@@ -30,7 +30,6 @@ from Leadpoet.utils.cloud_db import (
     push_curation_result,
     push_miner_curation_request,
     fetch_miner_curation_result,
-    push_validator_weights,
     push_validator_ranking,
 )
 from Leadpoet.utils.token_manager import TokenManager
@@ -891,75 +890,6 @@ class Validator(BaseValidatorNeuron):
                 lead["c_validator_hotkey"] = self.wallet.hotkey.ss58_address
 
             synapse.leads = top_leads
-
-            # V2: After Final Curated List is frozen, call reward calculation
-            if top_leads:
-                try:
-                    from Leadpoet.validator.reward import calculate_weights, record_event
-
-                    # Record events for each lead in the Final Curated List
-                    for lead in top_leads:
-                        if lead.get("source") and lead.get("curated_by"):
-                          
-                            record_event(lead)
-
-                    # STEP 4: CALCULATE WEIGHTS WITH CRYPTOGRAPHIC PROOF
-                    # Pass validator's wallet to prove hotkey ownership
-                    rewards = calculate_weights(
-                        total_emission=100.0,
-                        validator_wallet=self.wallet  # Proves we control this hotkey
-                    )
-                    
-                    # Check if we were eligible
-                    if "error" in rewards:
-                        print("\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
-                        print(f"   Reason: {rewards['error']}")
-                        print(f"   Validated: {rewards.get('validated_count', 0)}/{rewards.get('total_count', 0)} leads")
-                        print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 5.0%)")
-                        print("   No weights will be set this epoch - increase validation activity!")
-                    else:
-                        # Validator is eligible - set weights on-chain
-                        # Log final weights and emissions
-                        print("\n🎯 V2 REWARD CALCULATION COMPLETE:")
-                        print(f"   ✅ Validator eligible - validated {rewards.get('percentage', 0):.1f}% of epoch leads")
-                        print(f"   Final Curated List: {len(top_leads)} prospects")
-                        print(f"   Final weights (W): {rewards['W']}")
-                        print(f"   Emissions: {rewards['E']}")
-
-                        weights_dict = rewards["W"]                   # miner-hotkey ➜ share
-                        # publish weights on-chain
-                        try:
-                            # map hotkeys → uids present in current metagraph
-                            uids, weights = [], []
-                            for hk, w in weights_dict.items():
-                                if hk in self.metagraph.hotkeys and w > 0:
-                                    uids.append(self.metagraph.hotkeys.index(hk))
-                                    weights.append(float(w))
-
-                            # normalise to 1.0 as required by bittensor
-                            s = sum(weights)
-                            if not isclose(s, 1.0) and s > 0:
-                                weights = [w / s for w in weights]
-
-                            self.subtensor.set_weights(
-                                wallet             = self.wallet,
-                                netuid             = self.config.netuid,
-                                uids               = uids,
-                                weights            = weights,
-                                wait_for_inclusion = True,     # non-blocking
-                            )
-                            print(self.wallet, self.config.netuid, uids, weights)
-                            print("✅ Published new weights on-chain")
-                        except Exception as e:
-                            print(f"⚠️  Failed to publish weights on-chain: {e}")
-
-                        # Firestore write
-                        push_validator_weights(self.wallet, self.uid, weights_dict)
-
-                except Exception as e:
-                    print(f"⚠️  V2 reward calculation failed: {e}")
-            else:
-                print("⚠️  No prospects in Final Curated List - skipping reward calculation")
         else:
             print("❌ No leads received from any source")
             synapse.leads = []
@@ -1010,18 +940,6 @@ class Validator(BaseValidatorNeuron):
             if reward >= 0.9 and isinstance(response, LeadRequest) and response.leads:
                 if await self.run_automated_checks(response.leads):
                     from Leadpoet.base.utils.pool import add_to_pool
-
-                    # V2: Record events for reward calculation before adding to pool
-                    try:
-                        from Leadpoet.validator.reward import record_event
-                        for lead in response.leads:
-                            if lead.get("source") and lead.get("curated_by") and lead.get("conversion_score"):
-                                record_event(lead)
-                                print(f"🎯 V2: Recorded event for lead {lead.get('email', 'unknown')} "
-                                      f"(source: {lead['source']}, curator: {lead['curated_by']})")
-                    except Exception as e:
-                        print(f"⚠️  V2: Failed to record events: {e}")
-
                     add_to_pool(response.leads)
                     bt.logging.info(f"Added {len(response.leads)} leads from UID {miner_uids[i]} to pool")
                 else:
@@ -1382,178 +1300,6 @@ class Validator(BaseValidatorNeuron):
         try:
             # Keep the validator running and continuously process leads
             while not self.should_exit:
-        # AUTOMATIC WEIGHT CALCULATION NEAR EPOCH END
-                # Check if we're near the end of the epoch (blocks 355-360)
-                try:
-                    from Leadpoet.validator.reward import _get_epoch_status
-                    
-                    # Check every 5 iterations (approx every 5 seconds) for faster response
-                    if not hasattr(self, '_epoch_check_counter'):
-                        self._epoch_check_counter = 0  
-                        self._last_weight_calc_block = 0
-                    
-                    self._epoch_check_counter += 1
-                    if self._epoch_check_counter >= 2:  # Check every 2 iterations
-                        self._epoch_check_counter = 0
-                        
-                        status = _get_epoch_status()
-                        blocks_remaining = status.get("blocks_remaining", 360)
-                        current_epoch = status.get("current_epoch", 0)
-                        current_block = 360 - blocks_remaining
-                        
-                        # Reset block counter when entering a new epoch
-                        if hasattr(self, '_last_tracked_epoch') and self._last_tracked_epoch != current_epoch:
-                            self._last_weight_calc_block = 0
-                        self._last_tracked_epoch = current_epoch
-                        
-                        # Debug output to see current status
-                        print(f"⏰ Epoch check: Block {current_block}/360, Blocks remaining: {blocks_remaining}, Epoch: {current_epoch}")
-                        
-                        # TESTING: Trigger between blocks 90-120 (blocks_remaining 270-240)
-                        # Normal: blocks_remaining <= 5 (blocks 355-360)
-                        if blocks_remaining <= 350 and blocks_remaining >= 1:  # Blocks 90-120 for testing
-                            # Check if 2 blocks have passed since last attempt (or first attempt)
-                            current_block = 360 - blocks_remaining
-                            should_attempt = (current_block - self._last_weight_calc_block >= 2 or self._last_weight_calc_block == 0)
-                            
-                            if should_attempt:
-                                print("\n🎯 AUTOMATIC WEIGHT CALCULATION TRIGGERED")
-                                print(f"   Epoch: {current_epoch}")
-                                print(f"   Block: {360 - blocks_remaining}/360")
-                                print("   Requesting weight calculation...")
-                                
-                                # Mark that we attempted at this block
-                                self._last_weight_calc_block = current_block
-                                
-                                # Get JWT token and call Edge Function for weights
-                                import requests
-                                jwt_token = self.token_manager.get_token()
-                                
-                                if not jwt_token:
-                                    print("❌ No JWT token available - cannot get weights")
-                                    continue
-                                
-                                # Call Edge Function to get weights (server-side eligibility check)
-                                try:
-                                    print("   Calling Edge Function with JWT token...")
-                                    response = requests.post(
-                                        "https://qplwoislplkcegvdmbim.supabase.co/functions/v1/get-validator-weights",
-                                        headers={
-                                            "Authorization": f"Bearer {jwt_token}",
-                                            "Content-Type": "application/json"
-                                        },
-                                        json={"epoch_number": current_epoch},
-                                        timeout=30
-                                    )
-                                    
-                                    print(f"   Response status: {response.status_code}")
-                                    
-                                    # Try to parse JSON response
-                                    try:
-                                        weights_result = response.json()
-                                    except json.JSONDecodeError:
-                                        print("❌ Invalid JSON response from Edge Function")
-                                        print(f"   Response text: {response.text[:500]}")
-                                        continue
-                                    
-                                    # Edge Function returns 403 if not eligible
-                                    if response.status_code == 403:
-                                        print("❌ VALIDATOR NOT ELIGIBLE")
-                                        print(f"   Reason: {weights_result.get('error', 'Unknown')}")
-                                        print(f"   Validated: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)} leads")
-                                        print(f"   Percentage: {weights_result.get('percentage', 0):.1f}% (need >= 5.0%)")
-                                        # Don't mark as attempted - allow retry every 2 blocks
-                                        # self._last_epoch_weights_set = current_epoch  # Mark as attempted
-                                        continue
-                                    
-                                    if response.status_code == 404:
-                                        print("❌ Edge Function not found - it may not be deployed yet")
-                                        print("   Deploy with: supabase functions deploy get-validator-weights")
-                                        continue
-                                    
-                                    if response.status_code != 200:
-                                        print(f"❌ Error from Edge Function (status {response.status_code})")
-                                        print(f"   Error: {weights_result.get('error', 'Unknown error')}")
-                                        if 'details' in weights_result:
-                                            print(f"   Details: {weights_result['details']}")
-                                        # For 500 errors, also show the full response for debugging
-                                        if response.status_code == 500:
-                                            print(f"   Full response: {weights_result}")
-                                        continue
-                                        
-                                except requests.exceptions.RequestException as e:
-                                    print(f"❌ Network error calling Edge Function: {e}")
-                                    continue
-                                except Exception as e:
-                                    print(f"❌ Unexpected error calling Edge Function: {e}")
-                                    import traceback
-                                    traceback.print_exc()
-                                    continue
-                                
-                                # Check if validator is eligible (Edge Function already enforced this)
-                                # Note: weights can be empty dict if no leads accepted yet
-                                if weights_result.get("eligible") and weights_result.get("weights") is not None:
-                                    print("✅ VALIDATOR ELIGIBLE - Setting weights on chain")
-                                    print(f"   Consensus participation: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)} leads")
-                                    print(f"   Percentage: {weights_result.get('percentage', 0):.1f}%")
-                                    
-                                    # Convert weights dict to format expected by set_weights
-                                    # Edge Function returns weights directly (server-side calculated)
-                                    weight_dict = weights_result["weights"]
-                                    
-                                    # Check if there are any weights to set
-                                    if not weight_dict:
-                                        print("   ℹ️ No leads accepted yet - no weights to set")
-                                        print("   (Validator is eligible but waiting for leads to be accepted)")
-                                        continue
-                                    
-                                    # Get UIDs for the hotkeys
-                                    uids_and_weights = []
-                                    for hotkey, weight in weight_dict.items():
-                                        # Find UID for this hotkey
-                                        try:
-                                            uid = self.metagraph.hotkeys.index(hotkey)
-                                            uids_and_weights.append((uid, weight))
-                                            print(f"     Miner {hotkey[:10]}... (UID {uid}): {weight:.4f}")
-                                        except ValueError:
-                                            print(f"     ⚠️ Hotkey {hotkey[:10]}... not found in metagraph")
-                                    
-                                    if uids_and_weights:
-                                        # Set weights on chain
-                                        try:
-                                            success = self.subtensor.set_weights(
-                                                netuid=self.config.netuid,
-                                                wallet=self.wallet,
-                                                uids=[uid for uid, _ in uids_and_weights],
-                                                weights=[weight for _, weight in uids_and_weights],
-                                                wait_for_inclusion=False,
-                                                wait_for_finalization=False
-                                            )
-                                            
-                                            if success:
-                                                print(f"✅ Weights successfully set on chain for epoch {current_epoch}")
-                                                # Don't mark epoch as done - allow continuous updates every 2 blocks
-                                                # self._last_epoch_weights_set = current_epoch
-                                            else:
-                                                print("❌ Failed to set weights on chain")
-                                        except Exception as e:
-                                            print(f"❌ Error setting weights on chain: {e}")
-                                    else:
-                                        print("❌ No valid UIDs found for weight setting")
-                                        
-                                else:
-                                    # Debug: Show what we actually got from Edge Function
-                                    print("⚠️ No weights returned from Edge Function")
-                                    print(f"   Debug - Eligible: {weights_result.get('eligible', 'missing')}")
-                                    print(f"   Debug - Weights: {weights_result.get('weights', 'missing')}")
-                                    print(f"   Debug - Validated: {weights_result.get('validated_count', 0)}/{weights_result.get('total_count', 0)}")
-                                    print(f"   Debug - Percentage: {weights_result.get('percentage', 0):.1f}%")
-                                    # Don't mark as attempted - allow retry every 2 blocks
-                                    # self._last_epoch_weights_set = current_epoch  # Don't mark as attempted
-                                    
-                except Exception as e:
-                    bt.logging.warning(f"Error in automatic weight calculation: {e}")
-
                 # Check and refresh token every iteration
                 token_refreshed = self.token_manager.refresh_if_needed(threshold_hours=1)
                 if not token_refreshed and not self.token_manager.get_token():
@@ -1989,72 +1735,6 @@ class Validator(BaseValidatorNeuron):
                         except Exception as e:
                             print(f"⚠️  Error submitting validator ranking: {e}")
                             bt.logging.error(f"Error submitting validator ranking: {e}")
-
-                        # PUBLISH WEIGHTS for miners who provided leads
-                        try:
-                            from Leadpoet.validator.reward import calculate_weights, record_event
-
-                            # Record events for each lead in the ranked list
-                            for lead in top_leads:
-                                if lead.get("source") and lead.get("curated_by"):
-                                    record_event(lead)
-
-                            # STEP 4: CALCULATE WEIGHTS WITH CRYPTOGRAPHIC PROOF
-                            # Pass validator's wallet to prove hotkey ownership
-                            rewards = calculate_weights(
-                                total_emission=100.0,
-                                validator_wallet=self.wallet  # Proves we control this hotkey
-                            )
-                            
-                            # Check if we were eligible
-                            if "error" in rewards:
-                                print("\n❌ VALIDATOR NOT ELIGIBLE FOR WEIGHTS:")
-                                print(f"   Reason: {rewards['error']}")
-                                print(f"   Validated: {rewards.get('validated_count', 0)}/{rewards.get('total_count', 0)} leads")
-                                print(f"   Percentage: {rewards.get('percentage', 0):.1f}% (need >= 5.0%)")
-                                print("   No weights will be set this epoch - increase validation activity!")
-                            else:
-                                # Validator is eligible - set weights on-chain
-                                # Log final weights
-                                print("\n🎯 V2 REWARD CALCULATION COMPLETE:")
-                                print(f"   ✅ Validator eligible - validated {rewards.get('percentage', 0):.1f}% of epoch leads")
-                                print(f"   Ranked leads: {len(top_leads)} prospects")
-                                print(f"   Final weights (W): {rewards['W']}")
-                                print(f"   Emissions: {rewards['E']}")
-
-                                weights_dict = rewards["W"]
-
-                                # Publish weights on-chain
-                                try:
-                                    from math import isclose
-                                    uids, weights = [], []
-                                    for hk, w in weights_dict.items():
-                                        if hk in self.metagraph.hotkeys and w > 0:
-                                            uids.append(self.metagraph.hotkeys.index(hk))
-                                            weights.append(float(w))
-
-                                    # Normalize to 1.0
-                                    s = sum(weights)
-                                    if not isclose(s, 1.0) and s > 0:
-                                        weights = [w / s for w in weights]
-
-                                    self.subtensor.set_weights(
-                                        wallet=self.wallet,
-                                        netuid=self.config.netuid,
-                                        uids=uids,
-                                        weights=weights,
-                                        wait_for_inclusion=True,
-                                    )
-                                    print("✅ Published weights on-chain")
-                                except Exception as e:
-                                    print(f"⚠️  Failed to publish weights on-chain: {e}")
-
-                                # Store in Firestore
-                                from Leadpoet.utils.cloud_db import push_validator_weights
-                                push_validator_weights(self.wallet, self.uid, weights_dict)
-
-                        except Exception as e:
-                            print(f"⚠️  V2 reward calculation failed: {e}")
 
                         print(f"✅ Validator {self.wallet.hotkey.ss58_address[:10]}... completed processing broadcast {request_id[:8]}...")
 
@@ -3037,17 +2717,6 @@ def add_validated_leads_to_pool(leads):
         if "conversion_score" in lead:
             mapped_lead["conversion_score"] = validation_score
         mapped_leads.append(mapped_lead)
-
-    # V2: Record events for reward calculation when leads are added to pool
-    try:
-        from Leadpoet.validator.reward import record_event
-        for lead in leads:
-            if lead.get("source") and lead.get("curated_by") and lead.get("conversion_score"):
-                record_event(lead)
-                print(f"🎯 V2: Recorded event for lead {lead.get('email', 'unknown')} "
-                      f"(source: {lead['source']}, curator: {lead['curated_by']})")
-    except Exception as e:
-        print(f"⚠️  V2: Failed to record events: {e}")
 
     lead_pool.add_to_pool(mapped_leads)
 

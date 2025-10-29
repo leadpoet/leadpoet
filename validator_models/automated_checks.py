@@ -301,11 +301,11 @@ async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
                 "message": f"Invalid email format: {email}",
                 "failed_fields": ["email"]
             }
-        # Cache result
-        cache_key = f"email_regex:{email}"
-        validation_cache[cache_key] = (False, rejection_reason)
-        await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
-        return False, rejection_reason
+            # Cache result
+            cache_key = f"email_regex:{email}"
+            validation_cache[cache_key] = (False, rejection_reason)
+            await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
+            return False, rejection_reason
 
         # Valid email - cache success result
         cache_key = f"email_regex:{email}"
@@ -1062,13 +1062,6 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
         return validation_cache[cache_key]
 
     try:
-        # Mock-mode fallback
-        if "YOUR_MYEMAILVERIFIER_API_KEY" in MYEMAILVERIFIER_API_KEY:
-            print(f"   🔧 MOCK MODE: Using mock validation (no real API call)")
-            result = (True, {})
-            validation_cache[cache_key] = result
-            return result
-
         async with API_SEMAPHORE:
             async with aiohttp.ClientSession() as session:
                 # MyEmailVerifier API endpoint
@@ -1734,17 +1727,6 @@ async def check_duplicates(leads: list) -> Tuple[bool, dict]:
 
 async def validate_lead_list(leads: list) -> list:
     """Main validation function - maintains backward compatibility"""
-
-    # Mock mode fallback
-    if "YOUR_MYEMAILVERIFIER_API_KEY" in MYEMAILVERIFIER_API_KEY:
-        print("Mock mode: Assuming all leads pass automated checks")
-        return [{
-            "lead_index": i,
-            "email": get_email(lead),
-            "company_domain": urlparse(get_website(lead)).netloc,
-            "status": "Valid",
-            "reason": "Mock pass"
-        } for i, lead in enumerate(leads)]
 
     # Check for duplicates
     has_duplicates, duplicate_leads = await check_duplicates(leads)

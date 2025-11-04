@@ -1310,11 +1310,11 @@ class Validator(BaseValidatorNeuron):
                     bt.logging.info("🔄 Token was refreshed, reinitializing Supabase client...")
                     self._init_supabase_client()
                 
-                # Process any new leads that need validation (continuous)
+                # Process gateway validation workflow (Passages 1 & 2)
                 try:
-                    self.process_sourced_leads_continuous()
+                    self.process_gateway_validation_workflow()
                 except Exception as e:
-                    bt.logging.warning(f"Error in process_sourced_leads_continuous: {e}")
+                    bt.logging.warning(f"Error in gateway validation workflow: {e}")
                     time.sleep(5)  # Wait before retrying
                 
                 try:
@@ -1418,6 +1418,221 @@ class Validator(BaseValidatorNeuron):
 
         except Exception as e:
             print(f"❌ Error discovering miners: {e}")
+
+    def process_gateway_validation_workflow(self):
+        """
+        GATEWAY WORKFLOW (Passages 1 & 2): Fetch leads from gateway, validate, submit hashed results.
+        This replaces process_sourced_leads_continuous for the new gateway-based architecture.
+        """
+        # Skip if processing broadcast request
+        if self.processing_broadcast:
+            return
+        
+        try:
+            # Get current epoch_id from Bittensor block
+            current_block = self.subtensor.get_current_block()
+            epoch_length = 360  # blocks per epoch
+            current_epoch = current_block // epoch_length
+            
+            # Check if we've already processed this epoch
+            if not hasattr(self, '_last_processed_epoch'):
+                self._last_processed_epoch = current_epoch - 1
+            
+            if current_epoch <= self._last_processed_epoch:
+                time.sleep(5)
+                return
+            
+            # Fetch assigned leads from gateway
+            from Leadpoet.utils.cloud_db import gateway_get_epoch_leads, gateway_submit_validation, gateway_submit_reveal
+            
+            leads = gateway_get_epoch_leads(self.wallet, current_epoch)
+            if not leads:
+                bt.logging.info(f"No leads assigned for epoch {current_epoch}, waiting...")
+                time.sleep(10)
+                return
+            
+            bt.logging.info(f"🔍 Processing {len(leads)} leads for epoch {current_epoch}")
+            
+            # Validate each lead using automated_checks
+            import os
+            import hashlib
+            validation_results = []
+            local_validation_data = []  # Store for weight calculation
+            
+            # Generate salt for this validation batch
+            salt = os.urandom(32)
+            
+            for lead in leads:
+                try:
+                    # Run validation (uses existing automated_checks.py)
+                    result = asyncio.run(self.validate_lead(lead))
+                    
+                    # Extract results
+                    is_valid = result.get("is_legitimate", False)
+                    decision = "approve" if is_valid else "deny"
+                    rep_score = int(lead.get("rep_score", 50))  # Default 50 if not set
+                    rejection_reason = result.get("reason", {}) if not is_valid else {"message": "pass"}
+                    evidence_blob = json.dumps(result)
+                    
+                    # Compute hashes (SHA256 with salt)
+                    decision_hash = hashlib.sha256((decision + salt.hex()).encode()).hexdigest()
+                    rep_score_hash = hashlib.sha256((str(rep_score) + salt.hex()).encode()).hexdigest()
+                    rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason) + salt.hex()).encode()).hexdigest()
+                    evidence_hash = hashlib.sha256(evidence_blob.encode()).hexdigest()
+                    
+                    # Store hashed result for gateway submission
+                    validation_results.append({
+                        "lead_id": lead.get("lead_id"),
+                        "decision_hash": decision_hash,
+                        "rep_score_hash": rep_score_hash,
+                        "rejection_reason_hash": rejection_reason_hash,
+                        "evidence_hash": evidence_hash
+                    })
+                    
+                    # Store local data for weight calculation
+                    local_validation_data.append({
+                        "lead_id": lead.get("lead_id"),
+                        "miner_hotkey": lead.get("miner_hotkey"),
+                        "decision": decision,
+                        "rep_score": rep_score,
+                        "rejection_reason": rejection_reason,
+                        "salt": salt.hex()
+                    })
+                    
+                    bt.logging.info(f"   {'✅ Approved' if is_valid else '❌ Denied'}: {lead.get('email', 'Unknown')}")
+                    
+                except Exception as e:
+                    bt.logging.error(f"Error validating lead {lead.get('lead_id', 'unknown')}: {e}")
+                    continue
+            
+            # Submit hashed validation results to gateway
+            if validation_results:
+                success = gateway_submit_validation(self.wallet, current_epoch, validation_results)
+                if success:
+                    bt.logging.info(f"✅ Submitted {len(validation_results)} validations for epoch {current_epoch}")
+                    
+                    # Store local data for reveal later
+                    if not hasattr(self, '_pending_reveals'):
+                        self._pending_reveals = {}
+                    self._pending_reveals[current_epoch] = local_validation_data
+                else:
+                    bt.logging.error(f"Failed to submit validations for epoch {current_epoch}")
+            
+            # Calculate and submit weights to Bittensor (Passage 2)
+            self.calculate_and_submit_weights_local(local_validation_data)
+            
+            # Mark epoch as processed
+            self._last_processed_epoch = current_epoch
+            
+            # Check for reveals from previous epochs
+            self.process_pending_reveals()
+            
+        except Exception as e:
+            bt.logging.error(f"Error in gateway validation workflow: {e}")
+            import traceback
+            bt.logging.error(traceback.format_exc())
+    
+    def calculate_and_submit_weights_local(self, validation_data: List[Dict]):
+        """
+        Calculate miner weights based on LOCAL validation results (Passage 2).
+        Formula: miner_reward_i ∝ Σ(my_rep_score for all leads where my_decision="approve" AND miner_hotkey=miner_i)
+        """
+        try:
+            # Aggregate rewards by miner
+            miner_rewards = {}
+            for validation in validation_data:
+                if validation['decision'] == 'approve':
+                    miner_hotkey = validation['miner_hotkey']
+                    rep_score = validation['rep_score']
+                    
+                    if miner_hotkey not in miner_rewards:
+                        miner_rewards[miner_hotkey] = 0
+                    miner_rewards[miner_hotkey] += rep_score
+            
+            if not miner_rewards:
+                bt.logging.info("No approved leads, skipping weight submission")
+                return
+            
+            # Convert hotkeys to UIDs
+            uids = []
+            weights = []
+            for hotkey, reward in miner_rewards.items():
+                if hotkey in self.metagraph.hotkeys:
+                    uid = self.metagraph.hotkeys.index(hotkey)
+                    uids.append(uid)
+                    weights.append(reward)
+            
+            if not uids:
+                bt.logging.info("No valid UIDs found for weight submission")
+                return
+            
+            # Normalize weights
+            total_weight = sum(weights)
+            if total_weight > 0:
+                weights = [w / total_weight for w in weights]
+            
+            # Submit to Bittensor chain
+            bt.logging.info(f"📊 Submitting weights for {len(uids)} miners to Bittensor chain...")
+            result = self.subtensor.set_weights(
+                netuid=self.config.netuid,
+                wallet=self.wallet,
+                uids=uids,
+                weights=weights,
+                wait_for_finalization=False
+            )
+            
+            if result:
+                bt.logging.info(f"✅ Successfully submitted weights to Bittensor chain")
+            else:
+                bt.logging.error(f"Failed to submit weights to Bittensor chain")
+                
+        except Exception as e:
+            bt.logging.error(f"Error calculating/submitting weights: {e}")
+            import traceback
+            bt.logging.error(traceback.format_exc())
+    
+    def process_pending_reveals(self):
+        """
+        Check if previous epochs need reveal submission (after epoch closes).
+        """
+        if not hasattr(self, '_pending_reveals'):
+            return
+        
+        try:
+            current_block = self.subtensor.get_current_block()
+            epoch_length = 360
+            current_epoch = current_block // epoch_length
+            
+            from Leadpoet.utils.cloud_db import gateway_submit_reveal
+            
+            # Check each pending epoch
+            epochs_to_reveal = list(self._pending_reveals.keys())
+            for epoch_id in epochs_to_reveal:
+                # Reveal after epoch closes (current_epoch > epoch_id)
+                if current_epoch > epoch_id:
+                    reveal_data = self._pending_reveals[epoch_id]
+                    
+                    # Format reveals for gateway
+                    reveals = []
+                    for validation in reveal_data:
+                        reveals.append({
+                            "lead_id": validation["lead_id"],
+                            "decision": validation["decision"],
+                            "rep_score": validation["rep_score"],
+                            "rejection_reason": validation["rejection_reason"],
+                            "salt": validation["salt"]
+                        })
+                    
+                    # Submit reveal
+                    success = gateway_submit_reveal(self.wallet, epoch_id, reveals)
+                    if success:
+                        bt.logging.info(f"✅ Revealed validation for epoch {epoch_id}")
+                        del self._pending_reveals[epoch_id]
+                    else:
+                        bt.logging.error(f"Failed to reveal validation for epoch {epoch_id}")
+                        
+        except Exception as e:
+            bt.logging.error(f"Error processing reveals: {e}")
 
     def process_sourced_leads_continuous(self):
         """

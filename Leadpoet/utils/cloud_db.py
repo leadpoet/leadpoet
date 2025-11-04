@@ -16,6 +16,8 @@ from Leadpoet.utils.utils_lead_extraction import get_email, get_field
 
 load_dotenv()
 
+# Gateway URL (deployed production gateway)
+GATEWAY_URL = os.getenv("GATEWAY_URL", "http://104.236.33.157:8000")
 API_URL   = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
 
 # Network defaults - can be overridden via environment variables
@@ -1481,4 +1483,198 @@ def sync_metagraph_to_supabase(metagraph, netuid: int) -> bool:
         bt.logging.error(f"❌ Failed to sync metagraph to Supabase: {e}")
         import traceback
         bt.logging.error(traceback.format_exc())
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  GATEWAY INTEGRATION (Passages 1 & 2 Workflow)
+# ═══════════════════════════════════════════════════════════════════
+
+def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
+    """
+    Get presigned URL from gateway for S3/MinIO upload.
+    
+    Args:
+        wallet: Miner's wallet
+        lead_data: Lead data (used to generate lead_id)
+        
+    Returns:
+        Dict with: lead_id, presigned_url, storage_backend
+    """
+    try:
+        # Generate signature for authentication
+        nonce = str(int(time.time()))
+        message = f"presign:{wallet.hotkey.ss58_address}:{nonce}"
+        signature = wallet.hotkey.sign(message.encode()).hex()
+        
+        # Request presigned URL
+        response = requests.post(
+            f"{GATEWAY_URL}/presign",
+            json={
+                "miner_hotkey": wallet.hotkey.ss58_address,
+                "signature": signature,
+                "nonce": nonce,
+                "lead_preview": {
+                    "email": lead_data.get("email", ""),
+                    "business": lead_data.get("business", "")
+                }
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        bt.logging.info(f"✅ Got presigned URL for lead {result['lead_id'][:8]}...")
+        return result
+        
+    except Exception as e:
+        bt.logging.error(f"Failed to get presigned URL: {e}")
+        return None
+
+
+def gateway_upload_lead(presigned_url: str, lead_data: Dict) -> bool:
+    """
+    Upload lead blob to S3/MinIO using presigned URL.
+    
+    Args:
+        presigned_url: Presigned URL from gateway
+        lead_data: Complete lead data
+        
+    Returns:
+        bool: Success status
+    """
+    try:
+        # Upload lead JSON to storage
+        response = requests.put(
+            presigned_url,
+            data=json.dumps(lead_data),
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        bt.logging.info(f"✅ Uploaded lead to storage")
+        return True
+        
+    except Exception as e:
+        bt.logging.error(f"Failed to upload lead: {e}")
+        return False
+
+
+def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
+    """
+    Get assigned leads for current epoch (validator only).
+    
+    Args:
+        wallet: Validator's wallet
+        epoch_id: Current epoch ID
+        
+    Returns:
+        List of 50 lead dicts with full data
+    """
+    try:
+        # Generate signature for authentication
+        nonce = str(int(time.time()))
+        message = f"get_leads:{wallet.hotkey.ss58_address}:{epoch_id}:{nonce}"
+        signature = wallet.hotkey.sign(message.encode()).hex()
+        
+        # Request epoch leads
+        response = requests.get(
+            f"{GATEWAY_URL}/epoch/{epoch_id}/leads",
+            params={
+                "validator_hotkey": wallet.hotkey.ss58_address,
+                "signature": signature,
+                "nonce": nonce
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        leads = result.get("leads", [])
+        bt.logging.info(f"✅ Fetched {len(leads)} leads for epoch {epoch_id}")
+        return leads
+        
+    except Exception as e:
+        bt.logging.error(f"Failed to get epoch leads: {e}")
+        return []
+
+
+def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_results: List[Dict]) -> bool:
+    """
+    Submit hashed validation results for all 50 leads (POST /validate).
+    
+    Args:
+        wallet: Validator's wallet
+        epoch_id: Current epoch ID
+        validation_results: List of dicts with lead_id, decision_hash, rep_score_hash, rejection_reason_hash, evidence_hash
+        
+    Returns:
+        bool: Success status
+    """
+    try:
+        # Generate signature
+        nonce = str(int(time.time()))
+        message = f"validate:{wallet.hotkey.ss58_address}:{epoch_id}:{nonce}"
+        signature = wallet.hotkey.sign(message.encode()).hex()
+        
+        # Submit validation batch
+        response = requests.post(
+            f"{GATEWAY_URL}/validate",
+            json={
+                "validator_hotkey": wallet.hotkey.ss58_address,
+                "epoch_id": epoch_id,
+                "signature": signature,
+                "nonce": nonce,
+                "validations": validation_results
+            },
+            timeout=60
+        )
+        response.raise_for_status()
+        
+        bt.logging.info(f"✅ Submitted validation for {len(validation_results)} leads")
+        return True
+        
+    except Exception as e:
+        bt.logging.error(f"Failed to submit validation: {e}")
+        return False
+
+
+def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List[Dict]) -> bool:
+    """
+    Submit revealed validation results after epoch closes (POST /reveal).
+    
+    Args:
+        wallet: Validator's wallet
+        epoch_id: Epoch ID to reveal
+        reveal_results: List of dicts with lead_id, decision, rep_score, rejection_reason, salt
+        
+    Returns:
+        bool: Success status
+    """
+    try:
+        # Generate signature
+        nonce = str(int(time.time()))
+        message = f"reveal:{wallet.hotkey.ss58_address}:{epoch_id}:{nonce}"
+        signature = wallet.hotkey.sign(message.encode()).hex()
+        
+        # Submit reveal batch
+        response = requests.post(
+            f"{GATEWAY_URL}/reveal",
+            json={
+                "validator_hotkey": wallet.hotkey.ss58_address,
+                "epoch_id": epoch_id,
+                "signature": signature,
+                "nonce": nonce,
+                "reveals": reveal_results
+            },
+            timeout=60
+        )
+        response.raise_for_status()
+        
+        bt.logging.info(f"✅ Submitted reveal for {len(reveal_results)} leads")
+        return True
+        
+    except Exception as e:
+        bt.logging.error(f"Failed to submit reveal: {e}")
         return False

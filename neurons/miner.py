@@ -302,22 +302,34 @@ class Miner(BaseMinerNeuron):
                     owner = lead.get('full_name', 'Unknown')
                     email = lead.get('email', 'No email')
                     print(f"  {i}. {business} - {owner} ({email})")
+                
+                # Submit leads via gateway (Passage 1 workflow)
                 try:
-                    success = push_prospects_to_cloud(
-                        wallet=self.wallet,
-                        prospects=sanitized,
-                        network=self.config.subtensor.network,
-                        netuid=self.config.netuid
-                    )
-                    if success:
+                    from Leadpoet.utils.cloud_db import gateway_get_presigned_url, gateway_upload_lead
+                    
+                    submitted_count = 0
+                    for lead in sanitized:
+                        # Get presigned URL for this lead
+                        presign_result = gateway_get_presigned_url(self.wallet, lead)
+                        if not presign_result:
+                            print(f"⚠️  Failed to get presigned URL for {lead.get('business', 'Unknown')}")
+                            continue
+                        
+                        # Upload lead to S3/MinIO
+                        if gateway_upload_lead(presign_result['presigned_url'], lead):
+                            submitted_count += 1
+                        else:
+                            print(f"⚠️  Failed to upload {lead.get('business', 'Unknown')}")
+                    
+                    if submitted_count > 0:
                         print(
-                            f"✅ Pushed {len(sanitized)} prospects to Supabase queue "
+                            f"✅ Submitted {submitted_count}/{len(sanitized)} leads via gateway "
                             f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
                         )
                     else:
-                        print("⚠️  Failed to push prospects (see detailed error above)")
+                        print("⚠️  Failed to submit any leads via gateway")
                 except Exception as e:
-                    print(f"❌ Cloud push exception: {e}")
+                    print(f"❌ Gateway submission exception: {e}")
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 print("🛑 Sourcing task cancelled")

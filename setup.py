@@ -81,14 +81,15 @@ setup(
     author="Leadpoet",  
     author_email="hello@leadpoet.com",  
     license="MIT",
-    packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'miner_models', 'miner_models.*', 'neurons', 'neurons.*', 'validator_models', 'validator_models.*']),
+    packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'miner_models', 'miner_models.*', 'neurons', 'neurons.*', 'validator_models', 'validator_models.*', 'leadpoet_audit', 'leadpoet_audit.*', 'gateway', 'gateway.*']),
     include_package_data=True,
     python_requires=">=3.8",
     install_requires=requirements,
     entry_points={
         "console_scripts": [
             "leadpoet=neurons.miner:main",
-            "leadpoet-validate=neurons.validator:main"
+            "leadpoet-validate=neurons.validator:main",
+            "leadpoet-audit=leadpoet_audit.cli:main"
         ]
     },
     classifiers=[

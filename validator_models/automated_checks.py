@@ -4,6 +4,7 @@ import dns.resolver
 import pickle
 import os
 import re
+import requests
 import uuid
 import whois
 import json
@@ -11,7 +12,7 @@ import numpy as np
 from pygod.detector import DOMINANT
 from datetime import datetime
 from urllib.parse import urlparse
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List, Optional
 from dotenv import load_dotenv
 from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
 from Leadpoet.utils.utils_lead_extraction import (
@@ -35,6 +36,11 @@ class EmailVerificationUnavailableError(Exception):
 load_dotenv()
 MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "YOUR_MYEMAILVERIFIER_API_KEY")
 
+# NEW: Stage 4 API keys (Google Search Engine + OpenRouter LLM)
+GSE_CX = os.getenv("GSE_CX", "")
+GSE_API_KEY = os.getenv("GSE_API_KEY", "")
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
+
 EMAIL_CACHE_FILE = "email_verification_cache.pkl"
 VALIDATION_ARTIFACTS_DIR = "validation_artifacts"
 
@@ -47,6 +53,41 @@ CACHE_TTLS = {
 API_SEMAPHORE = asyncio.Semaphore(10)
 
 os.makedirs(VALIDATION_ARTIFACTS_DIR, exist_ok=True)
+
+# Commit-Reveal Logic for Trustless Validation
+
+def compute_validation_hashes(decision: str, rep_score: float, evidence: dict, salt: bytes) -> dict:
+    """
+    Compute commit hashes for validation result.
+    
+    Args:
+        decision: "approve" or "reject"
+        rep_score: Reputation score (0-30)
+        evidence: Evidence blob (full automated_checks_data)
+        salt: Random salt for commitment
+    
+    Returns:
+        {
+            "decision_hash": "sha256-hex",
+            "rep_score_hash": "sha256-hex",
+            "evidence_hash": "sha256-hex"
+        }
+    """
+    import hashlib
+    
+    # Canonicalize evidence (sort keys for determinism)
+    evidence_json = json.dumps(evidence, sort_keys=True)
+    
+    # Compute hashes
+    decision_hash = hashlib.sha256(salt + decision.encode()).hexdigest()
+    rep_score_hash = hashlib.sha256(salt + str(rep_score).encode()).hexdigest()
+    evidence_hash = hashlib.sha256(salt + evidence_json.encode()).hexdigest()
+    
+    return {
+        "decision_hash": decision_hash,
+        "rep_score_hash": rep_score_hash,
+        "evidence_hash": evidence_hash
+    }
 
 class LRUCache:
     """LRU Cache implementation with TTL support"""
@@ -1161,8 +1202,8 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                         # Any other status, log and assume valid
                         result = (True, {})
 
-        validation_cache[cache_key] = result
-        return result
+                    validation_cache[cache_key] = result
+                    return result
 
     except EmailVerificationUnavailableError:
         # Re-raise to propagate up to validator
@@ -1179,6 +1220,461 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
         # Any other error - SKIP the lead (API unavailable)
         print(f"   🚨 MyEmailVerifier API: Unexpected error")
         raise EmailVerificationUnavailableError(f"MyEmailVerifier API error: {str(e)}")
+
+# Stage 4: LinkedIn/GSE Validation
+
+async def search_linkedin_gse(full_name: str, company: str, max_results: int = 5) -> List[dict]:
+    """
+    Search LinkedIn using Google Custom Search Engine for person's profile.
+
+    Args:
+        full_name: Person's full name
+        company: Company name
+        max_results: Max search results to return
+
+    Returns:
+        List of search results with title, link, snippet
+    """
+    try:
+        query = f'"{full_name}" "{company}" site:linkedin.com'
+        url = "https://www.googleapis.com/customsearch/v1"
+        params = {
+            "key": GSE_API_KEY,
+            "cx": GSE_CX,
+            "q": query,
+            "num": max_results
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=10) as response:
+                if response.status != 200:
+                    print(f"   ⚠️ GSE API error: HTTP {response.status}")
+                    return []
+                
+                data = await response.json()
+                results = []
+                
+                for item in data.get("items", []):
+                    results.append({
+                        "title": item.get("title", ""),
+                        "link": item.get("link", ""),
+                        "snippet": item.get("snippet", "")
+                    })
+                
+                return results
+    
+    except asyncio.TimeoutError:
+        print(f"   ⚠️ GSE API timeout")
+        return []
+    except Exception as e:
+        print(f"   ⚠️ GSE API error: {str(e)}")
+        return []
+
+async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: str, search_results: List[dict]) -> Tuple[bool, str]:
+    """
+    Use OpenRouter LLM to verify if search results match the person.
+
+    Args:
+        full_name: Person's full name
+        company: Company name
+        linkedin_url: Provided LinkedIn URL
+        search_results: Google search results
+
+    Returns:
+        (is_verified, reasoning)
+    """
+    try:
+        if not search_results:
+            return False, "No LinkedIn search results found"
+        
+        # Prepare search results for LLM
+        results_text = json.dumps(search_results, indent=2)
+        
+        # Build LinkedIn URL line (only if provided)
+        linkedin_url_line = f"LinkedIn URL Provided: {linkedin_url}\n" if linkedin_url else ""
+        
+        # Prompt adapted from calculate-rep-score/utils/llm-client.ts
+        prompt = f"""Analyze these search results to validate LinkedIn profile and employer match.
+
+{linkedin_url_line}Company: {company}
+Full Name: {full_name}
+
+Search Results:
+{results_text}
+
+Determine:
+1. Is there evidence that {full_name} currently works at {company}?
+2. Do the search results suggest the LinkedIn profile is legitimate and active?
+3. Are there any red flags indicating this might be a fake profile or the person no longer works there?
+4. If you find a LinkedIn URL in the search results, include it in your response.
+
+Score based on:
+- Strong evidence of current employment at company = higher score
+- Multiple sources confirming the connection = higher score
+- Recent mentions or activity = higher score
+- No contradictory information = higher score
+- LinkedIn profile URL format is valid = bonus points
+- If provided LinkedIn URL matches found URL = bonus points
+
+Respond ONLY with valid JSON in this exact format: {{"linkedin_valid": true/false, "employer_match": true/false, "confidence": 0.0-1.0, "reasoning": "Brief explanation", "found_linkedin_url": "url or null"}}"""
+        
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "openai/gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1  # Low temperature for consistency
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=15
+            ) as response:
+                if response.status != 200:
+                    return False, f"LLM API error: HTTP {response.status}"
+                
+                data = await response.json()
+                llm_response = data["choices"][0]["message"]["content"]
+                
+                # Parse JSON response
+                result = json.loads(llm_response)
+                
+                linkedin_valid = result.get("linkedin_valid", False)
+                employer_match = result.get("employer_match", False)
+                confidence = result.get("confidence", 0.0)
+                reasoning = result.get("reasoning", "")
+                
+                # Verification passes if:
+                # 1. LinkedIn profile is valid
+                # 2. Employer match is confirmed
+                # 3. Confidence is >= 0.5 (medium to high)
+                if linkedin_valid and employer_match and confidence >= 0.5:
+                    return True, reasoning
+                else:
+                    return False, reasoning
+    
+    except asyncio.TimeoutError:
+        return False, "LLM API timeout"
+    except json.JSONDecodeError as e:
+        return False, f"LLM response parsing error: {str(e)}"
+    except Exception as e:
+        return False, f"LLM verification error: {str(e)}"
+
+async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
+    """
+    Stage 4: LinkedIn/GSE validation (HARD check).
+    
+    Verifies that the person works at the company using:
+    1. Google Custom Search (LinkedIn)
+    2. OpenRouter LLM verification
+    
+    This is a HARD check - instant rejection if fails.
+
+    Args:
+        lead: Lead data with full_name, company, linkedin
+
+    Returns:
+        (passed, rejection_reason)
+    """
+    try:
+        full_name = lead.get("full_name") or lead.get("Full_name") or lead.get("Full Name")
+        company = get_company(lead)
+        linkedin_url = get_linkedin(lead)
+        
+        if not full_name:
+            return False, {
+                "stage": "Stage 4: LinkedIn/GSE Validation",
+                "check_name": "check_linkedin_gse",
+                "message": "Missing full_name",
+                "failed_fields": ["full_name"]
+            }
+        
+        if not company:
+            return False, {
+                "stage": "Stage 4: LinkedIn/GSE Validation",
+                "check_name": "check_linkedin_gse",
+                "message": "Missing company",
+                "failed_fields": ["company"]
+            }
+        
+        if not linkedin_url:
+            return False, {
+                "stage": "Stage 4: LinkedIn/GSE Validation",
+                "check_name": "check_linkedin_gse",
+                "message": "Missing linkedin URL",
+                "failed_fields": ["linkedin"]
+            }
+        
+        # Step 1: Search LinkedIn via Google Custom Search
+        print(f"   🔍 Stage 4: Searching LinkedIn for {full_name} at {company}")
+        search_results = await search_linkedin_gse(full_name, company)
+        
+        if not search_results:
+            return False, {
+                "stage": "Stage 4: LinkedIn/GSE Validation",
+                "check_name": "check_linkedin_gse",
+                "message": f"No LinkedIn profiles found for {full_name} at {company}",
+                "failed_fields": ["linkedin", "full_name", "company"]
+            }
+        
+        # Step 2: Verify with LLM
+        verified, reasoning = await verify_linkedin_with_llm(full_name, company, linkedin_url, search_results)
+        
+        if not verified:
+            return False, {
+                "stage": "Stage 4: LinkedIn/GSE Validation",
+                "check_name": "check_linkedin_gse",
+                "message": f"LinkedIn verification failed: {reasoning}",
+                "failed_fields": ["linkedin"]
+            }
+        
+        print(f"   ✅ Stage 4: LinkedIn verified for {full_name} at {company}")
+        return True, {}
+    
+    except Exception as e:
+        return False, {
+            "stage": "Stage 4: LinkedIn/GSE Validation",
+            "check_name": "check_linkedin_gse",
+            "message": f"LinkedIn/GSE check failed: {str(e)}",
+            "failed_fields": ["linkedin"]
+        }
+
+# Rep Score: Soft Reputation Checks (SOFT - always passes, appends score)
+
+async def check_wayback_machine(lead: dict) -> Tuple[float, dict]:
+    """
+    Rep Score: Check domain history in Wayback Machine.
+    
+    Returns score (0-10) based on:
+    - Number of snapshots
+    - Age of domain in archive
+    - Consistency of snapshots
+    
+    This is a SOFT check - always passes, appends score.
+    
+    Args:
+        lead: Lead data with website
+    
+    Returns:
+        (score, metadata)
+    """
+    try:
+        website = get_website(lead)
+        if not website:
+            return 0, {"checked": False, "reason": "No website provided"}
+        
+        domain = extract_root_domain(website)
+        if not domain:
+            return 0, {"checked": False, "reason": "Invalid website format"}
+        
+        # Query Wayback Machine CDX API
+        url = f"https://web.archive.org/cdx/search/cdx"
+        params = {
+            "url": domain,
+            "output": "json",
+            "limit": 1000,
+            "fl": "timestamp"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=10) as response:
+                if response.status != 200:
+                    return 0, {"checked": False, "reason": f"Wayback API error: {response.status}"}
+                
+                data = await response.json()
+                
+                if len(data) <= 1:  # First row is header
+                    return 0, {"checked": True, "snapshots": 0, "reason": "No archive history"}
+                
+                snapshots = len(data) - 1  # Exclude header
+                
+                # Parse timestamps to calculate age
+                timestamps = [row[0] for row in data[1:]]  # Skip header
+                oldest = timestamps[0] if timestamps else None
+                newest = timestamps[-1] if timestamps else None
+                
+                # Calculate age in years
+                if oldest:
+                    oldest_year = int(oldest[:4])
+                    current_year = datetime.now().year
+                    age_years = current_year - oldest_year
+                else:
+                    age_years = 0
+                
+                # Scoring logic:
+                # - 0-10 snapshots: 0-2 points
+                # - 11-50 snapshots: 3-5 points
+                # - 51-200 snapshots: 6-8 points
+                # - 200+ snapshots: 9-10 points
+                # - Bonus: +1 for age > 5 years
+                
+                if snapshots < 10:
+                    score = min(2, snapshots * 0.2)
+                elif snapshots < 50:
+                    score = 3 + (snapshots - 10) * 0.05
+                elif snapshots < 200:
+                    score = 6 + (snapshots - 50) * 0.013
+                else:
+                    score = 9 + min(1, (snapshots - 200) * 0.001)
+                
+                # Age bonus
+                if age_years >= 5:
+                    score = min(10, score + 1)
+                
+                return score, {
+                    "checked": True,
+                    "snapshots": snapshots,
+                    "age_years": age_years,
+                    "oldest_snapshot": oldest,
+                    "newest_snapshot": newest,
+                    "score": score
+                }
+    
+    except asyncio.TimeoutError:
+        return 0, {"checked": False, "reason": "Wayback API timeout"}
+    except Exception as e:
+        return 0, {"checked": False, "reason": f"Wayback check error: {str(e)}"}
+
+async def check_uspto_trademarks(lead: dict) -> Tuple[float, dict]:
+    """
+    Rep Score: Check USPTO for company trademarks.
+    
+    Returns score (0-10) based on:
+    - Number of registered trademarks
+    - Age of trademarks
+    - Active status
+    
+    This is a SOFT check - always passes, appends score.
+
+    Args:
+        lead: Lead data with company
+
+    Returns:
+        (score, metadata)
+    """
+    try:
+        company = get_company(lead)
+        if not company:
+            return 0, {"checked": False, "reason": "No company provided"}
+        
+        # USPTO Trademark Search API
+        # Note: This is a simplified example - USPTO API structure may vary
+        headers = {"API_KEY": os.getenv("USPTO_API_KEY", "")}
+        url = "https://developer.uspto.gov/ibd-api/v1/application/grants"
+        params = {
+            "searchText": company,
+            "rows": 100
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, headers=headers, timeout=15) as response:
+                if response.status != 200:
+                    return 0, {"checked": False, "reason": f"USPTO API error: {response.status}"}
+                
+                data = await response.json()
+                results = data.get("response", {}).get("docs", [])
+                
+                if not results:
+                    return 0, {"checked": True, "trademarks": 0, "reason": "No trademarks found"}
+                
+                # Count active trademarks
+                active_count = sum(1 for tm in results if tm.get("status") == "LIVE")
+                total_count = len(results)
+                
+                # Calculate age of oldest trademark
+                grant_dates = [tm.get("grantDate") for tm in results if tm.get("grantDate")]
+                oldest_year = min([int(d[:4]) for d in grant_dates]) if grant_dates else datetime.now().year
+                age_years = datetime.now().year - oldest_year
+                
+                # Scoring logic:
+                # - 1-2 trademarks: 3 points
+                # - 3-5 trademarks: 5 points
+                # - 6-10 trademarks: 7 points
+                # - 10+ trademarks: 9-10 points
+                # - Bonus: +1 for age > 10 years
+                
+                if total_count <= 2:
+                    score = min(3, total_count * 1.5)
+                elif total_count <= 5:
+                    score = 5
+                elif total_count <= 10:
+                    score = 7
+                else:
+                    score = 9 + min(1, (total_count - 10) * 0.1)
+                
+                # Age bonus
+                if age_years >= 10:
+                    score = min(10, score + 1)
+                
+                return score, {
+                    "checked": True,
+                    "total_trademarks": total_count,
+                    "active_trademarks": active_count,
+                    "age_years": age_years,
+                    "score": score
+                }
+    
+    except asyncio.TimeoutError:
+        return 0, {"checked": False, "reason": "USPTO API timeout"}
+    except Exception as e:
+        return 0, {"checked": False, "reason": f"USPTO check error: {str(e)}"}
+
+async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
+    """
+    Rep Score: Check SEC EDGAR for company filings.
+    
+    Returns score (0-10) based on:
+    - Number of filings
+    - Recent filing activity
+    - Types of filings (10-K, 10-Q, 8-K)
+    
+    This is a SOFT check - always passes, appends score.
+    
+    Args:
+        lead: Lead data with company
+    
+    Returns:
+        (score, metadata)
+    """
+    try:
+        company = get_company(lead)
+        if not company:
+            return 0, {"checked": False, "reason": "No company provided"}
+        
+        # SEC EDGAR Company Search API
+        # Note: Requires exact CIK or ticker - this is simplified
+        headers = {
+            "User-Agent": f"LeadPoet/1.0 (API-Key: {os.getenv('SEC_EDGAR_API_KEY', '')})"
+        }
+        
+        # First, search for company to get CIK
+        search_url = f"https://www.sec.gov/cgi-bin/browse-edgar"
+        params = {
+            "company": company,
+            "action": "getcompany",
+            "output": "json"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            # Note: SEC API may require different approach - this is simplified
+            # In production, you'd use the company search endpoint first
+            
+            # For now, return a conservative score
+            # You'll need to implement full SEC integration based on their API docs
+            
+            return 0, {
+                "checked": False,
+                "reason": "SEC EDGAR integration pending - implement based on company CIK lookup"
+            }
+
+    except Exception as e:
+        return 0, {"checked": False, "reason": f"SEC check error: {str(e)}"}
 
 async def check_terms_attestation(lead: dict) -> Tuple[bool, dict]:
     """
@@ -1469,6 +1965,20 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
             "is_role_based": False,
             "is_free": False
         },
+        "stage_4_linkedin": {  # NEW
+            "linkedin_verified": False,
+            "gse_search_count": 0,
+            "llm_confidence": "none"
+        },
+        "rep_score": {  # NEW
+            "total_score": 0,
+            "max_score": 30,
+            "breakdown": {
+                "wayback_machine": 0,
+                "uspto_trademarks": 0,
+                "sec_edgar": 0
+            }
+        },
         "passed": False,
         "rejection_reason": None
     }
@@ -1639,6 +2149,59 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         return False, automated_checks_data
 
     print("   ✅ Stage 3 passed")
+
+    # ========================================================================
+    # Stage 4: LinkedIn/GSE Validation (HARD)
+    # ========================================================================
+    print(f"🔍 Stage 4: LinkedIn/GSE validation for {email} @ {company}")
+    
+    passed, rejection_reason = await check_linkedin_gse(lead)
+    if not passed:
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 4 failed: {msg}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
+
+    print("   ✅ Stage 4 passed")
+    
+    # Collect Stage 4 data after successful check
+    automated_checks_data["stage_4_linkedin"]["linkedin_verified"] = True
+
+    # ========================================================================
+    # Rep Score: Soft Reputation Checks (SOFT)
+    # - Wayback Machine, USPTO, SEC
+    # - Always passes, appends scores to lead
+    # ========================================================================
+    print(f"📊 Rep Score: Running soft checks for {email} @ {company}")
+    
+    wayback_score, wayback_data = await check_wayback_machine(lead)
+    uspto_score, uspto_data = await check_uspto_trademarks(lead)
+    sec_score, sec_data = await check_sec_edgar(lead)
+    
+    total_rep_score = wayback_score + uspto_score + sec_score
+    
+    # Append to lead data
+    lead["rep_score"] = total_rep_score
+    lead["rep_score_details"] = {
+        "wayback": wayback_data,
+        "uspto": uspto_data,
+        "sec": sec_data
+    }
+    
+    # Append to automated_checks_data
+    automated_checks_data["rep_score"] = {
+        "total_score": total_rep_score,
+        "max_score": 30,
+        "breakdown": {
+            "wayback_machine": wayback_score,
+            "uspto_trademarks": uspto_score,
+            "sec_edgar": sec_score
+        }
+    }
+    
+    print(f"   📊 Rep Score: {total_rep_score}/30 (Wayback: {wayback_score}, USPTO: {uspto_score}, SEC: {sec_score})")
+    
     print(f"🎉 All stages passed for {email} @ {company}")
 
     # All checks passed - return structured success data

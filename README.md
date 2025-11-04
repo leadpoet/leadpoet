@@ -270,6 +270,23 @@ Validators pull prospects from the queue (first-come, first-served). With two - 
 
 Validators must label leads with valid emails as "Valid" or "valid".
 
+### Community Audit Tool
+
+The `leadpoet-audit` CLI allows anyone to verify validation outcomes by querying public transparency logs:
+
+```bash
+# Install
+pip install -e .
+
+# Generate audit report for epoch
+leadpoet-audit report 100
+
+# Save report to JSON
+leadpoet-audit report 100 --output report.json
+```
+
+The audit tool queries **public data only** (transparency log) and shows consensus results, rejection reasons, and miner performance statistics.
+
 ## Reward Distribution
 
 ### Consensus-Based Rewards

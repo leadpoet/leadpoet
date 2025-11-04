@@ -14,7 +14,7 @@ env.txt
 .test_supabase_connection.py
 tasks.md
 tasks copy.md
-
+business_files/
 # Reputation scoring (keep local, do not commit)
 Rep_Score/
 
@@ -67,6 +67,7 @@ htmlcov/
 pip-log.txt
 pip-delete-this-directory.txt
 
+
 # IDEs and Editors
 .idea/
 .vscode/
@@ -91,3 +92,21 @@ Leadpoet/api/
 
 # Legacy miner code - no longer used (replaced by lead_sorcerer_main)
 miner_models/get_leads.py
+
+# Burn validator script 
+neurons/burn.py
+
+# Test files (contain credentials - DO NOT COMMIT)
+test_*.py
+test_*.sh
+
+# Docker compose files (deployment configs)
+docker-compose.minio.yml
+docker-compose.gateway.yml
+docker-compose.*.yml
+!docker-compose.example.yml
+
+# Temporary test files
+test-*.json
+*-test.json
+

@@ -100,13 +100,7 @@ neurons/burn.py
 test_*.py
 test_*.sh
 
-# Docker compose files (deployment configs)
-docker-compose.minio.yml
-docker-compose.gateway.yml
-docker-compose.*.yml
-!docker-compose.example.yml
-
-# Temporary test files
+# Temporary test output files
 test-*.json
 *-test.json
 

@@ -1574,8 +1574,8 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
     """
     try:
         # Generate signature for authentication
-        nonce = str(int(time.time()))
-        message = f"get_leads:{wallet.hotkey.ss58_address}:{epoch_id}:{nonce}"
+        # Gateway expects message format: "GET_EPOCH_LEADS:{epoch_id}:{validator_hotkey}"
+        message = f"GET_EPOCH_LEADS:{epoch_id}:{wallet.hotkey.ss58_address}"
         signature = wallet.hotkey.sign(message.encode()).hex()
         
         # Request epoch leads
@@ -1583,8 +1583,7 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
             f"{GATEWAY_URL}/epoch/{epoch_id}/leads",
             params={
                 "validator_hotkey": wallet.hotkey.ss58_address,
-                "signature": signature,
-                "nonce": nonce
+                "signature": signature
             },
             timeout=30
         )

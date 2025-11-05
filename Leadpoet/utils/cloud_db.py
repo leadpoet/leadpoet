@@ -1502,23 +1502,62 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
         Dict with: lead_id, presigned_url, storage_backend
     """
     try:
-        # Generate signature for authentication
-        nonce = str(int(time.time()))
-        message = f"presign:{wallet.hotkey.ss58_address}:{nonce}"
+        import hashlib
+        import uuid
+        
+        # Generate UUID v4 nonce (as expected by gateway)
+        nonce = str(uuid.uuid4())
+        
+        # Create ISO timestamp
+        ts = datetime.now(timezone.utc).isoformat()
+        
+        # Generate lead_id
+        lead_id = str(uuid.uuid4())
+        
+        # Compute lead blob hash
+        lead_blob = json.dumps(lead_data, sort_keys=True)
+        lead_blob_hash = hashlib.sha256(lead_blob.encode()).hexdigest()
+        
+        # Generate salt and commitment
+        salt = hashlib.sha256(os.urandom(32)).hexdigest()
+        commitment = hashlib.sha256(f"{salt}{lead_blob}".encode()).hexdigest()
+        
+        # Create payload
+        payload = {
+            "lead_id": lead_id,
+            "lead_blob_hash": lead_blob_hash,
+            "commitment": commitment
+        }
+        
+        # Compute payload hash (deterministic JSON)
+        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+        
+        # Build ID (use a constant for now, or get from environment)
+        build_id = os.getenv("BUILD_ID", "miner-client")
+        
+        # Construct message to sign (format: {event_type}:{actor_hotkey}:{nonce}:{ts}:{payload_hash}:{build_id})
+        message = f"SUBMISSION_REQUEST:{wallet.hotkey.ss58_address}:{nonce}:{ts}:{payload_hash}:{build_id}"
+        
+        # Sign the message
         signature = wallet.hotkey.sign(message.encode()).hex()
+        
+        # Create full event object
+        event = {
+            "event_type": "SUBMISSION_REQUEST",
+            "actor_hotkey": wallet.hotkey.ss58_address,
+            "nonce": nonce,
+            "ts": ts,
+            "payload_hash": payload_hash,
+            "build_id": build_id,
+            "signature": signature,
+            "payload": payload
+        }
         
         # Request presigned URL
         response = requests.post(
             f"{GATEWAY_URL}/presign",
-            json={
-                "miner_hotkey": wallet.hotkey.ss58_address,
-                "signature": signature,
-                "nonce": nonce,
-                "lead_preview": {
-                    "email": lead_data.get("email", ""),
-                    "business": lead_data.get("business", "")
-                }
-            },
+            json=event,
             timeout=10
         )
         response.raise_for_status()

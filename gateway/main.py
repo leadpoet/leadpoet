@@ -217,7 +217,8 @@ async def presign_urls(event: SubmissionRequestEvent):
     # ========================================
     # Step 3: Check actor is registered miner
     # ========================================
-    is_registered, role = is_registered_hotkey(event.actor_hotkey)
+    # Run blocking Bittensor call in thread to avoid blocking event loop
+    is_registered, role = await asyncio.to_thread(is_registered_hotkey, event.actor_hotkey)
     
     if not is_registered:
         raise HTTPException(

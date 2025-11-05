@@ -44,6 +44,9 @@ from gateway.api import epoch, validate, reveal, manifest
 # Import background tasks
 from gateway.tasks.epoch_lifecycle import epoch_lifecycle_task
 from gateway.tasks.reveal_collector import reveal_collector_task
+from gateway.tasks.checkpoints import checkpoint_task
+from gateway.tasks.anchor import daily_anchor_task
+from gateway.tasks.mirror_monitor import mirror_integrity_task
 
 # Create Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -64,30 +67,40 @@ async def lifespan(app: FastAPI):
     print("🚀 STARTING BACKGROUND TASKS")
     print("="*80)
     
-    # Start background tasks
+    # Start all background tasks
     epoch_task = asyncio.create_task(epoch_lifecycle_task())
     print("✅ Epoch lifecycle task started")
     
     reveal_task = asyncio.create_task(reveal_collector_task())
     print("✅ Reveal collector task started")
     
+    checkpoint_task_handle = asyncio.create_task(checkpoint_task())
+    print("✅ Checkpoint task started")
+    
+    anchor_task = asyncio.create_task(daily_anchor_task())
+    print("✅ Anchor task started")
+    
+    mirror_task = asyncio.create_task(mirror_integrity_task())
+    print("✅ Mirror monitor task started")
+    
     print("="*80 + "\n")
     
     # Yield control back to FastAPI (app runs here)
     yield
     
-    # Cleanup on shutdown (cancel background tasks)
+    # Cleanup on shutdown (cancel all background tasks)
     print("\n🛑 Shutting down background tasks...")
-    epoch_task.cancel()
-    reveal_task.cancel()
-    try:
-        await epoch_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await reveal_task
-    except asyncio.CancelledError:
-        pass
+    tasks = [epoch_task, reveal_task, checkpoint_task_handle, anchor_task, mirror_task]
+    for task in tasks:
+        task.cancel()
+    
+    # Wait for all tasks to finish
+    for task in tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    
     print("✅ Background tasks stopped\n")
 
 # ============================================================

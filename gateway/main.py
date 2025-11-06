@@ -296,7 +296,7 @@ async def presign_urls(event: SubmissionRequestEvent):
     # ========================================
     try:
         log_entry = {
-            "event_type": event.event_type,
+            "event_type": event.event_type.value,  # Convert enum to string
             "actor_hotkey": event.actor_hotkey,
             "nonce": event.nonce,
             "ts": event.ts.isoformat(),

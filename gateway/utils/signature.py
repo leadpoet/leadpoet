@@ -112,8 +112,11 @@ def construct_signed_message(event) -> str:
     else:
         ts_str = str(event.ts)
     
+    # Extract event type string value (not enum representation)
+    event_type_str = event.event_type.value if hasattr(event.event_type, 'value') else str(event.event_type)
+    
     # Construct message in exact format
-    message = f"{event.event_type}:{event.actor_hotkey}:{event.nonce}:{ts_str}:{event.payload_hash}:{event.build_id}"
+    message = f"{event_type_str}:{event.actor_hotkey}:{event.nonce}:{ts_str}:{event.payload_hash}:{event.build_id}"
     
     return message
 

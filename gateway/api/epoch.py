@@ -199,13 +199,15 @@ async def get_epoch_leads(
             detail=f"Failed to fetch lead data: {str(e)}"
         )
     
-    # Step 8: Fetch miner_hotkey for each lead from SUBMISSION events
+    # Step 8: Fetch miner_hotkey for each lead from SUBMISSION_REQUEST events
+    # Note: SUBMISSION events would be logged after storage verification, but for now
+    # we query SUBMISSION_REQUEST events which contain the miner's hotkey
     full_leads = []
     for lead_row in leads_result.data:
         try:
             submission = supabase.table("transparency_log") \
                 .select("actor_hotkey") \
-                .eq("event_type", "SUBMISSION") \
+                .eq("event_type", "SUBMISSION_REQUEST") \
                 .eq("payload->>lead_id", lead_row["lead_id"]) \
                 .limit(1) \
                 .execute()

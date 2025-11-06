@@ -219,7 +219,14 @@ async def presign_urls(event: SubmissionRequestEvent):
     # ========================================
     print("🔍 Step 2: Verifying signature...")
     message = construct_signed_message(event)
-    if not verify_wallet_signature(message, event.signature, event.actor_hotkey):
+    print(f"🔍 Message constructed for verification: {message[:150]}...")
+    print(f"🔍 Signature received: {event.signature[:64]}...")
+    print(f"🔍 Actor hotkey: {event.actor_hotkey}")
+    
+    is_valid = verify_wallet_signature(message, event.signature, event.actor_hotkey)
+    print(f"🔍 Signature valid: {is_valid}")
+    
+    if not is_valid:
         raise HTTPException(
             status_code=403,
             detail="Invalid signature"

@@ -126,6 +126,14 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers
 )
 
+# Debug middleware to log all requests
+@app.middleware("http")
+async def log_requests(request, call_next):
+    print(f"🔍 INCOMING REQUEST: {request.method} {request.url.path}")
+    response = await call_next(request)
+    print(f"🔍 RESPONSE STATUS: {response.status_code}")
+    return response
+
 # ============================================================
 # Include API Routers
 # ============================================================
@@ -193,10 +201,12 @@ async def presign_urls(event: SubmissionRequestEvent):
     Raises:
         HTTPException: 400 (bad request), 403 (forbidden)
     """
+    print("🔍 /presign called - START")
     
     # ========================================
     # Step 1: Verify payload hash
     # ========================================
+    print("🔍 Step 1: Computing payload hash...")
     computed_hash = compute_payload_hash(event.payload.model_dump())
     if computed_hash != event.payload_hash:
         raise HTTPException(
@@ -207,6 +217,7 @@ async def presign_urls(event: SubmissionRequestEvent):
     # ========================================
     # Step 2: Verify wallet signature
     # ========================================
+    print("🔍 Step 2: Verifying signature...")
     message = construct_signed_message(event)
     if not verify_wallet_signature(message, event.signature, event.actor_hotkey):
         raise HTTPException(
@@ -218,7 +229,9 @@ async def presign_urls(event: SubmissionRequestEvent):
     # Step 3: Check actor is registered miner
     # ========================================
     # Run blocking Bittensor call in thread to avoid blocking event loop
+    print("🔍 Step 3: Checking registration (in thread)...")
     is_registered, role = await asyncio.to_thread(is_registered_hotkey, event.actor_hotkey)
+    print(f"🔍 Step 3 complete: is_registered={is_registered}, role={role}")
     
     if not is_registered:
         raise HTTPException(

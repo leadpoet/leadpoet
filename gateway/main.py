@@ -273,15 +273,31 @@ async def presign_urls(event: SubmissionRequestEvent):
     # Step 5: Verify timestamp
     # ========================================
     print("🔍 Step 5: Verifying timestamp...")
-    now = datetime.utcnow()
-    time_diff = abs((now - event.ts).total_seconds())
-    
-    if time_diff > TIMESTAMP_TOLERANCE_SECONDS:
+    try:
+        # Use timezone-aware datetime for comparison
+        from datetime import timezone as tz
+        now = datetime.now(tz.utc)
+        
+        # Make event.ts timezone-aware if it's naive
+        event_ts = event.ts if event.ts.tzinfo else event.ts.replace(tzinfo=tz.utc)
+        
+        time_diff = abs((now - event_ts).total_seconds())
+        print(f"🔍 Timestamp check: now={now.isoformat()}, event={event_ts.isoformat()}, diff={time_diff:.2f}s")
+        
+        if time_diff > TIMESTAMP_TOLERANCE_SECONDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Timestamp out of range: {time_diff:.0f}s (max: {TIMESTAMP_TOLERANCE_SECONDS}s)"
+            )
+        print(f"🔍 Step 5 complete: Timestamp valid (diff={time_diff:.2f}s)")
+    except Exception as e:
+        print(f"❌ Timestamp verification error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
-            status_code=400,
-            detail=f"Timestamp out of range: {time_diff:.0f}s (max: {TIMESTAMP_TOLERANCE_SECONDS}s)"
+            status_code=500,
+            detail=f"Timestamp verification failed: {str(e)}"
         )
-    print(f"🔍 Step 5 complete: Timestamp valid (diff={time_diff:.2f}s)")
     
     # ========================================
     # Step 6: Generate presigned URLs

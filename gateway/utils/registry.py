@@ -118,8 +118,9 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         
         # Get neuron attributes
         stake = metagraph.S[uid]
-        active = metagraph.active[uid]
-        validator_permit = metagraph.validator_permit[uid]
+        # Cast numpy bools to Python bools for consistent display
+        active = bool(metagraph.active[uid])
+        validator_permit = bool(metagraph.validator_permit[uid])
         
         print(f"🔍 Registry check for {hotkey[:20]}...")
         print(f"   UID: {uid}")

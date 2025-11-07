@@ -255,6 +255,7 @@ async def presign_urls(event: SubmissionRequestEvent):
     # ========================================
     # Step 4: Verify nonce format and freshness
     # ========================================
+    print("🔍 Step 4: Verifying nonce...")
     if not validate_nonce_format(event.nonce):
         raise HTTPException(
             status_code=400,
@@ -266,10 +267,12 @@ async def presign_urls(event: SubmissionRequestEvent):
             status_code=400,
             detail="Nonce already used (replay attack detected)"
         )
+    print("🔍 Step 4 complete: Nonce valid")
     
     # ========================================
     # Step 5: Verify timestamp
     # ========================================
+    print("🔍 Step 5: Verifying timestamp...")
     now = datetime.utcnow()
     time_diff = abs((now - event.ts).total_seconds())
     
@@ -278,22 +281,26 @@ async def presign_urls(event: SubmissionRequestEvent):
             status_code=400,
             detail=f"Timestamp out of range: {time_diff:.0f}s (max: {TIMESTAMP_TOLERANCE_SECONDS}s)"
         )
+    print(f"🔍 Step 5 complete: Timestamp valid (diff={time_diff:.2f}s)")
     
     # ========================================
     # Step 6: Generate presigned URLs
     # ========================================
+    print(f"🔍 Step 6: Generating presigned URLs for lead_id={event.payload.lead_id}...")
     try:
-        urls = generate_presigned_put_urls(event.payload.cid)
+        urls = generate_presigned_put_urls(event.payload.lead_id)
     except Exception as e:
         print(f"❌ Error generating presigned URLs: {e}")
         raise HTTPException(
             status_code=500,
             detail="Failed to generate presigned URLs"
         )
+    print(f"🔍 Step 6 complete: URLs generated")
     
     # ========================================
     # Step 7: Log SUBMISSION_REQUEST to transparency log
     # ========================================
+    print("🔍 Step 7: Logging to transparency_log...")
     try:
         log_entry = {
             "event_type": event.event_type.value,  # Convert enum to string
@@ -308,7 +315,7 @@ async def presign_urls(event: SubmissionRequestEvent):
         
         supabase.table("transparency_log").insert(log_entry).execute()
         
-        print(f"✅ SUBMISSION_REQUEST logged: {event.payload.lead_id} from {event.actor_hotkey[:20]}...")
+        print(f"✅ Step 7 complete: SUBMISSION_REQUEST logged for {event.payload.lead_id}")
     
     except Exception as e:
         print(f"❌ Error logging to transparency_log: {e}")
@@ -317,6 +324,7 @@ async def presign_urls(event: SubmissionRequestEvent):
     # ========================================
     # Step 8: Return presigned URLs
     # ========================================
+    print("✅ /presign SUCCESS - returning presigned URLs")
     return PresignedURLResponse(
         s3_url=urls["s3_url"],
         minio_url=urls["minio_url"],

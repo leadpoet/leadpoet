@@ -48,6 +48,9 @@ s3_client = boto3.client(
 minio_endpoint = MINIO_ENDPOINT.replace("http://", "").replace("https://", "")
 minio_secure = MINIO_ENDPOINT.startswith("https")
 
+# Single MinIO client - connects to internal Docker hostname
+# MinIO is configured via MINIO_SERVER_URL env var to generate presigned URLs
+# with the public IP, ensuring external clients (miners) can access them
 minio_client = Minio(
     minio_endpoint,
     access_key=MINIO_ACCESS_KEY,
@@ -58,7 +61,10 @@ minio_client = Minio(
 
 def generate_presigned_put_urls(cid: str) -> dict:
     """
-    Generate presigned PUT URLs for S3 and MinIO.
+    Generate presigned PUT URL for S3.
+    
+    MinIO mirroring happens gateway-side after S3 upload verification.
+    This avoids presigned URL signature issues with Docker networking.
     
     Args:
         cid: Content identifier (SHA256 hash of lead blob)
@@ -66,22 +72,21 @@ def generate_presigned_put_urls(cid: str) -> dict:
     Returns:
         {
             "s3_url": "https://s3.amazonaws.com/...",
-            "minio_url": "http://localhost:9000/...",
             "expires_in": 60
         }
     
     Example:
         >>> cid = "abc123def456..."
         >>> urls = generate_presigned_put_urls(cid)
-        >>> # Miner uploads to both URLs
+        >>> # Miner uploads to S3
         >>> requests.put(urls['s3_url'], data=lead_blob)
-        >>> requests.put(urls['minio_url'], data=lead_blob)
+        >>> # Gateway mirrors to MinIO after verification
     
     Notes:
         - Object key format: leads/{cid}.json
         - URLs expire after PRESIGNED_URL_EXPIRY_SECONDS (default 60s)
-        - Miner must upload to BOTH mirrors atomically
-        - Gateway verifies each mirror independently
+        - Miner only uploads to S3 (public cloud)
+        - Gateway automatically mirrors to MinIO (internal backup)
     """
     # Object key format: leads/{cid}.json
     object_key = f"leads/{cid}.json"
@@ -97,17 +102,10 @@ def generate_presigned_put_urls(cid: str) -> dict:
         ExpiresIn=PRESIGNED_URL_EXPIRY_SECONDS
     )
     
-    # Generate MinIO presigned URL
-    from datetime import timedelta
-    minio_url = minio_client.presigned_put_object(
-        MINIO_BUCKET,
-        object_key,
-        expires=timedelta(seconds=PRESIGNED_URL_EXPIRY_SECONDS)
-    )
+    print(f"🔍 Presigned URL generated for S3 (MinIO will be mirrored by gateway)")
     
     return {
         "s3_url": s3_url,
-        "minio_url": minio_url,
         "expires_in": PRESIGNED_URL_EXPIRY_SECONDS
     }
 
@@ -172,6 +170,46 @@ def verify_storage_proof(cid: str, mirror: str) -> bool:
     
     except Exception as e:
         print(f"❌ Storage verification error ({mirror}): {e}")
+        return False
+
+
+def mirror_s3_to_minio(cid: str) -> bool:
+    """
+    Mirror blob from S3 to MinIO after S3 upload verification.
+    
+    This is called automatically by the gateway after S3 verification succeeds.
+    Ensures data redundancy without requiring miners to upload twice.
+    
+    Args:
+        cid: Content identifier (SHA256 hash)
+    
+    Returns:
+        True if mirroring succeeded, False otherwise
+    """
+    object_key = f"leads/{cid}.json"
+    
+    try:
+        # Fetch from S3
+        print(f"📥 Fetching blob from S3 for MinIO mirroring: {cid[:16]}...")
+        response = s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=object_key)
+        blob = response['Body'].read()
+        
+        # Upload to MinIO
+        print(f"📤 Mirroring blob to MinIO: {cid[:16]}...")
+        from io import BytesIO
+        minio_client.put_object(
+            MINIO_BUCKET,
+            object_key,
+            BytesIO(blob),
+            length=len(blob),
+            content_type="application/json"
+        )
+        
+        print(f"✅ Successfully mirrored {cid[:16]}... to MinIO")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to mirror to MinIO: {e}")
         return False
 
 

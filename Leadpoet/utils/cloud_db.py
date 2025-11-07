@@ -1522,6 +1522,8 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
         salt = hashlib.sha256(os.urandom(32)).hexdigest()
         commitment = hashlib.sha256(f"{salt}{lead_blob}".encode()).hexdigest()
         
+        print(f"📤 Sending lead_blob_hash: {lead_blob_hash[:16]}...")
+        
         # Create payload
         payload = {
             "lead_id": lead_id,
@@ -1538,6 +1540,8 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
         
         # Construct message to sign (format: {event_type}:{actor_hotkey}:{nonce}:{ts}:{payload_hash}:{build_id})
         message = f"SUBMISSION_REQUEST:{wallet.hotkey.ss58_address}:{nonce}:{ts}:{payload_hash}:{build_id}"
+        
+        print(f"🔐 Signing message to prove wallet ownership...")
         
         # Sign the message
         signature = wallet.hotkey.sign(message.encode()).hex()
@@ -1558,12 +1562,12 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
         response = requests.post(
             f"{GATEWAY_URL}/presign",
             json=event,
-            timeout=10
+            timeout=30  # Increased from 10s to allow for metagraph fetching
         )
         response.raise_for_status()
         
         result = response.json()
-        bt.logging.info(f"✅ Got presigned URL for lead {result['lead_id'][:8]}...")
+        print(f"✅ Received presigned URLs for lead {result['lead_id'][:8]}...")
         return result
         
     except Exception as e:
@@ -1583,21 +1587,109 @@ def gateway_upload_lead(presigned_url: str, lead_data: Dict) -> bool:
         bool: Success status
     """
     try:
-        # Upload lead JSON to storage
+        # Determine storage backend from URL
+        backend = "S3" if "s3.amazonaws.com" in presigned_url else "MinIO"
+        
+        print(f"📤 Uploading lead blob to {backend}...")
+        
+        # Upload lead JSON to storage (MUST use sort_keys=True to match hash computation)
         response = requests.put(
             presigned_url,
-            data=json.dumps(lead_data),
+            data=json.dumps(lead_data, sort_keys=True),
             headers={"Content-Type": "application/json"},
             timeout=30
         )
         response.raise_for_status()
         
-        bt.logging.info(f"✅ Uploaded lead to storage")
+        print(f"✅ Lead blob uploaded successfully to {backend}")
         return True
         
     except Exception as e:
         bt.logging.error(f"Failed to upload lead: {e}")
         return False
+
+
+def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
+    """
+    Trigger gateway verification of uploaded lead (BRD Section 4.1, Step 5-6).
+    
+    Called after miner uploads lead to both S3 and MinIO via presigned URLs.
+    Gateway will:
+    1. Fetch uploaded blobs from both mirrors
+    2. Verify SHA256 hashes match committed lead_blob_hash
+    3. Log STORAGE_PROOF events (one per mirror)
+    4. Store lead in leads_private table
+    5. Log SUBMISSION event
+    
+    This prevents blob substitution attacks.
+    
+    Args:
+        wallet: Miner's wallet
+        lead_id: UUID of the lead
+        
+    Returns:
+        Dict with: {status, lead_id, storage_backends, merkle_proof, submission_ts}
+        None if verification failed
+    """
+    try:
+        import uuid
+        import hashlib
+        
+        print(f"🔐 Requesting gateway to verify uploaded lead...")
+        
+        # Generate UUID v4 nonce
+        nonce = str(uuid.uuid4())
+        
+        # Create ISO timestamp
+        ts = datetime.now(timezone.utc).isoformat()
+        
+        # Create payload
+        payload = {
+            "lead_id": lead_id
+        }
+        
+        # Compute payload hash (deterministic JSON)
+        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+        
+        # Build ID
+        build_id = os.getenv("BUILD_ID", "miner-client")
+        
+        # Construct message to sign (format: {event_type}:{actor_hotkey}:{nonce}:{ts}:{payload_hash}:{build_id})
+        message = f"SUBMIT_LEAD:{wallet.hotkey.ss58_address}:{nonce}:{ts}:{payload_hash}:{build_id}"
+        
+        # Sign the message
+        signature = wallet.hotkey.sign(message.encode()).hex()
+        
+        # Create full event object
+        event = {
+            "event_type": "SUBMIT_LEAD",
+            "actor_hotkey": wallet.hotkey.ss58_address,
+            "nonce": nonce,
+            "ts": ts,
+            "payload_hash": payload_hash,
+            "build_id": build_id,
+            "signature": signature,
+            "payload": payload
+        }
+        
+        # Request verification
+        response = requests.post(
+            f"{GATEWAY_URL}/submit",
+            json=event,
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        print(f"✅ Gateway verified lead: {result['lead_id'][:8]}...")
+        print(f"   Storage backends: {result['storage_backends']}")
+        print(f"   Submission time: {result['submission_ts']}")
+        return result
+        
+    except Exception as e:
+        bt.logging.error(f"Failed to verify submission: {e}")
+        return None
 
 
 def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:

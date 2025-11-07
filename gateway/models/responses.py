@@ -12,9 +12,11 @@ from typing import List, Optional, Dict, Any
 class PresignedURLResponse(BaseModel):
     """Response from /presign endpoint"""
     
-    s3_url: str
-    minio_url: str
+    lead_id: str
+    presigned_url: str  # S3 URL for upload (miner uploads here)
+    s3_url: str  # Alias for backward compatibility
     expires_in: int
+    # Note: MinIO mirroring happens gateway-side after S3 upload verification
 
 
 class SubmissionResponse(BaseModel):

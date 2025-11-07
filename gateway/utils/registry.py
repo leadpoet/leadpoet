@@ -18,15 +18,15 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from gateway.config import BITTENSOR_NETWORK, BITTENSOR_NETUID
 
-# Cache for metagraph (1 minute TTL)
+# Cache for metagraph (5 minute TTL)
 _metagraph_cache = None
 _cache_timestamp = None
-_CACHE_TTL = 60  # 1 minute in seconds
+_CACHE_TTL = 300  # 5 minutes in seconds
 
 
 def get_metagraph() -> bt.metagraph:
     """
-    Get Bittensor metagraph (cached for 1 minute).
+    Get Bittensor metagraph (cached for 5 minutes).
     
     Caching reduces load on subtensor node and improves gateway performance.
     

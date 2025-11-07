@@ -39,7 +39,7 @@ from gateway.utils.storage import generate_presigned_put_urls
 from supabase import create_client, Client
 
 # Import API routers
-from gateway.api import epoch, validate, reveal, manifest
+from gateway.api import epoch, validate, reveal, manifest, submit
 
 # Import background tasks
 from gateway.tasks.epoch_lifecycle import epoch_lifecycle_task
@@ -60,10 +60,23 @@ async def lifespan(app: FastAPI):
     """
     Lifespan context manager for FastAPI app.
     
-    Starts background tasks on startup and ensures they run
-    for the lifetime of the application.
+    Initializes MinIO bucket and starts background tasks on startup.
     """
+    # Initialize MinIO bucket (must happen before background tasks)
     print("\n" + "="*80)
+    print("🔧 INITIALIZING MINIO")
+    print("="*80)
+    from gateway.init_minio import init_minio_bucket
+    # Run synchronous MinIO init in thread pool to avoid blocking event loop
+    import asyncio
+    loop = asyncio.get_event_loop()
+    success = await loop.run_in_executor(None, init_minio_bucket)
+    if not success:
+        print("⚠️  WARNING: MinIO bucket initialization failed")
+        print("   Presigned URL generation may fail until bucket is created")
+    print("="*80 + "\n")
+    
+    print("="*80)
     print("🚀 STARTING BACKGROUND TASKS")
     print("="*80)
     
@@ -142,6 +155,7 @@ app.include_router(epoch.router)
 app.include_router(validate.router)
 app.include_router(reveal.router)
 app.include_router(manifest.router)
+app.include_router(submit.router)
 
 # ============================================================
 # Health Check Endpoints
@@ -180,7 +194,9 @@ async def health():
 @app.post("/presign", response_model=PresignedURLResponse)
 async def presign_urls(event: SubmissionRequestEvent):
     """
-    Generate presigned PUT URLs for miner submission.
+    Generate presigned PUT URL for miner submission (S3 only).
+    
+    Gateway automatically mirrors to MinIO after S3 upload verification.
     
     Flow:
     1. Verify payload hash
@@ -188,15 +204,15 @@ async def presign_urls(event: SubmissionRequestEvent):
     3. Check actor is registered miner
     4. Verify nonce is fresh
     5. Verify timestamp within tolerance
-    6. Generate presigned URLs for S3 + MinIO
+    6. Generate presigned URL for S3
     7. Log SUBMISSION_REQUEST to transparency log
-    8. Return URLs
+    8. Return S3 URL
     
     Args:
         event: SubmissionRequestEvent with signature
     
     Returns:
-        PresignedURLResponse with S3 and MinIO URLs
+        PresignedURLResponse with S3 URL (MinIO mirroring happens gateway-side)
     
     Raises:
         HTTPException: 400 (bad request), 403 (forbidden)
@@ -303,8 +319,10 @@ async def presign_urls(event: SubmissionRequestEvent):
     # Step 6: Generate presigned URLs
     # ========================================
     print(f"🔍 Step 6: Generating presigned URLs for lead_id={event.payload.lead_id}...")
+    print(f"   Using lead_blob_hash as S3 key: {event.payload.lead_blob_hash[:16]}...")
     try:
-        urls = generate_presigned_put_urls(event.payload.lead_id)
+        # Use lead_blob_hash as the S3 object key (content-addressed storage)
+        urls = generate_presigned_put_urls(event.payload.lead_blob_hash)
     except Exception as e:
         print(f"❌ Error generating presigned URLs: {e}")
         raise HTTPException(
@@ -338,12 +356,13 @@ async def presign_urls(event: SubmissionRequestEvent):
         # Continue anyway - presigned URLs are valid
     
     # ========================================
-    # Step 8: Return presigned URLs
+    # Step 8: Return presigned URL (S3 only)
     # ========================================
-    print("✅ /presign SUCCESS - returning presigned URLs")
+    print("✅ /presign SUCCESS - returning S3 presigned URL (MinIO will be mirrored by gateway)")
     return PresignedURLResponse(
-        s3_url=urls["s3_url"],
-        minio_url=urls["minio_url"],
+        lead_id=event.payload.lead_id,
+        presigned_url=urls["s3_url"],  # Miner uploads to S3
+        s3_url=urls["s3_url"],  # Alias for backward compatibility
         expires_in=urls["expires_in"]
     )
 

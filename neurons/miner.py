@@ -33,8 +33,6 @@ import logging
 import random
 import grpc
 from pathlib import Path
-from Leadpoet.utils.token_manager import TokenManager
-from supabase import create_client, Client
 
 
 class _SilenceInvalidRequest(logging.Filter):
@@ -72,110 +70,7 @@ class Miner(BaseMinerNeuron):
         self._bg_interval: int = 60
         self._miner_hotkey: Optional[str] = None
         
-        try:
-            self.token_manager = TokenManager(
-                hotkey=self.wallet.hotkey.ss58_address,
-                wallet=self.wallet,
-                netuid=self.config.netuid,
-                network=self.config.subtensor.network
-            )
-            bt.logging.info(f"🔑 TokenManager initialized for {self.config.subtensor.network} subnet {self.config.netuid}")
-        except Exception as e:
-            bt.logging.error(f"Failed to initialize TokenManager: {e}")
-            raise
-        
-        # Check token status on startup
-        status = self.token_manager.get_status()
-        
-        if status.get('valid'):
-            bt.logging.info(f"✅ Token valid - Role: {status['role']}, Hours remaining: {status.get('hours_remaining', 0):.1f}")
-        else:
-            bt.logging.warning("⚠️ Token invalid or missing - attempting refresh now...")
-        
-        # Only refresh if needed
-        status = self.token_manager.get_status()
-        if status.get('needs_refresh') or not status.get('valid'):
-            success = self.token_manager.refresh_token()
-            if success:
-                bt.logging.info("✅ Token refreshed successfully")
-            else:
-                bt.logging.error("❌ Failed to refresh token")
-        else:
-            bt.logging.info("✅ Using existing valid token")
-        
-        # Initialize Supabase client with JWT from TokenManager
-        self.supabase_url = "https://qplwoislplkcegvdmbim.supabase.co"
-        self.supabase_client: Optional[Client] = None
-        self._init_supabase_client()
-    
-    def _init_supabase_client(self):
-        """Initialize or refresh Supabase client with current JWT token."""
-        try:
-            jwt = self.token_manager.get_token()
-            if jwt:
-                self.supabase_client = create_client(self.supabase_url, jwt)
-                bt.logging.info("✅ Supabase client initialized")
-            else:
-                bt.logging.warning("⚠️ No JWT token available for Supabase client")
-                self.supabase_client = None
-        except Exception as e:
-            bt.logging.error(f"Failed to initialize Supabase client: {e}")
-            self.supabase_client = None
-    
-    def get_old_leads(self, limit: int = 100) -> List[Dict]:
-        """
-        Read leads from Supabase that are older than 72 minutes.
-        RLS policies automatically enforce this restriction.
-        
-        Args:
-            limit: Maximum number of leads to fetch
-            
-        Returns:
-            List of lead dictionaries
-        """
-        if not self.supabase_client:
-            bt.logging.warning("Supabase client not initialized, cannot fetch leads")
-            return []
-        
-        try:
-            response = self.supabase_client.table("leads").select("*").limit(limit).execute()
-            bt.logging.info(f"📥 Fetched {len(response.data)} leads from Supabase (>72 min old)")
-            return response.data
-        except Exception as e:
-            bt.logging.error(f"Failed to fetch leads from Supabase: {e}")
-            return []
-    
-    def fetch_leads_from_supabase_pool(self, industry: str = None, region: str = None, limit: int = 1000) -> List[Dict]:
-        """
-        Fetch leads from Supabase that match criteria.
-        Only returns leads >72 minutes old (enforced by RLS).
-        
-        Args:
-            industry: Filter by industry (optional)
-            region: Filter by region (optional)
-            limit: Maximum number of leads to fetch
-            
-        Returns:
-            List of lead dictionaries
-        """
-        if not self.supabase_client:
-            bt.logging.warning("Supabase client not available, using fallback")
-            return []
-        
-        try:
-            query = self.supabase_client.table("leads").select("*")
-            
-            if industry:
-                query = query.eq("industry", industry)
-            if region:
-                query = query.eq("region", region)
-            
-            response = query.limit(limit).execute()
-            bt.logging.debug(f"📥 Fetched {len(response.data)} leads from Supabase pool")
-            return response.data
-        except Exception as e:
-            bt.logging.error(f"Failed to fetch leads from Supabase pool: {e}")
-            return []
+        bt.logging.info(f"✅ Miner initialized (using trustless gateway - no JWT tokens)")
 
     def pause_sourcing(self):
         print("⏸️ Pausing sourcing (cancel background task)…")
@@ -303,29 +198,60 @@ class Miner(BaseMinerNeuron):
                     email = lead.get('email', 'No email')
                     print(f"  {i}. {business} - {owner} ({email})")
                 
-                # Submit leads via gateway (Passage 1 workflow)
+                # Submit leads via gateway (Passage 1 workflow with commitment scheme)
                 try:
-                    from Leadpoet.utils.cloud_db import gateway_get_presigned_url, gateway_upload_lead
+                    from Leadpoet.utils.cloud_db import (
+                        gateway_get_presigned_url,
+                        gateway_upload_lead,
+                        gateway_verify_submission
+                    )
                     
                     submitted_count = 0
+                    verified_count = 0
+                    
                     for lead in sanitized:
-                        # Get presigned URL for this lead
+                        business_name = lead.get('business', 'Unknown')
+                        
+                        # Step 1: Get presigned URLs (gateway logs SUBMISSION_REQUEST with committed hash)
                         presign_result = gateway_get_presigned_url(self.wallet, lead)
                         if not presign_result:
-                            print(f"⚠️  Failed to get presigned URL for {lead.get('business', 'Unknown')}")
+                            print(f"⚠️  Failed to get presigned URL for {business_name}")
                             continue
                         
-                        # Upload lead to S3/MinIO
-                        if gateway_upload_lead(presign_result['presigned_url'], lead):
-                            submitted_count += 1
+                        # Step 2: Upload to S3 (gateway will mirror to MinIO automatically)
+                        s3_uploaded = gateway_upload_lead(presign_result['s3_url'], lead)
+                        if not s3_uploaded:
+                            print(f"⚠️  Failed to upload to S3: {business_name}")
+                            continue
+                        
+                        print(f"✅ Lead uploaded to S3 (gateway will mirror to MinIO)")
+                        submitted_count += 1
+                        
+                        # Step 4: Trigger gateway verification (BRD Section 4.1, Steps 5-6)
+                        # Gateway will:
+                        # - Fetch uploaded blobs from S3/MinIO
+                        # - Verify hashes match committed lead_blob_hash
+                        # - Log STORAGE_PROOF events (one per mirror)
+                        # - Store lead in leads_private table
+                        # - Log SUBMISSION event
+                        verification_result = gateway_verify_submission(
+                            self.wallet,
+                            presign_result['lead_id']
+                        )
+                        
+                        if verification_result:
+                            verified_count += 1
+                            print(f"✅ Verified: {business_name} (backends: {verification_result['storage_backends']})")
                         else:
-                            print(f"⚠️  Failed to upload {lead.get('business', 'Unknown')}")
+                            print(f"⚠️  Verification failed: {business_name}")
                     
-                    if submitted_count > 0:
+                    if verified_count > 0:
                         print(
-                            f"✅ Submitted {submitted_count}/{len(sanitized)} leads via gateway "
+                            f"✅ Successfully submitted and verified {verified_count}/{len(sanitized)} leads "
                             f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
                         )
+                    elif submitted_count > 0:
+                        print(f"⚠️  Uploaded {submitted_count} leads but verification failed")
                     else:
                         print("⚠️  Failed to submit any leads via gateway")
                 except Exception as e:
@@ -1036,25 +962,15 @@ class Miner(BaseMinerNeuron):
     def run(self):
         """
         Start the miner and run until interrupted.
+        
+        The miner uses wallet signature-based authentication via the trustless gateway.
+        No JWT tokens or server-issued credentials are used (BRD Section 3.5).
         """
         bt.logging.info("Starting miner...")
         
-        # ... existing code ...
-        
         try:
             while True:
-                # Check and refresh token every iteration (checks threshold internally)
-                token_refreshed = self.token_manager.refresh_if_needed(threshold_hours=1)
-                if not token_refreshed and not self.token_manager.get_token():
-                    bt.logging.warning("⚠️ Token refresh failed, continuing with existing token...")
-                
-                # Refresh Supabase client if token was refreshed
-                if token_refreshed:
-                    bt.logging.info("🔄 Token was refreshed, reinitializing Supabase client...")
-                    self._init_supabase_client()
-                
-                # ... existing code (sync, weight setting, etc.) ...
-                
+                # Sync metagraph and check miner status
                 time.sleep(12)
                 
         except KeyboardInterrupt:
@@ -1248,16 +1164,15 @@ async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
     miner.sourcing_task = asyncio.create_task(miner.sourcing_loop(
         interval, miner_hotkey),
                                               name="sourcing_loop")
-    miner.cloud_task = asyncio.create_task(
-        miner.cloud_curation_loop(miner_hotkey), name="cloud_curation_loop")
-    miner.broadcast_task = asyncio.create_task(
-        miner.broadcast_curation_loop(miner_hotkey),
-        name="broadcast_curation_loop")
+    # Disabled old curation loops (rely on deleted tables from JWT system)
+    # miner.cloud_task = asyncio.create_task(
+    #     miner.cloud_curation_loop(miner_hotkey), name="cloud_curation_loop")
+    # miner.broadcast_task = asyncio.create_task(
+    #     miner.broadcast_curation_loop(miner_hotkey),
+    #     name="broadcast_curation_loop")
 
-    print("✅ Started 3 background tasks:")
-    print("   1. sourcing_loop - Continuous lead sourcing")
-    print("   2. cloud_curation_loop - Cloud-Run curation requests")
-    print("   3. broadcast_curation_loop - Broadcast API requests")
+    print("✅ Started 1 background task:")
+    print("   1. sourcing_loop - Continuous lead sourcing via trustless gateway")
 
     # Keep alive
     while True:
@@ -1337,12 +1252,11 @@ def main():
         verify_attestation,
         create_attestation_record,
         save_attestation,
-        sync_attestation_to_supabase,
         TERMS_VERSION_HASH
     )
-    from Leadpoet.utils.token_manager import TokenManager
     
-    # Attestation stored at subnet level alongside other miner data
+    # Attestation stored locally (trustless gateway verifies from lead metadata)
+    # BRD Section 5.1: "✅ No JWT tokens or server-issued credentials"
     attestation_file = Path("data/regulatory/miner_attestation.json")
     
     # Check if attestation exists
@@ -1362,7 +1276,7 @@ def main():
             import sys
             sys.exit(0)
         
-        # Record attestation LOCALLY + SYNC TO SUPABASE (SOURCE OF TRUTH)
+        # Record attestation LOCALLY (gateway verifies via lead metadata)
         # Load wallet to get SS58 address
         try:
             temp_wallet = bt.wallet(config=config)
@@ -1379,50 +1293,8 @@ def main():
         save_attestation(attestation, attestation_file)
         print(f"\n✅ Terms accepted and recorded locally.")
         print(f"   Local: {attestation_file}")
-        
-        # SECURITY CRITICAL: Sync to Supabase immediately
-        print(f"   Syncing to Supabase (SOURCE OF TRUTH)...")
-        
-        try:
-            # Create TokenManager for authentication
-            token_manager = TokenManager(
-                hotkey=wallet_address,
-                wallet=temp_wallet,
-                netuid=config.netuid,
-                network=config.subtensor.network
-            )
-            
-            # CRITICAL: Fetch JWT token first (FORCE refresh)
-            print("   Fetching JWT token for authentication...")
-            success = token_manager.refresh_token()  # Force refresh, don't use cached token
-            if not success:
-                print("\n❌ CRITICAL: Failed to get JWT token for Supabase authentication")
-                print("   Cannot sync attestation without authentication")
-                import sys
-                sys.exit(1)
-            print("   ✅ JWT token obtained")
-            
-            # Sync attestation to Supabase
-            sync_success = sync_attestation_to_supabase(attestation, token_manager)
-            
-            if not sync_success:
-                print("\n❌ CRITICAL: Failed to sync attestation to Supabase")
-                print("   Miner cannot proceed without remote attestation record (security requirement)")
-                print("   Please check:")
-                print("   - Network connection is available")
-                print("   - Wallet is properly registered")
-                print("   - Supabase service is accessible")
-                import sys
-                sys.exit(1)
-            
-            print(f"   ✅ Remote: contributor_attestations table (Supabase)")
-            print(f"\n✅ Attestation complete! Miner can proceed.\n")
-            
-        except Exception as e:
-            print(f"\n❌ CRITICAL: Exception during Supabase sync: {e}")
-            print("   Miner cannot proceed without remote attestation record (security requirement)")
-            import sys
-            sys.exit(1)
+        print(f"   Attestation metadata will be included in each lead submission.")
+        print(f"   Gateway will verify attestations via wallet signatures (no JWT tokens).\n")
         
     else:
         # Verify existing attestation hash matches current version
@@ -1460,51 +1332,7 @@ def main():
             
             save_attestation(attestation, attestation_file)
             print(f"\n✅ Updated terms accepted and recorded locally.")
-            print(f"   Local: {attestation_file}")
-            
-            # SECURITY CRITICAL: Sync updated attestation to Supabase
-            print(f"   Syncing to Supabase (SOURCE OF TRUTH)...")
-            
-            try:
-                # Create TokenManager for authentication
-                token_manager = TokenManager(
-                    hotkey=wallet_address,
-                    wallet=temp_wallet,
-                    netuid=config.netuid,
-                    network=config.subtensor.network
-                )
-                
-                # CRITICAL: Fetch JWT token first (FORCE refresh)
-                print("   Fetching JWT token for authentication...")
-                success = token_manager.refresh_token()  # Force refresh, don't use cached token
-                if not success:
-                    print("\n❌ CRITICAL: Failed to get JWT token for Supabase authentication")
-                    print("   Cannot sync attestation without authentication")
-                    import sys
-                    sys.exit(1)
-                print("   ✅ JWT token obtained")
-                
-                # Sync updated attestation to Supabase
-                sync_success = sync_attestation_to_supabase(attestation, token_manager)
-                
-                if not sync_success:
-                    print("\n❌ CRITICAL: Failed to sync updated attestation to Supabase")
-                    print("   Miner cannot proceed without remote attestation record (security requirement)")
-                    print("   Please check:")
-                    print("   - Network connection is available")
-                    print("   - Wallet is properly registered")
-                    print("   - Supabase service is accessible")
-                    import sys
-                    sys.exit(1)
-                
-                print(f"   ✅ Remote: contributor_attestations table (Supabase)")
-                print(f"\n✅ Attestation update complete! Miner can proceed.\n")
-                
-            except Exception as e:
-                print(f"\n❌ CRITICAL: Exception during Supabase sync: {e}")
-                print("   Miner cannot proceed without remote attestation record (security requirement)")
-                import sys
-                sys.exit(1)
+            print(f"   Local: {attestation_file}\n")
         else:
             bt.logging.info(f"✅ Contributor terms attestation valid (hash: {TERMS_VERSION_HASH[:16]}...)")
     

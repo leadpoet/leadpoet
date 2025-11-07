@@ -151,17 +151,19 @@ def get_validator_set(epoch_id: int) -> List[str]:
         
         metagraph = get_metagraph()
         
-        # Filter validators (non-zero stake)
+        # Filter validators (active + validator_permit)
         validators = []
         for i, hotkey in enumerate(metagraph.hotkeys):
-            stake = metagraph.S[i]
-            if stake > 0:
+            # Validators must have BOTH active status AND validator permit
+            active = metagraph.active[i]
+            validator_permit = metagraph.validator_permit[i]
+            if active and validator_permit:
                 validators.append(hotkey)
         
         print(f"📊 Validator set for epoch {epoch_id}:")
         print(f"   Total registered: {len(metagraph.hotkeys)}")
-        print(f"   Validators (stake > 0): {len(validators)}")
-        print(f"   Miners (stake = 0): {len(metagraph.hotkeys) - len(validators)}")
+        print(f"   Validators (active + permit): {len(validators)}")
+        print(f"   Miners (no active or no permit): {len(metagraph.hotkeys) - len(validators)}")
         
         return validators
     

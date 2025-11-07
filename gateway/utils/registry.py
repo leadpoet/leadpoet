@@ -100,8 +100,8 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         >>>     print("Hotkey not registered")
     
     Notes:
-        - Validators are identified by non-zero stake
-        - Miners have zero stake (they earn rewards but don't validate)
+        - Validators are identified by: active=True AND validator_permit=True
+        - Miners: Either active=False OR validator_permit=False (can have stake > 0)
         - Uses cached metagraph (refreshed every 60 seconds)
     """
     try:
@@ -110,19 +110,31 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         
         # Check if hotkey exists in metagraph
         if hotkey not in metagraph.hotkeys:
+            print(f"🔍 Registry check: {hotkey[:20]}... NOT FOUND in metagraph")
             return False, None
         
         # Get UID for this hotkey
         uid = metagraph.hotkeys.index(hotkey)
         
-        # Check stake to determine role
-        # Validators have non-zero stake, miners have zero stake
+        # Get neuron attributes
         stake = metagraph.S[uid]
+        active = metagraph.active[uid]
+        validator_permit = metagraph.validator_permit[uid]
         
-        if stake > 0:
+        print(f"🔍 Registry check for {hotkey[:20]}...")
+        print(f"   UID: {uid}")
+        print(f"   Stake: {stake:.6f} τ")
+        print(f"   Active: {active}")
+        print(f"   Validator Permit: {validator_permit}")
+        
+        # Validators must have BOTH active status AND validator permit
+        # A miner can have stake > 0 but still be a miner if they lack permit
+        if active and validator_permit:
             role = "validator"
+            print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
         else:
             role = "miner"
+            print(f"   ✅ Role: MINER (active={active}, permit={validator_permit})")
         
         return True, role
     
@@ -136,7 +148,7 @@ def get_validator_count() -> int:
     Get the number of registered validators on the subnet.
     
     Returns:
-        Number of validators (neurons with stake > 0)
+        Number of validators (neurons with active=True AND validator_permit=True)
     
     Example:
         >>> count = get_validator_count()
@@ -145,8 +157,11 @@ def get_validator_count() -> int:
     try:
         metagraph = get_metagraph()
         
-        # Count neurons with non-zero stake
-        validator_count = sum(1 for stake in metagraph.S if stake > 0)
+        # Count neurons with active status AND validator permit
+        validator_count = sum(
+            1 for i in range(len(metagraph.hotkeys))
+            if metagraph.active[i] and metagraph.validator_permit[i]
+        )
         
         return validator_count
     
@@ -160,7 +175,7 @@ def get_miner_count() -> int:
     Get the number of registered miners on the subnet.
     
     Returns:
-        Number of miners (neurons with stake == 0)
+        Number of miners (neurons without active status OR without validator permit)
     
     Example:
         >>> count = get_miner_count()
@@ -169,8 +184,12 @@ def get_miner_count() -> int:
     try:
         metagraph = get_metagraph()
         
-        # Count neurons with zero stake
-        miner_count = sum(1 for stake in metagraph.S if stake == 0)
+        # Count neurons that are NOT validators
+        # (either not active OR no validator permit)
+        miner_count = sum(
+            1 for i in range(len(metagraph.hotkeys))
+            if not (metagraph.active[i] and metagraph.validator_permit[i])
+        )
         
         return miner_count
     

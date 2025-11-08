@@ -76,6 +76,40 @@ PRESIGNED_URL_EXPIRY_SECONDS = int(os.getenv("PRESIGNED_URL_EXPIRY_SECONDS", "60
 REDIS_URL = os.getenv("REDIS_URL", None)
 
 # ============================================================
+# Gateway Ed25519 Keypair for Signed Receipts
+# ============================================================
+# Public key is hardcoded here for miners/validators to verify signatures
+# Private key is stored encrypted in gateway/secrets/gateway_private_key.pem
+# Password is in GATEWAY_PRIVATE_KEY_PASSWORD environment variable
+
+GATEWAY_PUBLIC_KEY = os.getenv(
+    "GATEWAY_PUBLIC_KEY",
+    "312a4709ff6ab1aed727f336e8d79d3a7941fe7d234a3ec0391960ed471e3bd6"
+)
+
+# Warn if placeholder key is still being used
+if GATEWAY_PUBLIC_KEY == "REPLACE_WITH_YOUR_GATEWAY_PUBLIC_KEY_HEX_STRING_64_CHARS":
+    print("⚠️  WARNING: GATEWAY_PUBLIC_KEY is not set!")
+    print("   Run scripts/generate_gateway_keypair.py to generate keypair")
+    print("   Signed receipts will not work until key is configured")
+
+# Private key password (loaded from environment)
+GATEWAY_PRIVATE_KEY_PASSWORD = os.getenv("GATEWAY_PRIVATE_KEY_PASSWORD", None)
+GATEWAY_PRIVATE_KEY_PATH = os.getenv(
+    "GATEWAY_PRIVATE_KEY_PATH",
+    "gateway/secrets/gateway_private_key.pem"
+)
+
+# ============================================================
+# Arweave (Immutable Transparency Log - Primary Source of Truth)
+# ============================================================
+ARWEAVE_KEYFILE_PATH = os.getenv("ARWEAVE_KEYFILE_PATH", "gateway/secrets/arweave_keyfile.json")
+ARWEAVE_GATEWAY_URL = os.getenv("ARWEAVE_GATEWAY_URL", "https://arweave.net")
+
+# Note: Arweave keyfile validation is done lazily on first use
+# to avoid blocking startup if Arweave is temporarily unavailable
+
+# ============================================================
 # Configuration Validation
 # ============================================================
 
@@ -124,6 +158,8 @@ def print_config_summary():
     print(f"AWS S3 Bucket: {AWS_S3_BUCKET} ({AWS_S3_REGION})")
     print(f"MinIO Endpoint: {MINIO_ENDPOINT}")
     print(f"MinIO Bucket: {MINIO_BUCKET}")
+    print(f"Arweave Gateway: {ARWEAVE_GATEWAY_URL}")
+    print(f"Arweave Keyfile: {ARWEAVE_KEYFILE_PATH}")
     print(f"Bittensor Network: {BITTENSOR_NETWORK} (netuid={BITTENSOR_NETUID})")
     print(f"Nonce Expiry: {NONCE_EXPIRY_SECONDS}s")
     print(f"Timestamp Tolerance: ±{TIMESTAMP_TOLERANCE_SECONDS}s")

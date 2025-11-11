@@ -7,7 +7,7 @@ tests/
 path/
 validation_artifacts/
 data/
-logs/
+logs/  # Includes gateway/logs/arweave_fallback/ (local event logging when Arweave fails)
 validator_weights/
 env.txt
 .env
@@ -103,4 +103,18 @@ test_*.sh
 # Temporary test output files
 test-*.json
 *-test.json
+
+# Gateway secrets (Arweave keyfile, Ed25519 keypair, etc.)
+gateway/secrets/
+*.pem
+*.jwk
+*_keyfile.json
+
+# Gateway test files (moved to gateway/tests/)
+gateway/tests/
+
+# Gateway deployment files (contain infrastructure details)
+docker-compose.gateway.yml
+docker-compose.minio.yml
+.env
 

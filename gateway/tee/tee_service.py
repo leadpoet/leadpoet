@@ -597,8 +597,18 @@ def compute_code_hash() -> str:
             if dir_path.exists():
                 for py_file in sorted(dir_path.glob("**/*.py")):
                     # Skip __pycache__ and other build artifacts
-                    if "__pycache__" not in str(py_file) and not py_file.name.endswith(".pyc"):
-                        files_to_hash.append(py_file)
+                    if "__pycache__" in str(py_file) or py_file.name.endswith(".pyc"):
+                        continue
+                    
+                    # Skip test files (not in GitHub repo)
+                    if py_file.name.startswith("test_"):
+                        continue
+                    
+                    # Skip utility scripts (not critical for trustlessness)
+                    if py_file.name in ["provision_pcrs.py", "verify_code_hash.py"]:
+                        continue
+                    
+                    files_to_hash.append(py_file)
             else:
                 print(f"[TEE] ⚠️  Directory not found (skipping): {dir_path}", flush=True)
         

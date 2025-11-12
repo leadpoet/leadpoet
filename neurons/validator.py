@@ -32,7 +32,8 @@ from Leadpoet.utils.cloud_db import (
     fetch_miner_curation_result,
     push_validator_ranking,
 )
-from Leadpoet.utils.token_manager import TokenManager
+# TokenManager removed - JWT system deprecated in favor of TEE gateway
+# from Leadpoet.utils.token_manager import TokenManager
 from Leadpoet.utils.utils_lead_extraction import (
     get_email,
     get_website,
@@ -504,40 +505,16 @@ class Validator(BaseValidatorNeuron):
         self.broadcast_mode = False
         self.broadcast_lock = threading.Lock()
         
-        # Metagraph sync handled server-side
+        # TokenManager removed - JWT system deprecated in favor of TEE gateway (tasks6.md)
+        # Validators now authenticate with gateway using wallet signatures + metagraph verification
+        # No JWT tokens needed!
+        bt.logging.info("🔐 Using TEE gateway authentication (no JWT tokens)")
         
-        try:
-            self.token_manager = TokenManager(
-                hotkey=self.wallet.hotkey.ss58_address,
-                wallet=self.wallet,
-                netuid=self.config.netuid,
-                network=self.config.subtensor.network
-            )
-            bt.logging.info(f"🔑 TokenManager initialized for {self.config.subtensor.network} subnet {self.config.netuid}")
-        except Exception as e:
-            bt.logging.error(f"Failed to initialize TokenManager: {e}")
-            raise
-        
-        status = self.token_manager.get_status()
-        
-        if status.get('valid'):
-            bt.logging.info(f"✅ Token valid - Role: {status['role']}, Hours remaining: {status.get('hours_remaining', 0):.1f}")
-        else:
-            bt.logging.warning("⚠️ Token invalid or missing - will attempt refresh")
-        
-        status = self.token_manager.get_status()
-        if status.get('needs_refresh') or not status.get('valid'):
-            success = self.token_manager.refresh_token()
-            if success:
-                bt.logging.info("✅ Token refreshed successfully")
-            else:
-                bt.logging.error("❌ Failed to refresh token")
-        else:
-            bt.logging.info("✅ Using existing valid token")
-        
+        # Supabase client not needed for main validation flow
+        # Validators get leads from TEE gateway via /epoch/{epoch_id}/leads
         self.supabase_url = "https://qplwoislplkcegvdmbim.supabase.co"
         self.supabase_client: Optional[Client] = None
-        self._init_supabase_client()
+        # Skip Supabase init - not needed for TEE gateway workflow
     
     def _init_supabase_client(self):
         """Initialize or refresh Supabase client with current JWT token."""
@@ -1300,17 +1277,10 @@ class Validator(BaseValidatorNeuron):
         try:
             # Keep the validator running and continuously process leads
             while not self.should_exit:
-                # Check and refresh token every iteration
-                token_refreshed = self.token_manager.refresh_if_needed(threshold_hours=1)
-                if not token_refreshed and not self.token_manager.get_token():
-                    bt.logging.warning("⚠️ Token refresh failed, continuing with existing token...")
+                # TokenManager removed - no longer needed with TEE gateway
+                # Validators authenticate directly with gateway using wallet signatures
                 
-                # Refresh Supabase client if token was refreshed
-                if token_refreshed:
-                    bt.logging.info("🔄 Token was refreshed, reinitializing Supabase client...")
-                    self._init_supabase_client()
-                
-                # Process gateway validation workflow (Passages 1 & 2)
+                # Process gateway validation workflow (TEE-based, tasks6.md)
                 try:
                     self.process_gateway_validation_workflow()
                 except Exception as e:

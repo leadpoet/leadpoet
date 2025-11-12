@@ -1107,35 +1107,44 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
     """
     Fetch pending broadcast API requests from Supabase.
     Returns list of pending requests that need processing.
+    
+    NOTE: This function is deprecated. Validators should use TEE gateway
+    instead for lead fetching (tasks6.md). Returning empty list.
 
     Args:
         wallet: Bittensor wallet
         role: "validator" or "miner" - determines which requests to fetch
     """
-    try:
-        supabase = get_supabase_client()
-        if not supabase:
-            return []
-
-        # Fetch pending requests
-        result = supabase.table("api_requests") \
-            .select("*") \
-            .eq("status", "pending") \
-            .order("created_at", desc=False) \
-            .limit(10) \
-            .execute()
-
-        requests_list = result.data if result.data else []
-
-        # Only log when requests are found
-        if requests_list:
-            bt.logging.info(f"🔔 [{role.upper()}] Found {len(requests_list)} NEW broadcast request(s)!")
-
-        return requests_list
-
-    except Exception as e:
-        bt.logging.error(f"fetch_broadcast_requests ({role}) failed: {e}")
-        return []
+    # Broadcast API feature deprecated - validators use TEE gateway now
+    # Return empty list to prevent JWT authentication errors
+    bt.logging.debug(f"fetch_broadcast_requests() called but deprecated - returning empty list")
+    return []
+    
+    # DEPRECATED CODE BELOW (kept for reference):
+    # try:
+    #     supabase = get_supabase_client()
+    #     if not supabase:
+    #         return []
+    #
+    #     # Fetch pending requests
+    #     result = supabase.table("api_requests") \
+    #         .select("*") \
+    #         .eq("status", "pending") \
+    #         .order("created_at", desc=False) \
+    #         .limit(10) \
+    #         .execute()
+    #
+    #     requests_list = result.data if result.data else []
+    #
+    #     # Only log when requests are found
+    #     if requests_list:
+    #         bt.logging.info(f"🔔 [{role.upper()}] Found {len(requests_list)} NEW broadcast request(s)!")
+    #
+    #     return requests_list
+    #
+    # except Exception as e:
+    #     bt.logging.error(f"fetch_broadcast_requests ({role}) failed: {e}")
+    #     return []
 
 
 def mark_broadcast_processing(wallet: bt.wallet, request_id: str) -> bool:

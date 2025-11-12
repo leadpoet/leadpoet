@@ -36,14 +36,14 @@ with codecs.open(os.path.join(here, "Leadpoet/__init__.py"), encoding="utf-8") a
 
 
 requirements = [
-    # Core Bittensor dependencies
-    "bittensor>=6.9.3",
+    # Core Bittensor
+    "bittensor>=9.10",
     
     # HTTP and networking
     "requests>=2.31.0",
     "aiohttp>=3.9.5",
-    "aiodns>=3.1.1",
-    "httpx>=0.27.0",
+    "aiodns>=3.5.0",
+    "httpx>=0.28.1",
     
     # Data processing and ML
     "numpy>=1.24.0",
@@ -52,100 +52,75 @@ requirements = [
     "torch_geometric>=2.4.0",
     "pygod>=1.1.0",
     
-    # DNS
+    # DNS and validation
     "dnspython>=2.6.1",
+    "python-whois>=0.9.5",
     
-    # Caching and storage
+    # Storage and caching
     "redis>=5.0.0",
     "pickle-mixin>=1.0.2",
     "boto3>=1.40.0",
     "minio>=7.2.0",
     "arweave-python-client>=1.0.19",
     
-    # Monitoring and metrics
-    "prometheus_client>=0.19.0",
-    "structlog>=23.2.0",
-    
-    # Retry and resilience
-    "tenacity>=8.2.0",
-    
-    # Environment and configuration
-    "python-dotenv>=1.0.0",
+    # Configuration
     "pyyaml>=6.0.1",
-    
-    # Web framework
-    "starlette>=0.30.0",
-    "pydantic>=2.0.0",
-    "fastapi>=0.110.0",
-    "uvicorn[standard]>=0.38.0",
-    "python-multipart>=0.0.6",
-    
-    # Utilities
-    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
     "argparse>=1.4.0",
-    "click>=8.1.0",
     
-    # Testing
-    "pytest>=8.0.0",
-    "pytest-cov>=4.1.0",
-    "pytest-mock>=3.10.0",
-    "pytest-asyncio>=0.21.0",
-    
-    # Setuptools
-    "setuptools>=68.0.0",
-    
-    # Google Cloud
-    "google-cloud-firestore==2.11.1",
-    "google-auth==2.17.3",
-    "firebase-admin>=6.2.0",
-    
-    # Code quality and linting
-    "flake8>=6.0.0",
-    "black>=23.7.0",
-    "isort>=5.12.0",
-    
-    # Code coverage
-    "coverage>=7.3.0",
-    
-    # Additional utilities
-    "typing-extensions>=4.7.0",
-    "python-Levenshtein>=0.23.0",
-    
-    # Enhanced validation dependencies
-    "python-whois>=0.7.3",
+    # Validation utilities
     "fuzzywuzzy>=0.18.0",
+    "phonenumbers>=8.13.0",
+    "disposable-email-domains>=0.0.138",
+    "python-Levenshtein>=0.23.0",
     
     # Lead Sorcerer dependencies
     "openrouter>=1.0.0",
     "firecrawl>=2.16.0",
-    "openai>=1.0.0",
-    "phonenumbers>=8.13.0",
+    "firecrawl-py>=4.3.6",
+    "openai>=2.1.0",
     "portalocker>=2.7.0",
     "publicsuffix2>=2.20191221",
+    "jsonschema>=4.25.1",
     
-    # Schema validation and configuration
-    "jsonschema>=4.17.0",
-    "PyYAML>=6.0",
+    # Web framework (for gateway)
+    "fastapi>=0.110.0",
+    "uvicorn>=0.38.0",
+    "python-multipart>=0.0.6",
+    "pydantic>=2.0.0",
+    "starlette>=0.30.0",
     
-    # Throwaway email blocklist
-    "disposable-email-domains>=0.0.138",
+    # Utilities
+    "rich>=13.0.0",
+    "click>=8.1.0",
+    "typing-extensions>=4.7.0",
+    "tenacity>=8.2.0",
     
-    # JWT Token Management
-    "pyjwt>=2.8.0",
+    # Google Cloud (optional)
+    "google-cloud-firestore>=2.11.1",
+    "google-auth>=2.17.3",
+    "firebase-admin>=6.2.0",
     
-    # TEE Attestation Verification (for miners/validators)
+    # JWT token management
+    "pyjwt>=2.0.0",
+    
+    # Supabase
+    "supabase>=2.0.0",
+    
+    # TEE Attestation Verification
     "cbor2>=5.4.6",
     "cryptography>=41.0.7",
     
-    # Supabase (for gateway communication)
-    "supabase>=2.0.0",
+    # gRPC communication
+    "grpcio>=1.60.0",
     
-    # Additional dependencies
+    # Additional utilities
     "nest-asyncio>=1.6.0",
     "websockets>=15.0.1",
     
-    # gRPC communication (for miner/validator nodes)
-    "grpcio>=1.60.0"
+    # Monitoring
+    "prometheus_client>=0.19.0",
+    "structlog>=23.2.0"
 ]
 
 setup(

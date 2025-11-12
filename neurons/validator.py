@@ -1456,7 +1456,8 @@ class Validator(BaseValidatorNeuron):
                         "decision_hash": decision_hash,
                         "rep_score_hash": rep_score_hash,
                         "rejection_reason_hash": rejection_reason_hash,
-                        "evidence_hash": evidence_hash
+                        "evidence_hash": evidence_hash,
+                        "evidence_blob": result  # Include full evidence for gateway storage
                     })
                     
                     # Store local data for weight calculation

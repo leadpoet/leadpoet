@@ -16,8 +16,8 @@ from Leadpoet.utils.utils_lead_extraction import get_email, get_field
 
 load_dotenv()
 
-# Gateway URL (deployed production gateway)
-GATEWAY_URL = os.getenv("GATEWAY_URL", "http://104.236.33.157:8000")
+# Gateway URL (TEE-based trustless gateway on AWS EC2)
+GATEWAY_URL = os.getenv("GATEWAY_URL", "http://54.80.97.12:8000")
 API_URL   = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1.run.app")
 
 # Network defaults - can be overridden via environment variables

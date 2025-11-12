@@ -206,13 +206,12 @@ async def log_event(event: dict) -> Dict:
     
     if supabase:
         try:
-            # Map field names: API uses "timestamp" but DB column is "ts"
             # Create Supabase entry with correct column names
             supabase_entry = {
                 "event_type": event.get("event_type"),
                 "actor_hotkey": event.get("actor_hotkey"),
                 "nonce": event.get("nonce"),
-                "ts": event.get("timestamp"),  # Map timestamp → ts
+                "ts": event.get("ts"),  # Event already uses "ts" key
                 "payload_hash": event.get("payload_hash"),
                 "build_id": event.get("build_id"),
                 "signature": event.get("signature"),

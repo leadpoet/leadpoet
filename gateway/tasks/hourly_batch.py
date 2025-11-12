@@ -49,7 +49,6 @@ async def hourly_batch_task():
     print("="*80)
     print(f"   Batch interval: {BATCH_INTERVAL}s ({BATCH_INTERVAL/3600:.1f} hours)")
     print(f"   Emergency threshold: {EMERGENCY_BATCH_THRESHOLD} events")
-    print(f"   Confirmation timeout: {CONFIRMATION_TIMEOUT}s")
     print("="*80)
     print()
     

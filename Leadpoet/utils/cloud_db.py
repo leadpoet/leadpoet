@@ -1518,6 +1518,10 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
         lead_blob = json.dumps(lead_data, sort_keys=True)
         lead_blob_hash = hashlib.sha256(lead_blob.encode()).hexdigest()
         
+        # Extract email and compute email_hash for duplicate detection
+        email = lead_data.get("email", "").strip().lower()
+        email_hash = hashlib.sha256(email.encode()).hexdigest()
+        
         # Generate salt and commitment
         salt = hashlib.sha256(os.urandom(32)).hexdigest()
         commitment = hashlib.sha256(f"{salt}{lead_blob}".encode()).hexdigest()
@@ -1528,6 +1532,7 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
         payload = {
             "lead_id": lead_id,
             "lead_blob_hash": lead_blob_hash,
+            "email_hash": email_hash,
             "commitment": commitment
         }
         

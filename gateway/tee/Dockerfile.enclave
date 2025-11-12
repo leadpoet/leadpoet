@@ -8,21 +8,15 @@ RUN yum install -y \
     && yum clean all
 
 # Copy requirements and install dependencies
-COPY requirements.txt /tmp/requirements.txt
+COPY tee/requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Set working directory
 WORKDIR /app
 
-# Copy ENTIRE gateway directory structure for code_hash verification
-# This ensures compute_code_hash() can read all gateway files
-COPY ../ /app/gateway/
-
-# Copy TEE service files to /app/gateway/tee/ (their expected location)
-COPY tee_service.py /app/gateway/tee/tee_service.py
-COPY merkle.py /app/gateway/tee/merkle.py
-COPY nsm_lib.py /app/gateway/tee/nsm_lib.py
-COPY requirements.txt /app/gateway/tee/requirements.txt
+# Copy ENTIRE gateway directory for code_hash verification
+# Build context must be gateway root, not tee/ subdirectory
+COPY . /app/gateway/
 
 # Create keys directory
 RUN mkdir -p /app/gateway/keys

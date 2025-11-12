@@ -1,52 +1,44 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# Exclude sensitive files
+secrets/
+*.pem
+*.key
+service_account_key.json
 
-# Virtual environments
+# Exclude logs and runtime data
+logs/
+*.log
+gateway.log
+validation_artifacts/
+
+# Exclude Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Exclude build artifacts
+*.egg-info/
+dist/
+build/
+*.so
+
+# Exclude venv and node_modules
 venv/
 env/
-ENV/
+node_modules/
 
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-*.log
-
-# Git
+# Exclude git
 .git/
 .gitignore
 
-# Documentation
-*.md
-docs/
+# Exclude Docker and deployment files
+docker-compose*.yml
+Dockerfile*
+.dockerignore
 
-# Other
+# Exclude test and temp files
+*.swp
+*.swo
+*~
 .DS_Store
-Thumbs.db
-

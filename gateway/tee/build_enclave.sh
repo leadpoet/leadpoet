@@ -11,11 +11,15 @@ echo "=========================================="
 echo "🔨 Building Nitro Enclave Image"
 echo "=========================================="
 
-# Step 1: Build Docker image (use files from current directory)
+# Step 1: Build Docker image (use gateway root as build context)
 echo ""
 echo "📦 Step 1: Building Docker image..."
+echo "   Build context: ~/gateway/ (gateway root)"
+echo "   Dockerfile: ~/tee/Dockerfile.enclave"
 # Force fresh build (no cache) to ensure latest code is included
-docker build --no-cache -f Dockerfile.enclave -t tee-enclave:latest .
+# Build from ~/gateway/ so .dockerignore works properly
+# On EC2: ~/tee/ and ~/gateway/ are sibling directories
+docker build --no-cache -f ~/tee/Dockerfile.enclave -t tee-enclave:latest ~/gateway/
 
 # Step 2: Build enclave image file (.eif)
 echo ""

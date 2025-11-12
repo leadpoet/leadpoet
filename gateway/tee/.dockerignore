@@ -1,0 +1,23 @@
+# Exclude sensitive files
+secrets/
+*.pem
+*.key
+*.json
+
+# Exclude logs and runtime files
+logs/
+*.log
+__pycache__/
+*.pyc
+*.pyo
+
+# Exclude build artifacts
+*.egg-info/
+dist/
+build/
+
+# Exclude Docker files
+Dockerfile*
+docker-compose*
+.dockerignore
+

@@ -14,14 +14,19 @@ RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
 # Set working directory
 WORKDIR /app
 
-# Copy TEE service files (no gateway/tee prefix - files are in current dir)
-COPY tee_service.py /app/tee_service.py
-COPY merkle.py /app/merkle.py
-COPY nsm_lib.py /app/nsm_lib.py
+# Copy ENTIRE gateway directory structure for code_hash verification
+# This ensures compute_code_hash() can read all gateway files
+COPY ../ /app/gateway/
+
+# Copy TEE service files to /app/gateway/tee/ (their expected location)
+COPY tee_service.py /app/gateway/tee/tee_service.py
+COPY merkle.py /app/gateway/tee/merkle.py
+COPY nsm_lib.py /app/gateway/tee/nsm_lib.py
+COPY requirements.txt /app/gateway/tee/requirements.txt
 
 # Create keys directory
-RUN mkdir -p /app/keys
+RUN mkdir -p /app/gateway/keys
 
 # Run the TEE service
 # -u flag: unbuffered output (CRITICAL for debugging - shows prints immediately)
-ENTRYPOINT ["python3", "-u", "/app/tee_service.py"]
+ENTRYPOINT ["python3", "-u", "/app/gateway/tee/tee_service.py"]

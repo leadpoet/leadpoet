@@ -1,0 +1,12 @@
+# Python dependencies for Nitro Enclave TEE service
+# Compatible with Python 3.7 (Amazon Linux 2)
+
+# Cryptography for Ed25519 keypair generation and signing
+cryptography==41.0.7
+
+# CBOR encoding for compact attestation documents
+# Using 5.4.6 (latest version compatible with Python 3.7)
+cbor2==5.4.6
+
+# No other dependencies - keep enclave minimal and secure
+

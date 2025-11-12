@@ -20,7 +20,7 @@ echo "==========================================================================
 EIF_PATH="/home/ec2-user/tee/tee-enclave.eif"
 ENCLAVE_CID=16
 CPU_COUNT=2
-MEMORY_MB=3072
+MEMORY_MB=8192  # Increased from 3072 to accommodate full gateway code in enclave
 
 # Check if EIF exists
 if [ ! -f "$EIF_PATH" ]; then

@@ -318,10 +318,10 @@ async def submit_lead(event: SubmitLeadEvent):
             print(f"⚠️  MinIO mirroring failed (but S3 is OK)")
     
     # ========================================
-    # Step 9a: SUCCESS PATH - Both mirrors verified
+    # Step 9a: SUCCESS PATH - S3 verified (MinIO is optional backup)
     # ========================================
-    if s3_verified and minio_verified:
-        print(f"🔍 Step 9a: SUCCESS PATH - Both mirrors verified")
+    if s3_verified:
+        print(f"🔍 Step 9a: SUCCESS PATH - S3 verified (MinIO {'verified' if minio_verified else 'optional'})")
         
         try:
             # Log STORAGE_PROOF events to TEE buffer (hardware-protected)
@@ -331,7 +331,12 @@ async def submit_lead(event: SubmitLeadEvent):
             storage_proof_events = []
             storage_proof_tee_seqs = {}
             
-            for mirror in ["s3", "minio"]:
+            # Only log for verified mirrors
+            verified_mirrors = ["s3"]
+            if minio_verified:
+                verified_mirrors.append("minio")
+            
+            for mirror in verified_mirrors:
                 storage_proof_payload = {
                     "lead_id": event.payload.lead_id,
                     "lead_blob_hash": committed_lead_blob_hash,

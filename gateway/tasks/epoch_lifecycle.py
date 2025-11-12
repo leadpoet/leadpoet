@@ -27,7 +27,7 @@ from gateway.utils.epoch import (
     is_epoch_closed
 )
 from gateway.utils.merkle import compute_merkle_root
-from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BUILD_ID
+from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BUILD_ID, MAX_LEADS_PER_EPOCH
 from supabase import create_client
 
 # Supabase client
@@ -240,16 +240,16 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         print(f"   👥 Validator Set: {validator_count} active validators")
         
         # ========================================================================
-        # 3. Compute deterministic lead assignment (first 50 leads, FIFO)
+        # 3. Compute deterministic lead assignment (first N leads, FIFO)
         # ========================================================================
         assigned_lead_ids = deterministic_lead_assignment(
             queue_merkle_root, 
             validator_set, 
             epoch_id, 
-            max_leads_per_epoch=50
+            max_leads_per_epoch=MAX_LEADS_PER_EPOCH
         )
         
-        print(f"   📋 Assignment: {len(assigned_lead_ids)} leads assigned to all validators")
+        print(f"   📋 Assignment: {len(assigned_lead_ids)} leads assigned to all validators (max={MAX_LEADS_PER_EPOCH})")
         
         # ========================================================================
         # 4. Create single atomic EPOCH_INITIALIZATION event

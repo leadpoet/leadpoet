@@ -82,6 +82,12 @@ TIMESTAMP_TOLERANCE_SECONDS = int(os.getenv("TIMESTAMP_TOLERANCE_SECONDS", "120"
 PRESIGNED_URL_EXPIRY_SECONDS = int(os.getenv("PRESIGNED_URL_EXPIRY_SECONDS", "60"))  # 1 minute
 
 # ============================================================
+# Epoch Settings
+# ============================================================
+# Maximum leads assigned per epoch (default: 50, set to 10 for testing)
+MAX_LEADS_PER_EPOCH = int(os.getenv("MAX_LEADS_PER_EPOCH", "50"))
+
+# ============================================================
 # Redis for Nonce Tracking (Optional - uses PostgreSQL if not set)
 # ============================================================
 REDIS_URL = os.getenv("REDIS_URL", None)

@@ -228,10 +228,12 @@ async def submit_lead(event: SubmitLeadEvent):
             .eq("actor_hotkey", event.actor_hotkey) \
             .execute()
         
+        print(f"🔍 Found {len(result.data) if result.data else 0} SUBMISSION_REQUEST events for actor {event.actor_hotkey[:8]}...")
+        
         if not result.data:
             raise HTTPException(
                 status_code=404,
-                detail=f"No SUBMISSION_REQUEST found for lead_id={event.payload.lead_id}"
+                detail=f"No SUBMISSION_REQUEST found for actor {event.actor_hotkey[:8]}... (lead_id={event.payload.lead_id[:8]}...)"
             )
         
         # Find the specific SUBMISSION_REQUEST for this lead_id

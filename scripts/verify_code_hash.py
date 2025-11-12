@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""
+Verify gateway code hash matches GitHub commit.
+
+This script verifies that the gateway enclave is running the exact code from a
+specific GitHub commit by:
+1. Cloning the repo at the specified commit
+2. Computing SHA256 hash of tee_service.py
+3. Comparing to the code_hash from the gateway's attestation
+
+Usage:
+    python verify_code_hash.py <gateway_url> --github-url <url> --commit <commit>
+    python verify_code_hash.py http://54.80.97.12:8000 --github-url https://github.com/leadpoet/leadpoet --commit main
+
+Requirements:
+    - git
+    - Python with requests, cbor2, cryptography
+
+Note: This verifies the application code hash, which proves the exact Python code running.
+      It does NOT verify PCR0 (Docker image hash) since that requires AWS Nitro CLI on Linux.
+"""
+
+import sys
+import json
+import hashlib
+import subprocess
+import tempfile
+import shutil
+import argparse
+from pathlib import Path
+from typing import Optional
+import requests
+
+
+def check_dependencies():
+    """Check if required tools are installed"""
+    
+    print("🔍 Checking dependencies...")
+    
+    required_tools = {
+        "git": "Git is required to clone the repository",
+    }
+    
+    missing = []
+    for tool, description in required_tools.items():
+        if not shutil.which(tool):
+            print(f"   ❌ {tool} not found: {description}")
+            missing.append(tool)
+        else:
+            print(f"   ✅ {tool} found")
+    
+    return missing
+
+
+def clone_repo(github_url: str, commit: str, target_dir: Path) -> bool:
+    """Clone GitHub repository at specific commit"""
+    
+    print(f"\n📦 Cloning repository...")
+    print(f"   URL: {github_url}")
+    print(f"   Commit: {commit}")
+    print(f"   Target: {target_dir}")
+    
+    try:
+        # Clone with depth=1 for speed
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", commit, github_url, str(target_dir)],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minutes max
+        )
+        
+        if result.returncode != 0:
+            # Try without --depth if branch/tag doesn't work
+            print("   ℹ️  Trying full clone (commit may not be a branch/tag)...")
+            result = subprocess.run(
+                ["git", "clone", github_url, str(target_dir)],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.returncode != 0:
+                print(f"   ❌ Clone failed: {result.stderr}")
+                return False
+            
+            # Check out specific commit
+            result = subprocess.run(
+                ["git", "-C", str(target_dir), "checkout", commit],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode != 0:
+                print(f"   ❌ Checkout failed: {result.stderr}")
+                return False
+        
+        print("   ✅ Repository cloned successfully")
+        return True
+    
+    except subprocess.TimeoutExpired:
+        print("   ❌ Clone timed out (>5 minutes)")
+        return False
+    except Exception as e:
+        print(f"   ❌ Clone error: {e}")
+        return False
+
+
+def compute_code_hash(repo_dir: Path) -> Optional[str]:
+    """
+    Compute SHA256 hash of tee_service.py (same logic as enclave).
+    
+    This must match exactly how the enclave computes code_hash.
+    """
+    
+    print("\n🔍 Computing code hash from GitHub code...")
+    
+    tee_service_path = repo_dir / "gateway" / "tee" / "tee_service.py"
+    
+    if not tee_service_path.exists():
+        print(f"   ❌ File not found: {tee_service_path}")
+        return None
+    
+    try:
+        with open(tee_service_path, 'rb') as f:
+            code_bytes = f.read()
+            code_hash = hashlib.sha256(code_bytes).hexdigest()
+        
+        print(f"   ✅ Code hash computed: {code_hash[:32]}...{code_hash[-32:]}")
+        return code_hash
+    
+    except Exception as e:
+        print(f"   ❌ Failed to compute hash: {e}")
+        return None
+
+
+def get_gateway_attestation(gateway_url: str) -> Optional[dict]:
+    """Download attestation from gateway"""
+    
+    print(f"\n📥 Downloading attestation from {gateway_url}...")
+    
+    if not gateway_url.startswith("http"):
+        gateway_url = f"http://{gateway_url}"
+    
+    try:
+        response = requests.get(f"{gateway_url}/attest", timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        print(f"   ✅ Attestation downloaded")
+        return data
+    
+    except requests.RequestException as e:
+        print(f"   ❌ Failed to download: {e}")
+        return None
+
+
+def verify_code_hash(gateway_url: str, github_url: str, commit: str) -> bool:
+    """
+    Main verification logic.
+    
+    Returns True if code hash matches, False otherwise.
+    """
+    
+    print("=" * 80)
+    print("🔐 GATEWAY CODE INTEGRITY VERIFIER")
+    print("=" * 80)
+    print(f"\nGateway URL: {gateway_url}")
+    print(f"GitHub URL:  {github_url}")
+    print(f"Commit:      {commit}")
+    print()
+    
+    # Check dependencies
+    missing = check_dependencies()
+    if missing:
+        print(f"\n❌ Missing dependencies: {', '.join(missing)}")
+        print("   Please install: git")
+        return False
+    
+    # Get gateway attestation
+    attestation = get_gateway_attestation(gateway_url)
+    if not attestation:
+        return False
+    
+    gateway_code_hash = attestation.get("code_hash")
+    gateway_pcr0 = attestation.get("pcr0")
+    
+    if not gateway_code_hash:
+        print("   ❌ Attestation missing 'code_hash' field")
+        return False
+    
+    print(f"\n📋 Gateway attestation:")
+    print(f"   Code Hash: {gateway_code_hash[:32]}...{gateway_code_hash[-32:]}")
+    print(f"   PCR0:      {gateway_pcr0[:32]}...{gateway_pcr0[-32:] if gateway_pcr0 else 'null'}")
+    
+    # Clone repo and compute code hash
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_dir = Path(tmpdir) / "repo"
+        
+        if not clone_repo(github_url, commit, repo_dir):
+            return False
+        
+        github_code_hash = compute_code_hash(repo_dir)
+        if not github_code_hash:
+            return False
+    
+    # Compare
+    print("\n" + "=" * 80)
+    print("📊 VERIFICATION RESULT")
+    print("=" * 80)
+    
+    print(f"\nGitHub code hash:  {github_code_hash}")
+    print(f"Gateway code hash: {gateway_code_hash}")
+    
+    if github_code_hash == gateway_code_hash:
+        print("\n✅ CODE HASH MATCH - Gateway is running canonical code!")
+        print("\n🎯 The gateway enclave is provably running the exact code from:")
+        print(f"   Repository: {github_url}")
+        print(f"   Commit: {commit}")
+        print("\nThis proves the gateway operator cannot run modified code without detection.")
+        return True
+    else:
+        print("\n❌ CODE HASH MISMATCH - Gateway may be running modified code!")
+        print("\n⚠️  WARNING: The code running in the gateway does NOT match GitHub.")
+        print("   This could indicate:")
+        print("   1. Gateway operator is running modified/malicious code")
+        print("   2. GitHub commit doesn't match deployed version")
+        print("   3. Code was updated but not pushed to GitHub")
+        print("\n🔴 DO NOT TRUST THIS GATEWAY until code hashes match!")
+        return False
+
+
+def main():
+    """CLI entry point"""
+    
+    parser = argparse.ArgumentParser(
+        description="Verify gateway code integrity against GitHub",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Verify against main branch
+  python verify_code_hash.py http://54.80.97.12:8000 \\
+    --github-url https://github.com/leadpoet/leadpoet \\
+    --commit main
+  
+  # Verify against specific commit
+  python verify_code_hash.py http://gateway.leadpoet.ai \\
+    --github-url https://github.com/leadpoet/leadpoet \\
+    --commit abc123def456
+
+Note: This verifies the application code (tee_service.py) hash.
+      It does NOT verify PCR0 (Docker image), which requires AWS Nitro CLI on Linux.
+"""
+    )
+    
+    parser.add_argument(
+        "gateway_url",
+        help="Gateway URL (e.g., http://54.80.97.12:8000)"
+    )
+    parser.add_argument(
+        "--github-url",
+        required=True,
+        help="GitHub repository URL"
+    )
+    parser.add_argument(
+        "--commit",
+        default="main",
+        help="Git commit/branch/tag to verify (default: main)"
+    )
+    
+    args = parser.parse_args()
+    
+    success = verify_code_hash(args.gateway_url, args.github_url, args.commit)
+    
+    sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    main()

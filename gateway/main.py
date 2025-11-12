@@ -39,7 +39,7 @@ from gateway.utils.storage import generate_presigned_put_urls
 from supabase import create_client, Client
 
 # Import API routers
-from gateway.api import epoch, validate, reveal, manifest, submit
+from gateway.api import epoch, validate, reveal, manifest, submit, attest
 
 # Import background tasks
 from gateway.tasks.epoch_lifecycle import epoch_lifecycle_task
@@ -47,6 +47,7 @@ from gateway.tasks.reveal_collector import reveal_collector_task
 from gateway.tasks.checkpoints import checkpoint_task
 from gateway.tasks.anchor import daily_anchor_task
 from gateway.tasks.mirror_monitor import mirror_integrity_task
+from gateway.tasks.hourly_batch import start_hourly_batch_task
 
 # Create Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -76,6 +77,26 @@ async def lifespan(app: FastAPI):
         print("   Presigned URL generation may fail until bucket is created")
     print("="*80 + "\n")
     
+    # Load gateway keypair for signed receipts
+    print("="*80)
+    print("🔐 LOADING GATEWAY KEYPAIR")
+    print("="*80)
+    try:
+        from gateway.utils.keys import load_gateway_keypair
+        success = load_gateway_keypair()
+        if success:
+            print("✅ Gateway keypair loaded successfully")
+            print("✅ Signed receipts ENABLED")
+        else:
+            print("⚠️  WARNING: Gateway keypair failed to load")
+            print("   Signed receipts will be DISABLED")
+            print("   Receipts will not include gateway_signature field")
+    except Exception as e:
+        print(f"❌ ERROR loading gateway keypair: {e}")
+        print("   Signed receipts will be DISABLED")
+        print("   Gateway will continue but cannot sign receipts")
+    print("="*80 + "\n")
+    
     print("="*80)
     print("🚀 STARTING BACKGROUND TASKS")
     print("="*80)
@@ -96,6 +117,9 @@ async def lifespan(app: FastAPI):
     mirror_task = asyncio.create_task(mirror_integrity_task())
     print("✅ Mirror monitor task started")
     
+    hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
+    print("✅ Hourly Arweave batch task started")
+    
     print("="*80 + "\n")
     
     # Yield control back to FastAPI (app runs here)
@@ -103,7 +127,7 @@ async def lifespan(app: FastAPI):
     
     # Cleanup on shutdown (cancel all background tasks)
     print("\n🛑 Shutting down background tasks...")
-    tasks = [epoch_task, reveal_task, checkpoint_task_handle, anchor_task, mirror_task]
+    tasks = [epoch_task, reveal_task, checkpoint_task_handle, anchor_task, mirror_task, hourly_batch_task_handle]
     for task in tasks:
         task.cancel()
     
@@ -156,6 +180,7 @@ app.include_router(validate.router)
 app.include_router(reveal.router)
 app.include_router(manifest.router)
 app.include_router(submit.router)
+app.include_router(attest.router)  # TEE attestation endpoint
 
 # ============================================================
 # Health Check Endpoints
@@ -332,10 +357,15 @@ async def presign_urls(event: SubmissionRequestEvent):
     print(f"🔍 Step 6 complete: URLs generated")
     
     # ========================================
-    # Step 7: Log SUBMISSION_REQUEST to transparency log
+    # Step 7: Log SUBMISSION_REQUEST to TEE Buffer (CRITICAL: Hardware-Protected)
     # ========================================
-    print("🔍 Step 7: Logging to transparency_log...")
+    print("🔍 Step 7: Logging SUBMISSION_REQUEST to TEE buffer...")
+    arweave_tx_id = None  # Will be available after hourly Arweave batch
+    tee_sequence = None
+    
     try:
+        from gateway.utils.logger import log_event
+        
         log_entry = {
             "event_type": event.event_type.value,  # Convert enum to string
             "actor_hotkey": event.actor_hotkey,
@@ -347,23 +377,47 @@ async def presign_urls(event: SubmissionRequestEvent):
             "payload": event.payload.model_dump()
         }
         
-        supabase.table("transparency_log").insert(log_entry).execute()
+        # Write to TEE buffer (authoritative, hardware-protected)
+        # TEE will batch to Arweave hourly
+        result = await log_event(log_entry)
         
-        print(f"✅ Step 7 complete: SUBMISSION_REQUEST logged for {event.payload.lead_id}")
+        tee_sequence = result.get("sequence")
+        buffer_size = result.get("buffer_size", 0)
+        
+        print(f"✅ Step 7 complete: SUBMISSION_REQUEST buffered in TEE")
+        print(f"   TEE sequence: {tee_sequence}")
+        print(f"   Buffer size: {buffer_size} events")
+        print(f"   ⏰ Will batch to Arweave in next hourly checkpoint")
     
     except Exception as e:
-        print(f"❌ Error logging to transparency_log: {e}")
-        # Continue anyway - presigned URLs are valid
+        # CRITICAL: If TEE buffer write fails, request MUST fail
+        # This prevents censorship (cannot accept event and then drop it)
+        print(f"❌ Error logging to TEE buffer: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"🚨 CRITICAL: TEE buffer unavailable - failing request")
+        print(f"   Operator: Check TEE enclave health: sudo nitro-cli describe-enclaves")
+        raise HTTPException(
+            status_code=503,
+            detail=f"TEE buffer unavailable: {str(e)}. Gateway cannot accept events."
+        )
     
     # ========================================
-    # Step 8: Return presigned URL (S3 only)
+    # Step 8: Return presigned URL + Acknowledgment
     # ========================================
+    # NOTE (Phase 4): TEE-based trust model
+    # - Event is buffered in TEE (hardware-protected, sequence={tee_sequence})
+    # - Will be included in next hourly Arweave checkpoint (signed by TEE)
+    # - Verify gateway code integrity: GET /attest
+    request_timestamp = datetime.now(tz.utc).isoformat()
+    
     print("✅ /presign SUCCESS - returning S3 presigned URL (MinIO will be mirrored by gateway)")
     return PresignedURLResponse(
         lead_id=event.payload.lead_id,
         presigned_url=urls["s3_url"],  # Miner uploads to S3
         s3_url=urls["s3_url"],  # Alias for backward compatibility
-        expires_in=urls["expires_in"]
+        expires_in=urls["expires_in"],
+        timestamp=request_timestamp  # ISO 8601 timestamp
     )
 
 

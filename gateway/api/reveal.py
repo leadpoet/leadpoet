@@ -14,7 +14,9 @@ from fastapi import APIRouter, HTTPException, Body
 from pydantic import BaseModel, Field
 from typing import Literal
 from datetime import datetime
+from uuid import uuid4
 import hashlib
+import json
 
 from gateway.utils.signature import verify_wallet_signature
 from gateway.utils.epoch import is_epoch_closed
@@ -253,8 +255,65 @@ async def reveal_validation_result(
         )
     
     # ========================================
-    # Step 10: Return success
+    # Step 10: Log REVEAL event to TEE Buffer
     # ========================================
+    reveal_timestamp = datetime.utcnow().isoformat()
+    
+    print(f"🔍 Step 10: Logging REVEAL to TEE buffer...")
+    try:
+        from gateway.utils.logger import log_event
+        import hashlib
+        
+        # Construct REVEAL event for TEE buffer
+        reveal_log_entry = {
+            "event_type": "REVEAL",
+            "actor_hotkey": validator_hotkey,
+            "nonce": str(uuid4()),  # Generate fresh nonce for this event
+            "ts": reveal_timestamp,
+            "payload_hash": hashlib.sha256(
+                json.dumps({
+                    "evidence_id": payload.evidence_id,
+                    "epoch_id": payload.epoch_id,
+                    "decision": payload.decision,
+                    "rep_score": payload.rep_score,
+                    "rejection_reason": payload.rejection_reason
+                }, sort_keys=True).encode()
+            ).hexdigest(),
+            "build_id": "gateway",  # Gateway-generated event
+            "signature": signature,  # Validator's signature over reveal payload
+            "payload": {
+                "evidence_id": payload.evidence_id,
+                "lead_id": evidence["lead_id"],
+                "epoch_id": payload.epoch_id,
+                "decision": payload.decision,
+                "rep_score": payload.rep_score,
+                "rejection_reason": payload.rejection_reason,
+                "validator_hotkey": validator_hotkey
+                # NOTE: evidence_blob is NEVER revealed publicly (kept private)
+            }
+        }
+        
+        # Write to TEE buffer (hardware-protected)
+        result = await log_event(reveal_log_entry)
+        
+        reveal_tee_seq = result.get("sequence")
+        print(f"✅ Step 10 complete: REVEAL buffered in TEE: seq={reveal_tee_seq}")
+    
+    except Exception as e:
+        print(f"❌ Error logging REVEAL: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"   ⚠️  CONTINUING despite logging error - reveal is already stored in DB")
+    
+    # ========================================
+    # Step 11: Return Response
+    # ========================================
+    # NOTE (Phase 4): Receipts deprecated - TEE attestation provides trust
+    # - Event is buffered in TEE (hardware-protected memory)
+    # - Will be included in next hourly Arweave checkpoint (signed by TEE)
+    # - Verify gateway code integrity: GET /attest
+    reveal_timestamp = datetime.now(tz.utc).isoformat()
+    
     return {
         "status": "revealed",
         "evidence_id": payload.evidence_id,
@@ -262,7 +321,8 @@ async def reveal_validation_result(
         "decision": payload.decision,
         "rep_score": payload.rep_score,
         "rejection_reason": payload.rejection_reason,
-        "message": "Validation revealed successfully"
+        "timestamp": reveal_timestamp,
+        "message": "Validation revealed successfully. Proof available in next hourly Arweave checkpoint."
     }
 
 

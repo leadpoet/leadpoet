@@ -260,54 +260,65 @@ async def submit_validation_result(
         )
     
     # ========================================
-    # Step 10: Log VALIDATION_RESULT to transparency log
+    # Step 10: Log VALIDATION_RESULT to TEE Buffer
     # ========================================
     # CRITICAL: Only log hashes, NOT evidence_blob
+    validation_timestamp = event.ts.isoformat()
+    
+    print(f"🔍 Step 10: Logging VALIDATION_RESULT to TEE buffer...")
     try:
+        from gateway.utils.logger import log_event
+        
         log_entry = {
             "event_type": event.event_type.value,  # Convert enum to string
             "actor_hotkey": event.actor_hotkey,
             "nonce": event.nonce,
-            "ts": event.ts.isoformat(),
+            "ts": validation_timestamp,
             "payload_hash": event.payload_hash,
             "build_id": event.build_id,
             "signature": event.signature,
             "payload": {
                 "lead_id": event.payload.lead_id,
+                "epoch_id": epoch_id,
                 "decision_hash": event.payload.decision_hash,
                 "rep_score_hash": event.payload.rep_score_hash,
-                "evidence_hash": event.payload.evidence_hash
-                # NOTE: evidence_blob is NOT included here
+                "evidence_hash": event.payload.evidence_hash,
+                "evidence_id": evidence_id,
+                "v_score": v_score
+                # NOTE: evidence_blob is NOT included here (kept private)
             }
         }
         
-        log_result = supabase.table("transparency_log").insert(log_entry).execute()
+        # Write to TEE buffer (hardware-protected)
+        result = await log_event(log_entry)
         
-        print(f"✅ VALIDATION_RESULT logged to transparency_log")
+        validation_tee_seq = result.get("sequence")
+        print(f"✅ Step 10 complete: VALIDATION_RESULT buffered in TEE: seq={validation_tee_seq}")
         print(f"   ⚠️  Only hashes logged (evidence_blob kept private)")
     
     except Exception as e:
-        print(f"❌ Error logging to transparency_log: {e}")
-        # Continue anyway - evidence is already stored
+        print(f"❌ Error logging VALIDATION_RESULT: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"   ⚠️  CONTINUING despite logging error - validation is already stored")
     
     # ========================================
-    # Step 11: Generate Merkle proof (placeholder)
+    # Step 11: Return Response
     # ========================================
-    # In production, compute proof after batch of validations
-    # For now, return placeholder
-    merkle_proof = []  # Will be computed in batch later
+    # NOTE (Phase 4): Receipts deprecated - TEE attestation provides trust
+    # - Event is buffered in TEE (hardware-protected memory)
+    # - Will be included in next hourly Arweave checkpoint (signed by TEE)
+    # - Verify gateway code integrity: GET /attest
+    validation_timestamp = datetime.now(tz.utc).isoformat()
     
-    # ========================================
-    # Step 12: Return response
-    # ========================================
     return {
         "status": "recorded",
         "evidence_id": evidence_id,
         "lead_id": event.payload.lead_id,
         "epoch_id": epoch_id,
         "v_score": v_score,
-        "merkle_proof": merkle_proof,
-        "message": "Validation committed. Reveal after epoch closes."
+        "timestamp": validation_timestamp,
+        "message": "Validation committed. Reveal after epoch closes. Proof available in next hourly Arweave checkpoint."
     }
 
 

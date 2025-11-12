@@ -110,8 +110,6 @@ gateway/secrets/
 *.jwk
 *_keyfile.json
 
-# Gateway test files (moved to gateway/tests/)
-gateway/tests/
 
 # Gateway deployment files (contain infrastructure details)
 docker-compose.gateway.yml

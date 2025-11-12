@@ -39,7 +39,7 @@ async def get_epoch_leads(
     1. Verify signature over "GET_EPOCH_LEADS:{epoch_id}:{validator_hotkey}"
     2. Verify validator is registered on subnet
     3. Verify epoch is active (blocks 0-360)
-    4. Query QUEUE_ROOT from transparency_log
+    4. Query EPOCH_INITIALIZATION from transparency_log
     5. Get validator set from metagraph
     6. Compute deterministic assignment (first 50 lead_ids)
     7. Fetch full lead data from leads_private
@@ -70,7 +70,7 @@ async def get_epoch_leads(
     Raises:
         403: Invalid signature or not a registered validator
         400: Epoch not active
-        404: QUEUE_ROOT not found for epoch
+        404: EPOCH_INITIALIZATION not found for epoch
     
     Example:
         GET /epoch/100/leads?validator_hotkey=5GNJqR...&signature=0xabc123...
@@ -110,11 +110,11 @@ async def get_epoch_leads(
                 detail=f"Epoch {epoch_id} is not active. Current epoch: {current_epoch}"
             )
     
-    # Step 4: Query QUEUE_ROOT from transparency_log
+    # Step 4: Query EPOCH_INITIALIZATION from transparency_log
     try:
         result = supabase.table("transparency_log") \
             .select("payload") \
-            .eq("event_type", "QUEUE_ROOT") \
+            .eq("event_type", "EPOCH_INITIALIZATION") \
             .eq("payload->>epoch_id", str(epoch_id)) \
             .order("id", desc=True) \
             .limit(1) \
@@ -123,19 +123,19 @@ async def get_epoch_leads(
         if not result.data:
             raise HTTPException(
                 status_code=404,
-                detail=f"QUEUE_ROOT not found for epoch {epoch_id}. Epoch may not have started yet."
+                detail=f"EPOCH_INITIALIZATION not found for epoch {epoch_id}. Epoch may not have started yet."
             )
         
-        queue_root_event = result.data[0]
-        queue_root = queue_root_event["payload"]["queue_root"]
-        total_pending = queue_root_event["payload"].get("lead_count", 0)
+        epoch_init_event = result.data[0]["payload"]
+        queue_root = epoch_init_event["queue_state"]["queue_merkle_root"]
+        total_pending = epoch_init_event["queue_state"]["pending_lead_count"]
     
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to query QUEUE_ROOT: {str(e)}"
+            detail=f"Failed to query EPOCH_INITIALIZATION: {str(e)}"
         )
     
     # Step 5: Get validator set

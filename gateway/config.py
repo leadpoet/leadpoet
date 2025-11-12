@@ -8,10 +8,14 @@ Environment variables should be set in .env file in project root.
 """
 
 import os
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file (if dotenv available)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not installed - environment variables must be set directly
+    pass
 
 # ============================================================
 # Gateway Build Info (for reproducible builds)
@@ -26,10 +30,13 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")  # For client requests (not used by gateway)
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # Gateway uses this
 
+# Warn if Supabase credentials missing (but don't block import for testing)
 if not SUPABASE_URL:
-    raise ValueError("SUPABASE_URL environment variable is required")
+    import warnings
+    warnings.warn("SUPABASE_URL environment variable not set - Supabase mirroring will fail")
 if not SUPABASE_SERVICE_ROLE_KEY:
-    raise ValueError("SUPABASE_SERVICE_ROLE_KEY environment variable is required")
+    import warnings
+    warnings.warn("SUPABASE_SERVICE_ROLE_KEY environment variable not set - Supabase mirroring will fail")
 
 # ============================================================
 # AWS S3 (Primary Storage)
@@ -40,9 +47,11 @@ AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET", "leadpoet-leads-primary")
 AWS_S3_REGION = os.getenv("AWS_S3_REGION", "us-east-2")
 
 if not AWS_ACCESS_KEY_ID:
-    raise ValueError("AWS_ACCESS_KEY_ID environment variable is required")
+    import warnings
+    warnings.warn("AWS_ACCESS_KEY_ID environment variable not set - S3 storage will fail")
 if not AWS_SECRET_ACCESS_KEY:
-    raise ValueError("AWS_SECRET_ACCESS_KEY environment variable is required")
+    import warnings
+    warnings.warn("AWS_SECRET_ACCESS_KEY environment variable not set - S3 storage will fail")
 
 # ============================================================
 # MinIO (Self-Hosted Mirror)
@@ -53,9 +62,11 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "leadpoet-leads")
 
 if not MINIO_ACCESS_KEY:
-    raise ValueError("MINIO_ACCESS_KEY environment variable is required")
+    import warnings
+    warnings.warn("MINIO_ACCESS_KEY environment variable not set - MinIO storage will fail")
 if not MINIO_SECRET_KEY:
-    raise ValueError("MINIO_SECRET_KEY environment variable is required")
+    import warnings
+    warnings.warn("MINIO_SECRET_KEY environment variable not set - MinIO storage will fail")
 
 # ============================================================
 # Bittensor Network

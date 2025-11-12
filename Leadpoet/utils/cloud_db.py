@@ -1689,7 +1689,7 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
         result = response.json()
         print(f"✅ Gateway verified lead: {result['lead_id'][:8]}...")
         print(f"   Storage backends: {result['storage_backends']}")
-        print(f"   Submission time: {result['submission_ts']}")
+        print(f"   Submission time: {result['submission_timestamp']}")
         return result
         
     except Exception as e:

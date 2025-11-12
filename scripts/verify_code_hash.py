@@ -108,29 +108,73 @@ def clone_repo(github_url: str, commit: str, target_dir: Path) -> bool:
 
 def compute_code_hash(repo_dir: Path) -> Optional[str]:
     """
-    Compute SHA256 hash of tee_service.py (same logic as enclave).
+    Compute SHA256 hash of ALL gateway code (same logic as enclave).
     
-    This must match exactly how the enclave computes code_hash.
+    This must match EXACTLY how the enclave computes code_hash.
+    Both implementations hash the same files in the same order.
     """
     
     print("\n🔍 Computing code hash from GitHub code...")
     
-    tee_service_path = repo_dir / "gateway" / "tee" / "tee_service.py"
+    gateway_root = repo_dir / "gateway"
     
-    if not tee_service_path.exists():
-        print(f"   ❌ File not found: {tee_service_path}")
+    if not gateway_root.exists():
+        print(f"   ❌ Directory not found: {gateway_root}")
         return None
     
     try:
-        with open(tee_service_path, 'rb') as f:
-            code_bytes = f.read()
-            code_hash = hashlib.sha256(code_bytes).hexdigest()
+        # Collect all .py files to hash (EXACT same logic as TEE)
+        files_to_hash = []
         
-        print(f"   ✅ Code hash computed: {code_hash[:32]}...{code_hash[-32:]}")
+        # Same directories as TEE
+        include_dirs = [
+            gateway_root / "api",        # API endpoints
+            gateway_root / "tasks",      # Epoch lifecycle, hourly batching
+            gateway_root / "utils",      # Consensus, logger, signatures, registry
+            gateway_root / "models",     # Pydantic models
+            gateway_root / "tee",        # TEE service
+        ]
+        
+        # Root-level files
+        files_to_hash.append(gateway_root / "main.py")
+        files_to_hash.append(gateway_root / "config.py")
+        
+        # Collect all .py files from directories
+        for dir_path in include_dirs:
+            if dir_path.exists():
+                for py_file in sorted(dir_path.glob("**/*.py")):
+                    if "__pycache__" not in str(py_file) and not py_file.name.endswith(".pyc"):
+                        files_to_hash.append(py_file)
+        
+        # Sort for determinism (must match TEE exactly)
+        files_to_hash = sorted(set(files_to_hash))
+        
+        print(f"   📝 Hashing {len(files_to_hash)} files...")
+        
+        # Hash all files (EXACT same algorithm as TEE)
+        hasher = hashlib.sha256()
+        for file_path in files_to_hash:
+            if file_path.exists():
+                # Include filename (same as TEE)
+                hasher.update(str(file_path.name).encode('utf-8'))
+                
+                # Include file content
+                hasher.update(file_path.read_bytes())
+                
+                # Show first few files for debugging
+                if len(files_to_hash) <= 20 or files_to_hash.index(file_path) < 3:
+                    print(f"      ✓ {file_path.relative_to(gateway_root)}")
+        
+        code_hash = hasher.hexdigest()
+        
+        print(f"   ✅ Code hash computed from {len(files_to_hash)} files")
+        print(f"      {code_hash[:32]}...{code_hash[-32:]}")
         return code_hash
     
     except Exception as e:
         print(f"   ❌ Failed to compute hash: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -238,18 +282,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Verify against main branch
-  python verify_code_hash.py http://54.80.97.12:8000 \\
-    --github-url https://github.com/leadpoet/leadpoet \\
-    --commit main
+  # Verify against main branch (simplest)
+  python verify_code_hash.py http://54.80.97.12:8000
   
   # Verify against specific commit
-  python verify_code_hash.py http://gateway.leadpoet.ai \\
-    --github-url https://github.com/leadpoet/leadpoet \\
-    --commit abc123def456
+  python verify_code_hash.py http://54.80.97.12:8000 --commit abc123def456
+  
+  # Verify against different repo
+  python verify_code_hash.py http://54.80.97.12:8000 \\
+    --github-url https://github.com/different/repo \\
+    --commit main
 
 Note: This verifies the application code (tee_service.py) hash.
       It does NOT verify PCR0 (Docker image), which requires AWS Nitro CLI on Linux.
+      Other files (merkle.py, nsm_lib.py) are protected by PCR0 (Docker image hash).
 """
     )
     
@@ -259,8 +305,8 @@ Note: This verifies the application code (tee_service.py) hash.
     )
     parser.add_argument(
         "--github-url",
-        required=True,
-        help="GitHub repository URL"
+        default="https://github.com/leadpoet/leadpoet",
+        help="GitHub repository URL (default: https://github.com/leadpoet/leadpoet)"
     )
     parser.add_argument(
         "--commit",

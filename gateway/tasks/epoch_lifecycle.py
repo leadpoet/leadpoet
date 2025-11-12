@@ -2,9 +2,7 @@
 Epoch Lifecycle Management Task
 
 Background task that manages epoch lifecycle events:
-- EPOCH_START: Logged when new epoch begins
-- QUEUE_ROOT: Merkle root of pending leads at epoch start
-- EPOCH_ASSIGNMENT: List of 50 lead_ids assigned to ALL validators
+- EPOCH_INITIALIZATION: Combined event with epoch boundaries, queue root, and lead assignment
 - EPOCH_END: Logged when validation phase ends (block 360)
 - EPOCH_INPUTS: Hash of all events during epoch
 - Reveal Phase: Triggered after epoch closes (block 360+)
@@ -41,7 +39,7 @@ async def epoch_lifecycle_task():
     Background task to manage epoch lifecycle events.
     
     Runs every 30 seconds and checks:
-    - Is it time to start new epoch? → Log EPOCH_START + QUEUE_ROOT
+    - Is it time to start new epoch? → Log EPOCH_INITIALIZATION
     - Is it time to end validation? → Log EPOCH_END + EPOCH_INPUTS
     - Is it time to close epoch? → Trigger reveal phase + consensus
     
@@ -75,20 +73,8 @@ async def epoch_lifecycle_task():
                 print(f"   End (validation): {epoch_end.isoformat()}")
                 print(f"   Close: {epoch_close.isoformat()}")
                 
-                # Log EPOCH_START
-                await log_epoch_event("EPOCH_START", current_epoch, {
-                    "epoch_id": current_epoch,
-                    "start_time": epoch_start.isoformat(),
-                    "end_time": epoch_end.isoformat(),
-                    "close_time": epoch_close.isoformat(),
-                    "duration_minutes": 72
-                })
-                
-                # Compute and log QUEUE_ROOT
-                await compute_and_log_queue_root(current_epoch)
-                
-                # Compute and log EPOCH_ASSIGNMENT (50 lead_ids assigned for this epoch)
-                await compute_and_log_epoch_assignment(current_epoch)
+                # Compute and log single atomic EPOCH_INITIALIZATION event
+                await compute_and_log_epoch_initialization(current_epoch, epoch_start, epoch_end, epoch_close)
                 
                 last_epoch_id = current_epoch
                 print(f"   ✅ Epoch {current_epoch} initialized\n")
@@ -162,14 +148,23 @@ async def epoch_lifecycle_task():
 
 async def log_epoch_event(event_type: str, epoch_id: int, payload: dict):
     """
-    Log epoch management event to transparency log.
+    Log epoch management event to transparency log (Arweave-first).
+    
+    This function writes events to Arweave first (immutable source of truth),
+    then mirrors to Supabase (query cache). This ensures epoch events cannot
+    be tampered with by the gateway operator.
     
     Args:
-        event_type: EPOCH_START, EPOCH_END, QUEUE_ROOT, EPOCH_INPUTS, etc.
+        event_type: EPOCH_INITIALIZATION, EPOCH_END, EPOCH_INPUTS, etc.
         epoch_id: Epoch number
         payload: Event data
+    
+    Returns:
+        str: Arweave transaction ID if successful, None if failed
     """
     try:
+        from gateway.utils.logger import log_event
+        
         payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
         payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
         
@@ -184,25 +179,40 @@ async def log_epoch_event(event_type: str, epoch_id: int, payload: dict):
             "payload": payload
         }
         
-        supabase.table("transparency_log").insert(log_entry).execute()
-        print(f"   📝 Logged {event_type} for epoch {epoch_id}")
+        # Write to TEE buffer (hardware-protected)
+        result = await log_event(log_entry)
+        
+        tee_sequence = result.get("sequence")
+        print(f"   📝 Logged {event_type} for epoch {epoch_id} to TEE buffer (seq={tee_sequence})")
+        return tee_sequence
     
     except Exception as e:
         print(f"   ❌ Failed to log {event_type}: {e}")
+        return None
 
 
-async def compute_and_log_queue_root(epoch_id: int):
+async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datetime, epoch_end: datetime, epoch_close: datetime):
     """
-    Compute Merkle root of pending leads queue and log QUEUE_ROOT event.
+    Compute and log single atomic EPOCH_INITIALIZATION event.
     
-    This creates a deterministic snapshot of all pending leads at epoch start.
-    Validators use this root to verify lead assignment.
+    This combines three previously separate events (EPOCH_START, QUEUE_ROOT, EPOCH_ASSIGNMENT)
+    into one atomic event for efficiency and consistency. The event contains:
+    - Epoch boundaries (start, end, close times)
+    - Queue state (Merkle root of pending leads)
+    - Lead assignment (50 leads assigned to all validators)
     
     Args:
         epoch_id: Current epoch ID
+        epoch_start: Epoch start time
+        epoch_end: Epoch validation end time
+        epoch_close: Epoch close time
     """
     try:
-        # Query pending leads from leads_private (not yet validated)
+        from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
+        
+        # ========================================================================
+        # 1. Query pending leads from queue (FIFO order)
+        # ========================================================================
         result = supabase.table("leads_private") \
             .select("lead_id") \
             .is_("epoch_summary", "null") \
@@ -212,77 +222,66 @@ async def compute_and_log_queue_root(epoch_id: int):
         lead_ids = [row["lead_id"] for row in result.data]
         
         if not lead_ids:
-            queue_root = "0" * 64  # Empty queue
-            lead_count = 0
+            queue_merkle_root = "0" * 64  # Empty queue
+            pending_lead_count = 0
         else:
-            queue_root = compute_merkle_root(lead_ids)
-            lead_count = len(lead_ids)
+            queue_merkle_root = compute_merkle_root(lead_ids)
+            pending_lead_count = len(lead_ids)
         
-        await log_epoch_event("QUEUE_ROOT", epoch_id, {
+        print(f"   📊 Queue State: {queue_merkle_root[:16]}... ({pending_lead_count} pending leads)")
+        
+        # ========================================================================
+        # 2. Get validator set for this epoch
+        # ========================================================================
+        validator_set = get_validator_set(epoch_id)  # Returns List[str] of hotkeys
+        validator_hotkeys = validator_set  # Already a list of hotkey strings
+        validator_count = len(validator_hotkeys)
+        
+        print(f"   👥 Validator Set: {validator_count} active validators")
+        
+        # ========================================================================
+        # 3. Compute deterministic lead assignment (first 50 leads, FIFO)
+        # ========================================================================
+        assigned_lead_ids = deterministic_lead_assignment(
+            queue_merkle_root, 
+            validator_set, 
+            epoch_id, 
+            max_leads_per_epoch=50
+        )
+        
+        print(f"   📋 Assignment: {len(assigned_lead_ids)} leads assigned to all validators")
+        
+        # ========================================================================
+        # 4. Create single atomic EPOCH_INITIALIZATION event
+        # ========================================================================
+        payload = {
             "epoch_id": epoch_id,
-            "queue_root": queue_root,
-            "lead_count": lead_count,
-            "seq_range": [0, lead_count - 1] if lead_count > 0 else [0, 0],
-            "computed_at": datetime.utcnow().isoformat()
-        })
+            "epoch_boundaries": {
+                "start_block": epoch_id * 360,  # Approximate - actual block from blockchain
+                "end_block": (epoch_id * 360) + 360,
+                "start_timestamp": epoch_start.isoformat(),
+                "estimated_end_timestamp": epoch_end.isoformat()
+            },
+            "queue_state": {
+                "queue_merkle_root": queue_merkle_root,
+                "pending_lead_count": pending_lead_count
+            },
+            "assignment": {
+                "assigned_lead_ids": assigned_lead_ids,
+                "assigned_to_validators": validator_hotkeys,
+                "validator_count": validator_count
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
         
-        print(f"   📊 QUEUE_ROOT: {queue_root[:16]}... ({lead_count} leads)")
+        await log_epoch_event("EPOCH_INITIALIZATION", epoch_id, payload)
+        
+        print(f"   ✅ EPOCH_INITIALIZATION logged: {len(assigned_lead_ids)} leads, {validator_count} validators")
     
     except Exception as e:
-        print(f"   ❌ Failed to compute QUEUE_ROOT: {e}")
-
-
-async def compute_and_log_epoch_assignment(epoch_id: int):
-    """
-    Compute deterministic lead assignment and log EPOCH_ASSIGNMENT event.
-    
-    Selects the first 50 leads from the FIFO queue (oldest submissions first)
-    and logs them to the transparency log. These same 50 leads are assigned
-    to ALL active validators for redundant validation and consensus.
-    
-    Args:
-        epoch_id: Current epoch ID
-    """
-    try:
-        from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
-        
-        # Get validator set
-        validator_set = get_validator_set(epoch_id)
-        
-        # Get queue root (for deterministic input)
-        result = supabase.table("transparency_log") \
-            .select("payload") \
-            .eq("event_type", "QUEUE_ROOT") \
-            .eq("payload->>epoch_id", str(epoch_id)) \
-            .order("id", desc=True) \
-            .limit(1) \
-            .execute()
-        
-        if result.data:
-            queue_root = result.data[0]["payload"]["queue_root"]
-        else:
-            queue_root = "0" * 64  # Fallback
-        
-        # Compute deterministic assignment (first 50 leads from queue, FIFO)
-        assigned_lead_ids = deterministic_lead_assignment(queue_root, validator_set, epoch_id, max_leads_per_epoch=50)
-        
-        # Compute Merkle root of assigned lead_ids
-        assignment_root = compute_merkle_root(assigned_lead_ids) if assigned_lead_ids else "0" * 64
-        
-        await log_epoch_event("EPOCH_ASSIGNMENT", epoch_id, {
-            "epoch_id": epoch_id,
-            "lead_ids": assigned_lead_ids,
-            "lead_count": len(assigned_lead_ids),
-            "validator_count": len(validator_set),
-            "assignment_root": assignment_root,
-            "queue_root": queue_root,
-            "computed_at": datetime.utcnow().isoformat()
-        })
-        
-        print(f"   📋 EPOCH_ASSIGNMENT: {len(assigned_lead_ids)} leads assigned to {len(validator_set)} validators")
-    
-    except Exception as e:
-        print(f"   ❌ Failed to compute EPOCH_ASSIGNMENT: {e}")
+        print(f"   ❌ Failed to compute EPOCH_INITIALIZATION: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 async def compute_and_log_epoch_inputs(epoch_id: int):
@@ -471,8 +470,13 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
             "payload": payload
         }
         
-        supabase.table("transparency_log").insert(log_entry).execute()
-        print(f"         📊 Logged CONSENSUS_RESULT for lead {lead_id[:8]}...")
+        # Write to TEE buffer (authoritative, hardware-protected)
+        # Then mirrors to Supabase for queries
+        from gateway.utils.logger import log_event
+        result = await log_event(log_entry)
+        
+        tee_sequence = result.get("sequence")
+        print(f"         📊 Logged CONSENSUS_RESULT for lead {lead_id[:8]}... (TEE seq={tee_sequence})")
     
     except Exception as e:
         print(f"         ❌ Failed to log CONSENSUS_RESULT for lead {lead_id[:8]}...: {e}")

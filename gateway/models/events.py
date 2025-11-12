@@ -27,9 +27,7 @@ class EventType(str, Enum):
     EPOCH_MANIFEST = "EPOCH_MANIFEST"
     
     # Epoch management
-    EPOCH_START = "EPOCH_START"
-    QUEUE_ROOT = "QUEUE_ROOT"
-    EPOCH_ASSIGNMENT = "EPOCH_ASSIGNMENT"  # List of 50 lead_ids assigned for epoch
+    EPOCH_INITIALIZATION = "EPOCH_INITIALIZATION"  # Combined: boundaries + queue + assignment
     EPOCH_INPUTS = "EPOCH_INPUTS"
     EPOCH_END = "EPOCH_END"
     WEIGHT_COMMIT = "WEIGHT_COMMIT"
@@ -61,6 +59,7 @@ class SubmissionRequestPayload(BaseModel):
     
     lead_id: str = Field(..., description="UUID")
     lead_blob_hash: str = Field(..., description="SHA256 of lead_blob")
+    email_hash: str = Field(..., description="SHA256 of email field - for duplicate detection")
     commitment: str = Field(..., description="SHA256(salt || lead_blob)")
 
 
@@ -76,6 +75,7 @@ class StorageProofPayload(BaseModel):
     
     lead_id: str
     lead_blob_hash: str
+    email_hash: str = Field(..., description="SHA256 of email field - for duplicate detection")
     mirror: str = Field(..., description="s3 or minio")
     verified: bool
 

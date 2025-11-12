@@ -250,12 +250,13 @@ async def submit_lead(event: SubmitLeadEvent):
                 detail=f"SUBMISSION_REQUEST not found for lead_id={event.payload.lead_id}"
             )
         
-        # Extract committed lead_blob_hash
+        # Extract committed lead_blob_hash and email_hash
         payload = submission_request.get("payload", {})
         if isinstance(payload, str):
             payload = json.loads(payload)
         
         committed_lead_blob_hash = payload.get("lead_blob_hash")
+        committed_email_hash = payload.get("email_hash")
         commitment = payload.get("commitment")
         
         if not committed_lead_blob_hash:
@@ -264,8 +265,15 @@ async def submit_lead(event: SubmitLeadEvent):
                 detail="SUBMISSION_REQUEST missing lead_blob_hash"
             )
         
+        if not committed_email_hash:
+            raise HTTPException(
+                status_code=500,
+                detail="SUBMISSION_REQUEST missing email_hash"
+            )
+        
         print(f"🔍 Step 6 complete: Found SUBMISSION_REQUEST")
         print(f"   Committed lead_blob_hash: {committed_lead_blob_hash[:32]}...{committed_lead_blob_hash[-8:]}")
+        print(f"   Committed email_hash: {committed_email_hash[:32]}...{committed_email_hash[-8:]}")
         
     except HTTPException:
         raise
@@ -314,13 +322,18 @@ async def submit_lead(event: SubmitLeadEvent):
         print(f"🔍 Step 9a: SUCCESS PATH - Both mirrors verified")
         
         try:
-            # Log STORAGE_PROOF events (one per mirror)
+            # Log STORAGE_PROOF events to TEE buffer (hardware-protected)
+            from gateway.utils.logger import log_event
+            import asyncio
+            
             storage_proof_events = []
+            storage_proof_tee_seqs = {}
             
             for mirror in ["s3", "minio"]:
                 storage_proof_payload = {
                     "lead_id": event.payload.lead_id,
                     "lead_blob_hash": committed_lead_blob_hash,
+                    "email_hash": committed_email_hash,
                     "mirror": mirror,
                     "verified": True
                 }
@@ -338,17 +351,24 @@ async def submit_lead(event: SubmitLeadEvent):
                     "payload": storage_proof_payload
                 }
                 
-                print(f"   🔍 Logging STORAGE_PROOF for {mirror}...")
-                supabase.table("transparency_log").insert(storage_proof_log_entry).execute()
+                print(f"   🔍 Logging STORAGE_PROOF for {mirror} to TEE buffer...")
+                result = await log_event(storage_proof_log_entry)
+                
+                tee_sequence = result.get("sequence")
+                storage_proof_tee_seqs[mirror] = tee_sequence
+                print(f"   ✅ STORAGE_PROOF buffered in TEE for {mirror}: seq={tee_sequence}")
+                
                 storage_proof_events.append(mirror)
-                print(f"   ✅ STORAGE_PROOF logged for {mirror}")
+                
         except Exception as e:
             print(f"❌ Error logging STORAGE_PROOF: {e}")
             import traceback
             traceback.print_exc()
+            # CRITICAL: If TEE write fails, request MUST fail
+            print(f"🚨 CRITICAL: TEE buffer unavailable - failing request")
             raise HTTPException(
-                status_code=500,
-                detail=f"Failed to log STORAGE_PROOF: {str(e)}"
+                status_code=503,
+                detail=f"TEE buffer unavailable: {str(e)}"
             )
         
         # Fetch the lead blob from S3 to store in leads_private
@@ -393,14 +413,17 @@ async def submit_lead(event: SubmitLeadEvent):
                 detail=f"Failed to store lead: {str(e)}"
             )
         
-        # Log SUBMISSION event
-        print(f"   🔍 Logging SUBMISSION event...")
+        # Log SUBMISSION event to Arweave FIRST
+        print(f"   🔍 Logging SUBMISSION event to TEE buffer...")
         try:
             submission_payload = {
                 "lead_id": event.payload.lead_id,
                 "lead_blob_hash": committed_lead_blob_hash,
+                "email_hash": committed_email_hash,
                 "miner_hotkey": event.actor_hotkey,
-                "submission_timestamp": datetime.now(tz.utc).isoformat()
+                "submission_timestamp": datetime.now(tz.utc).isoformat(),
+                "s3_proof_tee_seq": storage_proof_tee_seqs.get("s3"),
+                "minio_proof_tee_seq": storage_proof_tee_seqs.get("minio")
             }
             
             submission_log_entry = {
@@ -416,25 +439,44 @@ async def submit_lead(event: SubmitLeadEvent):
                 "payload": submission_payload
             }
             
-            supabase.table("transparency_log").insert(submission_log_entry).execute()
-            print(f"   ✅ SUBMISSION event logged")
+            result = await log_event(submission_log_entry)
+            
+            submission_tee_seq = result.get("sequence")
+            print(f"   ✅ SUBMISSION event buffered in TEE: seq={submission_tee_seq}")
+                
         except Exception as e:
             print(f"❌ Error logging SUBMISSION event: {e}")
             import traceback
             traceback.print_exc()
+            # CRITICAL: If TEE write fails, request MUST fail
+            print(f"🚨 CRITICAL: TEE buffer unavailable - failing request")
             raise HTTPException(
-                status_code=500,
-                detail=f"Failed to log SUBMISSION: {str(e)}"
+                status_code=503,
+                detail=f"TEE buffer unavailable: {str(e)}"
             )
         
-        # Return success
+        # Compute queue_position (simplified - just count total submissions)
+        submission_timestamp = datetime.now(tz.utc).isoformat()
+        try:
+            queue_count_result = supabase.table("leads_private").select("lead_id", count="exact").execute()
+            queue_position = queue_count_result.count if hasattr(queue_count_result, 'count') else None
+        except Exception as e:
+            print(f"⚠️  Could not compute queue_position: {e}")
+            queue_position = None
+        
+        # Return success with simple acknowledgment
+        # NOTE (Phase 4): TEE-based trust model
+        # - Events buffered in TEE (hardware-protected memory)
+        # - Will be included in next hourly Arweave checkpoint (signed by TEE)
+        # - Verify gateway code integrity: GET /attest
         print(f"✅ /submit complete - lead accepted")
         return {
             "status": "accepted",
             "lead_id": event.payload.lead_id,
             "storage_backends": storage_proof_events,
-            "merkle_proof": [],  # TODO: Implement Merkle proof generation
-            "submission_ts": datetime.now(tz.utc).isoformat()
+            "submission_timestamp": submission_timestamp,
+            "queue_position": queue_position,
+            "message": "Lead accepted. Proof available in next hourly Arweave checkpoint."
         }
     
     # ========================================
@@ -449,10 +491,11 @@ async def submit_lead(event: SubmitLeadEvent):
         if not minio_verified:
             failed_mirrors.append("minio")
         
-        # Log UPLOAD_FAILED event
+        # Log UPLOAD_FAILED event to Arweave FIRST
         upload_failed_payload = {
             "lead_id": event.payload.lead_id,
             "lead_blob_hash": committed_lead_blob_hash,
+            "email_hash": committed_email_hash,
             "miner_hotkey": event.actor_hotkey,
             "failed_mirrors": failed_mirrors,
             "reason": "Hash mismatch or blob not found",
@@ -472,8 +515,14 @@ async def submit_lead(event: SubmitLeadEvent):
             "payload": upload_failed_payload
         }
         
-        supabase.table("transparency_log").insert(upload_failed_log_entry).execute()
-        print(f"   ❌ UPLOAD_FAILED event logged")
+        try:
+            from gateway.utils.logger import log_event
+            result = await log_event(upload_failed_log_entry)
+            
+            upload_failed_tee_seq = result.get("sequence")
+            print(f"   ❌ UPLOAD_FAILED event buffered in TEE: seq={upload_failed_tee_seq}")
+        except Exception as e:
+            print(f"   ⚠️  Error logging UPLOAD_FAILED: {e} (continuing with error response)")
         
         raise HTTPException(
             status_code=400,

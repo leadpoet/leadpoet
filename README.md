@@ -174,16 +174,23 @@ export MYEMAILVERIFIER_API_KEY="your_mev_key"        # Email validation
 ## Installation
 
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/leadpoet/Leadpoet.git
 cd Leadpoet
 
-# Install dependencies
+# 2. Create virtual environment (recommended)
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# 3. Install the package (includes all dependencies)
+pip install --upgrade pip
 pip install -e .
 
-# Verify installation
-python -c "import Leadpoet; print('Leadpoet installed successfully')"
+# 4. Verify installation
+python -c "import Leadpoet; print('✅ Leadpoet installed successfully')"
 ```
+
+**Note**: `pip install -e .` installs both the Leadpoet package AND all dependencies from `setup.py`. This is all you need!
 
 ## For Miners
 

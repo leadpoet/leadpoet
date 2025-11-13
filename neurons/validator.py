@@ -1409,19 +1409,28 @@ class Validator(BaseValidatorNeuron):
                 self._last_processed_epoch = current_epoch - 1
             
             if current_epoch <= self._last_processed_epoch:
+                # Already processed this epoch - no need to spam logs
                 time.sleep(5)
                 return
+            
+            bt.logging.info(f"\n{'='*80}")
+            bt.logging.info(f"🔍 EPOCH {current_epoch}: Starting validation workflow")
+            bt.logging.info(f"{'='*80}")
             
             # Fetch assigned leads from gateway
             from Leadpoet.utils.cloud_db import gateway_get_epoch_leads, gateway_submit_validation, gateway_submit_reveal
             
+            bt.logging.info(f"📡 Fetching leads from gateway for epoch {current_epoch}...")
+            
             leads = gateway_get_epoch_leads(self.wallet, current_epoch)
             if not leads:
-                bt.logging.info(f"No leads assigned for epoch {current_epoch}, waiting...")
+                bt.logging.info(f"⏳ No leads assigned for epoch {current_epoch}, waiting...")
                 time.sleep(10)
                 return
             
-            bt.logging.info(f"🔍 Processing {len(leads)} leads for epoch {current_epoch}")
+            bt.logging.info(f"✅ Received {len(leads)} leads from gateway")
+            bt.logging.info(f"🔍 Running automated checks on each lead...")
+            bt.logging.info("")
             
             # Validate each lead using automated_checks
             import os
@@ -1432,8 +1441,14 @@ class Validator(BaseValidatorNeuron):
             # Generate salt for this validation batch
             salt = os.urandom(32)
             
-            for lead in leads:
+            for idx, lead in enumerate(leads, 1):
                 try:
+                    email = lead.get("email", "unknown@example.com")
+                    company = lead.get("Company", "Unknown")
+                    
+                    bt.logging.info(f"{'─'*80}")
+                    bt.logging.info(f"📋 Lead {idx}/{len(leads)}: {email} @ {company}")
+                    
                     # Run validation (uses existing automated_checks.py)
                     result = asyncio.run(self.validate_lead(lead))
                     
@@ -1470,30 +1485,54 @@ class Validator(BaseValidatorNeuron):
                         "salt": salt.hex()
                     })
                     
-                    bt.logging.info(f"   {'✅ Approved' if is_valid else '❌ Denied'}: {lead.get('email', 'Unknown')}")
+                    # Pretty output
+                    status_icon = "✅" if is_valid else "❌"
+                    decision_text = "APPROVED" if is_valid else "DENIED"
+                    bt.logging.info(f"   {status_icon} Decision: {decision_text}")
+                    bt.logging.info(f"   📊 Rep Score: {rep_score}/100")
+                    if not is_valid:
+                        reason_msg = rejection_reason.get("message", "Unknown reason")
+                        bt.logging.info(f"   ⚠️  Reason: {reason_msg}")
+                    bt.logging.info("")
                     
                 except Exception as e:
-                    bt.logging.error(f"Error validating lead {lead.get('lead_id', 'unknown')}: {e}")
+                    bt.logging.error(f"❌ Error validating lead {lead.get('lead_id', 'unknown')}: {e}")
+                    bt.logging.error("")
                     continue
             
             # Submit hashed validation results to gateway
+            bt.logging.info(f"{'='*80}")
+            bt.logging.info(f"📤 Submitting {len(validation_results)} hashed validations to gateway...")
+            
             if validation_results:
                 success = gateway_submit_validation(self.wallet, current_epoch, validation_results)
                 if success:
-                    bt.logging.info(f"✅ Submitted {len(validation_results)} validations for epoch {current_epoch}")
+                    bt.logging.info(f"✅ Successfully submitted {len(validation_results)} validations for epoch {current_epoch}")
+                    bt.logging.info(f"   (Hashed: decision, rep_score, rejection_reason, evidence)")
+                    bt.logging.info(f"   Gateway logged to TEE buffer → will be in next Arweave checkpoint")
                     
                     # Store local data for reveal later
                     if not hasattr(self, '_pending_reveals'):
                         self._pending_reveals = {}
                     self._pending_reveals[current_epoch] = local_validation_data
                 else:
-                    bt.logging.error(f"Failed to submit validations for epoch {current_epoch}")
+                    bt.logging.error(f"❌ Failed to submit validations for epoch {current_epoch}")
+                    bt.logging.error(f"   Will retry on next iteration")
+                    # Don't mark as processed - retry next time
+                    return
+            else:
+                bt.logging.warning(f"⚠️  No validation results to submit (all leads failed validation)")
             
             # Calculate and submit weights to Bittensor (Passage 2)
+            bt.logging.info(f"\n{'='*80}")
+            bt.logging.info(f"⚖️  Calculating and submitting weights to Bittensor...")
             self.calculate_and_submit_weights_local(local_validation_data)
             
             # Mark epoch as processed
             self._last_processed_epoch = current_epoch
+            bt.logging.info(f"\n{'='*80}")
+            bt.logging.info(f"✅ EPOCH {current_epoch}: Validation workflow complete")
+            bt.logging.info(f"{'='*80}\n")
             
             # Check for reveals from previous epochs
             self.process_pending_reveals()

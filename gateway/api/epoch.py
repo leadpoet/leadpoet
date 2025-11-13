@@ -154,13 +154,14 @@ async def get_epoch_leads(
             detail=f"Failed to get validator set: {str(e)}"
         )
     
-    # Step 6: Compute deterministic assignment (returns first 50 lead_ids)
+    # Step 6: Compute deterministic assignment (returns first MAX_LEADS_PER_EPOCH lead_ids)
     try:
+        from gateway.config import MAX_LEADS_PER_EPOCH
         assigned_lead_ids = deterministic_lead_assignment(
             queue_root=queue_root,
             validator_set=validator_set,
             epoch_id=epoch_id,
-            max_leads_per_epoch=50
+            max_leads_per_epoch=MAX_LEADS_PER_EPOCH
         )
     
     except Exception as e:

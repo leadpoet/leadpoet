@@ -115,16 +115,16 @@ def download_submission_events(epoch_id: Optional[int] = None) -> List[Dict]:
 
 def download_epoch_assignment(epoch_id: int) -> Optional[Dict]:
     """
-    Download EPOCH_ASSIGNMENT event to get list of 50 lead_ids for the epoch.
+    Download EPOCH_INITIALIZATION event to get list of 50 lead_ids for the epoch.
     
-    EPOCH_ASSIGNMENT events are logged at epoch start and contain the list of
-    lead_ids assigned for validation in that epoch.
+    EPOCH_INITIALIZATION events are logged at epoch start and contain the epoch
+    boundaries, queue state, and lead assignment in a single atomic event.
     
     Args:
         epoch_id: Epoch number
     
     Returns:
-        EPOCH_ASSIGNMENT payload dict, or None if not found
+        Assignment data dict (extracted from EPOCH_INITIALIZATION), or None if not found
     
     Example:
         >>> assignment = download_epoch_assignment(100)
@@ -134,22 +134,32 @@ def download_epoch_assignment(epoch_id: int) -> Optional[Dict]:
             'lead_ids': ['550e8400-...', '550e8400-...', ...],  # 50 lead_ids
             'lead_count': 50,
             'queue_root': 'abc123...',
-            'assignment_timestamp': '2024-11-04T10:00:00Z'
+            'validator_count': 9
         }
     """
     result = supabase.table("transparency_log") \
         .select("payload") \
-        .eq("event_type", "EPOCH_ASSIGNMENT") \
+        .eq("event_type", "EPOCH_INITIALIZATION") \
         .eq("payload->>epoch_id", str(epoch_id)) \
         .limit(1) \
         .execute()
     
     if not result.data:
-        print(f"⚠️  No EPOCH_ASSIGNMENT found for epoch {epoch_id}")
+        print(f"⚠️  No EPOCH_INITIALIZATION found for epoch {epoch_id}")
         return None
     
-    assignment = result.data[0]["payload"]
-    print(f"📥 Downloaded EPOCH_ASSIGNMENT for epoch {epoch_id}: {assignment['lead_count']} leads")
+    epoch_init = result.data[0]["payload"]
+    
+    # Extract assignment data from nested structure
+    assignment = {
+        "epoch_id": epoch_init["epoch_id"],
+        "lead_ids": epoch_init["assignment"]["assigned_lead_ids"],
+        "lead_count": len(epoch_init["assignment"]["assigned_lead_ids"]),
+        "queue_root": epoch_init["queue_state"]["queue_merkle_root"],
+        "validator_count": epoch_init["assignment"]["validator_count"]
+    }
+    
+    print(f"📥 Downloaded EPOCH_INITIALIZATION for epoch {epoch_id}: {assignment['lead_count']} leads assigned")
     
     return assignment
 
@@ -196,15 +206,16 @@ def download_epoch_events(epoch_id: int, event_types: Optional[List[str]] = None
 
 def download_queue_root(epoch_id: int) -> Optional[Dict]:
     """
-    Download QUEUE_ROOT event for given epoch.
+    Download queue state from EPOCH_INITIALIZATION event for given epoch.
     
-    QUEUE_ROOT events contain the Merkle root of the pending leads queue at epoch start.
+    EPOCH_INITIALIZATION events contain the Merkle root of the pending leads queue 
+    at epoch start in the queue_state nested field.
     
     Args:
         epoch_id: Epoch number
     
     Returns:
-        QUEUE_ROOT payload dict, or None if not found
+        Queue state dict (extracted from EPOCH_INITIALIZATION), or None if not found
     
     Example:
         >>> queue_root = download_queue_root(100)
@@ -212,25 +223,32 @@ def download_queue_root(epoch_id: int) -> Optional[Dict]:
         {
             'epoch_id': 100,
             'queue_root': 'abc123...',
-            'pending_count': 75,
-            'timestamp': '2024-11-04T10:00:00Z'
+            'pending_count': 75
         }
     """
     result = supabase.table("transparency_log") \
         .select("payload") \
-        .eq("event_type", "QUEUE_ROOT") \
+        .eq("event_type", "EPOCH_INITIALIZATION") \
         .eq("payload->>epoch_id", str(epoch_id)) \
         .limit(1) \
         .execute()
     
     if not result.data:
-        print(f"⚠️  No QUEUE_ROOT found for epoch {epoch_id}")
+        print(f"⚠️  No EPOCH_INITIALIZATION found for epoch {epoch_id}")
         return None
     
-    queue_root = result.data[0]["payload"]
-    print(f"📥 Downloaded QUEUE_ROOT for epoch {epoch_id}")
+    epoch_init = result.data[0]["payload"]
     
-    return queue_root
+    # Extract queue state from nested structure
+    queue_state = {
+        "epoch_id": epoch_init["epoch_id"],
+        "queue_root": epoch_init["queue_state"]["queue_merkle_root"],
+        "pending_count": epoch_init["queue_state"]["pending_lead_count"]
+    }
+    
+    print(f"📥 Downloaded queue state for epoch {epoch_id}")
+    
+    return queue_state
 
 
 # Convenience function to download all epoch data at once

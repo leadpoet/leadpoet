@@ -1730,7 +1730,7 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
                 "validator_hotkey": wallet.hotkey.ss58_address,
                 "signature": signature
             },
-            timeout=30
+            timeout=60  # Increased to 60s - gateway may need time to fetch lead data from Supabase
         )
         response.raise_for_status()
         

@@ -83,11 +83,13 @@ def deterministic_lead_assignment(
         return []
     
     # Step 1: Fetch pending leads from Private DB (ordered by created_ts ASCENDING = FIFO)
+    # OPTIMIZATION: Only fetch max_leads_per_epoch + 1 (we only need first N)
     try:
         result = supabase.table("leads_private") \
             .select("lead_id, created_ts") \
             .is_("epoch_summary", "null") \
             .order("created_ts") \
+            .limit(max_leads_per_epoch + 1) \
             .execute()
         
         pending_leads = [row["lead_id"] for row in result.data]

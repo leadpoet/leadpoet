@@ -397,12 +397,76 @@ async def submit_lead(event: SubmitLeadEvent):
                 detail=f"Failed to fetch lead blob: {str(e)}"
             )
         
+        # ========================================
+        # CRITICAL: Verify Miner Attestation
+        # ========================================
+        print(f"   🔍 Verifying miner attestation...")
+        try:
+            wallet_ss58 = lead_blob.get("wallet_ss58")
+            terms_version_hash = lead_blob.get("terms_version_hash")
+            
+            if not wallet_ss58 or not terms_version_hash:
+                print(f"❌ Attestation check failed: Missing wallet_ss58 or terms_version_hash in lead")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Lead missing required attestation fields (wallet_ss58, terms_version_hash)"
+                )
+            
+            # Query contributor_attestations table
+            attestation_result = supabase.table("contributor_attestations")\
+                .select("*")\
+                .eq("wallet_ss58", wallet_ss58)\
+                .eq("terms_version_hash", terms_version_hash)\
+                .eq("accepted", True)\
+                .execute()
+            
+            if not attestation_result.data or len(attestation_result.data) == 0:
+                print(f"❌ Attestation check failed: No valid attestation for wallet {wallet_ss58[:20]}...")
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Miner has not accepted terms (wallet: {wallet_ss58[:20]}...)"
+                )
+            
+            # Verify attestation metadata matches lead
+            attestation = attestation_result.data[0]
+            expected_lawful = lead_blob.get("lawful_collection")
+            expected_no_restricted = lead_blob.get("no_restricted_sources")
+            expected_licensed = lead_blob.get("license_granted")
+            
+            actual_lawful = attestation.get("lawful_collection")
+            actual_no_restricted = attestation.get("no_restricted_sources")
+            actual_licensed = attestation.get("license_granted")
+            
+            if (expected_lawful != actual_lawful or 
+                expected_no_restricted != actual_no_restricted or 
+                expected_licensed != actual_licensed):
+                print(f"❌ Attestation mismatch: Lead metadata doesn't match attestation record")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Lead attestation metadata doesn't match miner's attestation record"
+                )
+            
+            print(f"   ✅ Attestation verified for wallet {wallet_ss58[:20]}...")
+            
+        except HTTPException:
+            # Re-raise HTTP exceptions
+            raise
+        except Exception as e:
+            print(f"❌ Attestation verification error: {e}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Attestation verification failed: {str(e)}"
+            )
+        
         # Store lead in leads_private table
         print(f"   🔍 Storing lead in leads_private database...")
         try:
             lead_private_entry = {
                 "lead_id": event.payload.lead_id,
                 "lead_blob_hash": committed_lead_blob_hash,
+                "miner_hotkey": event.actor_hotkey,  # Store miner hotkey for fast queries
                 "salt": commitment,  # Store commitment as salt for now
                 "lead_blob": lead_blob,
                 "created_ts": datetime.now(tz.utc).isoformat()

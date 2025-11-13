@@ -1404,33 +1404,41 @@ class Validator(BaseValidatorNeuron):
             epoch_length = 360  # blocks per epoch
             current_epoch = current_block // epoch_length
             
+            # DEBUG: Always log epoch status
+            print(f"[DEBUG] Current epoch: {current_epoch}, Block: {current_block}, Last processed: {getattr(self, '_last_processed_epoch', 'None')}")
+            
             # Check if we've already processed this epoch
             if not hasattr(self, '_last_processed_epoch'):
                 self._last_processed_epoch = current_epoch - 1
+                print(f"[DEBUG] Initialized _last_processed_epoch to {self._last_processed_epoch}")
             
             if current_epoch <= self._last_processed_epoch:
                 # Already processed this epoch - no need to spam logs
+                print(f"[DEBUG] Skipping epoch {current_epoch} (already processed)")
                 time.sleep(5)
                 return
             
-            bt.logging.info(f"\n{'='*80}")
-            bt.logging.info(f"🔍 EPOCH {current_epoch}: Starting validation workflow")
-            bt.logging.info(f"{'='*80}")
+            print(f"[DEBUG] Processing epoch {current_epoch} for the FIRST TIME")
+            
+            print(f"\n{'='*80}")
+            print(f"🔍 EPOCH {current_epoch}: Starting validation workflow")
+            print(f"{'='*80}")
             
             # Fetch assigned leads from gateway
             from Leadpoet.utils.cloud_db import gateway_get_epoch_leads, gateway_submit_validation, gateway_submit_reveal
             
-            bt.logging.info(f"📡 Fetching leads from gateway for epoch {current_epoch}...")
+            print(f"📡 Fetching leads from gateway for epoch {current_epoch}...")
             
             leads = gateway_get_epoch_leads(self.wallet, current_epoch)
+            print(f"[DEBUG] Received {len(leads) if leads else 0} leads from gateway")
             if not leads:
-                bt.logging.info(f"⏳ No leads assigned for epoch {current_epoch}, waiting...")
+                print(f"⏳ No leads assigned for epoch {current_epoch}, waiting...")
                 time.sleep(10)
                 return
             
-            bt.logging.info(f"✅ Received {len(leads)} leads from gateway")
-            bt.logging.info(f"🔍 Running automated checks on each lead...")
-            bt.logging.info("")
+            print(f"✅ Received {len(leads)} leads from gateway")
+            print(f"🔍 Running automated checks on each lead...")
+            print("")
             
             # Validate each lead using automated_checks
             import os
@@ -1443,19 +1451,26 @@ class Validator(BaseValidatorNeuron):
             
             for idx, lead in enumerate(leads, 1):
                 try:
-                    email = lead.get("email", "unknown@example.com")
-                    company = lead.get("Company", "Unknown")
+                    # Extract lead data from lead_blob (gateway returns nested structure)
+                    lead_blob = lead.get("lead_blob", {})
+                    email = lead_blob.get("email", "unknown@example.com")
+                    # Try both "Company" and "business" fields (miners may use different field names)
+                    company = lead_blob.get("Company") or lead_blob.get("business", "Unknown")
                     
-                    bt.logging.info(f"{'─'*80}")
-                    bt.logging.info(f"📋 Lead {idx}/{len(leads)}: {email} @ {company}")
+                    print(f"{'─'*80}")
+                    print(f"📋 Lead {idx}/{len(leads)}: {email} @ {company}")
+                    print(f"[DEBUG] Lead data keys: {list(lead.keys())}")
+                    print(f"[DEBUG] Lead blob keys: {list(lead_blob.keys()) if lead_blob else 'None'}")
                     
-                    # Run validation (uses existing automated_checks.py)
-                    result = asyncio.run(self.validate_lead(lead))
+                    # Pass lead_blob to validate_lead (not the wrapper object)
+                    print(f"[DEBUG] Calling validate_lead() for {email}...")
+                    result = asyncio.run(self.validate_lead(lead_blob))
+                    print(f"[DEBUG] validate_lead() returned for {email}")
                     
                     # Extract results
                     is_valid = result.get("is_legitimate", False)
                     decision = "approve" if is_valid else "deny"
-                    rep_score = int(lead.get("rep_score", 50))  # Default 50 if not set
+                    rep_score = int(lead_blob.get("rep_score", 50))  # Default 50 if not set
                     rejection_reason = result.get("reason", {}) if not is_valid else {"message": "pass"}
                     evidence_blob = json.dumps(result)
                     
@@ -1466,8 +1481,9 @@ class Validator(BaseValidatorNeuron):
                     evidence_hash = hashlib.sha256(evidence_blob.encode()).hexdigest()
                     
                     # Store hashed result for gateway submission
+                    # lead_id and miner_hotkey are at top level (not in lead_blob)
                     validation_results.append({
-                        "lead_id": lead.get("lead_id"),
+                        "lead_id": lead.get("lead_id"),  # Top level
                         "decision_hash": decision_hash,
                         "rep_score_hash": rep_score_hash,
                         "rejection_reason_hash": rejection_reason_hash,
@@ -1477,8 +1493,8 @@ class Validator(BaseValidatorNeuron):
                     
                     # Store local data for weight calculation
                     local_validation_data.append({
-                        "lead_id": lead.get("lead_id"),
-                        "miner_hotkey": lead.get("miner_hotkey"),
+                        "lead_id": lead.get("lead_id"),  # Top level
+                        "miner_hotkey": lead.get("miner_hotkey"),  # Top level
                         "decision": decision,
                         "rep_score": rep_score,
                         "rejection_reason": rejection_reason,
@@ -1488,56 +1504,63 @@ class Validator(BaseValidatorNeuron):
                     # Pretty output
                     status_icon = "✅" if is_valid else "❌"
                     decision_text = "APPROVED" if is_valid else "DENIED"
-                    bt.logging.info(f"   {status_icon} Decision: {decision_text}")
-                    bt.logging.info(f"   📊 Rep Score: {rep_score}/100")
+                    print(f"   {status_icon} Decision: {decision_text}")
+                    print(f"   📊 Rep Score: {rep_score}/100")
                     if not is_valid:
                         reason_msg = rejection_reason.get("message", "Unknown reason")
-                        bt.logging.info(f"   ⚠️  Reason: {reason_msg}")
-                    bt.logging.info("")
+                        print(f"   ⚠️  Reason: {reason_msg}")
+                    print("")
                     
                 except Exception as e:
-                    bt.logging.error(f"❌ Error validating lead {lead.get('lead_id', 'unknown')}: {e}")
-                    bt.logging.error("")
+                    lead_id = lead.get('lead_id', 'unknown')
+                    print(f"❌ Error validating lead {lead_id}: {e}")
+                    import traceback
+                    print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+                    print(f"[DEBUG] Lead structure: {lead}")
+                    print("")
                     continue
             
             # Submit hashed validation results to gateway
-            bt.logging.info(f"{'='*80}")
-            bt.logging.info(f"📤 Submitting {len(validation_results)} hashed validations to gateway...")
+            print(f"{'='*80}")
+            print(f"📤 Submitting {len(validation_results)} hashed validations to gateway...")
             
             if validation_results:
                 success = gateway_submit_validation(self.wallet, current_epoch, validation_results)
                 if success:
-                    bt.logging.info(f"✅ Successfully submitted {len(validation_results)} validations for epoch {current_epoch}")
-                    bt.logging.info(f"   (Hashed: decision, rep_score, rejection_reason, evidence)")
-                    bt.logging.info(f"   Gateway logged to TEE buffer → will be in next Arweave checkpoint")
+                    print(f"✅ Successfully submitted {len(validation_results)} validations for epoch {current_epoch}")
+                    print(f"   (Hashed: decision, rep_score, rejection_reason, evidence)")
+                    print(f"   Gateway logged to TEE buffer → will be in next Arweave checkpoint")
                     
                     # Store local data for reveal later
                     if not hasattr(self, '_pending_reveals'):
                         self._pending_reveals = {}
                     self._pending_reveals[current_epoch] = local_validation_data
                 else:
-                    bt.logging.error(f"❌ Failed to submit validations for epoch {current_epoch}")
-                    bt.logging.error(f"   Will retry on next iteration")
+                    print(f"❌ Failed to submit validations for epoch {current_epoch}")
+                    print(f"   Will retry on next iteration")
                     # Don't mark as processed - retry next time
                     return
             else:
-                bt.logging.warning(f"⚠️  No validation results to submit (all leads failed validation)")
+                print(f"⚠️  No validation results to submit (all leads failed validation)")
             
             # Calculate and submit weights to Bittensor (Passage 2)
-            bt.logging.info(f"\n{'='*80}")
-            bt.logging.info(f"⚖️  Calculating and submitting weights to Bittensor...")
+            print(f"\n{'='*80}")
+            print(f"⚖️  Calculating and submitting weights to Bittensor...")
             self.calculate_and_submit_weights_local(local_validation_data)
             
             # Mark epoch as processed
             self._last_processed_epoch = current_epoch
-            bt.logging.info(f"\n{'='*80}")
-            bt.logging.info(f"✅ EPOCH {current_epoch}: Validation workflow complete")
-            bt.logging.info(f"{'='*80}\n")
+            print(f"\n{'='*80}")
+            print(f"✅ EPOCH {current_epoch}: Validation workflow complete")
+            print(f"{'='*80}\n")
             
             # Check for reveals from previous epochs
             self.process_pending_reveals()
             
         except Exception as e:
+            print(f"[DEBUG] Exception caught in gateway validation workflow: {e}")
+            import traceback
+            print(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
             bt.logging.error(f"Error in gateway validation workflow: {e}")
             import traceback
             bt.logging.error(traceback.format_exc())
@@ -2478,24 +2501,9 @@ class Validator(BaseValidatorNeuron):
                 'enhanced_lead': mapped_lead  # Include enhanced lead with DNSBL/WHOIS data
             }
             
-            # Log validation to audit trail (Task 2.5)
-            try:
-                from Leadpoet.utils.audit_log import log_validation_audit
-                
-                audit_logged = log_validation_audit(
-                    lead=mapped_lead,
-                    validator_wallet=self.wallet.hotkey.ss58_address,
-                    validation_result={
-                        'passed': passed,
-                        'reason': reason
-                    }
-                )
-                if audit_logged:
-                    print(f"   ✅ Audit trail logged (validation: {'passed' if passed else 'rejected'})")
-                    bt.logging.info(f"✅ Audit trail logged (validation: {'passed' if passed else 'rejected'})")
-            except Exception as audit_error:
-                bt.logging.debug(f"Failed to log validation audit: {audit_error}")
-                # Don't fail validation if audit logging fails
+            # NOTE: Audit logging removed - validators should NOT write directly to Supabase.
+            # All logging is handled by the gateway via POST /validate (TEE architecture).
+            # The gateway stores evidence_blob in validation_evidence_private and logs to TEE buffer.
             
             return validation_result
             
@@ -2516,23 +2524,8 @@ class Validator(BaseValidatorNeuron):
                 "failed_fields": []
             }
             
-            # Log failed validation to audit trail
-            try:
-                from Leadpoet.utils.audit_log import log_validation_audit
-                
-                audit_logged = log_validation_audit(
-                    lead=lead,
-                    validator_wallet=self.wallet.hotkey.ss58_address,
-                    validation_result={
-                        'passed': False,
-                        'reason': error_rejection
-                    }
-                )
-                if audit_logged:
-                    print(f"   ✅ Audit trail logged (validation: error)")
-                    bt.logging.info(f"✅ Audit trail logged (validation: error)")
-            except Exception as audit_error:
-                bt.logging.debug(f"Failed to log validation audit: {audit_error}")
+            # NOTE: Audit logging removed - validators should NOT write directly to Supabase.
+            # All logging is handled by the gateway via POST /validate (TEE architecture).
             
             return {
                 'is_legitimate': False,

@@ -182,7 +182,7 @@ async def get_epoch_leads(
             }
         
         leads_result = supabase.table("leads_private") \
-            .select("lead_id, lead_blob, lead_blob_hash") \
+            .select("lead_id, lead_blob, lead_blob_hash, miner_hotkey") \
             .in_("lead_id", assigned_lead_ids) \
             .execute()
         
@@ -200,37 +200,16 @@ async def get_epoch_leads(
             detail=f"Failed to fetch lead data: {str(e)}"
         )
     
-    # Step 8: Fetch miner_hotkey for each lead from SUBMISSION_REQUEST events
-    # Note: SUBMISSION events would be logged after storage verification, but for now
-    # we query SUBMISSION_REQUEST events which contain the miner's hotkey
+    # Step 8: Build full_leads with miner_hotkey from database
+    # OPTIMIZATION: miner_hotkey is now stored in leads_private (no N+1 query needed)
     full_leads = []
     for lead_row in leads_result.data:
-        try:
-            submission = supabase.table("transparency_log") \
-                .select("actor_hotkey") \
-                .eq("event_type", "SUBMISSION_REQUEST") \
-                .eq("payload->>lead_id", lead_row["lead_id"]) \
-                .limit(1) \
-                .execute()
-            
-            miner_hotkey = submission.data[0]["actor_hotkey"] if submission.data else "unknown"
-            
-            full_leads.append({
-                "lead_id": lead_row["lead_id"],
-                "lead_blob": lead_row["lead_blob"],
-                "lead_blob_hash": lead_row["lead_blob_hash"],
-                "miner_hotkey": miner_hotkey
-            })
-        
-        except Exception as e:
-            # If we can't fetch miner_hotkey, still include the lead
-            print(f"⚠️  Warning: Failed to fetch miner_hotkey for lead {lead_row['lead_id']}: {e}")
-            full_leads.append({
-                "lead_id": lead_row["lead_id"],
-                "lead_blob": lead_row["lead_blob"],
-                "lead_blob_hash": lead_row["lead_blob_hash"],
-                "miner_hotkey": "unknown"
-            })
+        full_leads.append({
+            "lead_id": lead_row["lead_id"],
+            "lead_blob": lead_row["lead_blob"],
+            "lead_blob_hash": lead_row["lead_blob_hash"],
+            "miner_hotkey": lead_row.get("miner_hotkey", "unknown")  # Fetched from database
+        })
     
     # Step 9: Return full lead data
     return {

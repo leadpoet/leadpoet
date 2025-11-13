@@ -21,6 +21,11 @@ from gateway.utils.signature import verify_wallet_signature, compute_payload_has
 from gateway.utils.registry import is_registered_hotkey
 from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
 from gateway.utils.logger import log_event
+from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+from supabase import create_client, Client
+
+# Initialize Supabase client
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # Create router
 router = APIRouter(prefix="/validate", tags=["Validation"])
@@ -168,11 +173,38 @@ async def submit_validation(event: ValidationEvent):
     # ========================================
     # Step 6: Store evidence blobs (private)
     # ========================================
-    # TODO: Store evidence_blobs in validation_evidence_private table
-    # For now, we'll just log the hashes to TEE
+    # Store full evidence blobs in Supabase for reveal phase verification
+    # Evidence is stored privately (NOT logged to public Arweave)
+    # Only evidence_hash goes to Arweave (for tamper detection)
     
     print(f"✅ Batch validation received: {len(event.payload.validations)} validations from {event.actor_hotkey[:20]}...")
     print(f"   Epoch: {event.payload.epoch_id}")
+    
+    # Store evidence blobs in validation_evidence_private table
+    try:
+        evidence_records = []
+        for v in event.payload.validations:
+            evidence_records.append({
+                "lead_id": v.lead_id,
+                "epoch_id": event.payload.epoch_id,
+                "validator_hotkey": event.actor_hotkey,
+                "evidence_blob": v.evidence_blob,
+                "evidence_hash": v.evidence_hash,
+                "decision_hash": v.decision_hash,
+                "rep_score_hash": v.rep_score_hash,
+                "rejection_reason_hash": v.rejection_reason_hash,
+                "submission_timestamp": event.ts.isoformat()
+            })
+        
+        # Insert all evidence records in batch
+        result = supabase.table("validation_evidence_private").insert(evidence_records).execute()
+        print(f"✅ Stored {len(evidence_records)} evidence blobs in private DB")
+    
+    except Exception as e:
+        print(f"⚠️  Failed to store evidence blobs: {e}")
+        import traceback
+        traceback.print_exc()
+        # Don't fail the request - evidence can be reconstructed from validator logs if needed
     
     # ========================================
     # Step 7: Log to TEE transparency log

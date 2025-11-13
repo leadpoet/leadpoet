@@ -1984,20 +1984,18 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     }
 
     # ========================================================================
-    # Pre-Attestation Check: Terms Attestation Verification (HARD)
-    # Verifies miner attestation against Supabase database (source of truth)
+    # Pre-Attestation Check: REMOVED
     # ========================================================================
-    print(f"🔍 Pre-Attestation Check: Terms attestation check for {email} @ {company}")
-    
-    passed, rejection_reason = await check_terms_attestation(lead)
-    if not passed:
-        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
-        print(f"   ❌ Pre-Attestation Check failed: {msg}")
-        automated_checks_data["passed"] = False
-        automated_checks_data["rejection_reason"] = rejection_reason
-        return False, automated_checks_data
-    
-    print("   ✅ Pre-Attestation Check passed")
+    # NOTE: Attestation verification removed from validators.
+    # Validators don't have Supabase credentials and shouldn't verify attestations.
+    # 
+    # SECURITY: Gateway verifies attestations during POST /submit:
+    # - If lead is in validator queue → gateway already verified attestation
+    # - Validators trust gateway's verification (gateway is TEE-protected)
+    # - This prevents security bypass where validator skips check due to 401 errors
+    # 
+    # If you need attestation verification, implement it in gateway/api/submit.py
+    print(f"🔍 Pre-Attestation Check: Skipped (gateway verifies during submission)")
 
     # ========================================================================
     # Source Provenance Verification: Source Validation (HARD)

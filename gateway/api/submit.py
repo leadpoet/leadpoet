@@ -138,6 +138,63 @@ async def submit_lead(event: SubmitLeadEvent):
     print(f"\n🔍 POST /submit called - lead_id={event.payload.lead_id}")
     
     # ========================================
+    # Step 0: Check rate limits (BEFORE expensive operations)
+    # ========================================
+    # This is a DoS protection mechanism - we check rate limits using only
+    # the actor_hotkey field from the JSON payload BEFORE doing any expensive
+    # crypto operations (signature verification) or I/O (DB queries, S3 fetches).
+    # 
+    # An attacker can spam fake requests, but we reject them in <1ms.
+    print("🔍 Step 0: Checking rate limits...")
+    from gateway.utils.rate_limiter import check_rate_limit
+    
+    allowed, reason, stats = check_rate_limit(event.actor_hotkey)
+    if not allowed:
+        print(f"❌ Rate limit exceeded for {event.actor_hotkey[:20]}...")
+        print(f"   Reason: {reason}")
+        print(f"   Stats: {stats}")
+        
+        # Log RATE_LIMIT_HIT event to TEE buffer (for transparency)
+        try:
+            from gateway.utils.logger import log_event
+            
+            rate_limit_event = {
+                "event_type": "RATE_LIMIT_HIT",
+                "actor_hotkey": event.actor_hotkey,
+                "nonce": str(uuid.uuid4()),
+                "ts": datetime.utcnow().isoformat(),
+                "payload_hash": hashlib.sha256(json.dumps({
+                    "lead_id": event.payload.lead_id,
+                    "reason": reason,
+                    "stats": stats
+                }, sort_keys=True).encode()).hexdigest(),
+                "build_id": "gateway",
+                "signature": "rate_limit_check",  # No signature needed (gateway-generated)
+                "payload": {
+                    "lead_id": event.payload.lead_id,
+                    "reason": reason,
+                    "stats": stats
+                }
+            }
+            
+            await log_event(rate_limit_event)
+            print(f"   ✅ Logged RATE_LIMIT_HIT to TEE buffer")
+        except Exception as e:
+            print(f"   ⚠️  Failed to log RATE_LIMIT_HIT: {e}")
+        
+        # Return 429 Too Many Requests
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "rate_limit_exceeded",
+                "message": reason,
+                "stats": stats
+            }
+        )
+    
+    print(f"🔍 Step 0 complete: Rate limit OK (submissions={stats['submissions']}, rejections={stats['rejections']})")
+    
+    # ========================================
     # Step 1: Verify payload hash
     # ========================================
     print("🔍 Step 1: Verifying payload hash...")
@@ -449,6 +506,11 @@ async def submit_lead(event: SubmitLeadEvent):
             print(f"   ✅ Attestation verified for wallet {wallet_ss58[:20]}...")
             
         except HTTPException:
+            # Increment rate limit counter (FAILURE - attestation check)
+            from gateway.utils.rate_limiter import increment_submission
+            updated_stats = increment_submission(event.actor_hotkey, success=False)
+            print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/10")
+            
             # Re-raise HTTP exceptions
             raise
         except Exception as e:
@@ -542,6 +604,12 @@ async def submit_lead(event: SubmitLeadEvent):
         # - Events buffered in TEE (hardware-protected memory)
         # - Will be included in next hourly Arweave checkpoint (signed by TEE)
         # - Verify gateway code integrity: GET /attest
+        
+        # Increment rate limit counter (SUCCESS)
+        from gateway.utils.rate_limiter import increment_submission
+        updated_stats = increment_submission(event.actor_hotkey, success=True)
+        print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/10")
+        
         print(f"✅ /submit complete - lead accepted")
         return {
             "status": "accepted",
@@ -596,6 +664,11 @@ async def submit_lead(event: SubmitLeadEvent):
             print(f"   ❌ UPLOAD_FAILED event buffered in TEE: seq={upload_failed_tee_seq}")
         except Exception as e:
             print(f"   ⚠️  Error logging UPLOAD_FAILED: {e} (continuing with error response)")
+        
+        # Increment rate limit counter (FAILURE - verification failed)
+        from gateway.utils.rate_limiter import increment_submission
+        updated_stats = increment_submission(event.actor_hotkey, success=False)
+        print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/10")
         
         raise HTTPException(
             status_code=400,

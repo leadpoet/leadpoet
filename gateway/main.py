@@ -120,6 +120,11 @@ async def lifespan(app: FastAPI):
     hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
     print("✅ Hourly Arweave batch task started")
     
+    # Start rate limiter cleanup task
+    from gateway.utils.rate_limiter import rate_limiter_cleanup_task
+    rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
+    print("✅ Rate limiter cleanup task started")
+    
     print("="*80 + "\n")
     
     # Yield control back to FastAPI (app runs here)
@@ -127,7 +132,7 @@ async def lifespan(app: FastAPI):
     
     # Cleanup on shutdown (cancel all background tasks)
     print("\n🛑 Shutting down background tasks...")
-    tasks = [epoch_task, reveal_task, checkpoint_task_handle, anchor_task, mirror_task, hourly_batch_task_handle]
+    tasks = [epoch_task, reveal_task, checkpoint_task_handle, anchor_task, mirror_task, hourly_batch_task_handle, rate_limiter_task]
     for task in tasks:
         task.cancel()
     

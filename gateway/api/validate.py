@@ -193,7 +193,7 @@ async def submit_validation(event: ValidationEvent):
                 "decision_hash": v.decision_hash,
                 "rep_score_hash": v.rep_score_hash,
                 "rejection_reason_hash": v.rejection_reason_hash,
-                "submission_timestamp": event.ts.isoformat()
+                "created_ts": event.ts.isoformat()  # Use created_ts (matches Supabase schema)
             })
         
         # Insert all evidence records in batch

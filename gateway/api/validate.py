@@ -196,15 +196,16 @@ async def submit_validation(event: ValidationEvent):
     }
     
     # Log to TEE buffer (will be batched to Arweave hourly)
-    await log_event(
-        event_type="VALIDATION_RESULT_BATCH",
-        actor_hotkey=event.actor_hotkey,
-        nonce=event.nonce,
-        ts=event.ts,
-        payload=log_payload,
-        signature=event.signature,
-        build_id=event.build_id
-    )
+    log_entry = {
+        "event_type": "VALIDATION_RESULT_BATCH",
+        "actor_hotkey": event.actor_hotkey,
+        "nonce": event.nonce,
+        "ts": event.ts.isoformat(),
+        "payload": log_payload,
+        "signature": event.signature,
+        "build_id": event.build_id
+    }
+    await log_event(log_entry)
     
     print(f"✅ Batch validation logged to TEE buffer")
     

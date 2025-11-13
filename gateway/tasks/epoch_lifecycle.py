@@ -243,13 +243,15 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
         
         # ========================================================================
-        # 1. Query pending leads from queue (FIFO order)
+        # 1. Query pending leads from queue (FIFO order) - RUN IN THREAD
         # ========================================================================
-        result = supabase.table("leads_private") \
-            .select("lead_id") \
-            .is_("epoch_summary", "null") \
-            .order("created_ts") \
-            .execute()
+        result = await asyncio.to_thread(
+            lambda: supabase.table("leads_private")
+                .select("lead_id")
+                .is_("epoch_summary", "null")
+                .order("created_ts")
+                .execute()
+        )
         
         lead_ids = [row["lead_id"] for row in result.data]
         
@@ -263,9 +265,9 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         print(f"   📊 Queue State: {queue_merkle_root[:16]}... ({pending_lead_count} pending leads)")
         
         # ========================================================================
-        # 2. Get validator set for this epoch
+        # 2. Get validator set for this epoch - RUN IN THREAD
         # ========================================================================
-        validator_set = get_validator_set(epoch_id)  # Returns List[str] of hotkeys
+        validator_set = await asyncio.to_thread(get_validator_set, epoch_id)  # Returns List[str] of hotkeys
         validator_hotkeys = validator_set  # Already a list of hotkey strings
         validator_count = len(validator_hotkeys)
         
@@ -330,13 +332,15 @@ async def compute_and_log_epoch_inputs(epoch_id: int):
         epoch_start = get_epoch_start_time(epoch_id)
         epoch_end = get_epoch_end_time(epoch_id)
         
-        # Query all events in epoch (during validation phase)
-        result = supabase.table("transparency_log") \
-            .select("id, event_type, payload_hash") \
-            .gte("ts", epoch_start.isoformat()) \
-            .lte("ts", epoch_end.isoformat()) \
-            .order("id") \
-            .execute()
+        # Query all events in epoch (during validation phase) - RUN IN THREAD
+        result = await asyncio.to_thread(
+            lambda: supabase.table("transparency_log")
+                .select("id, event_type, payload_hash")
+                .gte("ts", epoch_start.isoformat())
+                .lte("ts", epoch_end.isoformat())
+                .order("id")
+                .execute()
+        )
         
         events = result.data
         
@@ -378,11 +382,13 @@ async def trigger_reveal_phase(epoch_id: int):
     try:
         print(f"   🔓 Validators can now reveal decisions for epoch {epoch_id}")
         
-        # Query how many validators submitted commits
-        result = supabase.table("validation_evidence_private") \
-            .select("evidence_id", count="exact") \
-            .eq("epoch_id", epoch_id) \
-            .execute()
+        # Query how many validators submitted commits - RUN IN THREAD
+        result = await asyncio.to_thread(
+            lambda: supabase.table("validation_evidence_private")
+                .select("evidence_id", count="exact")
+                .eq("epoch_id", epoch_id)
+                .execute()
+        )
         
         commit_count = result.count if result.count is not None else 0
         
@@ -409,11 +415,13 @@ async def compute_epoch_consensus(epoch_id: int):
         # Import here to avoid circular dependency
         from gateway.utils.consensus import compute_weighted_consensus
         
-        # Query all leads validated in this epoch
-        result = supabase.table("validation_evidence_private") \
-            .select("lead_id") \
-            .eq("epoch_id", epoch_id) \
-            .execute()
+        # Query all leads validated in this epoch - RUN IN THREAD
+        result = await asyncio.to_thread(
+            lambda: supabase.table("validation_evidence_private")
+                .select("lead_id")
+                .eq("epoch_id", epoch_id)
+                .execute()
+        )
         
         # Get unique lead IDs
         unique_leads = list(set([row["lead_id"] for row in result.data]))
@@ -432,11 +440,13 @@ async def compute_epoch_consensus(epoch_id: int):
                 # Compute weighted consensus for this lead
                 outcome = await compute_weighted_consensus(lead_id, epoch_id)
                 
-                # Update leads_private with final outcome
-                supabase.table("leads_private") \
-                    .update({"epoch_summary": outcome}) \
-                    .eq("lead_id", lead_id) \
-                    .execute()
+                # Update leads_private with final outcome - RUN IN THREAD
+                await asyncio.to_thread(
+                    lambda: supabase.table("leads_private")
+                        .update({"epoch_summary": outcome})
+                        .eq("lead_id", lead_id)
+                        .execute()
+                )
                 
                 # Log CONSENSUS_RESULT publicly for miner transparency
                 await log_consensus_result(lead_id, epoch_id, outcome)

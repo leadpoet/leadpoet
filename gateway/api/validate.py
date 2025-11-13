@@ -14,7 +14,7 @@ Works dynamically with any MAX_LEADS_PER_EPOCH (10, 20, 50, etc.).
 
 from fastapi import APIRouter, HTTPException
 from typing import List, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 from gateway.utils.signature import verify_wallet_signature, compute_payload_hash, construct_signed_message
@@ -156,7 +156,7 @@ async def submit_validation(event: ValidationEvent):
     # ========================================
     # Step 5: Verify timestamp
     # ========================================
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     time_diff = abs((now - event.ts).total_seconds())
     
     if time_diff > 120:  # 2 minutes tolerance
@@ -215,7 +215,7 @@ async def submit_validation(event: ValidationEvent):
         "status": "recorded",
         "epoch_id": event.payload.epoch_id,
         "validation_count": len(event.payload.validations),
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         "message": f"Validation recorded in TEE. Will be logged to Arweave in next hourly checkpoint."
     }
 

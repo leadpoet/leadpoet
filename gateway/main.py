@@ -176,7 +176,7 @@ async def log_requests(request, call_next):
 # ============================================================
 
 app.include_router(epoch.router)
-app.include_router(validate.router)
+app.include_router(validate.router)  # Individual + Batch validation
 app.include_router(reveal.router)
 app.include_router(manifest.router)
 app.include_router(submit.router)

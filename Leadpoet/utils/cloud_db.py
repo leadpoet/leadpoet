@@ -1746,98 +1746,98 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
 
 def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_results: List[Dict]) -> bool:
     """
-    Submit hashed validation results for all leads (POST /validate).
+    Submit hashed validation results for all leads in an epoch.
     
-    Gateway expects individual validation events (one per lead), not batches.
-    We submit 50 individual requests.
+    Efficient submission:
+    - 1 HTTP request (not N individual requests)
+    - 1 signature verification on gateway
+    - Atomic operation (all succeed or all fail)
+    - Works dynamically with any MAX_LEADS_PER_EPOCH (10, 20, 50, etc.)
     
     Args:
         wallet: Validator's wallet
         epoch_id: Current epoch ID
-        validation_results: List of dicts with lead_id, decision_hash, rep_score_hash, rejection_reason_hash, evidence_blob
+        validation_results: List of dicts with lead_id, decision_hash, rep_score_hash, rejection_reason_hash, evidence_hash, evidence_blob
         
     Returns:
-        bool: Success status (True if all succeed, False if any fail)
+        bool: Success status
     """
     import uuid
     import hashlib
     
-    success_count = 0
-    failed_count = 0
-    
-    for validation in validation_results:
-        try:
-            # Generate UUID v4 nonce (as expected by gateway)
-            nonce = str(uuid.uuid4())
-            
-            # Create ISO timestamp
-            ts = datetime.now(timezone.utc).isoformat()
-            
-            # Build ID
-            build_id = os.getenv("BUILD_ID", "validator-client")
-            
-            # Extract validation data
-            lead_id = validation["lead_id"]
-            decision_hash = validation["decision_hash"]
-            rep_score_hash = validation["rep_score_hash"]
-            rejection_reason_hash = validation["rejection_reason_hash"]
-            evidence_blob = validation.get("evidence_blob", {})
-            
-            # Create payload
-            payload = {
-                "lead_id": lead_id,
-                "decision_hash": decision_hash,
-                "rep_score_hash": rep_score_hash,
-                "rejection_reason_hash": rejection_reason_hash
-            }
-            
-            # Compute payload hash (deterministic JSON)
-            payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-            payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
-            
-            # Construct message to sign (format: {event_type}:{actor_hotkey}:{nonce}:{ts}:{payload_hash}:{build_id})
-            message = f"VALIDATION_RESULT:{wallet.hotkey.ss58_address}:{nonce}:{ts}:{payload_hash}:{build_id}"
-            
-            # Sign the message
-            signature = wallet.hotkey.sign(message.encode()).hex()
-            
-            # Create full event object
-            event = {
-                "event_type": "VALIDATION_RESULT",
-                "actor_hotkey": wallet.hotkey.ss58_address,
-                "nonce": nonce,
-                "ts": ts,
-                "payload_hash": payload_hash,
-                "build_id": build_id,
-                "signature": signature,
-                "payload": payload
-            }
-            
-            # Submit validation (individual request per lead)
-            response = requests.post(
-                f"{GATEWAY_URL}/validate",
-                json={
-                    "event": event,
-                    "evidence_blob": evidence_blob
-                },
-                timeout=30
-            )
-            response.raise_for_status()
-            success_count += 1
-            
-        except Exception as e:
-            bt.logging.error(f"Failed to submit validation for lead {validation.get('lead_id', 'unknown')[:8]}...: {e}")
-            failed_count += 1
-            continue
-    
-    if success_count > 0:
-        bt.logging.info(f"✅ Submitted {success_count}/{len(validation_results)} validations successfully")
-    
-    if failed_count > 0:
-        bt.logging.warning(f"⚠️ Failed to submit {failed_count}/{len(validation_results)} validations")
-    
-    # Return True if at least half succeeded
-    return success_count >= (len(validation_results) / 2)
+    try:
+        # Generate UUID v4 nonce
+        nonce = str(uuid.uuid4())
+        
+        # Create ISO timestamp
+        ts = datetime.now(timezone.utc).isoformat()
+        
+        # Build ID
+        build_id = os.getenv("BUILD_ID", "validator-client")
+        
+        # Format validations for batch submission
+        validations = []
+        for v in validation_results:
+            validations.append({
+                "lead_id": v["lead_id"],
+                "decision_hash": v["decision_hash"],
+                "rep_score_hash": v["rep_score_hash"],
+                "rejection_reason_hash": v["rejection_reason_hash"],
+                "evidence_hash": v["evidence_hash"],
+                "evidence_blob": v.get("evidence_blob", {})
+            })
+        
+        # Create payload
+        payload = {
+            "epoch_id": epoch_id,
+            "validations": validations
+        }
+        
+        # Compute payload hash (deterministic JSON)
+        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+        
+        # Construct message to sign (format: {event_type}:{actor_hotkey}:{nonce}:{ts}:{payload_hash}:{build_id})
+        message = f"VALIDATION_RESULT_BATCH:{wallet.hotkey.ss58_address}:{nonce}:{ts}:{payload_hash}:{build_id}"
+        
+        # Sign the message
+        signature = wallet.hotkey.sign(message.encode()).hex()
+        
+        # Create full event object
+        event = {
+            "event_type": "VALIDATION_RESULT_BATCH",
+            "actor_hotkey": wallet.hotkey.ss58_address,
+            "nonce": nonce,
+            "ts": ts,
+            "payload_hash": payload_hash,
+            "build_id": build_id,
+            "signature": signature,
+            "payload": payload
+        }
+        
+        bt.logging.info(f"📤 Submitting validation for {len(validations)} leads (epoch {epoch_id})...")
+        
+        # Submit validation (single request for all leads)
+        response = requests.post(
+            f"{GATEWAY_URL}/validate",
+            json=event,
+            timeout=60
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        bt.logging.info(f"✅ Validation submitted successfully: {result.get('validation_count', len(validations))} validations")
+        return True
+        
+    except Exception as e:
+        bt.logging.error(f"Failed to submit validation: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json()
+                bt.logging.error(f"   Error details: {error_detail}")
+            except:
+                bt.logging.error(f"   Response text: {e.response.text}")
+        return False
 
 
 def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List[Dict]) -> bool:

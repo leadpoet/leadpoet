@@ -455,6 +455,81 @@ async def submit_lead(event: SubmitLeadEvent):
             )
         
         # ========================================
+        # CRITICAL: Validate Required Fields (README.md lines 239-258)
+        # ========================================
+        print(f"   🔍 Validating required fields...")
+        
+        REQUIRED_FIELDS = [
+            "business",      # Company name
+            "full_name",     # Contact full name
+            "first",         # First name
+            "last",          # Last name
+            "email",         # Email address
+            "role",          # Job title
+            "website",       # Company website
+            "industry",      # Primary industry
+            "sub_industry",  # Sub-industry/niche
+            "region",        # Location
+            "linkedin"       # LinkedIn URL
+        ]
+        
+        missing_fields = []
+        for field in REQUIRED_FIELDS:
+            value = lead_blob.get(field)
+            if not value or (isinstance(value, str) and not value.strip()):
+                missing_fields.append(field)
+        
+        if missing_fields:
+            print(f"❌ Required fields validation failed: Missing {len(missing_fields)} field(s)")
+            print(f"   Missing: {', '.join(missing_fields)}")
+            
+            # Increment rate limit counter (FAILURE - missing required fields)
+            from gateway.utils.rate_limiter import increment_submission
+            updated_stats = increment_submission(event.actor_hotkey, success=False)
+            print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/10")
+            
+            # Log VALIDATION_FAILED event to TEE buffer (for transparency)
+            try:
+                from gateway.utils.logger import log_event
+                
+                validation_failed_event = {
+                    "event_type": "VALIDATION_FAILED",
+                    "actor_hotkey": event.actor_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.utcnow().isoformat(),
+                    "payload_hash": hashlib.sha256(json.dumps({
+                        "lead_id": event.payload.lead_id,
+                        "reason": "missing_required_fields",
+                        "missing_fields": missing_fields
+                    }, sort_keys=True).encode()).hexdigest(),
+                    "build_id": "gateway",
+                    "signature": "required_fields_check",  # Gateway-generated
+                    "payload": {
+                        "lead_id": event.payload.lead_id,
+                        "reason": "missing_required_fields",
+                        "missing_fields": missing_fields,
+                        "miner_hotkey": event.actor_hotkey
+                    }
+                }
+                
+                await log_event(validation_failed_event)
+                print(f"   ✅ Logged VALIDATION_FAILED to TEE buffer")
+            except Exception as e:
+                print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+            
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "missing_required_fields",
+                    "message": f"Lead is missing {len(missing_fields)} required field(s)",
+                    "missing_fields": missing_fields,
+                    "required_fields": REQUIRED_FIELDS
+                }
+            )
+        
+        print(f"   ✅ All required fields present")
+        
+        # ========================================
         # CRITICAL: Verify Miner Attestation
         # ========================================
         print(f"   🔍 Verifying miner attestation...")

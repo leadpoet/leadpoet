@@ -76,6 +76,10 @@ class SubmitLeadEvent(BaseModel):
     build_id: str = Field(default="miner-client", description="Client build ID")
     signature: str = Field(..., description="Ed25519 signature")
     payload: SubmitLeadPayload
+    
+    # Proof-of-Work fields (Anti-DDoS)
+    pow_timestamp: str = Field(..., description="ISO timestamp when PoW was computed")
+    pow_nonce: str = Field(..., description="Nonce that satisfies PoW difficulty (4 leading zeros)")
 
 
 # ============================================================
@@ -138,14 +142,76 @@ async def submit_lead(event: SubmitLeadEvent):
     print(f"\n🔍 POST /submit called - lead_id={event.payload.lead_id}")
     
     # ========================================
-    # Step 0: Check rate limits (BEFORE expensive operations)
+    # Step 0: Verify Proof-of-Work (Anti-DDoS)
     # ========================================
-    # This is a DoS protection mechanism - we check rate limits using only
+    # This is the FIRST line of defense against DDoS attacks.
+    # PoW verification is O(1) (single SHA256 hash) but REQUIRES the attacker
+    # to compute ~65k hashes per request, making billion-request attacks
+    # economically impossible (~$50k/hour for 1M req/sec).
+    #
+    # This runs BEFORE signature verification, rate limiting, or any I/O.
+    print("🔍 Step 0: Verifying Proof-of-Work...")
+    from gateway.utils.pow import verify_pow
+    
+    # Extract PoW fields from request body
+    pow_challenge = event.payload.lead_id  # Challenge = lead ID
+    pow_timestamp = event.pow_timestamp
+    pow_nonce = event.pow_nonce
+    
+    pow_valid, pow_error = verify_pow(pow_challenge, pow_timestamp, pow_nonce)
+    if not pow_valid:
+        print(f"❌ PoW invalid: {pow_error}")
+        
+        # Log POW_FAILED event to TEE buffer (for transparency)
+        try:
+            from gateway.utils.logger import log_event
+            
+            pow_failed_event = {
+                "event_type": "POW_FAILED",
+                "actor_hotkey": event.actor_hotkey,
+                "nonce": str(uuid.uuid4()),
+                "ts": datetime.utcnow().isoformat(),
+                "payload_hash": hashlib.sha256(json.dumps({
+                    "lead_id": event.payload.lead_id,
+                    "reason": pow_error,
+                    "pow_timestamp": pow_timestamp,
+                    "pow_nonce": pow_nonce
+                }, sort_keys=True).encode()).hexdigest(),
+                "build_id": "gateway",
+                "signature": "pow_check",
+                "payload": {
+                    "lead_id": event.payload.lead_id,
+                    "reason": pow_error,
+                    "miner_hotkey": event.actor_hotkey
+                }
+            }
+            
+            await log_event(pow_failed_event)
+            print(f"   ✅ Logged POW_FAILED to TEE buffer")
+        except Exception as e:
+            print(f"   ⚠️  Failed to log POW_FAILED: {e}")
+        
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_proof_of_work",
+                "message": pow_error,
+                "hint": "Compute SHA256(lead_id:timestamp:nonce) with 4 leading zeros"
+            }
+        )
+    
+    print(f"✅ PoW valid (timestamp: {pow_timestamp}, nonce: {pow_nonce})")
+    
+    # ========================================
+    # Step 1: Check rate limits (AFTER PoW)
+    # ========================================
+    # This is a SECOND line of defense - we check rate limits using only
     # the actor_hotkey field from the JSON payload BEFORE doing any expensive
     # crypto operations (signature verification) or I/O (DB queries, S3 fetches).
     # 
-    # An attacker can spam fake requests, but we reject them in <1ms.
-    print("🔍 Step 0: Checking rate limits...")
+    # An attacker can spam fake requests, but they need valid PoW (Step 0), 
+    # and then we reject rate-limited requests in <1ms.
+    print("🔍 Step 1: Checking rate limits...")
     from gateway.utils.rate_limiter import check_rate_limit
     
     allowed, reason, stats = check_rate_limit(event.actor_hotkey)

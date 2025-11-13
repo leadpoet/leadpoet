@@ -488,6 +488,37 @@ async def compute_epoch_consensus(epoch_id: int):
                     approved_count += 1
                 else:
                     rejected_count += 1
+                    
+                    # CRITICAL: Increment rejection count for miner (validator-rejected leads)
+                    try:
+                        print(f"         📊 Lead rejected by consensus - incrementing miner's rejection count...")
+                        
+                        # Fetch miner hotkey from lead_blob - RUN IN THREAD
+                        lead_result = await asyncio.to_thread(
+                            lambda: supabase.table("leads_private")
+                                .select("lead_blob")
+                                .eq("lead_id", lead_id)
+                                .execute()
+                        )
+                        
+                        if lead_result.data and len(lead_result.data) > 0:
+                            lead_blob = lead_result.data[0].get("lead_blob", {})
+                            miner_hotkey = lead_blob.get("wallet_ss58")
+                            
+                            if miner_hotkey:
+                                # Increment rejection count for this miner
+                                from gateway.utils.rate_limiter import increment_submission
+                                updated_stats = increment_submission(miner_hotkey, success=False)
+                                
+                                print(f"         ✅ Rejection count incremented for {miner_hotkey[:20]}...")
+                                print(f"            Stats: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/5")
+                            else:
+                                print(f"         ⚠️  Could not find miner_hotkey in lead_blob")
+                        else:
+                            print(f"         ⚠️  Could not fetch lead_blob for rejection count")
+                            
+                    except Exception as e:
+                        print(f"         ⚠️  Failed to increment rejection count: {e}")
                 
                 print(f"      ✅ Lead {lead_id[:8]}...: {outcome['final_decision']} (rep: {outcome['final_rep_score']:.2f}, reason: {outcome.get('primary_rejection_reason', 'N/A')})")
             

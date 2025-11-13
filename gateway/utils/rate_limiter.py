@@ -3,7 +3,7 @@ Trustless Rate Limiter for Gateway
 
 Prevents DoS attacks by rate-limiting miner submissions:
 - 10 submissions max per miner per day
-- 10 rejections max per miner per day
+- 5 rejections max per miner per day
 - Daily reset at midnight EST (05:00 UTC)
 
 Design:
@@ -31,7 +31,7 @@ _cache_lock = threading.Lock()
 
 # Rate limit constants
 MAX_SUBMISSIONS_PER_DAY = 10
-MAX_REJECTIONS_PER_DAY = 10
+MAX_REJECTIONS_PER_DAY = 5
 
 # EST timezone offset (UTC-5, or UTC-4 during DST)
 # For simplicity, we'll use UTC-5 (EST) year-round

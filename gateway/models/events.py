@@ -68,6 +68,10 @@ class SubmissionRequestEvent(BaseEvent):
     
     event_type: EventType = EventType.SUBMISSION_REQUEST
     payload: SubmissionRequestPayload
+    
+    # Proof-of-Work fields (Anti-DDoS)
+    pow_timestamp: str = Field(..., description="ISO timestamp when PoW was computed")
+    pow_nonce: str = Field(..., description="Nonce that satisfies PoW difficulty (4 leading zeros)")
 
 
 class StorageProofPayload(BaseModel):

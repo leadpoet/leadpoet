@@ -187,12 +187,15 @@ async def epoch_lifecycle_task():
                 closed_epochs = set(recent)
             
             # Sleep 30 seconds before next check
+            # Print periodic heartbeat so we know the task is alive
+            print(f"   ⏰ Epoch lifecycle: Checked epoch {current_epoch} (sleeping 30s)")
             await asyncio.sleep(30)
         
         except Exception as e:
             print(f"❌ Epoch lifecycle error: {e}")
             import traceback
             traceback.print_exc()
+            print(f"   🔄 Recovering from error, will retry in 30 seconds...")
             await asyncio.sleep(30)
 
 

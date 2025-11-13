@@ -8,6 +8,7 @@ The consensus mechanism aggregates validator decisions using their V-scores
 with higher stake/reputation have more influence on the final outcome.
 """
 
+import asyncio
 from typing import Dict, List
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 from supabase import create_client
@@ -70,18 +71,22 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
     """
     
     # ========================================
-    # Step 1: Query all revealed validations for this lead
+    # Step 1: Query all revealed validations for this lead - RUN IN THREAD
     # ========================================
     try:
-        result = supabase.table("validation_evidence_private") \
-            .select("validator_hotkey, decision, rep_score, rejection_reason, v_score, stake") \
-            .eq("lead_id", lead_id) \
-            .eq("epoch_id", epoch_id) \
-            .not_.is_("decision", "null") \
-            .not_.is_("rep_score", "null") \
-            .execute()
+        print(f"   🔍 Fetching validations for lead {lead_id[:8]}... from validation_evidence_private")
+        result = await asyncio.to_thread(
+            lambda: supabase.table("validation_evidence_private")
+                .select("validator_hotkey, decision, rep_score, rejection_reason, v_score, stake")
+                .eq("lead_id", lead_id)
+                .eq("epoch_id", epoch_id)
+                .not_.is_("decision", "null")
+                .not_.is_("rep_score", "null")
+                .execute()
+        )
         
         validations = result.data
+        print(f"   ✅ Found {len(validations)} validations for lead {lead_id[:8]}...")
     
     except Exception as e:
         print(f"❌ Error querying validations for lead {lead_id}: {e}")

@@ -463,10 +463,12 @@ async def submit_lead(event: SubmitLeadEvent):
         # Store lead in leads_private table
         print(f"   🔍 Storing lead in leads_private database...")
         try:
+            # NOTE: miner_hotkey column doesn't exist yet in Supabase
+            # TODO: Add migration to add miner_hotkey column for optimization
             lead_private_entry = {
                 "lead_id": event.payload.lead_id,
                 "lead_blob_hash": committed_lead_blob_hash,
-                "miner_hotkey": event.actor_hotkey,  # Store miner hotkey for fast queries
+                # "miner_hotkey": event.actor_hotkey,  # TODO: Uncomment after column is added
                 "salt": commitment,  # Store commitment as salt for now
                 "lead_blob": lead_blob,
                 "created_ts": datetime.now(tz.utc).isoformat()

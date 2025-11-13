@@ -184,8 +184,10 @@ async def get_epoch_leads(
         print(f"🔍 Step 7: Fetching {len(assigned_lead_ids)} leads from leads_private...")
         print(f"   Lead IDs: {assigned_lead_ids[:3]}... (showing first 3)")
         
+        # NOTE: miner_hotkey column doesn't exist yet in Supabase
+        # TODO: Add migration to create miner_hotkey column, then optimize this query
         leads_result = supabase.table("leads_private") \
-            .select("lead_id, lead_blob, lead_blob_hash, miner_hotkey") \
+            .select("lead_id, lead_blob, lead_blob_hash") \
             .in_("lead_id", assigned_lead_ids) \
             .execute()
         
@@ -211,22 +213,27 @@ async def get_epoch_leads(
             detail=f"Failed to fetch lead data: {str(e)}"
         )
     
-    # Step 8: Build full_leads with miner_hotkey from database
-    # OPTIMIZATION: miner_hotkey is now stored in leads_private (no N+1 query needed)
+    # Step 8: Build full_leads with miner_hotkey extracted from lead_blob
+    # NOTE: miner_hotkey column doesn't exist yet, so we extract from lead_blob (wallet_ss58)
     try:
         print(f"🔍 Step 8: Building full lead data for {len(leads_result.data)} leads...")
         full_leads = []
         for idx, lead_row in enumerate(leads_result.data):
             try:
+                # Extract miner_hotkey from lead_blob (wallet_ss58 field)
+                lead_blob = lead_row.get("lead_blob", {})
+                miner_hotkey = lead_blob.get("wallet_ss58", "unknown")
+                
                 full_leads.append({
                     "lead_id": lead_row["lead_id"],
-                    "lead_blob": lead_row["lead_blob"],
+                    "lead_blob": lead_blob,
                     "lead_blob_hash": lead_row["lead_blob_hash"],
-                    "miner_hotkey": lead_row.get("miner_hotkey", "unknown")  # Fetched from database
+                    "miner_hotkey": miner_hotkey  # Extracted from lead_blob
                 })
             except Exception as e:
                 print(f"❌ ERROR building lead {idx}: {e}")
                 print(f"   Lead row keys: {lead_row.keys() if hasattr(lead_row, 'keys') else 'N/A'}")
+                print(f"   Lead blob keys: {lead_blob.keys() if isinstance(lead_blob, dict) else 'N/A'}")
                 print(f"   Lead row: {lead_row}")
                 raise
         

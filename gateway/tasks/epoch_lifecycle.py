@@ -47,11 +47,17 @@ async def epoch_lifecycle_task():
     consensus is computed automatically.
     """
     
+    print("\n" + "="*80)
+    print("🚀 EPOCH LIFECYCLE TASK STARTING")
+    print("="*80)
+    
     last_epoch_id = None
     validation_ended_epochs = set()  # Track which epochs we've logged EPOCH_END for
     closed_epochs = set()  # Track which epochs we've processed consensus for
     
-    print("🚀 Epoch lifecycle task started")
+    print("✅ Epoch lifecycle task initialized")
+    print("   Will check for epoch transitions every 30 seconds")
+    print("="*80 + "\n")
     
     while True:
         try:
@@ -111,14 +117,19 @@ async def epoch_lifecycle_task():
             # FIX: Process ANY closed epoch that hasn't been processed yet
             # (not just within 120 second window - catches missed epochs after restart)
             if time_since_close >= 0 and current_epoch not in closed_epochs:
-                # Check if this epoch has validation evidence
-                evidence_check = supabase.table("validation_evidence_private") \
-                    .select("lead_id", count="exact") \
-                    .eq("epoch_id", current_epoch) \
-                    .limit(1) \
-                    .execute()
-                
-                has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
+                # Check if this epoch has validation evidence (run in thread to avoid blocking)
+                try:
+                    evidence_check = await asyncio.to_thread(
+                        lambda: supabase.table("validation_evidence_private")
+                            .select("lead_id", count="exact")
+                            .eq("epoch_id", current_epoch)
+                            .limit(1)
+                            .execute()
+                    )
+                    has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
+                except Exception as e:
+                    print(f"   ⚠️  Could not check validation evidence for epoch {current_epoch}: {e}")
+                    has_evidence = False
                 
                 if has_evidence:
                     print(f"\n{'='*80}")

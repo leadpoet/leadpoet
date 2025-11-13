@@ -23,8 +23,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional
 
 # Import gateway utilities
-from utils.tee_client import tee_client
-from utils.arweave_client import upload_checkpoint, get_wallet_balance
+from gateway.utils.tee_client import tee_client
+from gateway.utils.arweave_client import upload_checkpoint, get_wallet_balance
 
 
 # Configuration

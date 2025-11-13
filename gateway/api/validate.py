@@ -182,9 +182,11 @@ async def submit_validation(event: ValidationEvent):
     
     # Store evidence blobs in validation_evidence_private table
     try:
+        from uuid import uuid4
         evidence_records = []
         for v in event.payload.validations:
             evidence_records.append({
+                "evidence_id": str(uuid4()),  # Generate unique evidence ID
                 "lead_id": v.lead_id,
                 "epoch_id": event.payload.epoch_id,
                 "validator_hotkey": event.actor_hotkey,

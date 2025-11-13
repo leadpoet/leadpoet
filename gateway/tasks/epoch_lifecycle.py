@@ -119,62 +119,69 @@ async def epoch_lifecycle_task():
                 print(f"   ✅ Epoch {current_epoch} validation phase complete\n")
             
             # ========================================================================
-            # Check if epoch closed (block 360) - time to reveal + consensus
+            # Check if ANY previous epochs need consensus (check up to 10 epochs back)
             # ========================================================================
-            time_since_close = (now - epoch_close).total_seconds()
+            print(f"   🔍 Checking for closed epochs needing consensus...")
             
-            print(f"   🔍 Checking if epoch closed: time_since_close={time_since_close:.1f}s")
+            # Check current epoch and up to 10 previous epochs
+            epochs_to_check = range(max(1, current_epoch - 10), current_epoch + 1)
             
-            # FIX: Process ANY closed epoch that hasn't been processed yet
-            # (not just within 120 second window - catches missed epochs after restart)
-            if time_since_close >= 0 and current_epoch not in closed_epochs:
-                print(f"   ⚠️  EPOCH {current_epoch} IS CLOSED - Checking for evidence...")
-                # Check if this epoch has validation evidence (run in thread to avoid blocking)
-                try:
-                    print(f"   🔍 Querying validation_evidence_private for epoch {current_epoch}...")
-                    evidence_check = await asyncio.to_thread(
-                        lambda: supabase.table("validation_evidence_private")
-                            .select("lead_id", count="exact")
-                            .eq("epoch_id", current_epoch)
-                            .limit(1)
-                            .execute()
-                    )
-                    has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
-                    print(f"   📊 Evidence check: count={evidence_check.count}, has_evidence={has_evidence}")
-                except Exception as e:
-                    print(f"   ❌ Could not check validation evidence for epoch {current_epoch}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    has_evidence = False
+            for check_epoch in epochs_to_check:
+                if check_epoch in closed_epochs:
+                    continue  # Already processed
                 
-                if has_evidence:
-                    print(f"\n{'='*80}")
-                    print(f"🔓 EPOCH {current_epoch} CLOSED - STARTING REVEAL & CONSENSUS")
-                    print(f"{'='*80}")
-                    print(f"   Closed at: {epoch_close.isoformat()}")
-                    print(f"   Time since close: {time_since_close/60:.1f} minutes")
+                # Calculate close time for THIS epoch
+                check_epoch_close = get_epoch_close_time(check_epoch)
+                time_since_close = (now - check_epoch_close).total_seconds()
+                
+                if time_since_close >= 0:  # This epoch has closed
+                    print(f"   ⚠️  EPOCH {check_epoch} IS CLOSED - Checking for evidence...")
+                    # Check if this epoch has validation evidence (run in thread to avoid blocking)
+                    try:
+                        print(f"   🔍 Querying validation_evidence_private for epoch {check_epoch}...")
+                        evidence_check = await asyncio.to_thread(
+                            lambda: supabase.table("validation_evidence_private")
+                                .select("lead_id", count="exact")
+                                .eq("epoch_id", check_epoch)
+                                .limit(1)
+                                .execute()
+                        )
+                        has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
+                        print(f"   📊 Evidence check: count={evidence_check.count}, has_evidence={has_evidence}")
+                    except Exception as e:
+                        print(f"   ❌ Could not check validation evidence for epoch {check_epoch}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        has_evidence = False
                     
-                    # Trigger reveal phase (validators should reveal their commits)
-                    await trigger_reveal_phase(current_epoch)
-                    
-                    # Wait a bit for reveals to come in (only if epoch just closed)
-                    if time_since_close < 300:  # Within 5 minutes
-                        print(f"   ⏳ Waiting 2 minutes for reveals...")
-                        await asyncio.sleep(120)
+                    if has_evidence:
+                        print(f"\n{'='*80}")
+                        print(f"🔓 EPOCH {check_epoch} CLOSED - STARTING REVEAL & CONSENSUS")
+                        print(f"{'='*80}")
+                        print(f"   Closed at: {check_epoch_close.isoformat()}")
+                        print(f"   Time since close: {time_since_close/60:.1f} minutes")
+                        
+                        # Trigger reveal phase (validators should reveal their commits)
+                        await trigger_reveal_phase(check_epoch)
+                        
+                        # Wait a bit for reveals to come in (only if epoch just closed)
+                        if time_since_close < 300:  # Within 5 minutes
+                            print(f"   ⏳ Waiting 2 minutes for reveals...")
+                            await asyncio.sleep(120)
+                        else:
+                            print(f"   ℹ️  Epoch closed {time_since_close/60:.1f} minutes ago - skipping reveal wait")
+                        
+                        # Compute consensus for all leads in this epoch
+                        await compute_epoch_consensus(check_epoch)
+                        
+                        closed_epochs.add(check_epoch)
+                        print(f"   ✅ Epoch {check_epoch} fully processed\n")
+                    elif time_since_close >= 300:  # 5 minutes after close
+                        # No evidence after 5 minutes - mark as processed to avoid checking again
+                        print(f"   ℹ️  Epoch {check_epoch} closed {time_since_close/60:.1f} minutes ago with no validation evidence - marking as processed")
+                        closed_epochs.add(check_epoch)
                     else:
-                        print(f"   ℹ️  Epoch closed {time_since_close/60:.1f} minutes ago - skipping reveal wait")
-                    
-                    # Compute consensus for all leads in this epoch
-                    await compute_epoch_consensus(current_epoch)
-                    
-                    closed_epochs.add(current_epoch)
-                    print(f"   ✅ Epoch {current_epoch} fully processed\n")
-                elif time_since_close >= 300:  # 5 minutes after close
-                    # No evidence after 5 minutes - mark as processed to avoid checking again
-                    print(f"   ℹ️  Epoch {current_epoch} closed {time_since_close/60:.1f} minutes ago with no validation evidence - marking as processed")
-                    closed_epochs.add(current_epoch)
-                else:
-                    print(f"   ⏳ No evidence yet for epoch {current_epoch}, but only {time_since_close:.0f}s since close - will check again")
+                        print(f"   ⏳ No evidence yet for epoch {check_epoch}, but only {time_since_close:.0f}s since close - will check again")
             
             # Clean up old tracking sets to prevent memory growth
             if len(validation_ended_epochs) > 100:

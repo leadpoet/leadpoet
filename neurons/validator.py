@@ -1583,8 +1583,12 @@ class Validator(BaseValidatorNeuron):
                     miner_rewards[miner_hotkey] += rep_score
             
             if not miner_rewards:
+                print(f"   ℹ️  No approved leads → No weights to submit")
+                print(f"   (All {len(validation_data)} leads were denied)")
                 bt.logging.info("No approved leads, skipping weight submission")
                 return
+            
+            print(f"   ✅ Found rewards for {len(miner_rewards)} miners:")
             
             # Convert hotkeys to UIDs
             uids = []

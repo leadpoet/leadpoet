@@ -326,6 +326,145 @@ async def reveal_validation_result(
     }
 
 
+@router.post("/batch")
+async def reveal_validation_batch(
+    epoch_id: int = Body(..., description="Epoch ID"),
+    validator_hotkey: str = Body(..., description="Validator's SS58 address"),
+    signature: str = Body(..., description="Ed25519 signature over message"),
+    nonce: str = Body(..., description="Nonce used in signature"),
+    reveals: list = Body(..., description="List of reveal objects")
+):
+    """
+    Batch reveal endpoint for validators to reveal multiple validations at once.
+    
+    This is more efficient than calling /reveal once per lead.
+    
+    Args:
+        epoch_id: Epoch ID
+        validator_hotkey: Validator's SS58 address
+        signature: Ed25519 signature over "reveal:{hotkey}:{epoch_id}:{nonce}"
+        nonce: Nonce (timestamp)
+        reveals: List of {lead_id, decision, rep_score, rejection_reason, salt}
+    
+    Returns:
+        {
+            "status": "revealed",
+            "epoch_id": int,
+            "revealed_count": int,
+            "failed_count": int,
+            "errors": List[str]
+        }
+    """
+    # Verify signature
+    message = f"reveal:{validator_hotkey}:{epoch_id}:{nonce}"
+    if not verify_wallet_signature(message, signature, validator_hotkey):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid signature"
+        )
+    
+    # Verify epoch is closed
+    if not is_epoch_closed(epoch_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Epoch {epoch_id} is not closed yet. Wait until epoch closes to reveal."
+        )
+    
+    print(f"\n{'='*80}")
+    print(f"📥 BATCH REVEAL: {len(reveals)} reveals from {validator_hotkey[:20]}...")
+    print(f"{'='*80}")
+    
+    revealed_count = 0
+    failed_count = 0
+    errors = []
+    
+    for idx, reveal in enumerate(reveals, 1):
+        try:
+            lead_id = reveal["lead_id"]
+            decision = reveal["decision"]
+            rep_score = reveal["rep_score"]
+            rejection_reason = reveal["rejection_reason"]
+            salt = reveal["salt"]
+            
+            print(f"   [{idx}/{len(reveals)}] Revealing lead {lead_id[:8]}... - Decision: {decision}")
+            
+            # Find evidence by lead_id + validator_hotkey + epoch_id
+            result = supabase.table("validation_evidence_private") \
+                .select("*") \
+                .eq("lead_id", lead_id) \
+                .eq("validator_hotkey", validator_hotkey) \
+                .eq("epoch_id", epoch_id) \
+                .limit(1) \
+                .execute()
+            
+            if not result.data:
+                error_msg = f"Evidence not found for lead {lead_id[:8]}..."
+                print(f"      ❌ {error_msg}")
+                errors.append(error_msg)
+                failed_count += 1
+                continue
+            
+            evidence = result.data[0]
+            
+            # Verify hashes
+            computed_decision_hash = hashlib.sha256((decision + salt).encode()).hexdigest()
+            computed_rep_score_hash = hashlib.sha256((str(rep_score) + salt).encode()).hexdigest()
+            computed_rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason) + salt).encode()).hexdigest()
+            
+            if computed_decision_hash != evidence["decision_hash"]:
+                error_msg = f"Decision hash mismatch for lead {lead_id[:8]}..."
+                print(f"      ❌ {error_msg}")
+                errors.append(error_msg)
+                failed_count += 1
+                continue
+            
+            if computed_rep_score_hash != evidence["rep_score_hash"]:
+                error_msg = f"Rep score hash mismatch for lead {lead_id[:8]}..."
+                print(f"      ❌ {error_msg}")
+                errors.append(error_msg)
+                failed_count += 1
+                continue
+            
+            if computed_rejection_reason_hash != evidence["rejection_reason_hash"]:
+                error_msg = f"Rejection reason hash mismatch for lead {lead_id[:8]}..."
+                print(f"      ❌ {error_msg}")
+                errors.append(error_msg)
+                failed_count += 1
+                continue
+            
+            # Update evidence with revealed values
+            supabase.table("validation_evidence_private") \
+                .update({
+                    "decision": decision,
+                    "rep_score": rep_score,
+                    "rejection_reason": json.dumps(rejection_reason),
+                    "revealed_ts": datetime.utcnow().isoformat()
+                }) \
+                .eq("evidence_id", evidence["evidence_id"]) \
+                .execute()
+            
+            print(f"      ✅ Revealed: {decision} (rep_score={rep_score})")
+            revealed_count += 1
+            
+        except Exception as e:
+            error_msg = f"Error revealing lead {reveal.get('lead_id', 'unknown')[:8]}...: {str(e)}"
+            print(f"      ❌ {error_msg}")
+            errors.append(error_msg)
+            failed_count += 1
+    
+    print(f"{'='*80}")
+    print(f"✅ Batch reveal complete: {revealed_count} revealed, {failed_count} failed")
+    print(f"{'='*80}\n")
+    
+    return {
+        "status": "revealed",
+        "epoch_id": epoch_id,
+        "revealed_count": revealed_count,
+        "failed_count": failed_count,
+        "errors": errors if errors else None
+    }
+
+
 @router.get("/stats")
 async def get_reveal_stats(epoch_id: int):
     """

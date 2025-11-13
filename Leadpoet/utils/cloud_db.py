@@ -1860,7 +1860,7 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
         
         # Submit reveal batch
         response = requests.post(
-            f"{GATEWAY_URL}/reveal",
+            f"{GATEWAY_URL}/reveal/batch",
             json={
                 "validator_hotkey": wallet.hotkey.ss58_address,
                 "epoch_id": epoch_id,

@@ -102,12 +102,28 @@ async def hourly_batch_task():
             print(f"\n🔄 Requesting checkpoint from TEE...")
             checkpoint_data = await tee_client.build_checkpoint()
             
-            # Handle empty buffer
+            # Handle empty buffer - still upload for continuous audit trail
             if checkpoint_data.get("status") == "empty":
-                print("✅ No events to batch (buffer empty)")
-                print(f"⏭️  Skipping batch, waiting {BATCH_INTERVAL/60:.0f} minutes for next batch...")
-                await asyncio.sleep(BATCH_INTERVAL)
-                continue
+                print("ℹ️  No events in TEE buffer")
+                print("   Uploading empty checkpoint to maintain continuous audit trail...")
+                
+                # Create empty checkpoint
+                checkpoint_data = {
+                    "header": {
+                        "checkpoint_number": batch_count,
+                        "event_count": 0,
+                        "merkle_root": "0" * 64,  # Empty tree
+                        "time_range": {
+                            "start": datetime.utcnow().isoformat(),
+                            "end": datetime.utcnow().isoformat()
+                        }
+                    },
+                    "signature": "empty_checkpoint",
+                    "events": [],
+                    "tree_levels": []
+                }
+                
+                # Continue with empty upload (don't skip)
             
             # Extract checkpoint components
             header = checkpoint_data["header"]
@@ -186,6 +202,10 @@ async def hourly_batch_task():
             
             print(f"\n✅ Checkpoint uploaded to Arweave")
             print(f"   TX ID: {tx_id}")
+            if header['event_count'] == 0:
+                print(f"   Note: Empty checkpoint (maintains continuous audit trail)")
+            else:
+                print(f"   Events: {header['event_count']}")
             print(f"   Note: Full confirmation takes 2-20 minutes to propagate")
             print(f"   Content URL: https://arweave.net/{tx_id}")
             print(f"   ViewBlock: https://viewblock.io/arweave/tx/{tx_id}")

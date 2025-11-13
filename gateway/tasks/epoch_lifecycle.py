@@ -107,24 +107,45 @@ async def epoch_lifecycle_task():
             # Check if epoch closed (block 360) - time to reveal + consensus
             # ========================================================================
             time_since_close = (now - epoch_close).total_seconds()
-            if 0 <= time_since_close < 120 and current_epoch not in closed_epochs:
-                print(f"\n{'='*80}")
-                print(f"🔓 EPOCH {current_epoch} CLOSED - STARTING REVEAL & CONSENSUS")
-                print(f"{'='*80}")
-                print(f"   Closed at: {epoch_close.isoformat()}")
+            
+            # FIX: Process ANY closed epoch that hasn't been processed yet
+            # (not just within 120 second window - catches missed epochs after restart)
+            if time_since_close >= 0 and current_epoch not in closed_epochs:
+                # Check if this epoch has validation evidence
+                evidence_check = supabase.table("validation_evidence_private") \
+                    .select("lead_id", count="exact") \
+                    .eq("epoch_id", current_epoch) \
+                    .limit(1) \
+                    .execute()
                 
-                # Trigger reveal phase (validators should reveal their commits)
-                await trigger_reveal_phase(current_epoch)
+                has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
                 
-                # Wait a bit for reveals to come in (2 minutes)
-                print(f"   ⏳ Waiting 2 minutes for reveals...")
-                await asyncio.sleep(120)
-                
-                # Compute consensus for all leads in this epoch
-                await compute_epoch_consensus(current_epoch)
-                
-                closed_epochs.add(current_epoch)
-                print(f"   ✅ Epoch {current_epoch} fully processed\n")
+                if has_evidence:
+                    print(f"\n{'='*80}")
+                    print(f"🔓 EPOCH {current_epoch} CLOSED - STARTING REVEAL & CONSENSUS")
+                    print(f"{'='*80}")
+                    print(f"   Closed at: {epoch_close.isoformat()}")
+                    print(f"   Time since close: {time_since_close/60:.1f} minutes")
+                    
+                    # Trigger reveal phase (validators should reveal their commits)
+                    await trigger_reveal_phase(current_epoch)
+                    
+                    # Wait a bit for reveals to come in (only if epoch just closed)
+                    if time_since_close < 300:  # Within 5 minutes
+                        print(f"   ⏳ Waiting 2 minutes for reveals...")
+                        await asyncio.sleep(120)
+                    else:
+                        print(f"   ℹ️  Epoch closed {time_since_close/60:.1f} minutes ago - skipping reveal wait")
+                    
+                    # Compute consensus for all leads in this epoch
+                    await compute_epoch_consensus(current_epoch)
+                    
+                    closed_epochs.add(current_epoch)
+                    print(f"   ✅ Epoch {current_epoch} fully processed\n")
+                elif time_since_close >= 300:  # 5 minutes after close
+                    # No evidence after 5 minutes - mark as processed to avoid checking again
+                    print(f"   ℹ️  Epoch {current_epoch} closed {time_since_close/60:.1f} minutes ago with no validation evidence - marking as processed")
+                    closed_epochs.add(current_epoch)
             
             # Clean up old tracking sets to prevent memory growth
             if len(validation_ended_epochs) > 100:

@@ -68,6 +68,15 @@ async def epoch_lifecycle_task():
             epoch_end = get_epoch_end_time(current_epoch)
             epoch_close = get_epoch_close_time(current_epoch)
             
+            # Debug: Show lifecycle task is running (every 30 seconds)
+            time_to_end = (epoch_end - now).total_seconds()
+            time_to_close = (epoch_close - now).total_seconds()
+            print(f"🔄 Epoch {current_epoch} lifecycle check:")
+            print(f"   Time to validation end: {time_to_end/60:.1f} min")
+            print(f"   Time to epoch close: {time_to_close/60:.1f} min")
+            print(f"   Last epoch: {last_epoch_id}")
+            print(f"   Closed epochs: {sorted(list(closed_epochs))[-5:] if closed_epochs else []}")  # Show last 5
+            
             # ========================================================================
             # Check if new epoch started
             # ========================================================================
@@ -114,11 +123,15 @@ async def epoch_lifecycle_task():
             # ========================================================================
             time_since_close = (now - epoch_close).total_seconds()
             
+            print(f"   🔍 Checking if epoch closed: time_since_close={time_since_close:.1f}s")
+            
             # FIX: Process ANY closed epoch that hasn't been processed yet
             # (not just within 120 second window - catches missed epochs after restart)
             if time_since_close >= 0 and current_epoch not in closed_epochs:
+                print(f"   ⚠️  EPOCH {current_epoch} IS CLOSED - Checking for evidence...")
                 # Check if this epoch has validation evidence (run in thread to avoid blocking)
                 try:
+                    print(f"   🔍 Querying validation_evidence_private for epoch {current_epoch}...")
                     evidence_check = await asyncio.to_thread(
                         lambda: supabase.table("validation_evidence_private")
                             .select("lead_id", count="exact")
@@ -127,8 +140,11 @@ async def epoch_lifecycle_task():
                             .execute()
                     )
                     has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
+                    print(f"   📊 Evidence check: count={evidence_check.count}, has_evidence={has_evidence}")
                 except Exception as e:
-                    print(f"   ⚠️  Could not check validation evidence for epoch {current_epoch}: {e}")
+                    print(f"   ❌ Could not check validation evidence for epoch {current_epoch}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     has_evidence = False
                 
                 if has_evidence:
@@ -157,6 +173,8 @@ async def epoch_lifecycle_task():
                     # No evidence after 5 minutes - mark as processed to avoid checking again
                     print(f"   ℹ️  Epoch {current_epoch} closed {time_since_close/60:.1f} minutes ago with no validation evidence - marking as processed")
                     closed_epochs.add(current_epoch)
+                else:
+                    print(f"   ⏳ No evidence yet for epoch {current_epoch}, but only {time_since_close:.0f}s since close - will check again")
             
             # Clean up old tracking sets to prevent memory growth
             if len(validation_ended_epochs) > 100:
@@ -435,18 +453,23 @@ async def compute_epoch_consensus(epoch_id: int):
         approved_count = 0
         rejected_count = 0
         
-        for lead_id in unique_leads:
+        for i, lead_id in enumerate(unique_leads, 1):
             try:
+                print(f"      🔍 [{i}/{len(unique_leads)}] Computing consensus for lead {lead_id[:8]}...")
+                
                 # Compute weighted consensus for this lead
                 outcome = await compute_weighted_consensus(lead_id, epoch_id)
+                print(f"         📊 Outcome: {outcome['final_decision']} (rep: {outcome['final_rep_score']:.2f})")
                 
                 # Update leads_private with final outcome - RUN IN THREAD
+                print(f"         💾 Updating leads_private.epoch_summary...")
                 await asyncio.to_thread(
                     lambda: supabase.table("leads_private")
                         .update({"epoch_summary": outcome})
                         .eq("lead_id", lead_id)
                         .execute()
                 )
+                print(f"         ✅ Database updated")
                 
                 # Log CONSENSUS_RESULT publicly for miner transparency
                 await log_consensus_result(lead_id, epoch_id, outcome)
@@ -456,10 +479,12 @@ async def compute_epoch_consensus(epoch_id: int):
                 else:
                     rejected_count += 1
                 
-                print(f"      ✅ Lead {lead_id[:8]}...: {outcome['final_decision']} (rep: {outcome['final_rep_score']:.2f}, reason: {outcome['primary_rejection_reason']})")
+                print(f"      ✅ Lead {lead_id[:8]}...: {outcome['final_decision']} (rep: {outcome['final_rep_score']:.2f}, reason: {outcome.get('primary_rejection_reason', 'N/A')})")
             
             except Exception as e:
                 print(f"      ❌ Failed to compute consensus for lead {lead_id[:8]}...: {e}")
+                import traceback
+                traceback.print_exc()
         
         print(f"   📊 Consensus complete: {approved_count} approved, {rejected_count} rejected")
     

@@ -181,12 +181,20 @@ async def get_epoch_leads(
                 "validator_count": len(validator_set)
             }
         
+        print(f"🔍 Step 7: Fetching {len(assigned_lead_ids)} leads from leads_private...")
+        print(f"   Lead IDs: {assigned_lead_ids[:3]}... (showing first 3)")
+        
         leads_result = supabase.table("leads_private") \
             .select("lead_id, lead_blob, lead_blob_hash, miner_hotkey") \
             .in_("lead_id", assigned_lead_ids) \
             .execute()
         
+        print(f"✅ Fetched {len(leads_result.data) if leads_result.data else 0} leads from database")
+        
         if not leads_result.data:
+            print(f"❌ ERROR: No leads found in database for assigned IDs")
+            print(f"   This means leads were assigned but don't exist in leads_private")
+            print(f"   Assigned IDs: {assigned_lead_ids}")
             raise HTTPException(
                 status_code=500,
                 detail="Failed to fetch lead data from private database"
@@ -195,6 +203,9 @@ async def get_epoch_leads(
     except HTTPException:
         raise
     except Exception as e:
+        print(f"❌ ERROR in Step 7: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch lead data: {str(e)}"
@@ -202,16 +213,36 @@ async def get_epoch_leads(
     
     # Step 8: Build full_leads with miner_hotkey from database
     # OPTIMIZATION: miner_hotkey is now stored in leads_private (no N+1 query needed)
-    full_leads = []
-    for lead_row in leads_result.data:
-        full_leads.append({
-            "lead_id": lead_row["lead_id"],
-            "lead_blob": lead_row["lead_blob"],
-            "lead_blob_hash": lead_row["lead_blob_hash"],
-            "miner_hotkey": lead_row.get("miner_hotkey", "unknown")  # Fetched from database
-        })
+    try:
+        print(f"🔍 Step 8: Building full lead data for {len(leads_result.data)} leads...")
+        full_leads = []
+        for idx, lead_row in enumerate(leads_result.data):
+            try:
+                full_leads.append({
+                    "lead_id": lead_row["lead_id"],
+                    "lead_blob": lead_row["lead_blob"],
+                    "lead_blob_hash": lead_row["lead_blob_hash"],
+                    "miner_hotkey": lead_row.get("miner_hotkey", "unknown")  # Fetched from database
+                })
+            except Exception as e:
+                print(f"❌ ERROR building lead {idx}: {e}")
+                print(f"   Lead row keys: {lead_row.keys() if hasattr(lead_row, 'keys') else 'N/A'}")
+                print(f"   Lead row: {lead_row}")
+                raise
+        
+        print(f"✅ Step 8 complete: Built {len(full_leads)} full lead objects")
+    
+    except Exception as e:
+        print(f"❌ ERROR in Step 8: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to build lead data: {str(e)}"
+        )
     
     # Step 9: Return full lead data
+    print(f"✅ Step 9: Returning {len(full_leads)} leads to validator")
     return {
         "epoch_id": epoch_id,
         "leads": full_leads,

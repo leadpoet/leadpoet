@@ -1542,6 +1542,7 @@ def check_email_duplicate(email: str) -> bool:
             return True
         
         # No duplicate found
+        print(f"✅ No duplicate found - lead is unique")
         return False
         
     except Exception as e:

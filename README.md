@@ -55,7 +55,7 @@ export OPENROUTER_KEY="your_openrouter_key"          # openrouter.ai
 
 # Reputation Score APIs (REQUIRED - soft checks, run on every validation)
 export USPTO_API_KEY="your_uspto_key"                # https://developer.uspto.gov/api-catalog/tsdr-data-api
-export SEC_EDGAR_API_KEY="your_sec_key"              # www.sec.gov (optional - pending implementation)
+# Note: Wayback Machine and SEC EDGAR don't require API keys (public APIs)
 
 ```
 
@@ -330,14 +330,13 @@ The audit tool queries **public data only** (transparency log) and shows consens
 - **TEE Gateway**: All events logged through hardware-protected Trusted Execution Environment
 - **Immutable transparency**: Events permanently stored on Arweave with cryptographic proofs
 - **Commit/Reveal protocol**: Prevents validators from copying each other's decisions
-- **Consensus requirement**: Majority validator agreement required for lead approval
+- **Consensus requirement**: Majority validator agreement, weighted by stake and v_trust, is required for lead approval
 
 ## Data Flow
 
 ```
 Miner Sources Leads → Submit to TEE Gateway (S3 Upload) → 
-Epoch Assignment → Validators Validate (Commit/Reveal) → 
-Consensus Calculation → Lead Pool → Curation for Buyer Requests (Month 2)
+Epoch Assignment → Validators Validate (Commit/Reveal) 
 ```
 
 ## Roadmap

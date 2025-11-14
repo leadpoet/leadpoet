@@ -1649,8 +1649,9 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
         
         # SEC EDGAR Company Search API
         # Note: Requires exact CIK or ticker - this is simplified
+        # SEC.gov requires User-Agent header (no API key needed - it's a public API)
         headers = {
-            "User-Agent": f"LeadPoet/1.0 (API-Key: {os.getenv('SEC_EDGAR_API_KEY', '')})"
+            "User-Agent": "LeadPoet/1.0 (hello@leadpoet.com)"
         }
         
         # First, search for company to get CIK

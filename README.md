@@ -192,8 +192,6 @@ export GSE_CX="your_search_engine_id"                # Custom Search ID
 **💡 TIP**: Copy `env.example` to `.env` and fill in your API keys for easier configuration.
 
 ```bash
-# Network Configuration
-export SUBTENSOR_NETWORK=finney                      # "finney" (mainnet) or "local" (testnet)
 
 # Email Validation API (REQUIRED)
 export MYEMAILVERIFIER_API_KEY="your_mev_key"        # myemailverifier.com
@@ -204,7 +202,7 @@ export GSE_CX="your_search_engine_id"                # Custom Search Engine ID
 export OPENROUTER_KEY="your_openrouter_key"          # openrouter.ai
 
 # Reputation Score APIs (REQUIRED - soft checks, run on every validation)
-export USPTO_API_KEY="your_uspto_key"                # developer.uspto.gov
+export USPTO_API_KEY="your_uspto_key"                # https://developer.uspto.gov/api-catalog/tsdr-data-api
 export SEC_EDGAR_API_KEY="your_sec_key"              # www.sec.gov (optional - pending implementation)
 
 ```

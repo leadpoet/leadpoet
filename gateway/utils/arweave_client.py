@@ -24,7 +24,7 @@ from arweave.arweave_lib import Wallet, Transaction
 
 
 # Configuration (will be loaded from config.py)
-ARWEAVE_KEYFILE_PATH = os.getenv("ARWEAVE_KEYFILE_PATH", "gateway/secrets/arweave_keyfile.json")
+ARWEAVE_KEYFILE_PATH = os.getenv("ARWEAVE_KEYFILE_PATH", "secrets/arweave_keyfile.json")
 ARWEAVE_GATEWAY_URL = os.getenv("ARWEAVE_GATEWAY_URL", "https://arweave.net")
 
 # Retry configuration

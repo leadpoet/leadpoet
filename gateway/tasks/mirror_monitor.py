@@ -194,9 +194,12 @@ async def log_unavailable_event(
         "payload": payload
     }
     
-    supabase.table("transparency_log").insert(log_entry).execute()
+    # Log through TEE (authoritative, hardware-protected)
+    from gateway.utils.logger import log_event
+    result = await log_event(log_entry)
+    tee_sequence = result.get("sequence")
     
-    print(f"      ⚠️  UNAVAILABLE logged: {mirror}:{lead_blob_hash[:16]}... (lead: {lead_id[:8]}...)")
+    print(f"      ⚠️  UNAVAILABLE logged (seq={tee_sequence}): {mirror}:{lead_blob_hash[:16]}... (lead: {lead_id[:8]}...)")
 
 
 async def check_specific_lead(lead_id: str) -> Dict[str, bool]:

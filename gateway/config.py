@@ -120,7 +120,7 @@ GATEWAY_PRIVATE_KEY_PATH = os.getenv(
 # ============================================================
 # Arweave (Immutable Transparency Log - Primary Source of Truth)
 # ============================================================
-ARWEAVE_KEYFILE_PATH = os.getenv("ARWEAVE_KEYFILE_PATH", "gateway/secrets/arweave_keyfile.json")
+ARWEAVE_KEYFILE_PATH = os.getenv("ARWEAVE_KEYFILE_PATH", "secrets/arweave_keyfile.json")
 ARWEAVE_GATEWAY_URL = os.getenv("ARWEAVE_GATEWAY_URL", "https://arweave.net")
 
 # Note: Arweave keyfile validation is done lazily on first use

@@ -170,10 +170,12 @@ async def log_anchor_event(
         "payload": payload
     }
     
-    # Insert into transparency log
-    supabase.table("transparency_log").insert(log_entry).execute()
+    # Log through TEE (authoritative, hardware-protected)
+    from gateway.utils.logger import log_event
+    result = await log_event(log_entry)
+    tee_sequence = result.get("sequence")
     
-    print(f"   ✅ ANCHOR_ROOT event logged to transparency log")
+    print(f"   ✅ ANCHOR_ROOT event logged to transparency log (seq={tee_sequence})")
 
 
 # Optional: Manual anchor function for testing/debugging

@@ -6,8 +6,8 @@ This script verifies that the gateway is running inside a genuine AWS Nitro Encl
 and extracts the enclave measurements (PCRs) for code integrity verification.
 
 Usage:
+    python verify_attestation.py              # Uses default gateway URL
     python verify_attestation.py <gateway_url>
-    python verify_attestation.py https://gateway.leadpoet.ai
 
 Output:
     - Attestation validity (AWS Nitro signature verification)
@@ -47,6 +47,13 @@ import base64
 from typing import Dict, Any
 from datetime import datetime
 
+# ============================================================================
+# PRODUCTION GATEWAY CONFIGURATION
+# ============================================================================
+# Update this URL if the gateway moves to a different IP/port
+DEFAULT_GATEWAY_URL = "http://54.226.209.164:8000"
+# ============================================================================
+
 try:
     import cbor2
     import requests
@@ -64,7 +71,8 @@ def download_attestation(gateway_url: str) -> bytes:
     """Download attestation document from gateway /attest endpoint"""
     
     if not gateway_url.startswith("http"):
-        gateway_url = f"https://{gateway_url}"
+        # Use http by default (production gateway uses http)
+        gateway_url = f"http://{gateway_url}"
     
     attest_url = f"{gateway_url}/attest"
     
@@ -73,8 +81,31 @@ def download_attestation(gateway_url: str) -> bytes:
     try:
         response = requests.get(attest_url, timeout=60)
         response.raise_for_status()
+    except requests.ConnectionError:
+        print(f"❌ Failed to connect to gateway at {gateway_url}")
+        print()
+        print("🔧 TROUBLESHOOTING:")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("The gateway IP may have changed due to an EC2 instance restart.")
+        print()
+        print("Current configured IP in this script:")
+        print(f"   {DEFAULT_GATEWAY_URL}")
+        print()
+        print("To fix:")
+        print("1. Check if the EC2 instance is running")
+        print("2. Get the new public IP from AWS console")
+        print("3. Update DEFAULT_GATEWAY_URL at the top of this script")
+        print("4. OR contact us on LeadPoet Discord for the current IP")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        sys.exit(1)
+    except requests.Timeout:
+        print(f"❌ Request timed out after 60 seconds")
+        print(f"🔧 Gateway may be starting up or unresponsive")
+        print(f"   Contact us on LeadPoet Discord if the issue persists")
+        sys.exit(1)
     except requests.RequestException as e:
         print(f"❌ Failed to download attestation: {e}")
+        print(f"🔧 If the gateway IP has changed, update DEFAULT_GATEWAY_URL in this script")
         sys.exit(1)
     
     data = response.json()
@@ -258,16 +289,21 @@ def verify_attestation(attestation_bytes: bytes) -> Dict[str, Any]:
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: verify_attestation.py <gateway_url>")
-        print("Example: verify_attestation.py https://gateway.leadpoet.ai")
-        print("         verify_attestation.py gateway.leadpoet.ai")
+    # Parse command line arguments
+    if len(sys.argv) > 2:
+        print("Usage: verify_attestation.py [gateway_url]")
+        print()
+        print("Examples:")
+        print(f"  python verify_attestation.py               # Use default: {DEFAULT_GATEWAY_URL}")
+        print(f"  python verify_attestation.py http://custom-gateway:8000")
         sys.exit(1)
     
-    gateway_url = sys.argv[1]
+    gateway_url = sys.argv[1] if len(sys.argv) == 2 else DEFAULT_GATEWAY_URL
     
     print("=" * 80)
     print("🔐 AWS NITRO ENCLAVE ATTESTATION VERIFIER")
+    print("=" * 80)
+    print(f"Gateway: {gateway_url}")
     print("=" * 80)
     
     # Download attestation

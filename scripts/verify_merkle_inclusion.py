@@ -26,6 +26,13 @@ import gzip
 import hashlib
 from typing import List, Dict, Any, Optional, Tuple
 
+# ============================================================================
+# PRODUCTION GATEWAY CONFIGURATION
+# ============================================================================
+# Update this URL if the gateway moves to a different IP/port
+DEFAULT_GATEWAY_URL = "http://54.226.209.164:8000"
+# ============================================================================
+
 try:
     import requests
     from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -60,6 +67,14 @@ def download_checkpoint(tx_id: str) -> Optional[Dict[str, Any]]:
         
         return checkpoint
         
+    except requests.ConnectionError:
+        print(f"   ❌ Failed to connect to Arweave")
+        print(f"   🔧 Check your internet connection or try again later")
+        return None
+    except requests.Timeout:
+        print(f"   ❌ Request timed out after 30 seconds")
+        print(f"   🔧 Arweave may be slow, try again later")
+        return None
     except requests.RequestException as e:
         print(f"   ❌ Failed to download: {e}")
         return None

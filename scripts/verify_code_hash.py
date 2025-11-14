@@ -9,8 +9,9 @@ specific GitHub commit by:
 3. Comparing to the code_hash from the gateway's attestation
 
 Usage:
+    python verify_code_hash.py                    # Uses default gateway URL
+    python verify_code_hash.py <gateway_url>      # Custom gateway URL
     python verify_code_hash.py <gateway_url> --github-url <url> --commit <commit>
-    python verify_code_hash.py http://54.80.97.12:8000 --github-url https://github.com/leadpoet/leadpoet --commit main
 
 Requirements:
     - git
@@ -30,6 +31,13 @@ import argparse
 from pathlib import Path
 from typing import Optional
 import requests
+
+# ============================================================================
+# PRODUCTION GATEWAY CONFIGURATION
+# ============================================================================
+# Update this URL if the gateway moves to a different IP/port
+DEFAULT_GATEWAY_URL = "http://54.226.209.164:8000"
+# ============================================================================
 
 
 def check_dependencies():
@@ -194,8 +202,31 @@ def get_gateway_attestation(gateway_url: str) -> Optional[dict]:
         print(f"   ✅ Attestation downloaded")
         return data
     
+    except requests.ConnectionError:
+        print(f"   ❌ Failed to connect to gateway at {gateway_url}")
+        print()
+        print("   🔧 TROUBLESHOOTING:")
+        print("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print(f"   The gateway IP may have changed due to an EC2 instance restart.")
+        print()
+        print("   Current configured IP in this script:")
+        print(f"      {DEFAULT_GATEWAY_URL}")
+        print()
+        print("   To fix:")
+        print("   1. Check if the EC2 instance is running")
+        print("   2. Get the new public IP from AWS console")
+        print("   3. Update DEFAULT_GATEWAY_URL at the top of this script")
+        print("   4. OR contact us on LeadPoet Discord for the current IP")
+        print("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        return None
+    except requests.Timeout:
+        print(f"   ❌ Request timed out after 30 seconds")
+        print(f"   🔧 Gateway may be starting up or unresponsive")
+        print(f"      Contact us on LeadPoet Discord if the issue persists")
+        return None
     except requests.RequestException as e:
         print(f"   ❌ Failed to download: {e}")
+        print(f"   🔧 If the gateway IP has changed, update DEFAULT_GATEWAY_URL in this script")
         return None
 
 
@@ -280,16 +311,19 @@ def main():
     parser = argparse.ArgumentParser(
         description="Verify gateway code integrity against GitHub",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Examples:
-  # Verify against main branch (simplest)
-  python verify_code_hash.py http://54.80.97.12:8000
+  # Verify using default gateway ({DEFAULT_GATEWAY_URL})
+  python verify_code_hash.py
   
   # Verify against specific commit
-  python verify_code_hash.py http://54.80.97.12:8000 --commit abc123def456
+  python verify_code_hash.py --commit abc123def456
+  
+  # Verify against custom gateway
+  python verify_code_hash.py http://custom-gateway:8000
   
   # Verify against different repo
-  python verify_code_hash.py http://54.80.97.12:8000 \\
+  python verify_code_hash.py \\
     --github-url https://github.com/different/repo \\
     --commit main
 
@@ -301,7 +335,9 @@ Note: This verifies the application code (tee_service.py) hash.
     
     parser.add_argument(
         "gateway_url",
-        help="Gateway URL (e.g., http://54.80.97.12:8000)"
+        nargs="?",  # Make optional
+        default=DEFAULT_GATEWAY_URL,
+        help=f"Gateway URL (default: {DEFAULT_GATEWAY_URL})"
     )
     parser.add_argument(
         "--github-url",

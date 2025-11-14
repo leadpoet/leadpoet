@@ -310,9 +310,10 @@ leadpoet-audit report 19000
 # Save report to JSON
 leadpoet-audit report 19000 --output report.json
 
-# Query transparency logs by date, hours, or lead ID (outputs all event fields)
+# Query transparency logs by date, hours, or lead ID (outputs ALL database fields)
 leadpoet-audit logs --date 2025-11-14 --output events.json
 leadpoet-audit logs --hours 4 --output recent.json
+leadpoet-audit logs --lead-id abc123... --output lead_events.json
 ```
 
 The audit tool queries **public data only** (transparency log) and shows consensus results, rejection reasons, and miner performance statistics.

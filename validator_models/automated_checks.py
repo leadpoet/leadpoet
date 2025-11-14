@@ -1382,10 +1382,6 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
     Returns:
         (passed, rejection_reason)
     """
-    # TEMPORARY: Skip LinkedIn check for testing rep score
-    print(f"   ⚠️  TEMPORARY: Skipping LinkedIn/GSE check for rep score testing")
-    return True, {}
-    
     try:
         full_name = lead.get("full_name") or lead.get("Full_name") or lead.get("Full Name")
         company = get_company(lead)

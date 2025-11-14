@@ -1552,7 +1552,7 @@ class Validator(BaseValidatorNeuron):
                     status_icon = "✅" if is_valid else "❌"
                     decision_text = "APPROVED" if is_valid else "DENIED"
                     print(f"   {status_icon} Decision: {decision_text}")
-                    print(f"   📊 Rep Score: {rep_score}/100")
+                    print(f"   📊 Rep Score: {rep_score}/30")
                     if not is_valid:
                         reason_msg = rejection_reason.get("message", "Unknown reason")
                         print(f"   ⚠️  Reason: {reason_msg}")

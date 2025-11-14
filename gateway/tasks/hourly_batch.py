@@ -69,9 +69,29 @@ async def hourly_batch_task():
     # Wait before first batch (allow events to accumulate)
     print(f"⏳ Waiting {BATCH_INTERVAL/60:.0f} minutes for first batch...")
     print(f"   Events will accumulate in TEE buffer during this time.")
-    print(f"   Next batch: {datetime.utcnow() + timedelta(seconds=BATCH_INTERVAL)}\n")
+    next_batch = datetime.utcnow() + timedelta(seconds=BATCH_INTERVAL)
+    print(f"   Next batch: {next_batch}\n")
     
-    await asyncio.sleep(BATCH_INTERVAL)
+    # Add countdown progress every 15 minutes
+    remaining_time = BATCH_INTERVAL
+    progress_interval = 900  # 15 minutes in seconds
+    
+    while remaining_time > 0:
+        wait_time = min(progress_interval, remaining_time)
+        await asyncio.sleep(wait_time)
+        remaining_time -= wait_time
+        
+        if remaining_time > 0:
+            minutes_left = remaining_time / 60
+            # Get buffer stats to show accumulated events
+            try:
+                stats = await tee_client.get_buffer_stats()
+                buffer_size = stats.get("size", 0)
+                print(f"⏰ Arweave Upload Countdown: {minutes_left:.0f} minutes remaining")
+                print(f"   📊 {buffer_size} event(s) accumulated in TEE buffer")
+                print(f"   Next upload: {next_batch.isoformat()}\n")
+            except Exception:
+                print(f"⏰ Arweave Upload Countdown: {minutes_left:.0f} minutes remaining\n")
     
     batch_count = 0
     
@@ -239,26 +259,43 @@ async def hourly_batch_task():
         
         # Implement emergency batch check during wait
         # Check buffer size every 5 minutes during the 1-hour wait
+        # Print countdown every 15 minutes (3 intervals)
         check_interval = 300  # 5 minutes
+        progress_interval = 900  # 15 minutes (print countdown every 15 min)
         checks_per_hour = BATCH_INTERVAL // check_interval
+        
+        last_progress_print = 0
         
         for check_num in range(checks_per_hour):
             await asyncio.sleep(check_interval)
             
-            # Check if buffer is approaching capacity
-            try:
-                stats = await tee_client.get_buffer_stats()
-                current_size = stats.get("size", 0)
+            # Print countdown progress every 15 minutes
+            elapsed = (check_num + 1) * check_interval
+            if elapsed - last_progress_print >= progress_interval or check_num == checks_per_hour - 1:
+                last_progress_print = elapsed
+                remaining = BATCH_INTERVAL - elapsed
+                minutes_left = remaining / 60
                 
-                if current_size >= EMERGENCY_BATCH_THRESHOLD:
-                    print(f"\n🚨 EMERGENCY BATCH TRIGGERED!")
-                    print(f"   Buffer size: {current_size} events (threshold: {EMERGENCY_BATCH_THRESHOLD})")
-                    print(f"   Triggering early batch to prevent overflow...")
-                    break  # Exit wait loop, start next batch immediately
-                
-            except Exception as e:
-                # Ignore buffer check errors, continue waiting
-                pass
+                # Check buffer stats for countdown display
+                try:
+                    stats = await tee_client.get_buffer_stats()
+                    current_size = stats.get("size", 0)
+                    
+                    if minutes_left > 0:
+                        print(f"⏰ Arweave Upload Countdown: {minutes_left:.0f} minutes remaining")
+                        print(f"   📊 {current_size} event(s) accumulated in TEE buffer")
+                        print(f"   Next upload: {next_batch_time.isoformat()}\n")
+                    
+                    # Check if buffer is approaching capacity
+                    if current_size >= EMERGENCY_BATCH_THRESHOLD:
+                        print(f"\n🚨 EMERGENCY BATCH TRIGGERED!")
+                        print(f"   Buffer size: {current_size} events (threshold: {EMERGENCY_BATCH_THRESHOLD})")
+                        print(f"   Triggering early batch to prevent overflow...")
+                        break  # Exit wait loop, start next batch immediately
+                    
+                except Exception as e:
+                    # Ignore buffer check errors, continue waiting
+                    pass
 
 
 async def start_hourly_batch_task():

@@ -931,28 +931,50 @@ class Validator(BaseValidatorNeuron):
 
     def save_state(self):
         bt.logging.info("Saving validator state.")
-        state_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "validator_state.npz")
-        np.savez(
-            state_path,
-            step=self.step,
-            scores=self.scores,
-            hotkeys=self.hotkeys,
-            precision=self.precision,
-            consistency=self.consistency,
-            collusion_flag=self.collusion_flag,
-            reputation=self.reputation,
-            validation_history=np.array(self.validation_history, dtype=object),
-            registration_time=np.datetime64(self.registration_time),
-            appeal_status=self.appeal_status
-        )
         
-        # Save pending reveals separately (JSON-serializable)
-        reveals_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "pending_reveals.json")
-        if hasattr(self, '_pending_reveals') and self._pending_reveals:
-            import json
-            with open(reveals_path, 'w') as f:
-                json.dump(self._pending_reveals, f, indent=2)
-            bt.logging.info(f"Saved {len(self._pending_reveals)} pending reveals")
+        try:
+            # Ensure directory exists before saving
+            base_path = self.config.neuron.full_path or os.getcwd()
+            
+            # Create directory if it doesn't exist
+            os.makedirs(base_path, exist_ok=True)
+            
+            # Also ensure the parent directory of the state file exists
+            state_path = os.path.join(base_path, "validator_state.npz")
+            state_dir = os.path.dirname(state_path)
+            if state_dir and not os.path.exists(state_dir):
+                os.makedirs(state_dir, exist_ok=True)
+            
+            np.savez(
+                state_path,
+                step=self.step,
+                scores=self.scores,
+                hotkeys=self.hotkeys,
+                precision=self.precision,
+                consistency=self.consistency,
+                collusion_flag=self.collusion_flag,
+                reputation=self.reputation,
+                validation_history=np.array(self.validation_history, dtype=object),
+                registration_time=np.datetime64(self.registration_time),
+                appeal_status=self.appeal_status
+            )
+            bt.logging.info(f"✅ State saved to {state_path}")
+            
+            # Save pending reveals separately (JSON-serializable)
+            reveals_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "pending_reveals.json")
+            reveals_dir = os.path.dirname(reveals_path)
+            if reveals_dir and not os.path.exists(reveals_dir):
+                os.makedirs(reveals_dir, exist_ok=True)
+                
+            if hasattr(self, '_pending_reveals') and self._pending_reveals:
+                import json
+                with open(reveals_path, 'w') as f:
+                    json.dump(self._pending_reveals, f, indent=2)
+                bt.logging.info(f"Saved {len(self._pending_reveals)} pending reveals")
+        except Exception as e:
+            bt.logging.error(f"Failed to save state: {e}")
+            bt.logging.error(f"   Attempted path: {state_path if 'state_path' in locals() else 'unknown'}")
+            bt.logging.error(f"   Base path: {base_path if 'base_path' in locals() else 'unknown'}")
 
     def load_state(self):
         state_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "validator_state.npz")

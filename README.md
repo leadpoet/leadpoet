@@ -15,151 +15,11 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 
 ---
 
-## 🔐 Gateway Security Architecture (TEE-Based)
+## 🔐 Gateway Verification & Transparency
 
-The Leadpoet gateway uses **AWS Nitro Enclaves (Trusted Execution Environment)** to provide cryptographic proof that it's running the canonical code from GitHub. This makes the system **trustless** - even a malicious subnet owner cannot manipulate the gateway without detection.
+**Verify Gateway Integrity**: Run `python scripts/verify_attestation.py` to verify the gateway is running canonical code (see [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md) for details).
 
-### How It Works
-
-**1. Code Integrity**: Gateway code runs inside AWS Nitro Enclave (hardware-protected TEE)
-
-**2. Attestation Document**: Enclave generates cryptographic proof binding:
-   - **PCR0 (Enclave Measurement)**: SHA384 hash of Docker image - this IS the code integrity proof
-   - **Enclave Public Key**: Ed25519 key generated inside enclave (private key never exported)
-   - **Module ID**: Unique enclave instance identifier
-   - **AWS Nitro Hardware Signature**: Unforgeable proof from TEE hardware
-
-**3. Verification**: Anyone can verify the gateway by calling `GET /attest`:
-   - Verify attestation signature (AWS Nitro hardware proof)
-   - Compare PCR0 to expected value (published by subnet team)
-   - Confirm all checkpoints are signed by this enclave's public key
-
-### Event Flow (Trustless Architecture)
-
-```
-1. Miner Submits Lead
-   ↓
-2. Gateway writes to TEE Buffer (hardware-protected memory)
-   ↓ (buffered for up to 1 hour)
-3. TEE builds Merkle tree from buffered events
-   ↓
-4. TEE signs checkpoint header with enclave private key
-   ↓
-5. Upload checkpoint + events to Arweave (permanent storage)
-   ↓
-6. TEE clears buffer for next hour
-```
-
-**Parallel**: Gateway mirrors events to Supabase (query cache only, non-authoritative)
-
-### Why This Is Trustless
-
-| Attack Vector | Defense Mechanism |
-|---------------|-------------------|
-| ❌ Malicious operator runs modified code | ✅ Attestation proves PCR0 - modified code = different hash = detected |
-| ❌ Operator modifies events after acceptance | ✅ Events in TEE-protected memory, hardware-isolated from operator |
-| ❌ Operator selectively drops events | ✅ TEE signs complete Merkle root - missing events = signature mismatch |
-| ❌ Operator provides fake attestation | ✅ PCRs read from `/dev/nsm` hardware, parent EC2 cannot influence |
-
-**Result**: Even if the subnet owner is malicious, they **cannot cheat without cryptographic detection**. 🛡️
-
----
-
-## 🔍 Verification (For Miners & Validators)
-
-### Verify Gateway Is Running Canonical Code
-
-**Step 1: Get Attestation**
-```bash
-curl http://54.80.97.12:8000/attest > attestation.json
-cat attestation.json | jq
-```
-
-**Step 2: Verify Attestation Document**
-```bash
-python scripts/verify_attestation.py http://54.80.97.12:8000
-```
-
-This extracts **PCR0** (the code integrity proof) and verifies the AWS Nitro certificate chain.
-
-**Step 3: Verify PCR0 Matches Expected Value**
-
-Option A (Simple - Compare to Published Value):
-```bash
-# Get expected PCR0 from subnet documentation
-EXPECTED_PCR0="d2106245cba92cdba289501ef56a6c0e972fa100bd3ddde671570bf732ce16f7..."
-GATEWAY_PCR0=$(cat attestation.json | jq -r '.pcr0')
-
-if [ "$GATEWAY_PCR0" == "$EXPECTED_PCR0" ]; then
-  echo "✅ CODE HASH MATCHES - Gateway is trustworthy"
-else
-  echo "❌ CODE HASH MISMATCH - DO NOT TRUST THIS GATEWAY"
-fi
-```
-
-Option B (Advanced - Build Locally and Compare):
-```bash
-# Requires: Docker + AWS Nitro CLI
-python scripts/verify_code_hash.py \
-  <pcr0_from_attestation> \
-  <github_commit_hash>
-```
-
-### Verify Your Event Was Logged
-
-After submitting a lead, wait 1 hour for the hourly checkpoint, then verify:
-
-```bash
-# Get your lead_id from submission response
-LEAD_ID="8b6482bf-116e-41db-b8ec-a87ba3c86b8b"
-
-# Find checkpoint covering your submission timestamp
-# (Checkpoints created hourly)
-CHECKPOINT_TX="abc123def456..."
-
-# Verify inclusion
-python scripts/verify_merkle_inclusion.py $LEAD_ID $CHECKPOINT_TX
-```
-
-**What This Proves**:
-- ✅ Your event was accepted by the gateway
-- ✅ Event is permanently stored on Arweave
-- ✅ Event cannot be retroactively modified or deleted
-
-### View Complete Event Data from Arweave
-
-All events are compressed (gzip) before uploading to Arweave to save 80% on storage costs. The compression is **100% lossless** - every field is preserved!
-
-**Quick Access:**
-
-```bash
-# Edit these variables at top of script:
-# ARWEAVE_TX_ID = "abc123..."  # Specific checkpoint
-# SPECIFIC_DATE = "2025-11-14"  # All checkpoints from date
-# LAST_X_HOURS = 4              # Last X hours (default)
-
-python scripts/decompress_arweave_checkpoint.py
-```
-
-**What you'll see:**
-- Complete lead details (lead_id, email_hash, lead_blob_hash, miner hotkey)
-- All validation decisions (validator decisions, rep scores, rejection reasons)
-- Consensus results (final decision, weights, vote counts)
-- TEE signatures and Merkle proofs
-- Exact timestamps (microsecond precision)
-
-See [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md) for complete instructions.
-
-### 🚨 Red Flags - When to Reject a Gateway
-
-**DO NOT USE** the gateway if:
-1. ❌ PCR0 is all zeros (debug mode - NOT secure for production)
-2. ❌ PCR0 doesn't match published expected value
-3. ❌ Attestation certificate is invalid or expired
-4. ❌ Checkpoint signatures fail verification
-5. ❌ Events consistently missing from checkpoints
-
-For detailed verification instructions, see: [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md)
+**Query Immutable Logs**: Run `python scripts/decompress_arweave_checkpoint.py` to view complete event logs from Arweave's permanent storage.
 
 ---
 
@@ -264,8 +124,8 @@ python neurons/miner.py \
 ### How Miners Work
 
 1. **Continuous Sourcing**: Actively search for new prospects
-2. **Smart Submission**: Send prospects to Supabase `prospect_queue`
-3. **Consensus Validation**: Prospects validated by validators
+2. **Secure Submission**: Get pre-signed S3 URL, hash lead data, sign with private key, and upload
+3. **Consensus Validation**: Prospects validated by multiple validators using commit/reveal protocol
 4. **Approved Leads**: Only consensus-approved leads enter the main lead pool
 
 ### Lead JSON Structure
@@ -429,7 +289,7 @@ Note: Validators are configured to auto-update from GitHub on a 5-minute interva
 
 ### Consensus Validation System
 
-Validators pull prospects from the queue (first-come, first-served). With two - three validators participating, majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
+Validators receive batches of ~50 leads per epoch. Each validator independently validates leads using a commit/reveal protocol (submit hashed decisions, then reveal actual decisions). Majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
 
 **Eligibility for Rewards:**
 - Must participate in at least 5% of consensus decisions for last 24 hours

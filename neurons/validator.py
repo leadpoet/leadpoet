@@ -2567,6 +2567,11 @@ class Validator(BaseValidatorNeuron):
                         lead["manual_review_required"] = True
                         bt.logging.info(f"📋 Lead flagged for manual review")
 
+            # IMPORTANT: Copy rep_score from mapped_lead back to original lead
+            # The calling code reads from lead_blob.get("rep_score"), not from mapped_lead
+            if "rep_score" in mapped_lead:
+                lead["rep_score"] = mapped_lead["rep_score"]
+            
             # Prepare validation result with enhanced lead data
             validation_result = {
                 'is_legitimate': passed,

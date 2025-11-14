@@ -522,7 +522,14 @@ async def submit_lead(event: SubmitLeadEvent):
                     "error": "missing_required_fields",
                     "message": f"Lead is missing {len(missing_fields)} required field(s)",
                     "missing_fields": missing_fields,
-                    "required_fields": REQUIRED_FIELDS
+                    "required_fields": REQUIRED_FIELDS,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": 10,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": 5,
+                        "reset_at": updated_stats["reset_at"]
+                    }
                 }
             )
         
@@ -690,7 +697,14 @@ async def submit_lead(event: SubmitLeadEvent):
             "storage_backends": storage_proof_events,
             "submission_timestamp": submission_timestamp,
             "queue_position": queue_position,
-            "message": "Lead accepted. Proof available in next hourly Arweave checkpoint."
+            "message": "Lead accepted. Proof available in next hourly Arweave checkpoint.",
+            "rate_limit_stats": {
+                "submissions": updated_stats["submissions"],
+                "max_submissions": 10,
+                "rejections": updated_stats["rejections"],
+                "max_rejections": 5,
+                "reset_at": updated_stats["reset_at"]
+            }
         }
     
     # ========================================
@@ -745,6 +759,17 @@ async def submit_lead(event: SubmitLeadEvent):
         
         raise HTTPException(
             status_code=400,
-            detail=f"Upload verification failed for mirrors: {', '.join(failed_mirrors)}"
+            detail={
+                "error": "upload_verification_failed",
+                "message": f"Upload verification failed for mirrors: {', '.join(failed_mirrors)}",
+                "failed_mirrors": failed_mirrors,
+                "rate_limit_stats": {
+                    "submissions": updated_stats["submissions"],
+                    "max_submissions": 10,
+                    "rejections": updated_stats["rejections"],
+                    "max_rejections": 5,
+                    "reset_at": updated_stats["reset_at"]
+                }
+            }
         )
 

@@ -1747,6 +1747,12 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
         print(f"✅ Gateway verified lead: {result['lead_id'][:8]}...")
         print(f"   Storage backends: {result['storage_backends']}")
         print(f"   Submission time: {result['submission_timestamp']}")
+        
+        # Display rate limit stats
+        if "rate_limit_stats" in result:
+            stats = result["rate_limit_stats"]
+            print(f"   📊 Rate limits: {stats['submissions']}/{stats['max_submissions']} submissions, {stats['rejections']}/{stats['max_rejections']} rejections")
+        
         return result
         
     except requests.HTTPError as e:
@@ -1761,23 +1767,45 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
                     error_msg = detail.get("error", "unknown_error")
                     message = detail.get("message", str(e))
                     
-                    print(f"\n{'='*70}")
-                    print(f"❌ GATEWAY REJECTION: {error_msg}")
-                    print(f"{'='*70}")
-                    print(f"Reason: {message}")
-                    
-                    # Show missing fields if present
-                    if "missing_fields" in detail:
-                        print(f"\n⚠️  Missing required fields ({len(detail['missing_fields'])}):")
-                        for field in detail['missing_fields']:
-                            print(f"   • {field}")
+                    # Check if it's a rate limit error (HTTP 429)
+                    if e.response.status_code == 429:
+                        print(f"\n{'='*70}")
+                        print(f"🚫 RATE LIMIT EXCEEDED")
+                        print(f"{'='*70}")
+                        print(f"{message}")
                         
-                        if "required_fields" in detail:
-                            print(f"\n📋 All required fields:")
-                            for field in detail['required_fields']:
+                        if "stats" in detail:
+                            stats = detail["stats"]
+                            limit_type = stats.get("limit_type", "unknown")
+                            if limit_type == "submissions":
+                                print(f"\n📊 Daily submission limit: {stats.get('submissions', 'N/A')}/10 reached")
+                            elif limit_type == "rejections":
+                                print(f"\n📊 Daily rejection limit: {stats.get('rejections', 'N/A')}/5 reached")
+                            print(f"🕐 Resets at: {stats.get('reset_at', 'unknown')}")
+                        print(f"{'='*70}\n")
+                    else:
+                        print(f"\n{'='*70}")
+                        print(f"❌ GATEWAY REJECTION: {error_msg}")
+                        print(f"{'='*70}")
+                        print(f"Reason: {message}")
+                        
+                        # Show missing fields if present
+                        if "missing_fields" in detail:
+                            print(f"\n⚠️  Missing required fields ({len(detail['missing_fields'])}):")
+                            for field in detail['missing_fields']:
                                 print(f"   • {field}")
-                    
-                    print(f"{'='*70}\n")
+                            
+                            if "required_fields" in detail:
+                                print(f"\n📋 All required fields:")
+                                for field in detail['required_fields']:
+                                    print(f"   • {field}")
+                        
+                        # Show rate limit stats for ALL errors (success or failure)
+                        if "rate_limit_stats" in detail:
+                            stats = detail["rate_limit_stats"]
+                            print(f"\n📊 Rate limits: {stats['submissions']}/{stats['max_submissions']} submissions, {stats['rejections']}/{stats['max_rejections']} rejections")
+                        
+                        print(f"{'='*70}\n")
                 else:
                     print(f"❌ Gateway error: {error_details}")
             else:

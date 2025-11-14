@@ -29,8 +29,12 @@ from typing import List, Dict, Any, Optional, Tuple
 # ============================================================================
 # PRODUCTION GATEWAY CONFIGURATION
 # ============================================================================
-# Update this URL if the gateway moves to a different IP/port
-DEFAULT_GATEWAY_URL = "http://54.226.209.164:8000"
+# Import from centralized config - update GATEWAY_URL in Leadpoet/utils/cloud_db.py
+import sys as _sys
+import os as _os
+# Add parent directory to path to import from Leadpoet
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from Leadpoet.utils.cloud_db import GATEWAY_URL as DEFAULT_GATEWAY_URL
 # ============================================================================
 
 try:

@@ -19,14 +19,14 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
     """
-    Compute v_score × stake weighted consensus for lead outcome.
+    Compute v_trust × stake weighted consensus for lead outcome.
     
-    Aggregates all validator decisions for a lead using (v_score × stake) as weights.
+    Aggregates all validator decisions for a lead using (v_trust × stake) as weights.
     Only includes validators who validated THIS specific lead.
     
     Algorithm:
-    1. Query all revealed validations for this lead (decision, rep_score, rejection_reason, v_score, stake)
-    2. Calculate weight for each validator: v_score × stake
+    1. Query all revealed validations for this lead (decision, rep_score, rejection_reason, v_trust, stake)
+    2. Calculate weight for each validator: v_trust × stake
     3. Compute weighted rep_score (Σ rep_score × weight / Σ weight)
     4. Compute weighted approval (Σ weight for "approve" / Σ weight)
     5. Final decision: "approve" if approval_ratio > 50%, else "deny"
@@ -65,7 +65,7 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
     Notes:
         - Only considers revealed validations (decision != NULL)
         - Returns "deny" if no validators revealed
-        - Weight = v_score × stake (both factors matter)
+        - Weight = v_trust × stake (both factors matter)
         - Approval requires >50% weighted votes
         - Only includes validators who validated THIS lead
     """
@@ -77,7 +77,7 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
         print(f"   🔍 Fetching validations for lead {lead_id[:8]}... from validation_evidence_private")
         result = await asyncio.to_thread(
             lambda: supabase.table("validation_evidence_private")
-                .select("validator_hotkey, decision, rep_score, rejection_reason, v_score, stake")
+                .select("validator_hotkey, decision, rep_score, rejection_reason, v_trust, stake")
                 .eq("lead_id", lead_id)
                 .eq("epoch_id", epoch_id)
                 .not_.is_("decision", "null")
@@ -127,9 +127,9 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
     rejection_reasons = []
     
     for v in validations:
-        v_score = float(v["v_score"])
+        v_trust = float(v["v_trust"])
         stake = float(v["stake"])
-        weight = v_score * stake  # Weight = v_score × stake
+        weight = v_trust * stake  # Weight = v_trust × stake
         
         total_weight += weight
         

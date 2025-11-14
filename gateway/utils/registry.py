@@ -247,7 +247,7 @@ def print_registry_stats():
 
 def get_validator_weights(validator_hotkey: str) -> tuple[float, float]:
     """
-    Get validator's stake and v_score from metagraph.
+    Get validator's stake and v_trust from metagraph.
     
     This is called during COMMIT phase to snapshot validator weights.
     Critical: Must capture at COMMIT time, not REVEAL time, to prevent gaming
@@ -257,12 +257,12 @@ def get_validator_weights(validator_hotkey: str) -> tuple[float, float]:
         validator_hotkey: Validator's SS58 address
     
     Returns:
-        (stake, v_score): Tuple of (TAO stake, validator trust score)
+        (stake, v_trust): Tuple of (TAO stake, validator trust score)
         Returns (0.0, 0.0) if validator not found or not active
     
     Example:
-        >>> stake, v_score = get_validator_weights("5FNVgRnrx...")
-        >>> print(f"Stake: {stake:.6f} τ, V-Score: {v_score:.6f}")
+        >>> stake, v_trust = get_validator_weights("5FNVgRnrx...")
+        >>> print(f"Stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
     """
     try:
         metagraph = get_metagraph()
@@ -277,16 +277,16 @@ def get_validator_weights(validator_hotkey: str) -> tuple[float, float]:
         # Get stake (TAO amount)
         stake = float(metagraph.S[uid])
         
-        # Get v_score (validator trust/reputation)
-        # This is Bittensor's internal validator score (vtrust in metagraph)
+        # Get v_trust (validator trust/reputation)
+        # This is Bittensor's internal validator trust score (validator_trust in metagraph)
         # Defaults to 0.0 if validator has no trust yet
-        v_score = float(metagraph.validator_trust[uid]) if hasattr(metagraph, 'validator_trust') else 0.0
+        v_trust = float(metagraph.validator_trust[uid]) if hasattr(metagraph, 'validator_trust') else 0.0
         
         print(f"📊 Validator weights for {validator_hotkey[:20]}...")
         print(f"   Stake: {stake:.6f} τ")
-        print(f"   V-Score: {v_score:.6f}")
+        print(f"   V-Trust: {v_trust:.6f}")
         
-        return (stake, v_score)
+        return (stake, v_trust)
     
     except Exception as e:
         print(f"❌ Error fetching validator weights: {e}")

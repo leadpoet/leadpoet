@@ -171,14 +171,14 @@ async def submit_validation(event: ValidationEvent):
         )
     
     # ========================================
-    # Step 6: Fetch validator weights (stake + v_score)
+    # Step 6: Fetch validator weights (stake + v_trust)
     # ========================================
-    # CRITICAL: Must snapshot stake and v_score at COMMIT time (not REVEAL time)
+    # CRITICAL: Must snapshot stake and v_trust at COMMIT time (not REVEAL time)
     # This prevents validators from gaming the system by unstaking after seeing
     # other validators' decisions but before revealing their own.
     
     from gateway.utils.registry import get_validator_weights
-    stake, v_score = get_validator_weights(event.actor_hotkey)
+    stake, v_trust = get_validator_weights(event.actor_hotkey)
     
     # ========================================
     # Step 7: Store evidence blobs (private)
@@ -206,14 +206,14 @@ async def submit_validation(event: ValidationEvent):
                 "rep_score_hash": v.rep_score_hash,
                 "rejection_reason_hash": v.rejection_reason_hash,
                 "stake": stake,  # Snapshot validator stake at COMMIT time
-                "v_score": v_score,  # Snapshot validator trust score at COMMIT time
+                "v_trust": v_trust,  # Snapshot validator trust score at COMMIT time
                 "created_ts": event.ts.isoformat()  # Use created_ts (matches Supabase schema)
             })
         
         # Insert all evidence records in batch
         result = supabase.table("validation_evidence_private").insert(evidence_records).execute()
         print(f"✅ Stored {len(evidence_records)} evidence blobs in private DB")
-        print(f"   Validator stake: {stake:.6f} τ, V-Score: {v_score:.6f}")
+        print(f"   Validator stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
     
     except Exception as e:
         print(f"⚠️  Failed to store evidence blobs: {e}")

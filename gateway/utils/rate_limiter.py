@@ -103,7 +103,9 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
                 f"Daily submission limit reached ({MAX_SUBMISSIONS_PER_DAY}/day). Resets in {hours_left}h at midnight EST.",
                 {
                     "submissions": entry["submissions"],
+                    "max_submissions": MAX_SUBMISSIONS_PER_DAY,
                     "rejections": entry["rejections"],
+                    "max_rejections": MAX_REJECTIONS_PER_DAY,
                     "reset_at": entry["reset_at"].isoformat(),
                     "limit_type": "submissions"
                 }
@@ -118,7 +120,9 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
                 f"Daily rejection limit reached ({MAX_REJECTIONS_PER_DAY}/day). Resets in {hours_left}h at midnight EST.",
                 {
                     "submissions": entry["submissions"],
+                    "max_submissions": MAX_SUBMISSIONS_PER_DAY,
                     "rejections": entry["rejections"],
+                    "max_rejections": MAX_REJECTIONS_PER_DAY,
                     "reset_at": entry["reset_at"].isoformat(),
                     "limit_type": "rejections"
                 }
@@ -130,7 +134,9 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
             "",
             {
                 "submissions": entry["submissions"],
+                "max_submissions": MAX_SUBMISSIONS_PER_DAY,
                 "rejections": entry["rejections"],
+                "max_rejections": MAX_REJECTIONS_PER_DAY,
                 "reset_at": entry["reset_at"].isoformat()
             }
         )

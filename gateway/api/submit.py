@@ -41,6 +41,7 @@ from gateway.utils.signature import verify_wallet_signature, construct_signed_me
 from gateway.utils.registry import is_registered_hotkey
 from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
 from gateway.utils.storage import verify_storage_proof
+from gateway.utils.rate_limiter import MAX_SUBMISSIONS_PER_DAY, MAX_REJECTIONS_PER_DAY
 
 # Import Supabase
 from supabase import create_client, Client
@@ -485,7 +486,7 @@ async def submit_lead(event: SubmitLeadEvent):
             # Increment rate limit counter (FAILURE - missing required fields)
             from gateway.utils.rate_limiter import increment_submission
             updated_stats = increment_submission(event.actor_hotkey, success=False)
-            print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/10")
+            print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
             
             # Log VALIDATION_FAILED event to TEE buffer (for transparency)
             try:
@@ -525,9 +526,9 @@ async def submit_lead(event: SubmitLeadEvent):
                     "required_fields": REQUIRED_FIELDS,
                     "rate_limit_stats": {
                         "submissions": updated_stats["submissions"],
-                        "max_submissions": 10,
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
                         "rejections": updated_stats["rejections"],
-                        "max_rejections": 5,
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
                         "reset_at": updated_stats["reset_at"]
                     }
                 }
@@ -590,7 +591,7 @@ async def submit_lead(event: SubmitLeadEvent):
             # Increment rate limit counter (FAILURE - attestation check)
             from gateway.utils.rate_limiter import increment_submission
             updated_stats = increment_submission(event.actor_hotkey, success=False)
-            print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/10")
+            print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
             
             # Re-raise HTTP exceptions
             raise
@@ -688,7 +689,7 @@ async def submit_lead(event: SubmitLeadEvent):
         # Increment rate limit counter (SUCCESS)
         from gateway.utils.rate_limiter import increment_submission
         updated_stats = increment_submission(event.actor_hotkey, success=True)
-        print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/10")
+        print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
         
         print(f"✅ /submit complete - lead accepted")
         return {
@@ -700,9 +701,9 @@ async def submit_lead(event: SubmitLeadEvent):
             "message": "Lead accepted. Proof available in next hourly Arweave checkpoint.",
             "rate_limit_stats": {
                 "submissions": updated_stats["submissions"],
-                "max_submissions": 10,
+                "max_submissions": MAX_SUBMISSIONS_PER_DAY,
                 "rejections": updated_stats["rejections"],
-                "max_rejections": 5,
+                "max_rejections": MAX_REJECTIONS_PER_DAY,
                 "reset_at": updated_stats["reset_at"]
             }
         }
@@ -755,7 +756,7 @@ async def submit_lead(event: SubmitLeadEvent):
         # Increment rate limit counter (FAILURE - verification failed)
         from gateway.utils.rate_limiter import increment_submission
         updated_stats = increment_submission(event.actor_hotkey, success=False)
-        print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/10")
+        print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
         
         raise HTTPException(
             status_code=400,
@@ -765,9 +766,9 @@ async def submit_lead(event: SubmitLeadEvent):
                 "failed_mirrors": failed_mirrors,
                 "rate_limit_stats": {
                     "submissions": updated_stats["submissions"],
-                    "max_submissions": 10,
+                    "max_submissions": MAX_SUBMISSIONS_PER_DAY,
                     "rejections": updated_stats["rejections"],
-                    "max_rejections": 5,
+                    "max_rejections": MAX_REJECTIONS_PER_DAY,
                     "reset_at": updated_stats["reset_at"]
                 }
             }

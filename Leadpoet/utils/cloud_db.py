@@ -1778,9 +1778,9 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
                             stats = detail["stats"]
                             limit_type = stats.get("limit_type", "unknown")
                             if limit_type == "submissions":
-                                print(f"\n📊 Daily submission limit: {stats.get('submissions', 'N/A')}/10 reached")
+                                print(f"\n📊 Daily submission limit: {stats.get('submissions', 'N/A')}/{stats.get('max_submissions', '?')} reached")
                             elif limit_type == "rejections":
-                                print(f"\n📊 Daily rejection limit: {stats.get('rejections', 'N/A')}/5 reached")
+                                print(f"\n📊 Daily rejection limit: {stats.get('rejections', 'N/A')}/{stats.get('max_rejections', '?')} reached")
                             print(f"🕐 Resets at: {stats.get('reset_at', 'unknown')}")
                         print(f"{'='*70}\n")
                     else:

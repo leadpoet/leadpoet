@@ -15,14 +15,6 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 
 ---
 
-## 🔐 Gateway Verification & Transparency
-
-**Verify Gateway Integrity**: Run `python scripts/verify_attestation.py` to verify the gateway is running canonical code (see [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md) for details).
-
-**Query Immutable Logs**: Run `python scripts/decompress_arweave_checkpoint.py` to view complete event logs from Arweave's permanent storage.
-
----
-
 ## Prerequisites
 
 ### Hardware Requirements
@@ -241,7 +233,7 @@ To maintain lead quality and prevent spam, we enforce daily submission limits se
 - **5 rejections per day** - Includes:
   - Duplicate submissions
   - Missing required fields
-  - **Validator consensus rejections** - When 2+ validators reject your lead for quality issues
+  - **Validator consensus rejections** - When validator consensus rejects your lead based on quality checks
 
 **What Happens at Rate Limit:**
 ```
@@ -292,9 +284,9 @@ Note: Validators are configured to auto-update from GitHub on a 5-minute interva
 Validators receive batches of ~50 leads per epoch. Each validator independently validates leads using a commit/reveal protocol (submit hashed decisions, then reveal actual decisions). Majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
 
 **Eligibility for Rewards:**
-- Must participate in at least 5% of consensus decisions for last 24 hours
-- Verified server-side via Edge Function 
-- If eligible, validators receive miner weights to commit on-chain
+- Must participate in consensus validation epochs consistently
+- All validation activity is logged to the transparency log (immutable via TEE/Arweave)
+- Validators compute and commit miner weights on-chain based on approved leads
 
 **Validators perform multi-stage quality checks:**
 1. **Email validation**: Format, domain, disposable check, deliverability check
@@ -319,26 +311,33 @@ leadpoet-audit report 100 --output report.json
 
 The audit tool queries **public data only** (transparency log) and shows consensus results, rejection reasons, and miner performance statistics.
 
+## 🔐 Gateway Verification & Transparency
+
+**Verify Gateway Integrity**: Run `python scripts/verify_attestation.py` to verify the gateway is running canonical code (see [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md) for details).
+
+**Query Immutable Logs**: Run `python scripts/decompress_arweave_checkpoint.py` to view complete event logs from Arweave's permanent storage.
+
 ## Reward Distribution
 
 ### Consensus-Based Rewards
 
-1. Validators check eligibility (≥ 5% consensus participation requirement for last 24 hours)
-2. Miner weights calculated based on sourced approved leads
-3. Weights set on-chain proportional to leads sourced
+1. Validators participate in epoch-based consensus validation using commit/reveal protocol
+2. Miner weights calculated based on approved leads sourced
+3. Validators compute and commit weights on-chain proportional to leads sourced
 
 ### Security Features
 
-- **Edge Function enforcement**: Eligibility checked server-side
-- **Server-side weight calculations**: Validators can't manipulate weights
-- **JWT-based auth**: Validators only have limited database access
-- **Consensus requirement**: No single validator can approve/reject leads
+- **TEE Gateway**: All events logged through hardware-protected Trusted Execution Environment
+- **Immutable transparency**: Events permanently stored on Arweave with cryptographic proofs
+- **Commit/Reveal protocol**: Prevents validators from copying each other's decisions
+- **Consensus requirement**: Majority validator agreement required for lead approval
 
 ## Data Flow
 
 ```
-Miner Sources Leads → Prospect Queue → Validators Run Quality Checks → 
-Validator Consensus → Lead Pool → Curation for Buyer Requests (Month 2)
+Miner Sources Leads → Submit to TEE Gateway (S3 Upload) → 
+Epoch Assignment → Validators Validate (Commit/Reveal) → 
+Consensus Calculation → Lead Pool → Curation for Buyer Requests (Month 2)
 ```
 
 ## Roadmap
@@ -366,18 +365,20 @@ Validator Consensus → Lead Pool → Curation for Buyer Requests (Month 2)
 
 Common Errors:
 
-**"No JWT token available"**
-- Validators need to wait for token generation on first run
-- Token auto-refreshes every hour
+**Validator not receiving epoch assignments**
+- Ensure validator is registered on subnet with active stake
+- Check that validator is running latest code version (auto-updates every 5 minutes)
+- Verify axon is accessible and ports are open
 
-**"Not eligible - less than 5% consensus"**
-- Validator needs to validate more prospects to meet eligibility threshold (5% of leads in last 24 hours)
+**Lead submission rejected**
+- Check lead meets all requirements (valid email, name-email matching, required fields)
+- Verify you haven't hit daily rate limits (10 submissions, 5 rejections per day)
+- Check gateway logs on Arweave for specific rejection reasons
 
-**"Prospect already in queue"**
-- The prospect attempted to be submitted is already in the prospect queue
-
-**Consensus not reached after 15 seconds**
-- Insufficient number of validators ran quality checks on the lead to reach consensus
+**Consensus results not appearing**
+- Wait for current epoch to complete (~72 minutes / 360 blocks)
+- Check transparency log on Arweave for CONSENSUS_RESULT events
+- Run `python scripts/decompress_arweave_checkpoint.py` to view recent results
 
 ## Support
 

@@ -212,6 +212,7 @@ else:
             full_name = ""
             email = ""
             job_title = ""
+            linkedin = ""
 
         # Helper function to safely get string values
         def safe_str(value, default=""):
@@ -245,6 +246,8 @@ else:
             safe_str(company.get("sub_industry")),
             "role":
             job_title,
+            "linkedin":
+            linkedin,  # Add LinkedIn URL for gateway required field check
             "region":
             safe_str(company.get("hq_location")),
             "founded_year":

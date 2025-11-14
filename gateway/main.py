@@ -39,7 +39,7 @@ from gateway.utils.storage import generate_presigned_put_urls
 from supabase import create_client, Client
 
 # Import API routers
-from gateway.api import epoch, validate, reveal, manifest, submit, attest
+from gateway.api import epoch, validate, reveal, manifest, submit, attest, debug
 
 # Import background tasks
 from gateway.tasks.epoch_lifecycle import epoch_lifecycle_task
@@ -186,6 +186,7 @@ app.include_router(reveal.router)
 app.include_router(manifest.router)
 app.include_router(submit.router)
 app.include_router(attest.router)  # TEE attestation endpoint
+app.include_router(debug.router)  # Debug endpoints (rate limits, etc.)
 
 # ============================================================
 # Health Check Endpoints

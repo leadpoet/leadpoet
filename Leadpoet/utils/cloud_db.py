@@ -1749,6 +1749,45 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
         print(f"   Submission time: {result['submission_timestamp']}")
         return result
         
+    except requests.HTTPError as e:
+        bt.logging.error(f"Failed to verify submission: {e}")
+        
+        # Try to extract detailed error info from response
+        try:
+            error_details = e.response.json()
+            if isinstance(error_details, dict):
+                if "detail" in error_details and isinstance(error_details["detail"], dict):
+                    detail = error_details["detail"]
+                    error_msg = detail.get("error", "unknown_error")
+                    message = detail.get("message", str(e))
+                    
+                    print(f"\n{'='*70}")
+                    print(f"❌ GATEWAY REJECTION: {error_msg}")
+                    print(f"{'='*70}")
+                    print(f"Reason: {message}")
+                    
+                    # Show missing fields if present
+                    if "missing_fields" in detail:
+                        print(f"\n⚠️  Missing required fields ({len(detail['missing_fields'])}):")
+                        for field in detail['missing_fields']:
+                            print(f"   • {field}")
+                        
+                        if "required_fields" in detail:
+                            print(f"\n📋 All required fields:")
+                            for field in detail['required_fields']:
+                                print(f"   • {field}")
+                    
+                    print(f"{'='*70}\n")
+                else:
+                    print(f"❌ Gateway error: {error_details}")
+            else:
+                print(f"❌ Gateway error: {error_details}")
+        except Exception:
+            # If we can't parse error details, just show the exception
+            pass
+        
+        return None
+        
     except Exception as e:
         bt.logging.error(f"Failed to verify submission: {e}")
         return None

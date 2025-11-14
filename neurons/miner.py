@@ -262,7 +262,8 @@ class Miner(BaseMinerNeuron):
                         if duplicate_count > 0:
                             print(f"   ⏭️  Skipped {duplicate_count} duplicate(s)")
                     elif submitted_count > 0:
-                        print(f"⚠️  Uploaded {submitted_count} leads but verification failed")
+                        print(f"⚠️  {submitted_count} lead(s) rejected by gateway (see error details above)")
+                        print(f"   Note: Rejection counts towards your daily rate limit (5 max)")
                     elif duplicate_count > 0:
                         print(f"⏭️  All {duplicate_count} lead(s) were duplicates (already submitted)")
                     else:

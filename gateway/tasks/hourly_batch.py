@@ -66,14 +66,20 @@ async def hourly_batch_task():
         print(f"⚠️  Could not check wallet balance: {e}")
         print("   Continuing anyway...\n")
     
-    # Wait before first batch (allow events to accumulate)
-    print(f"⏳ Waiting {BATCH_INTERVAL/60:.0f} minutes for first batch...")
-    print(f"   Events will accumulate in TEE buffer during this time.")
-    next_batch = datetime.utcnow() + timedelta(seconds=BATCH_INTERVAL)
-    print(f"   Next batch: {next_batch}\n")
+    # Calculate time until next hour boundary (top of the hour)
+    now = datetime.utcnow()
+    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    wait_seconds = int((next_hour - now).total_seconds())
+    
+    print(f"⏳ Waiting {wait_seconds/60:.1f} minutes until top of next hour...")
+    print(f"   Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"   Next batch: {next_hour.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"   Events will accumulate in TEE buffer during this time.\n")
+    
+    next_batch = next_hour
     
     # Add countdown progress every 15 minutes
-    remaining_time = BATCH_INTERVAL
+    remaining_time = wait_seconds
     progress_interval = 900  # 15 minutes in seconds
     
     while remaining_time > 0:
@@ -253,27 +259,30 @@ async def hourly_batch_task():
             import traceback
             traceback.print_exc()
         
-        # Wait for next batch
-        next_batch_time = datetime.utcnow() + timedelta(seconds=BATCH_INTERVAL)
-        print(f"\n⏭️  Next batch: {next_batch_time.isoformat()} ({BATCH_INTERVAL/60:.0f} minutes)")
+        # Calculate time until next hour boundary (top of the hour)
+        now = datetime.utcnow()
+        next_batch_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        wait_seconds = int((next_batch_time - now).total_seconds())
+        
+        print(f"\n⏭️  Next batch: {next_batch_time.strftime('%Y-%m-%d %H:%M:%S')} UTC ({wait_seconds/60:.1f} minutes)")
         
         # Implement emergency batch check during wait
-        # Check buffer size every 5 minutes during the 1-hour wait
+        # Check buffer size every 5 minutes during wait
         # Print countdown every 15 minutes (3 intervals)
         check_interval = 300  # 5 minutes
         progress_interval = 900  # 15 minutes (print countdown every 15 min)
-        checks_per_hour = BATCH_INTERVAL // check_interval
+        checks_per_interval = wait_seconds // check_interval
         
         last_progress_print = 0
         
-        for check_num in range(checks_per_hour):
+        for check_num in range(checks_per_interval):
             await asyncio.sleep(check_interval)
             
             # Print countdown progress every 15 minutes
             elapsed = (check_num + 1) * check_interval
-            if elapsed - last_progress_print >= progress_interval or check_num == checks_per_hour - 1:
+            if elapsed - last_progress_print >= progress_interval or check_num == checks_per_interval - 1:
                 last_progress_print = elapsed
-                remaining = BATCH_INTERVAL - elapsed
+                remaining = wait_seconds - elapsed
                 minutes_left = remaining / 60
                 
                 # Check buffer stats for countdown display
@@ -294,8 +303,11 @@ async def hourly_batch_task():
                         break  # Exit wait loop, start next batch immediately
                     
                 except Exception as e:
-                    # Ignore buffer check errors, continue waiting
-                    pass
+                    # TEE connection failed, still print countdown (unknown buffer size)
+                    if minutes_left > 0:
+                        print(f"⏰ Arweave Upload Countdown: {minutes_left:.0f} minutes remaining")
+                        print(f"   📊 ? event(s) accumulated in TEE buffer (TEE unavailable)")
+                        print(f"   Next upload: {next_batch_time.isoformat()}\n")
 
 
 async def start_hourly_batch_task():

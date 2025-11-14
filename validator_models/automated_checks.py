@@ -1635,6 +1635,7 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
     - Types of filings (10-K, 10-Q, 8-K)
     
     This is a SOFT check - always passes, appends score.
+    Uses official SEC.gov API (free, no API key needed - just User-Agent)
     
     Args:
         lead: Lead data with company
@@ -1647,33 +1648,77 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
         if not company:
             return 0, {"checked": False, "reason": "No company provided"}
         
-        # SEC EDGAR Company Search API
-        # Note: Requires exact CIK or ticker - this is simplified
-        # SEC.gov requires User-Agent header (no API key needed - it's a public API)
+        # SEC.gov requires User-Agent header with contact info (no API key needed)
         headers = {
             "User-Agent": "LeadPoet/1.0 (hello@leadpoet.com)"
         }
         
-        # First, search for company to get CIK
-        search_url = f"https://www.sec.gov/cgi-bin/browse-edgar"
+        # Use SEC.gov company search endpoint to find CIK
+        # This searches the submissions index for company name matches
+        search_url = "https://www.sec.gov/cgi-bin/browse-edgar"
         params = {
             "company": company,
             "action": "getcompany",
-            "output": "json"
+            "count": "10"
         }
         
         async with aiohttp.ClientSession() as session:
-            # Note: SEC API may require different approach - this is simplified
-            # In production, you'd use the company search endpoint first
-            
-            # For now, return a conservative score
-            # You'll need to implement full SEC integration based on their API docs
-            
-            return 0, {
-                "checked": False,
-                "reason": "SEC EDGAR integration pending - implement based on company CIK lookup"
-            }
+            async with session.get(search_url, headers=headers, params=params, timeout=15) as response:
+                if response.status != 200:
+                    return 0, {
+                        "checked": False,
+                        "reason": f"SEC API error: HTTP {response.status}"
+                    }
+                
+                # Parse HTML response (SEC doesn't return JSON for this endpoint)
+                html = await response.text()
+                
+                # Check if company was found (HTML contains "No matching" if not found)
+                if "No matching" in html or "No results" in html:
+                    return 0, {
+                        "checked": True,
+                        "filings": 0,
+                        "reason": f"No SEC filings found for {company}"
+                    }
+                
+                # Count filing indicators in HTML (rough estimate)
+                # Look for common filing types
+                filing_types = ["10-K", "10-Q", "8-K", "S-1", "10-K/A", "10-Q/A"]
+                total_filings = 0
+                for filing_type in filing_types:
+                    total_filings += html.count(filing_type)
+                
+                if total_filings == 0:
+                    return 0, {
+                        "checked": True,
+                        "filings": 0,
+                        "reason": f"No filings detected for {company}"
+                    }
+                
+                # Scoring logic (similar to old implementation):
+                # - 1-5 filings: 3 points
+                # - 6-20 filings: 6 points
+                # - 21-50 filings: 8 points
+                # - 50+ filings: 10 points
+                
+                if total_filings <= 5:
+                    score = min(3, total_filings * 0.6)
+                elif total_filings <= 20:
+                    score = 6
+                elif total_filings <= 50:
+                    score = 8
+                else:
+                    score = 10
+                
+                return score, {
+                    "checked": True,
+                    "filings": total_filings,
+                    "score": score,
+                    "reason": f"Found {total_filings} SEC filing indicators for {company}"
+                }
 
+    except asyncio.TimeoutError:
+        return 0, {"checked": False, "reason": "SEC API timeout"}
     except Exception as e:
         return 0, {"checked": False, "reason": f"SEC check error: {str(e)}"}
 

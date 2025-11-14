@@ -206,6 +206,12 @@ async def log_event(event: dict) -> Dict:
     
     if supabase:
         try:
+            # Extract email_hash from payload if present (for duplicate detection)
+            email_hash = None
+            payload = event.get("payload")
+            if payload and isinstance(payload, dict):
+                email_hash = payload.get("email_hash")
+            
             # Create Supabase entry with correct column names
             supabase_entry = {
                 "event_type": event.get("event_type"),
@@ -215,11 +221,13 @@ async def log_event(event: dict) -> Dict:
                 "payload_hash": event.get("payload_hash"),
                 "build_id": event.get("build_id"),
                 "signature": event.get("signature"),
-                "payload": event.get("payload"),
+                "payload": payload,
                 # TEE metadata
                 "tee_sequence": sequence,
                 "tee_buffered_at": datetime.utcnow().isoformat(),
-                "tee_buffer_size": buffer_size
+                "tee_buffer_size": buffer_size,
+                # Email hash for duplicate detection (extracted from payload)
+                "email_hash": email_hash
             }
             
             # Remove None values (optional fields)

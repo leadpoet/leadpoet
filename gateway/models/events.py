@@ -60,7 +60,6 @@ class SubmissionRequestPayload(BaseModel):
     lead_id: str = Field(..., description="UUID")
     lead_blob_hash: str = Field(..., description="SHA256 of lead_blob")
     email_hash: str = Field(..., description="SHA256 of email field - for duplicate detection")
-    commitment: str = Field(..., description="SHA256(salt || lead_blob)")
 
 
 class SubmissionRequestEvent(BaseEvent):

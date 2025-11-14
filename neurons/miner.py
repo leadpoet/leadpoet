@@ -198,7 +198,7 @@ class Miner(BaseMinerNeuron):
                     email = lead.get('email', 'No email')
                     print(f"  {i}. {business} - {owner} ({email})")
                 
-                # Submit leads via gateway (Passage 1 workflow with commitment scheme)
+                # Submit leads via gateway (Passage 1 workflow)
                 try:
                     from Leadpoet.utils.cloud_db import (
                         gateway_get_presigned_url,

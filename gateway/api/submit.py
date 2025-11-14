@@ -129,7 +129,7 @@ async def submit_lead(event: SubmitLeadEvent):
     Security:
         - Ed25519 signature verification
         - Nonce replay protection
-        - Hash commitment verification (prevents blob substitution)
+        - Hash verification (prevents blob substitution)
         - Only registered miners can submit
     """
     
@@ -316,7 +316,6 @@ async def submit_lead(event: SubmitLeadEvent):
         
         committed_lead_blob_hash = payload.get("lead_blob_hash")
         committed_email_hash = payload.get("email_hash")
-        commitment = payload.get("commitment")
         
         if not committed_lead_blob_hash:
             raise HTTPException(
@@ -606,7 +605,6 @@ async def submit_lead(event: SubmitLeadEvent):
                 "lead_id": event.payload.lead_id,
                 "lead_blob_hash": committed_lead_blob_hash,
                 # "miner_hotkey": event.actor_hotkey,  # TODO: Uncomment after column is added
-                "salt": commitment,  # Store commitment as salt for now
                 "lead_blob": lead_blob,
                 "created_ts": datetime.now(tz.utc).isoformat()
             }

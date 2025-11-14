@@ -201,6 +201,7 @@ class Miner(BaseMinerNeuron):
                 # Submit leads via gateway (Passage 1 workflow)
                 try:
                     from Leadpoet.utils.cloud_db import (
+                        check_email_duplicate,
                         gateway_get_presigned_url,
                         gateway_upload_lead,
                         gateway_verify_submission
@@ -208,9 +209,17 @@ class Miner(BaseMinerNeuron):
                     
                     submitted_count = 0
                     verified_count = 0
+                    duplicate_count = 0
                     
                     for lead in sanitized:
                         business_name = lead.get('business', 'Unknown')
+                        email = lead.get('email', '')
+                        
+                        # Step 0: Check for duplicate BEFORE calling presign (saves time & rate limit)
+                        if check_email_duplicate(email):
+                            print(f"⏭️  Skipping duplicate: {business_name} ({email})")
+                            duplicate_count += 1
+                            continue
                         
                         # Step 1: Get presigned URLs (gateway logs SUBMISSION_REQUEST with committed hash)
                         presign_result = gateway_get_presigned_url(self.wallet, lead)
@@ -250,8 +259,12 @@ class Miner(BaseMinerNeuron):
                             f"✅ Successfully submitted and verified {verified_count}/{len(sanitized)} leads "
                             f"at {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
                         )
+                        if duplicate_count > 0:
+                            print(f"   ⏭️  Skipped {duplicate_count} duplicate(s)")
                     elif submitted_count > 0:
                         print(f"⚠️  Uploaded {submitted_count} leads but verification failed")
+                    elif duplicate_count > 0:
+                        print(f"⏭️  All {duplicate_count} lead(s) were duplicates (already submitted)")
                     else:
                         print("⚠️  Failed to submit any leads via gateway")
                 except Exception as e:

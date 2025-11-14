@@ -1499,6 +1499,57 @@ def sync_metagraph_to_supabase(metagraph, netuid: int) -> bool:
 #  GATEWAY INTEGRATION (Passages 1 & 2 Workflow)
 # ═══════════════════════════════════════════════════════════════════
 
+def check_email_duplicate(email: str) -> bool:
+    """
+    Check if an email has already been submitted by querying the public transparency_log.
+    
+    This allows miners to detect duplicates BEFORE wasting time on presign/upload.
+    The transparency_log is PUBLIC (read-only via SUPABASE_ANON_KEY).
+    
+    Args:
+        email: Email address to check (will be normalized: lowercase, trimmed)
+        
+    Returns:
+        True if email is a duplicate (already in transparency_log)
+        False if email is unique (safe to submit)
+    """
+    try:
+        import hashlib
+        from supabase import create_client
+        
+        # Normalize email (same as gateway does)
+        normalized_email = email.strip().lower()
+        
+        # Compute email hash (same as gateway does)
+        email_hash = hashlib.sha256(normalized_email.encode()).hexdigest()
+        
+        # Use ANON key for public read-only access to transparency_log
+        supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        
+        # Query transparency_log for this email_hash
+        result = supabase.table("transparency_log") \
+            .select("lead_id, actor_hotkey, ts") \
+            .eq("email_hash", email_hash) \
+            .limit(1) \
+            .execute()
+        
+        if result.data and len(result.data) > 0:
+            # Duplicate found!
+            existing = result.data[0]
+            bt.logging.warning(f"⚠️  DUPLICATE DETECTED: Email already submitted")
+            bt.logging.warning(f"   Original submission: {existing.get('ts', 'unknown time')}")
+            bt.logging.warning(f"   Original miner: {existing.get('actor_hotkey', 'unknown')[:20]}...")
+            return True
+        
+        # No duplicate found
+        return False
+        
+    except Exception as e:
+        bt.logging.warning(f"Failed to check duplicate (assuming not duplicate): {e}")
+        # If check fails, assume not duplicate (don't block submission)
+        return False
+
+
 def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
     """
     Get presigned URL from gateway for S3/MinIO upload.

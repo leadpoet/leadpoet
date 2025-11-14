@@ -41,7 +41,7 @@ export GSE_CX="your_search_engine_id"                # Custom Search ID
 
 ### For Validators
 
-**💡 TIP**: Copy `env.example` to `.env` and fill in your API keys for easier configuration.
+**TIP**: Copy `env.example` to `.env` and fill in your API keys for easier configuration.
 
 ```bash
 
@@ -182,11 +182,19 @@ These strict requirements at initial go-live demonstrate our dedication to quali
 
 ### Reward System
 
-Miners earn rewards based on a **reputation-weighted formula** combining recent activity and historical performance:
+Miners earn rewards based on the **quality and validity** of leads they submit during each epoch:
 
-**Weight Calculation (20% Recent + 80% Historical):**
-- **20% from last 72 minutes**: Encourages consistent mining activity
-- **80% from last 3 days**: Rewards sustained quality over time
+**How It Works:**
+1. Each epoch, validators receive ~50 leads to validate
+2. Validators run automated checks on all leads (email verification, domain checks, LinkedIn validation, reputation scoring)
+3. Each validator calculates weights proportionally: miners who submitted **VALID** (approved) leads receive rewards
+4. Rewards are weighted by each lead's reputation score (0-30 points: Wayback Machine + USPTO + SEC EDGAR)
+5. Formula: `miner_reward ∝ Σ(rep_score for all approved leads from that miner)`
+
+**Example:** If Miner A submitted 3 valid leads (scores: 10, 15, 12) and Miner B submitted 2 valid leads (scores: 8, 20), then:
+- Miner A total: 37 points
+- Miner B total: 28 points
+- Weights distributed proportionally: 57% to Miner A, 43% to Miner B
 
 
 ### Rejection Feedback
@@ -237,13 +245,7 @@ To maintain lead quality and prevent spam, we enforce daily submission limits se
 
 **What Happens at Rate Limit:**
 ```
-5th Rejection → Rate Limit Hit → HTTP 429 (Too Many Requests) → Blocked Until Midnight EST
-```
-
 When you hit the rejection limit, all subsequent submissions are blocked until the daily reset at midnight EST. All rate limit events are logged to the TEE buffer and permanently stored on Arweave for transparency.
-
-**DDoS Protection:**
-The gateway uses AWS Shield Standard (automatically enabled) for network-layer DDoS protection. Rate limiting provides application-layer protection against spam attacks.
 
 ## For Validators
 

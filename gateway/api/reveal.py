@@ -235,6 +235,7 @@ async def reveal_validation_result(
                 "decision": payload.decision,
                 "rep_score": payload.rep_score,
                 "rejection_reason": payload.rejection_reason,
+                "salt": payload.salt,
                 "revealed_ts": datetime.utcnow().isoformat()
             }) \
             .eq("evidence_id", payload.evidence_id) \
@@ -245,6 +246,7 @@ async def reveal_validation_result(
         print(f"   Decision: {payload.decision}")
         print(f"   Rep score: {payload.rep_score}")
         print(f"   Rejection reason: {payload.rejection_reason}")
+        print(f"   Salt: {payload.salt[:8]}...")
         print(f"   Validator: {validator_hotkey[:20]}...")
     
     except Exception as e:
@@ -276,7 +278,8 @@ async def reveal_validation_result(
                     "epoch_id": payload.epoch_id,
                     "decision": payload.decision,
                     "rep_score": payload.rep_score,
-                    "rejection_reason": payload.rejection_reason
+                    "rejection_reason": payload.rejection_reason,
+                    "salt": payload.salt
                 }, sort_keys=True).encode()
             ).hexdigest(),
             "build_id": "gateway",  # Gateway-generated event
@@ -288,6 +291,7 @@ async def reveal_validation_result(
                 "decision": payload.decision,
                 "rep_score": payload.rep_score,
                 "rejection_reason": payload.rejection_reason,
+                "salt": payload.salt,  # CRITICAL for public audit (verify hashes on Arweave)
                 "validator_hotkey": validator_hotkey
                 # NOTE: evidence_blob is NEVER revealed publicly (kept private)
             }
@@ -438,6 +442,7 @@ async def reveal_validation_batch(
                     "decision": decision,
                     "rep_score": rep_score,
                     "rejection_reason": json.dumps(rejection_reason),
+                    "salt": salt,
                     "revealed_ts": datetime.utcnow().isoformat()
                 }) \
                 .eq("evidence_id", evidence["evidence_id"]) \

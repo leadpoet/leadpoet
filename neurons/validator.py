@@ -945,6 +945,14 @@ class Validator(BaseValidatorNeuron):
             registration_time=np.datetime64(self.registration_time),
             appeal_status=self.appeal_status
         )
+        
+        # Save pending reveals separately (JSON-serializable)
+        reveals_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "pending_reveals.json")
+        if hasattr(self, '_pending_reveals') and self._pending_reveals:
+            import json
+            with open(reveals_path, 'w') as f:
+                json.dump(self._pending_reveals, f, indent=2)
+            bt.logging.info(f"Saved {len(self._pending_reveals)} pending reveals")
 
     def load_state(self):
         state_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "validator_state.npz")
@@ -968,6 +976,22 @@ class Validator(BaseValidatorNeuron):
         else:
             bt.logging.info("No state file found. Initializing with defaults.")
             self._initialize_default_state()
+        
+        # Load pending reveals separately
+        reveals_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "pending_reveals.json")
+        if os.path.exists(reveals_path):
+            try:
+                import json
+                with open(reveals_path, 'r') as f:
+                    self._pending_reveals = json.load(f)
+                # Convert string keys to integers (JSON converts int keys to strings)
+                self._pending_reveals = {int(k): v for k, v in self._pending_reveals.items()}
+                bt.logging.info(f"Loaded {len(self._pending_reveals)} pending reveals")
+            except Exception as e:
+                bt.logging.warning(f"Failed to load pending reveals: {e}")
+                self._pending_reveals = {}
+        else:
+            self._pending_reveals = {}
 
     def _initialize_default_state(self):
         self.step = 0
@@ -981,6 +1005,7 @@ class Validator(BaseValidatorNeuron):
         self.registration_time = datetime.now()
         self.appeal_status = None
         self.trusted_validator = False
+        self._pending_reveals = {}
 
     async def handle_api_request(self, request):
         """
@@ -1633,6 +1658,8 @@ class Validator(BaseValidatorNeuron):
         Check if previous epochs need reveal submission (after epoch closes).
         """
         if not hasattr(self, '_pending_reveals'):
+            print(f"[DEBUG] No _pending_reveals attribute - initializing empty dict")
+            self._pending_reveals = {}
             return
         
         try:
@@ -1640,14 +1667,25 @@ class Validator(BaseValidatorNeuron):
             epoch_length = 360
             current_epoch = current_block // epoch_length
             
+            if not self._pending_reveals:
+                print(f"[DEBUG] No pending reveals to process (current epoch: {current_epoch})")
+                return
+            
+            print(f"\n{'='*80}")
+            print(f"🔍 CHECKING REVEALS: Current epoch {current_epoch}, Pending: {list(self._pending_reveals.keys())}")
+            print(f"{'='*80}")
+            
             from Leadpoet.utils.cloud_db import gateway_submit_reveal
             
             # Check each pending epoch
             epochs_to_reveal = list(self._pending_reveals.keys())
             for epoch_id in epochs_to_reveal:
+                print(f"   📋 Epoch {epoch_id}: Current={current_epoch}, Ready={current_epoch > epoch_id}")
+                
                 # Reveal after epoch closes (current_epoch > epoch_id)
                 if current_epoch > epoch_id:
                     reveal_data = self._pending_reveals[epoch_id]
+                    print(f"   🔓 Revealing {len(reveal_data)} validations for epoch {epoch_id}...")
                     
                     # Format reveals for gateway
                     reveals = []
@@ -1661,14 +1699,23 @@ class Validator(BaseValidatorNeuron):
                         })
                     
                     # Submit reveal
+                    print(f"   📤 Submitting {len(reveals)} reveals to gateway...")
                     success = gateway_submit_reveal(self.wallet, epoch_id, reveals)
                     if success:
+                        print(f"   ✅ Revealed {len(reveals)} validations for epoch {epoch_id}")
                         bt.logging.info(f"✅ Revealed validation for epoch {epoch_id}")
                         del self._pending_reveals[epoch_id]
+                        self.save_state()  # Save state after successful reveal
                     else:
+                        print(f"   ❌ Failed to reveal validation for epoch {epoch_id}")
                         bt.logging.error(f"Failed to reveal validation for epoch {epoch_id}")
+                else:
+                    print(f"   ⏳ Epoch {epoch_id} not yet closed, waiting...")
                         
         except Exception as e:
+            print(f"[DEBUG] Exception in process_pending_reveals: {e}")
+            import traceback
+            print(f"[DEBUG] Traceback:\n{traceback.format_exc()}")
             bt.logging.error(f"Error processing reveals: {e}")
 
     def process_sourced_leads_continuous(self):

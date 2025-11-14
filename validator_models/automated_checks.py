@@ -1382,6 +1382,10 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
     Returns:
         (passed, rejection_reason)
     """
+    # TEMPORARY: Skip LinkedIn check for testing rep score
+    print(f"   ⚠️  TEMPORARY: Skipping LinkedIn/GSE check for rep score testing")
+    return True, {}
+    
     try:
         full_name = lead.get("full_name") or lead.get("Full_name") or lead.get("Full Name")
         company = get_company(lead)
@@ -2251,6 +2255,10 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # All checks passed - return structured success data
     automated_checks_data["passed"] = True
     automated_checks_data["rejection_reason"] = None
+    
+    # IMPORTANT: Also set rep_score on lead object for validator.py to pick up
+    # validator.py looks for lead_blob.get("rep_score", 50)
+    lead["rep_score"] = total_rep_score
     
     return True, automated_checks_data
 

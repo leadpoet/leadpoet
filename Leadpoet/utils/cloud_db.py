@@ -1528,7 +1528,7 @@ def check_email_duplicate(email: str) -> bool:
         
         # Query transparency_log for this email_hash
         result = supabase.table("transparency_log") \
-            .select("lead_id, actor_hotkey, ts") \
+            .select("id, actor_hotkey, ts") \
             .eq("email_hash", email_hash) \
             .limit(1) \
             .execute()

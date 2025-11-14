@@ -305,10 +305,14 @@ The `leadpoet-audit` CLI allows anyone to verify validation outcomes by querying
 pip install -e .
 
 # Generate audit report for epoch
-leadpoet-audit report 100
+leadpoet-audit report 19000
 
 # Save report to JSON
-leadpoet-audit report 100 --output report.json
+leadpoet-audit report 19000 --output report.json
+
+# Query transparency logs by date, hours, or lead ID (outputs all event fields)
+leadpoet-audit logs --date 2025-11-14 --output events.json
+leadpoet-audit logs --hours 4 --output recent.json
 ```
 
 The audit tool queries **public data only** (transparency log) and shows consensus results, rejection reasons, and miner performance statistics.
@@ -317,7 +321,7 @@ The audit tool queries **public data only** (transparency log) and shows consens
 
 **Verify Gateway Integrity**: Run `python scripts/verify_attestation.py` to verify the gateway is running canonical code (see [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md) for details).
 
-**Query Immutable Logs**: Run `python scripts/decompress_arweave_checkpoint.py` to view complete event logs from Arweave's permanent storage.
+**Query Immutable Logs**: Run `python scripts/decompress_arweave_checkpoint.py` to view complete event logs from Arweave's permanent, immutable storage.
 
 ## Reward Distribution
 

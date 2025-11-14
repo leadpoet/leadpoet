@@ -36,6 +36,76 @@ def main():
 
 
 @main.command()
+@click.option("--date", "-d", default=None, help="Query by date (YYYY-MM-DD)")
+@click.option("--hours", "-h", default=None, type=int, help="Query last X hours")
+@click.option("--lead-id", "-l", default=None, help="Query by lead ID")
+@click.option("--output", "-o", default=None, help="Save to JSON file")
+def logs(date: Optional[str], hours: Optional[int], lead_id: Optional[str], output: Optional[str]):
+    """
+    Query transparency log events with complete fields.
+    
+    Priority: --lead-id > --date > --hours (default: last 24 hours)
+    
+    Examples:
+        leadpoet-audit logs --hours 4
+        leadpoet-audit logs --date 2025-11-14
+        leadpoet-audit logs --lead-id abc123... --output lead.json
+    """
+    try:
+        from leadpoet_audit.downloader import supabase
+        from datetime import datetime, timedelta
+        
+        click.echo()
+        
+        # Determine query mode
+        if lead_id:
+            click.echo(f"🔍 Querying events for lead ID: {lead_id[:20]}...")
+            result = supabase.table("transparency_log").select("*").filter("payload->>lead_id", "eq", lead_id).execute()
+            events = result.data
+        elif date:
+            click.echo(f"🔍 Querying events for date: {date}")
+            start_time = f"{date}T00:00:00Z"
+            end_time = f"{date}T23:59:59Z"
+            result = supabase.table("transparency_log").select("*").gte("created_at", start_time).lte("created_at", end_time).order("id").execute()
+            events = result.data
+        else:
+            hours = hours or 24
+            click.echo(f"🔍 Querying events for last {hours} hours")
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(hours=hours)
+            result = supabase.table("transparency_log").select("*").gte("created_at", start_time.isoformat() + "Z").order("id").execute()
+            events = result.data
+        
+        click.echo(f"✅ Found {len(events)} event(s)")
+        click.echo()
+        
+        if output:
+            with open(output, 'w') as f:
+                json.dump(events, f, indent=2, default=str)
+            click.echo(f"💾 Saved to {output}")
+        else:
+            # Print summary
+            event_counts = {}
+            for event in events:
+                et = event.get('event_type', 'UNKNOWN')
+                event_counts[et] = event_counts.get(et, 0) + 1
+            
+            click.echo("📊 Event Breakdown:")
+            for et, count in sorted(event_counts.items(), key=lambda x: x[1], reverse=True):
+                click.echo(f"   {count:4d}  {et}")
+            click.echo()
+            click.echo("💡 Use --output to save full event data (all fields)")
+        
+        click.echo()
+        
+    except Exception as e:
+        click.echo()
+        click.echo(f"❌ Error querying logs: {e}", err=True)
+        click.echo()
+        sys.exit(1)
+
+
+@main.command()
 @click.argument("epoch_id", type=int)
 @click.option(
     "--output", "-o", 
@@ -100,22 +170,25 @@ def report(epoch_id: int, output: Optional[str], format: str):
 
 def _display_table_report(report: dict):
     """Display report in table format (default, most detailed)."""
+    epoch_metrics = report['epoch_metrics']
+    approval_dist = report['approval_distribution']
+    
     click.echo()
     click.echo("=" * 70)
-    click.echo(f"📊 Epoch {report['epoch_id']} Audit Report")
+    click.echo(f"📊 Epoch {epoch_metrics['epoch_id']} Audit Report")
     click.echo("=" * 70)
     click.echo()
     
     # Summary stats
     click.echo("📈 Summary Statistics:")
     click.echo("-" * 70)
-    click.echo(f"Total Leads Validated:    {report['total_leads_validated']}")
-    click.echo(f"Approved:                 {report['approved_leads']} ({report['approval_rate']}%)")
-    click.echo(f"Denied:                   {report['denied_leads']}")
-    click.echo(f"Avg Rep Score (All):      {report['avg_rep_score_all']}")
-    click.echo(f"Avg Rep Score (Approved): {report['avg_rep_score_approved']}")
-    click.echo(f"Unique Miners:            {report['unique_miners']}")
-    click.echo(f"Validators Participated:  {report['validator_count']}")
+    click.echo(f"Total Leads Validated:    {epoch_metrics['leads_validated_this_epoch']}")
+    click.echo(f"Approved:                 {approval_dist['approved_count']} ({approval_dist['approval_rate']}%)")
+    click.echo(f"Denied:                   {approval_dist['denied_count']}")
+    click.echo(f"Avg Rep Score (All):      {approval_dist['avg_rep_score_all']}")
+    click.echo(f"Avg Rep Score (Approved): {approval_dist['avg_rep_score_approved']}")
+    click.echo(f"Unique Miners:            {len(report['miner_performance'])}")
+    click.echo(f"Validators Participated:  {epoch_metrics['validator_count']}")
     click.echo()
     
     # Top miners
@@ -187,15 +260,18 @@ def _display_table_report(report: dict):
 
 def _display_summary_report(report: dict):
     """Display report in summary format (compact)."""
+    epoch_metrics = report['epoch_metrics']
+    approval_dist = report['approval_distribution']
+    
     click.echo()
-    click.echo(f"📊 Epoch {report['epoch_id']} - Summary")
+    click.echo(f"📊 Epoch {epoch_metrics['epoch_id']} - Summary")
     click.echo()
-    click.echo(f"  Leads:        {report['total_leads_validated']}")
-    click.echo(f"  Approved:     {report['approved_leads']} ({report['approval_rate']}%)")
-    click.echo(f"  Denied:       {report['denied_leads']}")
-    click.echo(f"  Avg Rep:      {report['avg_rep_score_all']}")
-    click.echo(f"  Miners:       {report['unique_miners']}")
-    click.echo(f"  Validators:   {report['validator_count']}")
+    click.echo(f"  Leads:        {epoch_metrics['leads_validated_this_epoch']}")
+    click.echo(f"  Approved:     {approval_dist['approved_count']} ({approval_dist['approval_rate']}%)")
+    click.echo(f"  Denied:       {approval_dist['denied_count']}")
+    click.echo(f"  Avg Rep:      {approval_dist['avg_rep_score_all']}")
+    click.echo(f"  Miners:       {len(report['miner_performance'])}")
+    click.echo(f"  Validators:   {epoch_metrics['validator_count']}")
     click.echo()
 
 
@@ -203,18 +279,10 @@ def _display_json_report(report: dict):
     """Display report in JSON format."""
     # Convert DataFrames to dicts for JSON serialization
     report_json = {
-        "epoch_id": report["epoch_id"],
-        "total_leads_validated": report["total_leads_validated"],
-        "approved_leads": report["approved_leads"],
-        "denied_leads": report["denied_leads"],
-        "approval_rate": report["approval_rate"],
-        "avg_rep_score_all": report["avg_rep_score_all"],
-        "avg_rep_score_approved": report["avg_rep_score_approved"],
-        "unique_miners": report["unique_miners"],
-        "validator_count": report["validator_count"],
         "miner_performance": report["miner_performance"].to_dict(orient="records"),
         "rejection_analysis": report["rejection_analysis"].to_dict(orient="records"),
-        "approval_distribution": report["approval_distribution"]
+        "approval_distribution": report["approval_distribution"],
+        "epoch_metrics": report["epoch_metrics"]
     }
     
     click.echo(json.dumps(report_json, indent=2))
@@ -224,20 +292,10 @@ def _save_report_to_file(report: dict, filepath: str):
     """Save report to JSON file."""
     # Convert DataFrames to dicts for JSON serialization
     report_json = {
-        "epoch_id": report["epoch_id"],
-        "total_leads_validated": report["total_leads_validated"],
-        "approved_leads": report["approved_leads"],
-        "denied_leads": report["denied_leads"],
-        "approval_rate": report["approval_rate"],
-        "avg_rep_score_all": report["avg_rep_score_all"],
-        "avg_rep_score_approved": report["avg_rep_score_approved"],
-        "unique_miners": report["unique_miners"],
-        "validator_count": report["validator_count"],
         "miner_performance": report["miner_performance"].to_dict(orient="records"),
         "rejection_analysis": report["rejection_analysis"].to_dict(orient="records"),
         "approval_distribution": report["approval_distribution"],
-        "epoch_assignment": report.get("epoch_assignment"),
-        "queue_root": report.get("queue_root")
+        "epoch_metrics": report["epoch_metrics"]
     }
     
     with open(filepath, 'w') as f:

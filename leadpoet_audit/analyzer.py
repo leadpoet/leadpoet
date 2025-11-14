@@ -312,22 +312,25 @@ def generate_epoch_report(epoch_id: int) -> Dict:
     if consensus_results:
         validator_count = consensus_results[0].get("validator_count", 0)
     
-    # Build comprehensive report
+    # Build comprehensive report (epoch-specific metrics grouped separately)
     report = {
-        "epoch_id": epoch_id,
-        "total_leads_validated": len(consensus_results),
-        "approved_leads": approval_distribution['approved_count'],
-        "denied_leads": approval_distribution['denied_count'],
-        "approval_rate": approval_distribution['approval_rate'],
-        "avg_rep_score_all": approval_distribution['avg_rep_score_all'],
-        "avg_rep_score_approved": approval_distribution['avg_rep_score_approved'],
-        "unique_miners": len(miner_performance),
-        "validator_count": validator_count,
         "miner_performance": miner_performance,
         "rejection_analysis": rejection_analysis,
         "approval_distribution": approval_distribution,
-        "epoch_assignment": assignment,
-        "queue_root": queue_root
+        "epoch_metrics": {
+            "epoch_id": epoch_id,
+            "leads_validated_this_epoch": len(consensus_results),
+            "leads_assigned_this_epoch": assignment['lead_count'] if assignment else 0,
+            "validator_count": validator_count,
+            "queue_state": {
+                "pending_leads": queue_root['pending_count'] if queue_root else 0,
+                "queue_merkle_root": queue_root['queue_root'] if queue_root else None
+            },
+            "assignment": {
+                "lead_ids": assignment['lead_ids'] if assignment else [],
+                "validator_count": assignment['validator_count'] if assignment else 0
+            }
+        }
     }
     
     print()
@@ -363,15 +366,17 @@ def compare_epochs(epoch_ids: List[int]) -> pd.DataFrame:
     for epoch_id in epoch_ids:
         try:
             report = generate_epoch_report(epoch_id)
+            epoch_metrics = report['epoch_metrics']
+            approval_dist = report['approval_distribution']
             rows.append({
-                'epoch_id': report['epoch_id'],
-                'total_leads': report['total_leads_validated'],
-                'approved': report['approved_leads'],
-                'denied': report['denied_leads'],
-                'approval_rate': report['approval_rate'],
-                'avg_rep_score': report['avg_rep_score_all'],
-                'unique_miners': report['unique_miners'],
-                'validators': report['validator_count']
+                'epoch_id': epoch_metrics['epoch_id'],
+                'total_leads': epoch_metrics['leads_validated_this_epoch'],
+                'approved': approval_dist['approved_count'],
+                'denied': approval_dist['denied_count'],
+                'approval_rate': approval_dist['approval_rate'],
+                'avg_rep_score': approval_dist['avg_rep_score_all'],
+                'unique_miners': len(report['miner_performance']),
+                'validators': epoch_metrics['validator_count']
             })
         except Exception as e:
             print(f"⚠️  Error processing epoch {epoch_id}: {e}")

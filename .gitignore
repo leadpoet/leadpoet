@@ -9,6 +9,7 @@ validation_artifacts/
 data/
 logs/  # Includes gateway/logs/arweave_fallback/ (local event logging when Arweave fails)
 validator_weights/
+validator_state/  # Validator state files (should remain local)
 .env
 .test_supabase_connection.py
 tasks.md

@@ -206,6 +206,15 @@ else:
             # Handle both 'role' (from crawl tool) and 'job_title' (legacy)
             job_title = best_contact.get("role") or best_contact.get(
                 "job_title") or ""
+            # Extract LinkedIn URL (can be full URL or path like "/in/username")
+            linkedin_raw = best_contact.get("linkedin") or best_contact.get("linkedin_url") or ""
+            # Normalize to full URL if it's just a path
+            if linkedin_raw and linkedin_raw.startswith("/in/"):
+                linkedin = f"https://www.linkedin.com{linkedin_raw}"
+            elif linkedin_raw and not linkedin_raw.startswith("http"):
+                linkedin = f"https://www.linkedin.com/in/{linkedin_raw}"
+            else:
+                linkedin = linkedin_raw
         else:
             first_name = ""
             last_name = ""

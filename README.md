@@ -126,6 +126,30 @@ python scripts/verify_merkle_inclusion.py $LEAD_ID $CHECKPOINT_TX
 - ✅ Event is permanently stored on Arweave
 - ✅ Event cannot be retroactively modified or deleted
 
+### View Complete Event Data from Arweave
+
+All events are compressed (gzip) before uploading to Arweave to save 80% on storage costs. The compression is **100% lossless** - every field is preserved!
+
+**Quick Access:**
+
+```bash
+# Edit these variables at top of script:
+# ARWEAVE_TX_ID = "abc123..."  # Specific checkpoint
+# SPECIFIC_DATE = "2025-11-14"  # All checkpoints from date
+# LAST_X_HOURS = 4              # Last X hours (default)
+
+python scripts/decompress_arweave_checkpoint.py
+```
+
+**What you'll see:**
+- Complete lead details (lead_id, email_hash, lead_blob_hash, miner hotkey)
+- All validation decisions (validator decisions, rep scores, rejection reasons)
+- Consensus results (final decision, weights, vote counts)
+- TEE signatures and Merkle proofs
+- Exact timestamps (microsecond precision)
+
+See [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md) for complete instructions.
+
 ### 🚨 Red Flags - When to Reject a Gateway
 
 **DO NOT USE** the gateway if:
@@ -165,11 +189,27 @@ export GSE_CX="your_search_engine_id"                # Custom Search ID
 
 ### For Validators
 
+**💡 TIP**: Copy `env.example` to `.env` and fill in your API keys for easier configuration.
+
 ```bash
-# Email Validation API
-export MYEMAILVERIFIER_API_KEY="your_mev_key"        # Email validation
+# Network Configuration
+export SUBTENSOR_NETWORK=finney                      # "finney" (mainnet) or "local" (testnet)
+
+# Email Validation API (REQUIRED)
+export MYEMAILVERIFIER_API_KEY="your_mev_key"        # myemailverifier.com
+
+# LinkedIn/GSE Validation (REQUIRED)
+export GSE_API_KEY="your_google_api_key"             # Google Custom Search API
+export GSE_CX="your_search_engine_id"                # Custom Search Engine ID
+export OPENROUTER_KEY="your_openrouter_key"          # openrouter.ai
+
+# Reputation Score APIs (REQUIRED - soft checks, run on every validation)
+export USPTO_API_KEY="your_uspto_key"                # developer.uspto.gov
+export SEC_EDGAR_API_KEY="your_sec_key"              # www.sec.gov (optional - pending implementation)
 
 ```
+
+See [`env.example`](env.example) for complete configuration template.
 
 ## Installation
 

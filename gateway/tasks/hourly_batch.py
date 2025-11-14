@@ -25,6 +25,7 @@ from typing import Dict, Optional
 # Import gateway utilities
 from gateway.utils.tee_client import tee_client
 from gateway.utils.arweave_client import upload_checkpoint, get_wallet_balance
+from gateway.utils.logger import log_event
 
 
 # Configuration
@@ -236,13 +237,62 @@ async def hourly_batch_task():
             print(f"   Content URL: https://arweave.net/{tx_id}")
             print(f"   ViewBlock: https://viewblock.io/arweave/tx/{tx_id}")
             
-            # Step 6: Clear TEE buffer
+            # Step 6: Log checkpoint to transparency log
+            print(f"\n📝 Logging checkpoint to transparency log...")
+            try:
+                checkpoint_log = {
+                    "event_type": "ARWEAVE_CHECKPOINT",
+                    "actor_hotkey": "system",
+                    "payload": {
+                        "arweave_tx_id": tx_id,
+                        "checkpoint_number": header['checkpoint_number'],
+                        "event_count": header['event_count'],
+                        "merkle_root": header['merkle_root'],
+                        "time_range": header['time_range'],
+                        "compressed_size_bytes": len(compressed_events),
+                        "viewblock_url": f"https://viewblock.io/arweave/tx/{tx_id}"
+                    }
+                }
+                
+                result = await log_event(checkpoint_log)
+                tee_sequence = result.get("sequence")
+                print(f"✅ Checkpoint logged (seq={tee_sequence})")
+                
+                # Also update transparency_log table with arweave_tx_id
+                # This allows miners to query for TX IDs easily
+                from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+                import httpx
+                
+                async with httpx.AsyncClient() as client:
+                    # Update the checkpoint event we just logged
+                    update_response = await client.patch(
+                        f"{SUPABASE_URL}/rest/v1/transparency_log",
+                        params={"tee_sequence": f"eq.{tee_sequence}"},
+                        headers={
+                            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                            "Content-Type": "application/json",
+                            "Prefer": "return=minimal"
+                        },
+                        json={"arweave_tx_id": tx_id}
+                    )
+                    
+                    if update_response.status_code in [200, 204]:
+                        print(f"✅ Arweave TX ID saved to database")
+                    else:
+                        print(f"⚠️  Failed to save TX ID to database: {update_response.status_code}")
+                        
+            except Exception as e:
+                print(f"⚠️  Failed to log checkpoint: {e}")
+                print(f"   (Upload succeeded, but logging failed - TX ID: {tx_id})")
+            
+            # Step 7: Clear TEE buffer
             print(f"\n🧹 Clearing TEE buffer...")
             clear_result = await tee_client.clear_buffer()
             print(f"✅ Buffer cleared: {clear_result.get('cleared_count', 0)} events removed")
             print(f"   Next checkpoint starts: {clear_result.get('next_checkpoint_at', 'N/A')}")
             
-            # Step 7: Log success
+            # Step 8: Log success
             print(f"\n" + "="*80)
             print(f"✅ BATCH #{batch_count} COMPLETE")
             print("="*80)

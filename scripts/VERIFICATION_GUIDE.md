@@ -153,7 +153,39 @@ python scripts/verify_code_hash.py $GATEWAY_PCR0 $GITHUB_COMMIT
 
 ---
 
-## **Step 3: Verify Event Inclusion in Checkpoint**
+## **Step 3: View Complete Event Logs from Arweave**
+
+**Purpose**: Decompress and view all events stored in Arweave. Events are gzip-compressed (100% lossless) to save 96% on storage costs.
+
+### **Get Transaction IDs**
+
+Checkpoint IDs are in the `transparency_log` table:
+
+```sql
+SELECT arweave_tx_id, created_at FROM transparency_log 
+WHERE event_type = 'ARWEAVE_CHECKPOINT' ORDER BY created_at DESC LIMIT 10;
+```
+
+### **Decompression Script**
+
+Edit variables at top of `scripts/decompress_arweave_checkpoint.py`:
+
+```python
+ARWEAVE_TX_ID = ""        # Specific checkpoint (highest priority)
+SPECIFIC_DATE = ""         # All from date: "2025-11-14" (medium priority)
+LAST_X_HOURS = 4           # Last X hours (default if above blank)
+```
+
+Then run:
+```bash
+python scripts/decompress_arweave_checkpoint.py
+```
+
+**Output**: Complete events with lead_id, email_hash, lead_blob_hash, hotkeys, timestamps, validator decisions, consensus results, and TEE signatures.
+
+---
+
+## **Step 4: Verify Event Inclusion in Checkpoint**
 
 **Purpose**: Prove your event (submission, validation, reveal) was logged and is permanently stored on Arweave.
 

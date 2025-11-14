@@ -19,8 +19,8 @@ echo "==========================================================================
 # Use absolute path (not $HOME) since this runs with sudo
 EIF_PATH="/home/ec2-user/tee/tee-enclave.eif"
 ENCLAVE_CID=16
-CPU_COUNT=2
-MEMORY_MB=3072  # 251MB Docker image needs ~3GB runtime memory
+CPU_COUNT=16
+MEMORY_MB=32768  # Option C: High Performance (16 CPUs, 32 GB for c7i.16xlarge)
 
 # Check if EIF exists
 if [ ! -f "$EIF_PATH" ]; then
@@ -68,6 +68,10 @@ echo "✅ ENCLAVE RUNNING"
 echo "================================================================================"
 echo "Enclave ID: $ENCLAVE_ID"
 echo "CID: $ENCLAVE_CID"
+echo ""
+echo "⏳ Waiting 15 seconds for enclave service to initialize..."
+sleep 15
+echo "✅ Enclave service should be ready"
 echo ""
 echo "Next steps:"
 echo "  1. Provision PCRs: python3 ~/tee/provision_pcrs.py"

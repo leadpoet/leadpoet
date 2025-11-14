@@ -3019,7 +3019,7 @@ def main():
     parser.add_argument("--wallet_hotkey", type=str, help="Wallet hotkey")
     parser.add_argument("--wallet_path", type=str, default="~/.bittensor/wallets", help="Path to wallets directory (default: ~/.bittensor/wallets)")
     parser.add_argument("--netuid", type=int, default=71, help="Network UID")
-    parser.add_argument("--subtensor_network", type=str, default="finney", help="Subtensor network")
+    parser.add_argument("--subtensor_network", type=str, default=os.getenv("SUBTENSOR_NETWORK", "finney"), help="Subtensor network (default: finney, or from SUBTENSOR_NETWORK env var)")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
     args = parser.parse_args()
 

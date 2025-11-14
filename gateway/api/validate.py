@@ -171,7 +171,17 @@ async def submit_validation(event: ValidationEvent):
         )
     
     # ========================================
-    # Step 6: Store evidence blobs (private)
+    # Step 6: Fetch validator weights (stake + v_score)
+    # ========================================
+    # CRITICAL: Must snapshot stake and v_score at COMMIT time (not REVEAL time)
+    # This prevents validators from gaming the system by unstaking after seeing
+    # other validators' decisions but before revealing their own.
+    
+    from gateway.utils.registry import get_validator_weights
+    stake, v_score = get_validator_weights(event.actor_hotkey)
+    
+    # ========================================
+    # Step 7: Store evidence blobs (private)
     # ========================================
     # Store full evidence blobs in Supabase for reveal phase verification
     # Evidence is stored privately (NOT logged to public Arweave)
@@ -195,12 +205,15 @@ async def submit_validation(event: ValidationEvent):
                 "decision_hash": v.decision_hash,
                 "rep_score_hash": v.rep_score_hash,
                 "rejection_reason_hash": v.rejection_reason_hash,
+                "stake": stake,  # Snapshot validator stake at COMMIT time
+                "v_score": v_score,  # Snapshot validator trust score at COMMIT time
                 "created_ts": event.ts.isoformat()  # Use created_ts (matches Supabase schema)
             })
         
         # Insert all evidence records in batch
         result = supabase.table("validation_evidence_private").insert(evidence_records).execute()
         print(f"✅ Stored {len(evidence_records)} evidence blobs in private DB")
+        print(f"   Validator stake: {stake:.6f} τ, V-Score: {v_score:.6f}")
     
     except Exception as e:
         print(f"⚠️  Failed to store evidence blobs: {e}")
@@ -209,7 +222,7 @@ async def submit_validation(event: ValidationEvent):
         # Don't fail the request - evidence can be reconstructed from validator logs if needed
     
     # ========================================
-    # Step 7: Log to TEE transparency log
+    # Step 8: Log to TEE transparency log
     # ========================================
     # Create log event with validation hashes (NO evidence_blob - that's private)
     validation_hashes = []
@@ -244,7 +257,7 @@ async def submit_validation(event: ValidationEvent):
     print(f"✅ Batch validation logged to TEE buffer")
     
     # ========================================
-    # Step 8: Return success
+    # Step 9: Return success
     # ========================================
     return {
         "status": "recorded",

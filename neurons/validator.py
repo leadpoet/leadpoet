@@ -1517,7 +1517,7 @@ class Validator(BaseValidatorNeuron):
                     # Extract results
                     is_valid = result.get("is_legitimate", False)
                     decision = "approve" if is_valid else "deny"
-                    rep_score = int(lead_blob.get("rep_score", 50))  # Default 50 if not set
+                    rep_score = int(lead_blob.get("rep_score", 0))  # Default 0 for rejected leads
                     rejection_reason = result.get("reason", {}) if not is_valid else {"message": "pass"}
                     evidence_blob = json.dumps(result)
                     

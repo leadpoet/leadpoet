@@ -334,23 +334,16 @@ EOF
 | Website not accessible | Verify website is online and accessible |
 | Domain blacklisted | Avoid domains flagged for spam/abuse |
 
-### Rate Limits & Anti-DDoS Protection
+### Rate Limits & Cooldown
 
-To maintain lead quality and prevent spam/DDoS attacks, we enforce server-side limits with Proof-of-Work verification.
-
-**Proof-of-Work Requirement (NEW):**
-- All `/presign` and `/submit` requests require valid PoW
-- Must compute SHA256(lead_id:timestamp:nonce) with 4 leading zeros
-- Takes ~0.1 seconds on modern CPU (~65k hash attempts)
-- Makes billion-req/sec DDoS attacks economically impossible (~$50k/hour)
-- See miner implementation guide in commit message
+To maintain lead quality and prevent spam, we enforce daily submission limits server-side. Think of it as guardrails to keep the lead pool high-quality.
 
 **Daily Limits (Reset at 12:00 AM EST):**
 - **10 submission attempts per day** - Counts all submission attempts (including duplicates/invalid)
 - **5 rejections per day** - Includes:
   - Duplicate submissions
   - Missing required fields
-  - **Validator consensus rejections** (NEW) - When 2+ validators reject your lead for quality issues
+  - **Validator consensus rejections** - When 2+ validators reject your lead for quality issues
 
 **What Happens at Rate Limit:**
 ```
@@ -358,6 +351,9 @@ To maintain lead quality and prevent spam/DDoS attacks, we enforce server-side l
 ```
 
 When you hit the rejection limit, all subsequent submissions are blocked until the daily reset at midnight EST. All rate limit events are logged to the TEE buffer and permanently stored on Arweave for transparency.
+
+**DDoS Protection:**
+The gateway uses AWS Shield Standard (automatically enabled) for network-layer DDoS protection. Rate limiting provides application-layer protection against spam attacks.
 
 ## For Validators
 

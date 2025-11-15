@@ -39,11 +39,11 @@ SPECIFIC_DATE = ""  # Leave blank to use time range
 
 # Mode 3: Last X Hours (default mode if above are blank)
 # Example: 4 = last 4 hours, 24 = last 24 hours
-LAST_X_HOURS = 4  # Change this to pull different time ranges
+LAST_X_HOURS = 8  # Change this to pull different time ranges
 
 # Gateway's Arweave wallet address (public, used to query checkpoints)
 # This is trustless - miners verify transactions come from this known address
-GATEWAY_WALLET_ADDRESS = "FHF3LaLJYaIRR8Uj-ncQYzmxOGmKLbTI84PbYIfsDYM"
+GATEWAY_WALLET_ADDRESS = "FHF3LaLJYaIRR8Uj-ncQYzmxOGmKLbT184PbYIfsDYM"
 
 # Arweave GraphQL endpoint (trustless - queries Arweave directly)
 ARWEAVE_GRAPHQL = "https://arweave.net/graphql"

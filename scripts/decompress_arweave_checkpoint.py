@@ -28,8 +28,9 @@ import os
 # ============================================================
 
 # Mode 1: Specific Arweave Transaction ID
-# Get this from transparency_log table: SELECT arweave_tx_id FROM transparency_log WHERE event_type = 'ARWEAVE_CHECKPOINT'
+# Get this from your Arweave wallet transaction history (click on any transaction)
 # Example: "jIINjzv0Pd3qhAJqejRh9S2uOn3r8+r95vQNGrIswECI"
+# PASTE A TX ID HERE TO TEST:
 ARWEAVE_TX_ID = ""  # Leave blank to use date or time range
 
 # Mode 2: Specific Date (YYYY-MM-DD format)
@@ -40,7 +41,11 @@ SPECIFIC_DATE = ""  # Leave blank to use time range
 # Example: 4 = last 4 hours, 24 = last 24 hours
 LAST_X_HOURS = 4  # Change this to pull different time ranges
 
-# Arweave GraphQL endpoint (trustless - queries Arweave directly, not subnet owners' database)
+# Gateway's Arweave wallet address (public, used to query checkpoints)
+# This is trustless - miners verify transactions come from this known address
+GATEWAY_WALLET_ADDRESS = "FHF3LaLJYaIRR8Uj-ncQYzmxOGmKLbTI84PbYIfsDYM"
+
+# Arweave GraphQL endpoint (trustless - queries Arweave directly)
 ARWEAVE_GRAPHQL = "https://arweave.net/graphql"
 
 # ============================================================
@@ -53,38 +58,29 @@ ARWEAVE_GRAPHQL = "https://arweave.net/graphql"
 
 def query_checkpoint_ids(date: Optional[str] = None, hours: Optional[int] = None) -> List[str]:
     """
-    Query Arweave GraphQL for checkpoint transaction IDs.
+    Query Arweave GraphQL for checkpoint transaction IDs from the gateway's wallet.
     
-    This is TRUSTLESS - queries Arweave directly using tags, not the subnet owners' database.
+    This is TRUSTLESS - queries Arweave directly by wallet address, verifying the known gateway address.
     """
     
     if date:
-        # Query for specific date (00:00:00 to 23:59:59 UTC)
-        start_time = f"{date}T00:00:00.000Z"
-        end_time = f"{date}T23:59:59.999Z"
         print(f"🔍 Querying Arweave for checkpoints on date: {date}")
+        print(f"   From wallet: {GATEWAY_WALLET_ADDRESS[:20]}...")
     elif hours:
-        # Query for last X hours
-        end_dt = datetime.utcnow()
-        start_dt = end_dt - timedelta(hours=hours)
-        start_time = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        end_time = end_dt.strftime("%Y-%m-%dT%H:%M:%S.999Z")
         print(f"🔍 Querying Arweave for checkpoints in last {hours} hours")
+        print(f"   From wallet: {GATEWAY_WALLET_ADDRESS[:20]}...")
     else:
         print("❌ Error: Must provide either date or hours")
         sys.exit(1)
     
-    # GraphQL query to find LeadPoet checkpoint transactions by tags
+    # GraphQL query to find all transactions from gateway wallet
+    # Note: Tags may take time to index, so we query all txs and filter locally
     query = """
-    query($startTime: String!, $endTime: String!) {
+    query($owner: String!, $first: Int!) {
       transactions(
-        tags: [
-          {name: "App", values: ["leadpoet"]},
-          {name: "Type", values: ["checkpoint"]},
-          {name: "Time-Start", values: [$startTime, $endTime]}
-        ]
-        sort: HEIGHT_ASC
-        first: 100
+        owners: [$owner]
+        sort: HEIGHT_DESC
+        first: $first
       ) {
         edges {
           node {
@@ -92,6 +88,9 @@ def query_checkpoint_ids(date: Optional[str] = None, hours: Optional[int] = None
             tags {
               name
               value
+            }
+            block {
+              timestamp
             }
           }
         }
@@ -101,15 +100,14 @@ def query_checkpoint_ids(date: Optional[str] = None, hours: Optional[int] = None
     
     try:
         print(f"   Querying Arweave GraphQL API...")
-        print(f"   Time range: {start_time} to {end_time}")
         
         response = requests.post(
             ARWEAVE_GRAPHQL,
             json={
                 "query": query,
                 "variables": {
-                    "startTime": start_time,
-                    "endTime": end_time
+                    "owner": GATEWAY_WALLET_ADDRESS,
+                    "first": 100  # Get last 100 checkpoints
                 }
             },
             timeout=30
@@ -122,18 +120,60 @@ def query_checkpoint_ids(date: Optional[str] = None, hours: Optional[int] = None
             sys.exit(1)
         
         edges = data.get("data", {}).get("transactions", {}).get("edges", [])
-        tx_ids = [edge["node"]["id"] for edge in edges]
         
-        if not tx_ids:
-            print(f"⚠️  No checkpoints found for the specified time range")
-            print(f"   Start: {start_time}")
-            print(f"   End: {end_time}")
+        if not edges:
+            print(f"⚠️  No transactions found from gateway wallet")
+            print(f"   Wallet: {GATEWAY_WALLET_ADDRESS}")
             print(f"\n💡 NOTE: Arweave transactions take 2-20 minutes to be indexed")
-            print(f"   If you just uploaded a checkpoint, wait a few minutes and try again")
             sys.exit(0)
         
-        print(f"✅ Found {len(tx_ids)} checkpoint(s) on Arweave")
-        return tx_ids
+        print(f"   Found {len(edges)} total transactions from wallet")
+        
+        # Filter by checkpoint tags and time range
+        filtered_txs = []
+        
+        for edge in edges:
+            node = edge["node"]
+            tags = {tag["name"]: tag["value"] for tag in node.get("tags", [])}
+            
+            # Check if this is a checkpoint transaction
+            is_checkpoint = (
+                tags.get("App") == "leadpoet" and 
+                tags.get("Type") == "checkpoint"
+            )
+            
+            if not is_checkpoint:
+                continue
+            
+            # Check time range
+            if date:
+                # Filter by specific date
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+                if node.get("block") and node["block"].get("timestamp"):
+                    tx_date = datetime.fromtimestamp(node["block"]["timestamp"]).date()
+                    if tx_date == target_date:
+                        filtered_txs.append(node["id"])
+            elif hours:
+                # Filter by last X hours
+                cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+                cutoff_timestamp = int(cutoff_time.timestamp())
+                
+                if node.get("block") and node["block"].get("timestamp"):
+                    if node["block"]["timestamp"] >= cutoff_timestamp:
+                        filtered_txs.append(node["id"])
+        
+        if not filtered_txs:
+            print(f"⚠️  No checkpoints found for the specified time range")
+            if date:
+                print(f"   Date: {date}")
+            else:
+                print(f"   Last {hours} hours")
+            print(f"\n💡 NOTE: Found {len(edges)} total checkpoints, but none in your time range")
+            print(f"   Try increasing LAST_X_HOURS or check a different date")
+            sys.exit(0)
+        
+        print(f"✅ Found {len(filtered_txs)} checkpoint(s) on Arweave")
+        return filtered_txs
         
     except Exception as e:
         print(f"❌ Failed to query Arweave GraphQL: {e}")

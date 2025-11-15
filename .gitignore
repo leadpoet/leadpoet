@@ -15,6 +15,7 @@ validator_state/  # Validator state files (should remain local)
 tasks.md
 tasks copy.md
 business_files/
+report.json
 # Reputation scoring (keep local, do not commit)
 Rep_Score/
 

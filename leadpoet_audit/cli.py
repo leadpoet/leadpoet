@@ -38,7 +38,7 @@ def main():
 @main.command()
 @click.option("--date", "-d", default=None, help="Query by date (YYYY-MM-DD)")
 @click.option("--hours", "-h", default=None, type=int, help="Query last X hours")
-@click.option("--lead-id", "-l", default=None, help="Query by lead ID")
+@click.option("--lead-id", "-l", default=None, help="Query by lead UUID (in payload, not row ID)")
 @click.option("--output", "-o", default=None, help="Save to JSON file")
 def logs(date: Optional[str], hours: Optional[int], lead_id: Optional[str], output: Optional[str]):
     """
@@ -46,10 +46,13 @@ def logs(date: Optional[str], hours: Optional[int], lead_id: Optional[str], outp
     
     Priority: --lead-id > --date > --hours (default: last 24 hours)
     
+    Note: --lead-id expects a lead UUID from the payload (e.g., 8183c849-c017-...),
+          NOT the database row ID. Run 'leadpoet-audit logs --hours 1' to see sample lead UUIDs.
+    
     Examples:
         leadpoet-audit logs --hours 4
         leadpoet-audit logs --date 2025-11-14
-        leadpoet-audit logs --lead-id abc123... --output lead.json
+        leadpoet-audit logs --lead-id 8183c849-c017-4f4c-b9fe-7f407873a799 --output lead.json
     """
     try:
         from leadpoet_audit.downloader import supabase

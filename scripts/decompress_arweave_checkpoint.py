@@ -124,7 +124,13 @@ def query_checkpoint_ids(date: Optional[str] = None, hours: Optional[int] = None
         if not edges:
             print(f"⚠️  No transactions found from gateway wallet")
             print(f"   Wallet: {GATEWAY_WALLET_ADDRESS}")
-            print(f"\n💡 NOTE: Arweave transactions take 2-20 minutes to be indexed")
+            print(f"\n💡 ARWEAVE CONFIRMATION PROCESS:")
+            print(f"   1. Transaction submitted → Shows in wallet (instant)")
+            print(f"   2. Mined into block → Gets confirmed (~2-10 minutes)")
+            print(f"   3. Indexed by GraphQL → Queryable by miners (~10-20 minutes after mining)")
+            print(f"\n   ⏰ Total time: ~15-30 minutes from upload to query")
+            print(f"\n   This delay is GOOD for security - ensures data is truly immutable!")
+            print(f"   Recent uploads may not be queryable yet - please wait and try again.")
             sys.exit(0)
         
         print(f"   Found {len(edges)} total transactions from wallet")

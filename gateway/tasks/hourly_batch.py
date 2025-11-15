@@ -240,9 +240,12 @@ async def hourly_batch_task():
             # Step 6: Log checkpoint to transparency log
             print(f"\n📝 Logging checkpoint to transparency log...")
             try:
+                import uuid
+                
                 checkpoint_log = {
                     "event_type": "ARWEAVE_CHECKPOINT",
                     "actor_hotkey": "system",
+                    "nonce": str(uuid.uuid4()),  # Required field
                     "payload": {
                         "arweave_tx_id": tx_id,
                         "checkpoint_number": header['checkpoint_number'],

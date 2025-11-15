@@ -286,9 +286,7 @@ Note: Validators are configured to auto-update from GitHub on a 5-minute interva
 Validators receive batches of ~50 leads per epoch. Each validator independently validates leads using a commit/reveal protocol (submit hashed decisions, then reveal actual decisions). Majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
 
 **Eligibility for Rewards:**
-- Must participate in consensus validation epochs consistently
-- All validation activity is logged to the transparency log (immutable via TEE/Arweave)
-- Validators compute and commit miner weights on-chain based on approved leads
+- Must participate in consensus validation epochs consistently and remain in consensus.
 
 **Validators perform multi-stage quality checks:**
 1. **Email validation**: Format, domain, disposable check, deliverability check

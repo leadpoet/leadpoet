@@ -87,7 +87,7 @@ def deterministic_lead_assignment(
     try:
         result = supabase.table("leads_private") \
             .select("lead_id, created_ts") \
-            .is_("epoch_summary", "null") \
+            .eq("status", "pending_validation") \
             .order("created_ts") \
             .limit(max_leads_per_epoch + 1) \
             .execute()
@@ -315,7 +315,7 @@ def get_assignment_stats(
     try:
         result = supabase.table("leads_private") \
             .select("lead_id", count="exact") \
-            .is_("epoch_summary", "null") \
+            .eq("status", "pending_validation") \
             .execute()
         
         pending_count = result.count if result.count is not None else 0

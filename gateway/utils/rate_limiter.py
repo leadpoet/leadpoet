@@ -30,8 +30,9 @@ _rate_limit_cache: Dict[str, Dict] = {}
 _cache_lock = threading.Lock()
 
 # Rate limit constants
-MAX_SUBMISSIONS_PER_DAY = 10
-MAX_REJECTIONS_PER_DAY = 5
+# TEMPORARY: Increased to 100 for testing (TODO: Revert to 10/5 for production)
+MAX_SUBMISSIONS_PER_DAY = 100
+MAX_REJECTIONS_PER_DAY = 100
 
 # EST timezone offset (UTC-5, or UTC-4 during DST)
 # For simplicity, we'll use UTC-5 (EST) year-round

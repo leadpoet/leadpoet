@@ -344,6 +344,98 @@ async def submit_lead(event: SubmitLeadEvent):
         )
     
     # ========================================
+    # Step 6.5: Check for duplicate email_hash (CRITICAL)
+    # ========================================
+    # Prevents malicious miners from bypassing client-side duplicate check
+    # Only checks SUBMISSION events (successful submissions), not SUBMISSION_REQUEST
+    # This allows miners to retry failed submissions with corrections
+    print(f"🔍 Step 6.5: Checking for duplicate email...")
+    try:
+        duplicate_check = supabase.table("transparency_log") \
+            .select("tee_sequence, event_type, actor_hotkey, created_at, payload") \
+            .eq("event_type", "SUBMISSION") \
+            .execute()
+        
+        # Check if any SUBMISSION event has the same email_hash
+        for log in duplicate_check.data:
+            payload = log.get("payload", {})
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            
+            existing_email_hash = payload.get("email_hash")
+            if existing_email_hash == committed_email_hash:
+                print(f"❌ Duplicate email detected!")
+                print(f"   Email hash: {committed_email_hash[:32]}...")
+                print(f"   Original submission: seq={log.get('tee_sequence')}, miner={log.get('actor_hotkey')[:10]}..., ts={log.get('created_at')}")
+                
+                # Increment rejection counter (FAILURE - duplicate)
+                from gateway.utils.rate_limiter import increment_submission
+                updated_stats = increment_submission(event.actor_hotkey, success=False)
+                print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+                
+                # Log VALIDATION_FAILED event to TEE (consistent with required fields check)
+                try:
+                    from gateway.utils.logger import log_event
+                    
+                    validation_failed_event = {
+                        "event_type": "VALIDATION_FAILED",
+                        "actor_hotkey": event.actor_hotkey,
+                        "nonce": str(uuid.uuid4()),
+                        "ts": datetime.now(tz.utc).isoformat(),
+                        "payload_hash": hashlib.sha256(json.dumps({
+                            "lead_id": event.payload.lead_id,
+                            "reason": "duplicate_email",
+                            "email_hash": committed_email_hash
+                        }, sort_keys=True).encode()).hexdigest(),
+                        "build_id": "gateway",
+                        "signature": "duplicate_check",  # Gateway-generated
+                        "payload": {
+                            "lead_id": event.payload.lead_id,
+                            "reason": "duplicate_email",
+                            "email_hash": committed_email_hash,
+                            "original_submission_seq": log.get("tee_sequence"),
+                            "miner_hotkey": event.actor_hotkey
+                        }
+                    }
+                    
+                    await log_event(validation_failed_event)
+                    print(f"   ✅ Logged VALIDATION_FAILED (duplicate) to TEE buffer")
+                except Exception as e:
+                    print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+                
+                raise HTTPException(
+                    status_code=409,  # 409 Conflict
+                    detail={
+                        "error": "duplicate_email",
+                        "message": "This email has already been submitted to the network",
+                        "email_hash": committed_email_hash,
+                        "original_submission": {
+                            "tee_sequence": log.get("tee_sequence"),
+                            "submitted_at": log.get("created_at")
+                        },
+                        "rate_limit_stats": {
+                            "submissions": updated_stats["submissions"],
+                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                            "rejections": updated_stats["rejections"],
+                            "max_rejections": MAX_REJECTIONS_PER_DAY,
+                            "reset_at": updated_stats["reset_at"]
+                        }
+                    }
+                )
+        
+        print(f"✅ No duplicate found - lead is unique")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"⚠️  Duplicate check error: {e}")
+        import traceback
+        traceback.print_exc()
+        # Continue anyway - don't block submission on duplicate check failure
+        # This prevents gateway outages if transparency_log is temporarily unavailable
+        print(f"⚠️  Continuing with submission despite duplicate check error")
+    
+    # ========================================
     # Step 7: Verify S3 upload
     # ========================================
     print(f"🔍 Step 7: Verifying S3 upload...")
@@ -537,13 +629,19 @@ async def submit_lead(event: SubmitLeadEvent):
         print(f"   ✅ All required fields present")
         
         # ========================================
-        # CRITICAL: Verify Miner Attestation
+        # CRITICAL: Verify Miner Attestation (Trustless Model)
         # ========================================
+        # In the trustless model, attestations are stored locally by miners
+        # and verified via the lead metadata itself (not database lookup)
         print(f"   🔍 Verifying miner attestation...")
         try:
             wallet_ss58 = lead_blob.get("wallet_ss58")
             terms_version_hash = lead_blob.get("terms_version_hash")
+            lawful_collection = lead_blob.get("lawful_collection")
+            no_restricted_sources = lead_blob.get("no_restricted_sources")
+            license_granted = lead_blob.get("license_granted")
             
+            # Check required attestation fields are present
             if not wallet_ss58 or not terms_version_hash:
                 print(f"❌ Attestation check failed: Missing wallet_ss58 or terms_version_hash in lead")
                 raise HTTPException(
@@ -551,41 +649,96 @@ async def submit_lead(event: SubmitLeadEvent):
                     detail="Lead missing required attestation fields (wallet_ss58, terms_version_hash)"
                 )
             
-            # Query contributor_attestations table
-            attestation_result = supabase.table("contributor_attestations")\
-                .select("*")\
-                .eq("wallet_ss58", wallet_ss58)\
-                .eq("terms_version_hash", terms_version_hash)\
-                .eq("accepted", True)\
-                .execute()
+            # ========================================
+            # CRITICAL: Verify terms_version_hash matches current canonical terms
+            # ========================================
+            # This prevents miners from using outdated or fake terms versions
+            from gateway.utils.contributor_terms import get_terms_version_hash
             
-            if not attestation_result.data or len(attestation_result.data) == 0:
-                print(f"❌ Attestation check failed: No valid attestation for wallet {wallet_ss58[:20]}...")
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Miner has not accepted terms (wallet: {wallet_ss58[:20]}...)"
-                )
+            try:
+                current_terms_hash = get_terms_version_hash()
+            except Exception as e:
+                print(f"⚠️  Failed to fetch current terms hash from GitHub: {e}")
+                # Don't fail submission if GitHub is temporarily unavailable
+                # Gateway should not be a single point of failure
+                print(f"   ⚠️  Continuing without hash verification (GitHub unavailable)")
+                current_terms_hash = None
             
-            # Verify attestation metadata matches lead
-            attestation = attestation_result.data[0]
-            expected_lawful = lead_blob.get("lawful_collection")
-            expected_no_restricted = lead_blob.get("no_restricted_sources")
-            expected_licensed = lead_blob.get("license_granted")
-            
-            actual_lawful = attestation.get("lawful_collection")
-            actual_no_restricted = attestation.get("no_restricted_sources")
-            actual_licensed = attestation.get("license_granted")
-            
-            if (expected_lawful != actual_lawful or 
-                expected_no_restricted != actual_no_restricted or 
-                expected_licensed != actual_licensed):
-                print(f"❌ Attestation mismatch: Lead metadata doesn't match attestation record")
+            if current_terms_hash and terms_version_hash != current_terms_hash:
+                print(f"❌ Attestation check failed: Outdated or invalid terms version")
+                print(f"   Submitted: {terms_version_hash[:16]}...")
+                print(f"   Current:   {current_terms_hash[:16]}...")
                 raise HTTPException(
                     status_code=400,
-                    detail="Lead attestation metadata doesn't match miner's attestation record"
+                    detail=f"Outdated or invalid terms version. Your miner is using an old terms version. Please restart your miner to accept the current terms."
+                )
+            
+            # Verify wallet matches actor (prevent impersonation)
+            if wallet_ss58 != event.actor_hotkey:
+                print(f"❌ Attestation check failed: wallet_ss58 ({wallet_ss58[:20]}...) doesn't match actor_hotkey ({event.actor_hotkey[:20]}...)")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Wallet mismatch: lead wallet_ss58 doesn't match submission actor_hotkey"
+                )
+            
+            # Verify attestation fields have expected values
+            if lawful_collection != True:
+                print(f"❌ Attestation check failed: lawful_collection must be True")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Attestation failed: lawful_collection must be True"
+                )
+            
+            if no_restricted_sources != True:
+                print(f"❌ Attestation check failed: no_restricted_sources must be True")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Attestation failed: no_restricted_sources must be True"
+                )
+            
+            if license_granted != True:
+                print(f"❌ Attestation check failed: license_granted must be True")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Attestation failed: license_granted must be True"
                 )
             
             print(f"   ✅ Attestation verified for wallet {wallet_ss58[:20]}...")
+            print(f"      Terms version: {terms_version_hash[:16]}...")
+            print(f"      Lawful: {lawful_collection}, No restricted: {no_restricted_sources}, Licensed: {license_granted}")
+            
+            # ========================================
+            # Store attestation in Supabase (for record-keeping, not verification)
+            # ========================================
+            # This creates an audit trail but does NOT affect verification (trustless)
+            print(f"   📊 Recording attestation to Supabase...")
+            try:
+                from datetime import timezone as tz
+                
+                attestation_record = {
+                    "wallet_ss58": wallet_ss58,
+                    "terms_version_hash": terms_version_hash,
+                    "accepted": True,
+                    "timestamp_utc": datetime.now(tz.utc).isoformat(),
+                    "ip_address": None  # Privacy: Don't store IP in trustless model
+                }
+                
+                # Note: Boolean attestation fields (lawful_collection, no_restricted_sources, license_granted)
+                # are stored in the lead metadata, not the attestation table
+                
+                # Upsert: Update if exists, insert if new
+                # This handles miners re-submitting with same or updated terms
+                result = supabase.table("contributor_attestations") \
+                    .upsert(attestation_record, on_conflict="wallet_ss58") \
+                    .execute()
+                
+                print(f"   ✅ Attestation recorded to database (audit trail)")
+                
+            except Exception as e:
+                # Don't fail the submission if database write fails
+                # Verification already passed (trustless)
+                print(f"   ⚠️  Failed to record attestation to database: {e}")
+                print(f"      (Submission continues - attestation verification already passed)")
             
         except HTTPException:
             # Increment rate limit counter (FAILURE - attestation check)
@@ -607,18 +760,20 @@ async def submit_lead(event: SubmitLeadEvent):
         # Store lead in leads_private table
         print(f"   🔍 Storing lead in leads_private database...")
         try:
-            # NOTE: miner_hotkey column doesn't exist yet in Supabase
-            # TODO: Add migration to add miner_hotkey column for optimization
+            # Note: salt is NOT stored here - validators generate their own salt
+            # for the commit-reveal scheme and store it in validation_evidence_private
+            
             lead_private_entry = {
                 "lead_id": event.payload.lead_id,
                 "lead_blob_hash": committed_lead_blob_hash,
-                # "miner_hotkey": event.actor_hotkey,  # TODO: Uncomment after column is added
+                "miner_hotkey": event.actor_hotkey,  # Extract from signature
                 "lead_blob": lead_blob,
+                "status": "pending_validation",  # Initial state when entering queue
                 "created_ts": datetime.now(tz.utc).isoformat()
             }
             
             supabase.table("leads_private").insert(lead_private_entry).execute()
-            print(f"   ✅ Lead stored in leads_private")
+            print(f"   ✅ Lead stored in leads_private (miner: {event.actor_hotkey[:10]}..., status: pending_validation)")
             
         except Exception as e:
             print(f"❌ Failed to store lead in leads_private: {e}")

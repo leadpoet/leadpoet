@@ -6,6 +6,7 @@
     "business consulting firm advisor email"
   ],
   "specific_urls": ["https://www.founderadvisors.tech/"],
+  "default_contact_linkedin": "https://www.linkedin.com/in/rogertoennis/",
   "required_fields": {
     "company": ["name", "industry", "sub_industry"],
     "contact": ["email", "job_title", "full_name"]

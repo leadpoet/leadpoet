@@ -3,99 +3,129 @@ Leadpoet Contributor Terms and Attestation System
 
 This module handles miner attestation to contributor terms at startup.
 All miners must accept these terms before participating in the network.
+
+This is the FULL version with all miner/validator functions.
+The gateway uses a minimal version at gateway/utils/contributor_terms.py.
 """
 
 import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 import bittensor as bt
 
 
-# Full Contributor Terms Text
-CONTRIBUTOR_TERMS_TEXT = """
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                    LEADPOET CONTRIBUTOR TERMS OF SERVICE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ============================================================================
+# CANONICAL TERMS SOURCE: GitHub Repository (Single Source of Truth)
+# ============================================================================
+# The official contributor terms are maintained in the GitHub repository.
+# This ensures all participants (miners, validators, gateway) use the same version.
+# Any updates to terms are made via GitHub commits, creating an immutable audit trail.
 
-By proceeding, you confirm and agree to the following:
+GITHUB_TERMS_URL = "https://raw.githubusercontent.com/leadpoet/leadpoet/main/docs/contributor_terms.md"
 
-1. LAWFUL DATA COLLECTION
-   You will only submit data obtained lawfully from public, first-party, or 
-   licensed resale sources. You will not use paid databases (e.g., Apollo, 
-   ZoomInfo, PDL, etc.) without resale agreements or breach any website's 
-   terms of service.
+# Cache for terms content (avoid repeated network calls)
+_CACHED_TERMS_TEXT = None
+_CACHED_TERMS_HASH = None
 
-2. OWNERSHIP & LICENSE GRANT
-   You own or have the right to share all data you submit. You grant Leadpoet 
-   an irrevocable, worldwide license to store, validate, sell, and distribute 
-   that data to third parties.
 
-3. ACCURACY & INTEGRITY
-   You will submit accurate, non-fraudulent, and non-duplicative information.
-   You will cooperate with audits or validation requests if needed.
+def fetch_contributor_terms_from_github() -> Tuple[str, str]:
+    """
+    Fetch the canonical contributor terms from GitHub repository.
+    
+    Returns:
+        Tuple of (terms_text, terms_hash)
+        
+    Raises:
+        Exception if unable to fetch terms from GitHub
+        
+    Security:
+        - Uses raw.githubusercontent.com (content-addressed)
+        - Verifies content is non-empty
+        - Creates SHA-256 hash for version tracking
+    """
+    global _CACHED_TERMS_TEXT, _CACHED_TERMS_HASH
+    
+    # Return cached version if available
+    if _CACHED_TERMS_TEXT and _CACHED_TERMS_HASH:
+        return _CACHED_TERMS_TEXT, _CACHED_TERMS_HASH
+    
+    try:
+        import requests
+        
+        bt.logging.debug(f"📥 Fetching contributor terms from GitHub: {GITHUB_TERMS_URL}")
+        
+        response = requests.get(GITHUB_TERMS_URL, timeout=10)
+        response.raise_for_status()
+        
+        terms_text = response.text
+        
+        if not terms_text or len(terms_text) < 100:
+            raise Exception("Fetched terms appear invalid (too short)")
+        
+        # Generate SHA-256 hash of canonical terms
+        terms_hash = hashlib.sha256(terms_text.encode('utf-8')).hexdigest()
+        
+        # Cache for future use
+        _CACHED_TERMS_TEXT = terms_text
+        _CACHED_TERMS_HASH = terms_hash
+        
+        bt.logging.debug(f"✅ Fetched contributor terms from GitHub")
+        bt.logging.debug(f"   Length: {len(terms_text)} characters")
+        bt.logging.debug(f"   Hash: {terms_hash[:16]}...")
+        
+        return terms_text, terms_hash
+        
+    except requests.RequestException as e:
+        raise Exception(f"Failed to fetch contributor terms from GitHub: {e}")
+    except Exception as e:
+        raise Exception(f"Error processing contributor terms: {e}")
 
-4. RESTRICTED SOURCES
-   You agree not to use any prohibited data brokers, private APIs, or scraped 
-   contact databases without proper authorization. Restricted sources include 
-   (but are not limited to):
-   - ZoomInfo, Apollo.io, People Data Labs
-   - RocketReach, Hunter.io, Snov.io
-   - Lusha, Clearbit, LeadIQ
-   
-   You may only use such sources if you have a valid resale agreement and 
-   provide proof via license document hash.
 
-5. RESALE RIGHTS
-   You acknowledge that Leadpoet and its buyers may resell, enrich, and 
-   redistribute approved leads.
+def get_contributor_terms_text() -> str:
+    """Get the canonical contributor terms text from GitHub."""
+    terms_text, _ = fetch_contributor_terms_from_github()
+    return terms_text
 
-6. COMPLIANCE & TAKEDOWNS
-   If a takedown request or legal issue arises from your submission, Leadpoet 
-   may remove your data and freeze all future earned rewards. You agree to 
-   respond to compliance inquiries within 10 business days.
 
-7. INDEMNIFICATION
-   You accept responsibility for your submissions. If your data causes a legal 
-   claim against Leadpoet, you agree to indemnify Leadpoet against losses or 
-   damages.
+def get_terms_version_hash() -> str:
+    """Get the SHA-256 hash of the canonical contributor terms from GitHub."""
+    _, terms_hash = fetch_contributor_terms_from_github()
+    return terms_hash
 
-8. TERMS VERSION TRACKING
-   Your agreement will be tied to a specific terms_version_hash for audit 
-   purposes. If terms are updated, you must re-accept them before mining 
-   resumes.
 
-9. PRIVACY
-   No personal KYC data is collected; your wallet address is your identity.
-   Leadpoet only logs your wallet, timestamp, and accepted version hash for 
-   compliance.
-
-10. TERMINATION
-    Leadpoet may suspend contributors who violate these terms or who fail 
-    audits. Suspended miners will not receive rewards for any pending leads.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Full Terms: https://leadpoet.com/contributor-terms
-
-BY TYPING 'Y' BELOW, YOU ACCEPT THESE TERMS AND CONDITIONS.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-
-# Generate SHA-256 hash of canonical terms for version tracking
-TERMS_VERSION_HASH = hashlib.sha256(CONTRIBUTOR_TERMS_TEXT.encode('utf-8')).hexdigest()
+# For backward compatibility, initialize these on module load
+# They cache after first fetch to avoid repeated network calls
+try:
+    CONTRIBUTOR_TERMS_TEXT = get_contributor_terms_text()
+    TERMS_VERSION_HASH = get_terms_version_hash()
+except Exception as e:
+    # If GitHub is unavailable during import, log warning
+    # Functions that need terms should call fetch_contributor_terms_from_github() directly
+    import sys
+    print(f"⚠️  Warning: Could not fetch terms from GitHub during module import: {e}", file=sys.stderr)
+    CONTRIBUTOR_TERMS_TEXT = None
+    TERMS_VERSION_HASH = None
 
 
 def display_terms_prompt():
     """
     Display the full contributor terms to the terminal.
     Should be called on first run or when terms are updated.
+    
+    Fetches the latest terms from GitHub to ensure miners see current version.
     """
-    print(CONTRIBUTOR_TERMS_TEXT)
-    print(f"\n📋 Terms Version Hash: {TERMS_VERSION_HASH[:16]}...")
-    print(f"📅 Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
+    try:
+        terms_text, terms_hash = fetch_contributor_terms_from_github()
+        print(terms_text)
+        print(f"\n📋 Terms Version Hash: {terms_hash[:16]}...")
+        print(f"📅 Fetched from GitHub: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"🔗 Source: {GITHUB_TERMS_URL}\n")
+    except Exception as e:
+        bt.logging.error(f"❌ Failed to fetch terms from GitHub: {e}")
+        bt.logging.error(f"   Cannot display terms - miner startup aborted")
+        raise
 
 
 def verify_attestation(attestation_file: Path, current_hash: str) -> tuple[bool, str]:

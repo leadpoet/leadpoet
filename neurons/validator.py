@@ -16,7 +16,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from Leadpoet.base.validator import BaseValidatorNeuron
 from Leadpoet.protocol import LeadRequest
-from validator_models.automated_checks import validate_lead_list as auto_check_leads, run_automated_checks
+from validator_models.automated_checks import validate_lead_list as auto_check_leads, run_automated_checks, MAX_REP_SCORE
 from Leadpoet.base.utils.config import add_validator_args
 import threading
 from Leadpoet.base.utils import queue as lead_queue
@@ -1334,6 +1334,12 @@ class Validator(BaseValidatorNeuron):
                     bt.logging.warning(f"Error in gateway validation workflow: {e}")
                     time.sleep(5)  # Wait before retrying
                 
+                # Check if we should submit accumulated weights (block 345+)
+                try:
+                    self.submit_weights_at_epoch_end()
+                except Exception as e:
+                    bt.logging.warning(f"Error in submit_weights_at_epoch_end: {e}")
+                
                 try:
                     self.process_curation_requests_continuous()
                 except Exception as e:
@@ -1548,15 +1554,27 @@ class Validator(BaseValidatorNeuron):
                         "salt": salt.hex()
                     })
                     
+                    # Accumulate weights in real-time for approved leads
+                    self.accumulate_miner_weights(
+                        miner_hotkey=lead.get("miner_hotkey"),
+                        rep_score=rep_score,
+                        decision=decision
+                    )
+                    
                     # Pretty output
                     status_icon = "✅" if is_valid else "❌"
                     decision_text = "APPROVED" if is_valid else "DENIED"
                     print(f"   {status_icon} Decision: {decision_text}")
-                    print(f"   📊 Rep Score: {rep_score}/30")
+                    print(f"   📊 Rep Score: {rep_score}/{MAX_REP_SCORE}")
                     if not is_valid:
                         reason_msg = rejection_reason.get("message", "Unknown reason")
                         print(f"   ⚠️  Reason: {reason_msg}")
                     print("")
+                    
+                    # Add 6-second delay between leads (except for the last one)
+                    if idx < len(leads):
+                        print(f"⏳ Waiting 6 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        time.sleep(6)
                     
                 except Exception as e:
                     lead_id = lead.get('lead_id', 'unknown')
@@ -1565,6 +1583,11 @@ class Validator(BaseValidatorNeuron):
                     print(f"[DEBUG] Traceback: {traceback.format_exc()}")
                     print(f"[DEBUG] Lead structure: {lead}")
                     print("")
+                    
+                    # Add 6-second delay between leads (except for the last one)
+                    if idx < len(leads):
+                        print(f"⏳ Waiting 6 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        time.sleep(6)
                     continue
             
             # Submit hashed validation results to gateway
@@ -1590,10 +1613,12 @@ class Validator(BaseValidatorNeuron):
             else:
                 print(f"⚠️  No validation results to submit (all leads failed validation)")
             
-            # Calculate and submit weights to Bittensor (Passage 2)
+            # Accumulate weights (already done per-lead above)
+            # calculate_and_submit_weights_local() is now called per-lead via accumulate_miner_weights()
             print(f"\n{'='*80}")
-            print(f"⚖️  Calculating and submitting weights to Bittensor...")
-            self.calculate_and_submit_weights_local(local_validation_data)
+            print(f"⚖️  Weights accumulated for this epoch")
+            print(f"   (Will submit at block 345+ via submit_weights_at_epoch_end())")
+            print(f"{'='*80}")
             
             # Mark epoch as processed
             self._last_processed_epoch = current_epoch
@@ -1604,6 +1629,9 @@ class Validator(BaseValidatorNeuron):
             # Check for reveals from previous epochs
             self.process_pending_reveals()
             
+            # Check if we should submit weights (block 345+)
+            self.submit_weights_at_epoch_end()
+            
         except Exception as e:
             print(f"[DEBUG] Exception caught in gateway validation workflow: {e}")
             import traceback
@@ -1612,68 +1640,253 @@ class Validator(BaseValidatorNeuron):
             import traceback
             bt.logging.error(traceback.format_exc())
     
-    def calculate_and_submit_weights_local(self, validation_data: List[Dict]):
+    def accumulate_miner_weights(self, miner_hotkey: str, rep_score: int, decision: str):
         """
-        Calculate miner weights based on LOCAL validation results (Passage 2).
-        Formula: miner_reward_i ∝ Σ(my_rep_score for all leads where my_decision="approve" AND miner_hotkey=miner_i)
+        Accumulate weights for approved leads in real-time as validation happens.
+        
+        This updates validator_weights/validator_weights with cumulative scores.
+        Called after each lead validation.
+        
+        Args:
+            miner_hotkey: Miner's hotkey who submitted the lead
+            rep_score: Reputation score (0-50) from automated checks
+            decision: "approve" or "deny"
+        """
+        if decision != "approve":
+            return  # Only accumulate for approved leads
+        
+        try:
+            weights_dir = Path("validator_weights")
+            weights_dir.mkdir(exist_ok=True)
+            weights_file = weights_dir / "validator_weights"
+            
+            # Load current weights
+            if weights_file.exists():
+                with open(weights_file, 'r') as f:
+                    weights_data = json.load(f)
+            else:
+                weights_data = {}
+            
+            # Get current epoch
+            current_block = self.subtensor.get_current_block()
+            current_epoch = current_block // 360
+            
+            # Initialize epoch if not exists
+            if str(current_epoch) not in weights_data:
+                weights_data[str(current_epoch)] = {
+                    "epoch": current_epoch,
+                    "start_block": current_epoch * 360,
+                    "end_block": (current_epoch + 1) * 360,
+                    "miner_scores": {},
+                    "last_updated": datetime.utcnow().isoformat()
+                }
+            
+            # Add score to miner's total
+            epoch_data = weights_data[str(current_epoch)]
+            if miner_hotkey not in epoch_data["miner_scores"]:
+                epoch_data["miner_scores"][miner_hotkey] = 0
+            
+            epoch_data["miner_scores"][miner_hotkey] += rep_score
+            epoch_data["last_updated"] = datetime.utcnow().isoformat()
+            
+            # Save updated weights
+            with open(weights_file, 'w') as f:
+                json.dump(weights_data, f, indent=2)
+            
+            print(f"      💾 Accumulated {rep_score} points for miner {miner_hotkey[:10]}... (total: {epoch_data['miner_scores'][miner_hotkey]})")
+            
+        except Exception as e:
+            bt.logging.error(f"Failed to accumulate miner weights: {e}")
+    
+    def submit_weights_at_epoch_end(self):
+        """
+        Submit accumulated weights to Bittensor chain at end of epoch (block 345+).
+        
+        This reads from validator_weights/validator_weights and submits to chain.
+        After submission, archives weights to history and clears active file.
         """
         try:
-            # Aggregate rewards by miner
-            miner_rewards = {}
-            for validation in validation_data:
-                if validation['decision'] == 'approve':
-                    miner_hotkey = validation['miner_hotkey']
-                    rep_score = validation['rep_score']
-                    
-                    if miner_hotkey not in miner_rewards:
-                        miner_rewards[miner_hotkey] = 0
-                    miner_rewards[miner_hotkey] += rep_score
+            current_block = self.subtensor.get_current_block()
+            epoch_length = 360
+            current_epoch = current_block // 360
+            blocks_into_epoch = current_block % epoch_length
             
-            if not miner_rewards:
-                print(f"   ℹ️  No approved leads → No weights to submit")
-                print(f"   (All {len(validation_data)} leads were denied)")
-                bt.logging.info("No approved leads, skipping weight submission")
-                return
+            # Only submit after block 345 (near end of epoch)
+            if blocks_into_epoch < 345:
+                return False
             
-            print(f"   ✅ Found rewards for {len(miner_rewards)} miners:")
+            weights_file = Path("validator_weights") / "validator_weights"
+            if not weights_file.exists():
+                print(f"   ℹ️  No accumulated weights to submit")
+                return False
             
-            # Convert hotkeys to UIDs
+            # Load accumulated weights
+            with open(weights_file, 'r') as f:
+                weights_data = json.load(f)
+            
+            # Get current epoch's weights
+            if str(current_epoch) not in weights_data:
+                print(f"   ℹ️  No weights accumulated for epoch {current_epoch}")
+                return False
+            
+            epoch_data = weights_data[str(current_epoch)]
+            miner_scores = epoch_data["miner_scores"]
+            
+            if not miner_scores:
+                print(f"   ℹ️  No approved leads in epoch {current_epoch} → No weights to submit")
+                return False
+            
+            print(f"\n{'='*80}")
+            print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
+            print(f"{'='*80}")
+            print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
+            print(f"   Miners rewarded: {len(miner_scores)}")
+            print(f"   Total points distributed: {sum(miner_scores.values())}")
+            print()
+            
+            # Convert hotkeys to UIDs and prepare weights
             uids = []
             weights = []
-            for hotkey, reward in miner_rewards.items():
-                if hotkey in self.metagraph.hotkeys:
-                    uid = self.metagraph.hotkeys.index(hotkey)
-                    uids.append(uid)
-                    weights.append(reward)
+            
+            for hotkey, total_score in miner_scores.items():
+                try:
+                    if hotkey in self.metagraph.hotkeys:
+                        uid = self.metagraph.hotkeys.index(hotkey)
+                        uids.append(uid)
+                        weights.append(total_score)
+                        print(f"   • UID {uid}: {total_score} points (miner {hotkey[:10]}...)")
+                except Exception as e:
+                    print(f"   ⚠️  Skipping miner {hotkey[:10]}...: {e}")
             
             if not uids:
-                bt.logging.info("No valid UIDs found for weight submission")
-                return
+                print(f"   ⚠️  No valid UIDs found for weight submission")
+                return False
             
-            # Normalize weights
+            # Normalize weights (sum to 1.0)
             total_weight = sum(weights)
             if total_weight > 0:
-                weights = [w / total_weight for w in weights]
+                normalized_weights = [w / total_weight for w in weights]
+            else:
+                print(f"   ⚠️  Total weight is 0, cannot normalize")
+                return False
             
             # Submit to Bittensor chain
-            bt.logging.info(f"📊 Submitting weights for {len(uids)} miners to Bittensor chain...")
+            print(f"\n📡 Submitting weights to Bittensor chain...")
             result = self.subtensor.set_weights(
                 netuid=self.config.netuid,
                 wallet=self.wallet,
                 uids=uids,
-                weights=weights,
+                weights=normalized_weights,
                 wait_for_finalization=False
             )
             
             if result:
-                bt.logging.info(f"✅ Successfully submitted weights to Bittensor chain")
+                print(f"✅ Successfully submitted weights to Bittensor chain")
+                print(f"{'='*80}\n")
+                
+                # Archive weights to history
+                self.archive_weights_to_history(current_epoch, epoch_data)
+                
+                # Clear active weights file (ready for next epoch)
+                self.clear_active_weights(current_epoch)
+                
+                return True
             else:
-                bt.logging.error(f"Failed to submit weights to Bittensor chain")
+                print(f"❌ Failed to submit weights to Bittensor chain")
+                print(f"{'='*80}\n")
+                return False
                 
         except Exception as e:
-            bt.logging.error(f"Error calculating/submitting weights: {e}")
+            bt.logging.error(f"Error submitting weights at epoch end: {e}")
             import traceback
             bt.logging.error(traceback.format_exc())
+            return False
+    
+    def archive_weights_to_history(self, epoch_id: int, epoch_data: Dict):
+        """
+        Archive submitted weights to validator_weights_history.json for record keeping.
+        
+        Args:
+            epoch_id: Epoch number
+            epoch_data: Dict containing epoch weights data
+        """
+        try:
+            weights_dir = Path("validator_weights")
+            weights_dir.mkdir(exist_ok=True)
+            history_file = weights_dir / "validator_weights_history.json"
+            
+            # Load existing history
+            if history_file.exists():
+                with open(history_file, 'r') as f:
+                    history = json.load(f)
+            else:
+                history = []
+            
+            # Add submission timestamp
+            epoch_data["submitted_at"] = datetime.utcnow().isoformat()
+            
+            # Append to history
+            history.append(epoch_data)
+            
+            # Save updated history
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+            
+            print(f"   📚 Archived epoch {epoch_id} weights to history")
+            
+        except Exception as e:
+            bt.logging.error(f"Failed to archive weights to history: {e}")
+    
+    def clear_active_weights(self, current_epoch: int):
+        """
+        Clear the active weights file after archiving (ready for next epoch).
+        
+        This removes the submitted epoch from validator_weights, keeping only
+        future epochs if they've started accumulating.
+        
+        Args:
+            current_epoch: Epoch that was just submitted
+        """
+        try:
+            weights_file = Path("validator_weights") / "validator_weights"
+            
+            if not weights_file.exists():
+                return
+            
+            # Load current weights
+            with open(weights_file, 'r') as f:
+                weights_data = json.load(f)
+            
+            # Remove submitted epoch
+            if str(current_epoch) in weights_data:
+                del weights_data[str(current_epoch)]
+            
+            # Save (might be empty for next epoch)
+            with open(weights_file, 'w') as f:
+                json.dump(weights_data, f, indent=2)
+            
+            print(f"   🧹 Cleared epoch {current_epoch} from active weights file")
+            
+        except Exception as e:
+            bt.logging.error(f"Failed to clear active weights: {e}")
+    
+    def calculate_and_submit_weights_local(self, validation_data: List[Dict]):
+        """
+        [DEPRECATED] Calculate miner weights based on LOCAL validation results (Passage 2).
+        
+        This function is now replaced by:
+        - accumulate_miner_weights() - called after each lead validation
+        - submit_weights_at_epoch_end() - called at block 345+ to submit accumulated weights
+        
+        Keeping for backwards compatibility, but new code should use the accumulation system.
+        """
+        # Accumulate weights instead of calculating at once
+        for validation in validation_data:
+            self.accumulate_miner_weights(
+                miner_hotkey=validation['miner_hotkey'],
+                rep_score=validation['rep_score'],
+                decision=validation['decision']
+            )
     
     def process_pending_reveals(self):
         """

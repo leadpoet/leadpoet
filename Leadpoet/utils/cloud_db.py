@@ -1527,9 +1527,12 @@ def check_email_duplicate(email: str) -> bool:
         supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
         
         # Query transparency_log for this email_hash
+        # CRITICAL: Only check SUBMISSION events (successful submissions)
+        # NOT SUBMISSION_REQUEST events (which exist even if validation failed)
         result = supabase.table("transparency_log") \
-            .select("id, actor_hotkey, ts") \
+            .select("id, actor_hotkey, ts, event_type") \
             .eq("email_hash", email_hash) \
+            .eq("event_type", "SUBMISSION") \
             .limit(1) \
             .execute()
         

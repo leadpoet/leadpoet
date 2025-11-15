@@ -28,6 +28,8 @@ from Leadpoet.utils.utils_lead_extraction import (
     get_field
 )
 
+MAX_REP_SCORE = 50
+
 # Custom exception for API infrastructure failures (should skip lead, not submit)
 class EmailVerificationUnavailableError(Exception):
     """Raised when email verification API is unavailable (no credits, bad key, network error, etc.)"""
@@ -1451,7 +1453,7 @@ async def check_wayback_machine(lead: dict) -> Tuple[float, dict]:
     """
     Rep Score: Check domain history in Wayback Machine.
     
-    Returns score (0-10) based on:
+    Returns score (0-6) based on:
     - Number of snapshots
     - Age of domain in archive
     - Consistency of snapshots
@@ -1507,25 +1509,25 @@ async def check_wayback_machine(lead: dict) -> Tuple[float, dict]:
                 else:
                     age_years = 0
                 
-                # Scoring logic:
-                # - 0-10 snapshots: 0-2 points
-                # - 11-50 snapshots: 3-5 points
-                # - 51-200 snapshots: 6-8 points
-                # - 200+ snapshots: 9-10 points
-                # - Bonus: +1 for age > 5 years
+                # Scoring logic (UPDATED: max 6 points for Wayback):
+                # - 0-10 snapshots: 0-1.2 points
+                # - 11-50 snapshots: 1.8-3 points
+                # - 51-200 snapshots: 3.6-4.8 points
+                # - 200+ snapshots: 5.4-6 points
+                # - Bonus: +0.6 for age > 5 years
                 
                 if snapshots < 10:
-                    score = min(2, snapshots * 0.2)
+                    score = min(1.2, snapshots * 0.12)
                 elif snapshots < 50:
-                    score = 3 + (snapshots - 10) * 0.05
+                    score = 1.8 + (snapshots - 10) * 0.03
                 elif snapshots < 200:
-                    score = 6 + (snapshots - 50) * 0.013
+                    score = 3.6 + (snapshots - 50) * 0.008
                 else:
-                    score = 9 + min(1, (snapshots - 200) * 0.001)
+                    score = 5.4 + min(0.6, (snapshots - 200) * 0.0006)
                 
                 # Age bonus
                 if age_years >= 5:
-                    score = min(10, score + 1)
+                    score = min(6, score + 0.6)
                 
                 return score, {
                     "checked": True,
@@ -1545,7 +1547,7 @@ async def check_uspto_trademarks(lead: dict) -> Tuple[float, dict]:
     """
     Rep Score: Check USPTO for company trademarks.
     
-    Returns score (0-10) based on:
+    Returns score (0-12) based on:
     - Number of registered trademarks
     - Age of trademarks
     - Active status
@@ -1592,25 +1594,25 @@ async def check_uspto_trademarks(lead: dict) -> Tuple[float, dict]:
                 oldest_year = min([int(d[:4]) for d in grant_dates]) if grant_dates else datetime.now().year
                 age_years = datetime.now().year - oldest_year
                 
-                # Scoring logic:
-                # - 1-2 trademarks: 3 points
-                # - 3-5 trademarks: 5 points
-                # - 6-10 trademarks: 7 points
-                # - 10+ trademarks: 9-10 points
-                # - Bonus: +1 for age > 10 years
+                # Scoring logic (UPDATED: max 12 points for USPTO):
+                # - 1-2 trademarks: 3.6 points
+                # - 3-5 trademarks: 6 points
+                # - 6-10 trademarks: 8.4 points
+                # - 10+ trademarks: 10.8-12 points
+                # - Bonus: +1.2 for age > 10 years
                 
                 if total_count <= 2:
-                    score = min(3, total_count * 1.5)
+                    score = min(3.6, total_count * 1.8)
                 elif total_count <= 5:
-                    score = 5
+                    score = 6
                 elif total_count <= 10:
-                    score = 7
+                    score = 8.4
                 else:
-                    score = 9 + min(1, (total_count - 10) * 0.1)
+                    score = 10.8 + min(1.2, (total_count - 10) * 0.12)
                 
                 # Age bonus
                 if age_years >= 10:
-                    score = min(10, score + 1)
+                    score = min(12, score + 1.2)
                 
                 return score, {
                     "checked": True,
@@ -1629,7 +1631,7 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
     """
     Rep Score: Check SEC EDGAR for company filings.
     
-    Returns score (0-10) based on:
+    Returns score (0-12) based on:
     - Number of filings
     - Recent filing activity
     - Types of filings (10-K, 10-Q, 8-K)
@@ -1695,20 +1697,20 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
                         "reason": f"No filings detected for {company}"
                     }
                 
-                # Scoring logic (similar to old implementation):
-                # - 1-5 filings: 3 points
-                # - 6-20 filings: 6 points
-                # - 21-50 filings: 8 points
-                # - 50+ filings: 10 points
+                # Scoring logic (UPDATED: max 12 points for SEC):
+                # - 1-5 filings: 3.6 points
+                # - 6-20 filings: 7.2 points
+                # - 21-50 filings: 9.6 points
+                # - 50+ filings: 12 points
                 
                 if total_filings <= 5:
-                    score = min(3, total_filings * 0.6)
+                    score = min(3.6, total_filings * 0.72)
                 elif total_filings <= 20:
-                    score = 6
+                    score = 7.2
                 elif total_filings <= 50:
-                    score = 8
+                    score = 9.6
                 else:
-                    score = 10
+                    score = 12
                 
                 return score, {
                     "checked": True,
@@ -1721,6 +1723,373 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
         return 0, {"checked": False, "reason": "SEC API timeout"}
     except Exception as e:
         return 0, {"checked": False, "reason": f"SEC check error: {str(e)}"}
+
+
+async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
+    """
+    Rep Score: Check GDELT for press mentions and trusted domain coverage.
+    
+    Returns score (0-10) based on:
+    - Press wire mentions (PRNewswire, BusinessWire, GlobeNewswire, ENPresswire)
+    - Trusted domain mentions (.edu, .gov, high-authority sites)
+    
+    This is a SOFT check - always passes, appends score.
+    Uses GDELT 2.0 DOC API (free, no API key needed)
+    
+    Scoring breakdown:
+    - 0-5 points: Press wire mentions (verified company PR)
+    - 0-5 points: Trusted domain mentions (.edu, .gov, DA>60)
+    
+    Args:
+        lead: Lead data with company
+    
+    Returns:
+        (score, metadata)
+    """
+    try:
+        company = get_company(lead)
+        if not company:
+            return 0, {"checked": False, "reason": "No company provided"}
+        
+        # GDELT 2.0 DOC API endpoint
+        # Uses free public API - no key required
+        gdelt_url = "https://api.gdeltproject.org/api/v2/doc/doc"
+        
+        # Query for company mentions in last 3 months
+        # Format: "company name" sourcelang:eng
+        query = f'"{company}" sourcelang:eng'
+        
+        async with aiohttp.ClientSession() as session:
+            params = {
+                "query": query,
+                "mode": "artlist",
+                "maxrecords": 250,  # Get up to 250 recent articles
+                "format": "json",
+                "sort": "datedesc"
+            }
+            
+            async with session.get(gdelt_url, params=params, timeout=15) as response:
+                if response.status != 200:
+                    return 0, {
+                        "checked": False,
+                        "reason": f"GDELT API error: HTTP {response.status}"
+                    }
+                
+                data = await response.json()
+                articles = data.get("articles", [])
+                
+                if not articles:
+                    return 0, {
+                        "checked": True,
+                        "press_mentions": 0,
+                        "trusted_mentions": 0,
+                        "reason": f"No GDELT coverage found for {company}"
+                    }
+                
+                # Parse articles for press wires and trusted domains
+                press_wire_domains = {
+                    "prnewswire.com",
+                    "businesswire.com",
+                    "globenewswire.com",
+                    "enpresswire.com",
+                    "prweb.com",
+                    "marketwired.com"
+                }
+                
+                trusted_tlds = {".edu", ".gov", ".mil"}
+                
+                # High-authority domains (Fortune 500, major news outlets)
+                high_authority_domains = {
+                    "forbes.com", "fortune.com", "bloomberg.com", "wsj.com",
+                    "nytimes.com", "reuters.com", "ft.com", "economist.com",
+                    "techcrunch.com", "wired.com", "theverge.com", "cnet.com"
+                }
+                
+                press_mentions = []
+                trusted_mentions = []
+                seen_domains = set()  # Track unique domains (no spam)
+                
+                for article in articles:
+                    url = article.get("url", "")
+                    domain = article.get("domain", "")
+                    title = article.get("title", "")
+                    
+                    # Skip if we've seen this domain (cap at 3 mentions per domain)
+                    if domain in seen_domains:
+                        domain_count = sum(1 for m in trusted_mentions if m["domain"] == domain)
+                        if domain_count >= 3:
+                            continue
+                    
+                    seen_domains.add(domain)
+                    
+                    # Check if company name appears in title (stronger signal)
+                    company_in_title = company.lower() in title.lower()
+                    
+                    # Check for press wire mentions
+                    if any(wire in domain for wire in press_wire_domains):
+                        press_mentions.append({
+                            "domain": domain,
+                            "url": url[:100],
+                            "title": title[:100],
+                            "company_in_title": company_in_title
+                        })
+                    
+                    # Check for trusted domain mentions
+                    is_trusted_tld = any(domain.endswith(tld) for tld in trusted_tlds)
+                    is_high_authority = any(auth in domain for auth in high_authority_domains)
+                    
+                    if is_trusted_tld or is_high_authority:
+                        trusted_mentions.append({
+                            "domain": domain,
+                            "url": url[:100],
+                            "title": title[:100],
+                            "company_in_title": company_in_title,
+                            "type": "tld" if is_trusted_tld else "high_authority"
+                        })
+                
+                # Calculate score
+                # Press wire mentions: 0-5 points
+                # - 1+ mention: 2 points
+                # - 3+ mentions: 3 points
+                # - 5+ mentions: 4 points
+                # - 10+ mentions: 5 points
+                press_score = 0
+                if len(press_mentions) >= 10:
+                    press_score = 5.0
+                elif len(press_mentions) >= 5:
+                    press_score = 4.0
+                elif len(press_mentions) >= 3:
+                    press_score = 3.0
+                elif len(press_mentions) >= 1:
+                    press_score = 2.0
+                
+                # Trusted domain mentions: 0-5 points
+                # - 1+ mention: 2 points
+                # - 3+ mentions: 3 points
+                # - 5+ mentions: 4 points
+                # - 10+ mentions: 5 points
+                trusted_score = 0
+                if len(trusted_mentions) >= 10:
+                    trusted_score = 5.0
+                elif len(trusted_mentions) >= 5:
+                    trusted_score = 4.0
+                elif len(trusted_mentions) >= 3:
+                    trusted_score = 3.0
+                elif len(trusted_mentions) >= 1:
+                    trusted_score = 2.0
+                
+                total_score = press_score + trusted_score
+                
+                return total_score, {
+                    "checked": True,
+                    "score": total_score,
+                    "press_score": press_score,
+                    "trusted_score": trusted_score,
+                    "press_mentions_count": len(press_mentions),
+                    "trusted_mentions_count": len(trusted_mentions),
+                    "press_mentions": press_mentions[:5],  # Sample of top 5
+                    "trusted_mentions": trusted_mentions[:5],  # Sample of top 5
+                    "reason": f"GDELT coverage: {len(press_mentions)} press mentions, {len(trusted_mentions)} trusted domain mentions"
+                }
+
+    except asyncio.TimeoutError:
+        return 0, {"checked": False, "reason": "GDELT API timeout"}
+    except Exception as e:
+        return 0, {"checked": False, "reason": f"GDELT check error: {str(e)}"}
+
+
+async def check_whois_dnsbl_reputation(lead: dict) -> Tuple[float, dict]:
+    """
+    Rep Score: WHOIS + DNSBL reputation check using cached validator data.
+    
+    Returns score (0-10) based on:
+    - WHOIS Stability: 0-3 points (whois_updated_days_ago)
+    - Registrant Consistency: 0-3 points (corporate signals)
+    - Hosting Provider: 0-3 points (nameservers)
+    - DNSBL: 0-1 points (not blacklisted)
+    
+    This is a SOFT check - always passes, appends score.
+    Uses FREE data already collected in Stage 1 (WHOIS) and Stage 2 (DNSBL).
+    
+    Mirrors TypeScript calculate-rep-score/checks/operational.ts checks.
+    
+    Args:
+        lead: Lead data with WHOIS and DNSBL fields
+    
+    Returns:
+        (score, metadata)
+    """
+    try:
+        score = 0
+        details = {
+            "whois_stability": 0,
+            "registrant_consistency": 0,
+            "hosting_provider": 0,
+            "dnsbl": 0
+        }
+        
+        # ============================================================
+        # 1. WHOIS Stability (0-3 points)
+        # ============================================================
+        # TypeScript: checkWhoisStabilityDays() - 4 points
+        # Python: 3 points (scaled down for 10-point total)
+        #
+        # Checks if WHOIS record was updated recently (instability signal)
+        # Recent updates indicate potential domain instability, ownership changes, 
+        # or drop-catch scenarios
+        # ============================================================
+        
+        whois_updated_days = lead.get("whois_updated_days_ago")
+        if isinstance(whois_updated_days, (int, float)) and whois_updated_days >= 0:
+            # Scoring:
+            # >= 180 days (6 months): 3.0 points (very stable)
+            # >= 90 days (3 months): 2.0 points (stable)
+            # >= 30 days (1 month): 1.0 points (acceptable)
+            # < 30 days: 0 points (unstable)
+            if whois_updated_days >= 180:
+                details["whois_stability"] = 3.0
+            elif whois_updated_days >= 90:
+                details["whois_stability"] = 2.0
+            elif whois_updated_days >= 30:
+                details["whois_stability"] = 1.0
+            else:
+                details["whois_stability"] = 0
+            
+            score += details["whois_stability"]
+            details["whois_updated_days_ago"] = whois_updated_days
+        else:
+            # Fallback: Use domain age if WHOIS update date not available
+            domain_age = lead.get("domain_age_days")
+            if isinstance(domain_age, (int, float)) and domain_age > 30:
+                # Old domain, assume stable (weak signal)
+                details["whois_stability"] = 1.0
+                score += 1.0
+                details["whois_updated_days_ago"] = "unavailable (used domain_age fallback)"
+        
+        # ============================================================
+        # 2. Registrant Consistency (0-3 points)
+        # ============================================================
+        # TypeScript: checkRegistrantConsistency() - 3 points
+        # Python: 3 points
+        #
+        # Counts corporate signals:
+        # - Corporate registrar name (Inc, LLC, Corp, etc.)
+        # - Reputable hosting providers in nameservers
+        # - Established domain (> 1 year old)
+        # ============================================================
+        
+        corporate_signals = []
+        
+        # Check registrar for corporate keywords
+        registrar = lead.get("domain_registrar", "")
+        if registrar:
+            corporate_keywords = ["inc", "corp", "llc", "ltd", "company", "corporation", 
+                                 "enterprises", "group", "holdings"]
+            registrar_lower = registrar.lower()
+            if any(keyword in registrar_lower for keyword in corporate_keywords):
+                corporate_signals.append("corporate_registrant")
+        
+        # Check for reputable hosting providers in nameservers
+        nameservers = lead.get("domain_nameservers", [])
+        if isinstance(nameservers, list) and len(nameservers) > 0:
+            reputable_providers = ["aws", "google", "cloudflare", "azure", "amazon"]
+            for ns in nameservers:
+                ns_lower = str(ns).lower()
+                if any(provider in ns_lower for provider in reputable_providers):
+                    corporate_signals.append("reputable_hosting")
+                    break
+        
+        # Check domain age (> 1 year = established)
+        domain_age = lead.get("domain_age_days", 0)
+        if domain_age > 365:
+            corporate_signals.append("established_domain")
+        
+        # Score based on signals count
+        # 3+ signals: 3 points
+        # 2 signals: 2 points
+        # 1 signal: 1 point
+        # 0 signals: 0 points
+        if len(corporate_signals) >= 3:
+            details["registrant_consistency"] = 3.0
+        elif len(corporate_signals) == 2:
+            details["registrant_consistency"] = 2.0
+        elif len(corporate_signals) == 1:
+            details["registrant_consistency"] = 1.0
+        else:
+            details["registrant_consistency"] = 0
+        
+        score += details["registrant_consistency"]
+        details["corporate_signals"] = corporate_signals
+        
+        # ============================================================
+        # 3. Hosting Provider Reputation (0-3 points)
+        # ============================================================
+        # TypeScript: checkHostingProviderReputation() - 3 points
+        # Python: 3 points
+        #
+        # Checks if domain is hosted on reputable infrastructure:
+        # AWS, Google Cloud, Cloudflare, Azure, Amazon
+        # ============================================================
+        
+        if isinstance(nameservers, list) and len(nameservers) > 0:
+            reputable_providers = ["aws", "google", "cloudflare", "azure", "amazon"]
+            found_provider = None
+            
+            for ns in nameservers:
+                ns_lower = str(ns).lower()
+                for provider in reputable_providers:
+                    if provider in ns_lower:
+                        found_provider = provider
+                        break
+                if found_provider:
+                    break
+            
+            if found_provider:
+                details["hosting_provider"] = 3.0
+                details["hosting_provider_name"] = found_provider
+                score += 3.0
+        
+        # ============================================================
+        # 4. DNSBL Reputation (0-1 points)
+        # ============================================================
+        # TypeScript: checkDnsblReputation() - 1 point
+        # Python: 1 point
+        #
+        # Checks if domain is NOT blacklisted in Spamhaus DBL
+        # Uses FREE data already collected in Stage 2
+        # ============================================================
+        
+        dnsbl_checked = lead.get("dnsbl_checked")
+        dnsbl_blacklisted = lead.get("dnsbl_blacklisted")
+        
+        if dnsbl_checked:
+            if not dnsbl_blacklisted:
+                details["dnsbl"] = 1.0
+                score += 1.0
+                details["dnsbl_status"] = "clean"
+            else:
+                details["dnsbl"] = 0
+                details["dnsbl_status"] = "blacklisted"
+                details["dnsbl_list"] = lead.get("dnsbl_list", "unknown")
+        
+        # ============================================================
+        # Return final score and details
+        # ============================================================
+        
+        return score, {
+            "checked": True,
+            "score": score,
+            "max_score": 10,
+            "details": details,
+            "reason": f"WHOIS/DNSBL reputation: {score:.1f}/10 (Stability: {details['whois_stability']}, Consistency: {details['registrant_consistency']}, Hosting: {details['hosting_provider']}, DNSBL: {details['dnsbl']})"
+        }
+        
+    except Exception as e:
+        return 0, {
+            "checked": False,
+            "reason": f"WHOIS/DNSBL check error: {str(e)}"
+        }
+
 
 async def check_terms_attestation(lead: dict) -> Tuple[bool, dict]:
     """
@@ -2018,11 +2387,13 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         },
         "rep_score": {  # NEW
             "total_score": 0,
-            "max_score": 30,
+            "max_score": MAX_REP_SCORE,
             "breakdown": {
                 "wayback_machine": 0,
                 "uspto_trademarks": 0,
-                "sec_edgar": 0
+                "sec_edgar": 0,
+                "whois_dnsbl": 0,
+                "gdelt": 0
             }
         },
         "passed": False,
@@ -2214,37 +2585,45 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
 
     # ========================================================================
     # Rep Score: Soft Reputation Checks (SOFT)
-    # - Wayback Machine, USPTO, SEC
+    # - Wayback Machine (max 6 points), USPTO (max 12 points), SEC (max 12 points), 
+    #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points)
     # - Always passes, appends scores to lead
+    # - Total: 0-50 points
     # ========================================================================
     print(f"📊 Rep Score: Running soft checks for {email} @ {company}")
     
     wayback_score, wayback_data = await check_wayback_machine(lead)
     uspto_score, uspto_data = await check_uspto_trademarks(lead)
     sec_score, sec_data = await check_sec_edgar(lead)
+    whois_dnsbl_score, whois_dnsbl_data = await check_whois_dnsbl_reputation(lead)
+    gdelt_score, gdelt_data = await check_gdelt_mentions(lead)
     
-    total_rep_score = wayback_score + uspto_score + sec_score
+    total_rep_score = wayback_score + uspto_score + sec_score + whois_dnsbl_score + gdelt_score
     
     # Append to lead data
     lead["rep_score"] = total_rep_score
     lead["rep_score_details"] = {
         "wayback": wayback_data,
         "uspto": uspto_data,
-        "sec": sec_data
+        "sec": sec_data,
+        "whois_dnsbl": whois_dnsbl_data,
+        "gdelt": gdelt_data
     }
     
     # Append to automated_checks_data
     automated_checks_data["rep_score"] = {
         "total_score": total_rep_score,
-        "max_score": 30,
+        "max_score": MAX_REP_SCORE,
         "breakdown": {
-            "wayback_machine": wayback_score,
-            "uspto_trademarks": uspto_score,
-            "sec_edgar": sec_score
+            "wayback_machine": wayback_score,       # 0-6 points
+            "uspto_trademarks": uspto_score,        # 0-12 points
+            "sec_edgar": sec_score,                 # 0-12 points
+            "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
+            "gdelt": gdelt_score                    # 0-10 points
         }
     }
     
-    print(f"   📊 Rep Score: {total_rep_score}/30 (Wayback: {wayback_score}, USPTO: {uspto_score}, SEC: {sec_score})")
+    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, USPTO: {uspto_score:.1f}/12, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10)")
     
     print(f"🎉 All stages passed for {email} @ {company}")
 

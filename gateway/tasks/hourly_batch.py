@@ -245,6 +245,7 @@ async def hourly_batch_task():
                 checkpoint_log = {
                     "event_type": "ARWEAVE_CHECKPOINT",
                     "actor_hotkey": "system",
+                    "ts": datetime.utcnow().isoformat() + "Z",  # Required timestamp field
                     "nonce": str(uuid.uuid4()),  # Required field
                     "payload": {
                         "arweave_tx_id": tx_id,

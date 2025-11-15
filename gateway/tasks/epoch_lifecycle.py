@@ -276,7 +276,7 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         result = await asyncio.to_thread(
             lambda: supabase.table("leads_private")
                 .select("lead_id")
-                .is_("epoch_summary", "null")
+                .eq("status", "pending_validation")
                 .order("created_ts")
                 .execute()
         )
@@ -433,8 +433,13 @@ async def compute_epoch_consensus(epoch_id: int):
     """
     Compute weighted consensus for all leads in epoch.
     
-    Uses V-scores to weight validator decisions and rep_scores.
-    Updates leads_private with final consensus outcomes.
+    Uses V-scores (v_trust × stake) to weight validator decisions and rep_scores.
+    Updates both validation_evidence_private and leads_private with final consensus outcomes.
+    
+    This implements all 3 priorities:
+    1. Consensus aggregation - populates all new columns in leads_private
+    2. Validator trust/stake population - updates validation_evidence_private
+    3. Weighted consensus - uses v_trust × stake weights from Bittensor metagraph
     
     Args:
         epoch_id: Epoch ID
@@ -442,7 +447,73 @@ async def compute_epoch_consensus(epoch_id: int):
     try:
         # Import here to avoid circular dependency
         from gateway.utils.consensus import compute_weighted_consensus
+        from gateway.utils.registry import get_metagraph
         
+        print(f"   📊 Starting consensus for epoch {epoch_id}...")
+        
+        # ========================================================================
+        # PRIORITY 2: Populate v_trust and stake from Bittensor metagraph
+        # ========================================================================
+        print(f"   🔍 Step 1: Populating validator trust and stake from metagraph...")
+        
+        try:
+            # Get metagraph to fetch v_trust and stake for all validators
+            metagraph = get_metagraph()
+            
+            # Query all evidence for this epoch that has been revealed - RUN IN THREAD
+            evidence_result = await asyncio.to_thread(
+                lambda: supabase.table("validation_evidence_private")
+                    .select("evidence_id, validator_hotkey")
+                    .eq("epoch_id", epoch_id)
+                    .not_.is_("decision", "null")
+                    .execute()
+            )
+            
+            print(f"   📊 Found {len(evidence_result.data)} revealed validation records")
+            
+            # Update v_trust and stake for each validator's evidence
+            for ev in evidence_result.data:
+                validator_hotkey = ev['validator_hotkey']
+                evidence_id = ev['evidence_id']
+                
+                try:
+                    # Get validator's UID in metagraph
+                    if validator_hotkey in metagraph.hotkeys:
+                        uid = metagraph.hotkeys.index(validator_hotkey)
+                        
+                        # Get stake (TAO amount) 
+                        stake = float(metagraph.S[uid])
+                        
+                        # Get v_trust (validator trust score) - same as registry.py line 283
+                        v_trust = float(metagraph.validator_trust[uid]) if hasattr(metagraph, 'validator_trust') else 0.0
+                        
+                        # Update evidence record with v_trust and stake - RUN IN THREAD
+                        await asyncio.to_thread(
+                            lambda: supabase.table("validation_evidence_private")
+                                .update({
+                                    "v_trust": v_trust,
+                                    "stake": stake
+                                })
+                                .eq("evidence_id", evidence_id)
+                                .execute()
+                        )
+                        
+                        print(f"      ✅ Updated {validator_hotkey[:10]}...: v_trust={v_trust:.4f}, stake={stake:.2f} τ")
+                    else:
+                        print(f"      ⚠️  Validator {validator_hotkey[:10]}... not found in metagraph")
+                        
+                except Exception as e:
+                    print(f"      ⚠️  Failed to update v_trust/stake for {validator_hotkey[:10]}...: {e}")
+                    
+            print(f"   ✅ Step 1 complete: Validator weights populated\n")
+            
+        except Exception as e:
+            print(f"   ⚠️  Failed to populate validator weights: {e}")
+            print(f"      Continuing with consensus calculation (may use default weights)...")
+        
+        # ========================================================================
+        # PRIORITY 3: Weighted consensus calculation (already implemented in consensus.py)
+        # ========================================================================
         # Query all leads validated in this epoch - RUN IN THREAD
         result = await asyncio.to_thread(
             lambda: supabase.table("validation_evidence_private")
@@ -458,28 +529,92 @@ async def compute_epoch_consensus(epoch_id: int):
             print(f"   ℹ️  No leads to compute consensus for in epoch {epoch_id}")
             return
         
-        print(f"   📊 Computing consensus for {len(unique_leads)} leads in epoch {epoch_id}")
+        print(f"   📊 Step 2: Computing consensus for {len(unique_leads)} leads...\n")
         
         approved_count = 0
         rejected_count = 0
         
         for i, lead_id in enumerate(unique_leads, 1):
             try:
-                print(f"      🔍 [{i}/{len(unique_leads)}] Computing consensus for lead {lead_id[:8]}...")
+                print(f"      🔍 [{i}/{len(unique_leads)}] Lead {lead_id[:8]}...")
                 
-                # Compute weighted consensus for this lead
+                # ========================================================================
+                # PRIORITY 3: Compute weighted consensus using v_trust × stake
+                # ========================================================================
                 outcome = await compute_weighted_consensus(lead_id, epoch_id)
-                print(f"         📊 Outcome: {outcome['final_decision']} (rep: {outcome['final_rep_score']:.2f})")
+                print(f"         📊 Consensus: {outcome['final_decision']} (rep: {outcome['final_rep_score']:.2f}, weight: {outcome['consensus_weight']:.2f})")
                 
-                # Update leads_private with final outcome - RUN IN THREAD
-                print(f"         💾 Updating leads_private.epoch_summary...")
+                # ========================================================================
+                # PRIORITY 1: Aggregate validator responses and populate leads_private
+                # ========================================================================
+                print(f"         📦 Aggregating validator responses...")
+                
+                # Query all validator responses for this lead - RUN IN THREAD
+                responses_result = await asyncio.to_thread(
+                    lambda: supabase.table("validation_evidence_private")
+                        .select("validator_hotkey, decision, rep_score, rejection_reason, revealed_ts, v_trust, stake")
+                        .eq("lead_id", lead_id)
+                        .eq("epoch_id", epoch_id)
+                        .not_.is_("decision", "null")
+                        .execute()
+                )
+                
+                # Build validators_responded array
+                validators_responded = [r['validator_hotkey'] for r in responses_result.data]
+                
+                # Build validator_responses array
+                validator_responses = []
+                for r in responses_result.data:
+                    validator_responses.append({
+                        "validator": r['validator_hotkey'],
+                        "decision": r['decision'],
+                        "rep_score": r['rep_score'],
+                        "rejection_reason": r.get('rejection_reason'),
+                        "submitted_at": r.get('revealed_ts'),
+                        "v_trust": r.get('v_trust'),
+                        "stake": r.get('stake')
+                    })
+                
+                # Build consensus_votes object
+                approve_count = sum(1 for r in responses_result.data if r['decision'] == 'approve')
+                deny_count = len(responses_result.data) - approve_count
+                
+                consensus_votes = {
+                    "total_validators": outcome['validator_count'],  # All validators who responded
+                    "responded": len(responses_result.data),
+                    "approve": approve_count,
+                    "deny": deny_count,
+                    "consensus": outcome['final_decision'],
+                    "avg_rep_score": outcome['final_rep_score'],
+                    "total_weight": outcome['consensus_weight'],
+                    "approval_ratio": outcome['approval_ratio'],
+                    "consensus_timestamp": datetime.utcnow().isoformat()
+                }
+                
+                # Determine final status
+                final_status = "approved" if outcome['final_decision'] == 'approve' else "denied"
+                
+                # Final rep_score (NULL if denied)
+                final_rep_score = outcome['final_rep_score'] if outcome['final_decision'] == 'approve' else None
+                
+                # ========================================================================
+                # Update leads_private with ALL aggregated data
+                # ========================================================================
+                print(f"         💾 Updating leads_private with aggregated data...")
                 await asyncio.to_thread(
                     lambda: supabase.table("leads_private")
-                        .update({"epoch_summary": outcome})
+                        .update({
+                            "status": final_status,
+                            "validators_responded": validators_responded,
+                            "validator_responses": validator_responses,
+                            "consensus_votes": consensus_votes,
+                            "rep_score": final_rep_score,
+                            "epoch_summary": outcome  # Keep existing epoch_summary for backwards compatibility
+                        })
                         .eq("lead_id", lead_id)
                         .execute()
                 )
-                print(f"         ✅ Database updated")
+                print(f"         ✅ leads_private updated")
                 
                 # Log CONSENSUS_RESULT publicly for miner transparency
                 await log_consensus_result(lead_id, epoch_id, outcome)
@@ -491,7 +626,7 @@ async def compute_epoch_consensus(epoch_id: int):
                     
                     # CRITICAL: Increment rejection count for miner (validator-rejected leads)
                     try:
-                        print(f"         📊 Lead rejected by consensus - incrementing miner's rejection count...")
+                        print(f"         📊 Lead rejected - incrementing miner's rejection count...")
                         
                         # Fetch miner hotkey from lead_blob - RUN IN THREAD
                         lead_result = await asyncio.to_thread(
@@ -520,14 +655,17 @@ async def compute_epoch_consensus(epoch_id: int):
                     except Exception as e:
                         print(f"         ⚠️  Failed to increment rejection count: {e}")
                 
-                print(f"      ✅ Lead {lead_id[:8]}...: {outcome['final_decision']} (rep: {outcome['final_rep_score']:.2f}, reason: {outcome.get('primary_rejection_reason', 'N/A')})")
+                print(f"      ✅ Lead {lead_id[:8]}...: {final_status.upper()} (rep: {final_rep_score if final_rep_score else 0:.2f}, validators: {len(validators_responded)})")
             
             except Exception as e:
                 print(f"      ❌ Failed to compute consensus for lead {lead_id[:8]}...: {e}")
                 import traceback
                 traceback.print_exc()
         
-        print(f"   📊 Consensus complete: {approved_count} approved, {rejected_count} rejected")
+        print(f"\n   📊 Epoch {epoch_id} consensus complete:")
+        print(f"      ✅ {approved_count} leads approved")
+        print(f"      ❌ {rejected_count} leads denied")
+        print(f"      📊 Total leads processed: {len(unique_leads)}")
     
     except Exception as e:
         print(f"   ❌ Failed to compute epoch consensus: {e}")

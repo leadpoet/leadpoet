@@ -215,13 +215,18 @@ else:
                 linkedin = f"https://www.linkedin.com/in/{linkedin_raw}"
             else:
                 linkedin = linkedin_raw
+            
+            # Fallback to default LinkedIn from ICP config if not found
+            if not linkedin and BASE_ICP_CONFIG.get("default_contact_linkedin"):
+                linkedin = BASE_ICP_CONFIG["default_contact_linkedin"]
         else:
             first_name = ""
             last_name = ""
             full_name = ""
             email = ""
             job_title = ""
-            linkedin = ""
+            # Use default LinkedIn from ICP config as fallback
+            linkedin = BASE_ICP_CONFIG.get("default_contact_linkedin", "")
 
         # Helper function to safely get string values
         def safe_str(value, default=""):

@@ -168,13 +168,14 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers
 )
 
-# Debug middleware to log all requests
-@app.middleware("http")
-async def log_requests(request, call_next):
-    print(f"🔍 INCOMING REQUEST: {request.method} {request.url.path}")
-    response = await call_next(request)
-    print(f"🔍 RESPONSE STATUS: {response.status_code}")
-    return response
+# Production middleware: Only log errors and critical paths
+# Comment out request logging to reduce overhead in production
+# @app.middleware("http")
+# async def log_requests(request, call_next):
+#     print(f"🔍 INCOMING REQUEST: {request.method} {request.url.path}")
+#     response = await call_next(request)
+#     print(f"🔍 RESPONSE STATUS: {response.status_code}")
+#     return response
 
 # ============================================================
 # Include API Routers
@@ -229,14 +230,15 @@ async def presign_urls(event: SubmissionRequestEvent):
     Gateway automatically mirrors to MinIO after S3 upload verification.
     
     Flow:
-    1. Verify payload hash
-    2. Verify wallet signature
-    3. Check actor is registered miner
-    4. Verify nonce is fresh
-    5. Verify timestamp within tolerance
-    6. Generate presigned URL for S3
-    7. Log SUBMISSION_REQUEST to transparency log
-    8. Return S3 URL
+    1. Verify wallet signature (MUST be first to prove identity)
+    2. Check rate limits (uses verified hotkey, blocks before expensive ops)
+    3. Verify payload hash (skip for rate-limited requests)
+    4. Check actor is registered miner
+    5. Verify nonce is fresh
+    6. Verify timestamp within tolerance
+    7. Generate presigned URL for S3
+    8. Log SUBMISSION_REQUEST to transparency log
+    9. Return S3 URL
     
     Args:
         event: SubmissionRequestEvent with signature
@@ -245,25 +247,14 @@ async def presign_urls(event: SubmissionRequestEvent):
         PresignedURLResponse with S3 URL (MinIO mirroring happens gateway-side)
     
     Raises:
-        HTTPException: 400 (bad request), 403 (forbidden)
+        HTTPException: 400 (bad request), 403 (forbidden), 429 (rate limited)
     """
     print("🔍 /presign called - START")
     
     # ========================================
-    # Step 1: Verify payload hash
+    # Step 1: Verify wallet signature (REQUIRED to verify identity)
     # ========================================
-    print("🔍 Step 1: Computing payload hash...")
-    computed_hash = compute_payload_hash(event.payload.model_dump())
-    if computed_hash != event.payload_hash:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Payload hash mismatch: expected {event.payload_hash[:16]}..., got {computed_hash[:16]}..."
-        )
-    
-    # ========================================
-    # Step 2: Verify wallet signature
-    # ========================================
-    print("🔍 Step 2: Verifying signature...")
+    print("🔍 Step 1: Verifying signature...")
     message = construct_signed_message(event)
     print(f"🔍 Message constructed for verification: {message[:150]}...")
     print(f"🔍 Signature received: {event.signature[:64]}...")
@@ -277,14 +268,43 @@ async def presign_urls(event: SubmissionRequestEvent):
             status_code=403,
             detail="Invalid signature"
         )
+    print("🔍 Step 1 complete: Signature verified")
     
     # ========================================
-    # Step 3: Check actor is registered miner
+    # Step 2: Check rate limits (NOW we have verified identity)
+    # ========================================
+    print("🔍 Step 2: Checking rate limits...")
+    from gateway.utils.rate_limiter import check_rate_limit
+    
+    allowed, rate_limit_message, _ = check_rate_limit(event.actor_hotkey)
+    if not allowed:
+        print(f"⚠️  Rate limit exceeded for {event.actor_hotkey[:20]}...")
+        print(f"   {rate_limit_message}")
+        raise HTTPException(
+            status_code=429,
+            detail=rate_limit_message
+        )
+    print("🔍 Step 2 complete: Rate limit OK")
+    
+    # ========================================
+    # Step 3: Verify payload hash
+    # ========================================
+    print("🔍 Step 3: Computing payload hash...")
+    computed_hash = compute_payload_hash(event.payload.model_dump())
+    if computed_hash != event.payload_hash:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Payload hash mismatch: expected {event.payload_hash[:16]}..., got {computed_hash[:16]}..."
+        )
+    print("🔍 Step 3 complete: Payload hash verified")
+    
+    # ========================================
+    # Step 4: Check actor is registered miner
     # ========================================
     # Run blocking Bittensor call in thread to avoid blocking event loop
-    print("🔍 Step 3: Checking registration (in thread)...")
+    print("🔍 Step 4: Checking registration (in thread)...")
     is_registered, role = await asyncio.to_thread(is_registered_hotkey, event.actor_hotkey)
-    print(f"🔍 Step 3 complete: is_registered={is_registered}, role={role}")
+    print(f"🔍 Step 4 complete: is_registered={is_registered}, role={role}")
     
     if not is_registered:
         raise HTTPException(
@@ -299,9 +319,9 @@ async def presign_urls(event: SubmissionRequestEvent):
         )
     
     # ========================================
-    # Step 4: Verify nonce format and freshness
+    # Step 5: Verify nonce format and freshness
     # ========================================
-    print("🔍 Step 4: Verifying nonce...")
+    print("🔍 Step 5: Verifying nonce...")
     if not validate_nonce_format(event.nonce):
         raise HTTPException(
             status_code=400,
@@ -313,12 +333,12 @@ async def presign_urls(event: SubmissionRequestEvent):
             status_code=400,
             detail="Nonce already used (replay attack detected)"
         )
-    print("🔍 Step 4 complete: Nonce valid")
+    print("🔍 Step 5 complete: Nonce valid")
     
     # ========================================
-    # Step 5: Verify timestamp
+    # Step 6: Verify timestamp
     # ========================================
-    print("🔍 Step 5: Verifying timestamp...")
+    print("🔍 Step 6: Verifying timestamp...")
     try:
         # Use timezone-aware datetime for comparison
         from datetime import timezone as tz
@@ -335,7 +355,7 @@ async def presign_urls(event: SubmissionRequestEvent):
                 status_code=400,
                 detail=f"Timestamp out of range: {time_diff:.0f}s (max: {TIMESTAMP_TOLERANCE_SECONDS}s)"
             )
-        print(f"🔍 Step 5 complete: Timestamp valid (diff={time_diff:.2f}s)")
+        print(f"🔍 Step 6 complete: Timestamp valid (diff={time_diff:.2f}s)")
     except Exception as e:
         print(f"❌ Timestamp verification error: {e}")
         import traceback
@@ -346,9 +366,9 @@ async def presign_urls(event: SubmissionRequestEvent):
         )
     
     # ========================================
-    # Step 6: Generate presigned URLs
+    # Step 7: Generate presigned URLs
     # ========================================
-    print(f"🔍 Step 6: Generating presigned URLs for lead_id={event.payload.lead_id}...")
+    print(f"🔍 Step 7: Generating presigned URLs for lead_id={event.payload.lead_id}...")
     print(f"   Using lead_blob_hash as S3 key: {event.payload.lead_blob_hash[:16]}...")
     try:
         # Use lead_blob_hash as the S3 object key (content-addressed storage)
@@ -359,12 +379,12 @@ async def presign_urls(event: SubmissionRequestEvent):
             status_code=500,
             detail="Failed to generate presigned URLs"
         )
-    print(f"🔍 Step 6 complete: URLs generated")
+    print(f"🔍 Step 7 complete: URLs generated")
     
     # ========================================
-    # Step 7: Log SUBMISSION_REQUEST to TEE Buffer (CRITICAL: Hardware-Protected)
+    # Step 8: Log SUBMISSION_REQUEST to TEE Buffer (CRITICAL: Hardware-Protected)
     # ========================================
-    print("🔍 Step 7: Logging SUBMISSION_REQUEST to TEE buffer...")
+    print("🔍 Step 8: Logging SUBMISSION_REQUEST to TEE buffer...")
     arweave_tx_id = None  # Will be available after hourly Arweave batch
     tee_sequence = None
     
@@ -408,7 +428,7 @@ async def presign_urls(event: SubmissionRequestEvent):
         )
     
     # ========================================
-    # Step 8: Return presigned URL + Acknowledgment
+    # Step 9: Return presigned URL + Acknowledgment
     # ========================================
     # NOTE (Phase 4): TEE-based trust model
     # - Event is buffered in TEE (hardware-protected, sequence={tee_sequence})

@@ -110,32 +110,45 @@ async def get_epoch_leads(
                 detail=f"Epoch {epoch_id} is not active. Current epoch: {current_epoch}"
             )
     
-    # Step 4: Query EPOCH_INITIALIZATION from transparency_log
+    # Step 4: Query CURRENT queue state (not frozen EPOCH_INITIALIZATION snapshot)
+    # DESIGN DECISION: We query the current queue state dynamically instead of using
+    # the frozen snapshot from EPOCH_INITIALIZATION. This allows leads that are
+    # submitted by miners DURING the epoch to be included in validation.
+    # 
+    # Why? Miners may submit leads at any time during the epoch, and we want
+    # validators to process them in the CURRENT epoch rather than waiting for
+    # the NEXT epoch. This improves throughput and reduces latency.
+    #
+    # The trade-off: The queue_root will differ from the EPOCH_INITIALIZATION event,
+    # but this is acceptable because the assignment is still deterministic (all
+    # validators get the same leads for any given query time).
     try:
-        result = supabase.table("transparency_log") \
-            .select("payload") \
-            .eq("event_type", "EPOCH_INITIALIZATION") \
-            .eq("payload->>epoch_id", str(epoch_id)) \
-            .order("id", desc=True) \
-            .limit(1) \
+        from gateway.utils.merkle import compute_merkle_root
+        
+        print(f"🔍 Step 4: Querying CURRENT queue state for epoch {epoch_id}...")
+        
+        # Query pending leads from queue (status = "pending_validation", FIFO by created_ts)
+        result = supabase.table("leads_private") \
+            .select("lead_id") \
+            .eq("status", "pending_validation") \
+            .order("created_ts") \
             .execute()
         
-        if not result.data:
-            raise HTTPException(
-                status_code=404,
-                detail=f"EPOCH_INITIALIZATION not found for epoch {epoch_id}. Epoch may not have started yet."
-            )
+        lead_ids = [row["lead_id"] for row in result.data]
         
-        epoch_init_event = result.data[0]["payload"]
-        queue_root = epoch_init_event["queue_state"]["queue_merkle_root"]
-        total_pending = epoch_init_event["queue_state"]["pending_lead_count"]
+        if not lead_ids:
+            queue_root = "0" * 64  # Empty queue
+            total_pending = 0
+        else:
+            queue_root = compute_merkle_root(lead_ids)
+            total_pending = len(lead_ids)
+        
+        print(f"   📊 Queue State: {queue_root[:16]}... ({total_pending} pending leads)")
     
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to query EPOCH_INITIALIZATION: {str(e)}"
+            detail=f"Failed to query current queue state: {str(e)}"
         )
     
     # Step 5: Get validator set

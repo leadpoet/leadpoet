@@ -157,14 +157,7 @@ python scripts/verify_code_hash.py $GATEWAY_PCR0 $GITHUB_COMMIT
 
 **Purpose**: Decompress and view all events stored in Arweave. Events are gzip-compressed (100% lossless) to save 96% on storage costs.
 
-### **Get Transaction IDs**
-
-Checkpoint IDs are in the `transparency_log` table:
-
-```sql
-SELECT arweave_tx_id, created_at FROM transparency_log 
-WHERE event_type = 'ARWEAVE_CHECKPOINT' ORDER BY created_at DESC LIMIT 10;
-```
+**🔒 Trustless**: Script queries Arweave GraphQL directly using tags - does NOT rely on subnet owners' database!
 
 ### **Decompression Script**
 

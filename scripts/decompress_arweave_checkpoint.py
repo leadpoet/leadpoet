@@ -40,9 +40,8 @@ SPECIFIC_DATE = ""  # Leave blank to use time range
 # Example: 4 = last 4 hours, 24 = last 24 hours
 LAST_X_HOURS = 4  # Change this to pull different time ranges
 
-# Supabase Configuration (to query transparency_log for checkpoint IDs)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zqglvpvtykgxneggpmri.supabase.co")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpxZ2x2cHZ0eWtneG5lZ2dwbXJpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MjcyODkyNTUsImV4cCI6MjA0Mjg2NTI1NX0.9J-tt8eCWbg9n4xxpP_w6LoC5YPRFiJXpnjBnXKMAqE")
+# Arweave GraphQL endpoint (trustless - queries Arweave directly, not subnet owners' database)
+ARWEAVE_GRAPHQL = "https://arweave.net/graphql"
 
 # ============================================================
 # Priority Hierarchy:
@@ -52,59 +51,93 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6
 # ============================================================
 
 
-def query_checkpoint_ids(date: Optional[str] = None, hours: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Query Supabase transparency_log for checkpoint transaction IDs"""
+def query_checkpoint_ids(date: Optional[str] = None, hours: Optional[int] = None) -> List[str]:
+    """
+    Query Arweave GraphQL for checkpoint transaction IDs.
+    
+    This is TRUSTLESS - queries Arweave directly using tags, not the subnet owners' database.
+    """
     
     if date:
         # Query for specific date (00:00:00 to 23:59:59 UTC)
-        start_time = f"{date}T00:00:00Z"
-        end_time = f"{date}T23:59:59Z"
-        print(f"🔍 Querying checkpoints for date: {date}")
+        start_time = f"{date}T00:00:00.000Z"
+        end_time = f"{date}T23:59:59.999Z"
+        print(f"🔍 Querying Arweave for checkpoints on date: {date}")
     elif hours:
         # Query for last X hours
-        end_time = datetime.utcnow()
-        start_time = end_time - timedelta(hours=hours)
-        start_time = start_time.isoformat() + "Z"
-        end_time = end_time.isoformat() + "Z"
-        print(f"🔍 Querying checkpoints for last {hours} hours")
+        end_dt = datetime.utcnow()
+        start_dt = end_dt - timedelta(hours=hours)
+        start_time = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        end_time = end_dt.strftime("%Y-%m-%dT%H:%M:%S.999Z")
+        print(f"🔍 Querying Arweave for checkpoints in last {hours} hours")
     else:
         print("❌ Error: Must provide either date or hours")
         sys.exit(1)
     
-    # Query Supabase transparency_log
-    url = f"{SUPABASE_URL}/rest/v1/transparency_log"
-    headers = {
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-        "Content-Type": "application/json"
+    # GraphQL query to find LeadPoet checkpoint transactions by tags
+    query = """
+    query($startTime: String!, $endTime: String!) {
+      transactions(
+        tags: [
+          {name: "App", values: ["leadpoet"]},
+          {name: "Type", values: ["checkpoint"]},
+          {name: "Time-Start", values: [$startTime, $endTime]}
+        ]
+        sort: HEIGHT_ASC
+        first: 100
+      ) {
+        edges {
+          node {
+            id
+            tags {
+              name
+              value
+            }
+          }
+        }
+      }
     }
-    
-    params = {
-        "select": "id,arweave_tx_id,created_at,payload",
-        "event_type": "eq.ARWEAVE_CHECKPOINT",
-        "created_at": f"gte.{start_time}",
-        "order": "created_at.asc"
-    }
-    
-    if date:
-        params["created_at"] = f"gte.{start_time},lte.{end_time}"
+    """
     
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        checkpoints = response.json()
+        print(f"   Querying Arweave GraphQL API...")
+        print(f"   Time range: {start_time} to {end_time}")
         
-        if not checkpoints:
+        response = requests.post(
+            ARWEAVE_GRAPHQL,
+            json={
+                "query": query,
+                "variables": {
+                    "startTime": start_time,
+                    "endTime": end_time
+                }
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        if "errors" in data:
+            print(f"❌ GraphQL errors: {data['errors']}")
+            sys.exit(1)
+        
+        edges = data.get("data", {}).get("transactions", {}).get("edges", [])
+        tx_ids = [edge["node"]["id"] for edge in edges]
+        
+        if not tx_ids:
             print(f"⚠️  No checkpoints found for the specified time range")
             print(f"   Start: {start_time}")
             print(f"   End: {end_time}")
+            print(f"\n💡 NOTE: Arweave transactions take 2-20 minutes to be indexed")
+            print(f"   If you just uploaded a checkpoint, wait a few minutes and try again")
             sys.exit(0)
         
-        print(f"✅ Found {len(checkpoints)} checkpoint(s)")
-        return checkpoints
+        print(f"✅ Found {len(tx_ids)} checkpoint(s) on Arweave")
+        return tx_ids
+        
     except Exception as e:
-        print(f"❌ Failed to query transparency log: {e}")
-        print(f"\n💡 TIP: If you don't have database access, provide ARWEAVE_TX_ID directly")
+        print(f"❌ Failed to query Arweave GraphQL: {e}")
+        print(f"\n💡 TIP: Provide ARWEAVE_TX_ID directly if you know the specific checkpoint to verify")
         sys.exit(1)
 
 
@@ -231,23 +264,11 @@ def main():
         
     elif SPECIFIC_DATE:
         print(f"📌 Mode: Specific Date")
-        checkpoints = query_checkpoint_ids(date=SPECIFIC_DATE)
-        tx_ids = [cp['arweave_tx_id'] for cp in checkpoints if cp.get('arweave_tx_id')]
-        
-        if not tx_ids:
-            print(f"⚠️  No Arweave transaction IDs found for {SPECIFIC_DATE}")
-            print(f"   This means no checkpoints were uploaded on that date")
-            sys.exit(0)
+        tx_ids = query_checkpoint_ids(date=SPECIFIC_DATE)
     
     else:
         print(f"📌 Mode: Last {LAST_X_HOURS} Hours")
-        checkpoints = query_checkpoint_ids(hours=LAST_X_HOURS)
-        tx_ids = [cp['arweave_tx_id'] for cp in checkpoints if cp.get('arweave_tx_id')]
-        
-        if not tx_ids:
-            print(f"⚠️  No Arweave transaction IDs found for last {LAST_X_HOURS} hours")
-            print(f"   This means no checkpoints were uploaded recently")
-            sys.exit(0)
+        tx_ids = query_checkpoint_ids(hours=LAST_X_HOURS)
     
     print(f"\n📦 Processing {len(tx_ids)} checkpoint(s)...")
     

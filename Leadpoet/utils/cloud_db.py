@@ -1558,6 +1558,8 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
     """
     Get presigned URL from gateway for S3/MinIO upload.
     
+    Retries up to 3 times with fresh nonce/signature on each attempt.
+    
     Args:
         wallet: Miner's wallet
         lead_data: Lead data (used to generate lead_id)
@@ -1565,79 +1567,82 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
     Returns:
         Dict with: lead_id, presigned_url, storage_backend
     """
-    try:
-        import hashlib
-        import uuid
-        
-        # Generate UUID v4 nonce (as expected by gateway)
-        nonce = str(uuid.uuid4())
-        
-        # Create ISO timestamp
-        ts = datetime.now(timezone.utc).isoformat()
-        
-        # Generate lead_id
-        lead_id = str(uuid.uuid4())
-        
-        # Compute lead blob hash
-        lead_blob = json.dumps(lead_data, sort_keys=True)
-        lead_blob_hash = hashlib.sha256(lead_blob.encode()).hexdigest()
-        
-        # Extract email and compute email_hash for duplicate detection
-        email = lead_data.get("email", "").strip().lower()
-        email_hash = hashlib.sha256(email.encode()).hexdigest()
-        
-        print(f"📤 Sending lead_blob_hash: {lead_blob_hash[:16]}...")
-        print(f"📤 Sending email_hash: {email_hash[:16]}... (for duplicate detection)")
-        
-        # Create payload
-        payload = {
-            "lead_id": lead_id,
-            "lead_blob_hash": lead_blob_hash,
-            "email_hash": email_hash
-        }
-        
-        # Compute payload hash (deterministic JSON)
-        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-        payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
-        
-        # Build ID (use a constant for now, or get from environment)
-        build_id = os.getenv("BUILD_ID", "miner-client")
-        
-        # Construct message to sign (format: {event_type}:{actor_hotkey}:{nonce}:{ts}:{payload_hash}:{build_id})
-        message = f"SUBMISSION_REQUEST:{wallet.hotkey.ss58_address}:{nonce}:{ts}:{payload_hash}:{build_id}"
-        
-        print(f"🔐 Signing message to prove wallet ownership...")
-        
-        # Sign the message
-        signature = wallet.hotkey.sign(message.encode()).hex()
-        
-        # Create full event object
-        event = {
-            "event_type": "SUBMISSION_REQUEST",
-            "actor_hotkey": wallet.hotkey.ss58_address,
-            "nonce": nonce,
-            "ts": ts,
-            "payload_hash": payload_hash,
-            "build_id": build_id,
-            "signature": signature,
-            "payload": payload
-        }
-        
-        # Request presigned URL
-        response = requests.post(
-            f"{GATEWAY_URL}/presign",
-            json=event,
-            timeout=30  # Increased from 10s to allow for metagraph fetching
-        )
-        response.raise_for_status()
-        
-        result = response.json()
-        print(f"✅ Received presigned URLs for lead {result['lead_id'][:8]}...")
-        return result
-        
-    except Exception as e:
-        bt.logging.error(f"Failed to get presigned URL: {e}")
-        return None
+    import hashlib
+    import uuid
+    
+    # Compute lead_id and hashes ONCE (reused across retries)
+    lead_id = str(uuid.uuid4())
+    lead_blob = json.dumps(lead_data, sort_keys=True)
+    lead_blob_hash = hashlib.sha256(lead_blob.encode()).hexdigest()
+    email = lead_data.get("email", "").strip().lower()
+    email_hash = hashlib.sha256(email.encode()).hexdigest()
+    
+    print(f"📤 Sending lead_blob_hash: {lead_blob_hash[:16]}...")
+    print(f"📤 Sending email_hash: {email_hash[:16]}... (for duplicate detection)")
+    
+    # Create payload (reused across retries)
+    payload = {
+        "lead_id": lead_id,
+        "lead_blob_hash": lead_blob_hash,
+        "email_hash": email_hash
+    }
+    payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+    build_id = os.getenv("BUILD_ID", "miner-client")
+    
+    # Retry loop: Up to 3 attempts
+    for attempt in range(1, 4):
+        try:
+            # Generate FRESH nonce and timestamp for each attempt
+            nonce = str(uuid.uuid4())
+            ts = datetime.now(timezone.utc).isoformat()
+            
+            # Construct message to sign with FRESH nonce/timestamp
+            message = f"SUBMISSION_REQUEST:{wallet.hotkey.ss58_address}:{nonce}:{ts}:{payload_hash}:{build_id}"
+            
+            if attempt == 1:
+                print(f"🔐 Signing message to prove wallet ownership...")
+            else:
+                print(f"🔐 Retry {attempt}/3: Signing with fresh nonce/timestamp...")
+            
+            # Sign the message
+            signature = wallet.hotkey.sign(message.encode()).hex()
+            
+            # Create full event object
+            event = {
+                "event_type": "SUBMISSION_REQUEST",
+                "actor_hotkey": wallet.hotkey.ss58_address,
+                "nonce": nonce,
+                "ts": ts,
+                "payload_hash": payload_hash,
+                "build_id": build_id,
+                "signature": signature,
+                "payload": payload
+            }
+            
+            # Request presigned URL
+            response = requests.post(
+                f"{GATEWAY_URL}/presign",
+                json=event,
+                timeout=90  # 90s timeout - gateway may need to refresh metagraph cache (45s) + other steps
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            if attempt > 1:
+                print(f"✅ Retry {attempt}/3 succeeded!")
+            print(f"✅ Received presigned URLs for lead {result['lead_id'][:8]}...")
+            return result
+            
+        except Exception as e:
+            if attempt < 3:
+                bt.logging.warning(f"⚠️  Attempt {attempt}/3 failed: {e}")
+                bt.logging.warning(f"   Retrying with fresh nonce/signature...")
+                continue  # Try again
+            else:
+                # All attempts exhausted
+                bt.logging.error(f"❌ All 3 attempts failed. Last error: {e}")
+                return None
 
 
 def gateway_upload_lead(presigned_url: str, lead_data: Dict) -> bool:
@@ -1742,7 +1747,7 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
         response = requests.post(
             f"{GATEWAY_URL}/submit",
             json=event,
-            timeout=30
+            timeout=90  # 90s timeout - gateway may need to refresh metagraph cache (45s) + verify storage + other steps
         )
         response.raise_for_status()
         
@@ -1848,7 +1853,7 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
                 "validator_hotkey": wallet.hotkey.ss58_address,
                 "signature": signature
             },
-            timeout=60  # Increased to 60s - gateway may need time to fetch lead data from Supabase
+            timeout=180  # Increased to 180s (3 minutes) - gateway may need time to query Supabase and build lead_blob data
         )
         response.raise_for_status()
         
@@ -1857,6 +1862,11 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
         bt.logging.info(f"✅ Fetched {len(leads)} leads for epoch {epoch_id}")
         return leads
         
+    except requests.exceptions.Timeout as e:
+        # Timeout is common during epoch transitions (gateway processing epoch lifecycle)
+        # This is NOT a fatal error - validator will retry automatically
+        bt.logging.warning(f"⏳ Gateway timeout fetching leads for epoch {epoch_id} - this is normal during epoch transitions. Validator will retry automatically.")
+        return []
     except Exception as e:
         bt.logging.error(f"Failed to get epoch leads: {e}")
         return []
@@ -1939,7 +1949,7 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
         response = requests.post(
             f"{GATEWAY_URL}/validate",
             json=event,
-            timeout=60
+            timeout=180  # Increased to 180s (3 minutes) - gateway may need time to process validations
         )
         response.raise_for_status()
         
@@ -1986,7 +1996,7 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
                 "nonce": nonce,
                 "reveals": reveal_results
             },
-            timeout=60
+            timeout=180  # Increased to 180s (3 minutes) - gateway may need time to process reveals
         )
         response.raise_for_status()
         

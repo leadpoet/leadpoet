@@ -392,14 +392,27 @@ async def reveal_validation_batch(
             
             print(f"   [{idx}/{len(reveals)}] Revealing lead {lead_id[:8]}... - Decision: {decision}")
             
-            # Find evidence by lead_id + validator_hotkey + epoch_id
-            result = supabase.table("validation_evidence_private") \
-                .select("*") \
-                .eq("lead_id", lead_id) \
-                .eq("validator_hotkey", validator_hotkey) \
-                .eq("epoch_id", epoch_id) \
-                .limit(1) \
-                .execute()
+            # Find evidence by lead_id + validator_hotkey + epoch_id (with timeout)
+            import asyncio
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda: supabase.table("validation_evidence_private")
+                            .select("*")
+                            .eq("lead_id", lead_id)
+                            .eq("validator_hotkey", validator_hotkey)
+                            .eq("epoch_id", epoch_id)
+                            .limit(1)
+                            .execute()
+                    ),
+                    timeout=10.0  # 10 second timeout per query
+                )
+            except asyncio.TimeoutError:
+                error_msg = f"Database timeout querying evidence for lead {lead_id[:8]}..."
+                print(f"      ❌ {error_msg}")
+                errors.append(error_msg)
+                failed_count += 1
+                continue
             
             if not result.data:
                 error_msg = f"Evidence not found for lead {lead_id[:8]}..."
@@ -436,17 +449,29 @@ async def reveal_validation_batch(
                 failed_count += 1
                 continue
             
-            # Update evidence with revealed values
-            supabase.table("validation_evidence_private") \
-                .update({
-                    "decision": decision,
-                    "rep_score": rep_score,
-                    "rejection_reason": json.dumps(rejection_reason),
-                    "salt": salt,
-                    "revealed_ts": datetime.utcnow().isoformat()
-                }) \
-                .eq("evidence_id", evidence["evidence_id"]) \
-                .execute()
+            # Update evidence with revealed values (with timeout)
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda: supabase.table("validation_evidence_private")
+                            .update({
+                                "decision": decision,
+                                "rep_score": rep_score,
+                                "rejection_reason": json.dumps(rejection_reason),
+                                "salt": salt,
+                                "revealed_ts": datetime.utcnow().isoformat()
+                            })
+                            .eq("evidence_id", evidence["evidence_id"])
+                            .execute()
+                    ),
+                    timeout=10.0  # 10 second timeout per update
+                )
+            except asyncio.TimeoutError:
+                error_msg = f"Database timeout updating evidence for lead {lead_id[:8]}..."
+                print(f"      ❌ {error_msg}")
+                errors.append(error_msg)
+                failed_count += 1
+                continue
             
             print(f"      ✅ Revealed: {decision} (rep_score={rep_score})")
             revealed_count += 1

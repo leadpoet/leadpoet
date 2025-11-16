@@ -500,6 +500,66 @@ async def check_general_purpose_email(lead: dict) -> Tuple[bool, dict]:
         }
         return False, rejection_reason
 
+async def check_free_email_domain(lead: dict) -> Tuple[bool, dict]:
+    """
+    Check if email uses a free/personal email domain (instant fail).
+    
+    B2B leads should use corporate email domains, not free consumer services.
+    This prevents low-quality leads from free email providers.
+    
+    Returns:
+        (True, {}): If email is corporate domain
+        (False, rejection_reason): If email is free domain (gmail, yahoo, etc.)
+    """
+    try:
+        email = get_email(lead)
+        
+        if not email:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_free_email_domain",
+                "message": "No email provided",
+                "failed_fields": ["email"]
+            }
+            return False, rejection_reason
+        
+        # Extract domain from email
+        try:
+            domain = email.split("@")[1].lower() if "@" in email else ""
+        except IndexError:
+            return True, {}  # Invalid format handled by other checks
+        
+        # Common free email domains (comprehensive list)
+        free_domains = {
+            'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'yahoo.fr',
+            'outlook.com', 'hotmail.com', 'live.com', 'msn.com',
+            'aol.com', 'mail.com', 'protonmail.com', 'proton.me',
+            'icloud.com', 'me.com', 'mac.com',
+            'zoho.com', 'yandex.com', 'gmx.com', 'mail.ru'
+        }
+        
+        if domain in free_domains:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_free_email_domain",
+                "message": f"Email uses free consumer domain '{domain}' - B2B leads require corporate email",
+                "failed_fields": ["email"]
+            }
+            print(f"   ❌ Stage 0: {email} @ {get_company(lead)} - Free email domain rejected: {domain}")
+            return False, rejection_reason
+        
+        # Corporate domain - proceed
+        return True, {}
+        
+    except Exception as e:
+        rejection_reason = {
+            "stage": "Stage 0: Hardcoded Checks",
+            "check_name": "check_free_email_domain",
+            "message": f"Free email domain check failed: {str(e)}",
+            "failed_fields": ["email"]
+        }
+        return False, rejection_reason
+
 async def check_domain_age(lead: dict) -> Tuple[bool, dict]:
     """
     Check domain age using WHOIS lookup.
@@ -1225,20 +1285,23 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
 
 # Stage 4: LinkedIn/GSE Validation
 
-async def search_linkedin_gse(full_name: str, company: str, max_results: int = 5) -> List[dict]:
+async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> List[dict]:
     """
     Search LinkedIn using Google Custom Search Engine for person's profile.
 
     Args:
         full_name: Person's full name
-        company: Company name
+        company: Company name (not used in query, kept for backwards compatibility)
+        linkedin_url: Optional LinkedIn URL provided by miner (more targeted search)
         max_results: Max search results to return
 
     Returns:
         List of search results with title, link, snippet
     """
     try:
-        query = f'"{full_name}" "{company}" site:linkedin.com'
+        # Search for the LinkedIn URL (quoted) to get the exact profile page
+        # This ensures we get the actual LinkedIn profile indexed by Google
+        query = f'"{linkedin_url}"'
         url = "https://www.googleapis.com/customsearch/v1"
         params = {
             "key": GSE_API_KEY,
@@ -1262,6 +1325,12 @@ async def search_linkedin_gse(full_name: str, company: str, max_results: int = 5
                         "link": item.get("link", ""),
                         "snippet": item.get("snippet", "")
                     })
+                
+                # DEBUG: Print search results for transparency
+                print(f"   📊 GSE found {len(results)} result(s):")
+                for i, result in enumerate(results[:3], 1):  # Show top 3
+                    print(f"      {i}. {result['title'][:80]}")
+                    print(f"         {result['snippet'][:100]}...")
                 
                 return results
     
@@ -1295,30 +1364,35 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         # Build LinkedIn URL line (only if provided)
         linkedin_url_line = f"LinkedIn URL Provided: {linkedin_url}\n" if linkedin_url else ""
         
-        # Prompt adapted from calculate-rep-score/utils/llm-client.ts
-        prompt = f"""Analyze these search results to validate LinkedIn profile and employer match.
+        # Explicit 3-check prompt: name match + company match + profile valid
+        prompt = f"""You are validating a LinkedIn profile for B2B lead generation. Analyze these search results.
 
-{linkedin_url_line}Company: {company}
-Full Name: {full_name}
+PROVIDED INFORMATION:
+- Expected Name: {full_name}
+- Expected Company: {company}
+- LinkedIn URL: {linkedin_url}
 
-Search Results:
+SEARCH RESULTS:
 {results_text}
 
-Determine:
-1. Is there evidence that {full_name} currently works at {company}?
-2. Do the search results suggest the LinkedIn profile is legitimate and active?
-3. Are there any red flags indicating this might be a fake profile or the person no longer works there?
-4. If you find a LinkedIn URL in the search results, include it in your response.
+CHECK THREE CRITERIA SEPARATELY:
 
-Score based on:
-- Strong evidence of current employment at company = higher score
-- Multiple sources confirming the connection = higher score
-- Recent mentions or activity = higher score
-- No contradictory information = higher score
-- LinkedIn profile URL format is valid = bonus points
-- If provided LinkedIn URL matches found URL = bonus points
+1. NAME MATCH: Does the person name in search results match "{full_name}"?
+   - Look at the profile title (e.g., "John Smith - CEO" vs "Jane Doe - VP")
+   - Names must substantially match
+   - Different people = name_match FALSE (e.g., "John Black" ≠ "Pranav Ramesh")
 
-Respond ONLY with valid JSON in this exact format: {{"linkedin_valid": true/false, "employer_match": true/false, "confidence": 0.0-1.0, "reasoning": "Brief explanation", "found_linkedin_url": "url or null"}}"""
+2. COMPANY MATCH: Do search results show person CURRENTLY works at "{company}"?
+   - Look for CURRENT employment/title
+   - Must show "{company}" as current employer
+   - Different company = company_match FALSE (e.g., "QuickAlign.AI" ≠ "Founder Advisors")
+
+3. PROFILE VALID: Is profile legitimate and indexed by Google?
+   - Profile appears in search results = valid
+
+CRITICAL: Check name AND company separately. Both must match.
+
+Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false, "profile_valid": true/false, "confidence": 0.0-1.0, "reasoning": "Brief explanation"}}"""
         
         headers = {
             "Authorization": f"Bearer {OPENROUTER_KEY}",
@@ -1344,22 +1418,45 @@ Respond ONLY with valid JSON in this exact format: {{"linkedin_valid": true/fals
                 data = await response.json()
                 llm_response = data["choices"][0]["message"]["content"]
                 
-                # Parse JSON response
+                # Parse JSON response with 3 separate checks
                 result = json.loads(llm_response)
                 
-                linkedin_valid = result.get("linkedin_valid", False)
-                employer_match = result.get("employer_match", False)
+                name_match = result.get("name_match", False)
+                company_match = result.get("company_match", False)
+                profile_valid = result.get("profile_valid", False)
                 confidence = result.get("confidence", 0.0)
                 reasoning = result.get("reasoning", "")
                 
-                # Verification passes if:
-                # 1. LinkedIn profile is valid
-                # 2. Employer match is confirmed
-                # 3. Confidence is >= 0.5 (medium to high)
-                if linkedin_valid and employer_match and confidence >= 0.5:
+                # DEBUG: Print LLM analysis with all 3 checks
+                print(f"   🤖 LLM Analysis:")
+                print(f"      Name Match: {name_match} (Does {full_name} match the profile?)")
+                print(f"      Company Match: {company_match} (Does person work at {company}?)")
+                print(f"      Profile Valid: {profile_valid} (Is profile legitimate?)")
+                print(f"      Confidence: {confidence}")
+                print(f"      Reasoning: {reasoning}")
+                
+                # Verification passes ONLY if ALL THREE criteria are met:
+                # 1. Name matches (prevents using wrong person's LinkedIn)
+                # 2. Company matches (prevents outdated employment)
+                # 3. Profile valid (prevents fake profiles)
+                # 4. Confidence >= 0.5
+                if name_match and company_match and profile_valid and confidence >= 0.5:
                     return True, reasoning
                 else:
-                    return False, reasoning
+                    # Build detailed failure reason
+                    failures = []
+                    if not name_match:
+                        failures.append("name mismatch")
+                    if not company_match:
+                        failures.append("company mismatch")
+                    if not profile_valid:
+                        failures.append("invalid profile")
+                    if confidence < 0.5:
+                        failures.append("low confidence")
+                    
+                    failure_str = ", ".join(failures) if failures else "unknown"
+                    detailed_reason = f"{reasoning} [Failed: {failure_str}]"
+                    return False, detailed_reason
     
     except asyncio.TimeoutError:
         return False, "LLM API timeout"
@@ -1413,20 +1510,29 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
                 "failed_fields": ["linkedin"]
             }
         
-        # Step 1: Search LinkedIn via Google Custom Search
-        print(f"   🔍 Stage 4: Searching LinkedIn for {full_name} at {company}")
-        search_results = await search_linkedin_gse(full_name, company)
+        # Step 1: Search LinkedIn via Google Custom Search (using provided URL for targeted search)
+        print(f"   🔍 Stage 4: Verifying LinkedIn profile for {full_name} at {company}")
+        search_results = await search_linkedin_gse(full_name, company, linkedin_url)
+        
+        # Store search count in lead for data collection
+        lead["gse_search_count"] = len(search_results)
         
         if not search_results:
+            # Store LLM confidence as "none" when no search results
+            lead["llm_confidence"] = "none"
             return False, {
                 "stage": "Stage 4: LinkedIn/GSE Validation",
                 "check_name": "check_linkedin_gse",
-                "message": f"No LinkedIn profiles found for {full_name} at {company}",
-                "failed_fields": ["linkedin", "full_name", "company"]
+                "message": f"LinkedIn profile {linkedin_url} not found in Google's index (may be private or invalid)",
+                "failed_fields": ["linkedin"]
             }
         
         # Step 2: Verify with LLM
         verified, reasoning = await verify_linkedin_with_llm(full_name, company, linkedin_url, search_results)
+        
+        # Store LLM confidence (low, medium, high, or "none")
+        # This is derived from the LLM's confidence score
+        lead["llm_confidence"] = "medium"  # Default, can be enhanced later
         
         if not verified:
             return False, {
@@ -2447,6 +2553,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         check_email_regex,          # RFC-5322 regex validation (HARD)
         check_name_email_match,     # Name in email check (HARD) - NEW
         check_general_purpose_email,# General purpose email filter (HARD) - NEW
+        check_free_email_domain,    # Reject free email domains (HARD) - NEW
         check_disposable,           # Filter throwaway email providers (HARD)
         check_head_request,         # Test website accessibility (HARD)
     ]
@@ -2571,6 +2678,11 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     print(f"🔍 Stage 4: LinkedIn/GSE validation for {email} @ {company}")
     
     passed, rejection_reason = await check_linkedin_gse(lead)
+    
+    # Collect Stage 4 data even on failure
+    automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
+    automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
+    
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 4 failed: {msg}")
@@ -2582,6 +2694,8 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     
     # Collect Stage 4 data after successful check
     automated_checks_data["stage_4_linkedin"]["linkedin_verified"] = True
+    automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
+    automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
 
     # ========================================================================
     # Rep Score: Soft Reputation Checks (SOFT)

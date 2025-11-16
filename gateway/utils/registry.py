@@ -11,6 +11,7 @@ This prevents spam from unregistered hotkeys.
 import bittensor as bt
 from typing import Optional, Tuple
 import time
+import threading
 
 # Import configuration
 import sys
@@ -18,17 +19,21 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from gateway.config import BITTENSOR_NETWORK, BITTENSOR_NETUID
 
-# Cache for metagraph (5 minute TTL)
+# Cache for metagraph (epoch-based invalidation)
 _metagraph_cache = None
-_cache_timestamp = None
-_CACHE_TTL = 300  # 5 minutes in seconds
+_cache_epoch = None  # Track which epoch the cache is from
+_cache_lock = threading.Lock()  # Prevent simultaneous fetches
 
 
 def get_metagraph() -> bt.metagraph:
     """
-    Get Bittensor metagraph (cached for 5 minutes).
+    Get Bittensor metagraph (cached per epoch).
     
-    Caching reduces load on subtensor node and improves gateway performance.
+    The metagraph is cached for the duration of the current epoch and refreshed
+    when a new epoch begins. This ensures:
+    1. Multiple validators requesting leads in the same epoch use the same metagraph
+    2. New registrations are picked up at epoch boundaries
+    3. Thread-safe access prevents simultaneous fetches
     
     Returns:
         Metagraph object for the configured subnet
@@ -39,45 +44,77 @@ def get_metagraph() -> bt.metagraph:
     Example:
         >>> metagraph = get_metagraph()
         >>> print(f"Subnet has {len(metagraph.hotkeys)} neurons")
+    
+    Notes:
+        - Cache is invalidated when epoch changes (every 360 blocks = 72 minutes)
+        - Thread lock prevents multiple simultaneous fetches during epoch transition
+        - Includes active status and validator_permit for each neuron
     """
-    global _metagraph_cache, _cache_timestamp
+    global _metagraph_cache, _cache_epoch
     
-    now = time.time()
+    # Import here to avoid circular dependency
+    from gateway.utils.epoch import get_current_epoch_id
     
-    # Return cached metagraph if still valid
-    if _metagraph_cache is not None and _cache_timestamp is not None:
-        age = now - _cache_timestamp
-        if age < _CACHE_TTL:
+    current_epoch = get_current_epoch_id()
+    
+    # Thread-safe cache check and update
+    with _cache_lock:
+        # Return cached metagraph if it's from the current epoch
+        if _metagraph_cache is not None and _cache_epoch == current_epoch:
+            print(f"✅ Using cached metagraph for epoch {current_epoch} ({len(_metagraph_cache.hotkeys)} neurons)")
             return _metagraph_cache
-    
-    # Cache expired or not set - fetch new metagraph
-    try:
-        print(f"🔄 Fetching metagraph for {BITTENSOR_NETWORK} subnet {BITTENSOR_NETUID}...")
         
-        # Create subtensor connection
-        subtensor = bt.subtensor(network=BITTENSOR_NETWORK)
+        # Cache expired (epoch changed) or not set - fetch new metagraph
+        # Use retry logic to handle rate limiting and transient failures
+        max_retries = 3
+        retry_delay = 2  # seconds
+        last_error = None
         
-        # Fetch metagraph for configured subnet
-        metagraph = subtensor.metagraph(netuid=BITTENSOR_NETUID)
+        for attempt in range(max_retries):
+            try:
+                if _cache_epoch is not None and _cache_epoch != current_epoch:
+                    print(f"🔄 Epoch changed: {_cache_epoch} → {current_epoch}")
+                    print(f"🔄 Refreshing metagraph for new epoch... (attempt {attempt + 1}/{max_retries})")
+                else:
+                    print(f"🔄 Fetching metagraph for epoch {current_epoch}... (attempt {attempt + 1}/{max_retries})")
+                
+                print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
+                
+                # Create subtensor connection
+                subtensor = bt.subtensor(network=BITTENSOR_NETWORK)
+                
+                # Fetch metagraph for configured subnet
+                metagraph = subtensor.metagraph(netuid=BITTENSOR_NETUID)
+                
+                # Update cache
+                _metagraph_cache = metagraph
+                _cache_epoch = current_epoch
+                
+                print(f"✅ Metagraph cached for epoch {current_epoch}: {len(metagraph.hotkeys)} neurons registered")
+                
+                return metagraph
+                
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    print(f"⚠️  Metagraph fetch attempt {attempt + 1}/{max_retries} failed: {e}")
+                    print(f"   Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                # Last attempt failed - fall through to error handling below
         
-        # Update cache
-        _metagraph_cache = metagraph
-        _cache_timestamp = now
+        # All retries exhausted
+        print(f"❌ Error fetching metagraph after {max_retries} attempts: {last_error}")
         
-        print(f"✅ Metagraph fetched: {len(metagraph.hotkeys)} neurons registered")
-        
-        return metagraph
-    
-    except Exception as e:
-        print(f"❌ Error fetching metagraph: {e}")
-        
-        # If we have a stale cache, return it rather than failing
+        # If we have a cache from previous epoch, use it with warning
         if _metagraph_cache is not None:
-            print(f"⚠️  Using stale metagraph cache (age: {now - _cache_timestamp:.0f}s)")
+            print(f"⚠️  Using metagraph from previous epoch {_cache_epoch} as fallback")
+            print(f"⚠️  This may not include validators who registered in epoch {current_epoch}")
             return _metagraph_cache
         
         # No cache available - raise error
-        raise Exception(f"Failed to fetch metagraph and no cache available: {e}")
+        raise Exception(f"Failed to fetch metagraph and no cache available: {last_error}")
 
 
 def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
@@ -210,10 +247,11 @@ def clear_metagraph_cache():
         >>> clear_metagraph_cache()
         >>> metagraph = get_metagraph()  # Will fetch fresh data
     """
-    global _metagraph_cache, _cache_timestamp
-    _metagraph_cache = None
-    _cache_timestamp = None
-    print("🗑️  Metagraph cache cleared")
+    global _metagraph_cache, _cache_epoch
+    with _cache_lock:
+        _metagraph_cache = None
+        _cache_epoch = None
+        print("🗑️  Metagraph cache cleared")
 
 
 def print_registry_stats():
@@ -238,7 +276,7 @@ def print_registry_stats():
         print(f"Total Neurons: {total_neurons}")
         print(f"Validators: {validator_count} ({validator_count/total_neurons*100:.1f}%)")
         print(f"Miners: {miner_count} ({miner_count/total_neurons*100:.1f}%)")
-        print(f"Cache Age: {time.time() - _cache_timestamp:.1f}s")
+        print(f"Cache Epoch: {_cache_epoch if _cache_epoch is not None else 'Not cached'}")
         print("=" * 60)
     
     except Exception as e:

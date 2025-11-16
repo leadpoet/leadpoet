@@ -3,6 +3,12 @@ Epoch API Endpoints
 
 Provides endpoints for epoch-related operations:
 - GET /epoch/{epoch_id}/leads - Get deterministically assigned leads for epoch
+
+Timing Windows:
+- Blocks 0-350: Lead distribution window (validators can fetch leads)
+- Blocks 351-355: Validation submission window (no new lead fetches)
+- Blocks 356-359: Buffer period (epoch closing)
+- Block 360+: Epoch closed (reveal phase begins)
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -39,6 +45,7 @@ async def get_epoch_leads(
     1. Verify signature over "GET_EPOCH_LEADS:{epoch_id}:{validator_hotkey}"
     2. Verify validator is registered on subnet
     3. Verify epoch is active (blocks 0-360)
+    3.5. Verify within lead distribution window (blocks 0-350)
     4. Query EPOCH_INITIALIZATION from transparency_log
     5. Get validator set from metagraph
     6. Compute deterministic assignment (first 50 lead_ids)
@@ -69,7 +76,7 @@ async def get_epoch_leads(
     
     Raises:
         403: Invalid signature or not a registered validator
-        400: Epoch not active
+        400: Epoch not active, or lead distribution window closed (block > 350)
         404: EPOCH_INITIALIZATION not found for epoch
     
     Example:
@@ -85,8 +92,19 @@ async def get_epoch_leads(
             detail="Invalid signature"
         )
     
-    # Step 2: Verify validator is registered
-    is_registered, role = is_registered_hotkey(validator_hotkey)
+    # CRITICAL: Must run in thread to avoid blocking event loop during metagraph fetch
+    import asyncio
+    try:
+        is_registered, role = await asyncio.wait_for(
+            asyncio.to_thread(is_registered_hotkey, validator_hotkey),
+            timeout=45.0  # 45 second timeout for metagraph query (cache refresh can be slow under load)
+        )
+    except asyncio.TimeoutError:
+        print(f"❌ Metagraph query timed out after 45s for {validator_hotkey[:20]}...")
+        raise HTTPException(
+            status_code=504,
+            detail="Metagraph query timeout - please retry in a moment (cache warming)"
+        )
     
     if not is_registered:
         raise HTTPException(
@@ -110,6 +128,18 @@ async def get_epoch_leads(
                 detail=f"Epoch {epoch_id} is not active. Current epoch: {current_epoch}"
             )
     
+    # Step 3.5: Verify within lead distribution window (blocks 0-350)
+    from gateway.utils.epoch import get_block_within_epoch
+    
+    block_within_epoch = get_block_within_epoch()
+    if block_within_epoch > 350:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Lead distribution window closed at block 350. Current block within epoch: {block_within_epoch}. Validators must fetch leads before block 351."
+        )
+    
+    print(f"✅ Step 3.5: Within lead distribution window (block {block_within_epoch}/350)")
+    
     # Step 4: Query CURRENT queue state (not frozen EPOCH_INITIALIZATION snapshot)
     # DESIGN DECISION: We query the current queue state dynamically instead of using
     # the frozen snapshot from EPOCH_INITIALIZATION. This allows leads that are
@@ -124,15 +154,29 @@ async def get_epoch_leads(
     # validators get the same leads for any given query time).
     try:
         from gateway.utils.merkle import compute_merkle_root
+        import asyncio
         
         print(f"🔍 Step 4: Querying CURRENT queue state for epoch {epoch_id}...")
         
         # Query pending leads from queue (status = "pending_validation", FIFO by created_ts)
-        result = supabase.table("leads_private") \
-            .select("lead_id") \
-            .eq("status", "pending_validation") \
-            .order("created_ts") \
-            .execute()
+        # Wrap with timeout to prevent hanging
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: supabase.table("leads_private")
+                        .select("lead_id")
+                        .eq("status", "pending_validation")
+                        .order("created_ts")
+                        .execute()
+                ),
+                timeout=15.0  # 15 second timeout for queue state query
+            )
+        except asyncio.TimeoutError:
+            print(f"❌ ERROR: Queue state query timed out after 15 seconds")
+            raise HTTPException(
+                status_code=504,
+                detail="Database query timeout - gateway may be experiencing high load"
+            )
         
         lead_ids = [row["lead_id"] for row in result.data]
         
@@ -183,7 +227,7 @@ async def get_epoch_leads(
             detail=f"Failed to compute assignment: {str(e)}"
         )
     
-    # Step 7: Fetch full lead data from leads_private
+    # Step 7: Fetch full lead data from leads_private (with timeout)
     try:
         if not assigned_lead_ids:
             # No leads assigned for this epoch
@@ -199,10 +243,25 @@ async def get_epoch_leads(
         
         # NOTE: miner_hotkey column doesn't exist yet in Supabase
         # TODO: Add migration to create miner_hotkey column, then optimize this query
-        leads_result = supabase.table("leads_private") \
-            .select("lead_id, lead_blob, lead_blob_hash") \
-            .in_("lead_id", assigned_lead_ids) \
-            .execute()
+        
+        # Wrap Supabase query with asyncio timeout (30 seconds)
+        import asyncio
+        try:
+            leads_result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: supabase.table("leads_private")
+                        .select("lead_id, lead_blob, lead_blob_hash")
+                        .in_("lead_id", assigned_lead_ids)
+                        .execute()
+                ),
+                timeout=30.0  # 30 second timeout for database query
+            )
+        except asyncio.TimeoutError:
+            print(f"❌ ERROR: Supabase query timed out after 30 seconds")
+            raise HTTPException(
+                status_code=504,
+                detail="Database query timeout - gateway may be experiencing high load"
+            )
         
         print(f"✅ Fetched {len(leads_result.data) if leads_result.data else 0} leads from database")
         

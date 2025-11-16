@@ -303,8 +303,18 @@ async def presign_urls(event: SubmissionRequestEvent):
     # ========================================
     # Run blocking Bittensor call in thread to avoid blocking event loop
     print("🔍 Step 4: Checking registration (in thread)...")
-    is_registered, role = await asyncio.to_thread(is_registered_hotkey, event.actor_hotkey)
-    print(f"🔍 Step 4 complete: is_registered={is_registered}, role={role}")
+    try:
+        is_registered, role = await asyncio.wait_for(
+            asyncio.to_thread(is_registered_hotkey, event.actor_hotkey),
+            timeout=45.0  # 45 second timeout for metagraph query (cache refresh can be slow under load)
+        )
+        print(f"🔍 Step 4 complete: is_registered={is_registered}, role={role}")
+    except asyncio.TimeoutError:
+        print(f"❌ Metagraph query timed out after 45s for {event.actor_hotkey[:20]}...")
+        raise HTTPException(
+            status_code=504,
+            detail="Metagraph query timeout - please retry in a moment (cache warming)"
+        )
     
     if not is_registered:
         raise HTTPException(
@@ -465,5 +475,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         log_level="info"
+       
     )
 

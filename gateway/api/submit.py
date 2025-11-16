@@ -225,7 +225,18 @@ async def submit_lead(event: SubmitLeadEvent):
     # Step 3: Check actor is registered miner
     # ========================================
     print("🔍 Step 3: Checking registration...")
-    is_registered, role = is_registered_hotkey(event.actor_hotkey)
+    import asyncio
+    try:
+        is_registered, role = await asyncio.wait_for(
+            asyncio.to_thread(is_registered_hotkey, event.actor_hotkey),
+            timeout=45.0  # 45 second timeout for metagraph query (cache refresh can be slow under load)
+        )
+    except asyncio.TimeoutError:
+        print(f"❌ Metagraph query timed out after 45s for {event.actor_hotkey[:20]}...")
+        raise HTTPException(
+            status_code=504,
+            detail="Metagraph query timeout - please retry in a moment (cache warming)"
+        )
     
     if not is_registered:
         raise HTTPException(

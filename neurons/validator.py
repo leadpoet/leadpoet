@@ -1567,8 +1567,14 @@ class Validator(BaseValidatorNeuron):
                     print(f"   {status_icon} Decision: {decision_text}")
                     print(f"   📊 Rep Score: {rep_score}/{MAX_REP_SCORE}")
                     if not is_valid:
-                        reason_msg = rejection_reason.get("message", "Unknown reason")
-                        print(f"   ⚠️  Reason: {reason_msg}")
+                        # Print full rejection details
+                        print(f"   ❌ REJECTION DETAILS:")
+                        print(f"      Stage: {rejection_reason.get('stage', 'Unknown')}")
+                        print(f"      Check: {rejection_reason.get('check_name', 'Unknown')}")
+                        print(f"      Message: {rejection_reason.get('message', 'Unknown reason')}")
+                        failed_fields = rejection_reason.get('failed_fields', [])
+                        if failed_fields:
+                            print(f"      Failed Fields: {', '.join(failed_fields)}")
                     print("")
                     
                     # Add 6-second delay between leads (except for the last one)
@@ -1644,8 +1650,12 @@ class Validator(BaseValidatorNeuron):
         """
         Accumulate weights for approved leads in real-time as validation happens.
         
-        This updates validator_weights/validator_weights with cumulative scores.
-        Called after each lead validation.
+        This updates BOTH files after each lead validation:
+        - validator_weights/validator_weights (current epoch only)
+        - validator_weights/validator_weights_history (all epochs, never cleared)
+        
+        This provides crash resilience - if validator disconnects before epoch end,
+        the latest weights are already saved in history.
         
         Args:
             miner_hotkey: Miner's hotkey who submitted the lead
@@ -1659,17 +1669,20 @@ class Validator(BaseValidatorNeuron):
             weights_dir = Path("validator_weights")
             weights_dir.mkdir(exist_ok=True)
             weights_file = weights_dir / "validator_weights"
-            
-            # Load current weights
-            if weights_file.exists():
-                with open(weights_file, 'r') as f:
-                    weights_data = json.load(f)
-            else:
-                weights_data = {}
+            history_file = weights_dir / "validator_weights_history"
             
             # Get current epoch
             current_block = self.subtensor.get_current_block()
             current_epoch = current_block // 360
+            
+            # ═══════════════════════════════════════════════════════════
+            # 1. UPDATE validator_weights (current epoch only)
+            # ═══════════════════════════════════════════════════════════
+            if weights_file.exists():
+                with open(weights_file, 'r') as f:
+                    weights_data = json.load(f)
+            else:
+                weights_data = {"curators": [], "sourcers_of_curated": []}
             
             # Initialize epoch if not exists
             if str(current_epoch) not in weights_data:
@@ -1689,11 +1702,34 @@ class Validator(BaseValidatorNeuron):
             epoch_data["miner_scores"][miner_hotkey] += rep_score
             epoch_data["last_updated"] = datetime.utcnow().isoformat()
             
-            # Save updated weights
+            # Save updated weights (current epoch only)
             with open(weights_file, 'w') as f:
                 json.dump(weights_data, f, indent=2)
             
+            # ═══════════════════════════════════════════════════════════
+            # 2. UPDATE validator_weights_history (all epochs, real-time)
+            # ═══════════════════════════════════════════════════════════
+            if history_file.exists():
+                with open(history_file, 'r') as f:
+                    history_data = json.load(f)
+            else:
+                history_data = {"curators": [], "sourcers_of_curated": []}
+            
+            # Update history with same epoch data (or create new entry)
+            history_data[str(current_epoch)] = {
+                "epoch": current_epoch,
+                "start_block": current_epoch * 360,
+                "end_block": (current_epoch + 1) * 360,
+                "miner_scores": epoch_data["miner_scores"].copy(),  # Deep copy of scores
+                "last_updated": datetime.utcnow().isoformat()
+            }
+            
+            # Save updated history (accumulates all epochs, never cleared)
+            with open(history_file, 'w') as f:
+                json.dump(history_data, f, indent=2)
+            
             print(f"      💾 Accumulated {rep_score} points for miner {miner_hotkey[:10]}... (total: {epoch_data['miner_scores'][miner_hotkey]})")
+            print(f"      📚 Updated history file (crash-resilient)")
             
         except Exception as e:
             bt.logging.error(f"Failed to accumulate miner weights: {e}")
@@ -1804,7 +1840,12 @@ class Validator(BaseValidatorNeuron):
     
     def archive_weights_to_history(self, epoch_id: int, epoch_data: Dict):
         """
-        Archive submitted weights to validator_weights_history.json for record keeping.
+        [DEPRECATED] Archive submitted weights to validator_weights_history for record keeping.
+        
+        This function is now a no-op because validator_weights_history is updated
+        in real-time by accumulate_miner_weights() after each lead validation.
+        
+        The history file is already up-to-date when weights are submitted.
         
         Args:
             epoch_id: Epoch number
@@ -1813,29 +1854,33 @@ class Validator(BaseValidatorNeuron):
         try:
             weights_dir = Path("validator_weights")
             weights_dir.mkdir(exist_ok=True)
-            history_file = weights_dir / "validator_weights_history.json"
+            history_file = weights_dir / "validator_weights_history"
             
-            # Load existing history
+            # Load existing history (should already have this epoch from real-time updates)
             if history_file.exists():
                 with open(history_file, 'r') as f:
                     history = json.load(f)
             else:
-                history = []
+                # Should never happen - history is created in accumulate_miner_weights()
+                bt.logging.warning("History file doesn't exist at submission time - creating it now")
+                history = {"curators": [], "sourcers_of_curated": []}
             
-            # Add submission timestamp
-            epoch_data["submitted_at"] = datetime.utcnow().isoformat()
-            
-            # Append to history
-            history.append(epoch_data)
-            
-            # Save updated history
-            with open(history_file, 'w') as f:
-                json.dump(history, f, indent=2)
-            
-            print(f"   📚 Archived epoch {epoch_id} weights to history")
+            # Add submission timestamp to the existing epoch entry
+            if str(epoch_id) in history:
+                history[str(epoch_id)]["submitted_at"] = datetime.utcnow().isoformat()
+                history[str(epoch_id)]["submitted_to_chain"] = True
+                
+                # Save updated history
+                with open(history_file, 'w') as f:
+                    json.dump(history, f, indent=2)
+                
+                print(f"   📚 Marked epoch {epoch_id} as submitted in history")
+            else:
+                # Shouldn't happen - history should already have this epoch
+                bt.logging.warning(f"Epoch {epoch_id} not found in history at submission time")
             
         except Exception as e:
-            bt.logging.error(f"Failed to archive weights to history: {e}")
+            bt.logging.error(f"Failed to update history submission status: {e}")
     
     def clear_active_weights(self, current_epoch: int):
         """

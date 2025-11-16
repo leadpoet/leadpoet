@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List
 import numpy as np
-from validator_models.automated_checks import validate_lead_list as auto_check_leads
 import threading
 import time
 
@@ -20,25 +19,69 @@ _epoch_start_block = None
 _epoch_lock = threading.Lock()
 _epoch_network = "finney"  # Default to mainnet
 
+# Block caching for resilient estimation
+_last_known_block = None
+_last_known_block_time = None
+_block_cache_lock = threading.Lock()
+
 def _get_current_block() -> int:
     """
     Get current block number from the validator's subtensor connection.
-    Falls back to estimated block if subtensor unavailable.
+    Falls back to cached block + time-based estimation if subtensor unavailable.
+    
+    Uses retry logic to handle transient failures and rate limiting.
     """
-    global _epoch_network
-    try:
-        import bittensor as bt
-        subtensor = bt.subtensor(network=_epoch_network)
-        current_block = subtensor.get_current_block()
-        return current_block
-        
-    except Exception as e:
-        print(f"⚠️  Cannot get current block from subtensor: {e}")
-        
-        import time
-        estimated_block = int(time.time() / 12)
-        print(f"   Using estimated block: {estimated_block}")
-        return estimated_block
+    global _epoch_network, _last_known_block, _last_known_block_time
+    
+    # Retry logic for subtensor queries (handles HTTP 429 rate limits)
+    max_retries = 3
+    retry_delay = 2  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            import bittensor as bt
+            import time
+            
+            # Create subtensor connection
+            subtensor = bt.subtensor(network=_epoch_network)
+            current_block = subtensor.get_current_block()
+            
+            # Cache the successful result
+            with _block_cache_lock:
+                _last_known_block = current_block
+                _last_known_block_time = time.time()
+            
+            return current_block
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                # Retry after delay
+                print(f"⚠️  Subtensor query attempt {attempt + 1}/{max_retries} failed: {e}")
+                print(f"   Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+                continue
+            else:
+                # All retries exhausted - use cached estimation
+                print(f"⚠️  Cannot get current block from subtensor after {max_retries} attempts: {e}")
+                
+                with _block_cache_lock:
+                    if _last_known_block is not None and _last_known_block_time is not None:
+                        # Calculate blocks elapsed since last known good block
+                        time_elapsed = time.time() - _last_known_block_time
+                        blocks_elapsed = int(time_elapsed / BITTENSOR_BLOCK_TIME_SECONDS)
+                        estimated_block = _last_known_block + blocks_elapsed
+                        
+                        print(f"   Using cached block estimation:")
+                        print(f"   Last known block: {_last_known_block} (cached {int(time_elapsed)}s ago)")
+                        print(f"   Estimated current: {estimated_block} (+{blocks_elapsed} blocks)")
+                        return estimated_block
+                    else:
+                        # No cache available - this should only happen on first run
+                        raise Exception(
+                            "Cannot query subtensor and no cached block available. "
+                            "Please ensure subtensor is accessible."
+                        )
 
 def _calculate_epoch_number(block_number: int) -> int:
     """
@@ -975,6 +1018,9 @@ async def get_rewards(self, responses: List[List[dict]]) -> np.ndarray:
 
 
 async def post_approval_check(self, leads: List[dict]) -> bool:
+    # Import here to avoid circular import at module level
+    from validator_models.automated_checks import validate_lead_list as auto_check_leads
+    
     report = await auto_check_leads(leads)
     valid_count = sum(1 for entry in report if entry["status"] == "Valid")
     return valid_count / len(leads) >= 0.9 if leads else False

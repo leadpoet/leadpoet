@@ -12,7 +12,7 @@ class BaseMinerNeuron(BaseNeuron):
     @classmethod
     def add_args(cls, parser: argparse.ArgumentParser):
         parser.add_argument("--netuid", type=int, help="The network UID of the subnet to connect to", default=71)
-        parser.add_argument("--subtensor_network", type=str, help="The network to connect to (e.g., test, main)", default="test")
+        parser.add_argument("--subtensor_network", type=str, help="The network to connect to (e.g., test, main)", default="finney")
         parser.add_argument("--wallet_name", type=str, help="The name of the wallet to use", required=True)
         parser.add_argument("--wallet_hotkey", type=str, help="The hotkey of the wallet to use", required=True)
         parser.add_argument("--use_open_source_lead_model", action="store_true", help="Use the open-source lead generation model instead of dummy leads")

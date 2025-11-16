@@ -172,7 +172,16 @@ async def epoch_lifecycle_task():
                             print(f"   ℹ️  Epoch closed {time_since_close/60:.1f} minutes ago - skipping reveal wait")
                         
                         # Compute consensus for all leads in this epoch
-                        await compute_epoch_consensus(check_epoch)
+                        print(f"   📊 About to call compute_epoch_consensus({check_epoch})...")
+                        try:
+                            await compute_epoch_consensus(check_epoch)
+                            print(f"   ✅ Consensus computation complete for epoch {check_epoch}")
+                        except Exception as e:
+                            print(f"   ❌ ERROR: Consensus failed for epoch {check_epoch}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            # Don't mark as closed so we retry next iteration
+                            continue
                         
                         closed_epochs.add(check_epoch)
                         print(f"   ✅ Epoch {check_epoch} fully processed\n")
@@ -559,6 +568,27 @@ async def compute_epoch_consensus(epoch_id: int):
                         .execute()
                 )
                 
+                # DEBUG: Log query results
+                print(f"         🔍 Query returned {len(responses_result.data)} validator responses")
+                if len(responses_result.data) == 0:
+                    print(f"         ⚠️  WARNING: No validator responses found for lead {lead_id[:8]}...")
+                    print(f"            This means either:")
+                    print(f"            1. No validators revealed their decisions yet")
+                    print(f"            2. Reveals were submitted but decision field is still NULL")
+                    print(f"            3. Query filters are too restrictive")
+                    # Query again WITHOUT the decision filter to debug
+                    debug_result = await asyncio.to_thread(
+                        lambda: supabase.table("validation_evidence_private")
+                            .select("evidence_id, validator_hotkey, decision, revealed_ts")
+                            .eq("lead_id", lead_id)
+                            .eq("epoch_id", epoch_id)
+                            .execute()
+                    )
+                    print(f"            Debug query (no decision filter): {len(debug_result.data)} records found")
+                    if len(debug_result.data) > 0:
+                        for rec in debug_result.data:
+                            print(f"               - Validator {rec['validator_hotkey'][:10]}...: decision={rec['decision']}, revealed={rec['revealed_ts']}")
+                
                 # Build validators_responded array
                 validators_responded = [r['validator_hotkey'] for r in responses_result.data]
                 
@@ -594,27 +624,47 @@ async def compute_epoch_consensus(epoch_id: int):
                 # Determine final status
                 final_status = "approved" if outcome['final_decision'] == 'approve' else "denied"
                 
-                # Final rep_score (NULL if denied)
-                final_rep_score = outcome['final_rep_score'] if outcome['final_decision'] == 'approve' else None
+                # Final rep_score (CRITICAL FIX: 0 for denied, not NULL)
+                final_rep_score = outcome['final_rep_score'] if outcome['final_decision'] == 'approve' else 0
                 
                 # ========================================================================
                 # Update leads_private with ALL aggregated data
                 # ========================================================================
                 print(f"         💾 Updating leads_private with aggregated data...")
-                await asyncio.to_thread(
-                    lambda: supabase.table("leads_private")
-                        .update({
-                            "status": final_status,
-                            "validators_responded": validators_responded,
-                            "validator_responses": validator_responses,
-                            "consensus_votes": consensus_votes,
-                            "rep_score": final_rep_score,
-                            "epoch_summary": outcome  # Keep existing epoch_summary for backwards compatibility
-                        })
-                        .eq("lead_id", lead_id)
-                        .execute()
-                )
-                print(f"         ✅ leads_private updated")
+                print(f"            - status: {final_status}")
+                print(f"            - validators_responded: {len(validators_responded)} validators")
+                print(f"            - validator_responses: {len(validator_responses)} responses")
+                print(f"            - consensus_votes: {consensus_votes.get('approve', 0)} approve, {consensus_votes.get('deny', 0)} deny")
+                print(f"            - rep_score: {final_rep_score}")
+                
+                try:
+                    update_result = await asyncio.to_thread(
+                        lambda: supabase.table("leads_private")
+                            .update({
+                                "status": final_status,
+                                "validators_responded": validators_responded,
+                                "validator_responses": validator_responses,
+                                "consensus_votes": consensus_votes,
+                                "rep_score": final_rep_score,
+                                "epoch_summary": outcome  # Keep existing epoch_summary for backwards compatibility
+                            })
+                            .eq("lead_id", lead_id)
+                            .execute()
+                    )
+                    
+                    # Verify update succeeded
+                    if update_result.data and len(update_result.data) > 0:
+                        print(f"         ✅ leads_private updated successfully")
+                    else:
+                        print(f"         ⚠️  WARNING: Update returned no data (lead_id might not exist or update failed)")
+                        print(f"            Update result: {update_result}")
+                
+                except Exception as e:
+                    print(f"         ❌ ERROR: Failed to update leads_private: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Don't stop consensus for other leads - just log the error
+                    continue
                 
                 # Log CONSENSUS_RESULT publicly for miner transparency
                 await log_consensus_result(lead_id, epoch_id, outcome)

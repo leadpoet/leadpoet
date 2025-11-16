@@ -10,6 +10,18 @@ This implements the COMMIT phase of commit-reveal:
 
 Validators submit all validations for an epoch in a single batch request.
 Works dynamically with any MAX_LEADS_PER_EPOCH (10, 20, 50, etc.).
+
+Timing Windows:
+- Blocks 0-350: Lead distribution (gateway sends leads to validators)
+- Blocks 351-355: Validation submission (validators submit commit hashes)
+- Blocks 356-359: Buffer period (no new submissions)
+- Block 360+: Epoch closed (reveal phase begins in next epoch)
+
+Security Safeguards:
+- Epoch verification: Only current epoch accepted (no past/future submissions)
+- Block cutoff: Submissions only during blocks 0-355 (closes 5 blocks early)
+- Lead assignment verification: Only assigned lead_ids accepted
+- Duplicate prevention: One submission per validator per epoch
 """
 
 from fastapi import APIRouter, HTTPException
@@ -85,9 +97,14 @@ async def submit_validation(event: ValidationEvent):
     3. Verify validator is registered
     4. Verify nonce is fresh
     5. Verify timestamp within tolerance
-    6. Store all evidence blobs in validation_evidence_private
-    7. Log single VALIDATION_RESULT_BATCH event to TEE
-    8. Return success
+    5.1. Verify epoch is current (not past/future) - SECURITY
+    5.2. Verify within validation submission window (blocks 0-355) - SECURITY
+    5.3. Verify lead_ids were assigned to this epoch - SECURITY
+    5.4. Verify no duplicate submission for this epoch - SECURITY
+    6. Fetch validator weights (stake + v_trust)
+    7. Store all evidence blobs in validation_evidence_private
+    8. Log single VALIDATION_RESULT_BATCH event to TEE
+    9. Return success
     
     Args:
         event: BatchValidationEvent with epoch_id and list of validations
@@ -101,7 +118,8 @@ async def submit_validation(event: ValidationEvent):
         }
     
     Raises:
-        400: Bad request (payload hash, nonce, timestamp)
+        400: Bad request (payload hash, nonce, timestamp, epoch mismatch, 
+             epoch closed, invalid lead_ids, duplicate submission)
         403: Forbidden (invalid signature, not registered, not validator)
         500: Server error
     """
@@ -129,7 +147,19 @@ async def submit_validation(event: ValidationEvent):
     # ========================================
     # Step 3: Verify actor is registered validator
     # ========================================
-    is_registered, role = is_registered_hotkey(event.actor_hotkey)
+    # CRITICAL: Must run in thread to avoid blocking event loop during metagraph fetch
+    import asyncio
+    try:
+        is_registered, role = await asyncio.wait_for(
+            asyncio.to_thread(is_registered_hotkey, event.actor_hotkey),
+            timeout=45.0  # 45 second timeout for metagraph query (cache refresh can be slow under load)
+        )
+    except asyncio.TimeoutError:
+        print(f"❌ Metagraph query timed out after 45s for {event.actor_hotkey[:20]}...")
+        raise HTTPException(
+            status_code=504,
+            detail="Metagraph query timeout - please retry in a moment (cache warming)"
+        )
     
     if not is_registered:
         raise HTTPException(
@@ -171,6 +201,123 @@ async def submit_validation(event: ValidationEvent):
         )
     
     # ========================================
+    # Step 5.1: Verify epoch is current (not past or future)
+    # ========================================
+    # CRITICAL SECURITY: Prevent validators from submitting old/stale validations
+    # or pre-computing validations for future epochs
+    from gateway.utils.epoch import get_current_epoch_id
+    
+    current_epoch = get_current_epoch_id()
+    
+    if event.payload.epoch_id != current_epoch:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Epoch mismatch: submitted epoch {event.payload.epoch_id}, current epoch is {current_epoch}. Cannot submit validations for past or future epochs."
+        )
+    
+    print(f"✅ Step 5.1: Epoch verification passed (epoch {event.payload.epoch_id} is current)")
+    
+    # ========================================
+    # Step 5.2: Verify within validation submission window (blocks 0-355)
+    # ========================================
+    # CRITICAL SECURITY: Prevent validators from submitting after block 355
+    # This gives validators:
+    # - Blocks 0-350: Fetch leads from gateway
+    # - Blocks 351-355: Complete validation and submit results
+    # - Blocks 356-359: Buffer period (no new submissions)
+    # - Block 360+: Epoch closed (next epoch begins, reveal phase starts)
+    from gateway.utils.epoch import get_block_within_epoch
+    
+    block_within_epoch = get_block_within_epoch()
+    if block_within_epoch > 355:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Validation submission window closed at block 355. Current block within epoch: {block_within_epoch}. Validators must submit before block 356."
+        )
+    
+    print(f"✅ Step 5.2: Within validation submission window (block {block_within_epoch}/355)")
+    
+    # ========================================
+    # Step 5.3: Verify lead_ids were assigned to this epoch
+    # ========================================
+    # CRITICAL SECURITY: Prevent validators from submitting validations for
+    # leads that were never assigned to this epoch (could be from old epochs)
+    try:
+        from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
+        from gateway.config import MAX_LEADS_PER_EPOCH
+        
+        # Get queue state for this epoch from transparency log
+        # We query the leads_private table for the current pending leads
+        # (same logic as /epoch/{epoch_id}/leads endpoint)
+        result = supabase.table("leads_private") \
+            .select("lead_id, created_ts") \
+            .eq("status", "pending_validation") \
+            .order("created_ts", desc=False) \
+            .limit(MAX_LEADS_PER_EPOCH) \
+            .execute()
+        
+        if not result.data:
+            # No leads in queue - this is actually OK (validators can submit empty batches)
+            assigned_lead_ids = []
+        else:
+            assigned_lead_ids = [row["lead_id"] for row in result.data]
+        
+        # Verify all submitted lead_ids are in the assigned set
+        submitted_lead_ids = {v.lead_id for v in event.payload.validations}
+        assigned_lead_ids_set = set(assigned_lead_ids)
+        
+        invalid_leads = submitted_lead_ids - assigned_lead_ids_set
+        if invalid_leads:
+            # Show first 3 invalid lead_ids for debugging
+            invalid_sample = list(invalid_leads)[:3]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) were not assigned to epoch {event.payload.epoch_id}. Cannot submit validations for unassigned leads."
+            )
+        
+        print(f"✅ Step 5.3: Lead assignment verification passed ({len(submitted_lead_ids)} lead_ids valid for epoch {event.payload.epoch_id})")
+    
+    except HTTPException:
+        # Re-raise HTTPException (validation errors)
+        raise
+    except Exception as e:
+        # Log error but don't fail - we don't want this check to break the workflow
+        # if there's a transient DB issue
+        print(f"⚠️  Warning: Failed to verify lead assignment (continuing anyway): {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # ========================================
+    # Step 5.4: Verify no duplicate submission for this epoch
+    # ========================================
+    # CRITICAL SECURITY: Prevent validators from submitting multiple times
+    # for the same epoch (double-dipping)
+    try:
+        existing_submission = supabase.table("validation_evidence_private") \
+            .select("evidence_id") \
+            .eq("validator_hotkey", event.actor_hotkey) \
+            .eq("epoch_id", event.payload.epoch_id) \
+            .limit(1) \
+            .execute()
+        
+        if existing_submission.data:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Duplicate submission detected: validator {event.actor_hotkey[:20]}... already submitted validations for epoch {event.payload.epoch_id}. Cannot submit twice."
+            )
+        
+        print(f"✅ Step 5.4: Duplicate submission check passed (first submission for epoch {event.payload.epoch_id})")
+    
+    except HTTPException:
+        # Re-raise HTTPException (duplicate submission error)
+        raise
+    except Exception as e:
+        # Log error but don't fail - we don't want this check to break the workflow
+        print(f"⚠️  Warning: Failed to check duplicate submission (continuing anyway): {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # ========================================
     # Step 6: Fetch validator weights (stake + v_trust)
     # ========================================
     # CRITICAL: Must snapshot stake and v_trust at COMMIT time (not REVEAL time)
@@ -210,16 +357,39 @@ async def submit_validation(event: ValidationEvent):
                 "created_ts": event.ts.isoformat()  # Use created_ts (matches Supabase schema)
             })
         
-        # Insert all evidence records in batch
-        result = supabase.table("validation_evidence_private").insert(evidence_records).execute()
-        print(f"✅ Stored {len(evidence_records)} evidence blobs in private DB")
-        print(f"   Validator stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
+        # Insert all evidence records in batch (with timeout to prevent hanging)
+        import asyncio
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: supabase.table("validation_evidence_private").insert(evidence_records).execute()
+                ),
+                timeout=30.0  # 30 second timeout for Supabase insert
+            )
+            print(f"✅ Stored {len(evidence_records)} evidence blobs in private DB")
+            print(f"   Validator stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
+        except asyncio.TimeoutError:
+            # FAIL the entire request - validator will retry
+            # This preserves atomicity: either everything succeeds or nothing succeeds
+            print(f"❌ Supabase insert timed out after 30s")
+            raise HTTPException(
+                status_code=504,
+                detail="Database timeout while storing evidence blobs - please retry"
+            )
     
+    except HTTPException:
+        # Re-raise HTTPException (timeout or other HTTP errors) to fail the request
+        # This preserves atomicity: if evidence storage fails, the entire request fails
+        raise
     except Exception as e:
+        # For non-HTTP exceptions, also fail the request to maintain atomicity
         print(f"⚠️  Failed to store evidence blobs: {e}")
         import traceback
         traceback.print_exc()
-        # Don't fail the request - evidence can be reconstructed from validator logs if needed
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to store evidence blobs: {str(e)}"
+        )
     
     # ========================================
     # Step 8: Log to TEE transparency log

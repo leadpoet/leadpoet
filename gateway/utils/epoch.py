@@ -14,35 +14,81 @@ Each block = 12 seconds, so 360 blocks = 72 minutes total.
 
 from datetime import datetime, timedelta
 import math
+import os
 
 # Configuration constants (must match validator/reward.py)
 EPOCH_DURATION_BLOCKS = 360  # 72 minutes = 360 blocks × 12 sec
 BITTENSOR_BLOCK_TIME_SECONDS = 12
 
-# Default network for epoch tracking
-_epoch_network = "finney"  # Mainnet
+# Network for epoch tracking (from environment variable)
+_epoch_network = os.getenv("BITTENSOR_NETWORK", "finney")
+
+# Block caching for resilient estimation (must match validator/reward.py)
+_last_known_block = None
+_last_known_block_time = None
+import threading
+_block_cache_lock = threading.Lock()
 
 
 def _get_current_block() -> int:
     """
     Get current block number from Bittensor subtensor.
-    Falls back to estimated block if subtensor unavailable.
+    Falls back to cached block + time-based estimation if subtensor unavailable.
     
+    Uses retry logic to handle transient failures and rate limiting.
     This matches the logic in Leadpoet/validator/reward.py
     """
-    try:
-        import bittensor as bt
-        subtensor = bt.subtensor(network=_epoch_network)
-        current_block = subtensor.get_current_block()
-        return current_block
-        
-    except Exception as e:
-        print(f"⚠️  Cannot get current block from subtensor: {e}")
-        
-        import time
-        estimated_block = int(time.time() / BITTENSOR_BLOCK_TIME_SECONDS)
-        print(f"   Using estimated block: {estimated_block}")
-        return estimated_block
+    global _last_known_block, _last_known_block_time
+    
+    # Retry logic for subtensor queries (handles HTTP 429 rate limits)
+    max_retries = 3
+    retry_delay = 2  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            import bittensor as bt
+            import time
+            
+            # Create subtensor connection
+            subtensor = bt.subtensor(network=_epoch_network)
+            current_block = subtensor.get_current_block()
+            
+            # Cache the successful result
+            with _block_cache_lock:
+                _last_known_block = current_block
+                _last_known_block_time = time.time()
+            
+            return current_block
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                # Retry after delay
+                print(f"⚠️  Subtensor query attempt {attempt + 1}/{max_retries} failed: {e}")
+                print(f"   Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+                continue
+            else:
+                # All retries exhausted - use cached estimation
+                print(f"⚠️  Cannot get current block from subtensor after {max_retries} attempts: {e}")
+                
+                with _block_cache_lock:
+                    if _last_known_block is not None and _last_known_block_time is not None:
+                        # Calculate blocks elapsed since last known good block
+                        time_elapsed = time.time() - _last_known_block_time
+                        blocks_elapsed = int(time_elapsed / BITTENSOR_BLOCK_TIME_SECONDS)
+                        estimated_block = _last_known_block + blocks_elapsed
+                        
+                        print(f"   Using cached block estimation:")
+                        print(f"   Last known block: {_last_known_block} (cached {int(time_elapsed)}s ago)")
+                        print(f"   Estimated current: {estimated_block} (+{blocks_elapsed} blocks)")
+                        return estimated_block
+                    else:
+                        # No cache available - this should only happen on first run
+                        raise Exception(
+                            "Cannot query subtensor and no cached block available. "
+                            "Please ensure subtensor is accessible."
+                        )
 
 
 def get_current_epoch_id() -> int:
@@ -62,6 +108,28 @@ def get_current_epoch_id() -> int:
     current_block = _get_current_block()
     epoch_id = current_block // EPOCH_DURATION_BLOCKS
     return epoch_id
+
+
+def get_block_within_epoch() -> int:
+    """
+    Get the current block number within the current epoch (0-359).
+    
+    This is used to determine the validation phase timing:
+    - Blocks 0-350: Lead distribution window (gateway sends leads)
+    - Blocks 351-355: Validation submission window (validators submit results)
+    - Blocks 356-359: Buffer period (no new submissions)
+    - Block 360+: Epoch closed (next epoch begins)
+    
+    Returns:
+        Block number within current epoch (0-359)
+    
+    Example:
+        >>> get_block_within_epoch()
+        145  # Current block is 145 blocks into the epoch
+    """
+    current_block = _get_current_block()
+    block_within_epoch = current_block % EPOCH_DURATION_BLOCKS
+    return block_within_epoch
 
 
 def get_epoch_start_time(epoch_id: int) -> datetime:

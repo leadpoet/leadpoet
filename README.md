@@ -22,7 +22,7 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 - **Network**: Stable internet connection with open ports for axon communication
 
 ### Software Requirements
-- Python 3.8+
+- Python 3.9 - 3.12       
 - Bittensor CLI: `pip install bittensor>=9.10`
 - Bittensor Wallet: `btcli wallet create`
 

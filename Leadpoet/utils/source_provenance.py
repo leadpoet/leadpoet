@@ -123,8 +123,13 @@ async def validate_source_url(url: str, source_type: str) -> Tuple[bool, str]:
         else:
             return False, f"Security violation: source_url is 'proprietary_database' but source_type is '{source_type}'. Both must match."
     
-    # Parse domain from URL
+    # Normalize URL: Add https:// if no protocol specified
+    # This handles cases like "tether.to" → "https://tether.to"
     from urllib.parse import urlparse
+    if not url.startswith(('http://', 'https://')):
+        url = f"https://{url}"
+    
+    # Parse domain from URL
     try:
         parsed = urlparse(url)
         domain = parsed.netloc or parsed.path

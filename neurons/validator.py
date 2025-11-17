@@ -1646,7 +1646,7 @@ class Validator(BaseValidatorNeuron):
                     
                     # Pass lead_blob to validate_lead (not the wrapper object)
                     print(f"[DEBUG] Calling validate_lead() for {email}...")
-                    result = asyncio.run(self.validate_lead(lead_blob))
+                    result = await self.validate_lead(lead_blob)
                     print(f"[DEBUG] validate_lead() returned for {email}")
                     
                     # Extract results

@@ -41,7 +41,7 @@ def check_config(cls, config: "bt.Config"):
         bt.logging.register_primary_logger(events_logger.name)
 
 def add_args(cls, parser):
-    parser.add_argument("--netuid", type=int, help="Subnet netuid", default=1)
+    parser.add_argument("--netuid", type=int, help="Subnet netuid", default=71)
     parser.add_argument(
         "--neuron.device",
         type=str,

@@ -149,6 +149,7 @@ def add_validator_args(cls, parser):
             "action": "store_true",
             "help": "Disables setting weights.",
             "default": False,
+            "dest": "neuron_disable_set_weights",
         },
         {
             "name": "--neuron.moving_average_alpha",

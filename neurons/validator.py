@@ -3458,6 +3458,8 @@ def main():
     config.netuid = args.netuid
     config.subtensor = bt.Config()
     config.subtensor.network = args.subtensor_network
+    config.neuron = bt.Config()
+    config.neuron.disable_set_weights = getattr(args, 'neuron_disable_set_weights', False)
 
     # Start the background epoch monitor AFTER config is set (so network is correct)
     start_epoch_monitor(network=args.subtensor_network)

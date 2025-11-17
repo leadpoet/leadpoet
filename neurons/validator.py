@@ -554,7 +554,8 @@ class Validator(BaseValidatorNeuron):
             raise Exception("AsyncSubtensor not initialized - call initialize_async_subtensor() first")
         
         # Use async call (reuses single instance)
-        block_data = await self.async_subtensor.get_block()
+        # Access via .substrate interface (AsyncSubstrateInterface)
+        block_data = await self.async_subtensor.substrate.get_block()
         current_block = block_data["header"]["number"]
         
         return current_block

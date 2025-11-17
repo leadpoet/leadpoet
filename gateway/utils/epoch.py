@@ -87,7 +87,8 @@ async def _get_current_block_async() -> int:
             import asyncio
             
             # Use async call to get block (NO new instance created!)
-            block_data = await _async_subtensor.get_block()
+            # Access via .substrate interface (AsyncSubstrateInterface)
+            block_data = await _async_subtensor.substrate.get_block()
             current_block = block_data["header"]["number"]
             
             # Cache the successful result

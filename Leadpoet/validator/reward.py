@@ -1,5 +1,6 @@
 import json
 import os
+import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List
@@ -76,10 +77,10 @@ async def _get_current_block_async() -> int:
     for attempt in range(max_retries):
         try:
             import time
-            import asyncio
             
             # Use async call to get block (NO new instance created!)
-            block_data = await _async_subtensor.get_block()
+            # Access via .substrate interface (AsyncSubstrateInterface)
+            block_data = await _async_subtensor.substrate.get_block()
             current_block = block_data["header"]["number"]
             
             # Cache the successful result

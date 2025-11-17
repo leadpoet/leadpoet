@@ -48,6 +48,7 @@ from gateway.tasks.checkpoints import checkpoint_task
 from gateway.tasks.anchor import daily_anchor_task
 from gateway.tasks.mirror_monitor import mirror_integrity_task
 from gateway.tasks.hourly_batch import start_hourly_batch_task
+from gateway.tasks.metagraph_warmer import metagraph_warmer_task
 
 # Create Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -125,6 +126,10 @@ async def lifespan(app: FastAPI):
     rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
     print("✅ Rate limiter cleanup task started")
     
+    # Start metagraph warmer task (proactive cache warming at epoch boundaries)
+    metagraph_warmer_task_handle = asyncio.create_task(metagraph_warmer_task())
+    print("✅ Metagraph warmer task started")
+    
     print("="*80 + "\n")
     
     # Yield control back to FastAPI (app runs here)
@@ -132,7 +137,7 @@ async def lifespan(app: FastAPI):
     
     # Cleanup on shutdown (cancel all background tasks)
     print("\n🛑 Shutting down background tasks...")
-    tasks = [epoch_task, reveal_task, checkpoint_task_handle, anchor_task, mirror_task, hourly_batch_task_handle, rate_limiter_task]
+    tasks = [epoch_task, reveal_task, checkpoint_task_handle, anchor_task, mirror_task, hourly_batch_task_handle, rate_limiter_task, metagraph_warmer_task_handle]
     for task in tasks:
         task.cancel()
     

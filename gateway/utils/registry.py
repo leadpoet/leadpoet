@@ -22,7 +22,11 @@ from gateway.config import BITTENSOR_NETWORK, BITTENSOR_NETUID
 # Cache for metagraph (epoch-based invalidation)
 _metagraph_cache = None
 _cache_epoch = None  # Track which epoch the cache is from
+_cache_epoch_timestamp = None  # Track when we last calculated the epoch
 _cache_lock = threading.Lock()  # Prevent simultaneous fetches
+
+# Epoch duration in seconds (360 blocks × 12 seconds/block = 4320 seconds = 72 minutes)
+EPOCH_DURATION_SECONDS = 360 * 12
 
 
 def get_metagraph() -> bt.metagraph:
@@ -50,22 +54,59 @@ def get_metagraph() -> bt.metagraph:
         - Thread lock prevents multiple simultaneous fetches during epoch transition
         - Includes active status and validator_permit for each neuron
     """
-    global _metagraph_cache, _cache_epoch
-    
-    # Import here to avoid circular dependency
-    from gateway.utils.epoch import get_current_epoch_id
-    
-    current_epoch = get_current_epoch_id()
+    global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp
+    import time
     
     # Thread-safe cache check and update
     with _cache_lock:
-        # Return cached metagraph if it's from the current epoch
+        # Fast path: Check if cache is still valid based on time
+        # Only query subtensor if enough time has passed for a potential epoch change
+        if _metagraph_cache is not None and _cache_epoch_timestamp is not None:
+            time_since_cache = time.time() - _cache_epoch_timestamp
+            
+            # If less than 72 minutes (one epoch) have passed, cache is definitely still valid
+            if time_since_cache < EPOCH_DURATION_SECONDS:
+                # Cache is guaranteed to still be for the current epoch
+                print(f"✅ Using cached metagraph for epoch {_cache_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - {int(time_since_cache)}s old")
+                return _metagraph_cache
+        
+        # Slow path: Need to query subtensor to determine current epoch
+        # This only happens:
+        # 1. On first request (no cache)
+        # 2. After 72+ minutes have passed (potential epoch change)
+        from gateway.utils.epoch import get_current_epoch_id
+        current_epoch = get_current_epoch_id()
+        
+        # Check if we already have a cached metagraph for this epoch
         if _metagraph_cache is not None and _cache_epoch == current_epoch:
-            print(f"✅ Using cached metagraph for epoch {current_epoch} ({len(_metagraph_cache.hotkeys)} neurons)")
+            # Update timestamp to reset the 72-minute timer
+            _cache_epoch_timestamp = time.time()
+            print(f"✅ Using cached metagraph for epoch {current_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - refreshed timestamp")
             return _metagraph_cache
         
+        # Epoch changed: Check if background warmer is already fetching
+        if _metagraph_cache is not None and _cache_epoch != current_epoch:
+            # Import warming flag
+            from gateway.tasks.metagraph_warmer import _warming_in_progress, _warming_lock
+            
+            with _warming_lock:
+                if _warming_in_progress:
+                    # Background warmer is fetching new epoch - use old cache gracefully
+                    print(f"🔥 GRACEFUL DEGRADATION: Epoch changed ({_cache_epoch} → {current_epoch})")
+                    print(f"🔥 Background warmer is fetching epoch {current_epoch} metagraph...")
+                    print(f"🔥 Using epoch {_cache_epoch} cache temporarily ({len(_metagraph_cache.hotkeys)} neurons)")
+                    print(f"🔥 This ensures zero-downtime during epoch transitions")
+                    
+                    # Update timestamp so we don't re-check for a while
+                    _cache_epoch_timestamp = time.time()
+                    
+                    return _metagraph_cache
+        
         # Cache expired (epoch changed) or not set - fetch new metagraph
-        # Use retry logic to handle rate limiting and transient failures
+        # This path is only hit if:
+        # 1. No cache exists (first request ever)
+        # 2. Epoch changed but background warmer hasn't started yet (rare race condition)
+        # 3. Background warmer failed and we need to fetch synchronously
         max_retries = 3
         retry_delay = 2  # seconds
         last_error = None
@@ -89,6 +130,7 @@ def get_metagraph() -> bt.metagraph:
                 # Update cache
                 _metagraph_cache = metagraph
                 _cache_epoch = current_epoch
+                _cache_epoch_timestamp = time.time()  # Record when we cached this epoch
                 
                 print(f"✅ Metagraph cached for epoch {current_epoch}: {len(metagraph.hotkeys)} neurons registered")
                 
@@ -247,11 +289,76 @@ def clear_metagraph_cache():
         >>> clear_metagraph_cache()
         >>> metagraph = get_metagraph()  # Will fetch fresh data
     """
-    global _metagraph_cache, _cache_epoch
+    global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp
     with _cache_lock:
         _metagraph_cache = None
         _cache_epoch = None
+        _cache_epoch_timestamp = None
         print("🗑️  Metagraph cache cleared")
+
+
+def warm_metagraph_cache(target_epoch: int) -> bool:
+    """
+    Proactively fetch and cache the metagraph for a specific epoch.
+    
+    This is called by the background metagraph warmer task at epoch boundaries
+    to ensure the cache is ready before any requests arrive.
+    
+    Args:
+        target_epoch: The epoch to fetch metagraph for
+        
+    Returns:
+        True if fetch succeeded, False otherwise
+        
+    Example:
+        >>> success = warm_metagraph_cache(19163)
+        >>> if success:
+        ...     print("Cache warmed successfully")
+    """
+    global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp
+    import time
+    
+    with _cache_lock:
+        # Check if cache is already warmed for this epoch
+        if _cache_epoch == target_epoch:
+            print(f"🔥 Cache already warmed for epoch {target_epoch}")
+            return True
+        
+        # Fetch new metagraph with retry logic
+        max_retries = 5  # More retries for background warming
+        retry_delay = 5  # Longer initial delay (less urgent than user requests)
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"🔥 Warming attempt {attempt + 1}/{max_retries} for epoch {target_epoch}...")
+                print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
+                
+                # Create subtensor connection
+                subtensor = bt.subtensor(network=BITTENSOR_NETWORK)
+                
+                # Fetch metagraph for configured subnet
+                metagraph = subtensor.metagraph(netuid=BITTENSOR_NETUID)
+                
+                # Update cache
+                _metagraph_cache = metagraph
+                _cache_epoch = target_epoch
+                _cache_epoch_timestamp = time.time()
+                
+                print(f"🔥 ✅ Cache warmed for epoch {target_epoch}: {len(metagraph.hotkeys)} neurons")
+                return True
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"🔥 ⚠️  Warming attempt {attempt + 1}/{max_retries} failed: {e}")
+                    print(f"   Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)  # Cap at 60s
+                    continue
+                else:
+                    print(f"🔥 ❌ All warming attempts failed for epoch {target_epoch}: {e}")
+                    return False
+        
+        return False
 
 
 def print_registry_stats():

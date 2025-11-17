@@ -726,7 +726,13 @@ async def submit_lead(event: SubmitLeadEvent):
             try:
                 from datetime import timezone as tz
                 
-                attestation_record = {
+                # Check if attestation already exists for this wallet
+                existing = supabase.table("contributor_attestations") \
+                    .select("id, wallet_ss58") \
+                    .eq("wallet_ss58", wallet_ss58) \
+                    .execute()
+                
+                attestation_data = {
                     "wallet_ss58": wallet_ss58,
                     "terms_version_hash": terms_version_hash,
                     "accepted": True,
@@ -737,13 +743,19 @@ async def submit_lead(event: SubmitLeadEvent):
                 # Note: Boolean attestation fields (lawful_collection, no_restricted_sources, license_granted)
                 # are stored in the lead metadata, not the attestation table
                 
-                # Upsert: Update if exists, insert if new
-                # This handles miners re-submitting with same or updated terms
-                result = supabase.table("contributor_attestations") \
-                    .upsert(attestation_record, on_conflict="wallet_ss58") \
-                    .execute()
-                
-                print(f"   ✅ Attestation recorded to database (audit trail)")
+                if existing.data and len(existing.data) > 0:
+                    # Update existing record
+                    result = supabase.table("contributor_attestations") \
+                        .update(attestation_data) \
+                        .eq("wallet_ss58", wallet_ss58) \
+                        .execute()
+                    print(f"   ✅ Attestation updated in database (audit trail)")
+                else:
+                    # Insert new record
+                    result = supabase.table("contributor_attestations") \
+                        .insert(attestation_data) \
+                        .execute()
+                    print(f"   ✅ Attestation inserted in database (audit trail)")
                 
             except Exception as e:
                 # Don't fail the submission if database write fails

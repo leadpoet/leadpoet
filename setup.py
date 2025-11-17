@@ -75,7 +75,7 @@ requirements = [
     "python-Levenshtein>=0.23.0",
     
     # Lead Sorcerer dependencies
-    "openrouter>=1.0.0",
+    "openrouter>=0.0.16",
     "firecrawl>=2.16.0",
     "firecrawl-py>=4.3.6",
     "openai>=2.1.0",

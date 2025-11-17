@@ -1709,7 +1709,7 @@ class Validator(BaseValidatorNeuron):
                     # Add 6-second delay between leads (except for the last one)
                     if idx < len(leads):
                         print(f"⏳ Waiting 6 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        time.sleep(6)
+                        await asyncio.sleep(6)
                     
                 except Exception as e:
                     from validator_models.automated_checks import EmailVerificationUnavailableError

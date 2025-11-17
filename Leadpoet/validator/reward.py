@@ -202,15 +202,21 @@ def _background_epoch_monitor():
     try:
         while _epoch_monitor_running:
             try:
-                # Check if async_subtensor is injected yet
-                if _async_subtensor is None:
-                    # Not injected yet - validator still starting up
-                    # Wait and retry (this happens during first 1-2 seconds of startup)
-                    time.sleep(5)
-                    continue
+                # CRITICAL: This background thread runs in a SEPARATE event loop
+                # from the main validator loop. AsyncSubtensor is NOT thread-safe
+                # across event loops, so we use the OLD sync method here.
+                # 
+                # This is acceptable because:
+                # 1. Background thread only queries once every 30s (low frequency)
+                # 2. Memory leak from this thread is minimal (vs main loop which was creating instances constantly)
+                # 3. Main validator loop uses async_subtensor (zero leaks there)
+                # 4. Block subscription in main loop keeps WebSocket alive
                 
-                # Use async call via run_until_complete
-                current_block = loop.run_until_complete(_get_current_block_async())
+                # Use OLD sync method (creates instance, but only every 30s)
+                import bittensor as bt
+                subtensor = bt.subtensor(network=_epoch_network)
+                current_block = subtensor.get_current_block()
+                
                 epoch_ended = _is_epoch_ended(current_block)
                 
                 if epoch_ended:

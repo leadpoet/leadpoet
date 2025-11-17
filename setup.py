@@ -48,9 +48,9 @@ requirements = [
     # Data processing and ML
     "numpy>=1.24.0",
     "pandas>=2.0.0",
-    "torch[cpu]>=2.0.0",
-    "torch_geometric>=2.4.0",
-    "pygod>=1.1.0",
+    # "torch[cpu]>=2.0.0",  # DEPRECATED: Only needed for unused collusion detection
+    # "torch_geometric>=2.4.0",  # DEPRECATED: Only needed for unused collusion detection
+    # "pygod>=1.1.0",  # DEPRECATED: Only needed for unused collusion detection
     
     # DNS and validation
     "dnspython>=2.6.1",

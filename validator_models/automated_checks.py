@@ -9,7 +9,7 @@ import uuid
 import whois
 import json
 import numpy as np
-from pygod.detector import DOMINANT
+# from pygod.detector import DOMINANT  # DEPRECATED: Only used in unused collusion_check function
 from datetime import datetime
 from urllib.parse import urlparse
 from typing import Dict, Any, Tuple, List, Optional
@@ -2864,21 +2864,22 @@ async def validate_lead_list(leads: list) -> list:
 
     return report
 
-async def collusion_check(validators: list, responses: list) -> dict:
-    """Simulate PyGOD/DBScan collusion detection."""
-    validator_scores = []
-    for v in validators:
-        for r in responses:
-            validation = await v.validate_leads(r.leads)
-            validator_scores.append({"hotkey": v.wallet.hotkey.ss58_address, "O_v": validation["O_v"]})
-
-    # Mock PyGOD analysis
-    data = np.array([[s["O_v"]] for s in validator_scores])
-    detector = DOMINANT()
-    detector.fit(data)
-    V_c = detector.decision_score_.max()
-
-    collusion_flags = {}
-    for v in validators:
-        collusion_flags[v.wallet.hotkey.ss58_address] = 0 if V_c > 0.7 else 1
-    return collusion_flags
+# DEPRECATED: Collusion detection function (never used in production)
+# async def collusion_check(validators: list, responses: list) -> dict:
+#     """Simulate PyGOD/DBScan collusion detection."""
+#     validator_scores = []
+#     for v in validators:
+#         for r in responses:
+#             validation = await v.validate_leads(r.leads)
+#             validator_scores.append({"hotkey": v.wallet.hotkey.ss58_address, "O_v": validation["O_v"]})
+# 
+#     # Mock PyGOD analysis
+#     data = np.array([[s["O_v"]] for s in validator_scores])
+#     detector = DOMINANT()
+#     detector.fit(data)
+#     V_c = detector.decision_score_.max()
+# 
+#     collusion_flags = {}
+#     for v in validators:
+#         collusion_flags[v.wallet.hotkey.ss58_address] = 0 if V_c > 0.7 else 1
+#     return collusion_flags

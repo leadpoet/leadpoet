@@ -1881,6 +1881,7 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
     - 1 signature verification on gateway
     - Atomic operation (all succeed or all fail)
     - Works dynamically with any MAX_LEADS_PER_EPOCH (10, 20, 50, etc.)
+    - Retries up to 3 times with fresh nonce/timestamp on gateway timeout
     
     Args:
         wallet: Validator's wallet
@@ -1893,84 +1894,103 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
     import uuid
     import hashlib
     
-    try:
-        # Generate UUID v4 nonce
-        nonce = str(uuid.uuid4())
-        
-        # Create ISO timestamp
-        ts = datetime.now(timezone.utc).isoformat()
-        
-        # Build ID
-        build_id = os.getenv("BUILD_ID", "validator-client")
-        
-        # Format validations for batch submission
-        validations = []
-        for v in validation_results:
-            validations.append({
-                "lead_id": v["lead_id"],
-                "decision_hash": v["decision_hash"],
-                "rep_score_hash": v["rep_score_hash"],
-                "rejection_reason_hash": v["rejection_reason_hash"],
-                "evidence_hash": v["evidence_hash"],
-                "evidence_blob": v.get("evidence_blob", {})
-            })
-        
-        # Create payload
-        payload = {
-            "epoch_id": epoch_id,
-            "validations": validations
-        }
-        
-        # Compute payload hash (deterministic JSON)
-        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-        payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
-        
-        # Construct message to sign (format: {event_type}:{actor_hotkey}:{nonce}:{ts}:{payload_hash}:{build_id})
-        message = f"VALIDATION_RESULT_BATCH:{wallet.hotkey.ss58_address}:{nonce}:{ts}:{payload_hash}:{build_id}"
-        
-        # Sign the message
-        signature = wallet.hotkey.sign(message.encode()).hex()
-        
-        # Create full event object
-        event = {
-            "event_type": "VALIDATION_RESULT_BATCH",
-            "actor_hotkey": wallet.hotkey.ss58_address,
-            "nonce": nonce,
-            "ts": ts,
-            "payload_hash": payload_hash,
-            "build_id": build_id,
-            "signature": signature,
-            "payload": payload
-        }
-        
-        bt.logging.info(f"📤 Submitting validation for {len(validations)} leads (epoch {epoch_id})...")
-        
-        # Submit validation (single request for all leads)
-        response = requests.post(
-            f"{GATEWAY_URL}/validate",
-            json=event,
-            timeout=180  # Increased to 180s (3 minutes) - gateway may need time to process validations
-        )
-        response.raise_for_status()
-        
-        result = response.json()
-        bt.logging.info(f"✅ Validation submitted successfully: {result.get('validation_count', len(validations))} validations")
-        return True
-        
-    except Exception as e:
-        bt.logging.error(f"Failed to submit validation: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                error_detail = e.response.json()
-                bt.logging.error(f"   Error details: {error_detail}")
-            except:
-                bt.logging.error(f"   Response text: {e.response.text}")
-        return False
+    # Build ID (constant for all attempts)
+    build_id = os.getenv("BUILD_ID", "validator-client")
+    
+    # Format validations for batch submission (constant for all attempts)
+    validations = []
+    for v in validation_results:
+        validations.append({
+            "lead_id": v["lead_id"],
+            "decision_hash": v["decision_hash"],
+            "rep_score_hash": v["rep_score_hash"],
+            "rejection_reason_hash": v["rejection_reason_hash"],
+            "evidence_hash": v["evidence_hash"],
+            "evidence_blob": v.get("evidence_blob", {})
+        })
+    
+    # Create payload (constant for all attempts)
+    payload = {
+        "epoch_id": epoch_id,
+        "validations": validations
+    }
+    
+    # Compute payload hash (deterministic JSON, constant for all attempts)
+    payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+    
+    # Retry loop: Up to 3 attempts with fresh nonce/timestamp
+    for attempt in range(1, 4):
+        try:
+            # Generate FRESH nonce and timestamp for each attempt
+            nonce = str(uuid.uuid4())
+            ts = datetime.now(timezone.utc).isoformat()
+            
+            # Construct message to sign with FRESH nonce/timestamp
+            message = f"VALIDATION_RESULT_BATCH:{wallet.hotkey.ss58_address}:{nonce}:{ts}:{payload_hash}:{build_id}"
+            
+            if attempt == 1:
+                bt.logging.info(f"📤 Submitting {len(validations)} hashed validations to gateway...")
+            else:
+                bt.logging.warning(f"🔄 Retry {attempt}/3: Submitting with fresh nonce/timestamp...")
+            
+            # Sign the message
+            signature = wallet.hotkey.sign(message.encode()).hex()
+            
+            # Create full event object
+            event = {
+                "event_type": "VALIDATION_RESULT_BATCH",
+                "actor_hotkey": wallet.hotkey.ss58_address,
+                "nonce": nonce,
+                "ts": ts,
+                "payload_hash": payload_hash,
+                "build_id": build_id,
+                "signature": signature,
+                "payload": payload
+            }
+            
+            # Submit validation (single request for all leads)
+            response = requests.post(
+                f"{GATEWAY_URL}/validate",
+                json=event,
+                timeout=180  # 180s timeout (gateway may need time for metagraph query on slow testnet)
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            if attempt > 1:
+                bt.logging.info(f"✅ Retry {attempt}/3 succeeded!")
+            bt.logging.info(f"✅ Validation submitted successfully: {result.get('validation_count', len(validations))} validations")
+            return True
+            
+        except Exception as e:
+            if attempt < 3:
+                bt.logging.warning(f"⚠️  Attempt {attempt}/3 failed: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        error_detail = e.response.json()
+                        bt.logging.warning(f"   Error details: {error_detail}")
+                    except:
+                        pass
+                bt.logging.warning(f"   Retrying with fresh nonce/signature...")
+                time.sleep(2)  # Brief delay before retry
+                continue  # Try again
+            else:
+                # All attempts exhausted
+                bt.logging.error(f"❌ All 3 attempts failed. Last error: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        error_detail = e.response.json()
+                        bt.logging.error(f"   Error details: {error_detail}")
+                    except:
+                        bt.logging.error(f"   Response text: {e.response.text}")
+                return False
 
 
 def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List[Dict]) -> bool:
     """
     Submit revealed validation results after epoch closes (POST /reveal).
+    Retries up to 3 times with fresh nonce/signature on gateway timeout.
     
     Args:
         wallet: Validator's wallet
@@ -1980,29 +2000,46 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
     Returns:
         bool: Success status
     """
-    try:
-        # Generate signature
-        nonce = str(int(time.time()))
-        message = f"reveal:{wallet.hotkey.ss58_address}:{epoch_id}:{nonce}"
-        signature = wallet.hotkey.sign(message.encode()).hex()
-        
-        # Submit reveal batch
-        response = requests.post(
-            f"{GATEWAY_URL}/reveal/batch",
-            json={
-                "validator_hotkey": wallet.hotkey.ss58_address,
-                "epoch_id": epoch_id,
-                "signature": signature,
-                "nonce": nonce,
-                "reveals": reveal_results
-            },
-            timeout=180  # Increased to 180s (3 minutes) - gateway may need time to process reveals
-        )
-        response.raise_for_status()
-        
-        bt.logging.info(f"✅ Submitted reveal for {len(reveal_results)} leads")
-        return True
-        
-    except Exception as e:
-        bt.logging.error(f"Failed to submit reveal: {e}")
-        return False
+    # Retry loop: Up to 3 attempts with fresh nonce/signature
+    for attempt in range(1, 4):
+        try:
+            # Generate FRESH nonce and signature for each attempt
+            nonce = str(int(time.time() * 1000))  # Millisecond precision to ensure uniqueness
+            message = f"reveal:{wallet.hotkey.ss58_address}:{epoch_id}:{nonce}"
+            signature = wallet.hotkey.sign(message.encode()).hex()
+            
+            if attempt == 1:
+                bt.logging.info(f"📤 Submitting {len(reveal_results)} reveals to gateway...")
+            else:
+                bt.logging.warning(f"🔄 Retry {attempt}/3: Submitting with fresh nonce/signature...")
+            
+            # Submit reveal batch
+            response = requests.post(
+                f"{GATEWAY_URL}/reveal/batch",
+                json={
+                    "validator_hotkey": wallet.hotkey.ss58_address,
+                    "epoch_id": epoch_id,
+                    "signature": signature,
+                    "nonce": nonce,
+                    "reveals": reveal_results
+                },
+                timeout=180  # 180s timeout (gateway may need time for database operations)
+            )
+            response.raise_for_status()
+            
+            if attempt > 1:
+                bt.logging.info(f"✅ Retry {attempt}/3 succeeded!")
+            bt.logging.info(f"✅ Submitted reveal for {len(reveal_results)} leads")
+            return True
+            
+        except Exception as e:
+            if attempt < 3:
+                bt.logging.warning(f"⚠️  Attempt {attempt}/3 failed: {e}")
+                bt.logging.warning(f"   Retrying with fresh nonce/signature...")
+                time.sleep(2)  # Brief delay before retry
+                continue  # Try again
+            else:
+                # All attempts exhausted
+                bt.logging.error(f"❌ All 3 attempts failed. Last error: {e}")
+                bt.logging.error(f"Failed to reveal validation for epoch {epoch_id}")
+                return False

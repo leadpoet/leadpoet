@@ -26,6 +26,7 @@ from typing import Dict, Optional
 from gateway.utils.tee_client import tee_client
 from gateway.utils.arweave_client import upload_checkpoint, get_wallet_balance
 from gateway.utils.logger import log_event
+from gateway.config import BUILD_ID
 
 
 # Configuration
@@ -242,20 +243,31 @@ async def hourly_batch_task():
             try:
                 import uuid
                 
+                # Compute payload hash for transparency
+                payload_data = {
+                    "arweave_tx_id": tx_id,
+                    "checkpoint_number": header['checkpoint_number'],
+                    "event_count": header['event_count'],
+                    "merkle_root": header['merkle_root'],
+                    "time_range": header['time_range'],
+                    "compressed_size_bytes": len(compressed_events),
+                    "viewblock_url": f"https://viewblock.io/arweave/tx/{tx_id}"
+                }
+                
+                import json
+                import hashlib
+                payload_json = json.dumps(payload_data, sort_keys=True)
+                payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+                
                 checkpoint_log = {
                     "event_type": "ARWEAVE_CHECKPOINT",
                     "actor_hotkey": "system",
                     "ts": datetime.utcnow().isoformat() + "Z",  # Required timestamp field
                     "nonce": str(uuid.uuid4()),  # Required field
-                    "payload": {
-                        "arweave_tx_id": tx_id,
-                        "checkpoint_number": header['checkpoint_number'],
-                        "event_count": header['event_count'],
-                        "merkle_root": header['merkle_root'],
-                        "time_range": header['time_range'],
-                        "compressed_size_bytes": len(compressed_events),
-                        "viewblock_url": f"https://viewblock.io/arweave/tx/{tx_id}"
-                    }
+                    "payload_hash": payload_hash,  # Required field
+                    "signature": "system",  # System-generated events use "system" as signature
+                    "build_id": BUILD_ID,  # Required field
+                    "payload": payload_data
                 }
                 
                 result = await log_event(checkpoint_log)

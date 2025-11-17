@@ -153,6 +153,13 @@ def get_metagraph() -> bt.metagraph:
         if _metagraph_cache is not None:
             print(f"⚠️  Using metagraph from previous epoch {_cache_epoch} as fallback")
             print(f"⚠️  This may not include validators who registered in epoch {current_epoch}")
+            
+            # CRITICAL: Update timestamp to prevent retry spam on every request
+            # This allows the stale cache to be used for up to 72 minutes before
+            # attempting another fetch, rather than retrying on every single request
+            _cache_epoch_timestamp = time.time()
+            print(f"⚠️  Fallback cache will be used for next 72 minutes (prevents retry spam)")
+            
             return _metagraph_cache
         
         # No cache available - raise error

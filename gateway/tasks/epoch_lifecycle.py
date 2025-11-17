@@ -24,14 +24,96 @@ from gateway.utils.epoch import (
     get_epoch_end_time,
     get_epoch_close_time,
     is_epoch_active,
-    is_epoch_closed
+    is_epoch_closed,
+    get_block_within_epoch
 )
 from gateway.utils.merkle import compute_merkle_root
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BUILD_ID, MAX_LEADS_PER_EPOCH
 from supabase import create_client
 
+# Import leads cache for prefetching
+from gateway.utils.leads_cache import (
+    prefetch_leads_for_next_epoch,
+    cleanup_old_epochs,
+    print_cache_status,
+    is_prefetch_in_progress
+)
+
 # Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+
+async def fetch_full_leads_for_epoch(epoch_id: int) -> list:
+    """
+    Fetch full lead data for an epoch (for caching).
+    
+    This function queries pending leads, assigns them to validators,
+    and fetches complete lead data with miner_hotkey.
+    
+    Args:
+        epoch_id: The epoch to fetch leads for
+    
+    Returns:
+        List of lead dictionaries with lead_id, lead_blob, lead_blob_hash, miner_hotkey
+    """
+    from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
+    
+    try:
+        # Step 1: Query pending leads from queue (FIFO order)
+        print(f"   🔍 Querying pending leads for epoch {epoch_id}...")
+        result = await asyncio.to_thread(
+            lambda: supabase.table("leads_private")
+                .select("lead_id")
+                .eq("status", "pending_validation")
+                .order("created_ts")
+                .execute()
+        )
+        
+        lead_ids = [row["lead_id"] for row in result.data]
+        print(f"   📊 Found {len(lead_ids)} pending leads in queue")
+        
+        # Step 2: Get validator set
+        validator_set = await asyncio.to_thread(
+            lambda: get_validator_set(epoch_id)
+        )
+        print(f"   👥 Validator set: {len(validator_set['all'])} registered, {len(validator_set['validators'])} active")
+        
+        # Step 3: Determine lead assignment
+        assigned_lead_ids = deterministic_lead_assignment(
+            lead_ids=lead_ids,
+            validator_count=len(validator_set['validators']),
+            max_leads=MAX_LEADS_PER_EPOCH
+        )
+        print(f"   📋 Assigned {len(assigned_lead_ids)} leads for epoch {epoch_id}")
+        
+        # Step 4: Fetch full lead data
+        print(f"   💾 Fetching full lead data from database...")
+        leads_result = await asyncio.to_thread(
+            lambda: supabase.table("leads_private")
+                .select("lead_id, lead_blob, lead_blob_hash")
+                .in_("lead_id", assigned_lead_ids)
+                .execute()
+        )
+        
+        # Step 5: Build full leads with miner_hotkey
+        full_leads = []
+        for lead_row in leads_result.data:
+            lead_blob = lead_row.get("lead_blob", {})
+            miner_hotkey = lead_blob.get("wallet_ss58", "unknown")
+            
+            full_leads.append({
+                "lead_id": lead_row["lead_id"],
+                "lead_blob": lead_blob,
+                "lead_blob_hash": lead_row["lead_blob_hash"],
+                "miner_hotkey": miner_hotkey
+            })
+        
+        print(f"   ✅ Built {len(full_leads)} complete lead objects")
+        return full_leads
+        
+    except Exception as e:
+        print(f"   ❌ Error fetching leads for epoch {epoch_id}: {e}")
+        raise
 
 
 async def epoch_lifecycle_task():
@@ -40,6 +122,7 @@ async def epoch_lifecycle_task():
     
     Runs every 30 seconds and checks:
     - Is it time to start new epoch? → Log EPOCH_INITIALIZATION
+    - Is it time to prefetch next epoch? → Cache leads at block 351
     - Is it time to end validation? → Log EPOCH_END + EPOCH_INPUTS
     - Is it time to close epoch? → Trigger reveal phase + consensus
     
@@ -54,9 +137,11 @@ async def epoch_lifecycle_task():
     last_epoch_id = None
     validation_ended_epochs = set()  # Track which epochs we've logged EPOCH_END for
     closed_epochs = set()  # Track which epochs we've processed consensus for
+    prefetch_triggered_epochs = set()  # Track which epochs we've triggered prefetch for
     
     print("✅ Epoch lifecycle task initialized")
     print("   Will check for epoch transitions every 30 seconds")
+    print("   Will prefetch next epoch leads at block 351")
     print("="*80 + "\n")
     
     while True:
@@ -91,8 +176,52 @@ async def epoch_lifecycle_task():
                 # Compute and log single atomic EPOCH_INITIALIZATION event
                 await compute_and_log_epoch_initialization(current_epoch, epoch_start, epoch_end, epoch_close)
                 
+                # Clean up old epoch cache (keep only current and next)
+                cleanup_old_epochs(current_epoch)
+                
                 last_epoch_id = current_epoch
                 print(f"   ✅ Epoch {current_epoch} initialized\n")
+            
+            # ========================================================================
+            # Check if it's time to prefetch next epoch leads (blocks 351-360)
+            # ========================================================================
+            try:
+                block_within_epoch = get_block_within_epoch()
+                
+                # Trigger prefetch once when we reach block 351
+                if (351 <= block_within_epoch <= 360 and 
+                    current_epoch not in prefetch_triggered_epochs and 
+                    not is_prefetch_in_progress()):
+                    
+                    next_epoch = current_epoch + 1
+                    
+                    print(f"\n{'='*80}")
+                    print(f"🔍 PREFETCH TRIGGER: Block {block_within_epoch}/360")
+                    print(f"{'='*80}")
+                    print(f"   Current epoch: {current_epoch}")
+                    print(f"   Prefetching for: epoch {next_epoch}")
+                    print(f"   Time remaining: {360 - block_within_epoch} blocks (~{(360 - block_within_epoch) * 12}s)")
+                    print(f"{'='*80}\n")
+                    
+                    # Mark as triggered immediately to prevent duplicate prefetch
+                    prefetch_triggered_epochs.add(current_epoch)
+                    
+                    # Start prefetch in background (don't block lifecycle checks)
+                    # This will retry with 30s timeout until successful
+                    asyncio.create_task(
+                        prefetch_leads_for_next_epoch(
+                            next_epoch=next_epoch,
+                            fetch_function=lambda: fetch_full_leads_for_epoch(next_epoch),
+                            timeout=30,  # 30 second timeout per attempt
+                            retry_delay=5  # 5 second delay between retries
+                        )
+                    )
+                    
+                    print(f"   ✅ Prefetch task started in background for epoch {next_epoch}\n")
+                
+            except Exception as e:
+                print(f"   ⚠️  Could not check block number for prefetch: {e}")
+                # Not critical - prefetch is optimization, workflow continues
             
             # ========================================================================
             # Check if validation phase just ended (t=67)

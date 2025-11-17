@@ -19,6 +19,7 @@ from gateway.utils.epoch import get_current_epoch_id, is_epoch_active, get_epoch
 from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
 from gateway.utils.signature import verify_wallet_signature
 from gateway.utils.registry import is_registered_hotkey
+from gateway.utils.leads_cache import get_cached_leads  # Import cache for instant lead distribution
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 from supabase import create_client
 
@@ -97,10 +98,10 @@ async def get_epoch_leads(
     try:
         is_registered, role = await asyncio.wait_for(
             asyncio.to_thread(is_registered_hotkey, validator_hotkey),
-            timeout=90.0  # 90 second timeout for metagraph query (matches validator timeout)
+            timeout=180.0  # 180 second timeout for metagraph query (testnet can be slow, allows for retries)
         )
     except asyncio.TimeoutError:
-        print(f"❌ Metagraph query timed out after 90s for {validator_hotkey[:20]}...")
+        print(f"❌ Metagraph query timed out after 180s for {validator_hotkey[:20]}...")
         raise HTTPException(
             status_code=504,
             detail="Metagraph query timeout - please retry in a moment (cache warming)"
@@ -140,6 +141,34 @@ async def get_epoch_leads(
     
     print(f"✅ Step 3.5: Within lead distribution window (block {block_within_epoch}/350)")
     
+    # ========================================================================
+    # OPTIMIZATION: Check cache first (instant response, no DB query)
+    # ========================================================================
+    cached_leads = get_cached_leads(epoch_id)
+    if cached_leads is not None:
+        print(f"✅ [CACHE HIT] Returning {len(cached_leads)} cached leads for epoch {epoch_id}")
+        print(f"   Response time: <100ms (no database query)")
+        print(f"   Validator: {validator_hotkey[:20]}...")
+        
+        # Get validator set for response metadata
+        try:
+            validator_set = get_validator_set(epoch_id)
+            validator_count = len(validator_set['all']) if validator_set else 0
+        except:
+            validator_count = 0
+        
+        return {
+            "epoch_id": epoch_id,
+            "leads": cached_leads,
+            "queue_root": "cached",  # Queue root not needed for cached response
+            "validator_count": validator_count,
+            "cached": True,  # Indicate this was served from cache
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    # Cache miss - fall back to database query (will happen on first request or if prefetch failed)
+    print(f"⚠️  [CACHE MISS] Epoch {epoch_id} not cached, falling back to database query...")
+    
     # Step 4: Query CURRENT queue state (not frozen EPOCH_INITIALIZATION snapshot)
     # DESIGN DECISION: We query the current queue state dynamically instead of using
     # the frozen snapshot from EPOCH_INITIALIZATION. This allows leads that are
@@ -169,10 +198,10 @@ async def get_epoch_leads(
                         .order("created_ts")
                         .execute()
                 ),
-                timeout=15.0  # 15 second timeout for queue state query
+                timeout=90.0  # 90 second timeout for queue state query (Supabase very slow on testnet)
             )
         except asyncio.TimeoutError:
-            print(f"❌ ERROR: Queue state query timed out after 15 seconds")
+            print(f"❌ ERROR: Queue state query timed out after 90 seconds")
             raise HTTPException(
                 status_code=504,
                 detail="Database query timeout - gateway may be experiencing high load"
@@ -244,7 +273,7 @@ async def get_epoch_leads(
         # NOTE: miner_hotkey column doesn't exist yet in Supabase
         # TODO: Add migration to create miner_hotkey column, then optimize this query
         
-        # Wrap Supabase query with asyncio timeout (30 seconds)
+        # Wrap Supabase query with asyncio timeout (90 seconds)
         import asyncio
         try:
             leads_result = await asyncio.wait_for(
@@ -254,10 +283,10 @@ async def get_epoch_leads(
                         .in_("lead_id", assigned_lead_ids)
                         .execute()
                 ),
-                timeout=30.0  # 30 second timeout for database query
+                timeout=90.0  # 90 second timeout for database query (Supabase very slow on testnet)
             )
         except asyncio.TimeoutError:
-            print(f"❌ ERROR: Supabase query timed out after 30 seconds")
+            print(f"❌ ERROR: Supabase query timed out after 90 seconds")
             raise HTTPException(
                 status_code=504,
                 detail="Database query timeout - gateway may be experiencing high load"
@@ -320,13 +349,21 @@ async def get_epoch_leads(
             detail=f"Failed to build lead data: {str(e)}"
         )
     
-    # Step 9: Return full lead data
-    print(f"✅ Step 9: Returning {len(full_leads)} leads to validator")
+    # Step 9: Cache leads for subsequent requests (instant response for other validators)
+    from gateway.utils.leads_cache import set_cached_leads
+    set_cached_leads(epoch_id, full_leads)
+    print(f"💾 [CACHE SET] Cached {len(full_leads)} leads for epoch {epoch_id}")
+    print(f"   Subsequent validator requests will be instant (<100ms)")
+    
+    # Step 10: Return full lead data
+    print(f"✅ Step 10: Returning {len(full_leads)} leads to validator")
     return {
         "epoch_id": epoch_id,
         "leads": full_leads,
         "queue_root": queue_root,
-        "validator_count": len(validator_set)
+        "validator_count": len(validator_set),
+        "cached": False,  # This response was from DB query, not cache
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 

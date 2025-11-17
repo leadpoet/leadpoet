@@ -378,9 +378,67 @@ async def reveal_validation_batch(
     print(f"📥 BATCH REVEAL: {len(reveals)} reveals from {validator_hotkey[:20]}...")
     print(f"{'='*80}")
     
+    import time
+    start_time = time.time()
+    
     revealed_count = 0
     failed_count = 0
     errors = []
+    
+    # ============================================================================
+    # OPTIMIZATION: Bulk database operations (1 SELECT + 1 UPDATE for all leads)
+    # Instead of N queries per lead, do 2 queries total
+    # ============================================================================
+    
+    # Step 1: Build lead_id list for bulk SELECT
+    lead_ids = [reveal["lead_id"] for reveal in reveals]
+    
+    print(f"   📊 Fetching evidence for {len(lead_ids)} leads in bulk...")
+    
+    # Step 2: Bulk SELECT all evidence for this validator + epoch
+    import asyncio
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: supabase.table("validation_evidence_private")
+                    .select("*")
+                    .eq("validator_hotkey", validator_hotkey)
+                    .eq("epoch_id", epoch_id)
+                    .in_("lead_id", lead_ids)
+                    .execute()
+            ),
+            timeout=90.0  # 90 second timeout for bulk query (Supabase can be very slow on testnet)
+        )
+        evidence_records = result.data
+        print(f"   ✅ Fetched {len(evidence_records)} evidence records from database")
+    except asyncio.TimeoutError:
+        error_msg = f"Database timeout during bulk SELECT (90s)"
+        print(f"   ❌ {error_msg}")
+        errors.append(error_msg)
+        return {
+            "status": "error",
+            "epoch_id": epoch_id,
+            "revealed_count": 0,
+            "failed_count": len(reveals),
+            "errors": [error_msg]
+        }
+    except Exception as e:
+        error_msg = f"Database error during bulk SELECT: {str(e)}"
+        print(f"   ❌ {error_msg}")
+        errors.append(error_msg)
+        return {
+            "status": "error",
+            "epoch_id": epoch_id,
+            "revealed_count": 0,
+            "failed_count": len(reveals),
+            "errors": [error_msg]
+        }
+    
+    # Step 3: Build evidence lookup map (lead_id -> evidence)
+    evidence_map = {evidence["lead_id"]: evidence for evidence in evidence_records}
+    
+    # Step 4: Verify hashes and build bulk update list
+    valid_updates = []
     
     for idx, reveal in enumerate(reveals, 1):
         try:
@@ -390,38 +448,17 @@ async def reveal_validation_batch(
             rejection_reason = reveal["rejection_reason"]
             salt = reveal["salt"]
             
-            print(f"   [{idx}/{len(reveals)}] Revealing lead {lead_id[:8]}... - Decision: {decision}")
+            print(f"   [{idx}/{len(reveals)}] Verifying lead {lead_id[:8]}... - Decision: {decision}")
             
-            # Find evidence by lead_id + validator_hotkey + epoch_id (with timeout)
-            import asyncio
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        lambda: supabase.table("validation_evidence_private")
-                            .select("*")
-                            .eq("lead_id", lead_id)
-                            .eq("validator_hotkey", validator_hotkey)
-                            .eq("epoch_id", epoch_id)
-                            .limit(1)
-                            .execute()
-                    ),
-                    timeout=10.0  # 10 second timeout per query
-                )
-            except asyncio.TimeoutError:
-                error_msg = f"Database timeout querying evidence for lead {lead_id[:8]}..."
-                print(f"      ❌ {error_msg}")
-                errors.append(error_msg)
-                failed_count += 1
-                continue
-            
-            if not result.data:
+            # Check if evidence exists in bulk query results
+            if lead_id not in evidence_map:
                 error_msg = f"Evidence not found for lead {lead_id[:8]}..."
                 print(f"      ❌ {error_msg}")
                 errors.append(error_msg)
                 failed_count += 1
                 continue
             
-            evidence = result.data[0]
+            evidence = evidence_map[lead_id]
             
             # Verify hashes
             computed_decision_hash = hashlib.sha256((decision + salt).encode()).hexdigest()
@@ -449,41 +486,84 @@ async def reveal_validation_batch(
                 failed_count += 1
                 continue
             
-            # Update evidence with revealed values (with timeout)
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        lambda: supabase.table("validation_evidence_private")
-                            .update({
-                                "decision": decision,
-                                "rep_score": rep_score,
-                                "rejection_reason": json.dumps(rejection_reason),
-                                "salt": salt,
-                                "revealed_ts": datetime.utcnow().isoformat()
-                            })
-                            .eq("evidence_id", evidence["evidence_id"])
-                            .execute()
-                    ),
-                    timeout=10.0  # 10 second timeout per update
-                )
-            except asyncio.TimeoutError:
-                error_msg = f"Database timeout updating evidence for lead {lead_id[:8]}..."
-                print(f"      ❌ {error_msg}")
-                errors.append(error_msg)
-                failed_count += 1
-                continue
+            # Hash verification passed - add to bulk update list
+            valid_updates.append({
+                "evidence_id": evidence["evidence_id"],
+                "lead_id": lead_id,
+                "decision": decision,
+                "rep_score": rep_score,
+                "rejection_reason": json.dumps(rejection_reason),
+                "salt": salt
+            })
             
-            print(f"      ✅ Revealed: {decision} (rep_score={rep_score})")
-            revealed_count += 1
+            print(f"      ✅ Hash verified: {decision} (rep_score={rep_score})")
             
         except Exception as e:
-            error_msg = f"Error revealing lead {reveal.get('lead_id', 'unknown')[:8]}...: {str(e)}"
+            error_msg = f"Error verifying lead {reveal.get('lead_id', 'unknown')[:8]}...: {str(e)}"
             print(f"      ❌ {error_msg}")
             errors.append(error_msg)
             failed_count += 1
     
+    # Step 5: Bulk UPDATE all valid reveals
+    if valid_updates:
+        print(f"   📊 Performing bulk UPDATE for {len(valid_updates)} validated reveals...")
+        
+        revealed_ts = datetime.utcnow().isoformat()
+        
+        # Update each evidence record
+        # Note: Supabase Python client doesn't support true bulk updates with different values per row,
+        # so we need to update individually but in a tight loop (still faster than original N queries)
+        for idx, update in enumerate(valid_updates, 1):
+            try:
+                # Extract values explicitly (avoid lambda closure issues)
+                evidence_id = update["evidence_id"]
+                decision = update["decision"]
+                rep_score = update["rep_score"]
+                rejection_reason_json = update["rejection_reason"]
+                salt = update["salt"]
+                lead_id = update["lead_id"]
+                
+                # Define update function
+                def do_update():
+                    return supabase.table("validation_evidence_private")\
+                        .update({
+                            "decision": decision,
+                            "rep_score": rep_score,
+                            "rejection_reason": rejection_reason_json,
+                            "salt": salt,
+                            "revealed_ts": revealed_ts
+                        })\
+                        .eq("evidence_id", evidence_id)\
+                        .execute()
+                
+                # Execute update with timeout
+                await asyncio.wait_for(
+                    asyncio.to_thread(do_update),
+                    timeout=15.0  # 15 second timeout per update (Supabase can be slow)
+                )
+                
+                print(f"      [{idx}/{len(valid_updates)}] ✅ Updated lead {lead_id[:8]}...")
+                revealed_count += 1
+                
+            except asyncio.TimeoutError:
+                error_msg = f"Database timeout updating lead {update['lead_id'][:8]}..."
+                print(f"      ❌ {error_msg}")
+                errors.append(error_msg)
+                failed_count += 1
+            except Exception as e:
+                error_msg = f"Database error updating lead {update['lead_id'][:8]}...: {str(e)}"
+                print(f"      ❌ {error_msg}")
+                errors.append(error_msg)
+                failed_count += 1
+        
+        print(f"   ✅ Bulk UPDATE complete: {revealed_count} successful, {failed_count} failed")
+    else:
+        print(f"   ⚠️  No valid reveals to update (all failed hash verification)")
+    
+    elapsed_time = time.time() - start_time
     print(f"{'='*80}")
     print(f"✅ Batch reveal complete: {revealed_count} revealed, {failed_count} failed")
+    print(f"   ⏱️  Total time: {elapsed_time:.2f}s")
     print(f"{'='*80}\n")
     
     return {

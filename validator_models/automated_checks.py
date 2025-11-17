@@ -1184,7 +1184,7 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                     else:
                         print(f"   🔄 Retry {attempt}/{max_retries} for: {email}")
                     
-                    async with session.get(url, timeout=15) as response:
+                    async with session.get(url, timeout=30) as response:
                         # Check for API error responses (no credits, invalid key, etc.)
                         # These should SKIP the lead entirely (not submit to Supabase)
                         if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:

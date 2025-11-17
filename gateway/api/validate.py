@@ -152,10 +152,10 @@ async def submit_validation(event: ValidationEvent):
     try:
         is_registered, role = await asyncio.wait_for(
             asyncio.to_thread(is_registered_hotkey, event.actor_hotkey),
-            timeout=90.0  # 90 second timeout for metagraph query (matches validator timeout)
+            timeout=180.0  # 180 second timeout for metagraph query (testnet can be slow, allows for retries)
         )
     except asyncio.TimeoutError:
-        print(f"❌ Metagraph query timed out after 90s for {event.actor_hotkey[:20]}...")
+        print(f"❌ Metagraph query timed out after 180s for {event.actor_hotkey[:20]}...")
         raise HTTPException(
             status_code=504,
             detail="Metagraph query timeout - please retry in a moment (cache warming)"
@@ -194,11 +194,11 @@ async def submit_validation(event: ValidationEvent):
     now = datetime.now(timezone.utc)
     time_diff = abs((now - event.ts).total_seconds())
     
-    if time_diff > 120:  # 2 minutes tolerance
-        raise HTTPException(
-            status_code=400,
-            detail=f"Timestamp too old or in future (diff: {time_diff:.0f}s)"
-        )
+        if time_diff > 480:  # 8 minutes tolerance (validator validation can take 3+ minutes with API retries)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Timestamp too old or in future (diff: {time_diff:.0f}s)"
+            )
     
     # ========================================
     # Step 5.1: Verify epoch is current (not past or future)
@@ -238,31 +238,29 @@ async def submit_validation(event: ValidationEvent):
     print(f"✅ Step 5.2: Within validation submission window (block {block_within_epoch}/355)")
     
     # ========================================
-    # Step 5.3: Verify lead_ids were assigned to this epoch
+    # Step 5.3: Verify lead_ids exist in database
     # ========================================
     # CRITICAL SECURITY: Prevent validators from submitting validations for
-    # leads that were never assigned to this epoch (could be from old epochs)
+    # leads that don't exist or were already processed
     try:
-        from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
         from gateway.config import MAX_LEADS_PER_EPOCH
         
-        # Get queue state for this epoch from transparency log
-        # We query the leads_private table for the current pending leads
-        # (same logic as /epoch/{epoch_id}/leads endpoint)
+        # Query current FIFO queue state (same as /epoch/{id}/leads endpoint)
+        # This ensures validators are submitting for leads that are actually in the queue
         result = supabase.table("leads_private") \
-            .select("lead_id, created_ts") \
+            .select("lead_id") \
             .eq("status", "pending_validation") \
             .order("created_ts", desc=False) \
-            .limit(MAX_LEADS_PER_EPOCH) \
+            .limit(MAX_LEADS_PER_EPOCH * 2) \
             .execute()
         
         if not result.data:
-            # No leads in queue - this is actually OK (validators can submit empty batches)
+            # No leads in queue - validators submitting for empty epoch
             assigned_lead_ids = []
         else:
             assigned_lead_ids = [row["lead_id"] for row in result.data]
         
-        # Verify all submitted lead_ids are in the assigned set
+        # Verify all submitted lead_ids are in the queue
         submitted_lead_ids = {v.lead_id for v in event.payload.validations}
         assigned_lead_ids_set = set(assigned_lead_ids)
         
@@ -272,10 +270,10 @@ async def submit_validation(event: ValidationEvent):
             invalid_sample = list(invalid_leads)[:3]
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) were not assigned to epoch {event.payload.epoch_id}. Cannot submit validations for unassigned leads."
+                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) are not in pending validation queue. Leads may have been already processed or never existed."
             )
         
-        print(f"✅ Step 5.3: Lead assignment verification passed ({len(submitted_lead_ids)} lead_ids valid for epoch {event.payload.epoch_id})")
+        print(f"✅ Step 5.3: Lead existence verification passed ({len(submitted_lead_ids)} lead_ids found in queue)")
     
     except HTTPException:
         # Re-raise HTTPException (validation errors)

@@ -222,26 +222,26 @@ class BaseValidatorNeuron(BaseNeuron):
         """
         Initialize async subtensor and subscribe to blocks.
         
-        This should be called by subclass run() method before entering main loop.
-        Creates single AsyncSubtensor instance that will be reused throughout
-        the validator's lifetime, eliminating memory leaks and HTTP 429 errors.
+        NOTE: This is a BASE CLASS method. Subclasses should override this
+        to provide their own implementation.
         
-        Example (in subclass run() method):
-            async def run_async():
-                await self.initialize_async_resources()
-                # ... main validator loop ...
+        For LeadPoet validator, see neurons/validator.py:initialize_async_subtensor()
+        which overrides this method with custom initialization + block subscription.
+        
+        This base implementation is kept for compatibility with other validator types.
         """
         import bittensor as bt
         
-        bt.logging.info(f"🔗 Initializing async resources...")
-        bt.logging.info(f"   Network: {self.config.subtensor.network}")
+        bt.logging.info(f"⚠️  Base class initialize_async_resources() called")
+        bt.logging.info(f"   Subclasses should override this with custom implementation")
+        bt.logging.info(f"   See neurons/validator.py:initialize_async_subtensor() for LeadPoet")
         
         # Create async subtensor (single instance for entire lifecycle)
+        # NOTE: Subclasses should override this method, so this code may not run
         self.async_subtensor = bt.AsyncSubtensor(network=self.config.subtensor.network)
         
-        bt.logging.info(f"✅ Async subtensor initialized")
+        bt.logging.info(f"✅ Async subtensor initialized (base class)")
         bt.logging.info(f"   Endpoint: {self.async_subtensor.chain_endpoint}")
-        bt.logging.info(f"   Benefits: Zero memory leaks, zero HTTP 429 errors")
     
     async def cleanup_async_resources(self):
         """

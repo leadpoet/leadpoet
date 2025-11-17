@@ -1185,95 +1185,95 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                         print(f"   🔄 Retry {attempt}/{max_retries} for: {email}")
                     
                     async with session.get(url, timeout=15) as response:
-                    # Check for API error responses (no credits, invalid key, etc.)
-                    # These should SKIP the lead entirely (not submit to Supabase)
-                    if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:
-                        if response.status == 402:
-                            print(f"   🚨 MyEmailVerifier API: No credits remaining")
-                        elif response.status == 401:
-                            print(f"   🚨 MyEmailVerifier API: Invalid API key")
-                        elif response.status == 429:
-                            print(f"   🚨 MyEmailVerifier API: Rate limit exceeded")
-                        else:
-                            print(f"   🚨 MyEmailVerifier API: Server error (HTTP {response.status})")
-                        # Raise exception to tell validator to SKIP this lead
-                        raise EmailVerificationUnavailableError(f"MyEmailVerifier API unavailable (HTTP {response.status})")
-                    
-                    data = await response.json()
-                    
-                    # Log the actual API response to prove it's not mock mode
-                    print(f"   📥 MyEmailVerifier Response: {data}")
-                    
-                    # Parse MyEmailVerifier response
-                    # API response fields (as per official docs):
-                    # - Address: the email address
-                    # - Status: "Valid", "Invalid", "Unknown", "Catch All", "Grey-listed"
-                    # - Disposable_Domain: "true" or "false" (string)
-                    # - catch_all: "true" or "false" (string)
-                    # - Role_Based: "true" or "false" (string)
-                    # - Free_Domain: "true" or "false" (string)
-                    # - Greylisted: "true" or "false" (string)
-                    # - Diagnosis: description (e.g., "Mailbox Exists and Active")
-                    
-                    status = data.get("Status", "Unknown")
-                    
-                    # Store email verification metadata in lead (for tasks2.md Phase 1)
-                    lead["email_verifier_status"] = status
-                    lead["email_verifier_disposable"] = data.get("Disposable_Domain", "false") == "true"
-                    lead["email_verifier_catch_all"] = data.get("catch_all", "false") == "true"
-                    lead["email_verifier_role_based"] = data.get("Role_Based", "false") == "true"
-                    lead["email_verifier_free"] = data.get("Free_Domain", "false") == "true"
-                    lead["email_verifier_diagnosis"] = data.get("Diagnosis", "")
-                    
-                    # Check for disposable domains
-                    is_disposable = lead["email_verifier_disposable"]
-                    if is_disposable:
-                        result = (False, {
-                            "stage": "Stage 3: MyEmailVerifier",
-                            "check_name": "check_myemailverifier_email",
-                            "message": "Email is from a disposable/temporary email provider",
-                            "failed_fields": ["email"]
-                        })
-                        validation_cache[cache_key] = result
-                        return result
+                        # Check for API error responses (no credits, invalid key, etc.)
+                        # These should SKIP the lead entirely (not submit to Supabase)
+                        if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:
+                            if response.status == 402:
+                                print(f"   🚨 MyEmailVerifier API: No credits remaining")
+                            elif response.status == 401:
+                                print(f"   🚨 MyEmailVerifier API: Invalid API key")
+                            elif response.status == 429:
+                                print(f"   🚨 MyEmailVerifier API: Rate limit exceeded")
+                            else:
+                                print(f"   🚨 MyEmailVerifier API: Server error (HTTP {response.status})")
+                            # Raise exception to tell validator to SKIP this lead
+                            raise EmailVerificationUnavailableError(f"MyEmailVerifier API unavailable (HTTP {response.status})")
+                        
+                        data = await response.json()
+                        
+                        # Log the actual API response to prove it's not mock mode
+                        print(f"   📥 MyEmailVerifier Response: {data}")
+                        
+                        # Parse MyEmailVerifier response
+                        # API response fields (as per official docs):
+                        # - Address: the email address
+                        # - Status: "Valid", "Invalid", "Unknown", "Catch All", "Grey-listed"
+                        # - Disposable_Domain: "true" or "false" (string)
+                        # - catch_all: "true" or "false" (string)
+                        # - Role_Based: "true" or "false" (string)
+                        # - Free_Domain: "true" or "false" (string)
+                        # - Greylisted: "true" or "false" (string)
+                        # - Diagnosis: description (e.g., "Mailbox Exists and Active")
+                        
+                        status = data.get("Status", "Unknown")
+                        
+                        # Store email verification metadata in lead (for tasks2.md Phase 1)
+                        lead["email_verifier_status"] = status
+                        lead["email_verifier_disposable"] = data.get("Disposable_Domain", "false") == "true"
+                        lead["email_verifier_catch_all"] = data.get("catch_all", "false") == "true"
+                        lead["email_verifier_role_based"] = data.get("Role_Based", "false") == "true"
+                        lead["email_verifier_free"] = data.get("Free_Domain", "false") == "true"
+                        lead["email_verifier_diagnosis"] = data.get("Diagnosis", "")
+                        
+                        # Check for disposable domains
+                        is_disposable = lead["email_verifier_disposable"]
+                        if is_disposable:
+                            result = (False, {
+                                "stage": "Stage 3: MyEmailVerifier",
+                                "check_name": "check_myemailverifier_email",
+                                "message": "Email is from a disposable/temporary email provider",
+                                "failed_fields": ["email"]
+                            })
+                            validation_cache[cache_key] = result
+                            return result
 
-                    # Handle validation results based on Status field
-                    if status == "Valid":
-                        result = (True, {})
-                    elif status == "Catch All":
-                        # BRD: Reject ALL catch-all emails (no exceptions)
-                        result = (False, {
-                            "stage": "Stage 3: MyEmailVerifier",
-                            "check_name": "check_myemailverifier_email",
-                            "message": "Email is catch-all (instant rejection)",
-                            "failed_fields": ["email"]
-                        })
-                    elif status == "Invalid":
-                        result = (False, {
-                            "stage": "Stage 3: MyEmailVerifier",
-                            "check_name": "check_myemailverifier_email",
-                            "message": "Email marked invalid",
-                            "failed_fields": ["email"]
-                        })
-                    elif status == "Grey-listed":
-                        # IMPORTANT: Treat grey-listed as invalid (as per tasks2.md Phase 1 requirement)
-                        result = (False, {
-                            "stage": "Stage 3: MyEmailVerifier",
-                            "check_name": "check_myemailverifier_email",
-                            "message": "Email is grey-listed (treated as invalid)",
-                            "failed_fields": ["email"]
-                        })
-                    elif status == "Unknown":
-                        # IMPORTANT: Treat unknown as invalid (as per tasks2.md Phase 1 requirement)
-                        result = (False, {
-                            "stage": "Stage 3: MyEmailVerifier",
-                            "check_name": "check_myemailverifier_email",
-                            "message": "Email status unknown (treated as invalid)",
-                            "failed_fields": ["email"]
-                        })
-                    else:
-                        # Any other status, log and assume valid
-                        result = (True, {})
+                        # Handle validation results based on Status field
+                        if status == "Valid":
+                            result = (True, {})
+                        elif status == "Catch All":
+                            # BRD: Reject ALL catch-all emails (no exceptions)
+                            result = (False, {
+                                "stage": "Stage 3: MyEmailVerifier",
+                                "check_name": "check_myemailverifier_email",
+                                "message": "Email is catch-all (instant rejection)",
+                                "failed_fields": ["email"]
+                            })
+                        elif status == "Invalid":
+                            result = (False, {
+                                "stage": "Stage 3: MyEmailVerifier",
+                                "check_name": "check_myemailverifier_email",
+                                "message": "Email marked invalid",
+                                "failed_fields": ["email"]
+                            })
+                        elif status == "Grey-listed":
+                            # IMPORTANT: Treat grey-listed as invalid (as per tasks2.md Phase 1 requirement)
+                            result = (False, {
+                                "stage": "Stage 3: MyEmailVerifier",
+                                "check_name": "check_myemailverifier_email",
+                                "message": "Email is grey-listed (treated as invalid)",
+                                "failed_fields": ["email"]
+                            })
+                        elif status == "Unknown":
+                            # IMPORTANT: Treat unknown as invalid (as per tasks2.md Phase 1 requirement)
+                            result = (False, {
+                                "stage": "Stage 3: MyEmailVerifier",
+                                "check_name": "check_myemailverifier_email",
+                                "message": "Email status unknown (treated as invalid)",
+                                "failed_fields": ["email"]
+                            })
+                        else:
+                            # Any other status, log and assume valid
+                            result = (True, {})
 
                         validation_cache[cache_key] = result
                         return result

@@ -1597,7 +1597,7 @@ class Validator(BaseValidatorNeuron):
             if current_epoch <= self._last_processed_epoch:
                 # Already processed this epoch - no need to spam logs
                 print(f"[DEBUG] Skipping epoch {current_epoch} (already processed)")
-                time.sleep(5)
+                await asyncio.sleep(5)
                 return
             
             print(f"[DEBUG] Processing epoch {current_epoch} for the FIRST TIME")
@@ -1615,7 +1615,7 @@ class Validator(BaseValidatorNeuron):
             print(f"[DEBUG] Received {len(leads) if leads else 0} leads from gateway")
             if not leads:
                 print(f"⏳ No leads assigned for epoch {current_epoch}, waiting...")
-                time.sleep(10)
+                await asyncio.sleep(10)
                 return
             
             print(f"✅ Received {len(leads)} leads from gateway")
@@ -1733,7 +1733,7 @@ class Validator(BaseValidatorNeuron):
                     # Add 6-second delay between leads (except for the last one)
                     if idx < len(leads):
                         print(f"⏳ Waiting 6 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        time.sleep(6)
+                        await asyncio.sleep(6)
                     continue
             
             # Submit hashed validation results to gateway

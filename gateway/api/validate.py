@@ -194,11 +194,11 @@ async def submit_validation(event: ValidationEvent):
     now = datetime.now(timezone.utc)
     time_diff = abs((now - event.ts).total_seconds())
     
-        if time_diff > 480:  # 8 minutes tolerance (validator validation can take 3+ minutes with API retries)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Timestamp too old or in future (diff: {time_diff:.0f}s)"
-            )
+    if time_diff > 480:  # 8 minutes tolerance (validator validation can take 3+ minutes with API retries)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Timestamp too old or in future (diff: {time_diff:.0f}s)"
+        )
     
     # ========================================
     # Step 5.1: Verify epoch is current (not past or future)

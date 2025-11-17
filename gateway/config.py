@@ -78,7 +78,7 @@ BITTENSOR_NETUID = int(os.getenv("BITTENSOR_NETUID", "71"))
 # Security Settings
 # ============================================================
 NONCE_EXPIRY_SECONDS = int(os.getenv("NONCE_EXPIRY_SECONDS", "300"))  # 5 minutes
-TIMESTAMP_TOLERANCE_SECONDS = int(os.getenv("TIMESTAMP_TOLERANCE_SECONDS", "180"))  # ±3 minutes (allows for miner retries)
+TIMESTAMP_TOLERANCE_SECONDS = int(os.getenv("TIMESTAMP_TOLERANCE_SECONDS", "600"))  # ±10 minutes (allows for international network latency + miner retries)
 PRESIGNED_URL_EXPIRY_SECONDS = int(os.getenv("PRESIGNED_URL_EXPIRY_SECONDS", "60"))  # 1 minute
 
 # ============================================================

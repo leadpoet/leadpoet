@@ -66,7 +66,9 @@ async def metagraph_warmer_task():
                 print(f"🔥 EPOCH TRANSITION DETECTED: {last_checked_epoch} → {current_epoch}")
                 print(f"{'='*80}")
                 print(f"🔥 Starting proactive metagraph fetch for epoch {current_epoch}...")
-                print(f"   (Meanwhile, requests will use epoch {last_checked_epoch} cache)")
+                print(f"   • Will attempt up to 8 times with 60s timeout per attempt")
+                print(f"   • Meanwhile, requests will use epoch {last_checked_epoch} cache")
+                print(f"   • Workflow continues even if all warming attempts fail")
                 print(f"{'='*80}\n")
                 
                 # Start warming the cache in a separate thread to avoid blocking
@@ -110,10 +112,11 @@ def _warm_cache_sync(target_epoch: int):
         
         if success:
             print(f"🔥 [Thread] ✅ Metagraph warming complete for epoch {target_epoch} ({elapsed:.1f}s)")
-            print(f"🔥 [Thread] All requests will now use epoch {target_epoch} cache")
+            print(f"🔥 [Thread] All requests will now seamlessly switch to epoch {target_epoch} cache")
         else:
-            print(f"🔥 [Thread] ⚠️  Metagraph warming failed for epoch {target_epoch} ({elapsed:.1f}s)")
-            print(f"🔥 [Thread] Requests will continue using previous epoch cache")
+            print(f"🔥 [Thread] ⚠️  All 8 warming attempts failed for epoch {target_epoch} ({elapsed:.1f}s)")
+            print(f"🔥 [Thread] Workflow continues: requests use epoch {target_epoch - 1} cache as fallback")
+            print(f"🔥 [Thread] This is safe - miners/validators can still operate normally")
             
     except Exception as e:
         print(f"🔥 [Thread] ❌ Metagraph warming error: {e}")

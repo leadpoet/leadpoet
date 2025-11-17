@@ -325,19 +325,29 @@ def warm_metagraph_cache(target_epoch: int) -> bool:
             return True
         
         # Fetch new metagraph with retry logic
-        max_retries = 5  # More retries for background warming
-        retry_delay = 5  # Longer initial delay (less urgent than user requests)
+        max_retries = 8  # Aggressive retries for background warming (user wants 8 attempts)
+        retry_delay = 10  # Initial 10s delay between attempts
+        timeout_per_attempt = 60  # 60 second timeout per attempt (user requirement)
         
         for attempt in range(max_retries):
             try:
                 print(f"🔥 Warming attempt {attempt + 1}/{max_retries} for epoch {target_epoch}...")
                 print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
+                print(f"   Timeout: {timeout_per_attempt}s per attempt")
                 
-                # Create subtensor connection
-                subtensor = bt.subtensor(network=BITTENSOR_NETWORK)
+                # Fetch metagraph with 60-second timeout enforcement
+                # We use concurrent.futures to enforce a hard timeout on the blocking call
+                from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
                 
-                # Fetch metagraph for configured subnet
-                metagraph = subtensor.metagraph(netuid=BITTENSOR_NETUID)
+                def _fetch_metagraph():
+                    """Helper function to fetch metagraph (runs in timeout-enforced thread)"""
+                    subtensor = bt.subtensor(network=BITTENSOR_NETWORK)
+                    return subtensor.metagraph(netuid=BITTENSOR_NETUID)
+                
+                # Execute with 60-second timeout
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_fetch_metagraph)
+                    metagraph = future.result(timeout=timeout_per_attempt)  # Hard 60s timeout
                 
                 # Update cache
                 _metagraph_cache = metagraph
@@ -347,15 +357,29 @@ def warm_metagraph_cache(target_epoch: int) -> bool:
                 print(f"🔥 ✅ Cache warmed for epoch {target_epoch}: {len(metagraph.hotkeys)} neurons")
                 return True
                 
+            except FuturesTimeoutError:
+                # Timeout after 60 seconds
+                if attempt < max_retries - 1:
+                    print(f"🔥 ⚠️  Warming attempt {attempt + 1}/{max_retries} timed out after {timeout_per_attempt}s")
+                    print(f"   Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 1.5, 30)  # Exponential backoff, cap at 30s
+                    continue
+                else:
+                    print(f"🔥 ❌ All {max_retries} warming attempts timed out for epoch {target_epoch}")
+                    print(f"🔥 ⚠️  Workflow will continue using epoch {target_epoch - 1} cache as fallback")
+                    return False
             except Exception as e:
+                # Other errors (network, rate limiting, etc.)
                 if attempt < max_retries - 1:
                     print(f"🔥 ⚠️  Warming attempt {attempt + 1}/{max_retries} failed: {e}")
                     print(f"   Retrying in {retry_delay}s...")
                     time.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, 60)  # Cap at 60s
+                    retry_delay = min(retry_delay * 1.5, 30)  # Exponential backoff, cap at 30s
                     continue
                 else:
-                    print(f"🔥 ❌ All warming attempts failed for epoch {target_epoch}: {e}")
+                    print(f"🔥 ❌ All {max_retries} warming attempts failed for epoch {target_epoch}: {e}")
+                    print(f"🔥 ⚠️  Workflow will continue using epoch {target_epoch - 1} cache as fallback")
                     return False
         
         return False

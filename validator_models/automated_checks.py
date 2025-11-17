@@ -1138,7 +1138,7 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
 
 async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
     """
-    Check email validity using MyEmailVerifier API
+    Check email validity using MyEmailVerifier API (with retry logic)
     
     MyEmailVerifier provides real-time email verification with:
     - Syntax validation
@@ -1147,6 +1147,9 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
     - Disposable email detection
     - Spam trap detection
     - Role account detection
+    
+    Retry logic: Up to 3 attempts with 10s wait between retries.
+    If all retries fail, lead is SKIPPED (not approved/denied).
     
     API Documentation: https://myemailverifier.com/real-time-email-verification
     """
@@ -1164,16 +1167,24 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
         print(f"   💾 Using cached MyEmailVerifier result for: {email}")
         return validation_cache[cache_key]
 
-    try:
-        async with API_SEMAPHORE:
-            async with aiohttp.ClientSession() as session:
-                # MyEmailVerifier API endpoint
-                # Correct endpoint format: https://client.myemailverifier.com/verifier/validate_single/{email}/{API_KEY}
-                url = f"https://client.myemailverifier.com/verifier/validate_single/{email}/{MYEMAILVERIFIER_API_KEY}"
-                
-                print(f"   📞 Calling MyEmailVerifier API for: {email}")
-                
-                async with session.get(url, timeout=15) as response:
+    # Retry logic: Up to 3 attempts
+    max_retries = 3
+    retry_delay = 10  # seconds
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with API_SEMAPHORE:
+                async with aiohttp.ClientSession() as session:
+                    # MyEmailVerifier API endpoint
+                    # Correct endpoint format: https://client.myemailverifier.com/verifier/validate_single/{email}/{API_KEY}
+                    url = f"https://client.myemailverifier.com/verifier/validate_single/{email}/{MYEMAILVERIFIER_API_KEY}"
+                    
+                    if attempt == 1:
+                        print(f"   📞 Calling MyEmailVerifier API for: {email}")
+                    else:
+                        print(f"   🔄 Retry {attempt}/{max_retries} for: {email}")
+                    
+                    async with session.get(url, timeout=15) as response:
                     # Check for API error responses (no credits, invalid key, etc.)
                     # These should SKIP the lead entirely (not submit to Supabase)
                     if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:
@@ -1264,24 +1275,45 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                         # Any other status, log and assume valid
                         result = (True, {})
 
-                    validation_cache[cache_key] = result
-                    return result
-
-    except EmailVerificationUnavailableError:
-        # Re-raise to propagate up to validator
-        raise
-    except asyncio.TimeoutError:
-        # Timeout - SKIP the lead (API unavailable)
-        print(f"   🚨 MyEmailVerifier API: Timeout (>15s)")
-        raise EmailVerificationUnavailableError("MyEmailVerifier API timeout")
-    except aiohttp.ClientError as e:
-        # Network error - SKIP the lead (API unavailable)
-        print(f"   🚨 MyEmailVerifier API: Network error")
-        raise EmailVerificationUnavailableError(f"MyEmailVerifier API network error: {str(e)}")
-    except Exception as e:
-        # Any other error - SKIP the lead (API unavailable)
-        print(f"   🚨 MyEmailVerifier API: Unexpected error")
-        raise EmailVerificationUnavailableError(f"MyEmailVerifier API error: {str(e)}")
+                        validation_cache[cache_key] = result
+                        return result
+        
+        except EmailVerificationUnavailableError:
+            # API infrastructure error (402, 429, etc.) - re-raise immediately, no retry
+            raise
+        
+        except asyncio.TimeoutError:
+            # Timeout - retry if attempts remaining
+            if attempt < max_retries:
+                print(f"   ⏳ API timed out. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
+                await asyncio.sleep(retry_delay)
+                continue  # Retry
+            else:
+                # All retries exhausted - SKIP the lead
+                print(f"   ❌ API timed out after {max_retries} attempts. Lead will be SKIPPED.")
+                raise EmailVerificationUnavailableError("MyEmailVerifier API timeout (all retries exhausted)")
+        
+        except aiohttp.ClientError as e:
+            # Network error - retry if attempts remaining
+            if attempt < max_retries:
+                print(f"   ⏳ Network error. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
+                await asyncio.sleep(retry_delay)
+                continue  # Retry
+            else:
+                # All retries exhausted - SKIP the lead
+                print(f"   ❌ Network error after {max_retries} attempts. Lead will be SKIPPED.")
+                raise EmailVerificationUnavailableError(f"MyEmailVerifier API network error: {str(e)}")
+        
+        except Exception as e:
+            # Unexpected error - retry if attempts remaining
+            if attempt < max_retries:
+                print(f"   ⏳ Unexpected error. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
+                await asyncio.sleep(retry_delay)
+                continue  # Retry
+            else:
+                # All retries exhausted - SKIP the lead
+                print(f"   ❌ Unexpected error after {max_retries} attempts. Lead will be SKIPPED.")
+                raise EmailVerificationUnavailableError(f"MyEmailVerifier API error: {str(e)}")
 
 # Stage 4: LinkedIn/GSE Validation
 

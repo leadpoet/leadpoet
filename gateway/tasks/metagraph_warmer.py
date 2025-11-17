@@ -39,6 +39,9 @@ async def metagraph_warmer_task():
     from gateway.utils.epoch import get_current_epoch_id
     from gateway.utils.registry import warm_metagraph_cache
     
+    # CRITICAL: Declare global to avoid UnboundLocalError when checking/modifying
+    global _warming_in_progress
+    
     last_checked_epoch = None
     
     while True:

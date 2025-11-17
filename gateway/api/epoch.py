@@ -97,10 +97,10 @@ async def get_epoch_leads(
     try:
         is_registered, role = await asyncio.wait_for(
             asyncio.to_thread(is_registered_hotkey, validator_hotkey),
-            timeout=45.0  # 45 second timeout for metagraph query (cache refresh can be slow under load)
+            timeout=90.0  # 90 second timeout for metagraph query (matches validator timeout)
         )
     except asyncio.TimeoutError:
-        print(f"❌ Metagraph query timed out after 45s for {validator_hotkey[:20]}...")
+        print(f"❌ Metagraph query timed out after 90s for {validator_hotkey[:20]}...")
         raise HTTPException(
             status_code=504,
             detail="Metagraph query timeout - please retry in a moment (cache warming)"

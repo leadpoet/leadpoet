@@ -1379,7 +1379,7 @@ class Validator(BaseValidatorNeuron):
             """
             Async main validator loop.
             
-            Uses async subtensor for all block queries (no memory leaks).
+            Uses async subtensor with block subscription for WebSocket health.
             """
             # Initialize async subtensor (single instance for entire lifecycle)
             await self.initialize_async_subtensor()
@@ -1395,6 +1395,36 @@ class Validator(BaseValidatorNeuron):
                 bt.logging.info("✅ AsyncSubtensor injected into reward and cloud_db modules")
             except Exception as e:
                 bt.logging.warning(f"Failed to inject async subtensor: {e}")
+            
+            # ════════════════════════════════════════════════════════════
+            # BLOCK SUBSCRIPTION: Keep WebSocket alive (prevents HTTP 429)
+            # ════════════════════════════════════════════════════════════
+            stop_event = asyncio.Event()
+            
+            async def block_callback(obj: dict):
+                """Callback for new blocks (keeps WebSocket alive)."""
+                if stop_event.is_set():
+                    return True  # Stop subscription
+                
+                # Just log block number (no processing needed)
+                # The subscription itself is what keeps WebSocket alive
+                try:
+                    block_number = obj["header"]["number"]
+                    bt.logging.debug(f"📦 Block #{block_number} received (WebSocket alive)")
+                except Exception as e:
+                    bt.logging.debug(f"Block callback error: {e}")
+                
+                return None  # Continue subscription
+            
+            # Start block subscription in background (keeps WebSocket alive)
+            bt.logging.info("🔔 Starting block subscription to keep WebSocket alive...")
+            subscription_task = asyncio.create_task(
+                self.async_subtensor.substrate.subscribe_block_headers(
+                    subscription_handler=block_callback,
+                    finalized_only=True
+                )
+            )
+            bt.logging.info("✅ Block subscription started (WebSocket will stay alive)")
             
             try:
                 # Keep the validator running and continuously process leads
@@ -1448,6 +1478,16 @@ class Validator(BaseValidatorNeuron):
                 # Continue running instead of crashing
                 await asyncio.sleep(10)  # Wait longer before retrying main loop
             finally:
+                # Stop block subscription
+                bt.logging.info("🛑 Stopping block subscription...")
+                stop_event.set()
+                subscription_task.cancel()
+                try:
+                    await subscription_task
+                except asyncio.CancelledError:
+                    pass
+                bt.logging.info("✅ Block subscription stopped")
+                
                 # Cleanup async subtensor on exit
                 await self.cleanup_async_subtensor()
         

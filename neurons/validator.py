@@ -1886,6 +1886,10 @@ class Validator(BaseValidatorNeuron):
         After submission, archives weights to history and clears active file.
         """
         try:
+            if self.config.neuron.disable_set_weights:
+                bt.logging.info("⏸️  Weight submission disabled (--neuron.disable_set_weights flag is set)")
+                return False
+            
             current_block = await self.get_current_block_async()
             epoch_length = 360
             current_epoch = current_block // 360

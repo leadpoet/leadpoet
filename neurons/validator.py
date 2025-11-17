@@ -1583,12 +1583,23 @@ class Validator(BaseValidatorNeuron):
                         time.sleep(6)
                     
                 except Exception as e:
+                    from validator_models.automated_checks import EmailVerificationUnavailableError
+                    
                     lead_id = lead.get('lead_id', 'unknown')
-                    print(f"❌ Error validating lead {lead_id}: {e}")
-                    import traceback
-                    print(f"[DEBUG] Traceback: {traceback.format_exc()}")
-                    print(f"[DEBUG] Lead structure: {lead}")
-                    print("")
+                    email = lead.get('lead_blob', {}).get('email', 'unknown')
+                    
+                    # Handle API timeout gracefully (no traceback)
+                    if isinstance(e, EmailVerificationUnavailableError):
+                        print(f"⏭️  Skipping lead {email} due to API timeout (after 3 retries)")
+                        print(f"   Lead ID: {lead_id[:8]}...")
+                        print("")
+                    else:
+                        # Print full traceback for unexpected errors
+                        print(f"❌ Error validating lead {lead_id}: {e}")
+                        import traceback
+                        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+                        print(f"[DEBUG] Lead structure: {lead}")
+                        print("")
                     
                     # Add 6-second delay between leads (except for the last one)
                     if idx < len(leads):

@@ -122,6 +122,10 @@ class BaseValidatorNeuron(BaseNeuron):
             bt.logging.debug("Stopped")
 
     def set_weights(self):
+        if self.config.neuron.disable_set_weights:
+            bt.logging.info("⏸️  Weight submission disabled (--neuron.disable_set_weights flag is set)")
+            return False
+        
         if np.isnan(self.scores).any():
             bt.logging.warning("Scores contain NaN values.")
         norm = np.linalg.norm(self.scores, ord=1, axis=0, keepdims=True)

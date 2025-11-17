@@ -56,7 +56,7 @@ async def fetch_full_leads_for_epoch(epoch_id: int) -> list:
     Returns:
         List of lead dictionaries with lead_id, lead_blob, lead_blob_hash, miner_hotkey
     """
-    from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
+    from gateway.utils.assignment import get_validator_set
     
     try:
         # Step 1: Query pending leads from queue (FIFO order)
@@ -76,12 +76,9 @@ async def fetch_full_leads_for_epoch(epoch_id: int) -> list:
         validator_set = await get_validator_set(epoch_id)
         print(f"   👥 Validator set: {len(validator_set)} validators")
         
-        # Step 3: Determine lead assignment
-        assigned_lead_ids = deterministic_lead_assignment(
-            lead_ids=lead_ids,
-            validator_count=len(validator_set),
-            max_leads=MAX_LEADS_PER_EPOCH
-        )
+        # Step 3: Determine lead assignment (simple FIFO - first N leads)
+        # All validators get the same leads, so just take first MAX_LEADS_PER_EPOCH
+        assigned_lead_ids = lead_ids[:MAX_LEADS_PER_EPOCH]
         print(f"   📋 Assigned {len(assigned_lead_ids)} leads for epoch {epoch_id}")
         
         # Step 4: Fetch full lead data

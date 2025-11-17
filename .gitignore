@@ -19,6 +19,9 @@ report.json
 # Reputation scoring (keep local, do not commit)
 Rep_Score/
 
+# Patrol reference code (from tao.com - separate repo)
+patrol/
+
 # Regulatory attestation files (contain wallet addresses)
 data/regulatory/miner_attestation.json
 # macOS

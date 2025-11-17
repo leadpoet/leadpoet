@@ -28,7 +28,7 @@ from Leadpoet.utils.utils_lead_extraction import (
     get_field
 )
 
-MAX_REP_SCORE = 50
+MAX_REP_SCORE = 38  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) = 38 (USPTO removed)
 
 # Custom exception for API infrastructure failures (should skip lead, not submit)
 class EmailVerificationUnavailableError(Exception):
@@ -1681,89 +1681,27 @@ async def check_wayback_machine(lead: dict) -> Tuple[float, dict]:
     except Exception as e:
         return 0, {"checked": False, "reason": f"Wayback check error: {str(e)}"}
 
+# DEPRECATED: USPTO check removed (API unreliable, scoring adjusted)
+# async def check_uspto_trademarks(lead: dict) -> Tuple[float, dict]:
+#     """
+#     Rep Score: Check USPTO for company trademarks.
+#     
+#     DEPRECATED: Removed due to USPTO API reliability issues.
+#     Points redistributed to other checks (Wayback: 6→8, SEC: 12→14, WHOIS/DNSBL: 10→12)
+#     """
+#     return 0, {"checked": False, "reason": "USPTO check deprecated"}
+
 async def check_uspto_trademarks(lead: dict) -> Tuple[float, dict]:
     """
-    Rep Score: Check USPTO for company trademarks.
+    Rep Score: USPTO check (DISABLED).
     
-    Returns score (0-12) based on:
-    - Number of registered trademarks
-    - Age of trademarks
-    - Active status
+    This check has been disabled due to API reliability issues.
+    Always returns 0 points.
     
-    This is a SOFT check - always passes, appends score.
-
-    Args:
-        lead: Lead data with company
-
     Returns:
-        (score, metadata)
+        (0, metadata indicating check is disabled)
     """
-    try:
-        company = get_company(lead)
-        if not company:
-            return 0, {"checked": False, "reason": "No company provided"}
-        
-        # USPTO Trademark Search API
-        # Note: This is a simplified example - USPTO API structure may vary
-        headers = {"API_KEY": os.getenv("USPTO_API_KEY", "")}
-        url = "https://developer.uspto.gov/ibd-api/v1/application/grants"
-        params = {
-            "searchText": company,
-            "rows": 100
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, headers=headers, timeout=15) as response:
-                if response.status != 200:
-                    return 0, {"checked": False, "reason": f"USPTO API error: {response.status}"}
-                
-                data = await response.json()
-                results = data.get("response", {}).get("docs", [])
-                
-                if not results:
-                    return 0, {"checked": True, "trademarks": 0, "reason": "No trademarks found"}
-                
-                # Count active trademarks
-                active_count = sum(1 for tm in results if tm.get("status") == "LIVE")
-                total_count = len(results)
-                
-                # Calculate age of oldest trademark
-                grant_dates = [tm.get("grantDate") for tm in results if tm.get("grantDate")]
-                oldest_year = min([int(d[:4]) for d in grant_dates]) if grant_dates else datetime.now().year
-                age_years = datetime.now().year - oldest_year
-                
-                # Scoring logic (UPDATED: max 12 points for USPTO):
-                # - 1-2 trademarks: 3.6 points
-                # - 3-5 trademarks: 6 points
-                # - 6-10 trademarks: 8.4 points
-                # - 10+ trademarks: 10.8-12 points
-                # - Bonus: +1.2 for age > 10 years
-                
-                if total_count <= 2:
-                    score = min(3.6, total_count * 1.8)
-                elif total_count <= 5:
-                    score = 6
-                elif total_count <= 10:
-                    score = 8.4
-                else:
-                    score = 10.8 + min(1.2, (total_count - 10) * 0.12)
-                
-                # Age bonus
-                if age_years >= 10:
-                    score = min(12, score + 1.2)
-                
-                return score, {
-                    "checked": True,
-                    "total_trademarks": total_count,
-                    "active_trademarks": active_count,
-                    "age_years": age_years,
-                    "score": score
-                }
-    
-    except asyncio.TimeoutError:
-        return 0, {"checked": False, "reason": "USPTO API timeout"}
-    except Exception as e:
-        return 0, {"checked": False, "reason": f"USPTO check error: {str(e)}"}
+    return 0, {"checked": False, "reason": "USPTO check disabled"}
 
 async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
     """
@@ -2731,26 +2669,25 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
 
     # ========================================================================
     # Rep Score: Soft Reputation Checks (SOFT)
-    # - Wayback Machine (max 6 points), USPTO (max 12 points), SEC (max 12 points), 
+    # - Wayback Machine (max 6 points), SEC (max 12 points), 
     #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points)
     # - Always passes, appends scores to lead
-    # - Total: 0-50 points
+    # - Total: 0-38 points (USPTO removed)
     # ========================================================================
     print(f"📊 Rep Score: Running soft checks for {email} @ {company}")
     
     wayback_score, wayback_data = await check_wayback_machine(lead)
-    uspto_score, uspto_data = await check_uspto_trademarks(lead)
+    # uspto_score, uspto_data = await check_uspto_trademarks(lead)  # DISABLED
     sec_score, sec_data = await check_sec_edgar(lead)
     whois_dnsbl_score, whois_dnsbl_data = await check_whois_dnsbl_reputation(lead)
     gdelt_score, gdelt_data = await check_gdelt_mentions(lead)
     
-    total_rep_score = wayback_score + uspto_score + sec_score + whois_dnsbl_score + gdelt_score
+    total_rep_score = wayback_score + sec_score + whois_dnsbl_score + gdelt_score  # USPTO removed
     
     # Append to lead data
     lead["rep_score"] = total_rep_score
     lead["rep_score_details"] = {
         "wayback": wayback_data,
-        "uspto": uspto_data,
         "sec": sec_data,
         "whois_dnsbl": whois_dnsbl_data,
         "gdelt": gdelt_data
@@ -2762,14 +2699,13 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         "max_score": MAX_REP_SCORE,
         "breakdown": {
             "wayback_machine": wayback_score,       # 0-6 points
-            "uspto_trademarks": uspto_score,        # 0-12 points
             "sec_edgar": sec_score,                 # 0-12 points
             "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
             "gdelt": gdelt_score                    # 0-10 points
         }
     }
     
-    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, USPTO: {uspto_score:.1f}/12, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10)")
+    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10)")
     
     print(f"🎉 All stages passed for {email} @ {company}")
 

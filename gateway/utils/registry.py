@@ -28,34 +28,59 @@ _cache_lock = threading.Lock()  # Prevent simultaneous fetches
 # Epoch duration in seconds (360 blocks × 12 seconds/block = 4320 seconds = 72 minutes)
 EPOCH_DURATION_SECONDS = 360 * 12
 
+# Async subtensor instance (injected at gateway startup)
+_async_subtensor = None
 
-def get_metagraph() -> bt.metagraph:
+
+def inject_async_subtensor(async_subtensor):
     """
-    Get Bittensor metagraph (cached per epoch).
+    Inject async subtensor instance at gateway startup.
+    
+    Called from main.py lifespan to provide shared AsyncSubtensor instance.
+    This eliminates memory leaks and HTTP 429 errors from repeated instance creation.
+    
+    Args:
+        async_subtensor: AsyncSubtensor instance from main.py lifespan
+    
+    Example:
+        # In main.py lifespan:
+        async with bt.AsyncSubtensor(network="finney") as async_sub:
+            registry_utils.inject_async_subtensor(async_sub)
+    """
+    global _async_subtensor
+    _async_subtensor = async_subtensor
+    print(f"✅ AsyncSubtensor injected into registry utils (network: {_async_subtensor.network})")
+
+
+async def get_metagraph_async() -> bt.metagraph:
+    """
+    Get Bittensor metagraph using injected async subtensor (ASYNC VERSION).
+    
+    Use this from async contexts (FastAPI endpoints, background tasks).
+    For sync contexts, use get_metagraph() wrapper.
     
     The metagraph is cached for the duration of the current epoch and refreshed
     when a new epoch begins. This ensures:
     1. Multiple validators requesting leads in the same epoch use the same metagraph
     2. New registrations are picked up at epoch boundaries
     3. Thread-safe access prevents simultaneous fetches
+    4. Single async subtensor (NO new instances created)
     
     Returns:
         Metagraph object for the configured subnet
     
     Raises:
-        Exception: If unable to connect to subtensor or fetch metagraph
-    
-    Example:
-        >>> metagraph = get_metagraph()
-        >>> print(f"Subnet has {len(metagraph.hotkeys)} neurons")
-    
-    Notes:
-        - Cache is invalidated when epoch changes (every 360 blocks = 72 minutes)
-        - Thread lock prevents multiple simultaneous fetches during epoch transition
-        - Includes active status and validator_permit for each neuron
+        Exception: If async_subtensor not injected or unable to fetch metagraph
     """
     global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp
     import time
+    import asyncio
+    
+    if _async_subtensor is None:
+        raise Exception(
+            "AsyncSubtensor not injected - call inject_async_subtensor() first. "
+            "This should be done in main.py lifespan."
+        )
     
     # Thread-safe cache check and update
     with _cache_lock:
@@ -74,8 +99,8 @@ def get_metagraph() -> bt.metagraph:
         # This only happens:
         # 1. On first request (no cache)
         # 2. After 72+ minutes have passed (potential epoch change)
-        from gateway.utils.epoch import get_current_epoch_id
-        current_epoch = get_current_epoch_id()
+        from gateway.utils.epoch import get_current_epoch_id_async
+        current_epoch = await get_current_epoch_id_async()
         
         # Check if we already have a cached metagraph for this epoch
         if _metagraph_cache is not None and _cache_epoch == current_epoch:
@@ -84,29 +109,7 @@ def get_metagraph() -> bt.metagraph:
             print(f"✅ Using cached metagraph for epoch {current_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - refreshed timestamp")
             return _metagraph_cache
         
-        # Epoch changed: Check if background warmer is already fetching
-        if _metagraph_cache is not None and _cache_epoch != current_epoch:
-            # Import warming flag
-            from gateway.tasks.metagraph_warmer import _warming_in_progress, _warming_lock
-            
-            with _warming_lock:
-                if _warming_in_progress:
-                    # Background warmer is fetching new epoch - use old cache gracefully
-                    print(f"🔥 GRACEFUL DEGRADATION: Epoch changed ({_cache_epoch} → {current_epoch})")
-                    print(f"🔥 Background warmer is fetching epoch {current_epoch} metagraph...")
-                    print(f"🔥 Using epoch {_cache_epoch} cache temporarily ({len(_metagraph_cache.hotkeys)} neurons)")
-                    print(f"🔥 This ensures zero-downtime during epoch transitions")
-                    
-                    # Update timestamp so we don't re-check for a while
-                    _cache_epoch_timestamp = time.time()
-                    
-                    return _metagraph_cache
-        
         # Cache expired (epoch changed) or not set - fetch new metagraph
-        # This path is only hit if:
-        # 1. No cache exists (first request ever)
-        # 2. Epoch changed but background warmer hasn't started yet (rare race condition)
-        # 3. Background warmer failed and we need to fetch synchronously
         max_retries = 3
         retry_delay = 2  # seconds
         last_error = None
@@ -121,11 +124,10 @@ def get_metagraph() -> bt.metagraph:
                 
                 print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
                 
-                # Create subtensor connection
-                subtensor = bt.subtensor(network=BITTENSOR_NETWORK)
-                
-                # Fetch metagraph for configured subnet
-                metagraph = subtensor.metagraph(netuid=BITTENSOR_NETUID)
+                # ════════════════════════════════════════════════════════════
+                # CRITICAL: Use injected async subtensor (NO new instance!)
+                # ════════════════════════════════════════════════════════════
+                metagraph = await _async_subtensor.metagraph(netuid=BITTENSOR_NETUID)
                 
                 # Update cache
                 _metagraph_cache = metagraph
@@ -141,7 +143,7 @@ def get_metagraph() -> bt.metagraph:
                 if attempt < max_retries - 1:
                     print(f"⚠️  Metagraph fetch attempt {attempt + 1}/{max_retries} failed: {e}")
                     print(f"   Retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
+                    await asyncio.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
                     continue
                 # Last attempt failed - fall through to error handling below
@@ -155,8 +157,6 @@ def get_metagraph() -> bt.metagraph:
             print(f"⚠️  This may not include validators who registered in epoch {current_epoch}")
             
             # CRITICAL: Update timestamp to prevent retry spam on every request
-            # This allows the stale cache to be used for up to 72 minutes before
-            # attempting another fetch, rather than retrying on every single request
             _cache_epoch_timestamp = time.time()
             print(f"⚠️  Fallback cache will be used for next 72 minutes (prevents retry spam)")
             
@@ -166,9 +166,48 @@ def get_metagraph() -> bt.metagraph:
         raise Exception(f"Failed to fetch metagraph and no cache available: {last_error}")
 
 
-def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
+def get_metagraph() -> bt.metagraph:
     """
-    Check if hotkey is registered on the subnet.
+    Get Bittensor metagraph (SYNC WRAPPER - prefer async version).
+    
+    DEPRECATED: This creates a temporary event loop. Use get_metagraph_async() from async contexts.
+    
+    Returns:
+        Metagraph object for the configured subnet
+    
+    Raises:
+        RuntimeError: If called from async context (use get_metagraph_async instead)
+        Exception: If unable to fetch metagraph
+    
+    Example:
+        >>> metagraph = get_metagraph()
+        >>> print(f"Subnet has {len(metagraph.hotkeys)} neurons")
+    """
+    import asyncio
+    
+    # Check if we're in an async context
+    try:
+        loop = asyncio.get_running_loop()
+        # We're in async context - this is an error
+        raise RuntimeError(
+            "Called get_metagraph() from async context. "
+            "Use 'await get_metagraph_async()' instead. "
+            "This is more efficient and doesn't create a new event loop."
+        )
+    except RuntimeError as e:
+        if "no running event loop" in str(e).lower():
+            # We're in sync context - create temp loop and run async version
+            return asyncio.run(get_metagraph_async())
+        else:
+            # Error was from our check above - re-raise it
+            raise
+
+
+async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check if hotkey is registered on the subnet (ASYNC VERSION).
+    
+    Use this from async contexts (FastAPI endpoints). For sync, use is_registered_hotkey() wrapper.
     
     Args:
         hotkey: SS58 address of the actor
@@ -176,19 +215,62 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
     Returns:
         (is_registered, role) where:
         - is_registered: True if hotkey exists in metagraph
-        - role: "validator" if stake > 0, "miner" if stake == 0, None if not registered
+        - role: "validator" if active=True AND permit=True, "miner" otherwise
+    """
+    try:
+        # Get metagraph using async version (cached, no new instance)
+        metagraph = await get_metagraph_async()
+        
+        # Check if hotkey exists in metagraph
+        if hotkey not in metagraph.hotkeys:
+            print(f"🔍 Registry check: {hotkey[:20]}... NOT FOUND in metagraph")
+            return False, None
+        
+        # Get UID for this hotkey
+        uid = metagraph.hotkeys.index(hotkey)
+        
+        # Get neuron attributes
+        stake = metagraph.S[uid]
+        active = bool(metagraph.active[uid])
+        validator_permit = bool(metagraph.validator_permit[uid])
+        
+        print(f"🔍 Registry check for {hotkey[:20]}...")
+        print(f"   UID: {uid}")
+        print(f"   Stake: {stake:.6f} τ")
+        print(f"   Active: {active}")
+        print(f"   Validator Permit: {validator_permit}")
+        
+        # Validators must have BOTH active status AND validator permit
+        if active and validator_permit:
+            role = "validator"
+            print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
+        else:
+            role = "miner"
+            print(f"   ✅ Role: MINER (active={active}, permit={validator_permit})")
+        
+        return True, role
+    
+    except Exception as e:
+        print(f"❌ Registry check error for {hotkey[:20]}...: {e}")
+        return False, None
+
+
+def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check if hotkey is registered on the subnet (SYNC WRAPPER).
+    
+    DEPRECATED: Use is_registered_hotkey_async() from async contexts.
+    
+    Args:
+        hotkey: SS58 address of the actor
+    
+    Returns:
+        (is_registered, role)
     
     Example:
         >>> is_registered, role = is_registered_hotkey("5GNJqR7T...")
         >>> if is_registered:
         >>>     print(f"Hotkey is a {role}")
-        >>> else:
-        >>>     print("Hotkey not registered")
-    
-    Notes:
-        - Validators are identified by: active=True AND validator_permit=True
-        - Miners: Either active=False OR validator_permit=False (can have stake > 0)
-        - Uses cached metagraph (refreshed every 60 seconds)
     """
     try:
         # Get metagraph (cached)
@@ -230,12 +312,39 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         return False, None
 
 
-def get_validator_count() -> int:
+async def get_validator_count_async() -> int:
     """
-    Get the number of registered validators on the subnet.
+    Get the number of registered validators (ASYNC VERSION).
+    
+    Use this from async contexts. For sync, use get_validator_count() wrapper.
     
     Returns:
         Number of validators (neurons with active=True AND validator_permit=True)
+    """
+    try:
+        metagraph = await get_metagraph_async()
+        
+        # Count neurons with active status AND validator permit
+        validator_count = sum(
+            1 for i in range(len(metagraph.hotkeys))
+            if metagraph.active[i] and metagraph.validator_permit[i]
+        )
+        
+        return validator_count
+    
+    except Exception as e:
+        print(f"❌ Error getting validator count: {e}")
+        return 0
+
+
+def get_validator_count() -> int:
+    """
+    Get the number of registered validators (SYNC WRAPPER).
+    
+    DEPRECATED: Use get_validator_count_async() from async contexts.
+    
+    Returns:
+        Number of validators
     
     Example:
         >>> count = get_validator_count()
@@ -257,12 +366,39 @@ def get_validator_count() -> int:
         return 0
 
 
-def get_miner_count() -> int:
+async def get_miner_count_async() -> int:
     """
-    Get the number of registered miners on the subnet.
+    Get the number of registered miners (ASYNC VERSION).
+    
+    Use this from async contexts. For sync, use get_miner_count() wrapper.
     
     Returns:
         Number of miners (neurons without active status OR without validator permit)
+    """
+    try:
+        metagraph = await get_metagraph_async()
+        
+        # Count neurons that are NOT validators
+        miner_count = sum(
+            1 for i in range(len(metagraph.hotkeys))
+            if not (metagraph.active[i] and metagraph.validator_permit[i])
+        )
+        
+        return miner_count
+    
+    except Exception as e:
+        print(f"❌ Error getting miner count: {e}")
+        return 0
+
+
+def get_miner_count() -> int:
+    """
+    Get the number of registered miners (SYNC WRAPPER).
+    
+    DEPRECATED: Use get_miner_count_async() from async contexts.
+    
+    Returns:
+        Number of miners
     
     Example:
         >>> count = get_miner_count()
@@ -421,20 +557,60 @@ def print_registry_stats():
         print(f"❌ Error printing registry stats: {e}")
 
 
-def get_validator_weights(validator_hotkey: str) -> tuple[float, float]:
+async def get_validator_weights_async(validator_hotkey: str) -> tuple[float, float]:
     """
-    Get validator's stake and v_trust from metagraph.
+    Get validator's stake and v_trust from metagraph (ASYNC VERSION).
+    
+    Use this from async contexts. For sync, use get_validator_weights() wrapper.
     
     This is called during COMMIT phase to snapshot validator weights.
-    Critical: Must capture at COMMIT time, not REVEAL time, to prevent gaming
-    (validator could unstake after seeing other decisions but before revealing).
+    Critical: Must capture at COMMIT time, not REVEAL time, to prevent gaming.
     
     Args:
         validator_hotkey: Validator's SS58 address
     
     Returns:
         (stake, v_trust): Tuple of (TAO stake, validator trust score)
-        Returns (0.0, 0.0) if validator not found or not active
+        Returns (0.0, 0.0) if validator not found
+    """
+    try:
+        metagraph = await get_metagraph_async()
+        
+        # Find validator's UID
+        if validator_hotkey not in metagraph.hotkeys:
+            print(f"⚠️  Validator {validator_hotkey[:20]}... not found in metagraph")
+            return (0.0, 0.0)
+        
+        uid = metagraph.hotkeys.index(validator_hotkey)
+        
+        # Get stake (TAO amount)
+        stake = float(metagraph.S[uid])
+        
+        # Get v_trust (validator trust/reputation)
+        v_trust = float(metagraph.validator_trust[uid]) if hasattr(metagraph, 'validator_trust') else 0.0
+        
+        print(f"📊 Validator weights for {validator_hotkey[:20]}...")
+        print(f"   Stake: {stake:.6f} τ")
+        print(f"   V-Trust: {v_trust:.6f}")
+        
+        return (stake, v_trust)
+    
+    except Exception as e:
+        print(f"❌ Error fetching validator weights: {e}")
+        return (0.0, 0.0)
+
+
+def get_validator_weights(validator_hotkey: str) -> tuple[float, float]:
+    """
+    Get validator's stake and v_trust from metagraph (SYNC WRAPPER).
+    
+    DEPRECATED: Use get_validator_weights_async() from async contexts.
+    
+    Args:
+        validator_hotkey: Validator's SS58 address
+    
+    Returns:
+        (stake, v_trust): Tuple of (TAO stake, validator trust score)
     
     Example:
         >>> stake, v_trust = get_validator_weights("5FNVgRnrx...")

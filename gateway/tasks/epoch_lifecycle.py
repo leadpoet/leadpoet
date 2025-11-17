@@ -73,15 +73,13 @@ async def fetch_full_leads_for_epoch(epoch_id: int) -> list:
         print(f"   📊 Found {len(lead_ids)} pending leads in queue")
         
         # Step 2: Get validator set
-        validator_set = await asyncio.to_thread(
-            lambda: get_validator_set(epoch_id)
-        )
-        print(f"   👥 Validator set: {len(validator_set['all'])} registered, {len(validator_set['validators'])} active")
+        validator_set = await get_validator_set(epoch_id)
+        print(f"   👥 Validator set: {len(validator_set)} validators")
         
         # Step 3: Determine lead assignment
         assigned_lead_ids = deterministic_lead_assignment(
             lead_ids=lead_ids,
-            validator_count=len(validator_set['validators']),
+            validator_count=len(validator_set),
             max_leads=MAX_LEADS_PER_EPOCH
         )
         print(f"   📋 Assigned {len(assigned_lead_ids)} leads for epoch {epoch_id}")
@@ -585,7 +583,7 @@ async def compute_epoch_consensus(epoch_id: int):
     try:
         # Import here to avoid circular dependency
         from gateway.utils.consensus import compute_weighted_consensus
-        from gateway.utils.registry import get_metagraph
+        from gateway.utils.registry import get_metagraph_async
         
         print(f"   📊 Starting consensus for epoch {epoch_id}...")
         
@@ -596,7 +594,7 @@ async def compute_epoch_consensus(epoch_id: int):
         
         try:
             # Get metagraph to fetch v_trust and stake for all validators
-            metagraph = get_metagraph()
+            metagraph = await get_metagraph_async()
             
             # Query all evidence for this epoch that has been revealed - RUN IN THREAD
             evidence_result = await asyncio.to_thread(

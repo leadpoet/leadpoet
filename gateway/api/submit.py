@@ -38,7 +38,7 @@ from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 # Import utilities
 from gateway.utils.signature import verify_wallet_signature, construct_signed_message, compute_payload_hash
-from gateway.utils.registry import is_registered_hotkey
+from gateway.utils.registry import is_registered_hotkey_async  # Use async version
 from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
 from gateway.utils.storage import verify_storage_proof
 from gateway.utils.rate_limiter import MAX_SUBMISSIONS_PER_DAY, MAX_REJECTIONS_PER_DAY
@@ -228,7 +228,7 @@ async def submit_lead(event: SubmitLeadEvent):
     import asyncio
     try:
         is_registered, role = await asyncio.wait_for(
-            asyncio.to_thread(is_registered_hotkey, event.actor_hotkey),
+            is_registered_hotkey_async(event.actor_hotkey),  # Direct async call (no thread wrapper)
             timeout=45.0  # 45 second timeout for metagraph query (cache refresh can be slow under load)
         )
     except asyncio.TimeoutError:

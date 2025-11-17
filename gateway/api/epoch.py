@@ -18,7 +18,7 @@ from datetime import datetime
 from gateway.utils.epoch import get_current_epoch_id, is_epoch_active, get_epoch_info
 from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
 from gateway.utils.signature import verify_wallet_signature
-from gateway.utils.registry import is_registered_hotkey
+from gateway.utils.registry import is_registered_hotkey_async  # Use async version
 from gateway.utils.leads_cache import get_cached_leads  # Import cache for instant lead distribution
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 from supabase import create_client
@@ -93,11 +93,11 @@ async def get_epoch_leads(
             detail="Invalid signature"
         )
     
-    # CRITICAL: Must run in thread to avoid blocking event loop during metagraph fetch
+    # Use async registry check (direct call, no thread needed - uses injected AsyncSubtensor)
     import asyncio
     try:
         is_registered, role = await asyncio.wait_for(
-            asyncio.to_thread(is_registered_hotkey, validator_hotkey),
+            is_registered_hotkey_async(validator_hotkey),  # Direct async call (no thread wrapper)
             timeout=180.0  # 180 second timeout for metagraph query (testnet can be slow, allows for retries)
         )
     except asyncio.TimeoutError:
@@ -152,8 +152,8 @@ async def get_epoch_leads(
         
         # Get validator set for response metadata
         try:
-            validator_set = get_validator_set(epoch_id)
-            validator_count = len(validator_set['all']) if validator_set else 0
+            validator_set = await get_validator_set(epoch_id)
+            validator_count = len(validator_set) if validator_set else 0
         except:
             validator_count = 0
         
@@ -226,7 +226,7 @@ async def get_epoch_leads(
     
     # Step 5: Get validator set
     try:
-        validator_set = get_validator_set(epoch_id)
+        validator_set = await get_validator_set(epoch_id)
         
         if not validator_set:
             raise HTTPException(

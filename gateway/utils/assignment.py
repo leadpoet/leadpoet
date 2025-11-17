@@ -123,12 +123,11 @@ def deterministic_lead_assignment(
     return assigned_leads
 
 
-def get_validator_set(epoch_id: int) -> List[str]:
+async def get_validator_set(epoch_id: int) -> List[str]:
     """
-    Get list of eligible validators for given epoch.
+    Get list of eligible validators for given epoch (ASYNC VERSION).
     
-    Queries Bittensor metagraph to find all registered validators
-    (nodes with non-zero stake).
+    Queries Bittensor metagraph to find all registered validators.
     
     Args:
         epoch_id: Epoch number (for logging/debugging)
@@ -137,21 +136,20 @@ def get_validator_set(epoch_id: int) -> List[str]:
         List of validator hotkeys (SS58 addresses)
     
     Example:
-        >>> validators = get_validator_set(100)
+        >>> validators = await get_validator_set(100)
         >>> validators
         ['5GNJqR7T...', '5FHneW46...', '5EPCUjPx...']
     
     Notes:
-        - Validator = node with stake > 0
-        - Miner = node with stake = 0
-        - Uses cached metagraph (1-minute TTL)
+        - Validator = active=True AND validator_permit=True
+        - Uses cached metagraph (epoch-based)
         - Returns empty list if metagraph unavailable
     """
     try:
-        # Use the registry utility's cached metagraph
-        from gateway.utils.registry import get_metagraph
+        # Use the registry utility's cached metagraph (async version)
+        from gateway.utils.registry import get_metagraph_async
         
-        metagraph = get_metagraph()
+        metagraph = await get_metagraph_async()
         
         # Filter validators (active + validator_permit)
         validators = []

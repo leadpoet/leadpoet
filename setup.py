@@ -48,7 +48,7 @@ requirements = [
     # Data processing and ML
     "numpy>=1.24.0",
     "pandas>=2.0.0",
-    "torch>=2.0.0",
+    "torch[cpu]>=2.0.0",
     "torch_geometric>=2.4.0",
     "pygod>=1.1.0",
     

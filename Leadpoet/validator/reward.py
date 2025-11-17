@@ -202,6 +202,13 @@ def _background_epoch_monitor():
     try:
         while _epoch_monitor_running:
             try:
+                # Check if async_subtensor is injected yet
+                if _async_subtensor is None:
+                    # Not injected yet - validator still starting up
+                    # Wait and retry (this happens during first 1-2 seconds of startup)
+                    time.sleep(5)
+                    continue
+                
                 # Use async call via run_until_complete
                 current_block = loop.run_until_complete(_get_current_block_async())
                 epoch_ended = _is_epoch_ended(current_block)

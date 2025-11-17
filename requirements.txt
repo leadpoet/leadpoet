@@ -83,7 +83,7 @@ fuzzywuzzy>=0.18.0
 
 # Core dependencies
 httpx>=0.27.0
-openrouter>=1.0.0
+openrouter>=0.0.16
 firecrawl>=2.16.0
 openai>=1.0.0
 

@@ -42,13 +42,16 @@ from supabase import create_client, Client
 from gateway.api import epoch, validate, reveal, manifest, submit, attest
 
 # Import background tasks
-from gateway.tasks.epoch_lifecycle import epoch_lifecycle_task
 from gateway.tasks.reveal_collector import reveal_collector_task
 from gateway.tasks.checkpoints import checkpoint_task
 from gateway.tasks.anchor import daily_anchor_task
 from gateway.tasks.mirror_monitor import mirror_integrity_task
 from gateway.tasks.hourly_batch import start_hourly_batch_task
-from gateway.tasks.metagraph_warmer import metagraph_warmer_task
+
+# Import new event-driven monitors (replace polling tasks)
+from gateway.tasks.epoch_monitor import EpochMonitor
+from gateway.tasks.metagraph_monitor import MetagraphMonitor
+from gateway.utils.block_publisher import ChainBlockPublisher
 
 # Create Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -62,7 +65,12 @@ async def lifespan(app: FastAPI):
     """
     Lifespan context manager for FastAPI app.
     
-    Initializes MinIO bucket and starts background tasks on startup.
+    ASYNC ARCHITECTURE:
+    - Creates single AsyncSubtensor instance for entire gateway lifecycle
+    - Subscribes to block notifications (push-based, not polling)
+    - Event-driven epoch management (no background polling loops)
+    - Zero memory leaks (async context manager handles cleanup)
+    - Zero HTTP 429 errors (single WebSocket stays alive)
     """
     # Initialize MinIO bucket (must happen before background tasks)
     print("\n" + "="*80)
@@ -98,57 +106,167 @@ async def lifespan(app: FastAPI):
         print("   Gateway will continue but cannot sign receipts")
     print("="*80 + "\n")
     
+    # ════════════════════════════════════════════════════════════════
+    # ASYNC SUBTENSOR: Create single instance for entire lifecycle
+    # ════════════════════════════════════════════════════════════════
+    from gateway.config import BITTENSOR_NETWORK
+    import bittensor as bt
+    
     print("="*80)
-    print("🚀 STARTING BACKGROUND TASKS")
+    print("🔗 INITIALIZING ASYNC SUBTENSOR")
     print("="*80)
-    
-    # Start all background tasks
-    epoch_task = asyncio.create_task(epoch_lifecycle_task())
-    print("✅ Epoch lifecycle task started")
-    
-    reveal_task = asyncio.create_task(reveal_collector_task())
-    print("✅ Reveal collector task started")
-    
-    checkpoint_task_handle = asyncio.create_task(checkpoint_task())
-    print("✅ Checkpoint task started")
-    
-    anchor_task = asyncio.create_task(daily_anchor_task())
-    print("✅ Anchor task started")
-    
-    mirror_task = asyncio.create_task(mirror_integrity_task())
-    print("✅ Mirror monitor task started")
-    
-    hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
-    print("✅ Hourly Arweave batch task started")
-    
-    # Start rate limiter cleanup task
-    from gateway.utils.rate_limiter import rate_limiter_cleanup_task
-    rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
-    print("✅ Rate limiter cleanup task started")
-    
-    # Start metagraph warmer task (proactive cache warming at epoch boundaries)
-    metagraph_warmer_task_handle = asyncio.create_task(metagraph_warmer_task())
-    print("✅ Metagraph warmer task started")
-    
+    print(f"   Network: {BITTENSOR_NETWORK}")
+    print(f"   Architecture: Single WebSocket for entire lifecycle")
+    print(f"   Benefits: Zero memory leaks, zero HTTP 429 errors")
     print("="*80 + "\n")
     
-    # Yield control back to FastAPI (app runs here)
-    yield
-    
-    # Cleanup on shutdown (cancel all background tasks)
-    print("\n🛑 Shutting down background tasks...")
-    tasks = [epoch_task, reveal_task, checkpoint_task_handle, anchor_task, mirror_task, hourly_batch_task_handle, rate_limiter_task, metagraph_warmer_task_handle]
-    for task in tasks:
-        task.cancel()
-    
-    # Wait for all tasks to finish
-    for task in tasks:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    
-    print("✅ Background tasks stopped\n")
+    # Create async subtensor with context manager (auto-cleanup on exit)
+    async with bt.AsyncSubtensor(network=BITTENSOR_NETWORK) as async_subtensor:
+        print("✅ AsyncSubtensor created (WebSocket active)")
+        print(f"   Endpoint: {async_subtensor.chain_endpoint}")
+        print("")
+        
+        # ════════════════════════════════════════════════════════════════
+        # BLOCK PUBLISHER: Subscribe to chain blocks (push-based)
+        # ════════════════════════════════════════════════════════════════
+        print("="*80)
+        print("🔔 INITIALIZING BLOCK SUBSCRIPTION")
+        print("="*80)
+        
+        stop_event = asyncio.Event()
+        block_publisher = ChainBlockPublisher(
+            substrate=async_subtensor.substrate,  # Underlying substrate interface
+            stop_event=stop_event
+        )
+        print("✅ ChainBlockPublisher created")
+        
+        # Create epoch monitor (replaces epoch_lifecycle_task polling loop)
+        epoch_monitor = EpochMonitor()
+        block_publisher.add_subscriber(epoch_monitor)
+        print("✅ EpochMonitor registered (replaces epoch_lifecycle polling)")
+        
+        # Create metagraph monitor (replaces metagraph_warmer_task polling loop)
+        metagraph_monitor = MetagraphMonitor(async_subtensor)
+        block_publisher.add_subscriber(metagraph_monitor)
+        print("✅ MetagraphMonitor registered (replaces metagraph_warmer polling)")
+        
+        print("="*80 + "\n")
+        
+        # ════════════════════════════════════════════════════════════════
+        # DEPENDENCY INJECTION: Inject async_subtensor into modules
+        # ════════════════════════════════════════════════════════════════
+        print("="*80)
+        print("💉 INJECTING ASYNC SUBTENSOR INTO MODULES")
+        print("="*80)
+        
+        from gateway.utils import epoch as epoch_utils
+        from gateway.utils import registry as registry_utils
+        
+        epoch_utils.inject_async_subtensor(async_subtensor)
+        print("✅ Injected into gateway.utils.epoch")
+        
+        registry_utils.inject_async_subtensor(async_subtensor)
+        print("✅ Injected into gateway.utils.registry")
+        
+        print("="*80 + "\n")
+        
+        # ════════════════════════════════════════════════════════════════
+        # APP STATE: Store for request handlers
+        # ════════════════════════════════════════════════════════════════
+        app.state.async_subtensor = async_subtensor
+        app.state.block_publisher = block_publisher
+        app.state.stop_event = stop_event
+        print("✅ Async subtensor stored in app.state")
+        print("")
+        
+        # ════════════════════════════════════════════════════════════════
+        # BACKGROUND TASKS: Start services
+        # ════════════════════════════════════════════════════════════════
+        print("="*80)
+        print("🚀 STARTING BACKGROUND TASKS")
+        print("="*80)
+        
+        # Start block subscription (keeps WebSocket alive, triggers monitors)
+        subscription_task = asyncio.create_task(block_publisher.start())
+        print("✅ Block subscription started (push-based, replaces polling)")
+        
+        # Start other background tasks (existing services)
+        reveal_task = asyncio.create_task(reveal_collector_task())
+        print("✅ Reveal collector task started")
+        
+        checkpoint_task_handle = asyncio.create_task(checkpoint_task())
+        print("✅ Checkpoint task started")
+        
+        anchor_task = asyncio.create_task(daily_anchor_task())
+        print("✅ Anchor task started")
+        
+        mirror_task = asyncio.create_task(mirror_integrity_task())
+        print("✅ Mirror monitor task started")
+        
+        hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
+        print("✅ Hourly Arweave batch task started")
+        
+        # Start rate limiter cleanup task
+        from gateway.utils.rate_limiter import rate_limiter_cleanup_task
+        rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
+        print("✅ Rate limiter cleanup task started")
+        
+        print("")
+        print("🎯 ARCHITECTURE SUMMARY:")
+        print("   • Single AsyncSubtensor (no memory leaks)")
+        print("   • Block subscription (push-based, no polling)")
+        print("   • Event-driven epoch management")
+        print("   • Zero HTTP 429 errors (WebSocket stays alive)")
+        print("="*80 + "\n")
+        
+        # Yield control back to FastAPI (app runs here)
+        yield
+        
+        # ════════════════════════════════════════════════════════════════
+        # CLEANUP: Graceful shutdown
+        # ════════════════════════════════════════════════════════════════
+        print("\n" + "="*80)
+        print("🛑 SHUTTING DOWN GATEWAY")
+        print("="*80)
+        
+        # Signal stop to block publisher
+        print("   🛑 Signaling stop event...")
+        stop_event.set()
+        
+        # Cancel all background tasks
+        print("   🛑 Cancelling background tasks...")
+        tasks = [
+            subscription_task,
+            reveal_task,
+            checkpoint_task_handle,
+            anchor_task,
+            mirror_task,
+            hourly_batch_task_handle,
+            rate_limiter_task
+        ]
+        
+        for task in tasks:
+            task.cancel()
+        
+        # Wait for all tasks to finish gracefully
+        print("   ⏳ Waiting for tasks to finish...")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Log any errors during shutdown
+        for i, result in enumerate(results):
+            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                print(f"   ⚠️  Task {i} error during shutdown: {result}")
+        
+        print("   ✅ All background tasks stopped")
+        print("")
+        
+        # AsyncSubtensor will be closed by context manager (async with)
+        print("   🔌 Closing AsyncSubtensor WebSocket...")
+        # (automatic cleanup by async with context manager)
+        
+        print("="*80)
+        print("✅ GATEWAY SHUTDOWN COMPLETE")
+        print("="*80 + "\n")
 
 # ============================================================
 # Create FastAPI App

@@ -141,133 +141,21 @@
       "salt": "d8c6aabfc3924a4089cd7abd6bbb3ea6432b6d8ee73c063ea0ad033c6c26373f"
     }
   ],
-  "16210": [
+  "16230": [
     {
-      "lead_id": "0364a4e2-346f-4f12-ac62-5a7f5aa27789",
-      "miner_hotkey": "5Dyc3cCbsnEP3PDqgHp1L65xCxJwRQNJim8ZvqLuEQmsjhPX",
-      "decision": "deny",
-      "rep_score": 0,
-      "rejection_reason": {
-        "stage": "Stage 0.5: Source Provenance",
-        "check_name": "check_source_provenance",
-        "message": "Source URL validation failed: Source URL returned status 403",
-        "failed_fields": [
-          "source_url"
-        ]
-      },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
-    },
-    {
-      "lead_id": "6eb5589d-3ce5-423b-92e9-75d68a88f27c",
-      "miner_hotkey": "5FvpqaLCWEV6WEyZ2YEvdiFRyAVCrDAie4oa5ddEkfhDpsVs",
-      "decision": "approve",
-      "rep_score": 12,
-      "rejection_reason": {
-        "message": "pass"
-      },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
-    },
-    {
-      "lead_id": "ce70be26-811c-44de-a285-8c1233272866",
-      "miner_hotkey": "5FvpqaLCWEV6WEyZ2YEvdiFRyAVCrDAie4oa5ddEkfhDpsVs",
-      "decision": "approve",
-      "rep_score": 16,
-      "rejection_reason": {
-        "message": "pass"
-      },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
-    },
-    {
-      "lead_id": "5c64d981-fbe6-45ec-b833-59caa960e112",
-      "miner_hotkey": "5Dyc3cCbsnEP3PDqgHp1L65xCxJwRQNJim8ZvqLuEQmsjhPX",
+      "lead_id": "ac66deea-d2a3-4ddc-a631-4a2d4ad19843",
+      "miner_hotkey": "5FBhsXVWpezSHcpogXo4CjMcgTBctLcZ7VnNoKzn3oEGST44",
       "decision": "deny",
       "rep_score": 0,
       "rejection_reason": {
         "stage": "Stage 4: LinkedIn/GSE Validation",
         "check_name": "check_linkedin_gse",
-        "message": "LinkedIn profile https://www.linkedin.com/in/wunderle-david-wunderle-88197260 not found in Google's index (may be private or invalid)",
+        "message": "LinkedIn verification failed: The name 'Roger Toennis' does not match the expected name 'roger toennis'. The company 'QuickAlign.AI' does not match the expected company 'Founder Advisors'. However, the profile is legitimate and indexed by Google. [Failed: name mismatch, company mismatch]",
         "failed_fields": [
           "linkedin"
         ]
       },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
-    },
-    {
-      "lead_id": "0f2399a1-e2bc-4ad0-810f-7edfee76459e",
-      "miner_hotkey": "5Dyc3cCbsnEP3PDqgHp1L65xCxJwRQNJim8ZvqLuEQmsjhPX",
-      "decision": "approve",
-      "rep_score": 18,
-      "rejection_reason": {
-        "message": "pass"
-      },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
-    },
-    {
-      "lead_id": "64f57f64-9c4c-47ce-9057-5eedfef2015a",
-      "miner_hotkey": "5FvpqaLCWEV6WEyZ2YEvdiFRyAVCrDAie4oa5ddEkfhDpsVs",
-      "decision": "approve",
-      "rep_score": 19,
-      "rejection_reason": {
-        "message": "pass"
-      },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
-    },
-    {
-      "lead_id": "f86da5c0-ba48-4a76-9a57-3149b62dd688",
-      "miner_hotkey": "5FvpqaLCWEV6WEyZ2YEvdiFRyAVCrDAie4oa5ddEkfhDpsVs",
-      "decision": "approve",
-      "rep_score": 13,
-      "rejection_reason": {
-        "message": "pass"
-      },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
-    },
-    {
-      "lead_id": "629d91e0-e1dd-4664-8b0c-fedbddcdc28f",
-      "miner_hotkey": "5FvpqaLCWEV6WEyZ2YEvdiFRyAVCrDAie4oa5ddEkfhDpsVs",
-      "decision": "deny",
-      "rep_score": 0,
-      "rejection_reason": {
-        "stage": "Stage 4: LinkedIn/GSE Validation",
-        "check_name": "check_linkedin_gse",
-        "message": "LinkedIn profile https://www.linkedin.com/in/miroslav-pekarovi\u010d-380422b9 not found in Google's index (may be private or invalid)",
-        "failed_fields": [
-          "linkedin"
-        ]
-      },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
-    },
-    {
-      "lead_id": "180da2e5-6edc-4bff-a87d-52fab6afadab",
-      "miner_hotkey": "5Dyc3cCbsnEP3PDqgHp1L65xCxJwRQNJim8ZvqLuEQmsjhPX",
-      "decision": "deny",
-      "rep_score": 0,
-      "rejection_reason": {
-        "stage": "Stage 0.5: Source Provenance",
-        "check_name": "check_source_provenance",
-        "message": "Source URL validation failed: Source URL returned status 403",
-        "failed_fields": [
-          "source_url"
-        ]
-      },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
-    },
-    {
-      "lead_id": "30ba011c-4325-4195-b63e-1e6438a95dda",
-      "miner_hotkey": "5Dyc3cCbsnEP3PDqgHp1L65xCxJwRQNJim8ZvqLuEQmsjhPX",
-      "decision": "deny",
-      "rep_score": 0,
-      "rejection_reason": {
-        "stage": "Stage 0: Hardcoded Checks",
-        "check_name": "check_name_email_match",
-        "message": "Name 'Todd MBA' does not match email pattern 'hanning@avinc.com'",
-        "failed_fields": [
-          "email",
-          "first_name",
-          "last_name"
-        ]
-      },
-      "salt": "28473220c95c4a8b2071903172283aa5e5fb7e0c5c7681c4d98a093cdbab818d"
+      "salt": "d9cf15e1f0dd6ae7c6d2f5cb4d2677407694d1586a04e05a27a2294e97e8ada8"
     }
   ]
 }

@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 from gateway.utils.signature import verify_wallet_signature, compute_payload_hash, construct_signed_message
-from gateway.utils.registry import is_registered_hotkey
+from gateway.utils.registry import is_registered_hotkey_async  # Use async version
 from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
 from gateway.utils.logger import log_event
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
@@ -147,11 +147,11 @@ async def submit_validation(event: ValidationEvent):
     # ========================================
     # Step 3: Verify actor is registered validator
     # ========================================
-    # CRITICAL: Must run in thread to avoid blocking event loop during metagraph fetch
+    # Use async registry check (direct call, no thread needed - uses injected AsyncSubtensor)
     import asyncio
     try:
         is_registered, role = await asyncio.wait_for(
-            asyncio.to_thread(is_registered_hotkey, event.actor_hotkey),
+            is_registered_hotkey_async(event.actor_hotkey),  # Direct async call (no thread wrapper)
             timeout=180.0  # 180 second timeout for metagraph query (testnet can be slow, allows for retries)
         )
     except asyncio.TimeoutError:
@@ -322,8 +322,8 @@ async def submit_validation(event: ValidationEvent):
     # This prevents validators from gaming the system by unstaking after seeing
     # other validators' decisions but before revealing their own.
     
-    from gateway.utils.registry import get_validator_weights
-    stake, v_trust = get_validator_weights(event.actor_hotkey)
+    from gateway.utils.registry import get_validator_weights_async
+    stake, v_trust = await get_validator_weights_async(event.actor_hotkey)
     
     # ========================================
     # Step 7: Store evidence blobs (private)

@@ -38,6 +38,10 @@ class BaseValidatorNeuron(BaseNeuron):
             self.serve_axon()
         
         self.total_emissions = 1000.0  # Default emissions value for subnet
+        
+        # Add async subtensor (initialized later in subclass run() method)
+        # This eliminates memory leaks from repeated instance creation
+        self.async_subtensor = None
 
     def serve_axon(self):
         bt.logging.info("Serving validator axon...")
@@ -213,5 +217,54 @@ class BaseValidatorNeuron(BaseNeuron):
         self.step = state["step"]
         self.scores = state["scores"]
         self.hotkeys = state["hotkeys"]
+    
+    async def initialize_async_resources(self):
+        """
+        Initialize async subtensor and subscribe to blocks.
+        
+        This should be called by subclass run() method before entering main loop.
+        Creates single AsyncSubtensor instance that will be reused throughout
+        the validator's lifetime, eliminating memory leaks and HTTP 429 errors.
+        
+        Example (in subclass run() method):
+            async def run_async():
+                await self.initialize_async_resources()
+                # ... main validator loop ...
+        """
+        import bittensor as bt
+        
+        bt.logging.info(f"🔗 Initializing async resources...")
+        bt.logging.info(f"   Network: {self.config.subtensor.network}")
+        
+        # Create async subtensor (single instance for entire lifecycle)
+        self.async_subtensor = bt.AsyncSubtensor(network=self.config.subtensor.network)
+        
+        bt.logging.info(f"✅ Async subtensor initialized")
+        bt.logging.info(f"   Endpoint: {self.async_subtensor.chain_endpoint}")
+        bt.logging.info(f"   Benefits: Zero memory leaks, zero HTTP 429 errors")
+    
+    async def cleanup_async_resources(self):
+        """
+        Clean up async subtensor on shutdown.
+        
+        This should be called by subclass cleanup logic (e.g., in finally block).
+        Properly closes the WebSocket connection and releases resources.
+        
+        Example (in subclass run() method):
+            try:
+                # ... main validator loop ...
+            finally:
+                await self.cleanup_async_resources()
+        """
+        if self.async_subtensor:
+            bt.logging.info("🔌 Closing async subtensor...")
+            
+            try:
+                await self.async_subtensor.close()
+                bt.logging.info("✅ Async subtensor closed successfully")
+            except Exception as e:
+                bt.logging.warning(f"Error closing async subtensor: {e}")
+            
+            self.async_subtensor = None
 
     

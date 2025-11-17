@@ -285,30 +285,164 @@ def get_supabase_client():
         return None
 
 class _Verifier:
-    """Lightweight on-chain permission checks."""
+    """
+    Lightweight on-chain permission checks.
+    
+    Supports both sync and async metagraph queries:
+    - Sync methods: Create new subtensor instance (for backward compatibility)
+    - Async methods: Use injected async subtensor (no memory leaks)
+    """
     def __init__(self):
         self._network = NETWORK
         self._netuid = SUBNET_ID
+        
+        # Async subtensor instance (injected from validator)
+        self._async_subtensor = None
+    
+    def inject_async_subtensor(self, async_subtensor):
+        """
+        Inject async subtensor instance from validator.
+        
+        Called from neurons/validator.py after initializing async subtensor.
+        Allows verifier to use shared instance (no memory leaks).
+        
+        Args:
+            async_subtensor: AsyncSubtensor instance from validator
+        
+        Example:
+            # In neurons/validator.py run_async():
+            from Leadpoet.utils import cloud_db
+            cloud_db._VERIFY.inject_async_subtensor(self.async_subtensor)
+        """
+        self._async_subtensor = async_subtensor
+        bt.logging.info(f"✅ AsyncSubtensor injected into _Verifier (network: {async_subtensor.network})")
+    
+    async def _get_fresh_metagraph_async(self, network=None, netuid=None):
+        """
+        Get metagraph using injected async subtensor (ASYNC VERSION).
+        
+        Use this from async contexts to avoid memory leaks.
+        
+        Args:
+            network: Network name (ignored - uses injected instance's network)
+            netuid: Subnet ID (default: self._netuid)
+        
+        Returns:
+            Metagraph object
+        
+        Raises:
+            Exception: If async_subtensor not injected
+        """
+        if self._async_subtensor is None:
+            raise Exception(
+                "AsyncSubtensor not injected - call inject_async_subtensor() first. "
+                "This should be done in neurons/validator.py run_async()."
+            )
+        
+        nid = netuid or self._netuid
+        
+        # Use injected async subtensor (NO new instance!)
+        return await self._async_subtensor.metagraph(netuid=nid)
 
     def _get_fresh_metagraph(self, network=None, netuid=None):
         """
-        Always get a fresh metagraph.
-        If network/netuid not provided, use defaults from environment/config.
+        Get metagraph (SYNC VERSION - creates new instance).
+        
+        DEPRECATED: Use _get_fresh_metagraph_async() from async contexts.
+        This creates a new subtensor instance - use sparingly.
+        
+        Args:
+            network: Network name
+            netuid: Subnet ID
+        
+        Returns:
+            Metagraph object
         """
         net = network or self._network
         nid = netuid or self._netuid
         subtensor = bt.subtensor(network=net)
         return subtensor.metagraph(netuid=nid)
+    
+    async def is_miner_async(self, ss58: str, network=None, netuid=None) -> bool:
+        """
+        Check if hotkey is registered as miner (ASYNC VERSION).
+        
+        Use this from async contexts to avoid memory leaks.
+        
+        Args:
+            ss58: Hotkey SS58 address
+            network: Network (ignored - uses injected instance)
+            netuid: Subnet ID
+        
+        Returns:
+            True if registered
+        """
+        try:
+            mg = await self._get_fresh_metagraph_async(network, netuid)
+            return ss58 in mg.hotkeys
+        except Exception as e:
+            bt.logging.warning(f"Failed to verify miner registration: {e}")
+            return False
 
     def is_miner(self, ss58: str, network=None, netuid=None) -> bool:
+        """
+        Check if hotkey is registered as miner (SYNC VERSION).
+        
+        DEPRECATED: Use is_miner_async() from async contexts.
+        
+        Args:
+            ss58: Hotkey SS58 address
+            network: Network
+            netuid: Subnet ID
+        
+        Returns:
+            True if registered
+        """
         try:
             mg = self._get_fresh_metagraph(network, netuid)
             return ss58 in mg.hotkeys
         except Exception as e:
             bt.logging.warning(f"Failed to verify miner registration: {e}")
             return False
+    
+    async def is_validator_async(self, ss58: str, network=None, netuid=None) -> bool:
+        """
+        Check if hotkey is registered as validator (ASYNC VERSION).
+        
+        Use this from async contexts to avoid memory leaks.
+        
+        Args:
+            ss58: Hotkey SS58 address
+            network: Network (ignored - uses injected instance)
+            netuid: Subnet ID
+        
+        Returns:
+            True if has validator permit
+        """
+        try:
+            mg = await self._get_fresh_metagraph_async(network, netuid)
+            uid = mg.hotkeys.index(ss58)
+            return mg.validator_permit[uid].item()
+        except ValueError:
+            return False
+        except Exception as e:
+            bt.logging.warning(f"Failed to verify validator registration: {e}")
+            return False
 
     def is_validator(self, ss58: str, network=None, netuid=None) -> bool:
+        """
+        Check if hotkey is registered as validator (SYNC VERSION).
+        
+        DEPRECATED: Use is_validator_async() from async contexts.
+        
+        Args:
+            ss58: Hotkey SS58 address
+            network: Network
+            netuid: Subnet ID
+        
+        Returns:
+            True if has validator permit
+        """
         try:
             mg = self._get_fresh_metagraph(network, netuid)
             uid = mg.hotkeys.index(ss58)

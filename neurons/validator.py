@@ -441,6 +441,10 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
+        
+        # Add async subtensor (initialized later in run())
+        # This eliminates memory leaks and HTTP 429 errors from repeated instance creation
+        self.async_subtensor = None
 
         bt.logging.info("Registering validator wallet on network...")
         max_retries = 3
@@ -515,6 +519,52 @@ class Validator(BaseValidatorNeuron):
         self.supabase_url = "https://qplwoislplkcegvdmbim.supabase.co"
         self.supabase_client: Optional[Client] = None
         # Skip Supabase init - not needed for TEE gateway workflow
+    
+    async def initialize_async_subtensor(self):
+        """
+        Create single AsyncSubtensor instance at validator startup.
+        
+        This eliminates memory leaks and HTTP 429 errors from repeated instance creation.
+        Call this from run() before entering main validation loop.
+        """
+        import bittensor as bt
+        
+        bt.logging.info(f"🔗 Initializing AsyncSubtensor for network: {self.config.subtensor.network}")
+        
+        # Create async subtensor (single instance for entire lifecycle)
+        self.async_subtensor = bt.AsyncSubtensor(network=self.config.subtensor.network)
+        
+        bt.logging.info(f"✅ AsyncSubtensor initialized")
+        bt.logging.info(f"   Endpoint: {self.async_subtensor.chain_endpoint}")
+        bt.logging.info(f"   Network: {self.async_subtensor.network}")
+    
+    async def get_current_block_async(self) -> int:
+        """
+        Get current block using async subtensor (NO new instances).
+        
+        Use this instead of self.subtensor.get_current_block() to avoid memory leaks.
+        
+        Returns:
+            Current block number
+        
+        Raises:
+            Exception: If async_subtensor not initialized
+        """
+        if self.async_subtensor is None:
+            raise Exception("AsyncSubtensor not initialized - call initialize_async_subtensor() first")
+        
+        # Use async call (reuses single instance)
+        block_data = await self.async_subtensor.get_block()
+        current_block = block_data["header"]["number"]
+        
+        return current_block
+    
+    async def cleanup_async_subtensor(self):
+        """Clean up async subtensor on shutdown."""
+        if self.async_subtensor:
+            bt.logging.info("🔌 Closing AsyncSubtensor...")
+            await self.async_subtensor.close()
+            bt.logging.info("✅ AsyncSubtensor closed")
     
     def _init_supabase_client(self):
         """Initialize or refresh Supabase client with current JWT token."""
@@ -1321,59 +1371,95 @@ class Validator(BaseValidatorNeuron):
         # Show available miners
         self.discover_miners()
 
-        try:
-            # Keep the validator running and continuously process leads
-            while not self.should_exit:
-                # TokenManager removed - no longer needed with TEE gateway
-                # Validators authenticate directly with gateway using wallet signatures
+        # ═══════════════════════════════════════════════════════════════
+        # ASYNC MAIN LOOP: Initialize async subtensor and run async workflow
+        # ═══════════════════════════════════════════════════════════════
+        async def run_async_main_loop():
+            """
+            Async main validator loop.
+            
+            Uses async subtensor for all block queries (no memory leaks).
+            """
+            # Initialize async subtensor (single instance for entire lifecycle)
+            await self.initialize_async_subtensor()
+            
+            # Inject into reward module
+            try:
+                from Leadpoet.validator import reward
+                from Leadpoet.utils import cloud_db
                 
-                # Process gateway validation workflow (TEE-based, tasks6.md)
-                try:
-                    self.process_gateway_validation_workflow()
-                except Exception as e:
-                    bt.logging.warning(f"Error in gateway validation workflow: {e}")
-                    time.sleep(5)  # Wait before retrying
+                reward.inject_async_subtensor(self.async_subtensor)
+                cloud_db._VERIFY.inject_async_subtensor(self.async_subtensor)
                 
-                # Check if we should submit accumulated weights (block 345+)
-                try:
-                    self.submit_weights_at_epoch_end()
-                except Exception as e:
-                    bt.logging.warning(f"Error in submit_weights_at_epoch_end: {e}")
-                
-                try:
-                    self.process_curation_requests_continuous()
-                except Exception as e:
-                    bt.logging.warning(f"Error in process_curation_requests_continuous: {e}")
-                    time.sleep(5)  # Wait before retrying
-
-                # process_broadcast_requests_continuous() runs in background thread
-
-                # Sync less frequently to avoid websocket concurrency issues
-                # Only sync every 10 iterations (approx every 10 seconds)
-                if not hasattr(self, '_sync_counter'):
-                    self._sync_counter = 0
-
-                self._sync_counter += 1
-                if self._sync_counter >= 10:
+                bt.logging.info("✅ AsyncSubtensor injected into reward and cloud_db modules")
+            except Exception as e:
+                bt.logging.warning(f"Failed to inject async subtensor: {e}")
+            
+            try:
+                # Keep the validator running and continuously process leads
+                while not self.should_exit:
+                    # Process gateway validation workflow (TEE-based, now async)
                     try:
-                        self.sync()
-                        self._sync_counter = 0
+                        await self.process_gateway_validation_workflow()
                     except Exception as e:
-                        bt.logging.warning(f"Sync error (will retry): {e}")
-                        # Don't crash on sync errors, just skip this sync
+                        bt.logging.warning(f"Error in gateway validation workflow: {e}")
+                        await asyncio.sleep(5)  # Wait before retrying
+                    
+                    # Check if we should submit accumulated weights (block 345+)
+                    try:
+                        await self.submit_weights_at_epoch_end()
+                    except Exception as e:
+                        bt.logging.warning(f"Error in submit_weights_at_epoch_end: {e}")
+                    
+                    try:
+                        self.process_curation_requests_continuous()
+                    except Exception as e:
+                        bt.logging.warning(f"Error in process_curation_requests_continuous: {e}")
+                        await asyncio.sleep(5)  # Wait before retrying
+
+                    # process_broadcast_requests_continuous() runs in background thread
+
+                    # Sync less frequently to avoid websocket concurrency issues
+                    # Only sync every 10 iterations (approx every 10 seconds)
+                    if not hasattr(self, '_sync_counter'):
                         self._sync_counter = 0
 
-                time.sleep(1)  # Small delay to prevent tight loop
+                    self._sync_counter += 1
+                    if self._sync_counter >= 10:
+                        try:
+                            self.sync()
+                            self._sync_counter = 0
+                        except Exception as e:
+                            bt.logging.warning(f"Sync error (will retry): {e}")
+                            # Don't crash on sync errors, just skip this sync
+                            self._sync_counter = 0
+
+                    await asyncio.sleep(1)  # Small delay to prevent tight loop
+                    
+            except KeyboardInterrupt:
+                self.axon.stop()
+                bt.logging.success("Validator killed by keyboard interrupt.")
+                exit()
+            except Exception as e:
+                bt.logging.error(f"Critical error in validator main loop: {e}")
+                import traceback
+                bt.logging.error(traceback.format_exc())
+                # Continue running instead of crashing
+                await asyncio.sleep(10)  # Wait longer before retrying main loop
+            finally:
+                # Cleanup async subtensor on exit
+                await self.cleanup_async_subtensor()
+        
+        # Run async main loop
+        try:
+            asyncio.run(run_async_main_loop())
         except KeyboardInterrupt:
-            self.axon.stop()
             bt.logging.success("Validator killed by keyboard interrupt.")
             exit()
         except Exception as e:
-            bt.logging.error(f"Critical error in validator main loop: {e}")
+            bt.logging.error(f"Fatal error in async main loop: {e}")
             import traceback
             bt.logging.error(traceback.format_exc())
-            # Continue running instead of crashing
-            time.sleep(10)  # Wait longer before retrying main loop
 
     # Add this method after the run() method (around line 1195)
 
@@ -1442,18 +1528,20 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             print(f"❌ Error discovering miners: {e}")
 
-    def process_gateway_validation_workflow(self):
+    async def process_gateway_validation_workflow(self):
         """
         GATEWAY WORKFLOW (Passages 1 & 2): Fetch leads from gateway, validate, submit hashed results.
         This replaces process_sourced_leads_continuous for the new gateway-based architecture.
+        
+        ASYNC VERSION: Uses async subtensor for block queries (no memory leaks).
         """
         # Skip if processing broadcast request
         if self.processing_broadcast:
             return
         
         try:
-            # Get current epoch_id from Bittensor block
-            current_block = self.subtensor.get_current_block()
+            # Get current epoch_id from Bittensor block using async subtensor
+            current_block = await self.get_current_block_async()
             epoch_length = 360  # blocks per epoch
             current_epoch = current_block // epoch_length
             
@@ -1555,7 +1643,7 @@ class Validator(BaseValidatorNeuron):
                     })
                     
                     # Accumulate weights in real-time for approved leads
-                    self.accumulate_miner_weights(
+                    await self.accumulate_miner_weights(
                         miner_hotkey=lead.get("miner_hotkey"),
                         rep_score=rep_score,
                         decision=decision
@@ -1644,10 +1732,10 @@ class Validator(BaseValidatorNeuron):
             print(f"{'='*80}\n")
             
             # Check for reveals from previous epochs
-            self.process_pending_reveals()
+            await self.process_pending_reveals()
             
             # Check if we should submit weights (block 345+)
-            self.submit_weights_at_epoch_end()
+            await self.submit_weights_at_epoch_end()
             
         except Exception as e:
             print(f"[DEBUG] Exception caught in gateway validation workflow: {e}")
@@ -1657,9 +1745,11 @@ class Validator(BaseValidatorNeuron):
             import traceback
             bt.logging.error(traceback.format_exc())
     
-    def accumulate_miner_weights(self, miner_hotkey: str, rep_score: int, decision: str):
+    async def accumulate_miner_weights(self, miner_hotkey: str, rep_score: int, decision: str):
         """
         Accumulate weights for approved leads in real-time as validation happens.
+        
+        ASYNC VERSION: Uses async subtensor for block queries.
         
         This updates BOTH files after each lead validation:
         - validator_weights/validator_weights (current epoch only)
@@ -1682,8 +1772,8 @@ class Validator(BaseValidatorNeuron):
             weights_file = weights_dir / "validator_weights"
             history_file = weights_dir / "validator_weights_history"
             
-            # Get current epoch
-            current_block = self.subtensor.get_current_block()
+            # Get current epoch using async subtensor
+            current_block = await self.get_current_block_async()
             current_epoch = current_block // 360
             
             # ═══════════════════════════════════════════════════════════
@@ -1745,15 +1835,17 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.error(f"Failed to accumulate miner weights: {e}")
     
-    def submit_weights_at_epoch_end(self):
+    async def submit_weights_at_epoch_end(self):
         """
         Submit accumulated weights to Bittensor chain at end of epoch (block 345+).
+        
+        ASYNC VERSION: Uses async subtensor for block queries.
         
         This reads from validator_weights/validator_weights and submits to chain.
         After submission, archives weights to history and clears active file.
         """
         try:
-            current_block = self.subtensor.get_current_block()
+            current_block = await self.get_current_block_async()
             epoch_length = 360
             current_epoch = current_block // 360
             blocks_into_epoch = current_block % epoch_length
@@ -1944,9 +2036,11 @@ class Validator(BaseValidatorNeuron):
                 decision=validation['decision']
             )
     
-    def process_pending_reveals(self):
+    async def process_pending_reveals(self):
         """
         Check if previous epochs need reveal submission (after epoch closes).
+        
+        ASYNC VERSION: Uses async subtensor for block queries.
         """
         if not hasattr(self, '_pending_reveals'):
             print(f"[DEBUG] No _pending_reveals attribute - initializing empty dict")
@@ -1954,7 +2048,7 @@ class Validator(BaseValidatorNeuron):
             return
         
         try:
-            current_block = self.subtensor.get_current_block()
+            current_block = await self.get_current_block_async()
             epoch_length = 360
             current_epoch = current_block // epoch_length
             

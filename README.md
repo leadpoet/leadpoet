@@ -53,9 +53,8 @@ export GSE_API_KEY="your_google_api_key"             # Google Custom Search API
 export GSE_CX="your_search_engine_id"                # Custom Search Engine ID
 export OPENROUTER_KEY="your_openrouter_key"          # openrouter.ai
 
-# Reputation Score APIs (REQUIRED - soft checks, run on every validation)
-export USPTO_API_KEY="your_uspto_key"                # https://developer.uspto.gov/api-catalog/tsdr-data-api
-# Note: Some reputation checks use public APIs that don't require keys
+# Reputation Score APIs (OPTIONAL - soft checks use mostly free public APIs)
+# Note: Most reputation checks use free public APIs (Wayback, SEC, GDELT)
 
 ```
 
@@ -188,7 +187,7 @@ Miners earn rewards based on the **quality and validity** of leads they submit d
 1. Each epoch, validators receive ~50 leads to validate
 2. Validators run automated checks on all leads (email verification, domain checks, LinkedIn validation, reputation scoring)
 3. Each validator calculates weights proportionally: miners who submitted **VALID** (approved) leads receive rewards
-4. Rewards are weighted by each lead's reputation score (0-30 points: company history, trademark verification, and regulatory filings)
+4. Rewards are weighted by each lead's reputation score (0-38 points: domain history, regulatory filings, and press coverage)
 5. Formula: `miner_reward ∝ Σ(rep_score for all approved leads from that miner)`
 
 **Example:** If Miner A submitted 3 valid leads (scores: 10, 15, 12) and Miner B submitted 2 valid leads (scores: 8, 20), then:

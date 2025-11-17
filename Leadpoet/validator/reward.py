@@ -24,14 +24,50 @@ _last_known_block = None
 _last_known_block_time = None
 _block_cache_lock = threading.Lock()
 
-def _get_current_block() -> int:
+# Async subtensor instance (injected from validator)
+_async_subtensor = None
+
+
+def inject_async_subtensor(async_subtensor):
     """
-    Get current block number from the validator's subtensor connection.
+    Inject async subtensor instance from validator.
+    
+    Called from neurons/validator.py after initializing async subtensor.
+    This allows the background epoch monitor to use the shared instance.
+    
+    Args:
+        async_subtensor: AsyncSubtensor instance from validator
+    
+    Example:
+        # In neurons/validator.py run_async():
+        from Leadpoet.validator import reward
+        reward.inject_async_subtensor(self.async_subtensor)
+    """
+    global _async_subtensor
+    _async_subtensor = async_subtensor
+    print(f"✅ AsyncSubtensor injected into reward module (network: {_async_subtensor.network})")
+
+
+async def _get_current_block_async() -> int:
+    """
+    Get current block number from injected async subtensor (ASYNC VERSION).
+    
+    Use this from async contexts or from background thread with event loop.
     Falls back to cached block + time-based estimation if subtensor unavailable.
     
-    Uses retry logic to handle transient failures and rate limiting.
+    Returns:
+        Current block number
+    
+    Raises:
+        Exception: If async_subtensor not injected or query fails with no cache
     """
     global _epoch_network, _last_known_block, _last_known_block_time
+    
+    if _async_subtensor is None:
+        raise Exception(
+            "AsyncSubtensor not injected - call inject_async_subtensor() first. "
+            "This should be done in neurons/validator.py run_async()."
+        )
     
     # Retry logic for subtensor queries (handles HTTP 429 rate limits)
     max_retries = 3
@@ -39,12 +75,12 @@ def _get_current_block() -> int:
     
     for attempt in range(max_retries):
         try:
-            import bittensor as bt
             import time
+            import asyncio
             
-            # Create subtensor connection
-            subtensor = bt.subtensor(network=_epoch_network)
-            current_block = subtensor.get_current_block()
+            # Use async call to get block (NO new instance created!)
+            block_data = await _async_subtensor.get_block()
+            current_block = block_data["header"]["number"]
             
             # Cache the successful result
             with _block_cache_lock:
@@ -58,7 +94,7 @@ def _get_current_block() -> int:
                 # Retry after delay
                 print(f"⚠️  Subtensor query attempt {attempt + 1}/{max_retries} failed: {e}")
                 print(f"   Retrying in {retry_delay}s...")
-                time.sleep(retry_delay)
+                await asyncio.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
                 continue
             else:
@@ -82,6 +118,38 @@ def _get_current_block() -> int:
                             "Cannot query subtensor and no cached block available. "
                             "Please ensure subtensor is accessible."
                         )
+
+
+def _get_current_block() -> int:
+    """
+    Get current block number (SYNC WRAPPER - prefer async version).
+    
+    DEPRECATED: Use _get_current_block_async() from async contexts.
+    This wrapper is kept for backward compatibility with sync code.
+    
+    Returns:
+        Current block number
+    
+    Raises:
+        Exception: If async_subtensor not injected or query fails
+    """
+    import asyncio
+    
+    # Check if we're in an async context
+    try:
+        loop = asyncio.get_running_loop()
+        # We're in async context - error
+        raise RuntimeError(
+            "Called _get_current_block() from async context. "
+            "Use 'await _get_current_block_async()' instead."
+        )
+    except RuntimeError as e:
+        if "no running event loop" in str(e).lower():
+            # We're in sync context - create temp loop
+            return asyncio.run(_get_current_block_async())
+        else:
+            # Error was from our check - re-raise
+            raise
 
 def _calculate_epoch_number(block_number: int) -> int:
     """
@@ -117,35 +185,48 @@ def _background_epoch_monitor():
     """
     Background thread that continuously monitors for epoch transitions
     and automatically clears tracking data when epochs end.
+    
+    UPDATED: Creates its own event loop to use async subtensor.
+    This eliminates memory leaks from repeated instance creation.
     """
     global _epoch_monitor_running
     
     print("🕐 Background epoch monitor started")
     
-    while _epoch_monitor_running:
-        try:
-            current_block = _get_current_block()
-            epoch_ended = _is_epoch_ended(current_block)
-            
-            if epoch_ended:
-                print(f"\n🔄 AUTOMATIC EPOCH TRANSITION DETECTED (Background Monitor)")
-                print(f"   Block {current_block} triggered epoch completion")
-                print(f"   Clearing tracking data automatically...")
-                
-                try:
-                    clear_epoch_tracking()
-                    print(f"✅ Epoch tracking auto-cleared by background monitor")
-                except Exception as e:
-                    print(f"❌ Error auto-clearing epoch tracking: {e}")
-            
-            # Check every 30 seconds (about 2-3 blocks)
-            time.sleep(30)
-            
-        except Exception as e:
-            print(f"⚠️  Error in background epoch monitor: {e}")
-            time.sleep(60)  # Wait longer on error
+    # Create event loop for this background thread
+    # Each thread needs its own event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    print("🕐 Background epoch monitor stopped")
+    try:
+        while _epoch_monitor_running:
+            try:
+                # Use async call via run_until_complete
+                current_block = loop.run_until_complete(_get_current_block_async())
+                epoch_ended = _is_epoch_ended(current_block)
+                
+                if epoch_ended:
+                    print(f"\n🔄 AUTOMATIC EPOCH TRANSITION DETECTED (Background Monitor)")
+                    print(f"   Block {current_block} triggered epoch completion")
+                    print(f"   Clearing tracking data automatically...")
+                    
+                    try:
+                        clear_epoch_tracking()
+                        print(f"✅ Epoch tracking auto-cleared by background monitor")
+                    except Exception as e:
+                        print(f"❌ Error auto-clearing epoch tracking: {e}")
+                
+                # Check every 30 seconds (about 2-3 blocks)
+                time.sleep(30)
+                
+            except Exception as e:
+                print(f"⚠️  Error in background epoch monitor: {e}")
+                time.sleep(60)  # Wait longer on error
+    
+    finally:
+        # Clean up event loop on thread exit
+        loop.close()
+        print("🕐 Background epoch monitor stopped")
 
 def start_epoch_monitor(network: str = "finney"):
     """

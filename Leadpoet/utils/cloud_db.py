@@ -1758,7 +1758,7 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
             response = requests.post(
                 f"{GATEWAY_URL}/presign",
                 json=event,
-                timeout=90  # 90s timeout - gateway may need to refresh metagraph cache (45s) + other steps
+                timeout=120  # 2 minutes timeout (gateway processes multiple steps: signature, registration, rate limits, logging)
             )
             response.raise_for_status()
             
@@ -1881,7 +1881,7 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
         response = requests.post(
             f"{GATEWAY_URL}/submit",
             json=event,
-            timeout=90  # 90s timeout - gateway may need to refresh metagraph cache (45s) + verify storage + other steps
+            timeout=120  # 2 minutes timeout (gateway verifies S3, mirrors MinIO, stores DB, logs TEE)
         )
         response.raise_for_status()
         

@@ -217,10 +217,10 @@ class EpochMonitor(BlockListener):
                 return
             
             # Import utilities
-            from gateway.utils.epoch import is_epoch_closed
+            from gateway.utils.epoch import is_epoch_closed_async
             
             # Check if epoch is actually closed
-            if not is_epoch_closed(epoch_id):
+            if not await is_epoch_closed_async(epoch_id):
                 return
             
             logger.info(f"\n{'='*80}")

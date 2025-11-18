@@ -241,37 +241,36 @@ async def submit_validation(event: ValidationEvent):
     # Step 5.3: Verify lead_ids exist in database
     # ========================================
     # CRITICAL SECURITY: Prevent validators from submitting validations for
-    # leads that don't exist
-    # 
-    # NOTE: We check if leads EXIST (any status), not just pending_validation,
-    # because consensus may have run between fetch and submit, changing status.
-    # This is a race condition that's expected - validator got valid leads at fetch time.
+    # leads that don't exist or were already processed
     try:
-        # Verify all submitted lead_ids exist in leads_private (any status)
-        submitted_lead_ids = {v.lead_id for v in event.payload.validations}
+        from gateway.config import MAX_LEADS_PER_EPOCH
         
-        # Query to check existence (don't filter by status - just check they exist)
+        # Query current FIFO queue state (same as /epoch/{id}/leads endpoint)
+        # This ensures validators are submitting for leads that are actually in the queue
         result = supabase.table("leads_private") \
             .select("lead_id") \
-            .in_("lead_id", list(submitted_lead_ids)) \
+            .eq("status", "pending_validation") \
+            .order("created_ts", desc=False) \
+            .limit(MAX_LEADS_PER_EPOCH * 2) \
             .execute()
         
         if not result.data:
-            # None of the leads exist - something is very wrong
-            raise HTTPException(
-                status_code=400,
-                detail=f"None of the submitted lead_ids exist in database. This may be a data integrity issue."
-            )
+            # No leads in queue - validators submitting for empty epoch
+            assigned_lead_ids = []
+        else:
+            assigned_lead_ids = [row["lead_id"] for row in result.data]
         
-        existing_lead_ids = {row["lead_id"] for row in result.data}
-        invalid_leads = submitted_lead_ids - existing_lead_ids
+        # Verify all submitted lead_ids are in the queue
+        submitted_lead_ids = {v.lead_id for v in event.payload.validations}
+        assigned_lead_ids_set = set(assigned_lead_ids)
         
+        invalid_leads = submitted_lead_ids - assigned_lead_ids_set
         if invalid_leads:
-            # Some leads don't exist at all (not just different status)
+            # Show first 3 invalid lead_ids for debugging
             invalid_sample = list(invalid_leads)[:3]
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) do not exist in database. Leads may have been deleted or never existed."
+                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) are not in pending validation queue. Leads may have been already processed or never existed."
             )
         
         print(f"✅ Step 5.3: Lead existence verification passed ({len(submitted_lead_ids)} lead_ids found in queue)")
@@ -426,7 +425,27 @@ async def submit_validation(event: ValidationEvent):
     print(f"✅ Batch validation logged to TEE buffer")
     
     # ========================================
-    # Step 9: Return success
+    # Step 9: Update lead status to prevent re-assignment
+    # ========================================
+    # CRITICAL FIX: Mark leads as "validating" so they're not re-assigned in next epoch
+    # Leads will stay "validating" until consensus runs and marks them approved/denied
+    try:
+        lead_ids = [v.lead_id for v in event.payload.validations]
+        
+        # Update all leads to "validating" status
+        supabase.table("leads_private")\
+            .update({"status": "validating"})\
+            .in_("lead_id", lead_ids)\
+            .execute()
+        
+        print(f"✅ Marked {len(lead_ids)} leads as 'validating' (removed from pending queue)")
+    except Exception as e:
+        # Don't fail the entire validation if status update fails
+        # Evidence is already stored, which is the source of truth
+        print(f"⚠️  Warning: Failed to update lead status: {e}")
+    
+    # ========================================
+    # Step 10: Return success
     # ========================================
     return {
         "status": "recorded",

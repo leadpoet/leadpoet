@@ -186,22 +186,33 @@ async def lifespan(app: FastAPI):
         print("🚀 STARTING BACKGROUND TASKS")
         print("="*80)
         
-        # Start other background tasks FIRST (don't block on subscription)
-        reveal_task = asyncio.create_task(reveal_collector_task())
-        print("✅ Reveal collector task started")
+        # Start block subscription (keeps WebSocket alive, triggers monitors)
+        subscription_task = asyncio.create_task(block_publisher.start())
+        print("✅ Block subscription started (push-based, replaces polling)")
         
-        checkpoint_task_handle = asyncio.create_task(checkpoint_task())
-        print("✅ Checkpoint task started")
+        # Start other background tasks - delay them to let subscription establish first
+        async def start_delayed_tasks():
+            await asyncio.sleep(10)  # Let subscription connect first
+            asyncio.create_task(reveal_collector_task())
+            print("✅ Reveal collector task started (delayed)")
+            asyncio.create_task(checkpoint_task())
+            print("✅ Checkpoint task started (delayed)")
+            asyncio.create_task(daily_anchor_task())
+            print("✅ Anchor task started (delayed)")
+            asyncio.create_task(start_hourly_batch_task())
+            print("✅ Hourly Arweave batch task started (delayed)")
+            from gateway.utils.rate_limiter import rate_limiter_cleanup_task
+            asyncio.create_task(rate_limiter_cleanup_task())
+            print("✅ Rate limiter cleanup task started (delayed)")
         
-        anchor_task = asyncio.create_task(daily_anchor_task())
-        print("✅ Anchor task started")
+        asyncio.create_task(start_delayed_tasks())
         
-        hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
-        print("✅ Hourly Arweave batch task started")
-        
-        from gateway.utils.rate_limiter import rate_limiter_cleanup_task
-        rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
-        print("✅ Rate limiter cleanup task started")
+        # Create empty task handles for cleanup (will be populated by delayed start)
+        reveal_task = None
+        checkpoint_task_handle = None
+        anchor_task = None
+        hourly_batch_task_handle = None
+        rate_limiter_task = None
         
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
@@ -213,10 +224,6 @@ async def lifespan(app: FastAPI):
         
         # Yield control back to FastAPI (app runs here)
         yield
-        
-        # Start block subscription AFTER yield (non-blocking for HTTP)
-        subscription_task = asyncio.create_task(block_publisher.start())
-        print("✅ Block subscription started AFTER app ready (push-based, replaces polling)")
         
         # ════════════════════════════════════════════════════════════════
         # CLEANUP: Graceful shutdown

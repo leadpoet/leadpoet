@@ -1069,7 +1069,14 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
             lead["dnsbl_blacklisted"] = cached_data.get("blacklisted", False)
             lead["dnsbl_list"] = cached_data.get("list", "spamhaus_dbl")
             lead["dnsbl_domain"] = cached_data.get("domain", root_domain)
+        print(f"   💾 Using cached DNSBL result for {root_domain}")
         return cached_result
+
+    # CRITICAL: Add delay before DNSBL query to prevent Spamhaus rate limiting
+    # Spamhaus free tier: ~10 queries/minute
+    # If exceeded, they return A records for EVERYTHING (false positives)
+    # 6-second delay = max 10 queries/minute (safe rate)
+    await asyncio.sleep(6)
 
     try:
         async with API_SEMAPHORE:

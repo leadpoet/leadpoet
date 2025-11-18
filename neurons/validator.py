@@ -1614,22 +1614,31 @@ class Validator(BaseValidatorNeuron):
             print(f"📡 Fetching leads from gateway for epoch {current_epoch}...")
             
             leads = gateway_get_epoch_leads(self.wallet, current_epoch)
-            print(f"[DEBUG] Received {len(leads) if leads else 0} leads from gateway")
-            if not leads:
+            
+            # Handle different response types:
+            # - None = Already submitted (gateway returned explicit message)
+            # - [] = Timeout/error (should retry)
+            # - [lead1, lead2, ...] = Got leads
+            
+            if leads is None:
+                # Gateway explicitly said "already submitted" or "queue empty"
                 print(f"ℹ️  No leads to process for epoch {current_epoch}")
-                print(f"   This is expected if:")
-                print(f"   • You've already submitted validations for this epoch")
-                print(f"   • Queue is empty")
-                print(f"   • Gateway is still initializing")
+                print(f"   Gateway confirmed: You've already submitted or queue is empty")
                 
-                # IMPORTANT: Mark epoch as processed to prevent infinite retry loop
-                # If gateway returns empty list, it means either:
-                # 1. Already submitted (Step 3.6 check in gateway)
-                # 2. Queue is genuinely empty
-                # Either way, no work to do - mark as processed and move on
+                # Mark as processed (don't retry - would be duplicate submission)
                 self._last_processed_epoch = current_epoch
-                print(f"✅ Marked epoch {current_epoch} as processed (no work to do)\n")
+                print(f"✅ Marked epoch {current_epoch} as processed (already submitted)\n")
                 await asyncio.sleep(10)
+                return
+            
+            print(f"[DEBUG] Received {len(leads)} leads from gateway")
+            
+            if not leads:
+                # Empty list = timeout or error (NOT already submitted)
+                print(f"⚠️  Gateway returned 0 leads (timeout or error)")
+                print(f"   This is likely a temporary issue - validator will retry automatically")
+                print(f"   NOT marking epoch as processed - will retry next iteration\n")
+                await asyncio.sleep(30)  # Wait longer before retry
                 return
             
             print(f"✅ Received {len(leads)} leads from gateway")

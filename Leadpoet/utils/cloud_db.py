@@ -1993,6 +1993,16 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
         
         result = response.json()
         leads = result.get("leads", [])
+        
+        # Check if gateway returned a message (e.g., "already submitted")
+        message = result.get("message", "")
+        
+        if not leads and message:
+            # Gateway explicitly said why there are no leads
+            bt.logging.info(f"ℹ️  Gateway: {message}")
+            # Return special marker: None means "already processed, don't retry"
+            return None
+        
         bt.logging.info(f"✅ Fetched {len(leads)} leads for epoch {epoch_id}")
         return leads
         
@@ -2000,10 +2010,10 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
         # Timeout is common during epoch transitions (gateway processing epoch lifecycle)
         # This is NOT a fatal error - validator will retry automatically
         bt.logging.warning(f"⏳ Gateway timeout fetching leads for epoch {epoch_id} - this is normal during epoch transitions. Validator will retry automatically.")
-        return []
+        return []  # Return empty list (not None) to indicate "retry later"
     except Exception as e:
         bt.logging.error(f"Failed to get epoch leads: {e}")
-        return []
+        return []  # Return empty list (not None) to indicate "retry later"
 
 
 def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_results: List[Dict]) -> bool:

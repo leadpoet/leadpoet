@@ -694,12 +694,17 @@ async def compute_epoch_consensus(epoch_id: int):
                 
                 # DEBUG: Log query results
                 print(f"         🔍 Query returned {len(responses_result.data)} validator responses")
+                
+                # ========================================================================
+                # CRITICAL: If 0 responses, leave lead as pending_validation (FIFO queue)
+                # ========================================================================
                 if len(responses_result.data) == 0:
                     print(f"         ⚠️  WARNING: No validator responses found for lead {lead_id[:8]}...")
                     print(f"            This means either:")
                     print(f"            1. No validators revealed their decisions yet")
-                    print(f"            2. Reveals were submitted but decision field is still NULL")
+                    print(f"            2. Validators skipped this lead (timeout, error, etc.)")
                     print(f"            3. Query filters are too restrictive")
+                    
                     # Query again WITHOUT the decision filter to debug
                     debug_result = await asyncio.to_thread(
                         lambda: supabase.table("validation_evidence_private")
@@ -712,6 +717,34 @@ async def compute_epoch_consensus(epoch_id: int):
                     if len(debug_result.data) > 0:
                         for rec in debug_result.data:
                             print(f"               - Validator {rec['validator_hotkey'][:10]}...: decision={rec['decision']}, revealed={rec['revealed_ts']}")
+                    
+                    # ════════════════════════════════════════════════════════════════════
+                    # CRITICAL: Do NOT mark as denied - leave as pending_validation
+                    # ════════════════════════════════════════════════════════════════════
+                    print(f"         🔄 Keeping lead {lead_id[:8]}... as pending_validation (will retry in next epoch)")
+                    print(f"            Lead stays at top of FIFO queue for next epoch")
+                    
+                    # Clear ALL consensus-related columns to reset for next epoch
+                    try:
+                        clear_result = await asyncio.to_thread(
+                            lambda: supabase.table("leads_private")
+                                .update({
+                                    "epoch_summary": None,  # Clear epoch summary
+                                    "consensus_votes": None,  # Clear consensus votes
+                                    "validators_responded": None,  # Clear validators who responded
+                                    "validator_responses": None,  # Clear individual validator responses
+                                    "rep_score": None,  # Clear reputation score
+                                })
+                                .eq("lead_id", lead_id)
+                                .execute()
+                        )
+                        print(f"         ✅ Cleared all consensus columns (epoch_summary, consensus_votes, validators_responded, validator_responses, rep_score)")
+                        print(f"            Lead ready for next epoch with clean slate")
+                    except Exception as e:
+                        print(f"         ⚠️  Failed to clear consensus columns: {e}")
+                    
+                    # Skip to next lead (don't update status)
+                    continue
                 
                 # Build validators_responded array
                 validators_responded = [r['validator_hotkey'] for r in responses_result.data]

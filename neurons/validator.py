@@ -1754,10 +1754,12 @@ class Validator(BaseValidatorNeuron):
                             print(f"      Failed Fields: {', '.join(failed_fields)}")
                     print("")
                     
-                    # Add 6-second delay between leads (except for the last one)
+                    # Add 20-second delay between leads (except for the last one)
+                    # CRITICAL: Prevents Spamhaus DNSBL rate limiting (free tier: 10 queries/min)
+                    # With 20s delay: ~2.5 queries/min (very safe margin)
                     if idx < len(leads):
-                        print(f"⏳ Waiting 6 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(6)
+                        print(f"⏳ Waiting 20 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(20)
                     
                 except Exception as e:
                     from validator_models.automated_checks import EmailVerificationUnavailableError
@@ -1778,10 +1780,12 @@ class Validator(BaseValidatorNeuron):
                         print(f"[DEBUG] Lead structure: {lead}")
                         print("")
                     
-                    # Add 6-second delay between leads (except for the last one)
+                    # Add 20-second delay between leads (except for the last one)
+                    # CRITICAL: Prevents Spamhaus DNSBL rate limiting (free tier: 10 queries/min)
+                    # With 20s delay: ~2.5 queries/min (very safe margin)
                     if idx < len(leads):
-                        print(f"⏳ Waiting 6 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(6)
+                        print(f"⏳ Waiting 20 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(20)
                     continue
             
             # Submit hashed validation results to gateway

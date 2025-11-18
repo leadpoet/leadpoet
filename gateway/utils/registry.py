@@ -126,8 +126,12 @@ async def get_metagraph_async() -> bt.metagraph:
                 
                 # ════════════════════════════════════════════════════════════
                 # CRITICAL: Use injected async subtensor (NO new instance!)
+                # Add 60-second timeout to prevent blocking entire gateway
                 # ════════════════════════════════════════════════════════════
-                metagraph = await _async_subtensor.metagraph(netuid=BITTENSOR_NETUID)
+                metagraph = await asyncio.wait_for(
+                    _async_subtensor.metagraph(netuid=BITTENSOR_NETUID),
+                    timeout=60.0  # 60s timeout - prevents hanging gateway
+                )
                 
                 # Update cache
                 _metagraph_cache = metagraph
@@ -137,6 +141,16 @@ async def get_metagraph_async() -> bt.metagraph:
                 print(f"✅ Metagraph cached for epoch {current_epoch}: {len(metagraph.hotkeys)} neurons registered")
                 
                 return metagraph
+            
+            except asyncio.TimeoutError:
+                last_error = TimeoutError(f"Metagraph fetch timed out after 60s")
+                if attempt < max_retries - 1:
+                    print(f"⚠️  Metagraph fetch attempt {attempt + 1}/{max_retries} TIMEOUT (60s)")
+                    print(f"   Bittensor chain might be overloaded - retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                # Last attempt timed out - fall through to error handling below
                 
             except Exception as e:
                 last_error = e

@@ -551,14 +551,39 @@ class Validator(BaseValidatorNeuron):
             Exception: If async_subtensor not initialized
         """
         if self.async_subtensor is None:
-            raise Exception("AsyncSubtensor not initialized - call initialize_async_subtensor() first")
+            bt.logging.warning("AsyncSubtensor not initialized - falling back to sync subtensor")
+            return self.subtensor.block
         
-        # Use async call (reuses single instance)
-        # Access via .substrate interface (AsyncSubstrateInterface)
-        block_data = await self.async_subtensor.substrate.get_block()
-        current_block = block_data["header"]["number"]
+        # Retry logic for WebSocket subscription conflicts
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Use async call (reuses single instance)
+                # Access via .substrate interface (AsyncSubstrateInterface)
+                block_data = await self.async_subtensor.substrate.get_block()
+                current_block = block_data["header"]["number"]
+                return current_block
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                
+                # Check if it's the subscription conflict error
+                if "unable to reconnect" in error_msg or "open subscriptions" in error_msg:
+                    if attempt < max_retries - 1:
+                        bt.logging.warning(f"⚠️  AsyncSubtensor subscription conflict (attempt {attempt + 1}/{max_retries}), retrying in 2s...")
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        # All retries failed - fall back to sync subtensor
+                        bt.logging.warning(f"⚠️  AsyncSubtensor subscription conflict after {max_retries} attempts, falling back to sync subtensor")
+                        return self.subtensor.block
+                else:
+                    # Different error - log and fall back
+                    bt.logging.error(f"AsyncSubtensor error: {e}")
+                    return self.subtensor.block
         
-        return current_block
+        # Should never reach here, but fall back to sync subtensor as safety
+        return self.subtensor.block
     
     async def cleanup_async_subtensor(self):
         """Clean up async subtensor on shutdown."""

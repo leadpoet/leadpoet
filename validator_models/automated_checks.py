@@ -1080,13 +1080,27 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
             loop = asyncio.get_event_loop()
             def dns_lookup():
                 try:
-                    dns.resolver.resolve(query, "A")
+                    print(f"   🔍 DNSBL Query: {query}")
+                    answers = dns.resolver.resolve(query, "A")
+                    # If we get A records, domain IS blacklisted
+                    a_records = [str(rdata) for rdata in answers]
+                    print(f"   ⚠️  DNSBL returned A records: {a_records} → BLACKLISTED")
                     return True  # Record exists = domain is blacklisted
                 except dns.resolver.NXDOMAIN:
+                    # NXDOMAIN = not in blacklist (expected for clean domains)
+                    print(f"   ✅ DNSBL returned NXDOMAIN → CLEAN")
                     return False  # No record = domain is clean
+                except dns.resolver.NoAnswer:
+                    # No answer = not in blacklist
+                    print(f"   ✅ DNSBL returned NoAnswer → CLEAN")
+                    return False
+                except dns.resolver.Timeout:
+                    # Timeout = treat as clean (don't block on infrastructure issues)
+                    print(f"   ⚠️  DNSBL query timeout for {query} → treating as CLEAN")
+                    return False
                 except Exception as e:
                     # On any DNS error, default to valid (don't block on infrastructure issues)
-                    print(f"⚠️ DNS lookup error for {query}: {e}")
+                    print(f"   ⚠️  DNS lookup error for {query}: {type(e).__name__}: {e} → treating as CLEAN")
                     return False
 
             is_blacklisted = await loop.run_in_executor(None, dns_lookup)

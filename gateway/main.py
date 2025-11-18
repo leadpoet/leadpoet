@@ -120,11 +120,50 @@ async def lifespan(app: FastAPI):
     print(f"   Benefits: Zero memory leaks, zero HTTP 429 errors")
     print("="*80 + "\n")
     
-    # Create async subtensor with context manager (auto-cleanup on exit)
-    async with bt.AsyncSubtensor(network=BITTENSOR_NETWORK) as async_subtensor:
-        print("✅ AsyncSubtensor created (WebSocket active)")
-        print(f"   Endpoint: {async_subtensor.chain_endpoint}")
-        print("")
+    # Create async subtensor with timeout + retry (handles network delays)
+    MAX_RETRIES = 3
+    TIMEOUT_SECONDS = 30
+    async_subtensor = None
+    
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            print(f"🔄 Attempt {attempt}/{MAX_RETRIES}: Connecting to {BITTENSOR_NETWORK}...")
+            
+            # Wrap AsyncSubtensor creation in timeout (prevents infinite hang)
+            async_subtensor = await asyncio.wait_for(
+                asyncio.create_task(bt.AsyncSubtensor(network=BITTENSOR_NETWORK).__aenter__()),
+                timeout=TIMEOUT_SECONDS
+            )
+            
+            print("✅ AsyncSubtensor created (WebSocket active)")
+            print(f"   Endpoint: {async_subtensor.chain_endpoint}")
+            print(f"   Connected on attempt {attempt}")
+            print("")
+            break  # Success - exit retry loop
+            
+        except asyncio.TimeoutError:
+            print(f"⚠️  Attempt {attempt}/{MAX_RETRIES}: Connection timeout after {TIMEOUT_SECONDS}s")
+            if attempt < MAX_RETRIES:
+                wait_time = 5 * attempt  # Progressive backoff: 5s, 10s, 15s
+                print(f"   Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"❌ FATAL: Failed to connect to {BITTENSOR_NETWORK} after {MAX_RETRIES} attempts")
+                print(f"   Check network connectivity and Bittensor chain status")
+                raise RuntimeError(f"AsyncSubtensor connection failed after {MAX_RETRIES} attempts")
+                
+        except Exception as e:
+            print(f"⚠️  Attempt {attempt}/{MAX_RETRIES}: Connection error: {e}")
+            if attempt < MAX_RETRIES:
+                wait_time = 5 * attempt
+                print(f"   Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"❌ FATAL: Failed to initialize AsyncSubtensor: {e}")
+                raise
+    
+    # Now use async_subtensor in a try/finally to ensure cleanup
+    try:
         
         # ════════════════════════════════════════════════════════════════
         # BLOCK PUBLISHER: Subscribe to chain blocks (push-based)
@@ -224,7 +263,8 @@ async def lifespan(app: FastAPI):
         
         # Yield control back to FastAPI (app runs here)
         yield
-        
+    
+    finally:
         # ════════════════════════════════════════════════════════════════
         # CLEANUP: Graceful shutdown
         # ════════════════════════════════════════════════════════════════
@@ -263,9 +303,14 @@ async def lifespan(app: FastAPI):
         print("   ✅ All background tasks stopped")
         print("")
         
-        # AsyncSubtensor will be closed by context manager (async with)
+        # Close AsyncSubtensor WebSocket manually (since we used __aenter__ with timeout)
         print("   🔌 Closing AsyncSubtensor WebSocket...")
-        # (automatic cleanup by async with context manager)
+        if async_subtensor:
+            try:
+                await async_subtensor.__aexit__(None, None, None)
+                print("   ✅ AsyncSubtensor closed")
+            except Exception as e:
+                print(f"   ⚠️  Error closing AsyncSubtensor: {e}")
         
         print("="*80)
         print("✅ GATEWAY SHUTDOWN COMPLETE")

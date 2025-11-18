@@ -7,6 +7,13 @@ def add_validator_args(cls, parser: argparse.ArgumentParser):
         help="Use the open-source validator model instead of simulated review"
     )
     parser.add_argument(
+        "--neuron.disable_set_weights",
+        action="store_true",
+        help="Disables setting weights.",
+        default=False,
+        dest="neuron_disable_set_weights",
+    )
+    parser.add_argument(
         "--neuron.sample_size",
         type=int,
         help="Number of miners to query per forward pass",

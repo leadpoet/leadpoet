@@ -180,20 +180,15 @@ async def lifespan(app: FastAPI):
         print("")
         
         # ════════════════════════════════════════════════════════════════
-        # BACKGROUND TASKS: Start services
+        # BACKGROUND TASKS: Start OTHER services first
         # ════════════════════════════════════════════════════════════════
         print("="*80)
         print("🚀 STARTING BACKGROUND TASKS")
         print("="*80)
         
-        # Start block subscription (keeps WebSocket alive, triggers monitors)
-        subscription_task = asyncio.create_task(block_publisher.start())
-        print("✅ Block subscription started (push-based, replaces polling)")
-        
-        # Start other background tasks (existing services)
-        # EMERGENCY: Disable reveal_collector - it's blocking on get_current_epoch_id_async()
-        # reveal_task = asyncio.create_task(reveal_collector_task())
-        print("⚠️  Reveal collector DISABLED (testing)")
+        # Start other background tasks FIRST (don't block on subscription)
+        reveal_task = asyncio.create_task(reveal_collector_task())
+        print("✅ Reveal collector task started")
         
         checkpoint_task_handle = asyncio.create_task(checkpoint_task())
         print("✅ Checkpoint task started")
@@ -218,6 +213,10 @@ async def lifespan(app: FastAPI):
         
         # Yield control back to FastAPI (app runs here)
         yield
+        
+        # Start block subscription AFTER yield (non-blocking for HTTP)
+        subscription_task = asyncio.create_task(block_publisher.start())
+        print("✅ Block subscription started AFTER app ready (push-based, replaces polling)")
         
         # ════════════════════════════════════════════════════════════════
         # CLEANUP: Graceful shutdown

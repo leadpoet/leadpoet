@@ -975,6 +975,8 @@ def _reset_validator_weights_file():
     
     with _validator_weights_lock:
         try:
+            # Ensure directory exists before writing
+            os.makedirs(VALIDATOR_WEIGHTS_DIR, exist_ok=True)
             with open(VALIDATOR_WEIGHTS_FILE, "w") as f:
                 json.dump(empty_structure, f, indent=2)
         except Exception as e:

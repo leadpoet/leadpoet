@@ -19,10 +19,10 @@ import hashlib
 import json
 
 from gateway.utils.epoch import (
-    get_current_epoch_id,
-    get_epoch_start_time,
-    get_epoch_end_time,
-    get_epoch_close_time,
+    get_current_epoch_id_async,
+    get_epoch_start_time_async,
+    get_epoch_end_time_async,
+    get_epoch_close_time_async,
     is_epoch_active,
     is_epoch_closed,
     get_block_within_epoch
@@ -141,12 +141,12 @@ async def epoch_lifecycle_task():
     
     while True:
         try:
-            current_epoch = get_current_epoch_id()
+            current_epoch = await get_current_epoch_id_async()
             now = datetime.utcnow()
             
-            epoch_start = get_epoch_start_time(current_epoch)
-            epoch_end = get_epoch_end_time(current_epoch)
-            epoch_close = get_epoch_close_time(current_epoch)
+            epoch_start = await get_epoch_start_time_async(current_epoch)
+            epoch_end = await get_epoch_end_time_async(current_epoch)
+            epoch_close = await get_epoch_close_time_async(current_epoch)
             
             # Debug: Show lifecycle task is running (every 30 seconds)
             time_to_end = (epoch_end - now).total_seconds()
@@ -255,7 +255,7 @@ async def epoch_lifecycle_task():
                     continue  # Already processed
                 
                 # Calculate close time for THIS epoch
-                check_epoch_close = get_epoch_close_time(check_epoch)
+                check_epoch_close = await get_epoch_close_time_async(check_epoch)
                 time_since_close = (now - check_epoch_close).total_seconds()
                 
                 if time_since_close >= 0:  # This epoch has closed
@@ -490,8 +490,8 @@ async def compute_and_log_epoch_inputs(epoch_id: int):
         epoch_id: Epoch ID
     """
     try:
-        epoch_start = get_epoch_start_time(epoch_id)
-        epoch_end = get_epoch_end_time(epoch_id)
+        epoch_start = await get_epoch_start_time_async(epoch_id)
+        epoch_end = await get_epoch_end_time_async(epoch_id)
         
         # Query all events in epoch (during validation phase) - RUN IN THREAD
         result = await asyncio.to_thread(

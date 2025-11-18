@@ -13,7 +13,7 @@ Runs every 2 minutes to check reveal progress.
 
 import asyncio
 from datetime import datetime, timedelta
-from gateway.utils.epoch import get_current_epoch_id, is_epoch_closed
+from gateway.utils.epoch import get_current_epoch_id_async, is_epoch_closed_async
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 from supabase import create_client
 
@@ -45,7 +45,7 @@ async def reveal_collector_task():
     
     while True:
         try:
-            current_epoch = get_current_epoch_id()
+            current_epoch = await get_current_epoch_id_async()
             
             # Check previous epoch (should be closed by now)
             previous_epoch = current_epoch - 1
@@ -56,7 +56,7 @@ async def reveal_collector_task():
                 continue
             
             # Check if previous epoch is closed
-            if not is_epoch_closed(previous_epoch):
+            if not await is_epoch_closed_async(previous_epoch):
                 # Previous epoch not closed yet, wait
                 await asyncio.sleep(120)
                 continue

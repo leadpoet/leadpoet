@@ -3,31 +3,46 @@ Trustless Rate Limiter for Gateway
 
 Prevents DoS attacks by rate-limiting miner submissions:
 - 10 submissions max per miner per day
-- 5 rejections max per miner per day
+- 8 rejections max per miner per day
 - Daily reset at midnight EST (05:00 UTC)
 
 Design:
 - In-memory cache for fast lookups (O(1))
+- Supabase persistence (survives gateway restarts)
+- Public read-only table (transparent rate limits)
+- Async writes to Supabase (non-blocking)
 - Check BEFORE expensive operations (signature verification, DB queries)
-- Log all rate limit decisions to TEE for transparency
-- Early rejection with HTTP 429 (minimal resource usage)
 
 Security:
 - Rate limits checked before signature verification (DoS protection)
-- All decisions logged to TEE buffer (auditability)
+- Persisted to Supabase (can't be bypassed by restarting gateway)
+- Public transparency (miners can verify their limits)
 - Daily reset prevents indefinite blocks
-- Per-hotkey limits (no metagraph dependency)
 """
 
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import threading
 import asyncio
+from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+from supabase import create_client
 
-# In-memory rate limit cache
+# Supabase client for rate limit persistence
+_supabase_client = None
+
+def _get_supabase():
+    """Get or create Supabase client (lazy initialization)."""
+    global _supabase_client
+    if _supabase_client is None:
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return _supabase_client
+
+# In-memory rate limit cache (fast lookups)
 # Structure: {miner_hotkey: {submissions: int, rejections: int, reset_at: datetime}}
+# Cache is loaded from Supabase on first use, then kept in sync
 _rate_limit_cache: Dict[str, Dict] = {}
 _cache_lock = threading.Lock()
+_cache_loaded = False  # Track if we've loaded from Supabase yet
 
 # Rate limit constants
 # Production limits to maintain lead quality and prevent spam
@@ -60,11 +75,82 @@ def get_next_midnight_est() -> datetime:
     return next_midnight_utc
 
 
+def _load_cache_from_supabase():
+    """
+    Load rate limit cache from Supabase on first use.
+    
+    Called once on first rate limit check to hydrate in-memory cache.
+    This ensures rate limits persist across gateway restarts.
+    """
+    global _cache_loaded
+    
+    if _cache_loaded:
+        return  # Already loaded
+    
+    try:
+        supabase = _get_supabase()
+        
+        # Fetch all rate limit entries
+        result = supabase.table("miner_rate_limits").select("*").execute()
+        
+        if result.data:
+            # Populate cache from database
+            for row in result.data:
+                _rate_limit_cache[row["miner_hotkey"]] = {
+                    "submissions": row["submissions"],
+                    "rejections": row["rejections"],
+                    "reset_at": datetime.fromisoformat(row["reset_at"].replace("Z", "+00:00"))
+                }
+            
+            print(f"✅ Loaded {len(result.data)} miner rate limits from Supabase")
+        else:
+            print(f"ℹ️  No existing rate limits in Supabase (starting fresh)")
+        
+        _cache_loaded = True
+        
+    except Exception as e:
+        print(f"⚠️  Failed to load rate limits from Supabase: {e}")
+        print(f"   Will start with empty cache and sync on first update")
+        _cache_loaded = True  # Don't keep trying to load
+
+
+async def _sync_to_supabase_async(miner_hotkey: str, entry: Dict):
+    """
+    Sync rate limit entry to Supabase (async, non-blocking).
+    
+    This is called after EVERY submission increment to ensure persistence.
+    Uses upsert (insert or update) for simplicity.
+    
+    Args:
+        miner_hotkey: Miner's SS58 address
+        entry: Rate limit entry dict {submissions, rejections, reset_at}
+    """
+    try:
+        supabase = _get_supabase()
+        
+        # Upsert to Supabase (insert or update)
+        supabase.table("miner_rate_limits").upsert({
+            "miner_hotkey": miner_hotkey,
+            "submissions": entry["submissions"],
+            "rejections": entry["rejections"],
+            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+            "max_rejections": MAX_REJECTIONS_PER_DAY,
+            "reset_at": entry["reset_at"].isoformat(),
+            "last_updated": datetime.now(timezone.utc).isoformat()
+        }).execute()
+        
+    except Exception as e:
+        # Don't fail the submission if Supabase sync fails
+        # The in-memory cache is still updated
+        print(f"⚠️  Failed to sync rate limit to Supabase for {miner_hotkey[:10]}...: {e}")
+
+
 def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
     """
     Check if miner has exceeded rate limits.
     
     This is called BEFORE signature verification to prevent DoS attacks.
+    Loads cache from Supabase on first use.
     
     Args:
         miner_hotkey: Miner's SS58 address
@@ -76,6 +162,9 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
             - stats: Current rate limit stats {submissions, rejections, reset_at}
     """
     with _cache_lock:
+        # Load cache from Supabase on first use
+        if not _cache_loaded:
+            _load_cache_from_supabase()
         now_utc = datetime.now(timezone.utc)
         
         # Get or create rate limit entry
@@ -148,6 +237,7 @@ def increment_submission(miner_hotkey: str, success: bool) -> Dict:
     Increment submission counters after processing a lead.
     
     Called AFTER signature verification and processing.
+    Updates both in-memory cache AND Supabase for persistence.
     
     Args:
         miner_hotkey: Miner's SS58 address
@@ -158,6 +248,10 @@ def increment_submission(miner_hotkey: str, success: bool) -> Dict:
     """
     with _cache_lock:
         now_utc = datetime.now(timezone.utc)
+        
+        # Load cache from Supabase on first use
+        if not _cache_loaded:
+            _load_cache_from_supabase()
         
         # Get or create entry
         if miner_hotkey not in _rate_limit_cache:
@@ -175,10 +269,19 @@ def increment_submission(miner_hotkey: str, success: bool) -> Dict:
             entry["rejections"] = 0
             entry["reset_at"] = get_next_midnight_est()
         
-        # Increment counters
+        # Increment counters (in-memory)
         entry["submissions"] += 1
         if not success:
             entry["rejections"] += 1
+        
+        # Sync to Supabase (async, non-blocking)
+        # Fire-and-forget - don't wait for DB write
+        try:
+            asyncio.create_task(_sync_to_supabase_async(miner_hotkey, entry))
+        except RuntimeError:
+            # No event loop running (shouldn't happen in FastAPI, but be defensive)
+            # Skip Supabase sync but in-memory cache is still updated
+            print(f"⚠️  No event loop - skipping Supabase sync for {miner_hotkey[:10]}...")
         
         return {
             "submissions": entry["submissions"],

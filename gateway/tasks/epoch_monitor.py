@@ -105,8 +105,10 @@ class EpochMonitor(BlockListener):
             # ════════════════════════════════════════════════════════════════
             # Check 3: Epoch closed and needs reveal/consensus (check previous epochs)
             # ════════════════════════════════════════════════════════════════
-            # Check up to 10 epochs back for any that need consensus
-            for check_epoch in range(max(0, current_epoch - 10), current_epoch):
+            # Check up to 3 epochs back for any that need consensus
+            # IMPORTANT: Limited to 3 to prevent thundering herd on startup
+            # (checking 10 epochs would trigger 10 concurrent consensus tasks)
+            for check_epoch in range(max(0, current_epoch - 3), current_epoch):
                 if check_epoch not in self.closed_epochs:
                     # Trigger reveal check (non-blocking)
                     asyncio.create_task(self._check_for_reveals(check_epoch))

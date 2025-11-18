@@ -31,6 +31,7 @@ data/regulatory/miner_attestation.json
 *.log
 *.npz   # Validator state files (e.g., validator_state.npz)
 *.key   # Stray key files
+pending_reveals.json  # Validator reveal cache (runtime file)
 
 # Leadpoet-specific
 wallet.hotkey/

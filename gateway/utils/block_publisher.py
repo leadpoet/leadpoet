@@ -171,9 +171,13 @@ class ChainBlockPublisher:
             
             self.__last_block_number = block_number
             
-            # Get block hash and timestamp
-            block_hash = await self.__substrate.get_block_hash(block_number)
-            timestamp = await self._get_timestamp(block_hash)
+            # Get block hash (use header hash directly to avoid extra query)
+            block_hash = header.get("hash", "")
+            if not block_hash:
+                block_hash = await self.__substrate.get_block_hash(block_number)
+            
+            # Use current time instead of querying chain (avoid blocking)
+            timestamp = datetime.now(timezone.utc)
             
             # Create block info object
             block_info = BlockInfo(

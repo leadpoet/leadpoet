@@ -125,7 +125,8 @@ async def reveal_validation_result(
     # ========================================
     # Step 2: Verify epoch is closed
     # ========================================
-    if not is_epoch_closed(payload.epoch_id):
+    from gateway.utils.epoch import is_epoch_closed_async
+    if not await is_epoch_closed_async(payload.epoch_id):
         raise HTTPException(
             status_code=400,
             detail=f"Epoch {payload.epoch_id} is not closed yet. Wait until epoch closes to reveal."
@@ -368,7 +369,8 @@ async def reveal_validation_batch(
         )
     
     # Verify epoch is closed
-    if not is_epoch_closed(epoch_id):
+    from gateway.utils.epoch import is_epoch_closed_async
+    if not await is_epoch_closed_async(epoch_id):
         raise HTTPException(
             status_code=400,
             detail=f"Epoch {epoch_id} is not closed yet. Wait until epoch closes to reveal."

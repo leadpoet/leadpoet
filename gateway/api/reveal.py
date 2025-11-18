@@ -272,6 +272,90 @@ async def reveal_validation_result(
         )
     
     # ========================================
+    # Step 9.5: Re-calculate weighted consensus with ALL revealed validators
+    # ========================================
+    # CRITICAL FIX: Ensure leads_private always reflects current weighted consensus
+    try:
+        lead_id = evidence["lead_id"]
+        
+        print(f"🔄 Re-calculating weighted consensus for lead {lead_id[:8]}...")
+        
+        # Import consensus calculation function
+        from gateway.utils.consensus import compute_weighted_consensus
+        import asyncio
+        
+        # Compute weighted consensus (queries ALL revealed validations for this lead)
+        outcome = await compute_weighted_consensus(lead_id, payload.epoch_id)
+        
+        # Query ALL validator responses (to rebuild validator_responses with v_trust/stake)
+        all_responses_result = supabase.table("validation_evidence_private")\
+            .select("validator_hotkey, decision, rep_score, rejection_reason, revealed_ts, v_trust, stake")\
+            .eq("lead_id", lead_id)\
+            .eq("epoch_id", payload.epoch_id)\
+            .not_.is_("decision", "null")\
+            .execute()
+        
+        all_responses = all_responses_result.data
+        
+        # Rebuild validator_responses array with ALL validators
+        validator_responses_full = []
+        validators_responded_full = []
+        for r in all_responses:
+            validators_responded_full.append(r['validator_hotkey'])
+            validator_responses_full.append({
+                "validator": r['validator_hotkey'],
+                "decision": r['decision'],
+                "rep_score": r['rep_score'],
+                "rejection_reason": r.get('rejection_reason'),
+                "submitted_at": r.get('revealed_ts'),
+                "v_trust": r.get('v_trust'),
+                "stake": r.get('stake')
+            })
+        
+        # Build consensus_votes object (same structure as epoch_lifecycle.py)
+        approve_count = sum(1 for r in all_responses if r['decision'] == 'approve')
+        deny_count = len(all_responses) - approve_count
+        
+        consensus_votes = {
+            "total_validators": outcome['validator_count'],
+            "responded": len(all_responses),
+            "approve": approve_count,
+            "deny": deny_count,
+            "consensus": outcome['final_decision'],
+            "avg_rep_score": outcome['final_rep_score'],
+            "total_weight": outcome['consensus_weight'],
+            "approval_ratio": outcome['approval_ratio'],
+            "consensus_timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Determine final status and rep_score
+        final_status = "approved" if outcome['final_decision'] == 'approve' else "denied"
+        final_rep_score = outcome['final_rep_score'] if outcome['final_decision'] == 'approve' else 0
+        
+        # Update leads_private with re-calculated consensus
+        supabase.table("leads_private")\
+            .update({
+                "status": final_status,
+                "validators_responded": validators_responded_full,
+                "validator_responses": validator_responses_full,
+                "consensus_votes": consensus_votes,
+                "rep_score": final_rep_score,
+                "epoch_summary": outcome
+            })\
+            .eq("lead_id", lead_id)\
+            .execute()
+        
+        print(f"✅ Consensus: {final_status.upper()} (rep: {final_rep_score:.2f}, weight: {outcome['consensus_weight']:.2f})")
+        print(f"   Validators: {len(validators_responded_full)}, Approve: {approve_count}, Deny: {deny_count}, Ratio: {outcome['approval_ratio']:.2%}")
+    
+    except Exception as e:
+        # Don't fail the reveal if consensus re-calculation fails
+        # The validator response is already recorded in evidence table
+        print(f"⚠️  Warning: Failed to re-calculate consensus: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # ========================================
     # Step 10: Log REVEAL event to TEE Buffer
     # ========================================
     reveal_timestamp = datetime.utcnow().isoformat()
@@ -570,6 +654,99 @@ async def reveal_validation_batch(
                     asyncio.to_thread(do_update),
                     timeout=15.0  # 15 second timeout per update (Supabase can be slow)
                 )
+                
+                # ════════════════════════════════════════════════════════════════════
+                # CRITICAL FIX: Re-calculate weighted consensus with ALL revealed validators
+                # This ensures leads_private always reflects the current weighted consensus
+                # ════════════════════════════════════════════════════════════════════
+                try:
+                    print(f"         🔄 Re-calculating weighted consensus for lead {lead_id[:8]}...")
+                    
+                    # Import consensus calculation function
+                    from gateway.utils.consensus import compute_weighted_consensus
+                    
+                    # Compute weighted consensus (queries ALL revealed validations for this lead)
+                    outcome = await compute_weighted_consensus(lead_id, epoch_id)
+                    
+                    # Query ALL validator responses (to rebuild validator_responses with v_trust/stake)
+                    def fetch_all_responses():
+                        return supabase.table("validation_evidence_private")\
+                            .select("validator_hotkey, decision, rep_score, rejection_reason, revealed_ts, v_trust, stake")\
+                            .eq("lead_id", lead_id)\
+                            .eq("epoch_id", epoch_id)\
+                            .not_.is_("decision", "null")\
+                            .execute()
+                    
+                    all_responses_result = await asyncio.wait_for(
+                        asyncio.to_thread(fetch_all_responses),
+                        timeout=10.0
+                    )
+                    
+                    all_responses = all_responses_result.data
+                    
+                    # Rebuild validator_responses array with ALL validators
+                    validator_responses_full = []
+                    validators_responded_full = []
+                    for r in all_responses:
+                        validators_responded_full.append(r['validator_hotkey'])
+                        validator_responses_full.append({
+                            "validator": r['validator_hotkey'],
+                            "decision": r['decision'],
+                            "rep_score": r['rep_score'],
+                            "rejection_reason": r.get('rejection_reason'),
+                            "submitted_at": r.get('revealed_ts'),
+                            "v_trust": r.get('v_trust'),
+                            "stake": r.get('stake')
+                        })
+                    
+                    # Build consensus_votes object (same structure as epoch_lifecycle.py)
+                    approve_count = sum(1 for r in all_responses if r['decision'] == 'approve')
+                    deny_count = len(all_responses) - approve_count
+                    
+                    consensus_votes = {
+                        "total_validators": outcome['validator_count'],
+                        "responded": len(all_responses),
+                        "approve": approve_count,
+                        "deny": deny_count,
+                        "consensus": outcome['final_decision'],
+                        "avg_rep_score": outcome['final_rep_score'],
+                        "total_weight": outcome['consensus_weight'],
+                        "approval_ratio": outcome['approval_ratio'],
+                        "consensus_timestamp": datetime.utcnow().isoformat()
+                    }
+                    
+                    # Determine final status and rep_score
+                    final_status = "approved" if outcome['final_decision'] == 'approve' else "denied"
+                    final_rep_score = outcome['final_rep_score'] if outcome['final_decision'] == 'approve' else 0
+                    
+                    # Update leads_private with re-calculated consensus
+                    def update_consensus():
+                        return supabase.table("leads_private")\
+                            .update({
+                                "status": final_status,
+                                "validators_responded": validators_responded_full,
+                                "validator_responses": validator_responses_full,
+                                "consensus_votes": consensus_votes,
+                                "rep_score": final_rep_score,
+                                "epoch_summary": outcome
+                            })\
+                            .eq("lead_id", lead_id)\
+                            .execute()
+                    
+                    await asyncio.wait_for(
+                        asyncio.to_thread(update_consensus),
+                        timeout=10.0
+                    )
+                    
+                    print(f"         ✅ Consensus: {final_status.upper()} (rep: {final_rep_score:.2f}, weight: {outcome['consensus_weight']:.2f})")
+                    print(f"            Validators: {len(validators_responded_full)}, Approve: {approve_count}, Deny: {deny_count}, Ratio: {outcome['approval_ratio']:.2%}")
+                
+                except Exception as e:
+                    # Don't fail the reveal if consensus re-calculation fails
+                    # The validator response is already recorded in evidence table
+                    print(f"         ⚠️  Warning: Failed to re-calculate consensus: {e}")
+                    import traceback
+                    traceback.print_exc()
                 
                 print(f"      [{idx}/{len(valid_updates)}] ✅ Updated lead {lead_id[:8]}...")
                 revealed_count += 1

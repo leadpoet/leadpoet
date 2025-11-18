@@ -242,7 +242,7 @@ async def lifespan(app: FastAPI):
             reveal_task,
             checkpoint_task_handle,
             anchor_task,
-            mirror_task,
+            # mirror_task,  # DISABLED (see line 203-206)
             hourly_batch_task_handle,
             rate_limiter_task
         ]

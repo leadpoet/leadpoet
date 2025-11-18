@@ -1614,7 +1614,19 @@ class Validator(BaseValidatorNeuron):
             leads = gateway_get_epoch_leads(self.wallet, current_epoch)
             print(f"[DEBUG] Received {len(leads) if leads else 0} leads from gateway")
             if not leads:
-                print(f"⏳ No leads assigned for epoch {current_epoch}, waiting...")
+                print(f"ℹ️  No leads to process for epoch {current_epoch}")
+                print(f"   This is expected if:")
+                print(f"   • You've already submitted validations for this epoch")
+                print(f"   • Queue is empty")
+                print(f"   • Gateway is still initializing")
+                
+                # IMPORTANT: Mark epoch as processed to prevent infinite retry loop
+                # If gateway returns empty list, it means either:
+                # 1. Already submitted (Step 3.6 check in gateway)
+                # 2. Queue is genuinely empty
+                # Either way, no work to do - mark as processed and move on
+                self._last_processed_epoch = current_epoch
+                print(f"✅ Marked epoch {current_epoch} as processed (no work to do)\n")
                 await asyncio.sleep(10)
                 return
             

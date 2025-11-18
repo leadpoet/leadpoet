@@ -143,6 +143,39 @@ async def get_epoch_leads(
     print(f"✅ Step 3.5: Within lead distribution window (block {block_within_epoch}/350)")
     
     # ========================================================================
+    # Step 3.6: Check if validator has already submitted validations for this epoch
+    # ========================================================================
+    # CRITICAL: Don't send leads to validators who've already submitted
+    # This prevents infinite loops and wasted work
+    try:
+        existing_submission = supabase.table("validation_evidence_private") \
+            .select("evidence_id") \
+            .eq("validator_hotkey", validator_hotkey) \
+            .eq("epoch_id", epoch_id) \
+            .limit(1) \
+            .execute()
+        
+        if existing_submission.data:
+            print(f"⚠️  Step 3.6: Validator {validator_hotkey[:20]}... already submitted for epoch {epoch_id}")
+            print(f"   Returning empty lead list (no work to do)")
+            return {
+                "epoch_id": epoch_id,
+                "leads": [],  # Empty list - already submitted
+                "queue_root": "already_submitted",
+                "validator_count": 0,
+                "message": f"You have already submitted validations for epoch {epoch_id}. No additional work needed.",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        
+        print(f"✅ Step 3.6: First time fetching leads for epoch {epoch_id} (no prior submission)")
+    
+    except Exception as e:
+        # Log error but don't fail - this is just an optimization check
+        print(f"⚠️  Warning: Failed to check existing submission (continuing anyway): {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # ========================================================================
     # OPTIMIZATION: Check cache first (instant response, no DB query)
     # ========================================================================
     cached_leads = get_cached_leads(epoch_id)

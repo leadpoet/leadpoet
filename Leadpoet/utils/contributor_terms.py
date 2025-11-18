@@ -23,7 +23,7 @@ import bittensor as bt
 # This ensures all participants (miners, validators, gateway) use the same version.
 # Any updates to terms are made via GitHub commits, creating an immutable audit trail.
 
-GITHUB_TERMS_URL = "https://raw.githubusercontent.com/leadpoet/leadpoet/main/docs/contributor_terms.md"
+GITHUB_TERMS_URL = "https://cdn.jsdelivr.net/gh/leadpoet/leadpoet@main/docs/contributor_terms.md"
 
 # Cache for terms content (avoid repeated network calls)
 _CACHED_TERMS_TEXT = None

@@ -984,17 +984,12 @@ class Validator(BaseValidatorNeuron):
         bt.logging.info("Saving validator state.")
         
         try:
-            # Ensure directory exists before saving
-            base_path = self.config.neuron.full_path or os.getcwd()
+            # Save everything to validator_weights/ directory for consistency
+            weights_dir = Path("validator_weights")
+            weights_dir.mkdir(exist_ok=True)
             
-            # Create directory if it doesn't exist
-            os.makedirs(base_path, exist_ok=True)
-            
-            # Also ensure the parent directory of the state file exists
-            state_path = os.path.join(base_path, "validator_state.npz")
-            state_dir = os.path.dirname(state_path)
-            if state_dir and not os.path.exists(state_dir):
-                os.makedirs(state_dir, exist_ok=True)
+            # Save validator state (numpy)
+            state_path = weights_dir / "validator_state.npz"
             
             np.savez(
                 state_path,
@@ -1011,25 +1006,30 @@ class Validator(BaseValidatorNeuron):
             )
             bt.logging.info(f"✅ State saved to {state_path}")
             
-            # Save pending reveals separately (JSON-serializable)
-            reveals_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "pending_reveals.json")
-            reveals_dir = os.path.dirname(reveals_path)
-            if reveals_dir and not os.path.exists(reveals_dir):
-                os.makedirs(reveals_dir, exist_ok=True)
+            # Save pending reveals separately (JSON-serializable) to validator_weights/
+            reveals_path = weights_dir / "pending_reveals.json"
                 
             if hasattr(self, '_pending_reveals') and self._pending_reveals:
                 import json
                 with open(reveals_path, 'w') as f:
                     json.dump(self._pending_reveals, f, indent=2)
-                bt.logging.info(f"Saved {len(self._pending_reveals)} pending reveals")
+                bt.logging.info(f"Saved {len(self._pending_reveals)} pending reveal epoch(s) to {reveals_path}")
+            elif hasattr(self, '_pending_reveals'):
+                # Save empty dict if no pending reveals (clean slate)
+                import json
+                with open(reveals_path, 'w') as f:
+                    json.dump({}, f, indent=2)
+                bt.logging.debug(f"Saved empty pending reveals to {reveals_path}")
         except Exception as e:
             bt.logging.error(f"Failed to save state: {e}")
             bt.logging.error(f"   Attempted path: {state_path if 'state_path' in locals() else 'unknown'}")
-            bt.logging.error(f"   Base path: {base_path if 'base_path' in locals() else 'unknown'}")
 
     def load_state(self):
-        state_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "validator_state.npz")
-        if os.path.exists(state_path):
+        # Load from validator_weights/ directory (new location)
+        weights_dir = Path("validator_weights")
+        state_path = weights_dir / "validator_state.npz"
+        
+        if state_path.exists():
             bt.logging.info("Loading validator state.")
             try:
                 state = np.load(state_path, allow_pickle=True)
@@ -1043,6 +1043,7 @@ class Validator(BaseValidatorNeuron):
                 self.validation_history = state["validation_history"].tolist()
                 self.registration_time = datetime.fromtimestamp(state["registration_time"].astype('datetime64[ns]').item() / 1e9)
                 self.appeal_status = state["appeal_status"].item()
+                bt.logging.info(f"✅ Loaded state from {state_path}")
             except Exception as e:
                 bt.logging.warning(f"Failed to load state: {e}. Using defaults.")
                 self._initialize_default_state()
@@ -1050,20 +1051,21 @@ class Validator(BaseValidatorNeuron):
             bt.logging.info("No state file found. Initializing with defaults.")
             self._initialize_default_state()
         
-        # Load pending reveals separately
-        reveals_path = os.path.join(self.config.neuron.full_path or os.getcwd(), "pending_reveals.json")
-        if os.path.exists(reveals_path):
+        # Load pending reveals separately from validator_weights/
+        reveals_path = weights_dir / "pending_reveals.json"
+        if reveals_path.exists():
             try:
                 import json
                 with open(reveals_path, 'r') as f:
                     self._pending_reveals = json.load(f)
                 # Convert string keys to integers (JSON converts int keys to strings)
                 self._pending_reveals = {int(k): v for k, v in self._pending_reveals.items()}
-                bt.logging.info(f"Loaded {len(self._pending_reveals)} pending reveals")
+                bt.logging.info(f"✅ Loaded {len(self._pending_reveals)} pending reveal epoch(s) from {reveals_path}")
             except Exception as e:
                 bt.logging.warning(f"Failed to load pending reveals: {e}")
                 self._pending_reveals = {}
         else:
+            bt.logging.info("No pending reveals file found. Starting fresh.")
             self._pending_reveals = {}
 
     def _initialize_default_state(self):

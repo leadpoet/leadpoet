@@ -1726,74 +1726,180 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
         if not company:
             return 0, {"checked": False, "reason": "No company provided"}
         
+        print(f"   🔍 SEC: Searching for company: '{company}'")
+        
         # SEC.gov requires User-Agent header with contact info (no API key needed)
         headers = {
             "User-Agent": "LeadPoet/1.0 (hello@leadpoet.com)"
         }
         
+        # Try multiple company name variations for better matching
+        # SEC often uses abbreviated forms (e.g., "Microsoft Corp" not "Microsoft Corporation")
+        company_variations = [
+            company,  # Original name
+            company.replace(" Company, Inc.", "").replace(" Corporation", " Corp").replace(", Inc.", ""),  # Abbreviated
+            company.split()[0] if len(company.split()) > 1 else company,  # First word only (e.g., "Microsoft")
+        ]
+        
+        print(f"      🔍 Trying {len(company_variations)} name variations: {company_variations}")
+        
         # Use SEC.gov company search endpoint to find CIK
         # This searches the submissions index for company name matches
         search_url = "https://www.sec.gov/cgi-bin/browse-edgar"
-        params = {
-            "company": company,
-            "action": "getcompany",
-            "count": "10"
-        }
         
+        # Try each variation until we find results
         async with aiohttp.ClientSession() as session:
-            async with session.get(search_url, headers=headers, params=params, timeout=15) as response:
-                if response.status != 200:
-                    return 0, {
-                        "checked": False,
-                        "reason": f"SEC API error: HTTP {response.status}"
-                    }
+            for idx, company_variation in enumerate(company_variations):
+                print(f"      🔄 Attempt {idx+1}/{len(company_variations)}: Searching for '{company_variation}'")
                 
-                # Parse HTML response (SEC doesn't return JSON for this endpoint)
-                html = await response.text()
-                
-                # Check if company was found (HTML contains "No matching" if not found)
-                if "No matching" in html or "No results" in html:
-                    return 0, {
-                        "checked": True,
-                        "filings": 0,
-                        "reason": f"No SEC filings found for {company}"
-                    }
-                
-                # Count filing indicators in HTML (rough estimate)
-                # Look for common filing types
-                filing_types = ["10-K", "10-Q", "8-K", "S-1", "10-K/A", "10-Q/A"]
-                total_filings = 0
-                for filing_type in filing_types:
-                    total_filings += html.count(filing_type)
-                
-                if total_filings == 0:
-                    return 0, {
-                        "checked": True,
-                        "filings": 0,
-                        "reason": f"No filings detected for {company}"
-                    }
-                
-                # Scoring logic (UPDATED: max 12 points for SEC):
-                # - 1-5 filings: 3.6 points
-                # - 6-20 filings: 7.2 points
-                # - 21-50 filings: 9.6 points
-                # - 50+ filings: 12 points
-                
-                if total_filings <= 5:
-                    score = min(3.6, total_filings * 0.72)
-                elif total_filings <= 20:
-                    score = 7.2
-                elif total_filings <= 50:
-                    score = 9.6
-                else:
-                    score = 12
-                
-                return score, {
-                    "checked": True,
-                    "filings": total_filings,
-                    "score": score,
-                    "reason": f"Found {total_filings} SEC filing indicators for {company}"
+                # Request actual filings, not just company landing page
+                # type=&dateb=&owner=include&start=0
+                params = {
+                    "company": company_variation,
+                    "action": "getcompany",
+                    "type": "",  # All filing types
+                    "dateb": "",  # All dates
+                    "owner": "include",  # Include company filings
+                    "start": "0",  # Start from first filing
+                    "count": "100"  # Get up to 100 recent filings
                 }
+                
+                async with session.get(search_url, headers=headers, params=params, timeout=15) as response:
+                    if response.status != 200:
+                        print(f"      ❌ SEC API returned HTTP {response.status}")
+                        continue  # Try next variation
+                    
+                    # Parse HTML response (SEC doesn't return JSON for this endpoint)
+                    html = await response.text()
+                    print(f"      📄 SEC response length: {len(html)} bytes")
+                    
+                    # Check if company was found (HTML contains "No matching" if not found)
+                    if "No matching" in html or "No results" in html:
+                        print(f"      ❌ SEC: 'No matching' found for '{company_variation}'")
+                        continue  # Try next variation
+                    
+                    # Found a result! Count filing indicators in HTML
+                    print(f"      ✅ SEC: Found match for '{company_variation}'")
+                    filing_types = ["10-K", "10-Q", "8-K", "S-1", "10-K/A", "10-Q/A", "4", "3", "SC 13", "DEF 14A"]
+                    total_filings = 0
+                    for filing_type in filing_types:
+                        # Look for the filing type in HTML context (e.g., ">10-K<" or " 10-K ")
+                        count = html.count(f">{filing_type}<") + html.count(f" {filing_type} ")
+                        if count > 0:
+                            print(f"      📊 Found {count}x {filing_type}")
+                        total_filings += count
+                    
+                    print(f"      📊 Total filings detected: {total_filings}")
+                    
+                    if total_filings == 0:
+                        # The HTML might be a landing page with a link to the actual filings
+                        # Try to extract CIK from the HTML and query directly
+                        import re
+                        cik_match = re.search(r'CIK=(\d{10})', html)
+                        if cik_match:
+                            cik = cik_match.group(1)
+                            print(f"      🔍 Found CIK: {cik}, fetching actual filings...")
+                            
+                            # Query the filings page directly using CIK
+                            cik_params = {
+                                "action": "getcompany",
+                                "CIK": cik,
+                                "type": "",
+                                "dateb": "",
+                                "owner": "include",
+                                "count": "100"
+                            }
+                            
+                            async with session.get(search_url, headers=headers, params=cik_params, timeout=15) as cik_response:
+                                if cik_response.status == 200:
+                                    cik_html = await cik_response.text()
+                                    print(f"      📄 CIK response length: {len(cik_html)} bytes")
+                                    
+                                    # Count filings again (use HTML-aware matching)
+                                    total_filings = 0
+                                    for filing_type in filing_types:
+                                        count = cik_html.count(f">{filing_type}<") + cik_html.count(f" {filing_type} ")
+                                        if count > 0:
+                                            print(f"      📊 Found {count}x {filing_type}")
+                                        total_filings += count
+                                    
+                                    # DEBUG: Check if HTML contains filing table markers
+                                    has_filing_table = "filingTable" in cik_html or "Filing" in cik_html
+                                    print(f"      🔍 DEBUG: Has 'filingTable' or 'Filing': {has_filing_table}")
+                                    
+                                    # If we have a valid CIK and filing indicators but can't parse exact counts,
+                                    # give partial credit (company IS SEC-registered with filings)
+                                    if total_filings == 0 and has_filing_table:
+                                        print(f"      ⚠️  CIK {cik} has filings but HTML parsing failed")
+                                        print(f"      ✅ SEC: Giving partial credit (3.6/12) for SEC-registered company")
+                                        return 3.6, {
+                                            "checked": True,
+                                            "filings": "unknown (parsing failed)",
+                                            "score": 3.6,
+                                            "cik": cik,
+                                            "company_name_used": company_variation,
+                                            "reason": f"Company registered with SEC (CIK {cik}) but exact filing count unavailable"
+                                        }
+                                    
+                                    if total_filings > 0:
+                                        # Success! Calculate score
+                                        print(f"      📊 Total filings detected: {total_filings}")
+                                        
+                                        if total_filings <= 5:
+                                            score = min(3.6, total_filings * 0.72)
+                                        elif total_filings <= 20:
+                                            score = 7.2
+                                        elif total_filings <= 50:
+                                            score = 9.6
+                                        else:
+                                            score = 12
+                                        
+                                        print(f"      ✅ SEC: {score}/12 pts for CIK {cik}")
+                                        return score, {
+                                            "checked": True,
+                                            "filings": total_filings,
+                                            "score": score,
+                                            "cik": cik,
+                                            "company_name_used": company_variation,
+                                            "reason": f"Found {total_filings} SEC filing indicators for CIK {cik}"
+                                        }
+                        
+                        print(f"      ⚠️  Match found but no filing types detected (showing first 500 chars):")
+                        print(f"         {html[:500]}")
+                        continue  # Try next variation
+                    
+                    # Scoring logic (UPDATED: max 12 points for SEC):
+                    # - 1-5 filings: 3.6 points
+                    # - 6-20 filings: 7.2 points
+                    # - 21-50 filings: 9.6 points
+                    # - 50+ filings: 12 points
+                    
+                    if total_filings <= 5:
+                        score = min(3.6, total_filings * 0.72)
+                    elif total_filings <= 20:
+                        score = 7.2
+                    elif total_filings <= 50:
+                        score = 9.6
+                    else:
+                        score = 12
+                    
+                    print(f"      ✅ SEC: {score}/12 pts for '{company_variation}'")
+                    return score, {
+                        "checked": True,
+                        "filings": total_filings,
+                        "score": score,
+                        "company_name_used": company_variation,
+                        "reason": f"Found {total_filings} SEC filing indicators for {company_variation}"
+                    }
+            
+            # All variations failed
+            print(f"      ❌ SEC: No results found for any name variation")
+            return 0, {
+                "checked": True,
+                "filings": 0,
+                "variations_tried": company_variations,
+                "reason": f"No SEC filings found for {company} (tried {len(company_variations)} variations)"
+            }
 
     except asyncio.TimeoutError:
         return 0, {"checked": False, "reason": "SEC API timeout"}
@@ -1827,6 +1933,8 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
         if not company:
             return 0, {"checked": False, "reason": "No company provided"}
         
+        print(f"   🔍 GDELT: Searching for company: '{company}'")
+        
         # GDELT 2.0 DOC API endpoint
         # Uses free public API - no key required
         gdelt_url = "https://api.gdeltproject.org/api/v2/doc/doc"
@@ -1846,6 +1954,7 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
             
             async with session.get(gdelt_url, params=params, timeout=15) as response:
                 if response.status != 200:
+                    print(f"      ❌ GDELT API returned HTTP {response.status}")
                     return 0, {
                         "checked": False,
                         "reason": f"GDELT API error: HTTP {response.status}"
@@ -1853,8 +1962,10 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
                 
                 data = await response.json()
                 articles = data.get("articles", [])
+                print(f"      📰 GDELT found {len(articles)} articles")
                 
                 if not articles:
+                    print(f"      ❌ No GDELT articles found for '{company}'")
                     return 0, {
                         "checked": True,
                         "press_mentions": 0,
@@ -1874,21 +1985,37 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
                 
                 trusted_tlds = {".edu", ".gov", ".mil"}
                 
-                # High-authority domains (Fortune 500, major news outlets)
+                # High-authority domains (Fortune 500, major news outlets, financial news)
                 high_authority_domains = {
+                    # Major news outlets
                     "forbes.com", "fortune.com", "bloomberg.com", "wsj.com",
                     "nytimes.com", "reuters.com", "ft.com", "economist.com",
-                    "techcrunch.com", "wired.com", "theverge.com", "cnet.com"
+                    "theguardian.com", "washingtonpost.com", "bbc.com", "cnbc.com",
+                    # Tech news
+                    "techcrunch.com", "wired.com", "theverge.com", "cnet.com",
+                    "arstechnica.com", "zdnet.com", "venturebeat.com",
+                    # Financial news
+                    "finance.yahoo.com", "yahoo.com", "marketwatch.com", "fool.com",
+                    "seekingalpha.com", "investing.com", "benzinga.com", "zacks.com",
+                    "morningstar.com", "barrons.com", "investopedia.com",
+                    # International business news
+                    "thehindubusinessline.com", "business-standard.com", "economictimes.indiatimes.com",
+                    "scmp.com", "japantimes.co.jp", "straitstimes.com"
                 }
                 
                 press_mentions = []
                 trusted_mentions = []
                 seen_domains = set()  # Track unique domains (no spam)
+                all_domains_found = []  # DEBUG: Track all domains for logging
                 
                 for article in articles:
                     url = article.get("url", "")
                     domain = article.get("domain", "")
                     title = article.get("title", "")
+                    
+                    # DEBUG: Track all domains
+                    if domain:
+                        all_domains_found.append(domain)
                     
                     # Skip if we've seen this domain (cap at 3 mentions per domain)
                     if domain in seen_domains:
@@ -1902,7 +2029,8 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
                     company_in_title = company.lower() in title.lower()
                     
                     # Check for press wire mentions
-                    if any(wire in domain for wire in press_wire_domains):
+                    is_press_wire = any(wire in domain for wire in press_wire_domains)
+                    if is_press_wire:
                         press_mentions.append({
                             "domain": domain,
                             "url": url[:100],
@@ -1922,6 +2050,19 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
                             "company_in_title": company_in_title,
                             "type": "tld" if is_trusted_tld else "high_authority"
                         })
+                
+                # DEBUG: Print domain analysis
+                unique_domains = set(all_domains_found)
+                print(f"      🌐 Unique domains in articles: {len(unique_domains)}")
+                print(f"      📰 Press wire matches: {len(press_mentions)}")
+                print(f"      🏛️  Trusted domain matches: {len(trusted_mentions)}")
+                
+                # Show sample of domains if we didn't find any matches
+                if len(press_mentions) == 0 and len(trusted_mentions) == 0 and len(unique_domains) > 0:
+                    sample_domains = list(unique_domains)[:10]
+                    print(f"      🔍 Sample domains (showing first 10):")
+                    for d in sample_domains:
+                        print(f"         - {d}")
                 
                 # Calculate score
                 # Press wire mentions: 0-5 points
@@ -1955,6 +2096,9 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
                     trusted_score = 2.0
                 
                 total_score = press_score + trusted_score
+                
+                print(f"      ✅ GDELT: {total_score}/10 pts (Press: {press_score}/5, Trusted: {trusted_score}/5)")
+                print(f"         Press wires: {len(press_mentions)}, Trusted domains: {len(trusted_mentions)}")
                 
                 return total_score, {
                     "checked": True,
@@ -2426,7 +2570,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     """
 
     email = get_email(lead)
-    company = lead.get("Company", "")
+    company = get_company(lead)
     
     # Initialize structured data collection
     automated_checks_data = {

@@ -123,17 +123,23 @@ class MetagraphMonitor(BlockListener):
             
             max_retries = 8
             retry_delay = 10  # Initial delay (seconds)
+            timeout_per_attempt = 60  # 60 second timeout per attempt (matches old sync version)
             
             for attempt in range(1, max_retries + 1):
                 try:
                     logger.info(f"🔥 Warming attempt {attempt}/{max_retries} for epoch {epoch_id}...")
                     logger.info(f"   Network: {self.async_subtensor.network}")
                     logger.info(f"   NetUID: {BITTENSOR_NETUID}")
+                    logger.info(f"   Timeout: {timeout_per_attempt}s per attempt")
                     
                     # ════════════════════════════════════════════════════════
                     # CRITICAL: Use injected async_subtensor (NO new instances!)
+                    # Wrap with 60-second timeout to prevent hanging (matches old sync version)
                     # ════════════════════════════════════════════════════════
-                    metagraph = await self.async_subtensor.metagraph(BITTENSOR_NETUID)
+                    metagraph = await asyncio.wait_for(
+                        self.async_subtensor.metagraph(BITTENSOR_NETUID),
+                        timeout=timeout_per_attempt
+                    )
                     
                     # ════════════════════════════════════════════════════════
                     # Update global cache atomically (thread-safe)
@@ -152,6 +158,22 @@ class MetagraphMonitor(BlockListener):
                     logger.info(f"   Cache updated atomically (thread-safe)")
                     
                     return True
+                    
+                except asyncio.TimeoutError:
+                    # Timeout after 60 seconds
+                    if attempt < max_retries:
+                        logger.warning(f"🔥 ⚠️  Warming attempt {attempt}/{max_retries} timed out after {timeout_per_attempt}s")
+                        logger.warning(f"   Retrying in {retry_delay}s...")
+                        
+                        # Exponential backoff with cap
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 1.5, 30)  # Cap at 30s
+                        continue
+                    else:
+                        # Last attempt timed out
+                        logger.error(f"🔥 ❌ All {max_retries} warming attempts timed out for epoch {epoch_id}")
+                        logger.error(f"   Workflow will continue using epoch {epoch_id - 1} cache as fallback")
+                        return False
                     
                 except Exception as e:
                     if attempt < max_retries:

@@ -190,28 +190,17 @@ async def lifespan(app: FastAPI):
         subscription_task = asyncio.create_task(block_publisher.start())
         print("✅ Block subscription started (push-based, replaces polling)")
         
-        # Start other background tasks (existing services)
-        reveal_task = asyncio.create_task(reveal_collector_task())
-        print("✅ Reveal collector task started")
+        # EMERGENCY: Disable all background tasks to isolate deadlock issue
+        # TODO: Re-enable one by one after identifying the culprit
+        print("⚠️  ALL BACKGROUND TASKS TEMPORARILY DISABLED")
+        print("⚠️  Only block subscription is active")
         
-        checkpoint_task_handle = asyncio.create_task(checkpoint_task())
-        print("✅ Checkpoint task started")
-        
-        anchor_task = asyncio.create_task(daily_anchor_task())
-        print("✅ Anchor task started")
-        
-        # TEMPORARILY DISABLED: mirror_integrity_task causes event loop deadlock
-        # TODO: Fix async/sync event loop conflict in mirror_monitor.py
-        # mirror_task = asyncio.create_task(mirror_integrity_task())
-        print("⚠️  Mirror monitor task DISABLED (causes deadlock)")
-        
-        hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
-        print("✅ Hourly Arweave batch task started")
-        
-        # Start rate limiter cleanup task
-        from gateway.utils.rate_limiter import rate_limiter_cleanup_task
-        rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
-        print("✅ Rate limiter cleanup task started")
+        # reveal_task = asyncio.create_task(reveal_collector_task())
+        # checkpoint_task_handle = asyncio.create_task(checkpoint_task())
+        # anchor_task = asyncio.create_task(daily_anchor_task())
+        # hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
+        # from gateway.utils.rate_limiter import rate_limiter_cleanup_task
+        # rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
         
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
@@ -239,12 +228,11 @@ async def lifespan(app: FastAPI):
         print("   🛑 Cancelling background tasks...")
         tasks = [
             subscription_task,
-            reveal_task,
-            checkpoint_task_handle,
-            anchor_task,
-            # mirror_task,  # DISABLED (see line 203-206)
-            hourly_batch_task_handle,
-            rate_limiter_task
+            # reveal_task,  # DISABLED
+            # checkpoint_task_handle,  # DISABLED
+            # anchor_task,  # DISABLED
+            # hourly_batch_task_handle,  # DISABLED
+            # rate_limiter_task  # DISABLED
         ]
         
         for task in tasks:

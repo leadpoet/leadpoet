@@ -120,9 +120,10 @@ async def get_epoch_leads(
         )
     
     # Step 3: Verify epoch is active
-    if not is_epoch_active(epoch_id):
+    from gateway.utils.epoch import is_epoch_active_async, get_current_epoch_id_async
+    if not await is_epoch_active_async(epoch_id):
         # Only allow fetching for the current epoch
-        current_epoch = get_current_epoch_id()
+        current_epoch = await get_current_epoch_id_async()
         if epoch_id != current_epoch:
             raise HTTPException(
                 status_code=400,
@@ -130,9 +131,9 @@ async def get_epoch_leads(
             )
     
     # Step 3.5: Verify within lead distribution window (blocks 0-350)
-    from gateway.utils.epoch import get_block_within_epoch
+    from gateway.utils.epoch import get_block_within_epoch_async
     
-    block_within_epoch = get_block_within_epoch()
+    block_within_epoch = await get_block_within_epoch_async()
     if block_within_epoch > 350:
         raise HTTPException(
             status_code=400,
@@ -411,7 +412,8 @@ async def get_current_epoch():
         GET /epoch/current
     """
     try:
-        current_epoch = get_current_epoch_id()
+        from gateway.utils.epoch import get_current_epoch_id_async
+        current_epoch = await get_current_epoch_id_async()
         info = get_epoch_info(current_epoch)
         
         return {

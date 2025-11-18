@@ -205,9 +205,9 @@ async def submit_validation(event: ValidationEvent):
     # ========================================
     # CRITICAL SECURITY: Prevent validators from submitting old/stale validations
     # or pre-computing validations for future epochs
-    from gateway.utils.epoch import get_current_epoch_id
+    from gateway.utils.epoch import get_current_epoch_id_async
     
-    current_epoch = get_current_epoch_id()
+    current_epoch = await get_current_epoch_id_async()
     
     if event.payload.epoch_id != current_epoch:
         raise HTTPException(
@@ -226,9 +226,9 @@ async def submit_validation(event: ValidationEvent):
     # - Blocks 351-355: Complete validation and submit results
     # - Blocks 356-359: Buffer period (no new submissions)
     # - Block 360+: Epoch closed (next epoch begins, reveal phase starts)
-    from gateway.utils.epoch import get_block_within_epoch
+    from gateway.utils.epoch import get_block_within_epoch_async
     
-    block_within_epoch = get_block_within_epoch()
+    block_within_epoch = await get_block_within_epoch_async()
     if block_within_epoch > 355:
         raise HTTPException(
             status_code=400,

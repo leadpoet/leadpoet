@@ -401,9 +401,40 @@ def get_epoch_close_time(epoch_id: int) -> datetime:
     return get_epoch_end_time(epoch_id)
 
 
+async def is_epoch_active_async(epoch_id: int) -> bool:
+    """
+    Check if epoch is currently in validation phase (blocks 0-360) (ASYNC VERSION).
+    
+    Use this from async contexts. For sync, use is_epoch_active() wrapper.
+    
+    During active phase:
+    - Validators can fetch assigned leads
+    - Validators can submit validation results (commit phase) anytime
+    - New leads can be added to queue
+    
+    Args:
+        epoch_id: Epoch number
+    
+    Returns:
+        True if validators can submit validation results
+    
+    Example:
+        >>> current_epoch = await get_current_epoch_id_async()
+        >>> await is_epoch_active_async(current_epoch)
+        True  # If current time is within validation window (blocks 0-360)
+    """
+    now = datetime.utcnow()
+    start = await get_epoch_start_time_async(epoch_id)
+    end = await get_epoch_end_time_async(epoch_id)
+    
+    return start <= now <= end
+
+
 def is_epoch_active(epoch_id: int) -> bool:
     """
-    Check if epoch is currently in validation phase (blocks 0-360).
+    Check if epoch is currently in validation phase (blocks 0-360) (SYNC WRAPPER).
+    
+    DEPRECATED: Use is_epoch_active_async() from async contexts.
     
     During active phase:
     - Validators can fetch assigned leads
@@ -448,9 +479,39 @@ def is_epoch_in_grace_period(epoch_id: int) -> bool:
     return False
 
 
+async def is_epoch_closed_async(epoch_id: int) -> bool:
+    """
+    Check if epoch is closed (past block 360) (ASYNC VERSION).
+    
+    Use this from async contexts. For sync, use is_epoch_closed() wrapper.
+    
+    After epoch closes:
+    - Consensus is computed
+    - Reveals are required
+    - No more submissions accepted
+    
+    Args:
+        epoch_id: Epoch number
+    
+    Returns:
+        True if epoch is fully closed
+    
+    Example:
+        >>> current = await get_current_epoch_id_async()
+        >>> await is_epoch_closed_async(current - 1)
+        True  # Previous epoch is closed
+    """
+    now = datetime.utcnow()
+    close = await get_epoch_close_time_async(epoch_id)
+    
+    return now > close
+
+
 def is_epoch_closed(epoch_id: int) -> bool:
     """
-    Check if epoch is closed (past block 360).
+    Check if epoch is closed (past block 360) (SYNC WRAPPER).
+    
+    DEPRECATED: Use is_epoch_closed_async() from async contexts.
     
     After epoch closes:
     - Consensus is computed

@@ -426,9 +426,9 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         print(f"   📊 Queue State: {queue_merkle_root[:16]}... ({pending_lead_count} pending leads)")
         
         # ========================================================================
-        # 2. Get validator set for this epoch - RUN IN THREAD
+        # 2. Get validator set for this epoch (ASYNC CALL - no thread needed)
         # ========================================================================
-        validator_set = await asyncio.to_thread(get_validator_set, epoch_id)  # Returns List[str] of hotkeys
+        validator_set = await get_validator_set(epoch_id)  # Returns List[str] of hotkeys
         validator_hotkeys = validator_set  # Already a list of hotkey strings
         validator_count = len(validator_hotkeys)
         

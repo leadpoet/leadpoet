@@ -52,8 +52,10 @@ class EpochMonitor(BlockListener):
         self.last_epoch = None
         self.validation_ended_epochs = set()
         self.closed_epochs = set()
+        self.startup_block_count = 0  # Count blocks since startup
         
         logger.info("🔄 EpochMonitor initialized (event-driven)")
+        logger.info("   Consensus will be delayed for first 10 blocks (startup grace period)")
     
     async def on_block(self, block_info: BlockInfo):
         """
@@ -72,6 +74,9 @@ class EpochMonitor(BlockListener):
         try:
             current_epoch = block_info.epoch_id
             block_within_epoch = block_info.block_within_epoch
+            
+            # Count blocks since startup (for grace period)
+            self.startup_block_count += 1
             
             # ════════════════════════════════════════════════════════════════
             # Check 1: New epoch started (block 0, or first time seeing this epoch)
@@ -105,6 +110,14 @@ class EpochMonitor(BlockListener):
             # ════════════════════════════════════════════════════════════════
             # Check 3: Epoch closed and needs reveal/consensus (check previous epochs)
             # ════════════════════════════════════════════════════════════════
+            # STARTUP GRACE PERIOD: Skip consensus for first 10 blocks
+            # This allows metagraph cache to warm up before triggering heavy operations
+            if self.startup_block_count <= 10:
+                if self.startup_block_count == 10:
+                    logger.info("✅ Startup grace period complete - consensus checks now active")
+                # Skip consensus checks during startup
+                return
+            
             # Check up to 3 epochs back for any that need consensus
             # IMPORTANT: Limited to 3 to prevent thundering herd on startup
             # (checking 10 epochs would trigger 10 concurrent consensus tasks)

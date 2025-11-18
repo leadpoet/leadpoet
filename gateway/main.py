@@ -191,8 +191,9 @@ async def lifespan(app: FastAPI):
         print("✅ Block subscription started (push-based, replaces polling)")
         
         # Start other background tasks (existing services)
-        reveal_task = asyncio.create_task(reveal_collector_task())
-        print("✅ Reveal collector task started")
+        # EMERGENCY: Disable reveal_collector - it's blocking on get_current_epoch_id_async()
+        # reveal_task = asyncio.create_task(reveal_collector_task())
+        print("⚠️  Reveal collector DISABLED (testing)")
         
         checkpoint_task_handle = asyncio.create_task(checkpoint_task())
         print("✅ Checkpoint task started")

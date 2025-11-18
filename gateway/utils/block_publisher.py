@@ -299,6 +299,11 @@ class ChainBlockPublisher:
         logger.info("="*80)
         logger.info("")
         
+        # CRITICAL: Wait 5 seconds to let app finish starting
+        # Without this, subscribe_block_headers blocks the lifespan and prevents HTTP from working
+        await asyncio.sleep(5)
+        logger.info("🔔 Connecting to block stream (after 5s delay)...")
+        
         try:
             # Subscribe to new block headers
             # This is a LONG-LIVED subscription that keeps the WebSocket alive

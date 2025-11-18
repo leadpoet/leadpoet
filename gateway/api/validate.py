@@ -439,6 +439,14 @@ async def submit_validation(event: ValidationEvent):
             .execute()
         
         print(f"✅ Marked {len(lead_ids)} leads as 'validating' (removed from pending queue)")
+        
+        # CRITICAL: Invalidate epoch cache after status change
+        # Without this, cached leads will still show as "pending_validation"
+        # causing other validators to receive already-assigned leads
+        from gateway.utils.leads_cache import clear_epoch_cache
+        clear_epoch_cache(event.payload.epoch_id)
+        print(f"✅ Invalidated epoch {event.payload.epoch_id} cache (prevents duplicate assignments)")
+        
     except Exception as e:
         # Don't fail the entire validation if status update fails
         # Evidence is already stored, which is the source of truth

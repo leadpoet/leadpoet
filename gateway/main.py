@@ -200,8 +200,10 @@ async def lifespan(app: FastAPI):
         anchor_task = asyncio.create_task(daily_anchor_task())
         print("✅ Anchor task started")
         
-        mirror_task = asyncio.create_task(mirror_integrity_task())
-        print("✅ Mirror monitor task started")
+        # TEMPORARILY DISABLED: mirror_integrity_task causes event loop deadlock
+        # TODO: Fix async/sync event loop conflict in mirror_monitor.py
+        # mirror_task = asyncio.create_task(mirror_integrity_task())
+        print("⚠️  Mirror monitor task DISABLED (causes deadlock)")
         
         hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
         print("✅ Hourly Arweave batch task started")

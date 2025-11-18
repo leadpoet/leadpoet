@@ -194,12 +194,18 @@ async def lifespan(app: FastAPI):
         reveal_task = asyncio.create_task(reveal_collector_task())
         print("✅ Reveal collector task started")
         
-        # reveal_task = asyncio.create_task(reveal_collector_task())
-        # checkpoint_task_handle = asyncio.create_task(checkpoint_task())
-        # anchor_task = asyncio.create_task(daily_anchor_task())
-        # hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
-        # from gateway.utils.rate_limiter import rate_limiter_cleanup_task
-        # rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
+        checkpoint_task_handle = asyncio.create_task(checkpoint_task())
+        print("✅ Checkpoint task started")
+        
+        anchor_task = asyncio.create_task(daily_anchor_task())
+        print("✅ Anchor task started")
+        
+        hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
+        print("✅ Hourly Arweave batch task started")
+        
+        from gateway.utils.rate_limiter import rate_limiter_cleanup_task
+        rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
+        print("✅ Rate limiter cleanup task started")
         
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")

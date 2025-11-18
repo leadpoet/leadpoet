@@ -190,10 +190,9 @@ async def lifespan(app: FastAPI):
         subscription_task = asyncio.create_task(block_publisher.start())
         print("✅ Block subscription started (push-based, replaces polling)")
         
-        # EMERGENCY: Disable all background tasks to isolate deadlock issue
-        # TODO: Re-enable one by one after identifying the culprit
-        print("⚠️  ALL BACKGROUND TASKS TEMPORARILY DISABLED")
-        print("⚠️  Only block subscription is active")
+        # Start other background tasks (existing services)
+        reveal_task = asyncio.create_task(reveal_collector_task())
+        print("✅ Reveal collector task started")
         
         # reveal_task = asyncio.create_task(reveal_collector_task())
         # checkpoint_task_handle = asyncio.create_task(checkpoint_task())
@@ -228,11 +227,12 @@ async def lifespan(app: FastAPI):
         print("   🛑 Cancelling background tasks...")
         tasks = [
             subscription_task,
-            # reveal_task,  # DISABLED
-            # checkpoint_task_handle,  # DISABLED
-            # anchor_task,  # DISABLED
-            # hourly_batch_task_handle,  # DISABLED
-            # rate_limiter_task  # DISABLED
+            reveal_task,
+            checkpoint_task_handle,
+            anchor_task,
+            # mirror_task,  # DISABLED (see line 203-206)
+            hourly_batch_task_handle,
+            rate_limiter_task
         ]
         
         for task in tasks:

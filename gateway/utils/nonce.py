@@ -20,8 +20,27 @@ from gateway.config import NONCE_EXPIRY_SECONDS, SUPABASE_URL, SUPABASE_SERVICE_
 # Import Supabase
 from supabase import create_client, Client
 
-# Create Supabase client (using service_role key for full access)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Lazy-load Supabase client (created on first use instead of at import time)
+# This prevents crashes when environment variables aren't set yet during module import
+_supabase_client: Optional[Client] = None
+
+
+def _get_supabase() -> Client:
+    """
+    Get or create Supabase client (lazy initialization).
+    
+    This ensures the client is only created when actually needed,
+    allowing environment variables to be set via nohup env before use.
+    """
+    global _supabase_client
+    if _supabase_client is None:
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+            raise RuntimeError(
+                "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set. "
+                "Pass them via environment variables."
+            )
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return _supabase_client
 
 
 def check_and_store_nonce(nonce: str, actor_hotkey: str) -> bool:
@@ -55,6 +74,9 @@ def check_and_store_nonce(nonce: str, actor_hotkey: str) -> bool:
         - This prevents the "check-then-store" race condition
     """
     try:
+        # Get Supabase client (lazy initialization)
+        supabase = _get_supabase()
+        
         # Query transparency_log for this nonce
         result = supabase.table("transparency_log").select("id").eq("nonce", nonce).execute()
         
@@ -108,6 +130,9 @@ def cleanup_expired_nonces():
         ℹ️  Transparency log is append-only - no cleanup performed
     """
     try:
+        # Get Supabase client (lazy initialization)
+        supabase = _get_supabase()
+        
         # Calculate expiry time
         expiry_time = datetime.utcnow() - timedelta(seconds=NONCE_EXPIRY_SECONDS)
         
@@ -141,6 +166,9 @@ def get_nonce_stats() -> dict:
         >>> print(f"Total events: {stats['total_events']}")
     """
     try:
+        # Get Supabase client (lazy initialization)
+        supabase = _get_supabase()
+        
         # Get total count
         total_result = supabase.table("transparency_log").select("id", count="exact").execute()
         total_events = total_result.count if total_result.count else 0

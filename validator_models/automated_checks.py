@@ -1067,21 +1067,15 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
         if cached_data:
             lead["dnsbl_checked"] = cached_data.get("checked", True)
             lead["dnsbl_blacklisted"] = cached_data.get("blacklisted", False)
-            lead["dnsbl_list"] = cached_data.get("list", "spamhaus_dbl")
+            lead["dnsbl_list"] = cached_data.get("list", "cloudflare_dbl")
             lead["dnsbl_domain"] = cached_data.get("domain", root_domain)
-        print(f"   💾 Using cached DNSBL result for {root_domain}")
         return cached_result
-
-    # CRITICAL: Add delay before DNSBL query to prevent Spamhaus rate limiting
-    # Spamhaus free tier: ~10 queries/minute
-    # If exceeded, they return A records for EVERYTHING (false positives)
-    # 6-second delay = max 10 queries/minute (safe rate)
-    await asyncio.sleep(6)
 
     try:
         async with API_SEMAPHORE:
-            # Perform Spamhaus DBL lookup
-            query = f"{root_domain}.dbl.spamhaus.org"
+            # Perform Cloudflare DNSBL lookup (more reliable than Spamhaus for free tier)
+            # Cloudflare has no rate limits and fewer false positives
+            query = f"{root_domain}.dbl.cloudflare.com"
 
             # Run DNS lookup in executor to avoid blocking
             loop = asyncio.get_event_loop()
@@ -1091,8 +1085,17 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
                     answers = dns.resolver.resolve(query, "A")
                     # If we get A records, domain IS blacklisted
                     a_records = [str(rdata) for rdata in answers]
-                    print(f"   ⚠️  DNSBL returned A records: {a_records} → BLACKLISTED")
-                    return True  # Record exists = domain is blacklisted
+                    
+                    # Check for actual blacklist codes (127.0.0.x where x < 128)
+                    for record in a_records:
+                        if record.startswith("127.0.0."):
+                            print(f"   ⚠️  DNSBL returned A records: {a_records} → BLACKLISTED")
+                            return True
+                    
+                    # Any other response is not a confirmed blacklist
+                    print(f"   ✅ DNSBL returned A records: {a_records} → CLEAN (not a blacklist code)")
+                    return False
+                    
                 except dns.resolver.NXDOMAIN:
                     # NXDOMAIN = not in blacklist (expected for clean domains)
                     print(f"   ✅ DNSBL returned NXDOMAIN → CLEAN")
@@ -1115,14 +1118,14 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
             # Append DNSBL data to lead
             lead["dnsbl_checked"] = True
             lead["dnsbl_blacklisted"] = is_blacklisted
-            lead["dnsbl_list"] = "spamhaus_dbl"
+            lead["dnsbl_list"] = "cloudflare_dbl"
             lead["dnsbl_domain"] = root_domain
 
             # Cache the data separately for restoration
             dnsbl_data = {
                 "checked": True,
                 "blacklisted": is_blacklisted,
-                "list": "spamhaus_dbl",
+                "list": "cloudflare_dbl",
                 "domain": root_domain
             }
             validation_cache[f"{cache_key}_data"] = dnsbl_data
@@ -1131,10 +1134,10 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
                 result = (False, {
                     "stage": "Stage 2: Domain Reputation",
                     "check_name": "check_dnsbl",
-                    "message": f"Domain {root_domain} blacklisted in Spamhaus DBL",
+                    "message": f"Domain {root_domain} blacklisted in Cloudflare DBL",
                     "failed_fields": ["email"]
                 })
-                print(f"❌ DNSBL: Domain {root_domain} found in Spamhaus blacklist")
+                print(f"❌ DNSBL: Domain {root_domain} found in Cloudflare blacklist")
             else:
                 result = (True, {})
                 print(f"✅ DNSBL: Domain {root_domain} clean")

@@ -123,13 +123,27 @@ async def reveal_validation_result(
         )
     
     # ========================================
-    # Step 2: Verify epoch is closed
+    # Step 2: Verify epoch is closed AND reveal window is valid
     # ========================================
-    from gateway.utils.epoch import is_epoch_closed_async
-    if not await is_epoch_closed_async(payload.epoch_id):
+    # CRITICAL: Validators can ONLY reveal in epoch N+1 (not N, not N+2)
+    # This prevents manipulation by waiting to see other validators' decisions
+    from gateway.utils.epoch import get_current_epoch_async
+    
+    current_epoch = await get_current_epoch_async()
+    validation_epoch = payload.epoch_id
+    
+    # Check 1: Cannot reveal during same epoch (must wait for epoch to close)
+    if current_epoch <= validation_epoch:
         raise HTTPException(
             status_code=400,
-            detail=f"Epoch {payload.epoch_id} is not closed yet. Wait until epoch closes to reveal."
+            detail=f"Epoch {validation_epoch} is not closed yet. Wait until epoch {validation_epoch + 1} to reveal."
+        )
+    
+    # Check 2: Must reveal in epoch N+1 (reveal window expires after that)
+    if current_epoch > validation_epoch + 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reveal window expired. Validations from epoch {validation_epoch} must be revealed in epoch {validation_epoch + 1}. Current epoch is {current_epoch}."
         )
     
     # ========================================
@@ -258,59 +272,6 @@ async def reveal_validation_result(
         )
     
     # ========================================
-    # Step 9.5: Update leads_private.validators_responded array
-    # ========================================
-    # CRITICAL FIX: Ensure late reveals are reflected in the lead record
-    try:
-        lead_id = evidence["lead_id"]
-        
-        # Fetch current lead record
-        lead_result = supabase.table("leads_private")\
-            .select("validators_responded, validator_responses")\
-            .eq("lead_id", lead_id)\
-            .limit(1)\
-            .execute()
-        
-        if lead_result.data and len(lead_result.data) > 0:
-            lead_data = lead_result.data[0]
-            
-            # Get current arrays (or empty if null)
-            validators_responded = lead_data.get("validators_responded") or []
-            validator_responses = lead_data.get("validator_responses") or []
-            
-            # Only append if validator not already in list (idempotent)
-            if validator_hotkey not in validators_responded:
-                validators_responded.append(validator_hotkey)
-                
-                # Append full response object
-                validator_responses.append({
-                    "validator": validator_hotkey,
-                    "decision": payload.decision,
-                    "rep_score": payload.rep_score,
-                    "rejection_reason": payload.rejection_reason,
-                    "submitted_at": datetime.utcnow().isoformat(),
-                    "v_trust": None,  # Will be populated by next consensus run
-                    "stake": None     # Will be populated by next consensus run
-                })
-                
-                # Update leads_private with appended arrays
-                supabase.table("leads_private")\
-                    .update({
-                        "validators_responded": validators_responded,
-                        "validator_responses": validator_responses
-                    })\
-                    .eq("lead_id", lead_id)\
-                    .execute()
-                
-                print(f"✅ Appended {validator_hotkey[:10]}... to validators_responded ({len(validators_responded)} total)")
-            else:
-                print(f"ℹ️  Validator {validator_hotkey[:10]}... already in validators_responded (idempotent)")
-    except Exception as e:
-        # Don't fail the entire reveal if leads_private update fails
-        # The evidence is already updated, which is the source of truth
-        print(f"⚠️  Warning: Failed to update leads_private.validators_responded: {e}")
-    
-    # ========================================
     # Step 10: Log REVEAL event to TEE Buffer
     # ========================================
     reveal_timestamp = datetime.utcnow().isoformat()
@@ -421,12 +382,25 @@ async def reveal_validation_batch(
             detail="Invalid signature"
         )
     
-    # Verify epoch is closed
-    from gateway.utils.epoch import is_epoch_closed_async
-    if not await is_epoch_closed_async(epoch_id):
+    # Verify epoch is closed AND reveal window is valid
+    # CRITICAL: Validators can ONLY reveal in epoch N+1 (not N, not N+2)
+    from gateway.utils.epoch import get_current_epoch_async
+    
+    current_epoch = await get_current_epoch_async()
+    validation_epoch = epoch_id
+    
+    # Check 1: Cannot reveal during same epoch (must wait for epoch to close)
+    if current_epoch <= validation_epoch:
         raise HTTPException(
             status_code=400,
-            detail=f"Epoch {epoch_id} is not closed yet. Wait until epoch closes to reveal."
+            detail=f"Epoch {validation_epoch} is not closed yet. Wait until epoch {validation_epoch + 1} to reveal."
+        )
+    
+    # Check 2: Must reveal in epoch N+1 (reveal window expires after that)
+    if current_epoch > validation_epoch + 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reveal window expired. Validations from epoch {validation_epoch} must be revealed in epoch {validation_epoch + 1}. Current epoch is {current_epoch}."
         )
     
     print(f"\n{'='*80}")
@@ -596,69 +570,6 @@ async def reveal_validation_batch(
                     asyncio.to_thread(do_update),
                     timeout=15.0  # 15 second timeout per update (Supabase can be slow)
                 )
-                
-                # ════════════════════════════════════════════════════════════════════
-                # CRITICAL FIX: Also update leads_private.validators_responded array
-                # This ensures late reveals are reflected in the lead record
-                # ════════════════════════════════════════════════════════════════════
-                try:
-                    # Fetch current lead record
-                    def fetch_lead():
-                        return supabase.table("leads_private")\
-                            .select("validators_responded, validator_responses")\
-                            .eq("lead_id", lead_id)\
-                            .limit(1)\
-                            .execute()
-                    
-                    lead_result = await asyncio.wait_for(
-                        asyncio.to_thread(fetch_lead),
-                        timeout=10.0
-                    )
-                    
-                    if lead_result.data and len(lead_result.data) > 0:
-                        lead_data = lead_result.data[0]
-                        
-                        # Get current arrays (or empty if null)
-                        validators_responded = lead_data.get("validators_responded") or []
-                        validator_responses = lead_data.get("validator_responses") or []
-                        
-                        # Only append if validator not already in list (idempotent)
-                        if validator_hotkey not in validators_responded:
-                            validators_responded.append(validator_hotkey)
-                            
-                            # Append full response object
-                            validator_responses.append({
-                                "validator": validator_hotkey,
-                                "decision": decision,
-                                "rep_score": rep_score,
-                                "rejection_reason": rejection_reason_json,
-                                "submitted_at": revealed_ts,
-                                "v_trust": None,  # Will be populated by next consensus run
-                                "stake": None     # Will be populated by next consensus run
-                            })
-                            
-                            # Update leads_private with appended arrays
-                            def update_lead():
-                                return supabase.table("leads_private")\
-                                    .update({
-                                        "validators_responded": validators_responded,
-                                        "validator_responses": validator_responses
-                                    })\
-                                    .eq("lead_id", lead_id)\
-                                    .execute()
-                            
-                            await asyncio.wait_for(
-                                asyncio.to_thread(update_lead),
-                                timeout=10.0
-                            )
-                            
-                            print(f"         ✅ Appended {validator_hotkey[:10]}... to validators_responded ({len(validators_responded)} total)")
-                        else:
-                            print(f"         ℹ️  Validator {validator_hotkey[:10]}... already in validators_responded (idempotent)")
-                except Exception as e:
-                    # Don't fail the entire reveal if leads_private update fails
-                    # The evidence is already updated, which is the source of truth
-                    print(f"         ⚠️  Warning: Failed to update leads_private.validators_responded: {e}")
                 
                 print(f"      [{idx}/{len(valid_updates)}] ✅ Updated lead {lead_id[:8]}...")
                 revealed_count += 1

@@ -254,7 +254,7 @@ async def hourly_batch_task():
                     "viewblock_url": f"https://viewblock.io/arweave/tx/{tx_id}"
                 }
                 
-                import json
+                # json and hashlib already imported at top of file
                 import hashlib
                 payload_json = json.dumps(payload_data, sort_keys=True)
                 payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()

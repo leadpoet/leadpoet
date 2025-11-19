@@ -2005,24 +2005,31 @@ class Validator(BaseValidatorNeuron):
             print(f"   Total points distributed: {sum(miner_scores.values())}")
             print()
             
-            # Convert hotkeys to UIDs and prepare weights
-            uids = []
-            weights = []
+            # ═══════════════════════════════════════════════════════════════════
+            # REVENUE SPLIT: 75% to UID 0, 25% to miners (by rep score)
+            # ═══════════════════════════════════════════════════════════════════
+            UID_ZERO = 0  # LeadPoet revenue UID
+            REVENUE_SHARE = 0.75  # 75% to UID 0
+            MINER_SHARE = 0.25    # 25% to miners
+            
+            # Convert miner hotkeys to UIDs
+            miner_uids = []
+            miner_points = []
             
             for hotkey, total_score in miner_scores.items():
                 try:
                     if hotkey in self.metagraph.hotkeys:
                         uid = self.metagraph.hotkeys.index(hotkey)
-                        uids.append(uid)
-                        weights.append(total_score)
-                        print(f"   • UID {uid}: {total_score} points (miner {hotkey[:10]}...)")
+                        miner_uids.append(uid)
+                        miner_points.append(total_score)
+                        print(f"   • Miner UID {uid}: {total_score} points ({hotkey[:10]}...)")
                 except Exception as e:
                     print(f"   ⚠️  Skipping miner {hotkey[:10]}...: {e}")
             
-            if not uids:
+            if not miner_uids:
                 # FALLBACK: Miner hotkeys not in metagraph (left subnet or never registered)
                 # Submit burn weights instead
-                print(f"   ⚠️  No valid UIDs found for weight submission")
+                print(f"   ⚠️  No valid miner UIDs found")
                 print(f"      Miners have left the subnet or are not registered")
                 print(f"   🔥 Submitting burn weights instead...")
                 
@@ -2061,13 +2068,47 @@ class Validator(BaseValidatorNeuron):
                     print(f"   ❌ Error submitting burn weights: {e}")
                     return False
             
-            # Normalize weights (sum to 1.0)
-            total_weight = sum(weights)
-            if total_weight > 0:
-                normalized_weights = [w / total_weight for w in weights]
-            else:
-                print(f"   ⚠️  Total weight is 0, cannot normalize")
+            # ═══════════════════════════════════════════════════════════════════
+            # Calculate 75/25 revenue split
+            # ═══════════════════════════════════════════════════════════════════
+            print(f"\n   💰 Revenue Split:")
+            print(f"      75% → UID {UID_ZERO} (LeadPoet)")
+            print(f"      25% → {len(miner_uids)} miners (by rep score)")
+            print()
+            
+            # Calculate total points for normalization
+            total_points = sum(miner_points)
+            
+            # Build final UIDs and weights lists
+            final_uids = [UID_ZERO] + miner_uids
+            final_weights = []
+            
+            # UID 0 gets 75%
+            final_weights.append(REVENUE_SHARE)
+            
+            # Miners split the remaining 25% by their rep score proportion
+            for uid, points in zip(miner_uids, miner_points):
+                miner_proportion = points / total_points  # Their share of total points
+                miner_weight = MINER_SHARE * miner_proportion  # Their share of the 25%
+                final_weights.append(miner_weight)
+                print(f"      Miner UID {uid}: {points}/{total_points} points = {miner_weight*100:.2f}% of emissions")
+            
+            print()
+            print(f"   Final weights (should sum to 1.0):")
+            print(f"      UID {UID_ZERO}: {final_weights[0]*100:.1f}%")
+            for i, uid in enumerate(miner_uids):
+                print(f"      UID {uid}: {final_weights[i+1]*100:.2f}%")
+            print(f"   Total: {sum(final_weights)*100:.1f}%")
+            
+            # Verify weights sum to 1.0 (with small floating point tolerance)
+            weight_sum = sum(final_weights)
+            if not (0.999 <= weight_sum <= 1.001):
+                print(f"   ❌ ERROR: Weights sum to {weight_sum}, not 1.0!")
                 return False
+            
+            # Use final_uids and final_weights (not uids/normalized_weights)
+            uids = final_uids
+            normalized_weights = final_weights
             
             # Submit to Bittensor chain
             print(f"\n📡 Submitting weights to Bittensor chain...")

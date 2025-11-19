@@ -127,9 +127,9 @@ async def reveal_validation_result(
     # ========================================
     # CRITICAL: Validators can ONLY reveal in epoch N+1 (not N, not N+2)
     # This prevents manipulation by waiting to see other validators' decisions
-    from gateway.utils.epoch import get_current_epoch_async
+    from gateway.utils.epoch import get_current_epoch_id_async
     
-    current_epoch = await get_current_epoch_async()
+    current_epoch = await get_current_epoch_id_async()
     validation_epoch = payload.epoch_id
     
     # Check 1: Cannot reveal during same epoch (must wait for epoch to close)
@@ -513,9 +513,9 @@ async def reveal_validation_batch(
     
     # Verify epoch is closed AND reveal window is valid
     # CRITICAL: Validators can ONLY reveal in epoch N+1 (not N, not N+2)
-    from gateway.utils.epoch import get_current_epoch_async
+    from gateway.utils.epoch import get_current_epoch_id_async
     
-    current_epoch = await get_current_epoch_async()
+    current_epoch = await get_current_epoch_id_async()
     validation_epoch = epoch_id
     
     # Check 1: Cannot reveal during same epoch (must wait for epoch to close)

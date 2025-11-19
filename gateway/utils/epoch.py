@@ -32,6 +32,9 @@ _block_cache_lock = threading.Lock()
 # Async subtensor instance (injected at gateway startup)
 _async_subtensor = None
 
+# Sync subtensor instance (for quick block queries without subscription conflicts)
+_sync_subtensor = None
+
 
 def inject_async_subtensor(async_subtensor):
     """
@@ -39,6 +42,8 @@ def inject_async_subtensor(async_subtensor):
     
     Called from main.py lifespan to provide shared AsyncSubtensor instance.
     This eliminates memory leaks and HTTP 429 errors from repeated instance creation.
+    
+    Also creates a sync subtensor for quick block queries (avoids subscription conflicts).
     
     Args:
         async_subtensor: AsyncSubtensor instance from main.py lifespan
@@ -48,9 +53,16 @@ def inject_async_subtensor(async_subtensor):
         async with bt.AsyncSubtensor(network="finney") as async_sub:
             epoch_utils.inject_async_subtensor(async_sub)
     """
-    global _async_subtensor
+    global _async_subtensor, _sync_subtensor
+    import bittensor as bt
+    
     _async_subtensor = async_subtensor
+    
+    # Create sync subtensor for quick block queries (avoids WebSocket subscription conflicts)
+    _sync_subtensor = bt.subtensor(network=_async_subtensor.network)
+    
     print(f"✅ AsyncSubtensor injected into epoch utils (network: {_async_subtensor.network})")
+    print(f"✅ Sync subtensor created for block queries (avoids subscription conflicts)")
 
 
 async def _get_current_block_async() -> int:
@@ -77,56 +89,48 @@ async def _get_current_block_async() -> int:
             "This should be done in main.py lifespan."
         )
     
-    # Retry logic for subtensor queries (handles HTTP 429 rate limits)
-    max_retries = 3
-    retry_delay = 2  # seconds
+    # Use sync subtensor for block queries (avoids WebSocket subscription conflicts)
+    # This is the same fix we used in the validator (neurons/validator.py line 556)
+    if _sync_subtensor is None:
+        raise Exception(
+            "Sync subtensor not initialized - call inject_async_subtensor() first. "
+            "This should be done in main.py lifespan."
+        )
     
-    for attempt in range(max_retries):
-        try:
-            import time
-            import asyncio
-            
-            # Use async call to get block (NO new instance created!)
-            # Access via .substrate interface (AsyncSubstrateInterface)
-            block_data = await _async_subtensor.substrate.get_block()
-            current_block = block_data["header"]["number"]
-            
-            # Cache the successful result
-            with _block_cache_lock:
-                _last_known_block = current_block
-                _last_known_block_time = time.time()
-            
-            return current_block
-            
-        except Exception as e:
-            if attempt < max_retries - 1:
-                # Retry after delay
-                print(f"⚠️  Subtensor query attempt {attempt + 1}/{max_retries} failed: {e}")
-                print(f"   Retrying in {retry_delay}s...")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-                continue
-            else:
-                # All retries exhausted - use cached estimation
-                print(f"⚠️  Cannot get current block from subtensor after {max_retries} attempts: {e}")
+    try:
+        import time
+        
+        # Use sync subtensor's .block property (fast, no subscription conflicts)
+        current_block = _sync_subtensor.block
+        
+        # Cache the successful result
+        with _block_cache_lock:
+            _last_known_block = current_block
+            _last_known_block_time = time.time()
+        
+        return current_block
+        
+    except Exception as e:
+        # Fallback to cached estimation
+        print(f"⚠️  Cannot get current block from sync subtensor: {e}")
+        
+        with _block_cache_lock:
+            if _last_known_block is not None and _last_known_block_time is not None:
+                # Calculate blocks elapsed since last known good block
+                time_elapsed = time.time() - _last_known_block_time
+                blocks_elapsed = int(time_elapsed / BITTENSOR_BLOCK_TIME_SECONDS)
+                estimated_block = _last_known_block + blocks_elapsed
                 
-                with _block_cache_lock:
-                    if _last_known_block is not None and _last_known_block_time is not None:
-                        # Calculate blocks elapsed since last known good block
-                        time_elapsed = time.time() - _last_known_block_time
-                        blocks_elapsed = int(time_elapsed / BITTENSOR_BLOCK_TIME_SECONDS)
-                        estimated_block = _last_known_block + blocks_elapsed
-                        
-                        print(f"   Using cached block estimation:")
-                        print(f"   Last known block: {_last_known_block} (cached {int(time_elapsed)}s ago)")
-                        print(f"   Estimated current: {estimated_block} (+{blocks_elapsed} blocks)")
-                        return estimated_block
-                    else:
-                        # No cache available - this should only happen on first run
-                        raise Exception(
-                            "Cannot query subtensor and no cached block available. "
-                            "Please ensure subtensor is accessible."
-                        )
+                print(f"   Using cached block estimation:")
+                print(f"   Last known block: {_last_known_block} (cached {int(time_elapsed)}s ago)")
+                print(f"   Estimated current: {estimated_block} (+{blocks_elapsed} blocks)")
+                return estimated_block
+            else:
+                # No cache available - this should only happen on first run
+                raise Exception(
+                    "Cannot query subtensor and no cached block available. "
+                    "Please ensure subtensor is accessible."
+                )
 
 
 def _get_current_block() -> int:

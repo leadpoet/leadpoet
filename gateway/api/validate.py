@@ -238,31 +238,45 @@ async def submit_validation(event: ValidationEvent):
     print(f"✅ Step 5.2: Within validation submission window (block {block_within_epoch}/355)")
     
     # ========================================
-    # Step 5.3: Verify lead_ids exist in database
+    # Step 5.3: Verify lead_ids exist in database AND match epoch assignment
     # ========================================
     # CRITICAL SECURITY: Prevent validators from submitting validations for
-    # leads that don't exist or were already processed
+    # leads that don't exist, were already processed, or belong to different epochs
     try:
         from gateway.config import MAX_LEADS_PER_EPOCH
         
-        # Query leads that are EITHER "pending_validation" OR "validating"
-        # This handles race condition where multiple validators fetch the same leads,
-        # but one submits first (changing status to "validating").
-        # All validators who fetched the leads should be able to submit.
-        result = supabase.table("leads_private") \
-            .select("lead_id") \
-            .in_("status", ["pending_validation", "validating"]) \
-            .order("created_ts", desc=False) \
-            .limit(MAX_LEADS_PER_EPOCH * 2) \
-            .execute()
+        # STEP 5.3a: Fetch the EPOCH_INITIALIZATION event to get the canonical lead assignment
+        # This is the frozen snapshot of which leads were assigned to THIS specific epoch
+        epoch_init_result = await asyncio.to_thread(
+            lambda: supabase.table("transparency_log")
+                .select("payload")
+                .eq("event_type", "EPOCH_INITIALIZATION")
+                .eq("epoch_id", event.payload.epoch_id)
+                .single()
+                .execute()
+        )
         
-        if not result.data:
-            # No leads in queue - validators submitting for empty epoch
-            assigned_lead_ids = []
-        else:
-            assigned_lead_ids = [row["lead_id"] for row in result.data]
+        if not epoch_init_result.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Epoch {event.payload.epoch_id} not initialized. Cannot determine valid lead assignment."
+            )
         
-        # Verify all submitted lead_ids are in the queue
+        # Extract assigned_lead_ids from the EPOCH_INITIALIZATION payload
+        epoch_payload = epoch_init_result.data["payload"]
+        assigned_lead_ids = epoch_payload.get("assigned_lead_ids", [])
+        
+        if not assigned_lead_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Epoch {event.payload.epoch_id} has no assigned leads. Cannot accept validations for empty epoch."
+            )
+        
+        print(f"📊 Epoch {event.payload.epoch_id} initialized with {len(assigned_lead_ids)} leads")
+        
+        # STEP 5.3b: Verify all submitted lead_ids match the epoch assignment
+        # This ensures validators can only submit for leads that were assigned to THIS epoch,
+        # even if those leads are now "validating" (prevents re-validation in subsequent epochs)
         submitted_lead_ids = {v.lead_id for v in event.payload.validations}
         assigned_lead_ids_set = set(assigned_lead_ids)
         
@@ -272,10 +286,10 @@ async def submit_validation(event: ValidationEvent):
             invalid_sample = list(invalid_leads)[:3]
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) are not in validation queue (pending or validating). Leads may have been already fully processed or never existed."
+                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) were not assigned to epoch {event.payload.epoch_id}. Leads may belong to different epoch or never existed."
             )
         
-        print(f"✅ Step 5.3: Lead existence verification passed ({len(submitted_lead_ids)} lead_ids found in queue)")
+        print(f"✅ Step 5.3: Lead assignment verification passed ({len(submitted_lead_ids)} lead_ids match epoch {event.payload.epoch_id})")
     
     except HTTPException:
         # Re-raise HTTPException (validation errors)

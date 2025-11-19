@@ -1541,9 +1541,13 @@ CHECK THREE CRITERIA SEPARATELY:
    - Different people = name_match FALSE (e.g., "John Black" ≠ "Pranav Ramesh")
 
 2. COMPANY MATCH: Do search results show person CURRENTLY works at "{company}"?
-   - Look for CURRENT employment/title
-   - Must show "{company}" as current employer
-   - Different company = company_match FALSE (e.g., "QuickAlign.AI" ≠ "Founder Advisors")
+   - Look for CURRENT employment/title, company name, or business description
+   - ACCEPT if:
+     * Company name "{company}" explicitly mentioned, OR
+     * Snippet describes the company's product/service matching the business context
+     * Person's title/role is consistent with working at this type of company
+   - REJECT only if clearly shows DIFFERENT company name
+   - Be lenient: Descriptions like "Financial Operating System" for company "Toku" are acceptable
 
 3. PROFILE VALID: Is profile legitimate and indexed by Google?
    - Profile appears in search results = valid

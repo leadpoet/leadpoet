@@ -199,7 +199,7 @@ def _background_epoch_monitor():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # Variable to hold the subtensor instance across iterations
+        # Variable to hold the subtensor instance across iterations
     subtensor = None
     
     try:
@@ -232,13 +232,8 @@ def _background_epoch_monitor():
                 
             except Exception as e:
                 print(f"⚠️  Error in background epoch monitor: {e}")
-                subtensor = None  # Reset on error to recreate on next iteration
+                subtensor = None
                 time.sleep(60)  # Wait longer on error
-    
-    finally:
-        # Clean up event loop on thread exit
-        loop.close()
-        print("🕐 Background epoch monitor stopped")
 
 def start_epoch_monitor(network: str = "finney"):
     """

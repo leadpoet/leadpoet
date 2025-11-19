@@ -1344,51 +1344,153 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
 async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> List[dict]:
     """
     Search LinkedIn using Google Custom Search Engine for person's profile.
+    
+    Tries multiple search variations to maximize chances of finding the profile:
+    1. Exact URL in quotes
+    2. URL without protocol
+    3. Profile slug only
+    4. Name + LinkedIn + company
+    5. Name + site:linkedin.com (broadest)
 
     Args:
         full_name: Person's full name
-        company: Company name (not used in query, kept for backwards compatibility)
-        linkedin_url: Optional LinkedIn URL provided by miner (more targeted search)
+        company: Company name
+        linkedin_url: LinkedIn URL provided by miner (required)
         max_results: Max search results to return
 
     Returns:
         List of search results with title, link, snippet
     """
+    if not linkedin_url:
+        print(f"   ⚠️ No LinkedIn URL provided")
+        return []
+    
+    # Extract profile slug from LinkedIn URL
+    # Example: https://www.linkedin.com/in/tanja-reese-cpa-31477926 → tanja-reese-cpa-31477926
+    profile_slug = linkedin_url.split("/in/")[-1].strip("/") if "/in/" in linkedin_url else None
+    
+    # Build search query variations (in order of specificity)
+    query_variations = [
+        # 1. Exact URL in quotes (most specific)
+        f'"{linkedin_url}"',
+        
+        # 2. URL without protocol (handles http vs https differences)
+        f'"{linkedin_url.replace("https://", "").replace("http://", "")}"',
+        
+        # 3. Profile slug only (handles www. differences)
+        f'"linkedin.com/in/{profile_slug}"' if profile_slug else None,
+        
+        # 4. Name + LinkedIn + company (more context)
+        f'"{full_name}" linkedin "{company}"',
+        
+        # 5. Name + site:linkedin.com (broadest - catches any LinkedIn profile for this person)
+        f'"{full_name}" site:linkedin.com',
+    ]
+    
+    # Remove None values
+    query_variations = [q for q in query_variations if q]
+    
+    print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile...")
+    
     try:
-        # Search for the LinkedIn URL (quoted) to get the exact profile page
-        # This ensures we get the actual LinkedIn profile indexed by Google
-        query = f'"{linkedin_url}"'
         url = "https://www.googleapis.com/customsearch/v1"
-        params = {
-            "key": GSE_API_KEY,
-            "cx": GSE_CX,
-            "q": query,
-            "num": max_results
-        }
-
+        
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as response:
-                if response.status != 200:
-                    print(f"   ⚠️ GSE API error: HTTP {response.status}")
-                    return []
+            # Try each query variation until we get results
+            for variation_idx, query in enumerate(query_variations, 1):
+                print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
                 
-                data = await response.json()
-                results = []
+                params = {
+                    "key": GSE_API_KEY,
+                    "cx": GSE_CX,
+                    "q": query,
+                    "num": max_results
+                }
                 
-                for item in data.get("items", []):
-                    results.append({
-                        "title": item.get("title", ""),
-                        "link": item.get("link", ""),
-                        "snippet": item.get("snippet", "")
-                    })
-                
-                # DEBUG: Print search results for transparency
-                print(f"   📊 GSE found {len(results)} result(s):")
-                for i, result in enumerate(results[:3], 1):  # Show top 3
-                    print(f"      {i}. {result['title'][:80]}")
-                    print(f"         {result['snippet'][:100]}...")
-                
-                return results
+                async with session.get(url, params=params, timeout=10) as response:
+                    if response.status != 200:
+                        print(f"         ⚠️ GSE API error: HTTP {response.status}")
+                        continue  # Try next variation
+                    
+                    data = await response.json()
+                    results = []
+                    
+                    for item in data.get("items", []):
+                        results.append({
+                            "title": item.get("title", ""),
+                            "link": item.get("link", ""),
+                            "snippet": item.get("snippet", "")
+                        })
+                    
+                    if results:
+                        # Found results! Now check if we need URL verification
+                        print(f"         ✅ Found {len(results)} result(s) with variation {variation_idx}")
+                        
+                        # Extract all LinkedIn profile URLs from search results
+                        found_profile_urls = []
+                        found_directory_urls = []
+                        
+                        for result in results:
+                            link = result.get("link", "")
+                            if "linkedin.com/in/" in link:
+                                # Direct profile link (e.g., /in/john-smith-123)
+                                result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
+                                found_profile_urls.append(result_slug)
+                            elif "linkedin.com/pub/dir/" in link or "/pub/dir/" in link:
+                                # Directory page (e.g., /pub/dir/Tanja/Reese)
+                                found_directory_urls.append(link)
+                        
+                        # DECISION LOGIC:
+                        # - Variations 1-3: Searched for exact URL → Always accept (they found the URL)
+                        # - Variations 4-5: Searched by name/company
+                        #     → If results contain direct profiles (/in/), verify URL match
+                        #     → If results only contain directory pages (/pub/dir/), SKIP URL check
+                        #       (directory pages will NEVER match /in/ URLs, so check is useless)
+                        #       Instead, rely on LLM to verify person + company from snippets
+                        
+                        if variation_idx >= 4 and profile_slug:
+                            # Using fallback variations (name + company search)
+                            
+                            if found_profile_urls:
+                                # Google returned direct profile links - verify URL match
+                                url_match_found = any(
+                                    profile_slug.lower() == result_slug.lower() 
+                                    for result_slug in found_profile_urls
+                                )
+                                
+                                if not url_match_found:
+                                    print(f"         ⚠️  URL MISMATCH: Miner provided '{profile_slug}'")
+                                    print(f"         ⚠️  But Google found: {found_profile_urls[:3]}")
+                                    print(f"         ❌ Failing - different profile")
+                                    continue  # Try next variation
+                                else:
+                                    print(f"         ✅ URL MATCH: Miner's profile '{profile_slug}' confirmed")
+                            
+                            elif found_directory_urls:
+                                # Google returned directory pages only - SKIP URL check
+                                # (Directory pages like /pub/dir/ will never match /in/ profiles)
+                                # LLM will verify person + company from snippets instead
+                                print(f"         ℹ️  Google returned directory pages (not direct profiles)")
+                                print(f"         ℹ️  Skipping URL verification - will rely on LLM to verify person+company")
+                            
+                            else:
+                                # No LinkedIn links at all (shouldn't happen, but handle it)
+                                print(f"         ⚠️  No LinkedIn links found in results")
+                                continue  # Try next variation
+                        
+                        # Results are valid - log and return
+                        print(f"      📊 GSE results:")
+                        for i, result in enumerate(results[:3], 1):  # Show top 3
+                            print(f"         {i}. {result['title'][:80]}")
+                            print(f"            {result['snippet'][:100]}...")
+                        
+                        return results
+                    else:
+                        print(f"         ❌ No results with variation {variation_idx}")
+            
+            # All variations exhausted
+            print(f"   ❌ GSE: No results found after trying {len(query_variations)} variations")
+            return []
     
     except asyncio.TimeoutError:
         print(f"   ⚠️ GSE API timeout")

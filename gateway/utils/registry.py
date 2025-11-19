@@ -254,13 +254,22 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
         print(f"   Active: {active}")
         print(f"   Validator Permit: {validator_permit}")
         
-        # Validators must have BOTH active status AND validator permit
-        if active and validator_permit:
+        # This handles validators who haven't set active flag but have significant stake
+        STAKE_THRESHOLD = 500000  # 500K TAO minimum for stake-based validator classification
+        
+        # Validators must have:
+        # 1. BOTH active=True AND validator_permit=True (normal path), OR
+        # 2. Stake > 500K TAO AND validator_permit=True (temporary stake-based override)
+        if (active and validator_permit) or (stake > STAKE_THRESHOLD and validator_permit):
             role = "validator"
-            print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
+            if active and validator_permit:
+                print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
+            else:
+                print(f"   ✅ Role: VALIDATOR (stake={stake:.0f} τ > {STAKE_THRESHOLD}, permit=True)")
+                print(f"      ⚠️  TEMPORARY: Stake-based classification (active={active})")
         else:
             role = "miner"
-            print(f"   ✅ Role: MINER (active={active}, permit={validator_permit})")
+            print(f"   ✅ Role: MINER (active={active}, permit={validator_permit}, stake={stake:.0f})")
         
         return True, role
     
@@ -310,14 +319,23 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         print(f"   Active: {active}")
         print(f"   Validator Permit: {validator_permit}")
         
-        # Validators must have BOTH active status AND validator permit
-        # A miner can have stake > 0 but still be a miner if they lack permit
-        if active and validator_permit:
+        # TEMPORARY: Allow high-stake validators even if active=False
+        # This handles validators who haven't set active flag but have significant stake
+        STAKE_THRESHOLD = 500000  # 500K TAO minimum for stake-based validator classification
+        
+        # Validators must have:
+        # 1. BOTH active=True AND validator_permit=True (normal path), OR
+        # 2. Stake > 500K TAO AND validator_permit=True (temporary stake-based override)
+        if (active and validator_permit) or (stake > STAKE_THRESHOLD and validator_permit):
             role = "validator"
-            print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
+            if active and validator_permit:
+                print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
+            else:
+                print(f"   ✅ Role: VALIDATOR (stake={stake:.0f} τ > {STAKE_THRESHOLD}, permit=True)")
+                print(f"      ⚠️  TEMPORARY: Stake-based classification (active={active})")
         else:
             role = "miner"
-            print(f"   ✅ Role: MINER (active={active}, permit={validator_permit})")
+            print(f"   ✅ Role: MINER (active={active}, permit={validator_permit}, stake={stake:.0f})")
         
         return True, role
     
@@ -333,15 +351,19 @@ async def get_validator_count_async() -> int:
     Use this from async contexts. For sync, use get_validator_count() wrapper.
     
     Returns:
-        Number of validators (neurons with active=True AND validator_permit=True)
+        Number of validators (neurons with active=True AND validator_permit=True,
+        OR stake > 500K TAO AND validator_permit=True)
     """
     try:
         metagraph = await get_metagraph_async()
         
-        # Count neurons with active status AND validator permit
+        STAKE_THRESHOLD = 500000  # 500K TAO minimum
+        
+        # Count neurons that are validators (normal OR stake-based)
         validator_count = sum(
             1 for i in range(len(metagraph.hotkeys))
-            if metagraph.active[i] and metagraph.validator_permit[i]
+            if (metagraph.active[i] and metagraph.validator_permit[i]) or 
+               (metagraph.S[i] > STAKE_THRESHOLD and metagraph.validator_permit[i])
         )
         
         return validator_count
@@ -358,7 +380,8 @@ def get_validator_count() -> int:
     DEPRECATED: Use get_validator_count_async() from async contexts.
     
     Returns:
-        Number of validators
+        Number of validators (neurons with active=True AND validator_permit=True,
+        OR stake > 500K TAO AND validator_permit=True)
     
     Example:
         >>> count = get_validator_count()
@@ -367,10 +390,13 @@ def get_validator_count() -> int:
     try:
         metagraph = get_metagraph()
         
-        # Count neurons with active status AND validator permit
+        STAKE_THRESHOLD = 500000  # 500K TAO minimum
+        
+        # Count neurons that are validators (normal OR stake-based)
         validator_count = sum(
             1 for i in range(len(metagraph.hotkeys))
-            if metagraph.active[i] and metagraph.validator_permit[i]
+            if (metagraph.active[i] and metagraph.validator_permit[i]) or 
+               (metagraph.S[i] > STAKE_THRESHOLD and metagraph.validator_permit[i])
         )
         
         return validator_count
@@ -387,15 +413,18 @@ async def get_miner_count_async() -> int:
     Use this from async contexts. For sync, use get_miner_count() wrapper.
     
     Returns:
-        Number of miners (neurons without active status OR without validator permit)
+        Number of miners (neurons that are NOT validators)
     """
     try:
         metagraph = await get_metagraph_async()
         
-        # Count neurons that are NOT validators
+        STAKE_THRESHOLD = 500000  # 500K TAO minimum
+        
+        # Count neurons that are NOT validators (inverse of validator logic)
         miner_count = sum(
             1 for i in range(len(metagraph.hotkeys))
-            if not (metagraph.active[i] and metagraph.validator_permit[i])
+            if not ((metagraph.active[i] and metagraph.validator_permit[i]) or 
+                   (metagraph.S[i] > STAKE_THRESHOLD and metagraph.validator_permit[i]))
         )
         
         return miner_count
@@ -412,7 +441,7 @@ def get_miner_count() -> int:
     DEPRECATED: Use get_miner_count_async() from async contexts.
     
     Returns:
-        Number of miners
+        Number of miners (neurons that are NOT validators)
     
     Example:
         >>> count = get_miner_count()
@@ -421,11 +450,13 @@ def get_miner_count() -> int:
     try:
         metagraph = get_metagraph()
         
-        # Count neurons that are NOT validators
-        # (either not active OR no validator permit)
+        STAKE_THRESHOLD = 500000  # 500K TAO minimum
+        
+        # Count neurons that are NOT validators (inverse of validator logic)
         miner_count = sum(
             1 for i in range(len(metagraph.hotkeys))
-            if not (metagraph.active[i] and metagraph.validator_permit[i])
+            if not ((metagraph.active[i] and metagraph.validator_permit[i]) or 
+                   (metagraph.S[i] > STAKE_THRESHOLD and metagraph.validator_permit[i]))
         )
         
         return miner_count

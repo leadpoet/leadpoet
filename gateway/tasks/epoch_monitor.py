@@ -119,21 +119,22 @@ class EpochMonitor(BlockListener):
                 return
             
             # ════════════════════════════════════════════════════════════════
-            # Check 4: Deregistered miner cleanup at block 10-15 (after metagraph warmed)
+            # Check 4: Deregistered miner cleanup at block 357 (before next epoch)
             # ════════════════════════════════════════════════════════════════
             # Clean up leads from miners who left the subnet
-            # Runs at block 10 to ensure metagraph cache is available
-            if block_within_epoch == 10 and current_epoch > 0:
+            # Runs at block 357 to clean DB BEFORE next epoch's initialization at block 360
+            # This ensures validators never receive leads from deregistered miners
+            if block_within_epoch == 357 and current_epoch > 0:
                 if not hasattr(self, '_cleanup_epochs'):
                     self._cleanup_epochs = set()
                 
                 if current_epoch not in self._cleanup_epochs:
                     logger.info(f"\n{'='*80}")
-                    logger.info(f"🧹 MINER CLEANUP TRIGGER: Block 10 of epoch {current_epoch}")
-                    logger.info(f"   Removing leads from deregistered miners...")
+                    logger.info(f"🧹 MINER CLEANUP TRIGGER: Block 357 of epoch {current_epoch}")
+                    logger.info(f"   Cleaning DB before epoch {current_epoch + 1} initialization...")
                     logger.info(f"{'='*80}")
                     
-                    # Trigger cleanup (non-blocking - won't delay epoch initialization)
+                    # Trigger cleanup (non-blocking - runs in background)
                     asyncio.create_task(self._run_miner_cleanup(current_epoch))
                     
                     self._cleanup_epochs.add(current_epoch)

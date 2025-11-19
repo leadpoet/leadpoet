@@ -2009,8 +2009,22 @@ class Validator(BaseValidatorNeuron):
             # REVENUE SPLIT: 75% to UID 0, 25% to miners (by rep score)
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
+            EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
             REVENUE_SHARE = 0.75  # 75% to UID 0
             MINER_SHARE = 0.25    # 25% to miners
+            
+            # CRITICAL: Verify UID 0 is the expected LeadPoet hotkey (safety check)
+            try:
+                actual_uid0_hotkey = self.metagraph.hotkeys[UID_ZERO]
+                if actual_uid0_hotkey != EXPECTED_UID_ZERO_HOTKEY:
+                    print(f"   ❌ CRITICAL ERROR: UID 0 ownership changed!")
+                    print(f"      Expected: {EXPECTED_UID_ZERO_HOTKEY[:20]}...")
+                    print(f"      Actual:   {actual_uid0_hotkey[:20]}...")
+                    print(f"      Revenue would go to WRONG address - aborting weight submission")
+                    return False
+            except Exception as e:
+                print(f"   ❌ Error verifying UID 0 ownership: {e}")
+                return False
             
             # Convert miner hotkeys to UIDs
             miner_uids = []

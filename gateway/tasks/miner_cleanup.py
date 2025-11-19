@@ -137,22 +137,34 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
         print(f"   📊 Found {len(leads_to_delete)} leads from {len(deregistered_miners)} deregistered miners")
         
         # ========================================================================
-        # Step 4: Batch delete leads (optimized - single query)
+        # Step 4: Batch delete leads (in chunks to avoid Supabase limits)
         # ========================================================================
         print(f"   🗑️  Deleting {len(leads_to_delete)} leads...")
         
+        # Supabase has a limit on query size - delete in batches of 100
+        BATCH_SIZE = 100
+        total_deleted = 0
+        
         try:
-            delete_result = await asyncio.to_thread(
-                lambda: supabase.table("leads_private")
-                    .delete()
-                    .in_("lead_id", leads_to_delete)
-                    .execute()
-            )
+            for i in range(0, len(leads_to_delete), BATCH_SIZE):
+                batch = leads_to_delete[i:i + BATCH_SIZE]
+                
+                await asyncio.to_thread(
+                    lambda b=batch: supabase.table("leads_private")
+                        .delete()
+                        .in_("lead_id", b)
+                        .execute()
+                )
+                
+                total_deleted += len(batch)
+                print(f"      ✅ Deleted batch {i//BATCH_SIZE + 1}/{(len(leads_to_delete) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(batch)} leads)")
             
-            print(f"   ✅ Deleted {len(leads_to_delete)} leads from deregistered miners")
+            print(f"   ✅ Deleted {total_deleted} leads from deregistered miners")
         
         except Exception as e:
             print(f"   ❌ Error deleting leads: {e}")
+            import traceback
+            traceback.print_exc()
             # Don't fail entire cleanup - continue to logging
         
         # ========================================================================
@@ -177,14 +189,19 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
         }
         
         # Log to transparency_log (Supabase)
+        # Note: epoch_id is in payload, not a separate column
         try:
             await asyncio.to_thread(
                 lambda: supabase.table("transparency_log")
                     .insert({
                         "event_type": "DEREGISTERED_MINER_REMOVAL",
-                        "epoch_id": epoch_id,
                         "timestamp": datetime.utcnow().isoformat(),
-                        "payload": cleanup_report
+                        "payload": cleanup_report,
+                        "actor_hotkey": "gateway",  # Required field
+                        "nonce": f"cleanup_{epoch_id}",  # Required field
+                        "payload_hash": hashlib.sha256(
+                            json.dumps(cleanup_report, sort_keys=True).encode()
+                        ).hexdigest()
                     })
                     .execute()
             )
@@ -193,10 +210,12 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
         
         except Exception as e:
             print(f"   ⚠️  Failed to log to transparency_log: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Log to TEE (Arweave buffer)
         try:
-            from gateway.tee.nsm_lib import log_to_tee_enclave
+            from gateway.utils.logger import log_event
             
             # Create payload for TEE
             payload_json = json.dumps(cleanup_report, sort_keys=True, separators=(',', ':'))
@@ -204,23 +223,24 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
             
             tee_event = {
                 "event_type": "DEREGISTERED_MINER_REMOVAL",
-                "epoch_id": epoch_id,
-                "timestamp": datetime.utcnow().isoformat(),
+                "actor_hotkey": "gateway",  # Gateway-generated event
+                "nonce": f"cleanup_{epoch_id}",
+                "ts": datetime.utcnow().isoformat(),
                 "payload": cleanup_report,
-                "payload_hash": payload_hash
+                "payload_hash": payload_hash,
+                "build_id": "gateway"
             }
             
-            # Log to TEE enclave (async)
-            seq_num = await asyncio.to_thread(
-                log_to_tee_enclave,
-                event_type="DEREGISTERED_MINER_REMOVAL",
-                data=tee_event
-            )
+            # Log to TEE enclave (uses log_event - dual logging)
+            result = await log_event(tee_event)
+            seq_num = result.get("sequence")
             
             print(f"   ✅ Logged to TEE buffer (seq={seq_num})")
         
         except Exception as e:
             print(f"   ⚠️  Failed to log to TEE: {e}")
+            import traceback
+            traceback.print_exc()
             # Continue anyway - transparency_log is the primary source
         
         # ========================================================================

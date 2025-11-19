@@ -146,6 +146,16 @@ async def reveal_validation_result(
             detail=f"Reveal window expired. Validations from epoch {validation_epoch} must be revealed in epoch {validation_epoch + 1}. Current epoch is {current_epoch}."
         )
     
+    # Check 3: Must reveal BEFORE block 350 of epoch N+1 (consensus deadline)
+    from gateway.utils.epoch import get_block_within_epoch_async
+    block_within_epoch = await get_block_within_epoch_async()
+    
+    if block_within_epoch >= 350:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reveal deadline passed. Reveals for epoch {validation_epoch} must be submitted before block 350 of epoch {validation_epoch + 1}. Current block: {block_within_epoch}/360."
+        )
+    
     # ========================================
     # Step 3: Fetch evidence from Private DB
     # ========================================
@@ -532,8 +542,19 @@ async def reveal_validation_batch(
             detail=f"Reveal window expired. Validations from epoch {validation_epoch} must be revealed in epoch {validation_epoch + 1}. Current epoch is {current_epoch}."
         )
     
+    # Check 3: Must reveal BEFORE block 350 of epoch N+1 (consensus deadline)
+    from gateway.utils.epoch import get_block_within_epoch_async
+    block_within_epoch = await get_block_within_epoch_async()
+    
+    if block_within_epoch >= 350:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reveal deadline passed. Reveals for epoch {validation_epoch} must be submitted before block 350 of epoch {validation_epoch + 1}. Current block: {block_within_epoch}/360."
+        )
+    
     print(f"\n{'='*80}")
     print(f"📥 BATCH REVEAL: {len(reveals)} reveals from {validator_hotkey[:20]}...")
+    print(f"   Block {block_within_epoch}/360 of epoch {current_epoch} (deadline: block 350)")
     print(f"{'='*80}")
     
     import time
@@ -701,122 +722,14 @@ async def reveal_validation_batch(
                 )
                 
                 # ════════════════════════════════════════════════════════════════════
-                # CRITICAL FIX: Re-calculate weighted consensus with ALL revealed validators
-                # This ensures leads_private always reflects the current weighted consensus
-                # IMPORTANT: Use retry logic with verification to prevent silent failures
+                # REAL-TIME CONSENSUS REMOVED (Option B)
                 # ════════════════════════════════════════════════════════════════════
-                CONSENSUS_RETRIES = 2  # Fewer retries in batch (to avoid slowing down entire batch)
-                consensus_updated = False
+                # Consensus is now calculated ONCE at block 350 of reveal epoch (batch mode)
+                # This reduces database writes from 50+ per epoch to 1 per epoch
+                # and ensures all reveals are captured before consensus runs
                 
-                for cons_attempt in range(1, CONSENSUS_RETRIES + 1):
-                    try:
-                        print(f"         🔄 Re-calculating weighted consensus for lead {lead_id[:8]}... (attempt {cons_attempt}/{CONSENSUS_RETRIES})")
-                        
-                        # Import consensus calculation function
-                        from gateway.utils.consensus import compute_weighted_consensus
-                        
-                        # Compute weighted consensus (queries ALL revealed validations for this lead)
-                        outcome = await asyncio.wait_for(
-                            compute_weighted_consensus(lead_id, epoch_id),
-                            timeout=20.0  # 20 second timeout
-                        )
-                        
-                        # Query ALL validator responses (to rebuild validator_responses with v_trust/stake)
-                        def fetch_all_responses():
-                            return supabase.table("validation_evidence_private")\
-                                .select("validator_hotkey, decision, rep_score, rejection_reason, revealed_ts, v_trust, stake")\
-                                .eq("lead_id", lead_id)\
-                                .eq("epoch_id", epoch_id)\
-                                .not_.is_("decision", "null")\
-                                .execute()
-                        
-                        all_responses_result = await asyncio.wait_for(
-                            asyncio.to_thread(fetch_all_responses),
-                            timeout=10.0
-                        )
-                        
-                        all_responses = all_responses_result.data
-                        
-                        # Rebuild validator_responses array with ALL validators
-                        validator_responses_full = []
-                        validators_responded_full = []
-                        for r in all_responses:
-                            validators_responded_full.append(r['validator_hotkey'])
-                            validator_responses_full.append({
-                                "validator": r['validator_hotkey'],
-                                "decision": r['decision'],
-                                "rep_score": r['rep_score'],
-                                "rejection_reason": r.get('rejection_reason'),
-                                "submitted_at": r.get('revealed_ts'),
-                                "v_trust": r.get('v_trust'),
-                                "stake": r.get('stake')
-                            })
-                        
-                        # Build consensus_votes object (same structure as epoch_lifecycle.py)
-                        approve_count = sum(1 for r in all_responses if r['decision'] == 'approve')
-                        deny_count = len(all_responses) - approve_count
-                        
-                        consensus_votes = {
-                            "total_validators": outcome['validator_count'],
-                            "responded": len(all_responses),
-                            "approve": approve_count,
-                            "deny": deny_count,
-                            "consensus": outcome['final_decision'],
-                            "avg_rep_score": outcome['final_rep_score'],
-                            "total_weight": outcome['consensus_weight'],
-                            "approval_ratio": outcome['approval_ratio'],
-                            "consensus_timestamp": datetime.utcnow().isoformat()
-                        }
-                        
-                        # Determine final status and rep_score
-                        final_status = "approved" if outcome['final_decision'] == 'approve' else "denied"
-                        final_rep_score = outcome['final_rep_score'] if outcome['final_decision'] == 'approve' else 0
-                        
-                        # CRITICAL: Update leads_private with verification
-                        def update_consensus():
-                            return supabase.table("leads_private")\
-                                .update({
-                                    "status": final_status,
-                                    "validators_responded": validators_responded_full,
-                                    "validator_responses": validator_responses_full,
-                                    "consensus_votes": consensus_votes,
-                                    "rep_score": final_rep_score,
-                                    "epoch_summary": outcome
-                                })\
-                                .eq("lead_id", lead_id)\
-                                .execute()
-                        
-                        update_result = await asyncio.wait_for(
-                            asyncio.to_thread(update_consensus),
-                            timeout=10.0
-                        )
-                        
-                        # VERIFY UPDATE SUCCEEDED
-                        if not update_result.data or len(update_result.data) == 0:
-                            raise Exception(f"leads_private update returned empty result")
-                        
-                        print(f"         ✅ Consensus: {final_status.upper()} (rep: {final_rep_score:.2f}, weight: {outcome['consensus_weight']:.2f})")
-                        print(f"            Validators: {len(validators_responded_full)}, Approve: {approve_count}, Deny: {deny_count}, Ratio: {outcome['approval_ratio']:.2%}")
-                        
-                        consensus_updated = True
-                        break  # Success - exit retry loop
-                    
-                    except asyncio.TimeoutError:
-                        print(f"         ⚠️  Consensus timeout (attempt {cons_attempt}/{CONSENSUS_RETRIES})")
-                        if cons_attempt < CONSENSUS_RETRIES:
-                            await asyncio.sleep(1)  # Brief wait before retry
-                    
-                    except Exception as e:
-                        print(f"         ⚠️  Consensus error (attempt {cons_attempt}/{CONSENSUS_RETRIES}): {e}")
-                        if cons_attempt < CONSENSUS_RETRIES:
-                            await asyncio.sleep(1)  # Brief wait before retry
-                
-                # Log if consensus update failed (but don't fail the entire batch)
-                if not consensus_updated:
-                    print(f"         ❌ WARNING: Consensus not updated for lead {lead_id[:8]}... after {CONSENSUS_RETRIES} attempts")
-                    print(f"            Evidence stored safely - will retry on next consensus run")
-                
-                print(f"      [{idx}/{len(valid_updates)}] ✅ Updated lead {lead_id[:8]}...")
+                print(f"      [{idx}/{len(valid_updates)}] ✅ Reveal recorded for lead {lead_id[:8]}...")
+                print(f"         📊 Consensus will be computed at block 350 of epoch {epoch_id + 1}")
                 revealed_count += 1
                 
             except asyncio.TimeoutError:

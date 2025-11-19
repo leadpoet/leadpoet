@@ -118,13 +118,22 @@ class EpochMonitor(BlockListener):
                 # Skip consensus checks during startup
                 return
             
-            # Check up to 3 epochs back for any that need consensus
-            # IMPORTANT: Limited to 3 to prevent thundering herd on startup
-            # (checking 10 epochs would trigger 10 concurrent consensus tasks)
-            for check_epoch in range(max(0, current_epoch - 3), current_epoch):
-                if check_epoch not in self.closed_epochs:
-                    # Trigger reveal check (non-blocking)
-                    asyncio.create_task(self._check_for_reveals(check_epoch))
+            # ════════════════════════════════════════════════════════════════
+            # Check 4: Batch consensus at block 350 (captures ALL reveals)
+            # ════════════════════════════════════════════════════════════════
+            # Run consensus at block 350 of epoch N (for epoch N-1 reveals)
+            # This ensures ALL reveals from blocks 0-349 are included
+            if block_within_epoch == 350 and current_epoch > 0:
+                consensus_epoch = current_epoch - 1  # Calculate consensus for previous epoch
+                
+                if consensus_epoch not in self.closed_epochs:
+                    logger.info(f"\n{'='*80}")
+                    logger.info(f"📊 BATCH CONSENSUS TRIGGER: Block 350 of epoch {current_epoch}")
+                    logger.info(f"   Computing consensus for epoch {consensus_epoch} reveals...")
+                    logger.info(f"{'='*80}")
+                    
+                    # Trigger consensus (non-blocking)
+                    asyncio.create_task(self._check_for_reveals(consensus_epoch))
         
         except Exception as e:
             logger.error(f"❌ Error in EpochMonitor.on_block: {e}")
@@ -278,18 +287,13 @@ class EpochMonitor(BlockListener):
             logger.info(f"   Closed at: {epoch_close.isoformat()}")
             logger.info(f"   Time since close: {time_since_close/60:.1f} minutes")
             
-            # Trigger reveal phase
+            # Trigger reveal phase notification
             await trigger_reveal_phase(epoch_id)
             
-            # Wait for reveals to come in (only if epoch just closed)
-            if time_since_close < 300:  # Within 5 minutes
-                logger.info(f"   ⏳ Waiting 2 minutes for reveals...")
-                await asyncio.sleep(120)
-            else:
-                logger.info(f"   ℹ️  Epoch closed {time_since_close/60:.1f} minutes ago - skipping reveal wait")
-            
-            # Compute consensus
-            logger.info(f"   📊 Computing consensus for epoch {epoch_id}...")
+            # NO WAIT: Consensus triggered at block 350, all reveals should be in already
+            # (Reveals accepted from block 0-349 only, enforced by reveal endpoint)
+            logger.info(f"   📊 Running batch consensus for epoch {epoch_id}...")
+            logger.info(f"   Closed {time_since_close/60:.1f} minutes ago")
             await compute_epoch_consensus(epoch_id)
             
             logger.info(f"   ✅ Epoch {epoch_id} fully processed")

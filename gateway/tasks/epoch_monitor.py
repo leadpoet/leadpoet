@@ -119,7 +119,27 @@ class EpochMonitor(BlockListener):
                 return
             
             # ════════════════════════════════════════════════════════════════
-            # Check 4: Batch consensus at block 350 (captures ALL reveals)
+            # Check 4: Deregistered miner cleanup at block 10-15 (after metagraph warmed)
+            # ════════════════════════════════════════════════════════════════
+            # Clean up leads from miners who left the subnet
+            # Runs at block 10 to ensure metagraph cache is available
+            if block_within_epoch == 10 and current_epoch > 0:
+                if not hasattr(self, '_cleanup_epochs'):
+                    self._cleanup_epochs = set()
+                
+                if current_epoch not in self._cleanup_epochs:
+                    logger.info(f"\n{'='*80}")
+                    logger.info(f"🧹 MINER CLEANUP TRIGGER: Block 10 of epoch {current_epoch}")
+                    logger.info(f"   Removing leads from deregistered miners...")
+                    logger.info(f"{'='*80}")
+                    
+                    # Trigger cleanup (non-blocking - won't delay epoch initialization)
+                    asyncio.create_task(self._run_miner_cleanup(current_epoch))
+                    
+                    self._cleanup_epochs.add(current_epoch)
+            
+            # ════════════════════════════════════════════════════════════════
+            # Check 5: Batch consensus at block 350 (captures ALL reveals)
             # ════════════════════════════════════════════════════════════════
             # Run consensus at block 350 of epoch N (for epoch N-1 reveals)
             # This ensures ALL reveals from blocks 0-349 are included
@@ -310,11 +330,37 @@ class EpochMonitor(BlockListener):
                 recent = sorted(list(self.closed_epochs))[-50:]
                 self.closed_epochs = set(recent)
             
+            if hasattr(self, '_cleanup_epochs') and len(self._cleanup_epochs) > 100:
+                recent = sorted(list(self._cleanup_epochs))[-50:]
+                self._cleanup_epochs = set(recent)
+            
         except Exception as e:
             logger.error(f"❌ Error checking reveals for epoch {epoch_id}: {e}")
             import traceback
             traceback.print_exc()
             # Don't mark as closed on error - will retry on next block
+    
+    async def _run_miner_cleanup(self, epoch_id: int):
+        """
+        Run cleanup of leads from deregistered miners.
+        
+        This is called at block 10 of each epoch (non-blocking background task).
+        Uses cached metagraph (doesn't force refresh).
+        
+        Args:
+            epoch_id: Current epoch number
+        """
+        try:
+            from gateway.tasks.miner_cleanup import cleanup_deregistered_miner_leads
+            
+            # Run cleanup (this is async and handles all errors internally)
+            await cleanup_deregistered_miner_leads(epoch_id)
+        
+        except Exception as e:
+            logger.error(f"❌ Error running miner cleanup for epoch {epoch_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Don't crash - this is a background task
     
     def get_stats(self) -> dict:
         """

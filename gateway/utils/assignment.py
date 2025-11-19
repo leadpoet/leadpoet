@@ -151,19 +151,25 @@ async def get_validator_set(epoch_id: int) -> List[str]:
         
         metagraph = await get_metagraph_async()
         
-        # Filter validators (active + validator_permit)
+        # Filter validators (active + validator_permit OR stake > 500K + permit)
+        STAKE_THRESHOLD = 500000  # 500K TAO minimum
+        
         validators = []
         for i, hotkey in enumerate(metagraph.hotkeys):
-            # Validators must have BOTH active status AND validator permit
+            # Validators must have:
+            # 1. BOTH active=True AND validator_permit=True (normal path), OR
+            # 2. Stake > 500K TAO AND validator_permit=True (temporary stake-based override)
             active = metagraph.active[i]
             validator_permit = metagraph.validator_permit[i]
-            if active and validator_permit:
+            stake = metagraph.S[i]
+            
+            if (active and validator_permit) or (stake > STAKE_THRESHOLD and validator_permit):
                 validators.append(hotkey)
         
         print(f"📊 Validator set for epoch {epoch_id}:")
         print(f"   Total registered: {len(metagraph.hotkeys)}")
-        print(f"   Validators (active + permit): {len(validators)}")
-        print(f"   Miners (no active or no permit): {len(metagraph.hotkeys) - len(validators)}")
+        print(f"   Validators (active+permit OR stake>500K+permit): {len(validators)}")
+        print(f"   Miners: {len(metagraph.hotkeys) - len(validators)}")
         
         return validators
     

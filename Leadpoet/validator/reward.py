@@ -234,6 +234,11 @@ def _background_epoch_monitor():
                 print(f"⚠️  Error in background epoch monitor: {e}")
                 subtensor = None
                 time.sleep(60)  # Wait longer on error
+    
+    finally:
+        # Clean up event loop on thread exit
+        loop.close()
+        print("🕐 Background epoch monitor stopped")
 
 def start_epoch_monitor(network: str = "finney"):
     """

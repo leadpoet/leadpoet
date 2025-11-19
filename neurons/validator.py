@@ -2020,8 +2020,46 @@ class Validator(BaseValidatorNeuron):
                     print(f"   ⚠️  Skipping miner {hotkey[:10]}...: {e}")
             
             if not uids:
+                # FALLBACK: Miner hotkeys not in metagraph (left subnet or never registered)
+                # Submit burn weights instead
                 print(f"   ⚠️  No valid UIDs found for weight submission")
-                return False
+                print(f"      Miners have left the subnet or are not registered")
+                print(f"   🔥 Submitting burn weights to subnet owner instead...")
+                
+                try:
+                    # Get subnet owner's hotkey
+                    owner_hotkey = self.subtensor.query_subtensor(
+                        "SubnetOwnerHotkey",
+                        params=[self.config.netuid]
+                    )
+                    
+                    # Get owner's UID
+                    burn_uid = self.subtensor.get_uid_for_hotkey_on_subnet(
+                        hotkey_ss58=str(owner_hotkey),
+                        netuid=self.config.netuid
+                    )
+                    
+                    print(f"   🔥 Burn UID: {burn_uid} (subnet owner)")
+                    
+                    # Submit burn weights (100% to owner)
+                    result = self.subtensor.set_weights(
+                        netuid=self.config.netuid,
+                        wallet=self.wallet,
+                        uids=[burn_uid],
+                        weights=[1.0],
+                        wait_for_finalization=False
+                    )
+                    
+                    if result:
+                        print(f"   ✅ Burn weights submitted successfully")
+                        return True
+                    else:
+                        print(f"   ❌ Failed to submit burn weights")
+                        return False
+                
+                except Exception as e:
+                    print(f"   ❌ Error submitting burn weights: {e}")
+                    return False
             
             # Normalize weights (sum to 1.0)
             total_weight = sum(weights)

@@ -1076,6 +1076,25 @@ class Validator(BaseValidatorNeuron):
         self.appeal_status = None
         self.trusted_validator = False
         self._pending_reveals = {}
+    
+    def _save_pending_reveals(self):
+        """
+        Save pending reveals to disk immediately.
+        
+        This is called after cleanup operations to persist state changes
+        without waiting for the next full save_state() call.
+        """
+        try:
+            weights_dir = Path("validator_weights")
+            weights_dir.mkdir(exist_ok=True)
+            reveals_path = weights_dir / "pending_reveals.json"
+            
+            with open(reveals_path, 'w') as f:
+                json.dump(self._pending_reveals, f, indent=2)
+            
+            bt.logging.debug(f"💾 Saved pending reveals to {reveals_path}")
+        except Exception as e:
+            bt.logging.error(f"Failed to save pending reveals: {e}")
 
     async def handle_api_request(self, request):
         """
@@ -2129,7 +2148,28 @@ class Validator(BaseValidatorNeuron):
             
             from Leadpoet.utils.cloud_db import gateway_submit_reveal
             
-            # Check each pending epoch
+            # CRITICAL: Clean up expired reveals BEFORE attempting submission
+            # Reveal window is N+1 only - anything older should be purged
+            epochs_to_remove = []
+            for epoch_id in list(self._pending_reveals.keys()):
+                # Check if reveal window has expired (current_epoch > epoch_id + 1)
+                if current_epoch > epoch_id + 1:
+                    print(f"   🗑️  Epoch {epoch_id} reveal window EXPIRED")
+                    print(f"      Should have revealed in epoch {epoch_id + 1}, current is {current_epoch}")
+                    print(f"      Removing from pending reveals (no longer valid)")
+                    epochs_to_remove.append(epoch_id)
+            
+            # Remove expired epochs
+            for epoch_id in epochs_to_remove:
+                del self._pending_reveals[epoch_id]
+            
+            # Save state after cleanup
+            if epochs_to_remove:
+                self._save_pending_reveals()
+                print(f"   ✅ Removed {len(epochs_to_remove)} expired epoch(s) from pending reveals")
+                print(f"      Remaining: {list(self._pending_reveals.keys())}")
+            
+            # Check each pending epoch (only those still valid)
             epochs_to_reveal = list(self._pending_reveals.keys())
             for epoch_id in epochs_to_reveal:
                 print(f"   📋 Epoch {epoch_id}: Current={current_epoch}, Ready={current_epoch > epoch_id}")

@@ -6,10 +6,11 @@ Manually triggers EPOCH_INITIALIZATION for the current epoch.
 Use this if the gateway was restarted mid-epoch and missed the epoch transition.
 
 Usage:
-    python3 gateway/scripts/force_epoch_init.py <epoch_id>
+    cd ~/gateway
+    python3 -m gateway.tasks.force_epoch_init <epoch_id>
     
 Example:
-    python3 gateway/scripts/force_epoch_init.py 19210
+    python3 -m gateway.tasks.force_epoch_init 19210
 """
 
 import asyncio
@@ -18,8 +19,8 @@ from datetime import datetime
 
 async def main():
     if len(sys.argv) < 2:
-        print("❌ Usage: python3 gateway/scripts/force_epoch_init.py <epoch_id>")
-        print("   Example: python3 gateway/scripts/force_epoch_init.py 19210")
+        print("❌ Usage: python3 -m gateway.tasks.force_epoch_init <epoch_id>")
+        print("   Example: python3 -m gateway.tasks.force_epoch_init 19210")
         sys.exit(1)
     
     epoch_id = int(sys.argv[1])

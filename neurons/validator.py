@@ -2024,7 +2024,7 @@ class Validator(BaseValidatorNeuron):
                 # Submit burn weights instead
                 print(f"   ⚠️  No valid UIDs found for weight submission")
                 print(f"      Miners have left the subnet or are not registered")
-                print(f"   🔥 Submitting burn weights to subnet owner instead...")
+                print(f"   🔥 Submitting burn weights instead...")
                 
                 try:
                     # Get subnet owner's hotkey

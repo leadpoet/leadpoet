@@ -2083,12 +2083,11 @@ class Validator(BaseValidatorNeuron):
                     return False
             
             # ═══════════════════════════════════════════════════════════════════
-            # Calculate 75/25 revenue split
+            # Calculate 75/25 alpha split
             # ═══════════════════════════════════════════════════════════════════
-            print(f"\n   💰 Revenue Split:")
-            print(f"      75% → UID {UID_ZERO} (LeadPoet)")
-            print(f"      25% → {len(miner_uids)} miners (by rep score)")
-            print()
+            print(f"\n   💰 Alpha Split:")
+            print(f"      UID {UID_ZERO}: 75%")
+            print(f"      Miners: 25% (split among {len(miner_uids)})")
             
             # Calculate total points for normalization
             total_points = sum(miner_points)
@@ -2105,14 +2104,9 @@ class Validator(BaseValidatorNeuron):
                 miner_proportion = points / total_points  # Their share of total points
                 miner_weight = MINER_SHARE * miner_proportion  # Their share of the 25%
                 final_weights.append(miner_weight)
-                print(f"      Miner UID {uid}: {points}/{total_points} points = {miner_weight*100:.2f}% of emissions")
+                print(f"      UID {uid}: {miner_weight*100:.2f}% ({points} points)")
             
-            print()
-            print(f"   Final weights (should sum to 1.0):")
-            print(f"      UID {UID_ZERO}: {final_weights[0]*100:.1f}%")
-            for i, uid in enumerate(miner_uids):
-                print(f"      UID {uid}: {final_weights[i+1]*100:.2f}%")
-            print(f"   Total: {sum(final_weights)*100:.1f}%")
+            print(f"   Total: {sum([REVENUE_SHARE] + [MINER_SHARE])*100:.0f}%")
             
             # Verify weights sum to 1.0 (with small floating point tolerance)
             weight_sum = sum(final_weights)

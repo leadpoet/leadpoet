@@ -199,22 +199,19 @@ def _background_epoch_monitor():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
+    # Variable to hold the subtensor instance across iterations
+    subtensor = None
+    
     try:
         while _epoch_monitor_running:
             try:
                 # CRITICAL: This background thread runs in a SEPARATE event loop
                 # from the main validator loop. AsyncSubtensor is NOT thread-safe
                 # across event loops, so we use the OLD sync method here.
-                # 
-                # This is acceptable because:
-                # 1. Background thread only queries once every 30s (low frequency)
-                # 2. Memory leak from this thread is minimal (vs main loop which was creating instances constantly)
-                # 3. Main validator loop uses async_subtensor (zero leaks there)
-                # 4. Block subscription in main loop keeps WebSocket alive
+                if subtensor is None:
+                    import bittensor as bt
+                    subtensor = bt.subtensor(network=_epoch_network)
                 
-                # Use OLD sync method (creates instance, but only every 30s)
-                import bittensor as bt
-                subtensor = bt.subtensor(network=_epoch_network)
                 current_block = subtensor.get_current_block()
                 
                 epoch_ended = _is_epoch_ended(current_block)
@@ -235,6 +232,7 @@ def _background_epoch_monitor():
                 
             except Exception as e:
                 print(f"⚠️  Error in background epoch monitor: {e}")
+                subtensor = None  # Reset on error to recreate on next iteration
                 time.sleep(60)  # Wait longer on error
     
     finally:

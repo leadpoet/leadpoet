@@ -245,11 +245,13 @@ async def submit_validation(event: ValidationEvent):
     try:
         from gateway.config import MAX_LEADS_PER_EPOCH
         
-        # Query current FIFO queue state (same as /epoch/{id}/leads endpoint)
-        # This ensures validators are submitting for leads that are actually in the queue
+        # Query leads that are EITHER "pending_validation" OR "validating"
+        # This handles race condition where multiple validators fetch the same leads,
+        # but one submits first (changing status to "validating").
+        # All validators who fetched the leads should be able to submit.
         result = supabase.table("leads_private") \
             .select("lead_id") \
-            .eq("status", "pending_validation") \
+            .in_("status", ["pending_validation", "validating"]) \
             .order("created_ts", desc=False) \
             .limit(MAX_LEADS_PER_EPOCH * 2) \
             .execute()
@@ -270,7 +272,7 @@ async def submit_validation(event: ValidationEvent):
             invalid_sample = list(invalid_leads)[:3]
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) are not in pending validation queue. Leads may have been already processed or never existed."
+                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) are not in validation queue (pending or validating). Leads may have been already fully processed or never existed."
             )
         
         print(f"✅ Step 5.3: Lead existence verification passed ({len(submitted_lead_ids)} lead_ids found in queue)")

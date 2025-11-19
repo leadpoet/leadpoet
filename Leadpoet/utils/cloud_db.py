@@ -2097,7 +2097,7 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
             response = requests.post(
                 f"{GATEWAY_URL}/validate",
                 json=event,
-                timeout=240  # 4 minutes timeout (gateway may need time for metagraph + database on slow testnet)
+                timeout=600  # 10 minutes timeout (gateway needs time for validation evidence storage + consensus + database operations)
             )
             response.raise_for_status()
             
@@ -2167,7 +2167,7 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
                     "nonce": nonce,
                     "reveals": reveal_results
                 },
-                timeout=240  # 4 minutes timeout (gateway may need time for database operations on slow testnet)
+                timeout=600  # 10 minutes timeout (gateway needs time for consensus re-calculation + database operations)
             )
             response.raise_for_status()
             

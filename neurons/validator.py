@@ -1983,7 +1983,7 @@ class Validator(BaseValidatorNeuron):
                         wallet=self.wallet,
                         uids=[burn_uid],
                         weights=[1.0],
-                        wait_for_finalization=False
+                        wait_for_finalization=True
                     )
                     
                     if result:
@@ -2068,7 +2068,7 @@ class Validator(BaseValidatorNeuron):
                         wallet=self.wallet,
                         uids=[burn_uid],
                         weights=[1.0],
-                        wait_for_finalization=False
+                        wait_for_finalization=True
                     )
                     
                     if result:
@@ -2131,7 +2131,7 @@ class Validator(BaseValidatorNeuron):
                 wallet=self.wallet,
                 uids=uids,
                 weights=normalized_weights,
-                wait_for_finalization=False
+                wait_for_finalization=True
             )
             
             if result:

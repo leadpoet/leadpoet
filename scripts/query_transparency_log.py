@@ -77,13 +77,13 @@ def get_supabase_client():
     from supabase import create_client
     
     url = os.getenv('SUPABASE_URL')
-    key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+    key = os.getenv('SUPABASE_ANON_KEY')
     
     if not url or not key:
-        print("❌ Error: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set in .env")
+        print("❌ Error: SUPABASE_URL or SUPABASE_ANON_KEY not set in .env")
         print("   Please create a .env file with these variables:")
         print("   SUPABASE_URL=https://your-project.supabase.co")
-        print("   SUPABASE_SERVICE_ROLE_KEY=your-service-role-key")
+        print("   SUPABASE_ANON_KEY=your-anon-key")
         sys.exit(1)
     
     return create_client(url, key)

@@ -1266,9 +1266,9 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                         # Valid statuses: "Valid", "Invalid", "Unknown", "Catch All", "Grey-listed"
                         if status == "Valid":
                             result = (True, {})
-                        elif status in ["Catch All", "Catch-All"]:
+                        elif status in ["Catch All", "Catch-All", "Catch-all"]:
                             # BRD: Reject ALL catch-all emails (no exceptions)
-                            # Check both "Catch All" (with space) and "Catch-All" (with hyphen) for safety
+                            # Check all variants: "Catch All", "Catch-All", "Catch-all" (API returns different formats)
                             result = (False, {
                                 "stage": "Stage 3: MyEmailVerifier",
                                 "check_name": "check_myemailverifier_email",
@@ -2903,7 +2903,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     raw_status = lead.get("email_verifier_status", "Unknown")
     if raw_status == "Valid":
         email_status = "valid"
-    elif raw_status == "Catch All":
+    elif raw_status in ["Catch All", "Catch-All", "Catch-all"]:
         email_status = "catch-all"
     elif raw_status in ["Invalid", "Grey-listed", "Unknown"]:
         # Grey-listed and Unknown are treated as invalid (tasks2.md Phase 1 requirement)

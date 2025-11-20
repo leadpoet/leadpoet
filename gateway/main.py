@@ -31,7 +31,7 @@ from gateway.models.responses import PresignedURLResponse, ErrorResponse, Health
 
 # Import utilities
 from gateway.utils.signature import verify_wallet_signature, compute_payload_hash, construct_signed_message
-from gateway.utils.registry import is_registered_hotkey
+from gateway.utils.registry import is_registered_hotkey_async
 from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
 from gateway.utils.storage import generate_presigned_put_urls
 
@@ -472,11 +472,11 @@ async def presign_urls(event: SubmissionRequestEvent):
     # ========================================
     # Step 4: Check actor is registered miner
     # ========================================
-    # Run blocking Bittensor call in thread to avoid blocking event loop
-    print("🔍 Step 4: Checking registration (in thread)...")
+    # Use async version - metagraph query already runs in thread pool internally
+    print("🔍 Step 4: Checking registration...")
     try:
         is_registered, role = await asyncio.wait_for(
-            asyncio.to_thread(is_registered_hotkey, event.actor_hotkey),
+            is_registered_hotkey_async(event.actor_hotkey),
             timeout=45.0  # 45 second timeout for metagraph query (cache refresh can be slow under load)
         )
         print(f"🔍 Step 4 complete: is_registered={is_registered}, role={role}")

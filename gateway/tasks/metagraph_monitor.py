@@ -134,10 +134,14 @@ class MetagraphMonitor(BlockListener):
                     
                     # ════════════════════════════════════════════════════════
                     # CRITICAL: Use injected async_subtensor (NO new instances!)
+                    # Run in thread pool to prevent blocking event loop
                     # Wrap with 60-second timeout to prevent hanging (matches old sync version)
                     # ════════════════════════════════════════════════════════
                     metagraph = await asyncio.wait_for(
-                        self.async_subtensor.metagraph(BITTENSOR_NETUID),
+                        asyncio.to_thread(
+                            self.async_subtensor.metagraph,
+                            BITTENSOR_NETUID
+                        ),
                         timeout=timeout_per_attempt
                     )
                     

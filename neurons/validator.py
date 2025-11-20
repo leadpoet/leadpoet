@@ -1992,6 +1992,10 @@ class Validator(BaseValidatorNeuron):
                     
                     if result:
                         print(f"   ✅ Burn weights submitted successfully")
+                        
+                        # Clear active weights file (prevents resubmission loop)
+                        self.clear_active_weights(current_epoch)
+                        
                         return True
                     else:
                         print(f"   ❌ Failed to submit burn weights")
@@ -2077,6 +2081,10 @@ class Validator(BaseValidatorNeuron):
                     
                     if result:
                         print(f"   ✅ Burn weights submitted successfully")
+                        
+                        # Clear active weights file (prevents resubmission loop)
+                        self.clear_active_weights(current_epoch)
+                        
                         return True
                     else:
                         print(f"   ❌ Failed to submit burn weights")

@@ -125,7 +125,7 @@ async def get_metagraph_async() -> bt.metagraph:
                 print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
                 
                 # ════════════════════════════════════════════════════════════
-                # CRITICAL: Use injected async subtensor (NO new instance!)
+                # CRITICAL: Use injected async subtensor 
                 # Run in thread pool to prevent blocking event loop
                 # Add 60-second timeout to prevent hanging gateway
                 # ════════════════════════════════════════════════════════════

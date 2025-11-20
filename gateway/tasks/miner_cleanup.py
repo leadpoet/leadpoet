@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Set, List
 import json
 import hashlib
+import uuid
 
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 from supabase import create_client
@@ -144,27 +145,77 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
         # Supabase has a limit on query size - delete in batches of 100
         BATCH_SIZE = 100
         total_deleted = 0
+        total_evidence_deleted = 0
+        deletion_failed = False
+        deletion_error = None
         
         try:
+            # CRITICAL: Delete from validation_evidence_private FIRST
+            # to avoid foreign key constraint violation
+            print(f"   🔍 Step 4a: Deleting validation evidence for {len(leads_to_delete)} leads...")
+            
             for i in range(0, len(leads_to_delete), BATCH_SIZE):
                 batch = leads_to_delete[i:i + BATCH_SIZE]
                 
-                await asyncio.to_thread(
+                print(f"      🔍 Evidence Batch {i//BATCH_SIZE + 1}: Deleting evidence for {len(batch)} leads...")
+                
+                # Delete validation_evidence_private rows that reference these leads
+                evidence_result = await asyncio.to_thread(
+                    lambda b=batch: supabase.table("validation_evidence_private")
+                        .delete()
+                        .in_("lead_id", b)
+                        .execute()
+                )
+                
+                evidence_deleted = len(evidence_result.data) if evidence_result.data else 0
+                total_evidence_deleted += evidence_deleted
+                print(f"         Deleted {evidence_deleted} validation evidence records")
+            
+            print(f"   ✅ Deleted {total_evidence_deleted} validation evidence records")
+            print(f"   🔍 Step 4b: Deleting leads from leads_private...")
+            
+            # Now delete the leads themselves
+            for i in range(0, len(leads_to_delete), BATCH_SIZE):
+                batch = leads_to_delete[i:i + BATCH_SIZE]
+                
+                print(f"      🔍 Batch {i//BATCH_SIZE + 1}: Attempting to delete {len(batch)} leads...")
+                print(f"         Sample lead_ids: {batch[:3]}")
+                
+                # Execute deletion and check result
+                result = await asyncio.to_thread(
                     lambda b=batch: supabase.table("leads_private")
                         .delete()
                         .in_("lead_id", b)
                         .execute()
                 )
                 
-                total_deleted += len(batch)
-                print(f"      ✅ Deleted batch {i//BATCH_SIZE + 1}/{(len(leads_to_delete) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(batch)} leads)")
+                # Debug: Print full result to understand Supabase response
+                print(f"         Supabase response: status={result.count if hasattr(result, 'count') else 'N/A'}, data_length={len(result.data) if result.data else 0}")
+                
+                # Verify deletion worked (check if response has data)
+                # NOTE: Supabase delete() returns the deleted rows in result.data
+                deleted_count = len(result.data) if result.data else 0
+                
+                if deleted_count != len(batch):
+                    print(f"      ⚠️  Batch {i//BATCH_SIZE + 1}: Expected to delete {len(batch)}, actually deleted {deleted_count}")
+                    print(f"         This may indicate RLS policy issues or leads already deleted")
+                
+                total_deleted += deleted_count
+                print(f"      ✅ Batch {i//BATCH_SIZE + 1}/{(len(leads_to_delete) + BATCH_SIZE - 1)//BATCH_SIZE}: Deleted {deleted_count}/{len(batch)} leads")
             
-            print(f"   ✅ Deleted {total_deleted} leads from deregistered miners")
+            if total_deleted == len(leads_to_delete):
+                print(f"   ✅ Successfully deleted {total_deleted} leads from deregistered miners")
+            else:
+                print(f"   ⚠️  Partial deletion: {total_deleted}/{len(leads_to_delete)} leads deleted")
+                deletion_failed = True
+                deletion_error = f"Only deleted {total_deleted}/{len(leads_to_delete)} leads"
         
         except Exception as e:
             print(f"   ❌ Error deleting leads: {e}")
             import traceback
             traceback.print_exc()
+            deletion_failed = True
+            deletion_error = str(e)
             # Don't fail entire cleanup - continue to logging
         
         # ========================================================================
@@ -172,15 +223,19 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
         # ========================================================================
         print(f"   📝 Logging cleanup to transparency log...")
         
-        # Prepare cleanup report
+        # Prepare cleanup report (include actual deletion results)
         cleanup_report = {
             "epoch_id": epoch_id,
-            "total_leads_deleted": len(leads_to_delete),
+            "total_leads_identified": len(leads_to_delete),
+            "total_leads_deleted": total_deleted,
+            "total_evidence_deleted": total_evidence_deleted,
+            "deletion_success": not deletion_failed,
+            "deletion_error": deletion_error if deletion_failed else None,
             "deregistered_miner_count": len(deregistered_miners),
             "deregistered_miners": [
                 {
                     "miner_hotkey": stats["hotkey"],
-                    "leads_removed": stats["lead_count"],
+                    "leads_identified": stats["lead_count"],
                     "status_breakdown": stats["statuses"]
                 }
                 for stats in deregistered_miners.values()
@@ -190,19 +245,34 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
         
         # Log to transparency_log (Supabase)
         # Note: epoch_id is in payload, not a separate column
+        # Generate unique nonce (UUID) for this cleanup
+        event_nonce = str(uuid.uuid4())
+        current_timestamp = datetime.utcnow().isoformat()
+        
         try:
+            # Build transparency_log entry with ALL required fields
+            # Based on schema: event_type, actor_hotkey, nonce (uuid), ts (timestamp),
+            # payload_hash, build_id, signature, payload, tee_sequence, tee_buffered_at, tee_buffer_size
+            transparency_entry = {
+                "event_type": "DEREGISTERED_MINER_REMOVAL",
+                "actor_hotkey": "gateway",
+                "nonce": event_nonce,  # UUID for this cleanup event
+                "ts": current_timestamp,  # Use 'ts' not 'timestamp'
+                "payload": cleanup_report,
+                "payload_hash": hashlib.sha256(
+                    json.dumps(cleanup_report, sort_keys=True).encode()
+                ).hexdigest(),
+                "build_id": "gateway",  # Required field
+                "signature": "gateway_internal_cleanup",  # Required field (gateway-generated event, no cryptographic signature)
+                # TEE fields (set to 0 for gateway-generated events that don't go through TEE buffer)
+                "tee_sequence": 0,
+                "tee_buffered_at": current_timestamp,
+                "tee_buffer_size": 0
+            }
+            
             await asyncio.to_thread(
                 lambda: supabase.table("transparency_log")
-                    .insert({
-                        "event_type": "DEREGISTERED_MINER_REMOVAL",
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "payload": cleanup_report,
-                        "actor_hotkey": "gateway",  # Required field
-                        "nonce": f"cleanup_{epoch_id}",  # Required field
-                        "payload_hash": hashlib.sha256(
-                            json.dumps(cleanup_report, sort_keys=True).encode()
-                        ).hexdigest()
-                    })
+                    .insert(transparency_entry)
                     .execute()
             )
             
@@ -224,11 +294,12 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
             tee_event = {
                 "event_type": "DEREGISTERED_MINER_REMOVAL",
                 "actor_hotkey": "gateway",  # Gateway-generated event
-                "nonce": f"cleanup_{epoch_id}",
-                "ts": datetime.utcnow().isoformat(),
+                "nonce": event_nonce,  # Use same UUID as transparency_log
+                "ts": current_timestamp,  # Use same timestamp as transparency_log
                 "payload": cleanup_report,
                 "payload_hash": payload_hash,
-                "build_id": "gateway"
+                "build_id": "gateway",
+                "signature": "gateway_internal_cleanup"  # Add signature for consistency
             }
             
             # Log to TEE enclave (uses log_event - dual logging)
@@ -247,7 +318,13 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
         # Step 6: Print summary
         # ========================================================================
         print(f"\n   📊 Cleanup Summary:")
-        print(f"      Leads deleted: {len(leads_to_delete)}")
+        print(f"      Leads identified for deletion: {len(leads_to_delete)}")
+        print(f"      Validation evidence deleted: {total_evidence_deleted}")
+        print(f"      Leads actually deleted: {total_deleted}")
+        if deletion_failed:
+            print(f"      ⚠️  Deletion status: FAILED - {deletion_error}")
+        else:
+            print(f"      ✅ Deletion status: SUCCESS")
         print(f"      Deregistered miners: {len(deregistered_miners)}")
         
         for stats in sorted(deregistered_miners.values(), key=lambda x: x["lead_count"], reverse=True)[:5]:

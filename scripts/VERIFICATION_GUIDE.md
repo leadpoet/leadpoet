@@ -153,7 +153,35 @@ python scripts/verify_code_hash.py $GATEWAY_PCR0 $GITHUB_COMMIT
 
 ---
 
-## **Step 3: View Complete Event Logs from Arweave**
+## **Step 3: Query Real-Time Transparency Log (Supabase)**
+
+**Purpose**: Query the live transparency log from Supabase to track events in real-time (before they're batched to Arweave).
+
+**🔍 Use Cases**: Debug submissions, track lead journey, monitor epoch events, find consensus results.
+
+### **Query Script**
+
+Edit variables at top of `scripts/query_transparency_log.py`:
+
+```python
+EMAIL_HASH = ""           # Track specific lead (highest priority)
+EVENT_TYPE = ""           # Filter by event type: SUBMISSION_REQUEST, CONSENSUS_RESULT, etc.
+SPECIFIC_DATE = ""        # All from date: "2025-11-20" (medium priority)  
+LAST_X_HOURS = 8          # Last X hours (default if above blank)
+```
+
+Then run:
+```bash
+python scripts/query_transparency_log.py
+```
+
+**Output**: Real-time events with full payloads, TEE sequences, Arweave TX IDs, and complete audit trail.
+
+**Event Types**: `SUBMISSION_REQUEST`, `STORAGE_PROOF`, `SUBMISSION`, `CONSENSUS_RESULT`, `EPOCH_INITIALIZATION`, `EPOCH_END`, `DEREGISTERED_MINER_REMOVAL`, `RATE_LIMIT`
+
+---
+
+## **Step 4: View Complete Event Logs from Arweave**
 
 **Purpose**: Decompress and view all events stored in Arweave. Events are gzip-compressed (100% lossless) to save 96% on storage costs.
 
@@ -178,7 +206,7 @@ python scripts/decompress_arweave_checkpoint.py
 
 ---
 
-## **Step 4: Verify Event Inclusion in Checkpoint**
+## **Step 5: Verify Event Inclusion in Checkpoint**
 
 **Purpose**: Prove your event (submission, validation, reveal) was logged and is permanently stored on Arweave.
 

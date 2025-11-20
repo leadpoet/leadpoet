@@ -573,7 +573,8 @@ async def submit_lead(event: SubmitLeadEvent):
             "industry",      # Primary industry
             "sub_industry",  # Sub-industry/niche
             "region",        # Location
-            "linkedin"       # LinkedIn URL
+            "linkedin",      # LinkedIn URL
+            "source_url"     # Source URL where lead was found
         ]
         
         missing_fields = []

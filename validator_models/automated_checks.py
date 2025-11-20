@@ -1266,8 +1266,9 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                         # Valid statuses: "Valid", "Invalid", "Unknown", "Catch All", "Grey-listed"
                         if status == "Valid":
                             result = (True, {})
-                        elif status == "Catch All":
+                        elif status in ["Catch All", "Catch-All"]:
                             # BRD: Reject ALL catch-all emails (no exceptions)
+                            # Check both "Catch All" (with space) and "Catch-All" (with hyphen) for safety
                             result = (False, {
                                 "stage": "Stage 3: MyEmailVerifier",
                                 "check_name": "check_myemailverifier_email",

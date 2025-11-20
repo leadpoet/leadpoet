@@ -1262,6 +1262,8 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                             return result
 
                         # Handle validation results based on Status field
+                        # API Documentation: https://myemailverifier.com/real-time-email-verification
+                        # Valid statuses: "Valid", "Invalid", "Unknown", "Catch All", "Grey-listed"
                         if status == "Valid":
                             result = (True, {})
                         elif status == "Catch All":
@@ -1296,8 +1298,14 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                                 "failed_fields": ["email"]
                             })
                         else:
-                            # Any other status, log and assume valid
-                            result = (True, {})
+                            # SECURITY: Reject any unrecognized status (prevents API changes from bypassing validation)
+                            print(f"   ⚠️  UNKNOWN MyEmailVerifier status: {status}")
+                            result = (False, {
+                                "stage": "Stage 3: MyEmailVerifier",
+                                "check_name": "check_myemailverifier_email",
+                                "message": f"Unrecognized email status '{status}' (rejected for safety)",
+                                "failed_fields": ["email"]
+                            })
 
                         validation_cache[cache_key] = result
                         return result

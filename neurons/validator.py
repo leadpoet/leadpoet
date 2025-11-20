@@ -1622,6 +1622,12 @@ class Validator(BaseValidatorNeuron):
             print(f"🔍 EPOCH {current_epoch}: Starting validation workflow")
             print(f"{'='*80}")
             
+            # ═══════════════════════════════════════════════════════════════════
+            # CRITICAL: Initialize epoch entry BEFORE fetching leads
+            # This ensures burn weights are submitted even if gateway timeouts occur
+            # ═══════════════════════════════════════════════════════════════════
+            await self._ensure_epoch_entry_exists(current_epoch)
+            
             # Fetch assigned leads from gateway
             from Leadpoet.utils.cloud_db import gateway_get_epoch_leads, gateway_submit_validation, gateway_submit_reveal
             
@@ -1660,6 +1666,7 @@ class Validator(BaseValidatorNeuron):
             print("")
             
             # Validate each lead using automated_checks
+            # (Epoch entry already created above, before fetching leads)
             import os
             import hashlib
             validation_results = []
@@ -1826,6 +1833,50 @@ class Validator(BaseValidatorNeuron):
             bt.logging.error(f"Error in gateway validation workflow: {e}")
             import traceback
             bt.logging.error(traceback.format_exc())
+    
+    async def _ensure_epoch_entry_exists(self, epoch_id: int):
+        """
+        Ensure epoch entry exists in weights file BEFORE validation starts.
+        
+        CRITICAL FIX: This prevents the bug where burn weights aren't submitted
+        when all leads are denied. By creating the epoch entry upfront, 
+        submit_weights_at_epoch_end() can always find it and submit burn weights.
+        
+        Args:
+            epoch_id: Epoch number to initialize
+        """
+        try:
+            weights_dir = Path("validator_weights")
+            weights_dir.mkdir(exist_ok=True)
+            weights_file = weights_dir / "validator_weights"
+            
+            # Load or create weights file
+            if weights_file.exists():
+                with open(weights_file, 'r') as f:
+                    weights_data = json.load(f)
+            else:
+                weights_data = {"curators": [], "sourcers_of_curated": []}
+            
+            # Create epoch entry if it doesn't exist
+            if str(epoch_id) not in weights_data:
+                weights_data[str(epoch_id)] = {
+                    "epoch": epoch_id,
+                    "start_block": epoch_id * 360,
+                    "end_block": (epoch_id + 1) * 360,
+                    "miner_scores": {},  # Will remain empty if all leads denied
+                    "last_updated": datetime.utcnow().isoformat()
+                }
+                
+                # Save immediately
+                with open(weights_file, 'w') as f:
+                    json.dump(weights_data, f, indent=2)
+                
+                print(f"   📝 Initialized epoch {epoch_id} entry in weights file")
+                print(f"      (Ensures burn weights can be submitted if all leads are denied)")
+        
+        except Exception as e:
+            bt.logging.error(f"Failed to initialize epoch entry: {e}")
+            # Don't raise - this is a best-effort operation
     
     async def accumulate_miner_weights(self, miner_hotkey: str, rep_score: int, decision: str):
         """

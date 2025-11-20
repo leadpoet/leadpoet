@@ -1768,7 +1768,35 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
             print(f"✅ Received presigned URLs for lead {result['lead_id'][:8]}...")
             return result
             
+        except requests.HTTPError as e:
+            # HTTP error (4xx, 5xx) - try to parse detailed message from gateway
+            error_msg = str(e)
+            if e.response is not None:
+                try:
+                    # Gateway returns detailed error in response body
+                    response_data = e.response.json()
+                    if isinstance(response_data, dict) and "detail" in response_data:
+                        error_detail = response_data["detail"]
+                        # Handle both string and dict detail formats
+                        if isinstance(error_detail, dict):
+                            error_msg = error_detail.get("message", str(e))
+                        else:
+                            error_msg = error_detail
+                except:
+                    # If parsing fails, fall back to generic error
+                    pass
+            
+            if attempt < 3:
+                bt.logging.warning(f"⚠️  Attempt {attempt}/3 failed: {error_msg}")
+                bt.logging.warning(f"   Retrying with fresh nonce/signature...")
+                continue  # Try again
+            else:
+                # All attempts exhausted
+                bt.logging.error(f"❌ All 3 attempts failed. Last error: {error_msg}")
+                return None
+        
         except Exception as e:
+            # Non-HTTP errors (network timeout, connection error, etc.)
             if attempt < 3:
                 bt.logging.warning(f"⚠️  Attempt {attempt}/3 failed: {e}")
                 bt.logging.warning(f"   Retrying with fresh nonce/signature...")

@@ -889,6 +889,7 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
     - Final reputation score (weighted average)
     - Primary rejection reason (most common among validators)
     - Validator count and consensus weight
+    - Email hash (for tracking specific lead)
     
     This provides full transparency to miners without revealing individual
     validator decisions or evidence.
@@ -899,6 +900,25 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
         outcome: Consensus result from compute_weighted_consensus()
     """
     try:
+        # Fetch lead_blob to compute email_hash
+        lead_result = await asyncio.to_thread(
+            lambda: supabase.table("leads_private")
+                .select("lead_blob")
+                .eq("lead_id", lead_id)
+                .execute()
+        )
+        
+        email_hash = None
+        if lead_result.data and len(lead_result.data) > 0:
+            lead_blob = lead_result.data[0].get("lead_blob", {})
+            if isinstance(lead_blob, str):
+                lead_blob = json.loads(lead_blob)
+            
+            # Extract email and compute hash (same logic as submit.py)
+            email = lead_blob.get("email", "").strip().lower()
+            if email:
+                email_hash = hashlib.sha256(email.encode()).hexdigest()
+        
         payload = {
             "lead_id": lead_id,
             "epoch_id": epoch_id,
@@ -920,7 +940,8 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
             "payload_hash": payload_hash,
             "build_id": BUILD_ID,
             "signature": "system",  # No signature for system events
-            "payload": payload
+            "payload": payload,
+            "email_hash": email_hash  # Add email_hash for transparency_log table
         }
         
         # Write to TEE buffer (authoritative, hardware-protected)
@@ -929,7 +950,7 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
         result = await log_event(log_entry)
         
         tee_sequence = result.get("sequence")
-        print(f"         📊 Logged CONSENSUS_RESULT for lead {lead_id[:8]}... (TEE seq={tee_sequence})")
+        print(f"         📊 Logged CONSENSUS_RESULT for lead {lead_id[:8]}... (TEE seq={tee_sequence}, email_hash={email_hash[:16] if email_hash else 'NULL'}...)")
     
     except Exception as e:
         print(f"         ❌ Failed to log CONSENSUS_RESULT for lead {lead_id[:8]}...: {e}")

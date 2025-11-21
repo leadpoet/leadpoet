@@ -206,11 +206,15 @@ async def log_event(event: dict) -> Dict:
     
     if supabase:
         try:
-            # Extract email_hash from payload if present (for duplicate detection)
+            # Extract email_hash from payload or top-level event (for duplicate detection)
             email_hash = None
             payload = event.get("payload")
             if payload and isinstance(payload, dict):
                 email_hash = payload.get("email_hash")
+            
+            # Fallback: check top-level event (used by CONSENSUS_RESULT, etc.)
+            if not email_hash:
+                email_hash = event.get("email_hash")
             
             # Create Supabase entry with correct column names
             supabase_entry = {

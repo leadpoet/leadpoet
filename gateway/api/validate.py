@@ -251,7 +251,7 @@ async def submit_validation(event: ValidationEvent):
             lambda: supabase.table("transparency_log")
                 .select("payload")
                 .eq("event_type", "EPOCH_INITIALIZATION")
-                .eq("epoch_id", event.payload.epoch_id)
+                .eq("payload->>epoch_id", str(event.payload.epoch_id))
                 .single()
                 .execute()
         )

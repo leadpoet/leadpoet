@@ -23,7 +23,8 @@ from datetime import datetime
 
 from gateway.utils.block_publisher import BlockListener, BlockInfo
 
-logger = logging.getLogger(__name__)
+# Use print() instead of logger to match rest of gateway
+# logger = logging.getLogger(__name__)
 
 
 class EpochMonitor(BlockListener):
@@ -54,8 +55,8 @@ class EpochMonitor(BlockListener):
         self.closed_epochs = set()
         self.startup_block_count = 0  # Count blocks since startup
         
-        logger.info("🔄 EpochMonitor initialized (event-driven)")
-        logger.info("   Consensus will be delayed for first 10 blocks (startup grace period)")
+        print("🔄 EpochMonitor initialized (event-driven)")
+        print("   Consensus will be delayed for first 10 blocks (startup grace period)")
     
     async def on_block(self, block_info: BlockInfo):
         """
@@ -82,9 +83,9 @@ class EpochMonitor(BlockListener):
             # Check 1: New epoch started (block 0, or first time seeing this epoch)
             # ════════════════════════════════════════════════════════════════
             if self.last_epoch is None or current_epoch > self.last_epoch:
-                logger.info(f"\n{'='*80}")
-                logger.info(f"🚀 EPOCH TRANSITION DETECTED: {self.last_epoch} → {current_epoch}")
-                logger.info(f"{'='*80}")
+                print(f"\n{'='*80}")
+                print(f"🚀 EPOCH TRANSITION DETECTED: {self.last_epoch} → {current_epoch}")
+                print(f"{'='*80}")
                 
                 # Trigger epoch start (non-blocking)
                 asyncio.create_task(self._on_epoch_start(current_epoch))
@@ -98,9 +99,9 @@ class EpochMonitor(BlockListener):
                 previous_epoch = current_epoch - 1
                 
                 if previous_epoch not in self.validation_ended_epochs:
-                    logger.info(f"\n{'='*80}")
-                    logger.info(f"⏰ VALIDATION PHASE ENDED: Epoch {previous_epoch}")
-                    logger.info(f"{'='*80}")
+                    print(f"\n{'='*80}")
+                    print(f"⏰ VALIDATION PHASE ENDED: Epoch {previous_epoch}")
+                    print(f"{'='*80}")
                     
                     # Trigger validation end (non-blocking)
                     asyncio.create_task(self._on_validation_end(previous_epoch))
@@ -114,7 +115,7 @@ class EpochMonitor(BlockListener):
             # This allows metagraph cache to warm up before triggering heavy operations
             if self.startup_block_count <= 10:
                 if self.startup_block_count == 10:
-                    logger.info("✅ Startup grace period complete - consensus checks now active")
+                    print("✅ Startup grace period complete - consensus checks now active")
                 # Skip consensus checks during startup
                 return
             
@@ -129,10 +130,10 @@ class EpochMonitor(BlockListener):
                     self._cleanup_epochs = set()
                 
                 if current_epoch not in self._cleanup_epochs:
-                    logger.info(f"\n{'='*80}")
-                    logger.info(f"🧹 MINER CLEANUP TRIGGER: Block 357 of epoch {current_epoch}")
-                    logger.info(f"   Cleaning DB before epoch {current_epoch + 1} initialization...")
-                    logger.info(f"{'='*80}")
+                    print(f"\n{'='*80}")
+                    print(f"🧹 MINER CLEANUP TRIGGER: Block 357 of epoch {current_epoch}")
+                    print(f"   Cleaning DB before epoch {current_epoch + 1} initialization...")
+                    print(f"{'='*80}")
                     
                     # Trigger cleanup (non-blocking - runs in background)
                     asyncio.create_task(self._run_miner_cleanup(current_epoch))
@@ -148,16 +149,16 @@ class EpochMonitor(BlockListener):
                 consensus_epoch = current_epoch - 1  # Calculate consensus for previous epoch
                 
                 if consensus_epoch not in self.closed_epochs:
-                    logger.info(f"\n{'='*80}")
-                    logger.info(f"📊 BATCH CONSENSUS TRIGGER: Block 350 of epoch {current_epoch}")
-                    logger.info(f"   Computing consensus for epoch {consensus_epoch} reveals...")
-                    logger.info(f"{'='*80}")
+                    print(f"\n{'='*80}")
+                    print(f"📊 BATCH CONSENSUS TRIGGER: Block 350 of epoch {current_epoch}")
+                    print(f"   Computing consensus for epoch {consensus_epoch} reveals...")
+                    print(f"{'='*80}")
                     
                     # Trigger consensus (non-blocking)
                     asyncio.create_task(self._check_for_reveals(consensus_epoch))
         
         except Exception as e:
-            logger.error(f"❌ Error in EpochMonitor.on_block: {e}")
+            print(f"❌ Error in EpochMonitor.on_block: {e}")
             import traceback
             traceback.print_exc()
             # Don't crash - log error and continue
@@ -174,7 +175,7 @@ class EpochMonitor(BlockListener):
             epoch_id: The new epoch that just started
         """
         try:
-            logger.info(f"🚀 Processing epoch start: {epoch_id}")
+            print(f"🚀 Processing epoch start: {epoch_id}")
             
             # Import lifecycle functions (reuse existing code)
             from gateway.tasks.epoch_lifecycle import compute_and_log_epoch_initialization
@@ -186,9 +187,9 @@ class EpochMonitor(BlockListener):
             epoch_end = await get_epoch_end_time_async(epoch_id)
             epoch_close = await get_epoch_close_time_async(epoch_id)
             
-            logger.info(f"   Start: {epoch_start.isoformat()}")
-            logger.info(f"   End (validation): {epoch_end.isoformat()}")
-            logger.info(f"   Close: {epoch_close.isoformat()}")
+            print(f"   Start: {epoch_start.isoformat()}")
+            print(f"   End (validation): {epoch_end.isoformat()}")
+            print(f"   Close: {epoch_close.isoformat()}")
             
             # Log EPOCH_INITIALIZATION to transparency log
             await compute_and_log_epoch_initialization(epoch_id, epoch_start, epoch_end, epoch_close)
@@ -196,10 +197,10 @@ class EpochMonitor(BlockListener):
             # Clean up old epoch cache (keep only current + next)
             cleanup_old_epochs(epoch_id)
             
-            logger.info(f"✅ Epoch {epoch_id} initialized")
+            print(f"✅ Epoch {epoch_id} initialized")
             
         except Exception as e:
-            logger.error(f"❌ Error handling epoch start for {epoch_id}: {e}")
+            print(f"❌ Error handling epoch start for {epoch_id}: {e}")
             import traceback
             traceback.print_exc()
             # Don't crash - log and continue
@@ -216,7 +217,7 @@ class EpochMonitor(BlockListener):
             epoch_id: The epoch whose validation phase just ended
         """
         try:
-            logger.info(f"⏰ Processing validation end: {epoch_id}")
+            print(f"⏰ Processing validation end: {epoch_id}")
             
             # Import lifecycle functions
             from gateway.tasks.epoch_lifecycle import compute_and_log_epoch_inputs, log_epoch_event
@@ -225,8 +226,8 @@ class EpochMonitor(BlockListener):
             epoch_end = await get_epoch_end_time_async(epoch_id)
             epoch_close = await get_epoch_close_time_async(epoch_id)
             
-            logger.info(f"   Ended at: {epoch_end.isoformat()}")
-            logger.info(f"   Epoch closed at: {epoch_close.isoformat()}")
+            print(f"   Ended at: {epoch_end.isoformat()}")
+            print(f"   Epoch closed at: {epoch_close.isoformat()}")
             
             # Log EPOCH_END event
             await log_epoch_event("EPOCH_END", epoch_id, {
@@ -238,10 +239,10 @@ class EpochMonitor(BlockListener):
             # Compute and log EPOCH_INPUTS (hash of all events during epoch)
             await compute_and_log_epoch_inputs(epoch_id)
             
-            logger.info(f"✅ Epoch {epoch_id} validation phase complete")
+            print(f"✅ Epoch {epoch_id} validation phase complete")
             
         except Exception as e:
-            logger.error(f"❌ Error handling validation end for {epoch_id}: {e}")
+            print(f"❌ Error handling validation end for {epoch_id}: {e}")
             import traceback
             traceback.print_exc()
             # Don't crash - log and continue
@@ -268,9 +269,9 @@ class EpochMonitor(BlockListener):
             if not await is_epoch_closed_async(epoch_id):
                 return
             
-            logger.info(f"\n{'='*80}")
-            logger.info(f"🔓 EPOCH {epoch_id} CLOSED - Checking for reveals...")
-            logger.info(f"{'='*80}")
+            print(f"\n{'='*80}")
+            print(f"🔓 EPOCH {epoch_id} CLOSED - Checking for reveals...")
+            print(f"{'='*80}")
             
             # Check if this epoch has validation evidence
             from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
@@ -291,12 +292,12 @@ class EpochMonitor(BlockListener):
             has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
             
             if not has_evidence:
-                logger.info(f"   ℹ️  No validation evidence for epoch {epoch_id} - skipping")
+                print(f"   ℹ️  No validation evidence for epoch {epoch_id} - skipping")
                 # Mark as closed so we don't check again
                 self.closed_epochs.add(epoch_id)
                 return
             
-            logger.info(f"   📊 Found validation evidence - processing reveals and consensus...")
+            print(f"   📊 Found validation evidence - processing reveals and consensus...")
             
             # Import lifecycle functions
             from gateway.tasks.epoch_lifecycle import trigger_reveal_phase, compute_epoch_consensus
@@ -305,19 +306,19 @@ class EpochMonitor(BlockListener):
             epoch_close = await get_epoch_close_time_async(epoch_id)
             time_since_close = (datetime.utcnow() - epoch_close).total_seconds()
             
-            logger.info(f"   Closed at: {epoch_close.isoformat()}")
-            logger.info(f"   Time since close: {time_since_close/60:.1f} minutes")
+            print(f"   Closed at: {epoch_close.isoformat()}")
+            print(f"   Time since close: {time_since_close/60:.1f} minutes")
             
             # Trigger reveal phase notification
             await trigger_reveal_phase(epoch_id)
             
             # NO WAIT: Consensus triggered at block 350, all reveals should be in already
             # (Reveals accepted from block 0-349 only, enforced by reveal endpoint)
-            logger.info(f"   📊 Running batch consensus for epoch {epoch_id}...")
-            logger.info(f"   Closed {time_since_close/60:.1f} minutes ago")
+            print(f"   📊 Running batch consensus for epoch {epoch_id}...")
+            print(f"   Closed {time_since_close/60:.1f} minutes ago")
             await compute_epoch_consensus(epoch_id)
             
-            logger.info(f"   ✅ Epoch {epoch_id} fully processed")
+            print(f"   ✅ Epoch {epoch_id} fully processed")
             
             # Mark as closed
             self.closed_epochs.add(epoch_id)
@@ -336,7 +337,7 @@ class EpochMonitor(BlockListener):
                 self._cleanup_epochs = set(recent)
             
         except Exception as e:
-            logger.error(f"❌ Error checking reveals for epoch {epoch_id}: {e}")
+            print(f"❌ Error checking reveals for epoch {epoch_id}: {e}")
             import traceback
             traceback.print_exc()
             # Don't mark as closed on error - will retry on next block
@@ -358,7 +359,7 @@ class EpochMonitor(BlockListener):
             await cleanup_deregistered_miner_leads(epoch_id)
         
         except Exception as e:
-            logger.error(f"❌ Error running miner cleanup for epoch {epoch_id}: {e}")
+            print(f"❌ Error running miner cleanup for epoch {epoch_id}: {e}")
             import traceback
             traceback.print_exc()
             # Don't crash - this is a background task

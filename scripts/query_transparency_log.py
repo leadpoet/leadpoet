@@ -5,14 +5,19 @@ Query Transparency Log (Supabase)
 This script queries the LeadPoet transparency log from Supabase, allowing you to inspect
 all events logged by the gateway in real-time.
 
-Four modes of operation:
+Query modes:
     1. By email hash (highest priority) - Track specific lead's journey
     2. By event type (high priority) - See all events of a specific type
-    3. By specific date (medium priority) - All events on a date
-    4. By last X hours (lowest priority - default) - Recent events
+    3. By email hash + event type (combined) - E.g., CONSENSUS_RESULT for specific lead
+    4. By specific date (medium priority) - All events on a date
+    5. By last X hours (lowest priority - default) - Recent events
 
 Usage:
     python query_transparency_log.py
+    
+Example - Track consensus for specific lead:
+    EMAIL_HASH = "a3c7f8e2b4d9e1f0c8a5b6d2e9f1a4c7..."
+    EVENT_TYPE = "CONSENSUS_RESULT"
 """
 
 import sys
@@ -37,6 +42,7 @@ EMAIL_HASH = ""  # Leave blank to use other modes
 # Mode 2: Query by Event Type (high priority)
 # Options: SUBMISSION_REQUEST, STORAGE_PROOF, SUBMISSION, CONSENSUS_RESULT,
 #          EPOCH_INITIALIZATION, EPOCH_END, EPOCH_INPUTS, DEREGISTERED_MINER_REMOVAL, RATE_LIMIT
+# NOTE: If both EMAIL_HASH and EVENT_TYPE are set, query will filter by BOTH
 EVENT_TYPE = ""  # Leave blank to use other modes
 
 # Mode 3: Specific Date (YYYY-MM-DD format)
@@ -52,8 +58,8 @@ MAX_RESULTS = 100
 
 # ============================================================
 # Priority Hierarchy:
-# 1. If EMAIL_HASH is set → Use it (ignore event type, date, hours)
-# 2. If EVENT_TYPE is set → Use it (ignore date and hours)
+# 1. If EMAIL_HASH is set → Use it (optionally filter by EVENT_TYPE if also set)
+# 2. If EVENT_TYPE is set (without EMAIL_HASH) → Use it (ignore date and hours)
 # 3. If SPECIFIC_DATE is set → Use it (ignore hours)
 # 4. Otherwise → Use LAST_X_HOURS
 # ============================================================
@@ -89,20 +95,35 @@ def get_supabase_client():
     return create_client(url, key)
 
 
-def query_by_email_hash(supabase, email_hash: str) -> List[Dict[str, Any]]:
-    """Query transparency log by email hash"""
-    print(f"🔍 Querying transparency log by email hash: {email_hash[:32]}...")
+def query_by_email_hash(supabase, email_hash: str, event_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Query transparency log by email hash (optionally filtered by event type)"""
+    if event_type:
+        print(f"🔍 Querying transparency log by email hash: {email_hash[:32]}... (event_type: {event_type})")
+    else:
+        print(f"🔍 Querying transparency log by email hash: {email_hash[:32]}...")
     
     try:
-        result = supabase.table("transparency_log")\
+        query = supabase.table("transparency_log")\
             .select("*")\
-            .eq("email_hash", email_hash)\
-            .order("ts", desc=True)\
+            .eq("email_hash", email_hash)
+        
+        # Optionally filter by event type
+        if event_type:
+            if event_type not in VALID_EVENT_TYPES:
+                print(f"❌ Invalid event type: {event_type}")
+                print(f"   Valid types: {', '.join(VALID_EVENT_TYPES)}")
+                sys.exit(1)
+            query = query.eq("event_type", event_type)
+        
+        result = query.order("ts", desc=True)\
             .limit(MAX_RESULTS)\
             .execute()
         
         if not result.data:
-            print(f"⚠️  No events found for email hash: {email_hash[:32]}...")
+            if event_type:
+                print(f"⚠️  No {event_type} events found for email hash: {email_hash[:32]}...")
+            else:
+                print(f"⚠️  No events found for email hash: {email_hash[:32]}...")
             return []
         
         print(f"✅ Found {len(result.data)} event(s)")
@@ -345,8 +366,11 @@ def main():
     events = []
     
     if EMAIL_HASH:
-        print(f"📌 Mode: Email Hash Query")
-        events = query_by_email_hash(supabase, EMAIL_HASH)
+        if EVENT_TYPE:
+            print(f"📌 Mode: Email Hash + Event Type Query")
+        else:
+            print(f"📌 Mode: Email Hash Query")
+        events = query_by_email_hash(supabase, EMAIL_HASH, event_type=EVENT_TYPE if EVENT_TYPE else None)
     
     elif EVENT_TYPE:
         print(f"📌 Mode: Event Type Query")
@@ -393,6 +417,7 @@ def main():
     print("   - Edit variables at top of script to change query mode")
     print("   - Set EMAIL_HASH to track a specific lead's journey")
     print("   - Set EVENT_TYPE to see all events of one type")
+    print("   - Set BOTH EMAIL_HASH + EVENT_TYPE to filter by both (e.g., CONSENSUS_RESULT for specific email)")
     print("   - Set SPECIFIC_DATE for full day (YYYY-MM-DD)")
     print("   - Change LAST_X_HOURS for time range (default: 8)")
     print(f"   - Change MAX_RESULTS to show more/fewer events (current: {MAX_RESULTS})")

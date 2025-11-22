@@ -125,15 +125,11 @@ async def get_metagraph_async() -> bt.metagraph:
                 print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
                 
                 # ════════════════════════════════════════════════════════════
-                # CRITICAL: Use injected async subtensor 
-                # Run in thread pool to prevent blocking event loop
-                # Add 60-second timeout to prevent hanging gateway
+                # CRITICAL: Use injected async subtensor (NO new instance!)
+                # Add 60-second timeout to prevent blocking entire gateway
                 # ════════════════════════════════════════════════════════════
                 metagraph = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        _async_subtensor.metagraph,
-                        netuid=BITTENSOR_NETUID
-                    ),
+                    _async_subtensor.metagraph(netuid=BITTENSOR_NETUID),
                     timeout=60.0  # 60s timeout - prevents hanging gateway
                 )
                 

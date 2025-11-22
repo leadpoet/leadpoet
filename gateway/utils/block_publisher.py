@@ -122,7 +122,7 @@ class ChainBlockPublisher:
         self.__subscribers: List[BlockListener] = []
         self.__last_block_number = None
         
-        logger.info("🔔 ChainBlockPublisher initialized")
+        print("🔔 ChainBlockPublisher initialized")
     
     def add_subscriber(self, subscriber: BlockListener):
         """
@@ -137,7 +137,7 @@ class ChainBlockPublisher:
         """
         self.__subscribers.append(subscriber)
         subscriber_name = type(subscriber).__name__
-        logger.info(f"✅ Added block subscriber: {subscriber_name} (total: {len(self.__subscribers)})")
+        print(f"✅ Added block subscriber: {subscriber_name} (total: {len(self.__subscribers)})")
     
     async def _on_block(self, obj: dict):
         """
@@ -156,7 +156,7 @@ class ChainBlockPublisher:
         """
         # Check if shutdown requested
         if self.__stop_event.is_set():
-            logger.info("🛑 Stop event detected - ending block subscription")
+            print("🛑 Stop event detected - ending block subscription")
             return True  # Stop subscription
         
         try:
@@ -187,7 +187,7 @@ class ChainBlockPublisher:
             )
             
             # Log block arrival
-            logger.info(
+            print(
                 f"📦 Block #{block_number} | "
                 f"Epoch {block_info.epoch_id} | "
                 f"Block {block_info.block_within_epoch}/360 | "
@@ -206,10 +206,10 @@ class ChainBlockPublisher:
                 for i, result in enumerate(results):
                     if isinstance(result, Exception):
                         subscriber_name = type(self.__subscribers[i]).__name__
-                        logger.error(f"❌ Subscriber {subscriber_name} failed: {result}")
+                        print(f"❌ Subscriber {subscriber_name} failed: {result}")
             
         except Exception as e:
-            logger.error(f"❌ Error processing block notification: {e}")
+            print(f"❌ Error processing block notification: {e}")
             import traceback
             traceback.print_exc()
             # Don't crash subscription - continue to next block
@@ -240,10 +240,10 @@ class ChainBlockPublisher:
             logger.debug(f"✅ {subscriber_name} processed block {block_info.block_number}")
             
         except asyncio.TimeoutError:
-            logger.error(f"⏱️  {subscriber_name} timed out processing block {block_info.block_number}")
+            print(f"⏱️  {subscriber_name} timed out processing block {block_info.block_number}")
             raise
         except Exception as e:
-            logger.error(f"❌ {subscriber_name} error: {e}")
+            print(f"❌ {subscriber_name} error: {e}")
             raise
     
     async def _get_timestamp(self, block_hash: str) -> datetime:
@@ -289,20 +289,20 @@ class ChainBlockPublisher:
             stop_event.set()  # Trigger shutdown
             await subscription_task  # Wait for clean shutdown
         """
-        logger.info("="*80)
-        logger.info("🔔 STARTING CHAIN BLOCK SUBSCRIPTION")
-        logger.info("="*80)
-        logger.info(f"   Subscription type: Finalized blocks only")
-        logger.info(f"   Registered listeners: {len(self.__subscribers)}")
+        print("="*80)
+        print("🔔 STARTING CHAIN BLOCK SUBSCRIPTION")
+        print("="*80)
+        print(f"   Subscription type: Finalized blocks only")
+        print(f"   Registered listeners: {len(self.__subscribers)}")
         for sub in self.__subscribers:
-            logger.info(f"      • {type(sub).__name__}")
-        logger.info("="*80)
-        logger.info("")
+            print(f"      • {type(sub).__name__}")
+        print("="*80)
+        print("")
         
         # CRITICAL: Wait 5 seconds to let app finish starting
         # Without this, subscribe_block_headers blocks the lifespan and prevents HTTP from working
         await asyncio.sleep(5)
-        logger.info("🔔 Connecting to block stream (after 5s delay)...")
+        print("🔔 Connecting to block stream (after 5s delay)...")
         
         try:
             # Subscribe to new block headers
@@ -313,18 +313,18 @@ class ChainBlockPublisher:
             )
             
         except asyncio.CancelledError:
-            logger.info("🛑 Block subscription cancelled (shutdown requested)")
+            print("🛑 Block subscription cancelled (shutdown requested)")
             
         except Exception as e:
-            logger.error(f"❌ Block subscription error: {e}")
+            print(f"❌ Block subscription error: {e}")
             import traceback
             traceback.print_exc()
             
         finally:
-            logger.info("")
-            logger.info("="*80)
-            logger.info("🔔 STOPPED CHAIN BLOCK SUBSCRIPTION")
-            logger.info("="*80)
+            print("")
+            print("="*80)
+            print("🔔 STOPPED CHAIN BLOCK SUBSCRIPTION")
+            print("="*80)
     
     def get_stats(self) -> dict:
         """

@@ -260,7 +260,7 @@ def get_supabase_client():
     try:
         jwt = os.getenv("SUPABASE_JWT")
         if not jwt:
-            bt.logging.warning("No SUPABASE_JWT found - Supabase client not available")
+            bt.logging.debug("No SUPABASE_JWT found - Supabase client not available")
             return None
         
         # Decode JWT to log role (minimal logging)

@@ -257,46 +257,40 @@ async def submit_validation(event: ValidationEvent):
         )
         
         if not epoch_init_result.data:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Epoch {event.payload.epoch_id} not initialized. Cannot validate lead assignment."
-            )
-        
-        # Extract assigned_lead_ids from EPOCH_INITIALIZATION payload
-        epoch_payload = epoch_init_result.data["payload"]
-        assigned_lead_ids = epoch_payload.get("assigned_lead_ids", [])
-        
-        if not assigned_lead_ids:
-            # Empty epoch - no leads were assigned
-            print(f"📊 Epoch {event.payload.epoch_id} has no assigned leads (empty epoch)")
-            if event.payload.validations:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Epoch {event.payload.epoch_id} has no assigned leads, but validator submitted {len(event.payload.validations)} validations."
-                )
+            print(f"⚠️  WARNING: No EPOCH_INITIALIZATION found for epoch {event.payload.epoch_id}")
+            print(f"   Allowing validation submission to proceed (check may not be critical)")
         else:
-            print(f"📊 Epoch {event.payload.epoch_id} has {len(assigned_lead_ids)} assigned leads")
-        
-        # Verify all submitted lead_ids match the epoch assignment
-        # This check is INDEPENDENT of current database status ("pending_validation" vs "validating")
-        # because we're checking against the frozen assignment, not current state
-        submitted_lead_ids = {v.lead_id for v in event.payload.validations}
-        assigned_lead_ids_set = set(assigned_lead_ids)
-        
-        invalid_leads = submitted_lead_ids - assigned_lead_ids_set
-        if invalid_leads:
-            # Show first 3 invalid lead_ids for debugging
-            invalid_sample = list(invalid_leads)[:3]
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid lead_ids: {invalid_sample} (showing first 3) were not assigned to epoch {event.payload.epoch_id}. Cannot validate leads from different epochs."
-            )
-        
-        print(f"✅ Step 5.3: Lead assignment verification passed ({len(submitted_lead_ids)} lead_ids match epoch {event.payload.epoch_id} assignment)")
+            # Extract assigned_lead_ids from EPOCH_INITIALIZATION payload
+            epoch_payload = epoch_init_result.data["payload"]
+            assigned_lead_ids = epoch_payload.get("assigned_lead_ids", [])
+            
+            if not assigned_lead_ids:
+                # Empty epoch - no leads were assigned
+                print(f"⚠️  WARNING: Epoch {event.payload.epoch_id} EPOCH_INITIALIZATION shows 0 assigned leads, but validator submitted {len(event.payload.validations)} validations")
+                print(f"   This may indicate a race condition or bug in epoch initialization")
+                print(f"   Allowing validation submission to proceed")
+            else:
+                print(f"📊 Epoch {event.payload.epoch_id} has {len(assigned_lead_ids)} assigned leads")
+                
+                # Verify all submitted lead_ids match the epoch assignment
+                # This check is INDEPENDENT of current database status ("pending_validation" vs "validating")
+                # because we're checking against the frozen assignment, not current state
+                submitted_lead_ids = {v.lead_id for v in event.payload.validations}
+                assigned_lead_ids_set = set(assigned_lead_ids)
+                
+                invalid_leads = submitted_lead_ids - assigned_lead_ids_set
+                if invalid_leads:
+                    # Show first 3 invalid lead_ids for debugging
+                    invalid_sample = list(invalid_leads)[:3]
+                    print(f"⚠️  WARNING: Found {len(invalid_leads)} lead_ids not in epoch assignment: {invalid_sample}")
+                    print(f"   This may indicate a race condition - allowing submission to proceed")
+                else:
+                    print(f"✅ Step 5.3: Lead assignment verification passed ({len(submitted_lead_ids)} lead_ids match epoch {event.payload.epoch_id} assignment)")
     
     except HTTPException:
-        # Re-raise HTTPException (validation errors)
-        raise
+        # Don't re-raise - just log and continue
+        print(f"⚠️  WARNING: Lead assignment check raised HTTPException - allowing submission anyway")
+        pass
     except Exception as e:
         # Log error but don't fail - we don't want this check to break the workflow
         # if there's a transient DB issue

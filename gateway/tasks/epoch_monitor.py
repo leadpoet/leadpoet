@@ -132,9 +132,6 @@ class EpochMonitor:
             current_epoch = block_number // 360
             block_within_epoch = block_number % 360
             
-            # DEBUG: Log EVERY block to verify subscription is working
-            print(f"📦 Block {block_number}: Epoch {current_epoch}, Block {block_within_epoch}/360")
-            
             # Count blocks since startup (for grace period)
             self.startup_block_count += 1
             

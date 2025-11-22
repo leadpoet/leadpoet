@@ -75,6 +75,10 @@ class EpochMonitor(BlockListener):
         try:
             current_epoch = block_info.epoch_id
             block_within_epoch = block_info.block_within_epoch
+            block_number = block_info.block_number
+            
+            # DEBUG: Log EVERY block to verify subscription is working
+            print(f"📦 Block {block_number}: Epoch {current_epoch}, Block {block_within_epoch}/360")
             
             # Count blocks since startup (for grace period)
             self.startup_block_count += 1
@@ -145,8 +149,10 @@ class EpochMonitor(BlockListener):
             # ════════════════════════════════════════════════════════════════
             # Run consensus at block 350 of epoch N (for epoch N-1 reveals)
             # This ensures ALL reveals from blocks 0-349 are included
+            print(f"   🔍 Check 5: block_within_epoch={block_within_epoch}, current_epoch={current_epoch}")
             if block_within_epoch == 350 and current_epoch > 0:
                 consensus_epoch = current_epoch - 1  # Calculate consensus for previous epoch
+                print(f"   ✅ BLOCK 350 DETECTED! Will check epoch {consensus_epoch}")
                 
                 if consensus_epoch not in self.closed_epochs:
                     print(f"\n{'='*80}")
@@ -156,6 +162,8 @@ class EpochMonitor(BlockListener):
                     
                     # Trigger consensus (non-blocking)
                     asyncio.create_task(self._check_for_reveals(consensus_epoch))
+                else:
+                    print(f"   ⚠️  Epoch {consensus_epoch} already processed (in closed_epochs set)")
         
         except Exception as e:
             print(f"❌ Error in EpochMonitor.on_block: {e}")

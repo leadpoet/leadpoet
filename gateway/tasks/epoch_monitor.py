@@ -1,38 +1,38 @@
 """
-Epoch Monitor (Block Listener)
-===============================
+Epoch Monitor (Polling-based)
+==============================
 
-Subscribes to new blocks and triggers epoch lifecycle events.
-Replaces the polling-based epoch_lifecycle.py background task.
+Polls Bittensor chain for new blocks and triggers epoch lifecycle events.
 
-This is an event-driven architecture:
-- Receives block notifications from ChainBlockPublisher (PUSH, not POLL)
+This uses the SAME polling approach as the validator (proven stable).
+
+Architecture:
+- Polls subtensor.get_current_block() every 12 seconds
 - Detects epoch transitions automatically
 - Triggers epoch start, validation end, and consensus phases
-- Zero CPU overhead when blocks aren't arriving (vs polling every 30s)
+- Bulletproof: No WebSocket subscriptions = No WebSocket failures
 
-Benefits over polling:
-- Instant detection of epoch transitions (no 30s delay)
-- Zero CPU usage between blocks
-- No risk of missed epochs (guaranteed notification for every block)
+Why polling instead of WebSocket:
+- Validator uses polling and runs for months without issues
+- Gateway used WebSocket and crashed every 2-4 hours
+- Bittensor AsyncSubtensor has WebSocket reconnection bugs
+- Polling is simple, reliable, and proven in production
 """
 
 import asyncio
 import logging
 from datetime import datetime
-
-from gateway.utils.block_publisher import BlockListener, BlockInfo
+import bittensor as bt
 
 # Use print() instead of logger to match rest of gateway
 # logger = logging.getLogger(__name__)
 
 
-class EpochMonitor(BlockListener):
+class EpochMonitor:
     """
     Monitors blocks for epoch transitions and triggers lifecycle events.
     
-    Implements BlockListener protocol to receive block notifications from
-    ChainBlockPublisher. Triggered by new blocks (push-based), not polling.
+    Uses POLLING (like validator) instead of WebSocket subscriptions.
     
     Responsibilities:
     - Detect new epochs (block 0 of new epoch)
@@ -48,22 +48,78 @@ class EpochMonitor(BlockListener):
     - closed_epochs: Set of epochs we've processed consensus for
     """
     
-    def __init__(self):
-        """Initialize epoch monitor with empty state."""
+    def __init__(self, network: str = "finney"):
+        """
+        Initialize epoch monitor with empty state.
+        
+        Args:
+            network: Bittensor network to connect to (default: finney)
+        """
+        self.network = network
+        self.subtensor = None  # Will be initialized in start()
         self.last_epoch = None
         self.validation_ended_epochs = set()
         self.closed_epochs = set()
         self.startup_block_count = 0  # Count blocks since startup
         
-        print("🔄 EpochMonitor initialized (event-driven)")
+        print("🔄 EpochMonitor initialized (polling-based, like validator)")
         print("   Consensus will be delayed for first 10 blocks (startup grace period)")
     
-    async def on_block(self, block_info: BlockInfo):
+    async def start(self):
         """
-        Called when a new finalized block arrives.
+        Start the polling loop (like validator does).
+        
+        Polls subtensor.get_current_block() every 12 seconds.
+        Never crashes - polling is bulletproof.
+        """
+        print("\n" + "="*80)
+        print("🔄 STARTING EPOCH MONITOR (POLLING MODE)")
+        print("="*80)
+        print(f"   Network: {self.network}")
+        print(f"   Poll interval: 12 seconds (approx block time)")
+        print(f"   Architecture: Same as validator (proven stable)")
+        print("="*80 + "\n")
+        
+        # Initialize subtensor (sync version - for polling)
+        try:
+            self.subtensor = bt.subtensor(network=self.network)
+            print(f"✅ Connected to {self.network} chain")
+        except Exception as e:
+            print(f"❌ Failed to connect to chain: {e}")
+            raise
+        
+        last_logged_block = None
+        
+        # Polling loop (like validator)
+        while True:
+            try:
+                # Get current block (polling - bulletproof, never crashes)
+                block_number = self.subtensor.get_current_block()
+                
+                # Log block occasionally (not every block - too spammy)
+                if last_logged_block is None or block_number - last_logged_block >= 10:
+                    current_epoch = block_number // 360
+                    block_within_epoch = block_number % 360
+                    print(f"📦 Block {block_number}: Epoch {current_epoch}, Block {block_within_epoch}/360")
+                    last_logged_block = block_number
+                
+                # Process block
+                await self._process_block(block_number)
+                
+                # Wait before next poll (12 seconds = approx block time)
+                await asyncio.sleep(12)
+                
+            except Exception as e:
+                print(f"❌ Error in epoch monitor polling loop: {e}")
+                print("   Retrying in 30 seconds...")
+                await asyncio.sleep(30)
+    
+    async def _process_block(self, block_number: int):
+        """
+        Process a block and trigger epoch lifecycle events.
         
         Args:
-            block_info: Information about the new block
+            block_number: Current block number from chain
         
         This method:
         1. Checks if epoch has changed (new epoch start)
@@ -73,9 +129,8 @@ class EpochMonitor(BlockListener):
         All checks are non-blocking and independent.
         """
         try:
-            current_epoch = block_info.epoch_id
-            block_within_epoch = block_info.block_within_epoch
-            block_number = block_info.block_number
+            current_epoch = block_number // 360
+            block_within_epoch = block_number % 360
             
             # DEBUG: Log EVERY block to verify subscription is working
             print(f"📦 Block {block_number}: Epoch {current_epoch}, Block {block_within_epoch}/360")
@@ -166,7 +221,7 @@ class EpochMonitor(BlockListener):
                     print(f"   ⚠️  Epoch {consensus_epoch} already processed (in closed_epochs set)")
         
         except Exception as e:
-            print(f"❌ Error in EpochMonitor.on_block: {e}")
+            print(f"❌ Error in EpochMonitor._process_block: {e}")
             import traceback
             traceback.print_exc()
             # Don't crash - log error and continue

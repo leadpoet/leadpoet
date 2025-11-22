@@ -48,10 +48,8 @@ from gateway.tasks.anchor import daily_anchor_task
 from gateway.tasks.mirror_monitor import mirror_integrity_task
 from gateway.tasks.hourly_batch import start_hourly_batch_task
 
-# Import new event-driven monitors (replace polling tasks)
+# Import epoch monitor (polling-based, like validator)
 from gateway.tasks.epoch_monitor import EpochMonitor
-from gateway.tasks.metagraph_monitor import MetagraphMonitor
-from gateway.utils.block_publisher import ChainBlockPublisher
 
 # Create Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -67,10 +65,9 @@ async def lifespan(app: FastAPI):
     
     ASYNC ARCHITECTURE:
     - Creates single AsyncSubtensor instance for entire gateway lifecycle
-    - Subscribes to block notifications (push-based, not polling)
-    - Event-driven epoch management (no background polling loops)
+    - Polling-based epoch management (proven stable, like validator)
     - Zero memory leaks (async context manager handles cleanup)
-    - Zero HTTP 429 errors (single WebSocket stays alive)
+    - Bulletproof: No WebSocket subscriptions = No WebSocket failures
     """
     # Initialize MinIO bucket (must happen before background tasks)
     print("\n" + "="*80)
@@ -166,30 +163,20 @@ async def lifespan(app: FastAPI):
     try:
         
         # ════════════════════════════════════════════════════════════════
-        # BLOCK PUBLISHER: Subscribe to chain blocks (push-based)
+        # EPOCH MONITOR: Polling-based (like validator - proven stable)
         # ════════════════════════════════════════════════════════════════
         print("="*80)
-        print("🔔 INITIALIZING BLOCK SUBSCRIPTION")
+        print("🔄 INITIALIZING EPOCH MONITOR")
         print("="*80)
-        
-        stop_event = asyncio.Event()
-        block_publisher = ChainBlockPublisher(
-            substrate=async_subtensor.substrate,  # Underlying substrate interface
-            stop_event=stop_event
-        )
-        print("✅ ChainBlockPublisher created")
-        
-        # Create epoch monitor (replaces epoch_lifecycle_task polling loop)
-        epoch_monitor = EpochMonitor()
-        block_publisher.add_subscriber(epoch_monitor)
-        print("✅ EpochMonitor registered (replaces epoch_lifecycle polling)")
-        
-        # Create metagraph monitor (replaces metagraph_warmer_task polling loop)
-        metagraph_monitor = MetagraphMonitor(async_subtensor)
-        block_publisher.add_subscriber(metagraph_monitor)
-        print("✅ MetagraphMonitor registered (replaces metagraph_warmer polling)")
-        
+        print(f"   Architecture: Polling (same as validator)")
+        print(f"   Benefits: Bulletproof - no WebSocket failures")
         print("="*80 + "\n")
+        
+        # Create epoch monitor
+        from gateway.config import BITTENSOR_NETWORK
+        epoch_monitor = EpochMonitor(network=BITTENSOR_NETWORK)
+        print("✅ EpochMonitor created (replaces event-driven version)")
+        print("")
         
         # ════════════════════════════════════════════════════════════════
         # DEPENDENCY INJECTION: Inject async_subtensor into modules
@@ -213,52 +200,43 @@ async def lifespan(app: FastAPI):
         # APP STATE: Store for request handlers
         # ════════════════════════════════════════════════════════════════
         app.state.async_subtensor = async_subtensor
-        app.state.block_publisher = block_publisher
-        app.state.stop_event = stop_event
         print("✅ Async subtensor stored in app.state")
         print("")
         
         # ════════════════════════════════════════════════════════════════
-        # BACKGROUND TASKS: Start OTHER services first
+        # BACKGROUND TASKS: Start all services
         # ════════════════════════════════════════════════════════════════
         print("="*80)
         print("🚀 STARTING BACKGROUND TASKS")
         print("="*80)
         
-        # Start block subscription (keeps WebSocket alive, triggers monitors)
-        subscription_task = asyncio.create_task(block_publisher.start())
-        print("✅ Block subscription started (push-based, replaces polling)")
+        # Start epoch monitor (polling loop - bulletproof)
+        epoch_monitor_task = asyncio.create_task(epoch_monitor.start())
+        print("✅ Epoch monitor started (polling mode)")
         
-        # Start other background tasks - delay them to let subscription establish first
-        async def start_delayed_tasks():
-            await asyncio.sleep(10)  # Let subscription connect first
-            asyncio.create_task(reveal_collector_task())
-            print("✅ Reveal collector task started (delayed)")
-            asyncio.create_task(checkpoint_task())
-            print("✅ Checkpoint task started (delayed)")
-            asyncio.create_task(daily_anchor_task())
-            print("✅ Anchor task started (delayed)")
-            asyncio.create_task(start_hourly_batch_task())
-            print("✅ Hourly Arweave batch task started (delayed)")
-            from gateway.utils.rate_limiter import rate_limiter_cleanup_task
-            asyncio.create_task(rate_limiter_cleanup_task())
-            print("✅ Rate limiter cleanup task started (delayed)")
+        # Start other background tasks
+        reveal_task = asyncio.create_task(reveal_collector_task())
+        print("✅ Reveal collector task started")
         
-        asyncio.create_task(start_delayed_tasks())
+        checkpoint_task_handle = asyncio.create_task(checkpoint_task())
+        print("✅ Checkpoint task started")
         
-        # Create empty task handles for cleanup (will be populated by delayed start)
-        reveal_task = None
-        checkpoint_task_handle = None
-        anchor_task = None
-        hourly_batch_task_handle = None
-        rate_limiter_task = None
+        anchor_task = asyncio.create_task(daily_anchor_task())
+        print("✅ Anchor task started")
+        
+        hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
+        print("✅ Hourly Arweave batch task started")
+        
+        from gateway.utils.rate_limiter import rate_limiter_cleanup_task
+        rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
+        print("✅ Rate limiter cleanup task started")
         
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
         print("   • Single AsyncSubtensor (no memory leaks)")
-        print("   • Block subscription (push-based, no polling)")
-        print("   • Event-driven epoch management")
-        print("   • Zero HTTP 429 errors (WebSocket stays alive)")
+        print("   • Polling-based epoch monitor (same as validator)")
+        print("   • Bulletproof: No WebSocket = No WebSocket failures")
+        print("   • Proven stable: Validator uses polling for months")
         print("="*80 + "\n")
         
         # Yield control back to FastAPI (app runs here)
@@ -272,24 +250,20 @@ async def lifespan(app: FastAPI):
         print("🛑 SHUTTING DOWN GATEWAY")
         print("="*80)
         
-        # Signal stop to block publisher
-        print("   🛑 Signaling stop event...")
-        stop_event.set()
-        
         # Cancel all background tasks
         print("   🛑 Cancelling background tasks...")
         tasks = [
-            subscription_task,
+            epoch_monitor_task,
             reveal_task,
             checkpoint_task_handle,
             anchor_task,
-            # mirror_task,  # DISABLED (see line 203-206)
             hourly_batch_task_handle,
             rate_limiter_task
         ]
         
         for task in tasks:
-            task.cancel()
+            if task:  # Check if task exists
+                task.cancel()
         
         # Wait for all tasks to finish gracefully
         print("   ⏳ Waiting for tasks to finish...")

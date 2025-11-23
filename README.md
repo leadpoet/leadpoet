@@ -137,6 +137,8 @@ Miners must submit prospects with the following structure:
   "sub_industry": "Space Transportation",  # REQUIRED
   "region": "Hawthorne, CA",               # REQUIRED
   "linkedin": "https://linkedin.com/in/elonmusk", # REQUIRED
+  "source_url": "https://spacex.com/careers", # REQUIRED (URL where lead was found, OR "proprietary_database")
+  "source_type": "company_site",           # Source category
   "description": "Aerospace manufacturer and space transportation company focused on reducing space transportation costs",
   "phone_numbers": ["+1-310-363-6000"],
   "founded_year": 2002,
@@ -146,6 +148,8 @@ Miners must submit prospects with the following structure:
   "socials": {"twitter": "spacex"}
 }
 ```
+
+**Source URL:** Provide the actual URL where the lead was found. For proprietary databases, set both `source_url` and `source_type` to `"proprietary_database"`. LinkedIn URLs in `source_url` are blocked.
 
 ### Lead Requirements
 

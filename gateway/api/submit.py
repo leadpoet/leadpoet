@@ -641,6 +641,58 @@ async def submit_lead(event: SubmitLeadEvent):
         print(f"   ✅ All required fields present")
         
         # ========================================
+        # Verify source_type and source_url consistency
+        # ========================================
+        source_type = lead_blob.get("source_type", "").strip()
+        source_url = lead_blob.get("source_url", "").strip()
+        
+        if source_type == "proprietary_database" and source_url != "proprietary_database":
+            print(f"❌ Source provenance mismatch: source_type='proprietary_database' but source_url='{source_url[:50]}...'")
+            
+            # Increment rate limit counter (FAILURE)
+            from gateway.utils.rate_limiter import increment_submission
+            updated_stats = increment_submission(event.actor_hotkey, success=False)
+            
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Source provenance mismatch: If source_type is 'proprietary_database', source_url must also be 'proprietary_database'",
+                    "source_type": source_type,
+                    "source_url": source_url,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY
+                    }
+                }
+            )
+        
+        # Block LinkedIn URLs in source_url (miners should use source_type="linkedin" instead)
+        if "linkedin" in source_url.lower():
+            print(f"❌ LinkedIn URL detected in source_url: {source_url[:50]}...")
+            
+            # Increment rate limit counter (FAILURE)
+            from gateway.utils.rate_limiter import increment_submission
+            updated_stats = increment_submission(event.actor_hotkey, success=False)
+            
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "LinkedIn URLs are not allowed in source_url. Use source_type='linkedin' and source_url='linkedin' instead.",
+                    "source_url": source_url,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY
+                    }
+                }
+            )
+        
+        print(f"   ✅ Source provenance verified: source_type={source_type}")
+        
+        # ========================================
         # CRITICAL: Verify Miner Attestation (Trustless Model)
         # ========================================
         # In the trustless model, attestations are stored locally by miners

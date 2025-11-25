@@ -1479,14 +1479,12 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     # Extract profile slug from LinkedIn URL
     profile_slug = linkedin_url.split("/in/")[-1].strip("/") if "/in/" in linkedin_url else None
     
-    # 5 variations - try multiple approaches to find the exact LinkedIn profile
-    # Mix of quoted (exact) and unquoted (broader) searches
+    # 4 variations - try multiple approaches to find the exact LinkedIn profile
     query_variations = [
-        f"{linkedin_url}",                                  # 1. Exact URL in quotes (most specific)
-        f"{full_name} linkedin {company}",                    # 2. Name + LinkedIn + company
-        f"{full_name} linkedin",                              # 3. Name + LinkedIn (broader)
-        f"site:linkedin.com/in {full_name}",                  # 4. Site-restricted search
-        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 5. Profile slug directly
+        f"{full_name} linkedin {company}",                    # 1. Name + LinkedIn + company
+        f"{full_name} linkedin",                              # 2. Name + LinkedIn (broader)
+        f"site:linkedin.com/in {full_name}",                  # 3. Site-restricted search
+        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 4. Profile slug directly
     ]
     
     # Remove None values
@@ -1528,8 +1526,8 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
                 
                 print(f"         ✅ Found {len(linkedin_results)} LinkedIn result(s)")
                 
-                # URL matching logic - for broader searches (variations 2+), verify profile matches
-                if variation_idx >= 2 and profile_slug:
+                # URL matching logic - all variations are name-based, verify profile matches
+                if profile_slug:
                     if found_profile_urls:
                         # Check exact match first
                         exact_match = any(

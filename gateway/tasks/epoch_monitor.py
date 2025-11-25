@@ -197,12 +197,13 @@ class EpochMonitor:
                     self._cleanup_epochs.add(current_epoch)
             
             # ════════════════════════════════════════════════════════════════
-            # Check 5: Batch consensus at block 350 (captures ALL reveals)
+            # Check 5: Batch consensus at blocks 348-350 (captures ALL reveals)
             # ════════════════════════════════════════════════════════════════
-            # Run consensus at block 350 of epoch N (for epoch N-1 reveals)
-            # This ensures ALL reveals from blocks 0-349 are included
+            # Run consensus at blocks 348-350 of epoch N (for epoch N-1 reveals)
+            # Using a 3-block window to handle polling misses (poll every 12s, blocks ~12s)
+            # This ensures ALL reveals from blocks 0-347 are included
             print(f"   🔍 Check 5: block_within_epoch={block_within_epoch}, current_epoch={current_epoch}")
-            if block_within_epoch == 350 and current_epoch > 0:
+            if 348 <= block_within_epoch <= 350 and current_epoch > 0:
                 consensus_epoch = current_epoch - 1  # Calculate consensus for previous epoch
                 print(f"   ✅ BLOCK 350 DETECTED! Will check epoch {consensus_epoch}")
                 

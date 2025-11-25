@@ -7,9 +7,11 @@ tests/
 path/
 validation_artifacts/
 data/
-logs/  # Includes gateway/logs/arweave_fallback/ (local event logging when Arweave fails)
+# Includes gateway/logs/arweave_fallback/ (local event logging when Arweave fails)
+logs/
 validator_weights/
-validator_state/  # Validator state files (should remain local)
+# Validator state files (should remain local)
+validator_state/
 .env
 .test_supabase_connection.py
 tasks.md
@@ -29,7 +31,8 @@ data/regulatory/miner_attestation.json
 
 # Bittensor-specific
 *.log
-*.npz   # Validator state files (e.g., validator_state.npz)
+# Validator state files (e.g., validator_state.npz)
+*.npz
 *.key   # Stray key files
 pending_reveals.json  # Validator reveal cache (runtime file)
 

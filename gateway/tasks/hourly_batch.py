@@ -1,11 +1,11 @@
 """
-Hourly Arweave Batching Task
-============================
+Arweave Batching Task
+=====================
 
-This background task runs continuously to batch TEE events to Arweave every hour.
+This background task runs continuously to batch TEE events to Arweave every 3 hours.
 
 Flow:
-1. Wait 1 hour (or until buffer is full)
+1. Wait 3 hours (or until buffer is full)
 2. Request checkpoint from TEE via vsock
 3. Compress events (gzip)
 4. Upload checkpoint to Arweave
@@ -13,7 +13,7 @@ Flow:
 6. Tell TEE to clear buffer
 7. Repeat
 
-Cost: ~$0.30/month for hourly batching (vs $300+/month for per-event writes)
+Cost: ~$0.10/month for 3-hour batching (vs $300+/month for per-event writes)
 """
 
 import asyncio
@@ -30,7 +30,7 @@ from gateway.config import BUILD_ID
 
 
 # Configuration
-BATCH_INTERVAL = 3600  # 1 hour in seconds
+BATCH_INTERVAL = 10800  # 3 hours in seconds
 EMERGENCY_BATCH_THRESHOLD = 10000  # Trigger early batch if buffer hits this size
 MAX_UPLOAD_RETRIES = 3  # Retry failed uploads
 
@@ -80,9 +80,9 @@ async def hourly_batch_task():
     
     next_batch = next_hour
     
-    # Add countdown progress every 15 minutes
+    # Add countdown progress every hour
     remaining_time = wait_seconds
-    progress_interval = 900  # 15 minutes in seconds
+    progress_interval = 3600  # 1 hour in seconds
     
     while remaining_time > 0:
         wait_time = min(progress_interval, remaining_time)
@@ -334,9 +334,9 @@ async def hourly_batch_task():
         
         # Implement emergency batch check during wait
         # Check buffer size every 5 minutes during wait
-        # Print countdown every 15 minutes (3 intervals)
-        check_interval = 300  # 5 minutes
-        progress_interval = 900  # 15 minutes (print countdown every 15 min)
+        # Print countdown every hour
+        check_interval = 300  # 5 minutes (check buffer size)
+        progress_interval = 3600  # 1 hour (print countdown every hour)
         checks_per_interval = wait_seconds // check_interval
         
         last_progress_print = 0

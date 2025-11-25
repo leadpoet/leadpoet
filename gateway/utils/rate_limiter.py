@@ -245,6 +245,11 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
                 }
             )
         
+        # CRITICAL: Update last_submission_time IMMEDIATELY when check passes
+        # This prevents race condition where multiple requests slip through
+        # before increment_submission() is called at request end
+        entry["last_submission_time"] = now_utc
+        
         # Allowed - return current stats
         return (
             True,

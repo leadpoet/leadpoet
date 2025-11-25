@@ -1811,7 +1811,23 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         # DETERMINISTIC PRE-CHECK: Check company match from titles directly
         # This avoids LLM hallucination issues
         company_lower = company.lower().strip()
-        company_words = company_lower.split()  # ["garuda", "robotics"]
+        
+        # Normalize company name by removing common legal suffixes
+        # e.g., "Bank Of America Corporation" → "Bank Of America"
+        # e.g., "Google LLC" → "Google"
+        LEGAL_SUFFIXES = [
+            " corporation", " corp.", " corp", " incorporated", " inc.", " inc",
+            " llc", " l.l.c.", " ltd.", " ltd", " limited", " plc", " p.l.c.",
+            " co.", " co", " company", " gmbh", " ag", " sa", " nv", " bv",
+            " holdings", " holding", " group", " international", " intl"
+        ]
+        company_normalized = company_lower
+        for suffix in LEGAL_SUFFIXES:
+            if company_normalized.endswith(suffix):
+                company_normalized = company_normalized[:-len(suffix)].strip()
+                break  # Only remove one suffix
+        
+        company_words = company_normalized.split()  # ["bank", "of", "america"]
         
         # Check first result (most authoritative for target person)
         first_title = search_results[0].get("title", "").lower()
@@ -1822,20 +1838,53 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         if "| linkedin" in first_title:
             first_title = first_title.split("| linkedin")[0].strip()
         
-        # Method 1: Exact company name in title
-        company_in_title = company_lower in first_title
+        # Also get snippet for additional company matching
+        first_snippet = search_results[0].get("snippet", "").lower()
+        
+        # Method 1: Exact normalized company name in title
+        company_in_title = company_normalized in first_title
         
         # Method 2: All significant words of company name in title (for multi-word companies)
-        # e.g., "Garuda Robotics" → check if both "garuda" AND "robotics" are in title
+        # e.g., "Bank Of America" → check if "bank", "of", "america" are all in title
         if not company_in_title and len(company_words) > 1:
-            significant_words = [w for w in company_words if len(w) > 2]  # Skip "at", "the", etc.
+            significant_words = [w for w in company_words if len(w) > 2]  # Skip "of", "the", etc.
             company_in_title = all(word in first_title for word in significant_words)
         
-        # Deterministic company match decision
-        deterministic_company_match = company_in_title
+        # Method 3: Check snippet for "Experience: [Company]" pattern ONLY (LinkedIn format)
+        # This is STRICT - we only match the LinkedIn standard format
+        # e.g., "Experience: Bank of America" in snippet
+        # We do NOT match general mentions like "Former EverCommerce" or random text
+        company_in_snippet = False
+        if not company_in_title:
+            # Check for "experience: [company]" pattern (LinkedIn's standard format)
+            if f"experience: {company_normalized}" in first_snippet:
+                company_in_snippet = True
+            elif f"experience : {company_normalized}" in first_snippet:
+                company_in_snippet = True
+            # Check for multi-word companies in Experience section
+            elif len(company_words) > 1:
+                significant_words = [w for w in company_words if len(w) > 2]
+                # Must have "experience:" prefix AND all company words
+                if "experience:" in first_snippet or "experience :" in first_snippet:
+                    # Find the part after "experience:"
+                    exp_parts = first_snippet.split("experience:")
+                    if len(exp_parts) > 1:
+                        experience_section = exp_parts[1][:100]  # First 100 chars after "experience:"
+                        if all(word in experience_section for word in significant_words):
+                            company_in_snippet = True
         
-        print(f"   🔍 Deterministic check: Company '{company}' in title = {deterministic_company_match}")
+        # Deterministic company match decision (title OR snippet)
+        deterministic_company_match = company_in_title or company_in_snippet
+        
+        # Show normalized company name if it differs from original
+        match_location = "title" if company_in_title else ("snippet" if company_in_snippet else "NOT FOUND")
+        if company_normalized != company_lower:
+            print(f"   🔍 Deterministic check: Company '{company}' (normalized: '{company_normalized}') in {match_location} = {deterministic_company_match}")
+        else:
+            print(f"   🔍 Deterministic check: Company '{company}' in {match_location} = {deterministic_company_match}")
         print(f"      First title: {first_title[:80]}...")
+        if company_in_snippet and not company_in_title:
+            print(f"      First snippet: {first_snippet[:80]}...")
         
         # Prepare search results for LLM
         results_text = json.dumps(search_results, indent=2)

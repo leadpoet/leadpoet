@@ -139,14 +139,15 @@ async def submit_lead(event: SubmitLeadEvent):
     print(f"\n🔍 POST /submit called - lead_id={event.payload.lead_id}")
     
     # ========================================
-    # Step 0: Check rate limits (BEFORE expensive operations)
+    # Step 0: Quick rate limit check (BEFORE expensive operations)
     # ========================================
-    # This is a DoS protection mechanism - we check rate limits using only
-    # the actor_hotkey field from the JSON payload BEFORE doing any expensive
-    # crypto operations (signature verification) or I/O (DB queries, S3 fetches).
+    # This is a DoS protection mechanism - we do a quick READ-ONLY check
+    # using only the actor_hotkey field BEFORE any expensive crypto operations.
     # 
-    # An attacker can spam fake requests, but we reject them in <1ms.
-    print("🔍 Step 0: Checking rate limits...")
+    # NOTE: This is a preliminary check only. The actual atomic reservation
+    # happens in Step 2.5 AFTER signature verification (to prevent attackers
+    # from exhausting a victim's rate limit with fake requests).
+    print("🔍 Step 0: Quick rate limit check...")
     from gateway.utils.rate_limiter import check_rate_limit
     
     allowed, reason, stats = check_rate_limit(event.actor_hotkey)
@@ -193,7 +194,7 @@ async def submit_lead(event: SubmitLeadEvent):
             }
         )
     
-    print(f"🔍 Step 0 complete: Rate limit OK (submissions={stats['submissions']}, rejections={stats['rejections']})")
+    print(f"🔍 Step 0 complete: Preliminary check OK (submissions={stats['submissions']}, rejections={stats['rejections']})")
     
     # ========================================
     # Step 1: Verify payload hash
@@ -220,6 +221,41 @@ async def submit_lead(event: SubmitLeadEvent):
             detail="Invalid signature"
         )
     print("🔍 Step 2 complete: Signature valid")
+    
+    # ========================================
+    # Step 2.5: ATOMIC Rate Limit Reservation (after identity verified)
+    # ========================================
+    # Now that we've verified the signature, we KNOW this is the real miner.
+    # We atomically reserve a submission slot to prevent race conditions.
+    # 
+    # RACE CONDITION FIX:
+    # Previously, check_rate_limit() and increment_submission() were separate,
+    # allowing multiple simultaneous requests to all pass the check before any
+    # incremented. Now we atomically check AND increment in one operation.
+    print("🔍 Step 2.5: Reserving submission slot (atomic)...")
+    from gateway.utils.rate_limiter import reserve_submission_slot, mark_submission_failed
+    
+    slot_reserved, reservation_reason, reservation_stats = reserve_submission_slot(event.actor_hotkey)
+    if not slot_reserved:
+        print(f"❌ Could not reserve submission slot for {event.actor_hotkey[:20]}...")
+        print(f"   Reason: {reservation_reason}")
+        print(f"   Stats: {reservation_stats}")
+        
+        # Return 429 Too Many Requests
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "rate_limit_exceeded",
+                "message": reservation_reason,
+                "stats": reservation_stats
+            }
+        )
+    
+    print(f"🔍 Step 2.5 complete: Slot reserved (submissions={reservation_stats['submissions']}/{reservation_stats['max_submissions']})")
+    
+    # From this point on, a slot is RESERVED. If processing fails, we must call
+    # mark_submission_failed() to increment the rejections counter.
+    # If processing succeeds, the slot is already consumed (no further action needed).
     
     # ========================================
     # Step 3: Check actor is registered miner
@@ -355,84 +391,99 @@ async def submit_lead(event: SubmitLeadEvent):
         )
     
     # ========================================
-    # Step 6.5: Check for duplicate email_hash (CRITICAL)
+    # Step 6.5: Check for duplicate email (CRITICAL)
     # ========================================
-    # Prevents malicious miners from bypassing client-side duplicate check
-    # Only checks SUBMISSION events (successful submissions), not SUBMISSION_REQUEST
-    # This allows miners to retry failed submissions with corrections
+    # Prevents malicious miners from submitting the same email
+    # Checks leads_private directly (source of truth, no race condition)
     print(f"🔍 Step 6.5: Checking for duplicate email...")
     try:
-        duplicate_check = supabase.table("transparency_log") \
-            .select("tee_sequence, event_type, actor_hotkey, created_at, payload") \
-            .eq("event_type", "SUBMISSION") \
-            .execute()
+        # First, we need to get the actual email from the committed lead blob
+        # Fetch it from S3 using the lead_blob_hash (S3 key is the hash, not lead_id)
+        from gateway.utils.storage import s3_client as storage_s3_client, AWS_S3_BUCKET
         
-        # Check if any SUBMISSION event has the same email_hash
-        for log in duplicate_check.data:
-            payload = log.get("payload", {})
-            if isinstance(payload, str):
-                payload = json.loads(payload)
+        # S3 key is the lead_blob_hash from SUBMISSION_REQUEST, not the lead_id
+        s3_key = f"leads/{committed_lead_blob_hash}.json"
+        
+        try:
+            response = storage_s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=s3_key)
+            lead_blob_data = json.loads(response['Body'].read().decode('utf-8'))
+            submitted_email = lead_blob_data.get("email", "").strip().lower()
+        except Exception as e:
+            print(f"   ⚠️ Could not fetch lead blob for duplicate check: {e}")
+            submitted_email = None
+        
+        # Check leads_private directly for duplicate email
+        if submitted_email:
+            duplicate_check = supabase.table("leads_private") \
+                .select("lead_id, miner_hotkey, created_ts, lead_blob") \
+                .execute()
             
-            existing_email_hash = payload.get("email_hash")
-            if existing_email_hash == committed_email_hash:
-                print(f"❌ Duplicate email detected!")
-                print(f"   Email hash: {committed_email_hash[:32]}...")
-                print(f"   Original submission: seq={log.get('tee_sequence')}, miner={log.get('actor_hotkey')[:10]}..., ts={log.get('created_at')}")
+            # Check if any existing lead has the same email
+            for existing_lead in duplicate_check.data:
+                existing_blob = existing_lead.get("lead_blob", {})
+                if isinstance(existing_blob, str):
+                    existing_blob = json.loads(existing_blob)
+                existing_email = existing_blob.get("email", "").strip().lower() if existing_blob else ""
                 
-                # Increment rejection counter (FAILURE - duplicate)
-                from gateway.utils.rate_limiter import increment_submission
-                updated_stats = increment_submission(event.actor_hotkey, success=False)
-                print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
-                
-                # Log VALIDATION_FAILED event to TEE (consistent with required fields check)
-                try:
-                    from gateway.utils.logger import log_event
+                if existing_email == submitted_email:
+                    print(f"❌ Duplicate email detected!")
+                    print(f"   Email: {submitted_email}")
+                    print(f"   Original lead: {existing_lead.get('lead_id')[:10]}..., miner={existing_lead.get('miner_hotkey', 'unknown')[:10]}..., ts={existing_lead.get('created_ts')}")
                     
-                    validation_failed_event = {
-                        "event_type": "VALIDATION_FAILED",
-                        "actor_hotkey": event.actor_hotkey,
-                        "nonce": str(uuid.uuid4()),
-                        "ts": datetime.now(tz.utc).isoformat(),
-                        "payload_hash": hashlib.sha256(json.dumps({
-                            "lead_id": event.payload.lead_id,
-                            "reason": "duplicate_email",
-                            "email_hash": committed_email_hash
-                        }, sort_keys=True).encode()).hexdigest(),
-                        "build_id": "gateway",
-                        "signature": "duplicate_check",  # Gateway-generated
-                        "payload": {
-                            "lead_id": event.payload.lead_id,
-                            "reason": "duplicate_email",
+                    # Mark submission as failed (FAILURE - duplicate)
+                    # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
+                    updated_stats = mark_submission_failed(event.actor_hotkey)
+                    print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+                    
+                    # Log VALIDATION_FAILED event to TEE (consistent with required fields check)
+                    try:
+                        from gateway.utils.logger import log_event
+                        
+                        validation_failed_event = {
+                            "event_type": "VALIDATION_FAILED",
+                            "actor_hotkey": event.actor_hotkey,
+                            "nonce": str(uuid.uuid4()),
+                            "ts": datetime.now(tz.utc).isoformat(),
+                            "payload_hash": hashlib.sha256(json.dumps({
+                                "lead_id": event.payload.lead_id,
+                                "reason": "duplicate_email",
+                                "email_hash": committed_email_hash
+                            }, sort_keys=True).encode()).hexdigest(),
+                            "build_id": "gateway",
+                            "signature": "duplicate_check",  # Gateway-generated
+                            "payload": {
+                                "lead_id": event.payload.lead_id,
+                                "reason": "duplicate_email",
+                                "email_hash": committed_email_hash,
+                                "original_lead_id": existing_lead.get("lead_id"),
+                                "miner_hotkey": event.actor_hotkey
+                            }
+                        }
+                        
+                        await log_event(validation_failed_event)
+                        print(f"   ✅ Logged VALIDATION_FAILED (duplicate) to TEE buffer")
+                    except Exception as e:
+                        print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+                    
+                    raise HTTPException(
+                        status_code=409,  # 409 Conflict
+                        detail={
+                            "error": "duplicate_email",
+                            "message": "This email has already been submitted to the network",
                             "email_hash": committed_email_hash,
-                            "original_submission_seq": log.get("tee_sequence"),
-                            "miner_hotkey": event.actor_hotkey
+                            "original_submission": {
+                                "lead_id": existing_lead.get("lead_id"),
+                                "submitted_at": existing_lead.get("created_ts")
+                            },
+                            "rate_limit_stats": {
+                                "submissions": updated_stats["submissions"],
+                                "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                                "rejections": updated_stats["rejections"],
+                                "max_rejections": MAX_REJECTIONS_PER_DAY,
+                                "reset_at": updated_stats["reset_at"]
+                            }
                         }
-                    }
-                    
-                    await log_event(validation_failed_event)
-                    print(f"   ✅ Logged VALIDATION_FAILED (duplicate) to TEE buffer")
-                except Exception as e:
-                    print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
-                
-                raise HTTPException(
-                    status_code=409,  # 409 Conflict
-                    detail={
-                        "error": "duplicate_email",
-                        "message": "This email has already been submitted to the network",
-                        "email_hash": committed_email_hash,
-                        "original_submission": {
-                            "tee_sequence": log.get("tee_sequence"),
-                            "submitted_at": log.get("created_at")
-                        },
-                        "rate_limit_stats": {
-                            "submissions": updated_stats["submissions"],
-                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
-                            "rejections": updated_stats["rejections"],
-                            "max_rejections": MAX_REJECTIONS_PER_DAY,
-                            "reset_at": updated_stats["reset_at"]
-                        }
-                    }
-                )
+                    )
         
         print(f"✅ No duplicate found - lead is unique")
         
@@ -587,9 +638,9 @@ async def submit_lead(event: SubmitLeadEvent):
             print(f"❌ Required fields validation failed: Missing {len(missing_fields)} field(s)")
             print(f"   Missing: {', '.join(missing_fields)}")
             
-            # Increment rate limit counter (FAILURE - missing required fields)
-            from gateway.utils.rate_limiter import increment_submission
-            updated_stats = increment_submission(event.actor_hotkey, success=False)
+            # Mark submission as failed (FAILURE - missing required fields)
+            # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
+            updated_stats = mark_submission_failed(event.actor_hotkey)
             print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
             
             # Log VALIDATION_FAILED event to TEE buffer (for transparency)
@@ -649,9 +700,9 @@ async def submit_lead(event: SubmitLeadEvent):
         if source_type == "proprietary_database" and source_url != "proprietary_database":
             print(f"❌ Source provenance mismatch: source_type='proprietary_database' but source_url='{source_url[:50]}...'")
             
-            # Increment rate limit counter (FAILURE)
-            from gateway.utils.rate_limiter import increment_submission
-            updated_stats = increment_submission(event.actor_hotkey, success=False)
+            # Mark submission as failed (FAILURE - source provenance mismatch)
+            # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
+            updated_stats = mark_submission_failed(event.actor_hotkey)
             
             raise HTTPException(
                 status_code=400,
@@ -672,9 +723,9 @@ async def submit_lead(event: SubmitLeadEvent):
         if "linkedin" in source_url.lower():
             print(f"❌ LinkedIn URL detected in source_url: {source_url[:50]}...")
             
-            # Increment rate limit counter (FAILURE)
-            from gateway.utils.rate_limiter import increment_submission
-            updated_stats = increment_submission(event.actor_hotkey, success=False)
+            # Mark submission as failed (FAILURE - LinkedIn URL in source_url)
+            # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
+            updated_stats = mark_submission_failed(event.actor_hotkey)
             
             raise HTTPException(
                 status_code=400,
@@ -817,9 +868,9 @@ async def submit_lead(event: SubmitLeadEvent):
                 print(f"      (Submission continues - attestation verification already passed)")
             
         except HTTPException:
-            # Increment rate limit counter (FAILURE - attestation check)
-            from gateway.utils.rate_limiter import increment_submission
-            updated_stats = increment_submission(event.actor_hotkey, success=False)
+            # Mark submission as failed (FAILURE - attestation check)
+            # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
+            updated_stats = mark_submission_failed(event.actor_hotkey)
             print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
             
             # Re-raise HTTP exceptions
@@ -852,6 +903,34 @@ async def submit_lead(event: SubmitLeadEvent):
             print(f"   ✅ Lead stored in leads_private (miner: {event.actor_hotkey[:10]}..., status: pending_validation)")
             
         except Exception as e:
+            error_str = str(e).lower()
+            
+            # Check if this is a duplicate email constraint violation
+            if "duplicate" in error_str or "unique" in error_str or "23505" in error_str:
+                print(f"❌ Duplicate email detected at database level (race condition caught)!")
+                print(f"   Email from lead_blob: {lead_blob.get('email', 'unknown')}")
+                
+                # Mark submission as failed (FAILURE - duplicate at DB level)
+                # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                print(f"   📊 Rate limit updated: rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+                
+                raise HTTPException(
+                    status_code=409,  # 409 Conflict
+                    detail={
+                        "error": "duplicate_email",
+                        "message": "This email has already been submitted to the network (race condition)",
+                        "email_hash": committed_email_hash,
+                        "rate_limit_stats": {
+                            "submissions": updated_stats["submissions"],
+                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                            "rejections": updated_stats["rejections"],
+                            "max_rejections": MAX_REJECTIONS_PER_DAY,
+                            "reset_at": updated_stats["reset_at"]
+                        }
+                    }
+                )
+            
             print(f"❌ Failed to store lead in leads_private: {e}")
             import traceback
             traceback.print_exc()
@@ -917,10 +996,9 @@ async def submit_lead(event: SubmitLeadEvent):
         # - Will be included in next hourly Arweave checkpoint (signed by TEE)
         # - Verify gateway code integrity: GET /attest
         
-        # Increment rate limit counter (SUCCESS)
-        from gateway.utils.rate_limiter import increment_submission
-        updated_stats = increment_submission(event.actor_hotkey, success=True)
-        print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+        # NOTE: Submission slot was already reserved in Step 2.5 (atomic rate limiting)
+        # No need to increment again - just log the current stats from reservation
+        print(f"   📊 Rate limit (from reservation): submissions={reservation_stats['submissions']}/{reservation_stats['max_submissions']}, rejections={reservation_stats['rejections']}/{reservation_stats['max_rejections']}")
         
         print(f"✅ /submit complete - lead accepted")
         return {
@@ -931,11 +1009,11 @@ async def submit_lead(event: SubmitLeadEvent):
             "queue_position": queue_position,
             "message": "Lead accepted. Proof available in next hourly Arweave checkpoint.",
             "rate_limit_stats": {
-                "submissions": updated_stats["submissions"],
-                "max_submissions": MAX_SUBMISSIONS_PER_DAY,
-                "rejections": updated_stats["rejections"],
-                "max_rejections": MAX_REJECTIONS_PER_DAY,
-                "reset_at": updated_stats["reset_at"]
+                "submissions": reservation_stats["submissions"],
+                "max_submissions": reservation_stats["max_submissions"],
+                "rejections": reservation_stats["rejections"],
+                "max_rejections": reservation_stats["max_rejections"],
+                "reset_at": reservation_stats["reset_at"]
             }
         }
     
@@ -984,9 +1062,9 @@ async def submit_lead(event: SubmitLeadEvent):
         except Exception as e:
             print(f"   ⚠️  Error logging UPLOAD_FAILED: {e} (continuing with error response)")
         
-        # Increment rate limit counter (FAILURE - verification failed)
-        from gateway.utils.rate_limiter import increment_submission
-        updated_stats = increment_submission(event.actor_hotkey, success=False)
+        # Mark submission as failed (FAILURE - verification failed)
+        # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
+        updated_stats = mark_submission_failed(event.actor_hotkey)
         print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
         
         raise HTTPException(

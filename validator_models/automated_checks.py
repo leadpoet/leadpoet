@@ -43,6 +43,19 @@ GSE_CX = os.getenv("GSE_CX", "")
 GSE_API_KEY = os.getenv("GSE_API_KEY", "")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
 
+# DuckDuckGo Search (FREE, no API key needed)
+# Uses the 'ddgs' Python library which handles DDG's API properly
+# Set to "true" to enable DuckDuckGo, otherwise uses GSE
+USE_DDG_SEARCH = os.getenv("USE_DDG_SEARCH", "true").lower() == "true"
+
+# Try to import ddgs library
+try:
+    from ddgs import DDGS
+    DDGS_AVAILABLE = True
+except ImportError:
+    DDGS_AVAILABLE = False
+    print("⚠️ ddgs library not installed. Run: pip install ddgs")
+
 # NEW: Rep Score API keys (Companies House)
 COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY", "")
 
@@ -411,7 +424,9 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
         
         # Check if either first OR last name appears in email
         # Pattern matching: full name, first initial + last, last + first initial, etc.
-        # Also handles shortened names (e.g., "Gregory" → "greg")
+        # Also handles shortened names by checking if email local part is a prefix of the name
+        # Examples: "rich@" matches "Richard" (prefix check), "greg@" matches "Gregory" (prefix check)
+        # Security: Requires minimum 3 characters and checks that local part matches BEGINNING of name (not substring)
         
         # Minimum match length to prevent false positives (e.g., "an" in "daniel")
         MIN_NAME_MATCH_LENGTH = 3
@@ -1405,6 +1420,146 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
 
 # Stage 4: LinkedIn/GSE Validation
 
+async def _ddg_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """
+    Perform DuckDuckGo search using the ddgs library.
+    Returns GSE-compatible results: [{title, link, snippet}]
+    
+    Works on headless servers (VPS) - no GUI required.
+    The ddgs library handles DDG's API complexity internally.
+    
+    Requires: pip install ddgs
+    """
+    if not DDGS_AVAILABLE:
+        print(f"         ⚠️ ddgs library not available - install with: pip install ddgs")
+        return []
+    
+    try:
+        # Run synchronous ddgs in thread to avoid blocking
+        def do_search():
+            return DDGS().text(query, max_results=max_results)
+        
+        results_raw = await asyncio.to_thread(do_search)
+        
+        # Convert to GSE-compatible format
+        results = []
+        for r in results_raw:
+            results.append({
+                "title": r.get("title", ""),
+                "link": r.get("href", ""),
+                "snippet": r.get("body", "")
+            })
+        
+        return results
+        
+    except Exception as e:
+        print(f"         ⚠️ DDG search error: {str(e)}")
+        return []
+
+async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> List[dict]:
+    """
+    Search LinkedIn using DuckDuckGo (FREE, no API key needed).
+    
+    Directly scrapes DuckDuckGo - no server required.
+    Returns results in same format as GSE: [{title, link, snippet}]
+    
+    Args:
+        full_name: Person's full name
+        company: Company name
+        linkedin_url: LinkedIn URL provided by miner (required)
+        max_results: Max search results to return
+    
+    Returns:
+        List of search results with title, link, snippet
+    """
+    if not linkedin_url:
+        print(f"   ⚠️ No LinkedIn URL provided")
+        return []
+    
+    # Extract profile slug from LinkedIn URL
+    profile_slug = linkedin_url.split("/in/")[-1].strip("/") if "/in/" in linkedin_url else None
+    
+    # DuckDuckGo works better WITHOUT quotes (unlike Google)
+    # 4 variations - try multiple approaches to find the exact LinkedIn profile
+    query_variations = [
+        f"{full_name} linkedin {company}",                    # 1. Name + LinkedIn + company (most specific)
+        f"{full_name} linkedin",                              # 2. Name + LinkedIn (broader)
+        f"site:linkedin.com/in {full_name}",                  # 3. Site-restricted search
+        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 4. Profile slug directly
+    ]
+    
+    # Remove None values
+    query_variations = [q for q in query_variations if q]
+    
+    print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile (DuckDuckGo, then LLM verify)...")
+    
+    for variation_idx, query in enumerate(query_variations, 1):
+        print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
+        
+        try:
+            items = await _ddg_search(query)
+            
+            if items:
+                print(f"         ✅ Found {len(items)} result(s) with variation {variation_idx}")
+                
+                # FILTER: Only keep LinkedIn results (profile URLs)
+                linkedin_results = []
+                found_profile_urls = []
+                
+                for item in items:
+                    link = item.get("link", "")
+                    if "linkedin.com/in/" in link:
+                        result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
+                        found_profile_urls.append(result_slug)
+                        linkedin_results.append(item)
+                    elif "linkedin.com" in link:
+                        # Include other LinkedIn pages (company, posts) for context
+                        linkedin_results.append(item)
+                
+                if not linkedin_results:
+                    print(f"         ⚠️ No LinkedIn URLs in results, trying next variation...")
+                    continue
+                
+                print(f"         ✅ Found {len(linkedin_results)} LinkedIn result(s)")
+                
+                # URL matching logic - for broader searches (variations 2+), verify profile matches
+                if variation_idx >= 2 and profile_slug:
+                    if found_profile_urls:
+                        # Check exact match first
+                        exact_match = any(
+                            profile_slug.lower() == result_slug.lower()
+                            for result_slug in found_profile_urls
+                        )
+                        # Also check partial match (profile slug contained in result)
+                        partial_match = any(
+                            profile_slug.lower() in result_slug.lower() or result_slug.lower() in profile_slug.lower()
+                            for result_slug in found_profile_urls
+                        )
+                        
+                        if exact_match:
+                            print(f"         ✅ URL MATCH: Profile '{profile_slug}' confirmed (exact)")
+                        elif partial_match:
+                            print(f"         ✅ URL MATCH: Profile '{profile_slug}' confirmed (partial)")
+                        else:
+                            print(f"         ⚠️  URL MISMATCH: Expected '{profile_slug}' but found: {found_profile_urls[:3]}")
+                            continue
+                
+                # Show results (only LinkedIn)
+                print(f"      📊 DDG LinkedIn results:")
+                for i, item in enumerate(linkedin_results[:3], 1):
+                    print(f"         {i}. {item.get('title', '')[:70]}")
+                
+                return linkedin_results[:max_results]
+            else:
+                print(f"         ❌ No results with variation {variation_idx}")
+        
+        except Exception as e:
+            print(f"         ⚠️ DDG search error: {str(e)}")
+            continue
+    
+    print(f"   ❌ DDG: No results found after trying {len(query_variations)} variations")
+    return []
+
 async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> List[dict]:
     """
     Search LinkedIn using Google Custom Search Engine for person's profile.
@@ -1737,9 +1892,22 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
                 "failed_fields": ["linkedin"]
             }
         
-        # Step 1: Search LinkedIn via Google Custom Search (using provided URL for targeted search)
+        # Step 1: Search LinkedIn via DuckDuckGo (FREE, default) or Google Custom Search (fallback)
         print(f"   🔍 Stage 4: Verifying LinkedIn profile for {full_name} at {company}")
-        search_results = await search_linkedin_gse(full_name, company, linkedin_url)
+        
+        # DuckDuckGo is FREE and default - no API key needed
+        # GSE is fallback if DDG fails
+        if USE_DDG_SEARCH:
+            try:
+                search_results = await search_linkedin_ddg(full_name, company, linkedin_url)
+                if not search_results:
+                    print(f"   ⚠️ DDG returned no results, trying GSE fallback...")
+                    search_results = await search_linkedin_gse(full_name, company, linkedin_url)
+            except Exception as e:
+                print(f"   ⚠️ DuckDuckGo search failed: {e}, falling back to GSE")
+                search_results = await search_linkedin_gse(full_name, company, linkedin_url)
+        else:
+            search_results = await search_linkedin_gse(full_name, company, linkedin_url)
         
         # Store search count in lead for data collection
         lead["gse_search_count"] = len(search_results)

@@ -48,10 +48,15 @@ export GSE_CX="your_search_engine_id"                # Custom Search ID
 # Email Validation API (REQUIRED)
 export MYEMAILVERIFIER_API_KEY="your_mev_key"        # myemailverifier.com
 
-# LinkedIn/GSE Validation (REQUIRED)
-export GSE_API_KEY="your_google_api_key"             # Google Custom Search API
-export GSE_CX="your_search_engine_id"                # Custom Search Engine ID
-export OPENROUTER_KEY="your_openrouter_key"          # openrouter.ai
+# LinkedIn Validation (REQUIRED)
+# Uses DuckDuckGo search by default (FREE, no API key needed)
+# Requires: pip install ddgs
+export OPENROUTER_KEY="your_openrouter_key"          # openrouter.ai (for LLM verification)
+
+# Google Custom Search (fallback if DDG fails)
+# configure since we want GSE as backup:
+export GSE_API_KEY="your_google_api_key"           # Google Custom Search API
+export GSE_CX="your_search_engine_id"              # Custom Search Engine ID
 
 # Reputation Score APIs (OPTIONAL - soft checks use mostly free public APIs)
 # Note: Most reputation checks use free public APIs (Wayback, SEC, GDELT)

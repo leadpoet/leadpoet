@@ -73,6 +73,7 @@ requirements = [
     "phonenumbers>=8.13.0",
     "disposable-email-domains>=0.0.138",
     "python-Levenshtein>=0.23.0",
+    "ddgs>=6.0.0",  # DuckDuckGo search for LinkedIn validation
     
     # Lead Sorcerer dependencies
     "openrouter>=0.0.16",

@@ -28,7 +28,7 @@ from Leadpoet.utils.utils_lead_extraction import (
     get_field
 )
 
-MAX_REP_SCORE = 38  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) = 38 (USPTO removed)
+MAX_REP_SCORE = 48  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) + Companies House (10) = 48
 
 # Custom exception for API infrastructure failures (should skip lead, not submit)
 class EmailVerificationUnavailableError(Exception):
@@ -42,6 +42,9 @@ MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "YOUR_MYEMAILVERI
 GSE_CX = os.getenv("GSE_CX", "")
 GSE_API_KEY = os.getenv("GSE_API_KEY", "")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
+
+# NEW: Rep Score API keys (Companies House)
+COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY", "")
 
 EMAIL_CACHE_FILE = "email_verification_cache.pkl"
 VALIDATION_ARTIFACTS_DIR = "validation_artifacts"
@@ -2258,6 +2261,89 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
         return 0, {"checked": False, "reason": f"GDELT check error: {str(e)}"}
 
 
+async def check_companies_house(lead: dict) -> Tuple[float, dict]:
+    """
+    Rep Score: Check UK Companies House registry.
+    
+    Returns score (0-10) based on company found in UK Companies House.
+    This is a SOFT check - always passes, appends score.
+    Uses UK Companies House API (free, requires API key registration).
+    
+    API Key: Register at https://developer.company-information.service.gov.uk/
+    If API key not configured, returns 0 points and continues.
+    
+    Args:
+        lead: Lead data with company
+    
+    Returns:
+        (score, metadata)
+    """
+    try:
+        company = get_company(lead)
+        if not company:
+            return 0, {"checked": False, "reason": "No company provided"}
+        
+        if not COMPANIES_HOUSE_API_KEY or COMPANIES_HOUSE_API_KEY == "":
+            print(f"   ❌ Companies House: API key not configured - skipping check (0 points)")
+            return 0, {
+                "checked": True,
+                "score": 0,
+                "reason": "Companies House API key not configured (register at https://developer.company-information.service.gov.uk/)"
+            }
+        
+        print(f"   🔍 Companies House: Searching for '{company}'")
+        
+        import base64
+        auth_b64 = base64.b64encode(f"{COMPANIES_HOUSE_API_KEY}:".encode()).decode()
+        search_url = "https://api.company-information.service.gov.uk/search/companies"
+        
+        async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"Basic {auth_b64}"}
+            
+            async with session.get(
+                search_url,
+                headers=headers,
+                params={"q": company, "items_per_page": 5},
+                timeout=10
+            ) as response:
+                if response.status != 200:
+                    return 0, {"checked": False, "reason": f"Companies House API error: HTTP {response.status}"}
+                
+                data = await response.json()
+                items = data.get("items", [])
+                
+                if not items:
+                    print(f"      ❌ Companies House: No results found")
+                    return 0, {"checked": True, "score": 0, "reason": "Company not found in UK Companies House"}
+                
+                company_upper = company.upper()
+                for item in items[:5]:
+                    ch_name = item.get("title", "").upper()
+                    status = item.get("company_status", "").lower()
+                    
+                    if company_upper == ch_name:
+                        score = 10.0 if status == "active" else 8.0
+                    elif company_upper in ch_name or ch_name in company_upper:
+                        score = 8.0 if status == "active" else 6.0
+                    else:
+                        continue
+                    
+                    print(f"      ✅ Companies House: Found - {item.get('title')} ({status})")
+                    return score, {
+                        "checked": True,
+                        "score": score,
+                        "matched_company": item.get("title"),
+                        "company_status": status
+                    }
+                
+                return 0, {"checked": True, "score": 0, "reason": "No close name match"}
+    
+    except asyncio.TimeoutError:
+        return 0, {"checked": False, "reason": "Companies House API timeout"}
+    except Exception as e:
+        return 0, {"checked": False, "reason": f"Companies House check error: {str(e)}"}
+
+
 async def check_whois_dnsbl_reputation(lead: dict) -> Tuple[float, dict]:
     """
     Rep Score: WHOIS + DNSBL reputation check using cached validator data.
@@ -2753,7 +2839,8 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
                 "uspto_trademarks": 0,
                 "sec_edgar": 0,
                 "whois_dnsbl": 0,
-                "gdelt": 0
+                "gdelt": 0,
+                "companies_house": 0
             }
         },
         "passed": False,
@@ -2954,9 +3041,10 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # ========================================================================
     # Rep Score: Soft Reputation Checks (SOFT)
     # - Wayback Machine (max 6 points), SEC (max 12 points), 
-    #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points)
+    #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
+    #   Companies House (max 10 points)
     # - Always passes, appends scores to lead
-    # - Total: 0-38 points (USPTO removed)
+    # - Total: 0-48 points
     # ========================================================================
     print(f"📊 Rep Score: Running soft checks for {email} @ {company}")
     
@@ -2965,8 +3053,12 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     sec_score, sec_data = await check_sec_edgar(lead)
     whois_dnsbl_score, whois_dnsbl_data = await check_whois_dnsbl_reputation(lead)
     gdelt_score, gdelt_data = await check_gdelt_mentions(lead)
+    companies_house_score, companies_house_data = await check_companies_house(lead)
     
-    total_rep_score = wayback_score + sec_score + whois_dnsbl_score + gdelt_score  # USPTO removed
+    total_rep_score = (
+        wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
+        companies_house_score
+    )
     
     # Append to lead data
     lead["rep_score"] = total_rep_score
@@ -2974,7 +3066,8 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         "wayback": wayback_data,
         "sec": sec_data,
         "whois_dnsbl": whois_dnsbl_data,
-        "gdelt": gdelt_data
+        "gdelt": gdelt_data,
+        "companies_house": companies_house_data
     }
     
     # Append to automated_checks_data
@@ -2985,11 +3078,12 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
             "wayback_machine": wayback_score,       # 0-6 points
             "sec_edgar": sec_score,                 # 0-12 points
             "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
-            "gdelt": gdelt_score                    # 0-10 points
+            "gdelt": gdelt_score,                   # 0-10 points
+            "companies_house": companies_house_score      # 0-10 points
         }
     }
     
-    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10)")
+    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
     print(f"🎉 All stages passed for {email} @ {company}")
 

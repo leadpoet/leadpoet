@@ -803,6 +803,7 @@ async def compute_epoch_consensus(epoch_id: int):
                                 "validator_responses": validator_responses,
                                 "consensus_votes": consensus_votes,
                                 "rep_score": final_rep_score,
+                                "rep_score_version": "v1",
                                 "epoch_summary": outcome  # Keep existing epoch_summary for backwards compatibility
                             })
                             .eq("lead_id", lead_id)

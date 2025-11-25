@@ -55,6 +55,17 @@ export OPENROUTER_KEY="your_openrouter_key"          # openrouter.ai
 
 # Reputation Score APIs (OPTIONAL - soft checks use mostly free public APIs)
 # Note: Most reputation checks use free public APIs (Wayback, SEC, GDELT)
+# UK Companies House API Key Setup:
+# 1. Go to https://developer.company-information.service.gov.uk/get-started
+# 2. Click "register a user account" -> "create sign in details" if you don't have an account
+# 3. Either create a GOV.UK One Login or create sign in details without using GOV.UK One Login
+# 4. Create your account
+# 5. Once created, go to https://developer.company-information.service.gov.uk/manage-applications
+# 6. Add an application with:
+#    - Application name: "API Key"
+#    - Description: "Requesting the Companies House API to verify eligibility of companies for <your company name>"
+#    - Environment: "live"
+export COMPANIES_HOUSE_API_KEY="your_companies_house_key"
 
 ```
 

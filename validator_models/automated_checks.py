@@ -1479,13 +1479,14 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     # Extract profile slug from LinkedIn URL
     profile_slug = linkedin_url.split("/in/")[-1].strip("/") if "/in/" in linkedin_url else None
     
-    # DuckDuckGo works better WITHOUT quotes (unlike Google)
-    # 4 variations - try multiple approaches to find the exact LinkedIn profile
+    # 5 variations - try multiple approaches to find the exact LinkedIn profile
+    # Mix of quoted (exact) and unquoted (broader) searches
     query_variations = [
-        f"{full_name} linkedin {company}",                    # 1. Name + LinkedIn + company (most specific)
-        f"{full_name} linkedin",                              # 2. Name + LinkedIn (broader)
-        f"site:linkedin.com/in {full_name}",                  # 3. Site-restricted search
-        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 4. Profile slug directly
+        f'"{linkedin_url}"',                                  # 1. Exact URL in quotes (most specific)
+        f"{full_name} linkedin {company}",                    # 2. Name + LinkedIn + company
+        f"{full_name} linkedin",                              # 3. Name + LinkedIn (broader)
+        f"site:linkedin.com/in {full_name}",                  # 4. Site-restricted search
+        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 5. Profile slug directly
     ]
     
     # Remove None values
@@ -1494,6 +1495,11 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile (DuckDuckGo, then LLM verify)...")
     
     for variation_idx, query in enumerate(query_variations, 1):
+        # 5 second delay between variations (avoid rate limiting)
+        if variation_idx > 1:
+            print(f"      ⏳ Waiting 5s before next variation...")
+            await asyncio.sleep(5)
+        
         print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
         
         try:
@@ -1769,7 +1775,7 @@ CHECK THREE CRITERIA SEPARATELY:
    - REJECT only if clearly shows DIFFERENT company name
    - Be lenient: Descriptions like "Financial Operating System" for company "Toku" are acceptable
 
-3. PROFILE VALID: Is profile legitimate and indexed by Google?
+3. PROFILE VALID: Is profile legitimate and indexed?
    - Profile appears in search results = valid
 
 CRITICAL: Check name AND company separately. Both must match.

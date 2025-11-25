@@ -1479,12 +1479,15 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     # Extract profile slug from LinkedIn URL
     profile_slug = linkedin_url.split("/in/")[-1].strip("/") if "/in/" in linkedin_url else None
     
-    # 4 variations - try multiple approaches to find the exact LinkedIn profile
+    # 7 variations - try multiple approaches to find the exact LinkedIn profile
     query_variations = [
-        f"{full_name} linkedin {company}",                    # 1. Name + LinkedIn + company
-        f"{full_name} linkedin",                              # 2. Name + LinkedIn (broader)
-        f"site:linkedin.com/in {full_name}",                  # 3. Site-restricted search
-        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 4. Profile slug directly
+        f'"{full_name}" linkedin {company}',                  # 1. Quoted name + company (most specific)
+        f"site:linkedin.com/in {full_name} {company}",        # 2. Site-restricted + company
+        f"{full_name} linkedin {company}",                    # 3. Name + LinkedIn + company
+        f"site:linkedin.com/in {full_name}",                  # 4. Site-restricted (broader)
+        f"{full_name} linkedin",                              # 5. Name + LinkedIn (broader)
+        f'"{full_name}" site:linkedin.com',                   # 6. Quoted name + site
+        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 7. Profile slug directly
     ]
     
     # Remove None values
@@ -1493,10 +1496,10 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile (DuckDuckGo, then LLM verify)...")
     
     for variation_idx, query in enumerate(query_variations, 1):
-        # 5 second delay between variations (avoid rate limiting)
+        # 3 second delay between variations (avoid rate limiting)
         if variation_idx > 1:
-            print(f"      ⏳ Waiting 5s before next variation...")
-            await asyncio.sleep(5)
+            print(f"      ⏳ Waiting 3s before next variation...")
+            await asyncio.sleep(3)
         
         print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
         
@@ -1548,12 +1551,77 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
                             print(f"         ⚠️  URL MISMATCH: Expected '{profile_slug}' but found: {found_profile_urls[:3]}")
                             continue
                 
-                # Show results (only LinkedIn)
-                print(f"      📊 DDG LinkedIn results:")
-                for i, item in enumerate(linkedin_results[:3], 1):
-                    print(f"         {i}. {item.get('title', '')[:70]}")
+                # FILTER 1: Clean up concatenated titles and separate profile headlines from posts
+                # DDG often concatenates multiple result titles together
+                profile_headlines = []
+                posts = []
                 
-                return linkedin_results[:max_results]
+                for item in linkedin_results:
+                    title = item.get("title", "")
+                    
+                    # DDG concatenates titles - extract only the FIRST profile
+                    # Pattern: "Name - Title | LinkedIn Name2 - Title2"
+                    if " | LinkedIn " in title:
+                        # Take only the first profile (before the concatenation)
+                        title = title.split(" | LinkedIn ")[0] + " | LinkedIn"
+                        item = dict(item)  # Copy to avoid modifying original
+                        item["title"] = title
+                    
+                    # Skip non-profile results (posts, intro requests, etc.)
+                    if " on LinkedIn:" in title or " on LinkedIn :" in title:
+                        posts.append(item)
+                        continue
+                    if title.lower().startswith("seeking intro"):
+                        posts.append(item)
+                        continue
+                    if "profiles | LinkedIn" in title:
+                        # Generic "X profiles" page, not authoritative
+                        continue
+                        
+                    profile_headlines.append(item)
+                
+                # FILTER 2: Only keep results for TARGET PERSON (filter out other people)
+                # DDG often returns concatenated results with multiple profiles
+                name_parts = full_name.lower().split()
+                first_name = name_parts[0] if name_parts else ""
+                last_name = name_parts[-1] if len(name_parts) > 1 else ""
+                
+                target_person_results = []
+                other_person_results = []
+                
+                for item in profile_headlines:
+                    title_lower = item.get("title", "").lower()
+                    # Check if target person's name is in the title
+                    if first_name in title_lower and last_name in title_lower:
+                        target_person_results.append(item)
+                    else:
+                        other_person_results.append(item)
+                
+                # Prioritize target person's profile headlines
+                if target_person_results:
+                    print(f"      📊 DDG Profile Headlines for {full_name}:")
+                    for i, item in enumerate(target_person_results[:3], 1):
+                        print(f"         {i}. {item.get('title', '')[:70]}")
+                    if other_person_results:
+                        print(f"      📊 Other profiles filtered out: {len(other_person_results)}")
+                    if posts:
+                        print(f"      📊 Posts filtered out: {len(posts)}")
+                    # Return only target person's profile headlines
+                    return target_person_results[:max_results]
+                elif profile_headlines:
+                    # No exact name match - use all profile headlines
+                    print(f"      📊 DDG Profile Headlines (no exact name match):")
+                    for i, item in enumerate(profile_headlines[:3], 1):
+                        print(f"         {i}. {item.get('title', '')[:70]}")
+                    if posts:
+                        print(f"      📊 Posts filtered out: {len(posts)}")
+                    return profile_headlines[:max_results]
+                else:
+                    # No profile headlines found, fall back to posts
+                    print(f"      📊 DDG Posts only (no profile headlines found):")
+                    for i, item in enumerate(posts[:3], 1):
+                        print(f"         {i}. {item.get('title', '')[:70]}")
+                    return posts[:max_results]
             else:
                 print(f"         ❌ No results with variation {variation_idx}")
         
@@ -1740,6 +1808,35 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         if not search_results:
             return False, "No LinkedIn search results found"
         
+        # DETERMINISTIC PRE-CHECK: Check company match from titles directly
+        # This avoids LLM hallucination issues
+        company_lower = company.lower().strip()
+        company_words = company_lower.split()  # ["garuda", "robotics"]
+        
+        # Check first result (most authoritative for target person)
+        first_title = search_results[0].get("title", "").lower()
+        
+        # Extract ONLY the headline part (before "| linkedin")
+        # DDG often concatenates descriptions after "| LinkedIn"
+        # e.g., "Name - Title @ Company | LinkedIn About Company: ..."
+        if "| linkedin" in first_title:
+            first_title = first_title.split("| linkedin")[0].strip()
+        
+        # Method 1: Exact company name in title
+        company_in_title = company_lower in first_title
+        
+        # Method 2: All significant words of company name in title (for multi-word companies)
+        # e.g., "Garuda Robotics" → check if both "garuda" AND "robotics" are in title
+        if not company_in_title and len(company_words) > 1:
+            significant_words = [w for w in company_words if len(w) > 2]  # Skip "at", "the", etc.
+            company_in_title = all(word in first_title for word in significant_words)
+        
+        # Deterministic company match decision
+        deterministic_company_match = company_in_title
+        
+        print(f"   🔍 Deterministic check: Company '{company}' in title = {deterministic_company_match}")
+        print(f"      First title: {first_title[:80]}...")
+        
         # Prepare search results for LLM
         results_text = json.dumps(search_results, indent=2)
         
@@ -1764,14 +1861,13 @@ CHECK THREE CRITERIA SEPARATELY:
    - Names must substantially match
    - Different people = name_match FALSE (e.g., "John Black" ≠ "Pranav Ramesh")
 
-2. COMPANY MATCH: Do search results show person CURRENTLY works at "{company}"?
-   - Look for CURRENT employment/title, company name, or business description
-   - ACCEPT if:
-     * Company name "{company}" explicitly mentioned, OR
-     * Snippet describes the company's product/service matching the business context
-     * Person's title/role is consistent with working at this type of company
-   - REJECT only if clearly shows DIFFERENT company name
-   - Be lenient: Descriptions like "Financial Operating System" for company "Toku" are acceptable
+2. COMPANY MATCH: Does the profile TITLE show "{company}" as current employer?
+   - ONLY look at the TITLE (e.g., "Name - Title at Company | LinkedIn")
+   - IGNORE the snippet/description - it may contain outdated or unrelated info
+   - ACCEPT if "{company}" appears in the TITLE
+   - REJECT if TITLE shows a DIFFERENT company (e.g., "Name - CEO at OtherCorp")
+   - REJECT if "Exited", "Former", or "Left" in TITLE about "{company}"
+   - If NO company in TITLE, company_match = FALSE
 
 3. PROFILE VALID: Is profile legitimate and indexed?
    - Profile appears in search results = valid
@@ -1786,7 +1882,7 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
         }
         
         payload = {
-            "model": "openai/gpt-3.5-turbo",
+            "model": "openai/gpt-4o-mini",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1  # Low temperature for consistency
         }
@@ -1804,19 +1900,38 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
                 data = await response.json()
                 llm_response = data["choices"][0]["message"]["content"]
                 
+                # Strip markdown code blocks if present (LLM sometimes wraps JSON in ```json ... ```)
+                llm_response = llm_response.strip()
+                if llm_response.startswith("```"):
+                    # Remove opening ```json or ```
+                    lines = llm_response.split("\n")
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]  # Remove first line
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]  # Remove last line
+                    llm_response = "\n".join(lines).strip()
+                
                 # Parse JSON response with 3 separate checks
                 result = json.loads(llm_response)
                 
                 name_match = result.get("name_match", False)
-                company_match = result.get("company_match", False)
+                llm_company_match = result.get("company_match", False)
                 profile_valid = result.get("profile_valid", False)
                 confidence = result.get("confidence", 0.0)
                 reasoning = result.get("reasoning", "")
                 
+                # OVERRIDE: Use deterministic company match instead of LLM's decision
+                # This prevents LLM hallucination issues
+                company_match = deterministic_company_match
+                
+                if llm_company_match != deterministic_company_match:
+                    print(f"   ⚠️ LLM company_match ({llm_company_match}) OVERRIDDEN by deterministic check ({deterministic_company_match})")
+                    reasoning = f"[Deterministic: company '{company}' {'found' if deterministic_company_match else 'NOT found'} in title] {reasoning}"
+                
                 # DEBUG: Print LLM analysis with all 3 checks
                 print(f"   🤖 LLM Analysis:")
                 print(f"      Name Match: {name_match} (Does {full_name} match the profile?)")
-                print(f"      Company Match: {company_match} (Does person work at {company}?)")
+                print(f"      Company Match: {company_match} (Deterministic from title)")
                 print(f"      Profile Valid: {profile_valid} (Is profile legitimate?)")
                 print(f"      Confidence: {confidence}")
                 print(f"      Reasoning: {reasoning}")

@@ -411,15 +411,67 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
         
         # Check if either first OR last name appears in email
         # Pattern matching: full name, first initial + last, last + first initial, etc.
-        patterns = [
-            first_normalized,                           # john
-            last_normalized,                            # doe
-            f"{first_normalized}{last_normalized}",     # johndoe
-            f"{first_normalized[0]}{last_normalized}",  # jdoe
-            f"{last_normalized}{first_normalized[0]}",  # doej
-        ]
+        # Also handles shortened names (e.g., "Gregory" → "greg")
         
-        name_match = any(pattern in local_normalized for pattern in patterns if pattern)
+        # Minimum match length to prevent false positives (e.g., "an" in "daniel")
+        MIN_NAME_MATCH_LENGTH = 3
+        
+        name_match = False
+        
+        # Strategy 1: Check if normalized name patterns appear in local part
+        # This handles: john@example.com, johndoe@example.com, jdoe@example.com
+        patterns = []
+        
+        # Full normalized names
+        if len(first_normalized) >= MIN_NAME_MATCH_LENGTH:
+            patterns.append(first_normalized)  # john
+        if len(last_normalized) >= MIN_NAME_MATCH_LENGTH:
+            patterns.append(last_normalized)  # doe
+        
+        # Full name combinations
+        patterns.append(f"{first_normalized}{last_normalized}")  # johndoe
+        
+        # Initial + last name combinations
+        if len(first_normalized) > 0:
+            patterns.append(f"{first_normalized[0]}{last_normalized}")  # jdoe
+            patterns.append(f"{last_normalized}{first_normalized[0]}")  # doej
+        
+        # Check if any pattern appears in the normalized local part
+        patterns = [p for p in patterns if p and len(p) >= MIN_NAME_MATCH_LENGTH]
+        name_match = any(pattern in local_normalized for pattern in patterns)
+        
+        # Strategy 2: Check if local part matches shortened versions of the name
+        # This handles: greg@example.com where first_name is "Gregory"
+        # Check if local_part is a prefix of the normalized name (shortened form)
+        if not name_match and len(local_normalized) >= MIN_NAME_MATCH_LENGTH:
+            # Check if local_part matches beginning of first name (shortened)
+            # e.g., "greg" matches "gregory" (local_part is prefix of name)
+            if len(first_normalized) >= len(local_normalized):
+                if first_normalized.startswith(local_normalized):
+                    name_match = True
+            
+            # Check if local_part matches beginning of last name (shortened)
+            if not name_match and len(last_normalized) >= len(local_normalized):
+                if last_normalized.startswith(local_normalized):
+                    name_match = True
+            
+            # Check if name prefixes appear in local part (reverse direction)
+            # e.g., "gregory" prefix "greg" in local_part "greg"
+            if not name_match:
+                # Check first name prefixes (3-6 characters)
+                for length in range(MIN_NAME_MATCH_LENGTH, min(len(first_normalized) + 1, 7)):
+                    name_prefix = first_normalized[:length]
+                    if name_prefix == local_normalized or name_prefix in local_normalized:
+                        name_match = True
+                        break
+                
+                # Check last name prefixes if still no match
+                if not name_match:
+                    for length in range(MIN_NAME_MATCH_LENGTH, min(len(last_normalized) + 1, 7)):
+                        name_prefix = last_normalized[:length]
+                        if name_prefix == local_normalized or name_prefix in local_normalized:
+                            name_match = True
+                            break
         
         if not name_match:
             rejection_reason = {

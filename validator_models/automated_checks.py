@@ -1482,7 +1482,7 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     # 5 variations - try multiple approaches to find the exact LinkedIn profile
     # Mix of quoted (exact) and unquoted (broader) searches
     query_variations = [
-        f'"{linkedin_url}"',                                  # 1. Exact URL in quotes (most specific)
+        f"{linkedin_url}",                                  # 1. Exact URL in quotes (most specific)
         f"{full_name} linkedin {company}",                    # 2. Name + LinkedIn + company
         f"{full_name} linkedin",                              # 3. Name + LinkedIn (broader)
         f"site:linkedin.com/in {full_name}",                  # 4. Site-restricted search

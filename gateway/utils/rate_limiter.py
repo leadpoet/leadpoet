@@ -38,7 +38,7 @@ def _get_supabase():
     return _supabase_client
 
 # In-memory rate limit cache (fast lookups)
-# Structure: {miner_hotkey: {submissions: int, rejections: int, reset_at: datetime}}
+# Structure: {miner_hotkey: {submissions: int, rejections: int, reset_at: datetime, last_submission_time: datetime}}
 # Cache is loaded from Supabase on first use, then kept in sync
 _rate_limit_cache: Dict[str, Dict] = {}
 _cache_lock = threading.Lock()
@@ -48,6 +48,7 @@ _cache_loaded = False  # Track if we've loaded from Supabase yet
 # Production limits to maintain lead quality and prevent spam
 MAX_SUBMISSIONS_PER_DAY = 10
 MAX_REJECTIONS_PER_DAY = 8
+MIN_SECONDS_BETWEEN_SUBMISSIONS = 30  # Cooldown between submissions (anti-spam)
 
 # EST timezone offset (UTC-5, or UTC-4 during DST)
 # For simplicity, we'll use UTC-5 (EST) year-round
@@ -96,10 +97,12 @@ def _load_cache_from_supabase():
         if result.data:
             # Populate cache from database
             for row in result.data:
+                last_sub = row.get("last_submission_time")
                 _rate_limit_cache[row["miner_hotkey"]] = {
                     "submissions": row["submissions"],
                     "rejections": row["rejections"],
-                    "reset_at": datetime.fromisoformat(row["reset_at"].replace("Z", "+00:00"))
+                    "reset_at": datetime.fromisoformat(row["reset_at"].replace("Z", "+00:00")),
+                    "last_submission_time": datetime.fromisoformat(last_sub.replace("Z", "+00:00")) if last_sub else None
                 }
             
             print(f"✅ Loaded {len(result.data)} miner rate limits from Supabase")
@@ -129,6 +132,7 @@ async def _sync_to_supabase_async(miner_hotkey: str, entry: Dict):
         supabase = _get_supabase()
         
         # Upsert to Supabase (insert or update)
+        last_sub_time = entry.get("last_submission_time")
         supabase.table("miner_rate_limits").upsert({
             "miner_hotkey": miner_hotkey,
             "submissions": entry["submissions"],
@@ -136,6 +140,7 @@ async def _sync_to_supabase_async(miner_hotkey: str, entry: Dict):
             "max_submissions": MAX_SUBMISSIONS_PER_DAY,
             "max_rejections": MAX_REJECTIONS_PER_DAY,
             "reset_at": entry["reset_at"].isoformat(),
+            "last_submission_time": last_sub_time.isoformat() if last_sub_time else None,
             "last_updated": datetime.now(timezone.utc).isoformat()
         }).execute()
         
@@ -172,7 +177,8 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
             _rate_limit_cache[miner_hotkey] = {
                 "submissions": 0,
                 "rejections": 0,
-                "reset_at": get_next_midnight_est()
+                "reset_at": get_next_midnight_est(),
+                "last_submission_time": None
             }
         
         entry = _rate_limit_cache[miner_hotkey]
@@ -183,6 +189,27 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
             entry["submissions"] = 0
             entry["rejections"] = 0
             entry["reset_at"] = get_next_midnight_est()
+        
+        # Check cooldown (anti-spam: minimum time between submissions)
+        last_time = entry.get("last_submission_time")
+        if last_time is not None:
+            seconds_since_last = (now_utc - last_time).total_seconds()
+            if seconds_since_last < MIN_SECONDS_BETWEEN_SUBMISSIONS:
+                wait_seconds = int(MIN_SECONDS_BETWEEN_SUBMISSIONS - seconds_since_last)
+                return (
+                    False,
+                    f"Please wait {wait_seconds} seconds before submitting another lead (anti-spam cooldown).",
+                    {
+                        "submissions": entry["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": entry["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": entry["reset_at"].isoformat(),
+                        "limit_type": "cooldown",
+                        "cooldown_seconds": MIN_SECONDS_BETWEEN_SUBMISSIONS,
+                        "wait_seconds": wait_seconds
+                    }
+                )
         
         # Check submission limit
         if entry["submissions"] >= MAX_SUBMISSIONS_PER_DAY:
@@ -258,7 +285,8 @@ def increment_submission(miner_hotkey: str, success: bool) -> Dict:
             _rate_limit_cache[miner_hotkey] = {
                 "submissions": 0,
                 "rejections": 0,
-                "reset_at": get_next_midnight_est()
+                "reset_at": get_next_midnight_est(),
+                "last_submission_time": None
             }
         
         entry = _rate_limit_cache[miner_hotkey]
@@ -273,6 +301,9 @@ def increment_submission(miner_hotkey: str, success: bool) -> Dict:
         entry["submissions"] += 1
         if not success:
             entry["rejections"] += 1
+        
+        # Record last submission time (for cooldown check)
+        entry["last_submission_time"] = now_utc
         
         # Sync to Supabase (async, non-blocking)
         # Fire-and-forget - don't wait for DB write

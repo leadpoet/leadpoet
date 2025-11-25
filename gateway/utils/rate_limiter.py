@@ -245,10 +245,12 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
                 }
             )
         
-        # CRITICAL: Update last_submission_time IMMEDIATELY when check passes
-        # This prevents race condition where multiple requests slip through
-        # before increment_submission() is called at request end
-        entry["last_submission_time"] = now_utc
+        # NOTE: last_submission_time is updated in increment_submission() AFTER successful submission
+        # We do NOT update it here because:
+        # 1. /presign calls check_rate_limit() first
+        # 2. Then /submit calls check_rate_limit() again
+        # 3. If we set the time here, /submit would be blocked after /presign succeeds!
+        # The 30-second cooldown is enforced AFTER a lead is fully submitted.
         
         # Allowed - return current stats
         return (

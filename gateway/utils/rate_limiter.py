@@ -425,3 +425,208 @@ def get_all_rate_limit_stats() -> Dict[str, Dict]:
             for hotkey, entry in _rate_limit_cache.items()
         }
 
+
+# ============================================================
+# ATOMIC RATE LIMITING (Fixes race condition)
+# ============================================================
+# These functions atomically check AND reserve/update counters
+# to prevent the race condition where multiple simultaneous
+# requests all pass check_rate_limit() before any increment.
+# ============================================================
+
+def reserve_submission_slot(miner_hotkey: str) -> Tuple[bool, str, Dict]:
+    """
+    ATOMICALLY check rate limits AND reserve a submission slot.
+    
+    This fixes the race condition in the original check_rate_limit() + increment_submission()
+    pattern where multiple simultaneous requests could all pass the check before any incremented.
+    
+    If allowed:
+      - Increments submissions counter IMMEDIATELY (atomically)
+      - Sets last_submission_time (starts cooldown)
+      - Syncs to Supabase
+      - Returns (True, "", stats)
+    
+    If not allowed:
+      - Does NOT increment anything
+      - Returns (False, reason, stats)
+    
+    Args:
+        miner_hotkey: Miner's SS58 address
+        
+    Returns:
+        Tuple[bool, str, Dict]: (allowed, reason, stats)
+    
+    Usage in /submit endpoint:
+        allowed, reason, stats = reserve_submission_slot(hotkey)
+        if not allowed:
+            return 429 error
+        # Process submission...
+        if failed:
+            mark_submission_failed(hotkey)  # Increment rejections
+        # If success: slot already consumed, nothing more to do
+    """
+    with _cache_lock:
+        # Load cache from Supabase on first use
+        if not _cache_loaded:
+            _load_cache_from_supabase()
+        
+        now_utc = datetime.now(timezone.utc)
+        
+        # Get or create rate limit entry
+        if miner_hotkey not in _rate_limit_cache:
+            _rate_limit_cache[miner_hotkey] = {
+                "submissions": 0,
+                "rejections": 0,
+                "reset_at": get_next_midnight_est(),
+                "last_submission_time": None
+            }
+        
+        entry = _rate_limit_cache[miner_hotkey]
+        
+        # Check if reset time has passed
+        if now_utc >= entry["reset_at"]:
+            # Reset counters
+            entry["submissions"] = 0
+            entry["rejections"] = 0
+            entry["reset_at"] = get_next_midnight_est()
+        
+        # Check cooldown (anti-spam: minimum time between submissions)
+        last_time = entry.get("last_submission_time")
+        if last_time is not None:
+            seconds_since_last = (now_utc - last_time).total_seconds()
+            if seconds_since_last < MIN_SECONDS_BETWEEN_SUBMISSIONS:
+                wait_seconds = int(MIN_SECONDS_BETWEEN_SUBMISSIONS - seconds_since_last)
+                return (
+                    False,
+                    f"Please wait {wait_seconds} seconds before submitting another lead (anti-spam cooldown).",
+                    {
+                        "submissions": entry["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": entry["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": entry["reset_at"].isoformat(),
+                        "limit_type": "cooldown",
+                        "cooldown_seconds": MIN_SECONDS_BETWEEN_SUBMISSIONS,
+                        "wait_seconds": wait_seconds
+                    }
+                )
+        
+        # Check submission limit
+        if entry["submissions"] >= MAX_SUBMISSIONS_PER_DAY:
+            time_until_reset = entry["reset_at"] - now_utc
+            hours_left = int(time_until_reset.total_seconds() / 3600)
+            return (
+                False,
+                f"Daily submission limit reached ({MAX_SUBMISSIONS_PER_DAY}/day). Resets in {hours_left}h at midnight EST.",
+                {
+                    "submissions": entry["submissions"],
+                    "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                    "rejections": entry["rejections"],
+                    "max_rejections": MAX_REJECTIONS_PER_DAY,
+                    "reset_at": entry["reset_at"].isoformat(),
+                    "limit_type": "submissions"
+                }
+            )
+        
+        # Check rejection limit
+        if entry["rejections"] >= MAX_REJECTIONS_PER_DAY:
+            time_until_reset = entry["reset_at"] - now_utc
+            hours_left = int(time_until_reset.total_seconds() / 3600)
+            return (
+                False,
+                f"Daily rejection limit reached ({MAX_REJECTIONS_PER_DAY}/day). Resets in {hours_left}h at midnight EST.",
+                {
+                    "submissions": entry["submissions"],
+                    "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                    "rejections": entry["rejections"],
+                    "max_rejections": MAX_REJECTIONS_PER_DAY,
+                    "reset_at": entry["reset_at"].isoformat(),
+                    "limit_type": "rejections"
+                }
+            )
+        
+        # ============================================================
+        # ATOMIC RESERVATION: Increment submissions counter NOW
+        # ============================================================
+        # This is the key fix: we increment INSIDE the lock, before
+        # releasing it. Any other request that arrives will see the
+        # updated counter and may be blocked.
+        entry["submissions"] += 1
+        entry["last_submission_time"] = now_utc
+        
+        # Prepare stats to return
+        stats = {
+            "submissions": entry["submissions"],
+            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+            "rejections": entry["rejections"],
+            "max_rejections": MAX_REJECTIONS_PER_DAY,
+            "reset_at": entry["reset_at"].isoformat()
+        }
+        
+        # Sync to Supabase (async, non-blocking)
+        # Fire-and-forget - don't wait for DB write
+        try:
+            asyncio.create_task(_sync_to_supabase_async(miner_hotkey, entry))
+        except RuntimeError:
+            # No event loop running - sync will happen on next update
+            print(f"⚠️  No event loop - Supabase sync deferred for {miner_hotkey[:10]}...")
+        
+        return (True, "", stats)
+
+
+def mark_submission_failed(miner_hotkey: str) -> Dict:
+    """
+    Mark a reserved submission slot as failed (increment rejections).
+    
+    Called when a submission that was reserved via reserve_submission_slot()
+    fails during processing. This increments the rejections counter.
+    
+    NOTE: The submissions counter was already incremented in reserve_submission_slot().
+    This function ONLY increments rejections.
+    
+    Args:
+        miner_hotkey: Miner's SS58 address
+        
+    Returns:
+        Dict: Updated stats {submissions, rejections, reset_at}
+    """
+    with _cache_lock:
+        now_utc = datetime.now(timezone.utc)
+        
+        # Load cache from Supabase on first use (should already be loaded)
+        if not _cache_loaded:
+            _load_cache_from_supabase()
+        
+        # Entry should exist (reserved earlier), but be defensive
+        if miner_hotkey not in _rate_limit_cache:
+            _rate_limit_cache[miner_hotkey] = {
+                "submissions": 1,  # Already had one submission (the failed one)
+                "rejections": 0,
+                "reset_at": get_next_midnight_est(),
+                "last_submission_time": now_utc
+            }
+        
+        entry = _rate_limit_cache[miner_hotkey]
+        
+        # Check if reset time has passed
+        if now_utc >= entry["reset_at"]:
+            entry["submissions"] = 1  # The current failed one
+            entry["rejections"] = 0
+            entry["reset_at"] = get_next_midnight_est()
+        
+        # Increment ONLY rejections (submissions was already incremented in reserve_submission_slot)
+        entry["rejections"] += 1
+        
+        # Sync to Supabase (async, non-blocking)
+        try:
+            asyncio.create_task(_sync_to_supabase_async(miner_hotkey, entry))
+        except RuntimeError:
+            print(f"⚠️  No event loop - Supabase sync deferred for {miner_hotkey[:10]}...")
+        
+        return {
+            "submissions": entry["submissions"],
+            "rejections": entry["rejections"],
+            "reset_at": entry["reset_at"].isoformat()
+        }
+

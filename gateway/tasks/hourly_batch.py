@@ -325,10 +325,9 @@ async def hourly_batch_task():
             import traceback
             traceback.print_exc()
         
-        # Calculate time until next hour boundary (top of the hour)
-        now = datetime.utcnow()
-        next_batch_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        wait_seconds = int((next_batch_time - now).total_seconds())
+        # Wait for BATCH_INTERVAL before next batch
+        wait_seconds = BATCH_INTERVAL
+        next_batch_time = datetime.utcnow() + timedelta(seconds=BATCH_INTERVAL)
         
         print(f"\n⏭️  Next batch: {next_batch_time.strftime('%Y-%m-%d %H:%M:%S')} UTC ({wait_seconds/60:.1f} minutes)")
         

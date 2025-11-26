@@ -1420,7 +1420,7 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
 
 # Stage 4: LinkedIn/GSE Validation
 
-async def _ddg_search(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+async def _ddg_search(query: str, max_results: int = 10, max_retries: int = 3) -> List[Dict[str, str]]:
     """
     Perform DuckDuckGo search using the ddgs library.
     Returns GSE-compatible results: [{title, link, snippet}]
@@ -1428,33 +1428,42 @@ async def _ddg_search(query: str, max_results: int = 10) -> List[Dict[str, str]]
     Works on headless servers (VPS) - no GUI required.
     The ddgs library handles DDG's API complexity internally.
     
+    Retries up to 3 times on API/request failure before raising exception.
+    Raises exception on persistent failure (triggers GSE fallback).
+    
     Requires: pip install ddgs
     """
     if not DDGS_AVAILABLE:
-        print(f"         ⚠️ ddgs library not available - install with: pip install ddgs")
-        return []
+        raise Exception("ddgs library not available - install with: pip install ddgs")
     
-    try:
-        # Run synchronous ddgs in thread to avoid blocking
-        def do_search():
-            return DDGS().text(query, max_results=max_results)
-        
-        results_raw = await asyncio.to_thread(do_search)
-        
-        # Convert to GSE-compatible format
-        results = []
-        for r in results_raw:
-            results.append({
-                "title": r.get("title", ""),
-                "link": r.get("href", ""),
-                "snippet": r.get("body", "")
-            })
-        
-        return results
-        
-    except Exception as e:
-        print(f"         ⚠️ DDG search error: {str(e)}")
-        return []
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Run synchronous ddgs in thread to avoid blocking
+            def do_search():
+                return DDGS().text(query, max_results=max_results)
+            
+            results_raw = await asyncio.to_thread(do_search)
+            
+            # Convert to GSE-compatible format
+            results = []
+            for r in results_raw:
+                results.append({
+                    "title": r.get("title", ""),
+                    "link": r.get("href", ""),
+                    "snippet": r.get("body", "")
+                })
+            
+            return results
+            
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                print(f"         ⚠️ DDG API error (attempt {attempt}/{max_retries}): {str(e)}, retrying...")
+                await asyncio.sleep(2)  # Wait 2 seconds before retry
+            else:
+                print(f"         ❌ DDG API failed after {max_retries} attempts: {str(e)}")
+                raise Exception(f"DDG API failed after {max_retries} retries: {str(last_error)}")
 
 async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> List[dict]:
     """
@@ -1492,6 +1501,9 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     
     # Remove None values
     query_variations = [q for q in query_variations if q]
+    
+    # Track API errors to distinguish "no match" from "API failure"
+    api_errors = []
     
     print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile (DuckDuckGo, then LLM verify)...")
     
@@ -1626,10 +1638,17 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
                 print(f"         ❌ No results with variation {variation_idx}")
         
         except Exception as e:
-            print(f"         ⚠️ DDG search error: {str(e)}")
+            # API/request error - try next variation, but track that API failed
+            print(f"         ❌ DDG API error: {str(e)}")
+            api_errors.append(str(e))
             continue
     
-    print(f"   ❌ DDG: No results found after trying {len(query_variations)} variations")
+    # If ALL variations had API errors → raise exception (triggers GSE fallback)
+    if len(api_errors) == len(query_variations):
+        raise Exception(f"DDG API failed for all {len(query_variations)} variations: {api_errors[0]}")
+    
+    # DDG worked for at least one variation but no URL match → return empty (NO GSE fallback)
+    print(f"   ❌ DDG: No matching profile found after trying {len(query_variations)} variations")
     return []
 
 async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> List[dict]:
@@ -2064,15 +2083,14 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
         print(f"   🔍 Stage 4: Verifying LinkedIn profile for {full_name} at {company}")
         
         # DuckDuckGo is FREE and default - no API key needed
-        # GSE is fallback if DDG fails
+        # GSE is fallback ONLY if DDG has API/request error (not URL mismatch)
         if USE_DDG_SEARCH:
             try:
                 search_results = await search_linkedin_ddg(full_name, company, linkedin_url)
-                if not search_results:
-                    print(f"   ⚠️ DDG returned no results, trying GSE fallback...")
-                    search_results = await search_linkedin_gse(full_name, company, linkedin_url)
+                # NO GSE fallback if DDG returns empty (URL mismatch or no results)
+                # This prevents gaming: if DDG can't find the profile, it's likely invalid
             except Exception as e:
-                print(f"   ⚠️ DuckDuckGo search failed: {e}, falling back to GSE")
+                print(f"   ⚠️ DuckDuckGo API/request failed: {e}, falling back to GSE")
                 search_results = await search_linkedin_gse(full_name, company, linkedin_url)
         else:
             search_results = await search_linkedin_gse(full_name, company, linkedin_url)

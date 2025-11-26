@@ -98,11 +98,25 @@ def _load_cache_from_supabase():
             # Populate cache from database
             for row in result.data:
                 last_sub = row.get("last_submission_time")
+                
+                # Parse timestamps flexibly (handles varying decimal precision)
+                def parse_timestamp(ts_str):
+                    if not ts_str:
+                        return None
+                    ts_str = ts_str.replace("Z", "+00:00")
+                    try:
+                        return datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        # Handle non-standard decimal precision (e.g., 5 digits instead of 3/6)
+                        # Strip fractional seconds and parse, then add them back
+                        from dateutil import parser
+                        return parser.isoparse(ts_str)
+                
                 _rate_limit_cache[row["miner_hotkey"]] = {
                     "submissions": row["submissions"],
                     "rejections": row["rejections"],
-                    "reset_at": datetime.fromisoformat(row["reset_at"].replace("Z", "+00:00")),
-                    "last_submission_time": datetime.fromisoformat(last_sub.replace("Z", "+00:00")) if last_sub else None
+                    "reset_at": parse_timestamp(row["reset_at"]),
+                    "last_submission_time": parse_timestamp(last_sub)
                 }
             
             print(f"✅ Loaded {len(result.data)} miner rate limits from Supabase")

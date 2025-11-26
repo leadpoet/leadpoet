@@ -2162,7 +2162,7 @@ async def check_wayback_machine(lead: dict) -> Tuple[float, dict]:
         if not domain:
             return 0, {"checked": False, "reason": "Invalid website format"}
         
-        # Query Wayback Machine CDX API
+        # Query Wayback Machine CDX API (with 3 retries for timeout)
         url = f"https://web.archive.org/cdx/search/cdx"
         params = {
             "url": domain,
@@ -2171,62 +2171,60 @@ async def check_wayback_machine(lead: dict) -> Tuple[float, dict]:
             "fl": "timestamp"
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as response:
-                if response.status != 200:
-                    return 0, {"checked": False, "reason": f"Wayback API error: {response.status}"}
-                
-                data = await response.json()
-                
-                if len(data) <= 1:  # First row is header
-                    return 0, {"checked": True, "snapshots": 0, "reason": "No archive history"}
-                
-                snapshots = len(data) - 1  # Exclude header
-                
-                # Parse timestamps to calculate age
-                timestamps = [row[0] for row in data[1:]]  # Skip header
-                oldest = timestamps[0] if timestamps else None
-                newest = timestamps[-1] if timestamps else None
-                
-                # Calculate age in years
-                if oldest:
-                    oldest_year = int(oldest[:4])
-                    current_year = datetime.now().year
-                    age_years = current_year - oldest_year
-                else:
-                    age_years = 0
-                
-                # Scoring logic (UPDATED: max 6 points for Wayback):
-                # - 0-10 snapshots: 0-1.2 points
-                # - 11-50 snapshots: 1.8-3 points
-                # - 51-200 snapshots: 3.6-4.8 points
-                # - 200+ snapshots: 5.4-6 points
-                # - Bonus: +0.6 for age > 5 years
-                
-                if snapshots < 10:
-                    score = min(1.2, snapshots * 0.12)
-                elif snapshots < 50:
-                    score = 1.8 + (snapshots - 10) * 0.03
-                elif snapshots < 200:
-                    score = 3.6 + (snapshots - 50) * 0.008
-                else:
-                    score = 5.4 + min(0.6, (snapshots - 200) * 0.0006)
-                
-                # Age bonus
-                if age_years >= 5:
-                    score = min(6, score + 0.6)
-                
-                return score, {
-                    "checked": True,
-                    "snapshots": snapshots,
-                    "age_years": age_years,
-                    "oldest_snapshot": oldest,
-                    "newest_snapshot": newest,
-                    "score": score
-                }
-    
-    except asyncio.TimeoutError:
-        return 0, {"checked": False, "reason": "Wayback API timeout"}
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, params=params, timeout=15) as response:
+                        if response.status != 200:
+                            return 0, {"checked": False, "reason": f"Wayback API error: {response.status}"}
+                        
+                        data = await response.json()
+                        
+                        if len(data) <= 1:  # First row is header
+                            return 0, {"checked": True, "snapshots": 0, "reason": "No archive history"}
+                        
+                        snapshots = len(data) - 1  # Exclude header
+                        
+                        # Parse timestamps to calculate age
+                        timestamps = [row[0] for row in data[1:]]  # Skip header
+                        oldest = timestamps[0] if timestamps else None
+                        newest = timestamps[-1] if timestamps else None
+                        
+                        # Calculate age in years
+                        if oldest:
+                            oldest_year = int(oldest[:4])
+                            current_year = datetime.now().year
+                            age_years = current_year - oldest_year
+                        else:
+                            age_years = 0
+                        
+                        # Scoring logic (UPDATED: max 6 points for Wayback):
+                        if snapshots < 10:
+                            score = min(1.2, snapshots * 0.12)
+                        elif snapshots < 50:
+                            score = 1.8 + (snapshots - 10) * 0.03
+                        elif snapshots < 200:
+                            score = 3.6 + (snapshots - 50) * 0.008
+                        else:
+                            score = 5.4 + min(0.6, (snapshots - 200) * 0.0006)
+                        
+                        # Age bonus
+                        if age_years >= 5:
+                            score = min(6, score + 0.6)
+                        
+                        return score, {
+                            "checked": True,
+                            "snapshots": snapshots,
+                            "age_years": age_years,
+                            "oldest_snapshot": oldest,
+                            "newest_snapshot": newest,
+                            "score": score
+                        }
+            except asyncio.TimeoutError:
+                if attempt < 2:
+                    await asyncio.sleep(5)
+                    continue
+                return 0, {"checked": False, "reason": "Wayback API timeout (3 attempts)"}
     except Exception as e:
         return 0, {"checked": False, "reason": f"Wayback check error: {str(e)}"}
 

@@ -2164,17 +2164,33 @@ class Validator(BaseValidatorNeuron):
                     return False
             
             # ═══════════════════════════════════════════════════════════════════
-            # Calculate alpha split with LINEAR EMISSIONS
+            # Filter scores to only include REGISTERED miners
+            # Deregistered miners' points are redistributed to registered miners
+            # (burn % stays fixed based on approval rate formula)
             # ═══════════════════════════════════════════════════════════════════
+            registered_current_scores = {h: p for h, p in miner_scores.items() if h in hotkey_to_uid}
+            registered_rolling_scores = {h: p for h, p in rolling_scores.items() if h in hotkey_to_uid}
+            
+            # Log any deregistered miners
+            deregistered_current = len(miner_scores) - len(registered_current_scores)
+            deregistered_rolling = len(rolling_scores) - len(registered_rolling_scores)
+            if deregistered_current > 0 or deregistered_rolling > 0:
+                print(f"   ⚠️  Miners left subnet (redistributing their share to registered miners):")
+                if deregistered_current > 0:
+                    print(f"      Current epoch: {deregistered_current} deregistered")
+                if deregistered_rolling > 0:
+                    print(f"      Rolling epochs: {deregistered_rolling} deregistered")
+                print()
+            
             print(f"\n    Alpha Split (with linear emissions):")
             print(f"      {total_burn_share*100:.2f}% → UID {UID_ZERO} (Burn)")
-            print(f"      {effective_current_share*100:.2f}% → Current epoch miners ({len(miner_scores)} miners)")
-            print(f"      {effective_rolling_share*100:.2f}% → Rolling {ROLLING_WINDOW} epoch miners ({len(rolling_scores)} miners)")
+            print(f"      {effective_current_share*100:.2f}% → Current epoch miners ({len(registered_current_scores)} registered miners)")
+            print(f"      {effective_rolling_share*100:.2f}% → Rolling {ROLLING_WINDOW} epoch miners ({len(registered_rolling_scores)} registered miners)")
             print()
             
-            # Calculate totals for normalization
-            current_epoch_total = sum(miner_scores.values()) if miner_scores else 0
-            rolling_total = sum(rolling_scores.values()) if rolling_scores else 0
+            # Calculate totals from REGISTERED miners only
+            current_epoch_total = sum(registered_current_scores.values()) if registered_current_scores else 0
+            rolling_total = sum(registered_rolling_scores.values()) if registered_rolling_scores else 0
             
             # Build final UIDs and weights
             uid_weights = {}  # UID -> weight (will aggregate if miner appears in both)
@@ -2182,39 +2198,45 @@ class Validator(BaseValidatorNeuron):
             # UID 0 gets total burn share (base 75% + unused slots)
             uid_weights[UID_ZERO] = total_burn_share
             
-            # Distribute effective current epoch share to miners (by their rep score proportion)
+            # Distribute effective current epoch share to REGISTERED miners (by their rep score proportion)
             print(f"    Current Epoch ({effective_current_share*100:.2f}% effective split):")
             if current_epoch_total > 0 and effective_current_share > 0:
-                for hotkey, points in miner_scores.items():
-                    if hotkey in hotkey_to_uid:
-                        uid = hotkey_to_uid[hotkey]
-                        miner_proportion = points / current_epoch_total
-                        miner_weight = effective_current_share * miner_proportion
-                        
-                        if uid not in uid_weights:
-                            uid_weights[uid] = 0
-                        uid_weights[uid] += miner_weight
-                        
-                        print(f"      UID {uid}: {points}/{current_epoch_total} pts = {miner_weight*100:.2f}%")
+                for hotkey, points in registered_current_scores.items():
+                    uid = hotkey_to_uid[hotkey]
+                    miner_proportion = points / current_epoch_total
+                    miner_weight = effective_current_share * miner_proportion
+                    
+                    if uid not in uid_weights:
+                        uid_weights[uid] = 0
+                    uid_weights[uid] += miner_weight
+                    
+                    print(f"      UID {uid}: {points}/{current_epoch_total} pts = {miner_weight*100:.2f}%")
             else:
-                print(f"      (No current epoch scores or 0% effective share)")
+                print(f"      (No registered miners with current epoch scores)")
+                # Edge case: ALL current epoch miners deregistered - add their share to burn
+                if effective_current_share > 0:
+                    print(f"      → Adding {effective_current_share*100:.2f}% to burn (all current epoch miners left)")
+                    uid_weights[UID_ZERO] += effective_current_share
             
-            # Distribute effective rolling share to miners (by their rep score proportion)
+            # Distribute effective rolling share to REGISTERED miners (by their rep score proportion)
             print(f"\n    Rolling {ROLLING_WINDOW} Epochs ({effective_rolling_share*100:.2f}% effective split):")
             if rolling_total > 0 and effective_rolling_share > 0:
-                for hotkey, points in rolling_scores.items():
-                    if hotkey in hotkey_to_uid:
-                        uid = hotkey_to_uid[hotkey]
-                        miner_proportion = points / rolling_total
-                        miner_weight = effective_rolling_share * miner_proportion
-                        
-                        if uid not in uid_weights:
-                            uid_weights[uid] = 0
-                        uid_weights[uid] += miner_weight
-                        
-                        print(f"      UID {uid}: {points}/{rolling_total} pts = {miner_weight*100:.2f}%")
+                for hotkey, points in registered_rolling_scores.items():
+                    uid = hotkey_to_uid[hotkey]
+                    miner_proportion = points / rolling_total
+                    miner_weight = effective_rolling_share * miner_proportion
+                    
+                    if uid not in uid_weights:
+                        uid_weights[uid] = 0
+                    uid_weights[uid] += miner_weight
+                    
+                    print(f"      UID {uid}: {points}/{rolling_total} pts = {miner_weight*100:.2f}%")
             else:
-                print(f"      (No rolling epoch scores or 0% effective share)")
+                print(f"      (No registered miners with rolling epoch scores)")
+                # Edge case: ALL rolling miners deregistered - add their share to burn
+                if effective_rolling_share > 0:
+                    print(f"      → Adding {effective_rolling_share*100:.2f}% to burn (all rolling miners left)")
+                    uid_weights[UID_ZERO] += effective_rolling_share
             
             # Convert to final lists
             final_uids = list(uid_weights.keys())

@@ -201,13 +201,13 @@ These strict requirements at initial go-live demonstrate our dedication to quali
 
 ### Reward System
 
-Miners earn rewards based on the **quality and validity** of leads they submit during each epoch:
+Miners earn rewards based on the **quality and validity** of leads they submit, with 10% of emissions weighted by current epoch performance and 15% weighted by a rolling 30-epoch history:
 
 **How It Works:**
 1. Each epoch, validators receive ~50 leads to validate
 2. Validators run automated checks on all leads (email verification, domain checks, LinkedIn validation, reputation scoring)
 3. Each validator calculates weights proportionally: miners who submitted **VALID** (approved) leads receive rewards
-4. Rewards are weighted by each lead's reputation score (0-38 points: domain history, regulatory filings, and press coverage)
+4. Rewards are weighted by each lead's reputation score (0-48 points: domain history, regulatory filings, and press coverage)
 5. Formula: `miner_reward ∝ Σ(rep_score for all approved leads from that miner)`
 
 **Example:** If Miner A submitted 3 valid leads (scores: 10, 15, 12) and Miner B submitted 2 valid leads (scores: 8, 20), then:
@@ -257,7 +257,7 @@ To maintain lead quality and prevent spam, we enforce daily submission limits se
 
 **Daily Limits (Reset at 12:00 AM EST):**
 - **10 submission attempts per day** - Counts all submission attempts (including duplicates/invalid)
-- **5 rejections per day** - Includes:
+- **8 rejections per day** - Includes:
   - Duplicate submissions
   - Missing required fields
   - **Validator consensus rejections** - When validator consensus rejects your lead based on quality checks
@@ -395,7 +395,7 @@ Common Errors:
 
 **Lead submission rejected**
 - Check lead meets all requirements (valid email, name-email matching, required fields)
-- Verify you haven't hit daily rate limits (10 submissions, 5 rejections per day)
+- Verify you haven't hit daily rate limits (10 submissions, 8 rejections per day)
 - Check gateway logs on Arweave for specific rejection reasons
 
 **Consensus results not appearing**

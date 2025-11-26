@@ -1840,6 +1840,10 @@ class Validator(BaseValidatorNeuron):
         This provides crash resilience - if validator disconnects before epoch end,
         the latest weights are already saved in history.
         
+        Tracks both:
+        - miner_scores: Sum of rep_scores per miner (for weight distribution)
+        - approved_lead_count: Number of approved leads (for linear emissions scaling)
+        
         Args:
             miner_hotkey: Miner's hotkey who submitted the lead
             rep_score: Reputation score (0-50) from automated checks
@@ -1871,6 +1875,7 @@ class Validator(BaseValidatorNeuron):
                     "start_block": current_epoch * 360,
                     "end_block": (current_epoch + 1) * 360,
                     "miner_scores": {},
+                    "approved_lead_count": 0,  # Track number of approved leads for linear emissions
                     "last_updated": datetime.utcnow().isoformat()
                 }
                 # Save immediately so epoch exists even if all leads are denied
@@ -1887,6 +1892,12 @@ class Validator(BaseValidatorNeuron):
                 epoch_data["miner_scores"][miner_hotkey] = 0
             
             epoch_data["miner_scores"][miner_hotkey] += rep_score
+            
+            # Increment approved lead count for linear emissions
+            if "approved_lead_count" not in epoch_data:
+                epoch_data["approved_lead_count"] = 0
+            epoch_data["approved_lead_count"] += 1
+            
             epoch_data["last_updated"] = datetime.utcnow().isoformat()
             
             # Save updated weights
@@ -1908,14 +1919,20 @@ class Validator(BaseValidatorNeuron):
                 "start_block": current_epoch * 360,
                 "end_block": (current_epoch + 1) * 360,
                 "miner_scores": epoch_data["miner_scores"].copy(),  # Deep copy of scores
+                "approved_lead_count": epoch_data.get("approved_lead_count", 0),  # Track for linear emissions
                 "last_updated": datetime.utcnow().isoformat()
             }
             
-            # Save updated history (accumulates all epochs, never cleared)
+            # Save updated history (accumulates all epochs)
             with open(history_file, 'w') as f:
                 json.dump(history_data, f, indent=2)
             
+            # Prune old epochs to prevent file bloat (keep max 50 epochs)
+            self.prune_history_file(current_epoch, max_epochs=50)
+            
+            approved_count = epoch_data.get("approved_lead_count", 0)
             print(f"      💾 Accumulated {rep_score} points for miner {miner_hotkey[:10]}... (total: {epoch_data['miner_scores'][miner_hotkey]})")
+            print(f"      📊 Epoch approved leads: {approved_count}")
             print(f"      📚 Updated history file (crash-resilient)")
             
         except Exception as e:
@@ -2009,17 +2026,26 @@ class Validator(BaseValidatorNeuron):
             print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
             print(f"{'='*80}")
             print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
-            print(f"   Miners rewarded: {len(miner_scores)}")
-            print(f"   Total points distributed: {sum(miner_scores.values())}")
+            print(f"   Current epoch miners: {len(miner_scores)}")
+            print(f"   Current epoch points: {sum(miner_scores.values())}")
             print()
             
             # ═══════════════════════════════════════════════════════════════════
-            # REVENUE SPLIT: 75% to UID 0, 25% to miners (by rep score)
+            # LINEAR EMISSIONS: Scale rewards by approval rate
+            # - 75% base burn (UID 0)
+            # - 10% max to current epoch miners (scaled by approval rate)
+            # - 15% max to rolling 30 epoch miners (scaled by approval rate)
+            # Unused portions (unapproved slots) are added to burn
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
             EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
-            REVENUE_SHARE = 0.75  # 75% to UID 0
-            MINER_SHARE = 0.25    # 25% to miners
+            BASE_BURN_SHARE = 0.75         # 75% base burn to UID 0
+            MAX_CURRENT_EPOCH_SHARE = 0.10 # 10% max to miners (current epoch)
+            MAX_ROLLING_EPOCH_SHARE = 0.15 # 15% max to miners (rolling 30 epochs)
+            
+            # Configurable: Maximum leads per epoch (used for linear emissions scaling)
+            MAX_LEADS_PER_EPOCH = 50  # TODO: Make this configurable via environment variable
+            ROLLING_WINDOW = 30  # Number of epochs for rolling rewards
             
             # CRITICAL: Verify UID 0 is the expected LeadPoet hotkey (safety check)
             try:
@@ -2034,23 +2060,66 @@ class Validator(BaseValidatorNeuron):
                 print(f"   ❌ Error verifying UID 0 ownership: {e}")
                 return False
             
-            # Convert miner hotkeys to UIDs
-            miner_uids = []
-            miner_points = []
+            # ═══════════════════════════════════════════════════════════════════
+            # Get current epoch lead count for linear emissions
+            # ═══════════════════════════════════════════════════════════════════
+            current_epoch_lead_count = epoch_data.get("approved_lead_count", len(miner_scores))
+            # Fallback: if approved_lead_count not tracked, estimate from number of miners with scores
             
-            for hotkey, total_score in miner_scores.items():
+            # ═══════════════════════════════════════════════════════════════════
+            # Get rolling 30 epoch scores and lead counts for the 15% allocation
+            # ═══════════════════════════════════════════════════════════════════
+            rolling_scores, rolling_lead_count = self.get_rolling_epoch_scores(current_epoch, window=ROLLING_WINDOW)
+            print(f"   Rolling {ROLLING_WINDOW} epoch miners: {len(rolling_scores)}")
+            print(f"   Rolling {ROLLING_WINDOW} epoch points: {sum(rolling_scores.values()) if rolling_scores else 0}")
+            print()
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # LINEAR EMISSIONS: Calculate approval rates and effective shares
+            # ═══════════════════════════════════════════════════════════════════
+            # Current epoch approval rate
+            current_epoch_approval_rate = min(current_epoch_lead_count / MAX_LEADS_PER_EPOCH, 1.0)
+            
+            # Rolling epochs approval rate (max possible = MAX_LEADS_PER_EPOCH * ROLLING_WINDOW)
+            max_rolling_leads = MAX_LEADS_PER_EPOCH * ROLLING_WINDOW
+            rolling_approval_rate = min(rolling_lead_count / max_rolling_leads, 1.0) if max_rolling_leads > 0 else 0
+            
+            # Calculate effective shares (scaled by approval rate)
+            effective_current_share = MAX_CURRENT_EPOCH_SHARE * current_epoch_approval_rate
+            effective_rolling_share = MAX_ROLLING_EPOCH_SHARE * rolling_approval_rate
+            
+            # Calculate additional burn from unapproved slots
+            unused_current_share = MAX_CURRENT_EPOCH_SHARE - effective_current_share
+            unused_rolling_share = MAX_ROLLING_EPOCH_SHARE - effective_rolling_share
+            total_burn_share = BASE_BURN_SHARE + unused_current_share + unused_rolling_share
+            
+            print(f"   📈 LINEAR EMISSIONS SCALING:")
+            print(f"      Current epoch: {current_epoch_lead_count}/{MAX_LEADS_PER_EPOCH} leads = {current_epoch_approval_rate*100:.1f}% approval")
+            print(f"         → {MAX_CURRENT_EPOCH_SHARE*100:.0f}% × {current_epoch_approval_rate*100:.1f}% = {effective_current_share*100:.2f}% to miners")
+            print(f"         → {unused_current_share*100:.2f}% burned (unused slots)")
+            print(f"      Rolling {ROLLING_WINDOW} epochs: {rolling_lead_count}/{max_rolling_leads} leads = {rolling_approval_rate*100:.1f}% approval")
+            print(f"         → {MAX_ROLLING_EPOCH_SHARE*100:.0f}% × {rolling_approval_rate*100:.1f}% = {effective_rolling_share*100:.2f}% to miners")
+            print(f"         → {unused_rolling_share*100:.2f}% burned (unused slots)")
+            print(f"      Total burn: {BASE_BURN_SHARE*100:.0f}% base + {unused_current_share*100:.2f}% + {unused_rolling_share*100:.2f}% = {total_burn_share*100:.2f}%")
+            print()
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # Combine all miner scores (current epoch + rolling) for UID mapping
+            # ═══════════════════════════════════════════════════════════════════
+            all_miner_hotkeys = set(miner_scores.keys()) | set(rolling_scores.keys())
+            
+            # Convert miner hotkeys to UIDs
+            hotkey_to_uid = {}
+            for hotkey in all_miner_hotkeys:
                 try:
                     if hotkey in self.metagraph.hotkeys:
                         uid = self.metagraph.hotkeys.index(hotkey)
-                        miner_uids.append(uid)
-                        miner_points.append(total_score)
-                        print(f"   • Miner UID {uid}: {total_score} points ({hotkey[:10]}...)")
+                        hotkey_to_uid[hotkey] = uid
                 except Exception as e:
                     print(f"   ⚠️  Skipping miner {hotkey[:10]}...: {e}")
             
-            if not miner_uids:
-                # FALLBACK: Miner hotkeys not in metagraph (left subnet or never registered)
-                # Submit burn weights instead
+            if not hotkey_to_uid:
+                # FALLBACK: No valid miner UIDs found - submit burn weights
                 print(f"   ⚠️  No valid miner UIDs found")
                 print(f"      Miners have left the subnet or are not registered")
                 print(f"   🔥 Submitting burn weights instead...")
@@ -2095,36 +2164,71 @@ class Validator(BaseValidatorNeuron):
                     return False
             
             # ═══════════════════════════════════════════════════════════════════
-            # Calculate 75/25 alpha split
+            # Calculate alpha split with LINEAR EMISSIONS
             # ═══════════════════════════════════════════════════════════════════
-            print(f"\n    Alpha Split:")
-            print(f"      75% → UID {UID_ZERO} (LeadPoet)")
-            print(f"      25% → {len(miner_uids)} miners")
+            print(f"\n    Alpha Split (with linear emissions):")
+            print(f"      {total_burn_share*100:.2f}% → UID {UID_ZERO} (Burn)")
+            print(f"      {effective_current_share*100:.2f}% → Current epoch miners ({len(miner_scores)} miners)")
+            print(f"      {effective_rolling_share*100:.2f}% → Rolling {ROLLING_WINDOW} epoch miners ({len(rolling_scores)} miners)")
             print()
             
-            # Calculate total points for normalization
-            total_points = sum(miner_points)
+            # Calculate totals for normalization
+            current_epoch_total = sum(miner_scores.values()) if miner_scores else 0
+            rolling_total = sum(rolling_scores.values()) if rolling_scores else 0
             
-            # Build final UIDs and weights lists
-            final_uids = [UID_ZERO] + miner_uids
-            final_weights = []
+            # Build final UIDs and weights
+            uid_weights = {}  # UID -> weight (will aggregate if miner appears in both)
             
-            # UID 0 gets 75%
-            final_weights.append(REVENUE_SHARE)
+            # UID 0 gets total burn share (base 75% + unused slots)
+            uid_weights[UID_ZERO] = total_burn_share
             
-            # Miners split the remaining 25% by their rep score proportion
-            for uid, points in zip(miner_uids, miner_points):
-                miner_proportion = points / total_points  # Their share of total points
-                miner_weight = MINER_SHARE * miner_proportion  # Their share of the 25%
-                final_weights.append(miner_weight)
-                print(f"      Miner UID {uid}: {points}/{total_points} points = {miner_weight*100:.2f}% of emissions")
+            # Distribute effective current epoch share to miners (by their rep score proportion)
+            print(f"    Current Epoch ({effective_current_share*100:.2f}% effective split):")
+            if current_epoch_total > 0 and effective_current_share > 0:
+                for hotkey, points in miner_scores.items():
+                    if hotkey in hotkey_to_uid:
+                        uid = hotkey_to_uid[hotkey]
+                        miner_proportion = points / current_epoch_total
+                        miner_weight = effective_current_share * miner_proportion
+                        
+                        if uid not in uid_weights:
+                            uid_weights[uid] = 0
+                        uid_weights[uid] += miner_weight
+                        
+                        print(f"      UID {uid}: {points}/{current_epoch_total} pts = {miner_weight*100:.2f}%")
+            else:
+                print(f"      (No current epoch scores or 0% effective share)")
+            
+            # Distribute effective rolling share to miners (by their rep score proportion)
+            print(f"\n    Rolling {ROLLING_WINDOW} Epochs ({effective_rolling_share*100:.2f}% effective split):")
+            if rolling_total > 0 and effective_rolling_share > 0:
+                for hotkey, points in rolling_scores.items():
+                    if hotkey in hotkey_to_uid:
+                        uid = hotkey_to_uid[hotkey]
+                        miner_proportion = points / rolling_total
+                        miner_weight = effective_rolling_share * miner_proportion
+                        
+                        if uid not in uid_weights:
+                            uid_weights[uid] = 0
+                        uid_weights[uid] += miner_weight
+                        
+                        print(f"      UID {uid}: {points}/{rolling_total} pts = {miner_weight*100:.2f}%")
+            else:
+                print(f"      (No rolling epoch scores or 0% effective share)")
+            
+            # Convert to final lists
+            final_uids = list(uid_weights.keys())
+            final_weights = list(uid_weights.values())
             
             print()
             print(f"   Final weights (should sum to 1.0):")
-            print(f"      UID {UID_ZERO}: {final_weights[0]*100:.1f}%")
-            for i, uid in enumerate(miner_uids):
-                print(f"      UID {uid}: {final_weights[i+1]*100:.2f}%")
-            print(f"   Total: {sum(final_weights)*100:.1f}%")
+            for uid in sorted(final_uids):
+                weight = uid_weights[uid]
+                if uid == UID_ZERO:
+                    print(f"      UID {uid} (Burn): {weight*100:.2f}%")
+                else:
+                    print(f"      UID {uid}: {weight*100:.2f}%")
+            print(f"   Total: {sum(final_weights)*100:.2f}%")
             
             # Verify weights sum to 1.0 (with small floating point tolerance)
             weight_sum = sum(final_weights)
@@ -2132,7 +2236,7 @@ class Validator(BaseValidatorNeuron):
                 print(f"   ❌ ERROR: Weights sum to {weight_sum}, not 1.0!")
                 return False
             
-            # Use final_uids and final_weights (not uids/normalized_weights)
+            # Use final_uids and final_weights
             uids = final_uids
             normalized_weights = final_weights
             
@@ -2244,6 +2348,117 @@ class Validator(BaseValidatorNeuron):
             
         except Exception as e:
             bt.logging.error(f"Failed to clear active weights: {e}")
+    
+    def get_rolling_epoch_scores(self, current_epoch: int, window: int = 30) -> tuple:
+        """
+        Get aggregated miner scores and lead counts from the last N epochs (rolling window).
+        
+        This reads from validator_weights_history and sums up scores for each miner
+        across the specified window of epochs.
+        
+        Args:
+            current_epoch: Current epoch number
+            window: Number of past epochs to include (default: 30)
+            
+        Returns:
+            Tuple of:
+            - Dict mapping miner_hotkey -> total_rep_score across rolling window
+            - int: Total approved lead count across rolling window
+        """
+        try:
+            history_file = Path("validator_weights") / "validator_weights_history"
+            
+            if not history_file.exists():
+                print(f"   ℹ️  No history file found - no rolling scores available")
+                return {}, 0
+            
+            with open(history_file, 'r') as f:
+                history_data = json.load(f)
+            
+            # Calculate epoch range for rolling window
+            # Include epochs from (current_epoch - window) to (current_epoch - 1)
+            # We exclude current_epoch since that's handled separately by the 10% allocation
+            start_epoch = current_epoch - window
+            end_epoch = current_epoch - 1
+            
+            rolling_scores = {}
+            rolling_lead_count = 0
+            epochs_included = 0
+            
+            for epoch_str, epoch_data in history_data.items():
+                # Skip non-epoch entries (curators, sourcers_of_curated)
+                if not epoch_str.isdigit():
+                    continue
+                
+                epoch_id = int(epoch_str)
+                
+                # Check if epoch is within rolling window
+                if start_epoch <= epoch_id <= end_epoch:
+                    epochs_included += 1
+                    miner_scores = epoch_data.get("miner_scores", {})
+                    
+                    for hotkey, score in miner_scores.items():
+                        if hotkey not in rolling_scores:
+                            rolling_scores[hotkey] = 0
+                        rolling_scores[hotkey] += score
+                    
+                    # Sum up approved lead counts for linear emissions
+                    rolling_lead_count += epoch_data.get("approved_lead_count", 0)
+            
+            print(f"   📊 Rolling window: epochs {start_epoch}-{end_epoch} ({epochs_included} epochs with data)")
+            print(f"   📊 Rolling scores: {len(rolling_scores)} miners, {rolling_lead_count} total approved leads")
+            
+            return rolling_scores, rolling_lead_count
+            
+        except Exception as e:
+            bt.logging.error(f"Failed to get rolling epoch scores: {e}")
+            return {}, 0
+    
+    def prune_history_file(self, current_epoch: int, max_epochs: int = 50):
+        """
+        Prune old epochs from validator_weights_history to prevent file bloat.
+        
+        Keeps only the most recent max_epochs entries.
+        
+        Args:
+            current_epoch: Current epoch number
+            max_epochs: Maximum epochs to retain (default: 50)
+        """
+        try:
+            history_file = Path("validator_weights") / "validator_weights_history"
+            
+            if not history_file.exists():
+                return
+            
+            with open(history_file, 'r') as f:
+                history_data = json.load(f)
+            
+            # Find all epoch entries (numeric keys)
+            epoch_entries = [k for k in history_data.keys() if k.isdigit()]
+            
+            if len(epoch_entries) <= max_epochs:
+                return  # No pruning needed
+            
+            # Calculate cutoff epoch
+            cutoff_epoch = current_epoch - max_epochs
+            
+            # Remove epochs older than cutoff
+            epochs_removed = 0
+            for epoch_str in epoch_entries:
+                epoch_id = int(epoch_str)
+                if epoch_id < cutoff_epoch:
+                    del history_data[epoch_str]
+                    epochs_removed += 1
+            
+            if epochs_removed > 0:
+                # Save pruned history
+                with open(history_file, 'w') as f:
+                    json.dump(history_data, f, indent=2)
+                
+                print(f"   🗑️  Pruned {epochs_removed} old epochs from history (keeping last {max_epochs})")
+            
+        except Exception as e:
+            bt.logging.error(f"Failed to prune history file: {e}")
     
     def calculate_and_submit_weights_local(self, validation_data: List[Dict]):
         """

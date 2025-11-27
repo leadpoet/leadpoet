@@ -258,6 +258,28 @@ class EpochMonitor:
             # Clean up old epoch cache (keep only current + next)
             cleanup_old_epochs(epoch_id)
             
+            # ════════════════════════════════════════════════════════════════
+            # REFRESH METAGRAPH: Use sync subtensor (HTTP, never goes stale)
+            # This ensures validators registered in new epoch are recognized
+            # ════════════════════════════════════════════════════════════════
+            try:
+                from gateway.config import BITTENSOR_NETUID
+                import gateway.utils.registry as registry_module
+                import time
+                
+                print(f"🔄 Refreshing metagraph for epoch {epoch_id}...")
+                metagraph = await asyncio.to_thread(self.subtensor.metagraph, netuid=BITTENSOR_NETUID)
+                
+                # Update global cache atomically
+                with registry_module._cache_lock:
+                    registry_module._metagraph_cache = metagraph
+                    registry_module._cache_epoch = epoch_id
+                    registry_module._cache_epoch_timestamp = time.time()
+                
+                print(f"✅ Metagraph refreshed: {len(metagraph.hotkeys)} neurons")
+            except Exception as e:
+                print(f"⚠️  Metagraph refresh failed (will use cache): {e}")
+            
             print(f"✅ Epoch {epoch_id} initialized")
             
         except Exception as e:

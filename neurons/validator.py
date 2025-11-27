@@ -1961,91 +1961,71 @@ class Validator(BaseValidatorNeuron):
             if blocks_into_epoch < 345:
                 return False
             
+            # ═══════════════════════════════════════════════════════════════════
+            # Load current epoch data (may be empty if gateway was down)
+            # ═══════════════════════════════════════════════════════════════════
             weights_file = Path("validator_weights") / "validator_weights"
-            if not weights_file.exists():
-                print(f"   ℹ️  No accumulated weights to submit")
-                return False
+            miner_scores = {}
+            current_epoch_lead_count = 0
+            epoch_data = None
             
-            # Load accumulated weights
-            with open(weights_file, 'r') as f:
-                weights_data = json.load(f)
-            
-            # Get current epoch's weights
-            if str(current_epoch) not in weights_data:
-                print(f"   ℹ️  No weights accumulated for epoch {current_epoch}")
-                return False
-            
-            epoch_data = weights_data[str(current_epoch)]
-            miner_scores = epoch_data["miner_scores"]
-            
-            if not miner_scores:
-                # FALLBACK: No approved leads → Submit burn weights to subnet owner
-                print(f"   ⚠️  No approved leads in epoch {current_epoch}")
-                print(f"   🔥 Submitting burn weights to subnet owner instead...")
+            if weights_file.exists():
+                with open(weights_file, 'r') as f:
+                    weights_data = json.load(f)
                 
-                try:
-                    # Get subnet owner's hotkey
-                    owner_hotkey = self.subtensor.query_subtensor(
-                        "SubnetOwnerHotkey",
-                        params=[self.config.netuid]
-                    )
-                    
-                    # Get owner's UID
-                    burn_uid = self.subtensor.get_uid_for_hotkey_on_subnet(
-                        hotkey_ss58=str(owner_hotkey),
-                        netuid=self.config.netuid
-                    )
-                    
-                    print(f"   🔥 Burn UID: {burn_uid} (subnet owner)")
-                    
-                    # Submit burn weights (100% to owner)
-                    result = self.subtensor.set_weights(
-                        netuid=self.config.netuid,
-                        wallet=self.wallet,
-                        uids=[burn_uid],
-                        weights=[1.0],
-                        wait_for_finalization=True
-                    )
-                    
-                    if result:
-                        print(f"   ✅ Burn weights submitted successfully")
-                        
-                        # Clear active weights file (prevents resubmission loop)
-                        self.clear_active_weights(current_epoch)
-                        
-                        return True
-                    else:
-                        print(f"   ❌ Failed to submit burn weights")
-                        return False
-                
-                except Exception as e:
-                    print(f"   ❌ Error submitting burn weights: {e}")
-                    return False
-            
-            print(f"\n{'='*80}")
-            print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
-            print(f"{'='*80}")
-            print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
-            print(f"   Current epoch miners: {len(miner_scores)}")
-            print(f"   Current epoch points: {sum(miner_scores.values())}")
-            print()
+                if str(current_epoch) in weights_data:
+                    epoch_data = weights_data[str(current_epoch)]
+                    miner_scores = epoch_data.get("miner_scores", {})
+                    current_epoch_lead_count = epoch_data.get("approved_lead_count", 0)
             
             # ═══════════════════════════════════════════════════════════════════
-            # LINEAR EMISSIONS: Scale rewards by approval rate
-            # - 75% base burn (UID 0)
-            # - 10% max to current epoch miners (scaled by approval rate)
-            # - 15% max to rolling 30 epoch miners (scaled by approval rate)
-            # Unused portions (unapproved slots) are added to burn
+            # Constants for weight distribution
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
             EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
             BASE_BURN_SHARE = 0.75         # 75% base burn to UID 0
             MAX_CURRENT_EPOCH_SHARE = 0.10 # 10% max to miners (current epoch)
             MAX_ROLLING_EPOCH_SHARE = 0.15 # 15% max to miners (rolling 30 epochs)
+            MAX_LEADS_PER_EPOCH = 50
+            ROLLING_WINDOW = 30
             
-            # Configurable: Maximum leads per epoch (used for linear emissions scaling)
-            MAX_LEADS_PER_EPOCH = 50  # TODO: Make this configurable via environment variable
-            ROLLING_WINDOW = 30  # Number of epochs for rolling rewards
+            # ═══════════════════════════════════════════════════════════════════
+            # Get rolling 30 epoch scores BEFORE checking if we should proceed
+            # This ensures we still distribute rolling 15% even if gateway was down
+            # ═══════════════════════════════════════════════════════════════════
+            rolling_scores, rolling_lead_count = self.get_rolling_epoch_scores(current_epoch, window=ROLLING_WINDOW)
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # Check if we have ANYTHING to submit (current OR rolling)
+            # ═══════════════════════════════════════════════════════════════════
+            if not miner_scores and not rolling_scores:
+                print(f"   ℹ️  No current epoch OR rolling epoch data for epoch {current_epoch}")
+                print(f"   ℹ️  Nothing to submit (this is the first epoch or history was cleared)")
+                return False
+            
+            # Log what we have
+            has_current_epoch = bool(miner_scores)
+            has_rolling_history = bool(rolling_scores)
+            
+            if not has_current_epoch and has_rolling_history:
+                print(f"\n{'='*80}")
+                print(f"⚠️  GATEWAY DOWN FALLBACK: Epoch {current_epoch}")
+                print(f"{'='*80}")
+                print(f"   No leads received for current epoch (gateway was likely down)")
+                print(f"   But rolling history exists: {len(rolling_scores)} miners, {rolling_lead_count} leads")
+                print(f"   → Will distribute rolling 15% to historical miners")
+                print(f"   → Will burn current epoch 10% (no leads to distribute)")
+                print()
+            
+            # Normal case: we have current epoch data
+            if has_current_epoch:
+                print(f"\n{'='*80}")
+                print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
+                print(f"{'='*80}")
+                print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
+                print(f"   Current epoch miners: {len(miner_scores)}")
+                print(f"   Current epoch points: {sum(miner_scores.values())}")
+                print()
             
             # CRITICAL: Verify UID 0 is the expected LeadPoet hotkey (safety check)
             try:
@@ -2059,26 +2039,17 @@ class Validator(BaseValidatorNeuron):
             except Exception as e:
                 print(f"   ❌ Error verifying UID 0 ownership: {e}")
                 return False
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # Get current epoch lead count for linear emissions
-            # ═══════════════════════════════════════════════════════════════════
-            current_epoch_lead_count = epoch_data.get("approved_lead_count", len(miner_scores))
-            # Fallback: if approved_lead_count not tracked, estimate from number of miners with scores
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # Get rolling 30 epoch scores and lead counts for the 15% allocation
-            # ═══════════════════════════════════════════════════════════════════
-            rolling_scores, rolling_lead_count = self.get_rolling_epoch_scores(current_epoch, window=ROLLING_WINDOW)
+            # Log rolling epoch data
             print(f"   Rolling {ROLLING_WINDOW} epoch miners: {len(rolling_scores)}")
             print(f"   Rolling {ROLLING_WINDOW} epoch points: {sum(rolling_scores.values()) if rolling_scores else 0}")
             print()
             
             # ═══════════════════════════════════════════════════════════════════
             # LINEAR EMISSIONS: Calculate approval rates and effective shares
+            # Handle case where current epoch has no leads (gateway was down)
             # ═══════════════════════════════════════════════════════════════════
-            # Current epoch approval rate
-            current_epoch_approval_rate = min(current_epoch_lead_count / MAX_LEADS_PER_EPOCH, 1.0)
+            # Current epoch approval rate (0 if no leads received)
+            current_epoch_approval_rate = min(current_epoch_lead_count / MAX_LEADS_PER_EPOCH, 1.0) if current_epoch_lead_count > 0 else 0.0
             
             # Rolling epochs approval rate (max possible = MAX_LEADS_PER_EPOCH * ROLLING_WINDOW)
             max_rolling_leads = MAX_LEADS_PER_EPOCH * ROLLING_WINDOW
@@ -2283,8 +2254,12 @@ class Validator(BaseValidatorNeuron):
                 print(f"✅ Successfully submitted weights to Bittensor chain")
                 print(f"{'='*80}\n")
                 
-                # Archive weights to history
-                self.archive_weights_to_history(current_epoch, epoch_data)
+                # Archive weights to history (only if we had current epoch data)
+                if epoch_data is not None:
+                    self.archive_weights_to_history(current_epoch, epoch_data)
+                else:
+                    # Gateway was down - just mark in history that we submitted rolling-only weights
+                    print(f"   📚 Submitted rolling-only weights (no current epoch leads received)")
                 
                 # Clear active weights file (ready for next epoch)
                 self.clear_active_weights(current_epoch)

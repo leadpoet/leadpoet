@@ -260,25 +260,58 @@ class EpochMonitor:
             
             # ════════════════════════════════════════════════════════════════
             # REFRESH METAGRAPH: Use sync subtensor (HTTP, never goes stale)
+            # 3 retries with 90s timeout each - ONLY for epoch transitions
             # This ensures validators registered in new epoch are recognized
             # ════════════════════════════════════════════════════════════════
-            try:
-                from gateway.config import BITTENSOR_NETUID
-                import gateway.utils.registry as registry_module
-                import time
-                
-                print(f"🔄 Refreshing metagraph for epoch {epoch_id}...")
-                metagraph = await asyncio.to_thread(self.subtensor.metagraph, netuid=BITTENSOR_NETUID)
-                
-                # Update global cache atomically
+            from gateway.config import BITTENSOR_NETUID
+            import gateway.utils.registry as registry_module
+            import time
+            
+            max_retries = 3
+            timeout_seconds = 90
+            refresh_success = False
+            
+            for attempt in range(1, max_retries + 1):
+                try:
+                    print(f"🔄 Refreshing metagraph for epoch {epoch_id} (attempt {attempt}/{max_retries}, timeout {timeout_seconds}s)...")
+                    
+                    # Use sync subtensor with timeout (HTTP-based, never goes stale)
+                    metagraph = await asyncio.wait_for(
+                        asyncio.to_thread(self.subtensor.metagraph, netuid=BITTENSOR_NETUID),
+                        timeout=timeout_seconds
+                    )
+                    
+                    # Update global cache atomically
+                    with registry_module._cache_lock:
+                        registry_module._metagraph_cache = metagraph
+                        registry_module._cache_epoch = epoch_id
+                        registry_module._cache_epoch_timestamp = time.time()
+                    
+                    print(f"✅ Metagraph refreshed: {len(metagraph.hotkeys)} neurons")
+                    refresh_success = True
+                    break  # Success - exit retry loop
+                    
+                except asyncio.TimeoutError:
+                    print(f"⚠️  Attempt {attempt}/{max_retries} timed out after {timeout_seconds}s")
+                    if attempt < max_retries:
+                        print(f"   Retrying in 5 seconds...")
+                        await asyncio.sleep(5)
+                except Exception as e:
+                    print(f"⚠️  Attempt {attempt}/{max_retries} failed: {e}")
+                    if attempt < max_retries:
+                        print(f"   Retrying in 5 seconds...")
+                        await asyncio.sleep(5)
+            
+            # CRITICAL: Always update _cache_epoch even if refresh failed
+            # This prevents the lazy refresh in registry.py from trying (it would fail too)
+            if not refresh_success:
+                print(f"❌ All {max_retries} metagraph refresh attempts failed")
+                print(f"   Using cached metagraph from previous epoch")
+                # Update epoch marker to prevent lazy refresh from retrying
                 with registry_module._cache_lock:
-                    registry_module._metagraph_cache = metagraph
                     registry_module._cache_epoch = epoch_id
                     registry_module._cache_epoch_timestamp = time.time()
-                
-                print(f"✅ Metagraph refreshed: {len(metagraph.hotkeys)} neurons")
-            except Exception as e:
-                print(f"⚠️  Metagraph refresh failed (will use cache): {e}")
+                    # Note: _metagraph_cache stays as-is (old epoch's data)
             
             print(f"✅ Epoch {epoch_id} initialized")
             

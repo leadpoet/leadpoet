@@ -2374,39 +2374,6 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.error(f"Failed to update history submission status: {e}")
     
-    def clear_active_weights(self, current_epoch: int):
-        """
-        Clear the active weights file after archiving (ready for next epoch).
-        
-        This removes the submitted epoch from validator_weights, keeping only
-        future epochs if they've started accumulating.
-        
-        Args:
-            current_epoch: Epoch that was just submitted
-        """
-        try:
-            weights_file = Path("validator_weights") / "validator_weights"
-            
-            if not weights_file.exists():
-                return
-            
-            # Load current weights
-            with open(weights_file, 'r') as f:
-                weights_data = json.load(f)
-            
-            # Remove submitted epoch
-            if str(current_epoch) in weights_data:
-                del weights_data[str(current_epoch)]
-            
-            # Save (might be empty for next epoch)
-            with open(weights_file, 'w') as f:
-                json.dump(weights_data, f, indent=2)
-            
-            print(f"   🧹 Cleared epoch {current_epoch} from active weights file")
-            
-        except Exception as e:
-            bt.logging.error(f"Failed to clear active weights: {e}")
-    
     def _clear_old_epochs_from_weights(self, current_epoch: int):
         """
         Clear OLD epochs from validator_weights file at epoch transition.

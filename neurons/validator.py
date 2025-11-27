@@ -1970,6 +1970,7 @@ class Validator(BaseValidatorNeuron):
             
             if self._last_weight_submission_epoch == current_epoch:
                 # Already submitted for this epoch - don't resubmit!
+                # This is the PRIMARY guard against duplicate submissions
                 return True
             
             # ═══════════════════════════════════════════════════════════════════

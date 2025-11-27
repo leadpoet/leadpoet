@@ -23,7 +23,8 @@ from gateway.config import BITTENSOR_NETWORK, BITTENSOR_NETUID
 _metagraph_cache = None
 _cache_epoch = None  # Track which epoch the cache is from
 _cache_epoch_timestamp = None  # Track when we last calculated the epoch
-_cache_lock = threading.Lock()  # Prevent simultaneous fetches
+_cache_lock = threading.Lock()  # For quick cache read/write ONLY (no await inside!)
+_fetch_in_progress = False  # Flag to prevent concurrent fetches (async-safe)
 
 # Epoch duration in seconds (360 blocks × 12 seconds/block = 4320 seconds = 72 minutes)
 EPOCH_DURATION_SECONDS = 360 * 12
@@ -66,13 +67,16 @@ async def get_metagraph_async() -> bt.metagraph:
     3. Thread-safe access prevents simultaneous fetches
     4. Single async subtensor (NO new instances created)
     
+    CRITICAL: Lock is only held for cache read/write, NOT during network fetch!
+    This prevents blocking the async event loop.
+    
     Returns:
         Metagraph object for the configured subnet
     
     Raises:
         Exception: If async_subtensor not injected or unable to fetch metagraph
     """
-    global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp
+    global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp, _fetch_in_progress
     import time
     import asyncio
     
@@ -82,42 +86,60 @@ async def get_metagraph_async() -> bt.metagraph:
             "This should be done in main.py lifespan."
         )
     
-    # Thread-safe cache check and update
+    # ═══════════════════════════════════════════════════════════════════════════
+    # STEP 1: Quick cache check (lock held only for read)
+    # ═══════════════════════════════════════════════════════════════════════════
     with _cache_lock:
         # Fast path: Check if cache is still valid based on time
-        # Only query subtensor if enough time has passed for a potential epoch change
         if _metagraph_cache is not None and _cache_epoch_timestamp is not None:
             time_since_cache = time.time() - _cache_epoch_timestamp
             
             # If less than 72 minutes (one epoch) have passed, cache is definitely still valid
             if time_since_cache < EPOCH_DURATION_SECONDS:
-                # Cache is guaranteed to still be for the current epoch
                 print(f"✅ Using cached metagraph for epoch {_cache_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - {int(time_since_cache)}s old")
                 return _metagraph_cache
         
-        # Slow path: Need to query subtensor to determine current epoch
-        # This only happens:
-        # 1. On first request (no cache)
-        # 2. After 72+ minutes have passed (potential epoch change)
+        # Check if another task is already fetching
+        if _fetch_in_progress:
+            # Another task is fetching - use cache if available, otherwise wait
+            if _metagraph_cache is not None:
+                print(f"⏳ Metagraph fetch in progress - using existing cache for epoch {_cache_epoch}")
+                return _metagraph_cache
+            # No cache and fetch in progress - we'll proceed (rare race condition)
+        
+        # Mark that we're starting a fetch
+        _fetch_in_progress = True
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # STEP 2: Get current epoch (OUTSIDE the lock - this is async!)
+    # ═══════════════════════════════════════════════════════════════════════════
+    try:
         from gateway.utils.epoch import get_current_epoch_id_async
         current_epoch = await get_current_epoch_id_async()
         
-        # Check if we already have a cached metagraph for this epoch
-        if _metagraph_cache is not None and _cache_epoch == current_epoch:
-            # Update timestamp to reset the 72-minute timer
-            _cache_epoch_timestamp = time.time()
-            print(f"✅ Using cached metagraph for epoch {current_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - refreshed timestamp")
-            return _metagraph_cache
+        # Quick check: maybe cache is still valid for this epoch
+        with _cache_lock:
+            if _metagraph_cache is not None and _cache_epoch == current_epoch:
+                _cache_epoch_timestamp = time.time()
+                _fetch_in_progress = False
+                print(f"✅ Using cached metagraph for epoch {current_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - refreshed timestamp")
+                return _metagraph_cache
         
-        # Cache expired (epoch changed) or not set - fetch new metagraph
+        # ═══════════════════════════════════════════════════════════════════════
+        # STEP 3: Fetch new metagraph (OUTSIDE the lock - this is async!)
+        # ═══════════════════════════════════════════════════════════════════════
         max_retries = 3
-        retry_delay = 2  # seconds
+        retry_delay = 2
         last_error = None
+        cached_epoch = None
+        
+        with _cache_lock:
+            cached_epoch = _cache_epoch
         
         for attempt in range(max_retries):
             try:
-                if _cache_epoch is not None and _cache_epoch != current_epoch:
-                    print(f"🔄 Epoch changed: {_cache_epoch} → {current_epoch}")
+                if cached_epoch is not None and cached_epoch != current_epoch:
+                    print(f"🔄 Epoch changed: {cached_epoch} → {current_epoch}")
                     print(f"🔄 Refreshing metagraph for new epoch... (attempt {attempt + 1}/{max_retries})")
                 else:
                     print(f"🔄 Fetching metagraph for epoch {current_epoch}... (attempt {attempt + 1}/{max_retries})")
@@ -127,57 +149,63 @@ async def get_metagraph_async() -> bt.metagraph:
                 # ════════════════════════════════════════════════════════════
                 # CRITICAL: Use injected async subtensor (NO new instance!)
                 # Add 60-second timeout to prevent blocking entire gateway
+                # THIS IS OUTSIDE THE LOCK - async timeouts work correctly!
                 # ════════════════════════════════════════════════════════════
                 metagraph = await asyncio.wait_for(
                     _async_subtensor.metagraph(netuid=BITTENSOR_NETUID),
                     timeout=60.0  # 60s timeout - prevents hanging gateway
                 )
                 
-                # Update cache
-                _metagraph_cache = metagraph
-                _cache_epoch = current_epoch
-                _cache_epoch_timestamp = time.time()  # Record when we cached this epoch
+                # ═══════════════════════════════════════════════════════════
+                # STEP 4: Update cache (lock held only for write)
+                # ═══════════════════════════════════════════════════════════
+                with _cache_lock:
+                    _metagraph_cache = metagraph
+                    _cache_epoch = current_epoch
+                    _cache_epoch_timestamp = time.time()
+                    _fetch_in_progress = False
                 
                 print(f"✅ Metagraph cached for epoch {current_epoch}: {len(metagraph.hotkeys)} neurons registered")
-                
                 return metagraph
             
             except asyncio.TimeoutError:
                 last_error = TimeoutError(f"Metagraph fetch timed out after 60s")
+                print(f"⚠️  Metagraph fetch attempt {attempt + 1}/{max_retries} TIMEOUT (60s)")
                 if attempt < max_retries - 1:
-                    print(f"⚠️  Metagraph fetch attempt {attempt + 1}/{max_retries} TIMEOUT (60s)")
                     print(f"   Bittensor chain might be overloaded - retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    retry_delay *= 2
                     continue
-                # Last attempt timed out - fall through to error handling below
                 
             except Exception as e:
                 last_error = e
+                print(f"⚠️  Metagraph fetch attempt {attempt + 1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
-                    print(f"⚠️  Metagraph fetch attempt {attempt + 1}/{max_retries} failed: {e}")
                     print(f"   Retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    retry_delay *= 2
                     continue
-                # Last attempt failed - fall through to error handling below
         
         # All retries exhausted
         print(f"❌ Error fetching metagraph after {max_retries} attempts: {last_error}")
         
-        # If we have a cache from previous epoch, use it with warning
-        if _metagraph_cache is not None:
-            print(f"⚠️  Using metagraph from previous epoch {_cache_epoch} as fallback")
-            print(f"⚠️  This may not include validators who registered in epoch {current_epoch}")
-            
-            # CRITICAL: Update timestamp to prevent retry spam on every request
-            _cache_epoch_timestamp = time.time()
-            print(f"⚠️  Fallback cache will be used for next 72 minutes (prevents retry spam)")
-            
-            return _metagraph_cache
+        # Use fallback cache
+        with _cache_lock:
+            _fetch_in_progress = False
+            if _metagraph_cache is not None:
+                print(f"⚠️  Using metagraph from previous epoch {_cache_epoch} as fallback")
+                print(f"⚠️  This may not include validators who registered in epoch {current_epoch}")
+                _cache_epoch_timestamp = time.time()
+                print(f"⚠️  Fallback cache will be used for next 72 minutes (prevents retry spam)")
+                return _metagraph_cache
         
-        # No cache available - raise error
         raise Exception(f"Failed to fetch metagraph and no cache available: {last_error}")
+    
+    except Exception as e:
+        # Always clear the fetch flag on any exception
+        with _cache_lock:
+            _fetch_in_progress = False
+        raise
 
 
 def get_metagraph() -> bt.metagraph:

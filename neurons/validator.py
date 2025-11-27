@@ -1997,11 +1997,38 @@ class Validator(BaseValidatorNeuron):
             
             # ═══════════════════════════════════════════════════════════════════
             # Check if we have ANYTHING to submit (current OR rolling)
+            # If both are empty, submit 100% burn weights
             # ═══════════════════════════════════════════════════════════════════
             if not miner_scores and not rolling_scores:
-                print(f"   ℹ️  No current epoch OR rolling epoch data for epoch {current_epoch}")
-                print(f"   ℹ️  Nothing to submit (this is the first epoch or history was cleared)")
-                return False
+                print(f"   ⚠️  No current epoch OR rolling epoch data for epoch {current_epoch}")
+                print(f"   🔥 Submitting 100% burn weights (first epoch or history cleared)...")
+                
+                try:
+                    # Verify UID 0 is correct before burning
+                    actual_uid0_hotkey = self.metagraph.hotkeys[UID_ZERO]
+                    if actual_uid0_hotkey != EXPECTED_UID_ZERO_HOTKEY:
+                        print(f"   ❌ CRITICAL ERROR: UID 0 ownership changed!")
+                        return False
+                    
+                    result = self.subtensor.set_weights(
+                        netuid=self.config.netuid,
+                        wallet=self.wallet,
+                        uids=[UID_ZERO],
+                        weights=[1.0],
+                        wait_for_finalization=True
+                    )
+                    
+                    if result:
+                        print(f"   ✅ 100% burn weights submitted successfully")
+                        self.clear_active_weights(current_epoch)
+                        return True
+                    else:
+                        print(f"   ❌ Failed to submit burn weights")
+                        return False
+                        
+                except Exception as e:
+                    print(f"   ❌ Error submitting burn weights: {e}")
+                    return False
             
             # Log what we have
             has_current_epoch = bool(miner_scores)

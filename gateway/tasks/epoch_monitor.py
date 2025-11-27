@@ -259,13 +259,15 @@ class EpochMonitor:
             cleanup_old_epochs(epoch_id)
             
             # ════════════════════════════════════════════════════════════════
-            # REFRESH METAGRAPH: Use sync subtensor (HTTP, never goes stale)
+            # REFRESH METAGRAPH: Use NEW sync subtensor (HTTP, never goes stale)
             # 3 retries with 90s timeout each - ONLY for epoch transitions
             # This ensures validators registered in new epoch are recognized
+            # CRITICAL: Create NEW subtensor instance to avoid blocking polling loop
             # ════════════════════════════════════════════════════════════════
             from gateway.config import BITTENSOR_NETUID
             import gateway.utils.registry as registry_module
             import time
+            import bittensor as bt
             
             max_retries = 3
             timeout_seconds = 90
@@ -275,9 +277,25 @@ class EpochMonitor:
                 try:
                     print(f"🔄 Refreshing metagraph for epoch {epoch_id} (attempt {attempt}/{max_retries}, timeout {timeout_seconds}s)...")
                     
-                    # Use sync subtensor with timeout (HTTP-based, never goes stale)
+                    # Create NEW subtensor instance for metagraph refresh
+                    # DO NOT use self.subtensor - it's used by polling loop and would cause deadlock
+                    # Explicitly clean up temp_subtensor to prevent memory leaks
+                    def fetch_metagraph():
+                        temp_subtensor = None
+                        try:
+                            temp_subtensor = bt.subtensor(network=self.network)
+                            result = temp_subtensor.metagraph(netuid=BITTENSOR_NETUID)
+                            return result
+                        finally:
+                            # Explicit cleanup to prevent memory leaks
+                            if temp_subtensor is not None:
+                                try:
+                                    del temp_subtensor
+                                except:
+                                    pass
+                    
                     metagraph = await asyncio.wait_for(
-                        asyncio.to_thread(self.subtensor.metagraph, netuid=BITTENSOR_NETUID),
+                        asyncio.to_thread(fetch_metagraph),
                         timeout=timeout_seconds
                     )
                     

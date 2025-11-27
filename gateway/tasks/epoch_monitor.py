@@ -258,6 +258,27 @@ class EpochMonitor:
             # Clean up old epoch cache (keep only current + next)
             cleanup_old_epochs(epoch_id)
             
+            # ════════════════════════════════════════════════════════════════
+            # REFRESH METAGRAPH: Force refresh using existing AsyncSubtensor
+            # - Resets cache timestamp to bypass "fast path" (which skips epoch check)
+            # - Uses existing get_metagraph_async() with 60s timeout, 3 retries, fallback
+            # - Keeps AsyncSubtensor WebSocket alive (we're using it!)
+            # - Non-blocking: runs in background task, doesn't block polling loop
+            # ════════════════════════════════════════════════════════════════
+            import gateway.utils.registry as registry_module
+            
+            # Reset cache timestamp to force the "slow path" (which checks epoch)
+            with registry_module._cache_lock:
+                registry_module._cache_epoch_timestamp = None
+            
+            try:
+                # This uses the injected AsyncSubtensor - keeps WebSocket alive!
+                metagraph = await registry_module.get_metagraph_async()
+                print(f"🔄 Metagraph refreshed for epoch {epoch_id}: {len(metagraph.hotkeys)} neurons")
+            except Exception as e:
+                # Don't crash - registry.py already falls back to cached metagraph
+                print(f"⚠️  Metagraph refresh failed: {e} (using cached metagraph)")
+            
             print(f"✅ Epoch {epoch_id} initialized")
             
         except Exception as e:

@@ -1618,6 +1618,12 @@ class Validator(BaseValidatorNeuron):
             
             print(f"[DEBUG] Processing epoch {current_epoch} for the FIRST TIME")
             
+            # ═══════════════════════════════════════════════════════════════════
+            # EPOCH TRANSITION: Clear old epochs from validator_weights file
+            # This prevents file bloat and ensures clean state for new epoch
+            # ═══════════════════════════════════════════════════════════════════
+            self._clear_old_epochs_from_weights(current_epoch)
+            
             print(f"\n{'='*80}")
             print(f"🔍 EPOCH {current_epoch}: Starting validation workflow")
             print(f"{'='*80}")
@@ -2400,6 +2406,49 @@ class Validator(BaseValidatorNeuron):
             
         except Exception as e:
             bt.logging.error(f"Failed to clear active weights: {e}")
+    
+    def _clear_old_epochs_from_weights(self, current_epoch: int):
+        """
+        Clear OLD epochs from validator_weights file at epoch transition.
+        
+        Called at the START of each new epoch to remove data from previous epochs.
+        This prevents file bloat while keeping current epoch data intact.
+        
+        Args:
+            current_epoch: The NEW epoch we're transitioning to
+        """
+        try:
+            weights_file = Path("validator_weights") / "validator_weights"
+            
+            if not weights_file.exists():
+                return
+            
+            with open(weights_file, 'r') as f:
+                weights_data = json.load(f)
+            
+            # Find all epoch entries (numeric keys)
+            epoch_keys = [k for k in weights_data.keys() if k.isdigit()]
+            
+            if not epoch_keys:
+                return  # No epoch data to clear
+            
+            # Remove all epochs BEFORE the current epoch
+            epochs_removed = 0
+            for epoch_key in epoch_keys:
+                epoch_id = int(epoch_key)
+                if epoch_id < current_epoch:
+                    del weights_data[epoch_key]
+                    epochs_removed += 1
+            
+            if epochs_removed > 0:
+                # Save the cleaned file
+                with open(weights_file, 'w') as f:
+                    json.dump(weights_data, f, indent=2)
+                
+                print(f"   🧹 Epoch transition: Cleared {epochs_removed} old epoch(s) from validator_weights")
+            
+        except Exception as e:
+            bt.logging.error(f"Failed to clear old epochs from weights: {e}")
     
     def get_rolling_epoch_scores(self, current_epoch: int, window: int = 30) -> tuple:
         """

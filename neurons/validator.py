@@ -1962,6 +1962,17 @@ class Validator(BaseValidatorNeuron):
                 return False
             
             # ═══════════════════════════════════════════════════════════════════
+            # CRITICAL: Check if we've already submitted weights for this epoch
+            # Prevents duplicate submissions (which would show 0 leads after clear)
+            # ═══════════════════════════════════════════════════════════════════
+            if not hasattr(self, '_last_weight_submission_epoch'):
+                self._last_weight_submission_epoch = None
+            
+            if self._last_weight_submission_epoch == current_epoch:
+                # Already submitted for this epoch - don't resubmit!
+                return True
+            
+            # ═══════════════════════════════════════════════════════════════════
             # Load current epoch data (may be empty if gateway was down)
             # ═══════════════════════════════════════════════════════════════════
             weights_file = Path("validator_weights") / "validator_weights"
@@ -2280,6 +2291,10 @@ class Validator(BaseValidatorNeuron):
             if result:
                 print(f"✅ Successfully submitted weights to Bittensor chain")
                 print(f"{'='*80}\n")
+                
+                # CRITICAL: Mark this epoch as submitted BEFORE any cleanup
+                # This prevents duplicate submissions if the function is called again
+                self._last_weight_submission_epoch = current_epoch
                 
                 # Archive weights to history (only if we had current epoch data)
                 if epoch_data is not None:

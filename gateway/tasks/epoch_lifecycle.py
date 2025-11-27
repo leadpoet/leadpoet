@@ -850,11 +850,14 @@ async def compute_epoch_consensus(epoch_id: int):
                             
                             if miner_hotkey:
                                 # Increment rejection count for this miner
-                                from gateway.utils.rate_limiter import increment_submission
-                                updated_stats = increment_submission(miner_hotkey, success=False)
+                                # NOTE: Use mark_submission_failed() NOT increment_submission()!
+                                # The submission was already counted in reserve_submission_slot() at /submit time.
+                                # increment_submission() would DOUBLE-COUNT the submission.
+                                from gateway.utils.rate_limiter import mark_submission_failed
+                                updated_stats = mark_submission_failed(miner_hotkey)
                                 
                                 print(f"         ✅ Rejection count incremented for {miner_hotkey[:20]}...")
-                                print(f"            Stats: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/5")
+                                print(f"            Stats: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/8")
                             else:
                                 print(f"         ⚠️  Could not find miner_hotkey in lead_blob")
                         else:

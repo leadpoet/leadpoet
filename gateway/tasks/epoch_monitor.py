@@ -269,6 +269,13 @@ class EpochMonitor:
             import time
             import bittensor as bt
             
+            # CRITICAL: Update _cache_epoch IMMEDIATELY to prevent race condition
+            # This stops registry.py's lazy refresh from triggering while we fetch
+            with registry_module._cache_lock:
+                registry_module._cache_epoch = epoch_id
+                registry_module._cache_epoch_timestamp = time.time()
+            print(f"🔒 Epoch {epoch_id} locked - preventing lazy refresh race condition")
+            
             max_retries = 3
             timeout_seconds = 90
             refresh_success = False

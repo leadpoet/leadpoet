@@ -313,7 +313,7 @@ async def submit_validation(event: ValidationEvent):
         existing_submission = supabase.table("validation_evidence_private") \
             .select("evidence_id") \
             .eq("validator_hotkey", event.actor_hotkey) \
-                .eq("payload->>epoch_id", str(event.payload.epoch_id)) \
+            .eq("epoch_id", event.payload.epoch_id) \
             .limit(1) \
             .execute()
         

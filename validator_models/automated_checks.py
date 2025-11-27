@@ -2488,7 +2488,12 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
         
         # Query for company mentions in last 3 months
         # Format: "company name" sourcelang:eng
-        query = f'"{company}" sourcelang:eng'
+        # NOTE: GDELT requires minimum 5 characters in query, so append "company" for short names
+        search_term = company
+        if len(company) <= 4:
+            search_term = f"{company} company"
+            print(f"      ℹ️  Short name detected, searching: '{search_term}'")
+        query = f'"{search_term}" sourcelang:eng'
         
         async with aiohttp.ClientSession() as session:
             params = {
@@ -2505,6 +2510,19 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
                     return 0, {
                         "checked": False,
                         "reason": f"GDELT API error: HTTP {response.status}"
+                    }
+                
+                # GDELT sometimes returns HTML instead of JSON for short/uncommon company names
+                # Check Content-Type before parsing to avoid json decode errors
+                content_type = response.headers.get("Content-Type", "")
+                if "text/html" in content_type:
+                    # GDELT returned HTML page - treat as no coverage (not an error)
+                    print(f"      ⚠️  GDELT returned HTML instead of JSON (no articles for '{company}')")
+                    return 0, {
+                        "checked": True,
+                        "press_mentions": 0,
+                        "trusted_mentions": 0,
+                        "reason": f"No GDELT coverage found for {company}"
                     }
                 
                 data = await response.json()

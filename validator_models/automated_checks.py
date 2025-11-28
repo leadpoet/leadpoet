@@ -36,7 +36,8 @@ class EmailVerificationUnavailableError(Exception):
     pass
 
 load_dotenv()
-MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "YOUR_MYEMAILVERIFIER_API_KEY")
+MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "")
+TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 
 # NEW: Stage 4 API keys (Google Search Engine + OpenRouter LLM)
 GSE_CX = os.getenv("GSE_CX", "")
@@ -1228,11 +1229,128 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
         print(f"⚠️ DNSBL check error for {root_domain}: {e}")
         return result
 
-# Stage 3: MyEmailVerifier Check
+# Stage 3: Email Verification (MyEmailVerifier or TrueList fallback)
+
+async def check_truelist_email(lead: dict) -> Tuple[bool, dict]:
+    """
+    Check email validity using TrueList API (fallback when MEV not configured).
+    
+    TrueList API: https://apidocs.truelist.io/#tag/Single-email-validation
+    Only accepts "email_ok" status (equivalent to MEV "Valid").
+    
+    Retry logic: Up to 3 attempts with 10s wait between retries.
+    """
+    email = get_email(lead)
+    if not email:
+        return False, {
+            "stage": "Stage 3: TrueList",
+            "check_name": "check_truelist_email",
+            "message": "No email provided",
+            "failed_fields": ["email"]
+        }
+
+    cache_key = f"truelist:{email}"
+    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["myemailverifier"]):
+        print(f"   💾 Using cached TrueList result for: {email}")
+        return validation_cache[cache_key]
+
+    max_retries = 3
+    retry_delay = 10
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with API_SEMAPHORE:
+                async with aiohttp.ClientSession() as session:
+                    # TrueList single email validation endpoint
+                    # API docs: https://apidocs.truelist.io/#tag/Single-email-validation
+                    url = "https://api.truelist.io/api/v1/verify_inline"
+                    headers = {"Authorization": f"Bearer {TRUELIST_API_KEY}"}
+                    payload = {"email": email}
+                    
+                    if attempt == 1:
+                        print(f"   📞 Calling TrueList API for: {email}")
+                    else:
+                        print(f"   🔄 Retry {attempt}/{max_retries} for: {email}")
+                    
+                    async with session.post(url, headers=headers, json=payload, timeout=30) as response:
+                        if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:
+                            print(f"   🚨 TrueList API error (HTTP {response.status})")
+                            raise EmailVerificationUnavailableError(f"TrueList API unavailable (HTTP {response.status})")
+                        
+                        data = await response.json()
+                        print(f"   📥 TrueList Response: {data}")
+                        
+                        # TrueList returns: {"emails": [{"email_sub_state": "email_ok", ...}]}
+                        emails = data.get("emails", [])
+                        if not emails:
+                            raise Exception("No email results in TrueList response")
+                        
+                        email_data = emails[0]
+                        status = email_data.get("email_sub_state", "unknown")
+                        email_state = email_data.get("email_state", "unknown")
+                        
+                        # Store metadata in lead
+                        lead["email_verifier_status"] = status
+                        lead["email_verifier_disposable"] = status == "disposable"
+                        lead["email_verifier_catch_all"] = status == "accept_all"
+                        lead["email_verifier_provider"] = "truelist"
+                        
+                        # Only accept "email_ok" (equivalent to MEV "Valid")
+                        if status == "email_ok":
+                            result = (True, {})
+                        elif status == "accept_all":
+                            result = (False, {
+                                "stage": "Stage 3: TrueList",
+                                "check_name": "check_truelist_email",
+                                "message": "Email is catch-all/accept-all (instant rejection)",
+                                "failed_fields": ["email"]
+                            })
+                        elif status == "disposable":
+                            result = (False, {
+                                "stage": "Stage 3: TrueList",
+                                "check_name": "check_truelist_email",
+                                "message": "Email is from a disposable provider",
+                                "failed_fields": ["email"]
+                            })
+                        else:
+                            # Reject all other statuses (unknown, invalid, failed_*, etc.)
+                            result = (False, {
+                                "stage": "Stage 3: TrueList",
+                                "check_name": "check_truelist_email",
+                                "message": f"Email status '{status}' (only 'email_ok' accepted)",
+                                "failed_fields": ["email"]
+                            })
+                        
+                        validation_cache[cache_key] = result
+                        return result
+        
+        except EmailVerificationUnavailableError:
+            raise
+        except asyncio.TimeoutError:
+            if attempt < max_retries:
+                print(f"   ⏳ TrueList timed out. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
+                await asyncio.sleep(retry_delay)
+            else:
+                raise EmailVerificationUnavailableError("TrueList API timeout (all retries exhausted)")
+        except aiohttp.ClientError as e:
+            if attempt < max_retries:
+                print(f"   ⏳ Network error. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
+                await asyncio.sleep(retry_delay)
+            else:
+                raise EmailVerificationUnavailableError(f"TrueList API network error: {str(e)}")
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"   ⏳ Unexpected error. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
+                await asyncio.sleep(retry_delay)
+            else:
+                raise EmailVerificationUnavailableError(f"TrueList API error: {str(e)}")
+
 
 async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
     """
     Check email validity using MyEmailVerifier API (with retry logic)
+    
+    FALLBACK: If MYEMAILVERIFIER_API_KEY is not set, uses TrueList API instead.
     
     MyEmailVerifier provides real-time email verification with:
     - Syntax validation
@@ -1247,6 +1365,14 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
     
     API Documentation: https://myemailverifier.com/real-time-email-verification
     """
+    # FALLBACK: Use TrueList if MEV API key not configured
+    if not MYEMAILVERIFIER_API_KEY:
+        if TRUELIST_API_KEY:
+            print(f"   ℹ️  MEV API key not set, using TrueList fallback")
+            return await check_truelist_email(lead)
+        else:
+            raise EmailVerificationUnavailableError("No email verification API key configured (MEV or TrueList)")
+    
     email = get_email(lead)
     if not email:
         return False, {

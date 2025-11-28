@@ -1794,7 +1794,7 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
                 # All attempts exhausted
                 bt.logging.error(f"❌ All 3 attempts failed. Last error: {error_msg}")
                 return None
-        
+            
         except Exception as e:
             # Non-HTTP errors (network timeout, connection error, etc.)
             if attempt < 3:

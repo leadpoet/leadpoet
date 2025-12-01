@@ -24,10 +24,13 @@ API_URL   = os.getenv("LEAD_API", "https://leadpoet-api-511161415764.us-central1
 SUBNET_ID = int(os.getenv("NETUID", "71"))  # Default to mainnet subnet 71
 NETWORK   = os.getenv("SUBTENSOR_NETWORK", "finney")  # Default to mainnet
 
+# ============================================================
+# PUBLIC SUPABASE CREDENTIALS (Read-only access to transparency_log)
+# These are PUBLIC and safe to commit - they only allow READ access
+# to the transparency_log table via Row Level Security (RLS) policies.
+# Miners can use these to query the transparency log for duplicate checks.
+# ============================================================
 SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-SUPABASE_JWT = os.getenv("SUPABASE_JWT")
-
-# Supabase anon key for API routing (public, safe to commit)
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDcwMDUsImV4cCI6MjA2MDQyMzAwNX0.5E0WjAthYDXaCWY6qjzXm2k20EhadWfigak9hleKZk8"
 
 # Create a response object similar to what supabase-py returns
@@ -1991,7 +1994,7 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
         return None
 
 
-def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
+def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
     """
     Get assigned leads for current epoch (validator only).
     
@@ -2000,7 +2003,9 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
         epoch_id: Current epoch ID
         
     Returns:
-        List of 50 lead dicts with full data
+        Tuple of (leads, max_leads_per_epoch):
+        - leads: List of lead dicts with full data (or None if already submitted, [] if timeout)
+        - max_leads_per_epoch: int - Dynamic config from gateway (for linear emissions calculation)
     """
     try:
         # Generate signature for authentication
@@ -2021,6 +2026,7 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
         
         result = response.json()
         leads = result.get("leads", [])
+        max_leads_per_epoch = result.get("max_leads_per_epoch", 50)  # Default to 50 for backwards compatibility
         
         # Check if gateway returned a message (e.g., "already submitted")
         message = result.get("message", "")
@@ -2029,19 +2035,19 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> List[Dict]:
             # Gateway explicitly said why there are no leads
             bt.logging.info(f"ℹ️  Gateway: {message}")
             # Return special marker: None means "already processed, don't retry"
-            return None
+            return (None, max_leads_per_epoch)
         
-        bt.logging.info(f"✅ Fetched {len(leads)} leads for epoch {epoch_id}")
-        return leads
+        bt.logging.info(f"✅ Fetched {len(leads)} leads for epoch {epoch_id} (max_leads_per_epoch={max_leads_per_epoch})")
+        return (leads, max_leads_per_epoch)
         
     except requests.exceptions.Timeout as e:
         # Timeout is common during epoch transitions (gateway processing epoch lifecycle)
         # This is NOT a fatal error - validator will retry automatically
         bt.logging.warning(f"⏳ Gateway timeout fetching leads for epoch {epoch_id} - this is normal during epoch transitions. Validator will retry automatically.")
-        return []  # Return empty list (not None) to indicate "retry later"
+        return ([], 50)  # Return empty list (not None) to indicate "retry later", default max
     except Exception as e:
         bt.logging.error(f"Failed to get epoch leads: {e}")
-        return []  # Return empty list (not None) to indicate "retry later"
+        return ([], 50)  # Return empty list (not None) to indicate "retry later", default max
 
 
 def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_results: List[Dict]) -> bool:

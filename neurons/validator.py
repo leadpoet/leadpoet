@@ -1633,7 +1633,12 @@ class Validator(BaseValidatorNeuron):
             
             print(f"📡 Fetching leads from gateway for epoch {current_epoch}...")
             
-            leads = gateway_get_epoch_leads(self.wallet, current_epoch)
+            # Unpack tuple: (leads, max_leads_per_epoch)
+            leads, max_leads_per_epoch = gateway_get_epoch_leads(self.wallet, current_epoch)
+            
+            # Store max_leads_per_epoch for use in submit_weights_at_epoch_end
+            # This value comes dynamically from the gateway config
+            self._max_leads_per_epoch = max_leads_per_epoch
             
             # Handle different response types:
             # - None = Already submitted (gateway returned explicit message)
@@ -1651,7 +1656,7 @@ class Validator(BaseValidatorNeuron):
                 await asyncio.sleep(10)
                 return
             
-            print(f"[DEBUG] Received {len(leads)} leads from gateway")
+            print(f"[DEBUG] Received {len(leads)} leads from gateway (max_leads_per_epoch={max_leads_per_epoch})")
             
             if not leads:
                 # Empty list = timeout or error (NOT already submitted)
@@ -2004,7 +2009,8 @@ class Validator(BaseValidatorNeuron):
             BASE_BURN_SHARE = 0.75         # 75% base burn to UID 0
             MAX_CURRENT_EPOCH_SHARE = 0.10 # 10% max to miners (current epoch)
             MAX_ROLLING_EPOCH_SHARE = 0.15 # 15% max to miners (rolling 30 epochs)
-            MAX_LEADS_PER_EPOCH = 50
+            # Dynamic MAX_LEADS_PER_EPOCH from gateway (fetched during process_gateway_validation_workflow)
+            MAX_LEADS_PER_EPOCH = getattr(self, '_max_leads_per_epoch', 50)  # Default to 50 for backwards compat
             ROLLING_WINDOW = 30
             
             # ═══════════════════════════════════════════════════════════════════
@@ -2070,6 +2076,7 @@ class Validator(BaseValidatorNeuron):
                 print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
                 print(f"{'='*80}")
                 print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
+                print(f"   MAX_LEADS_PER_EPOCH: {MAX_LEADS_PER_EPOCH} (from gateway config)")
                 print(f"   Current epoch miners: {len(miner_scores)}")
                 print(f"   Current epoch points: {sum(miner_scores.values())}")
                 print()

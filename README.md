@@ -46,7 +46,8 @@ export GSE_CX="your_search_engine_id"                # Custom Search ID
 ```bash
 
 # Email Validation API (REQUIRED)
-export MYEMAILVERIFIER_API_KEY="your_mev_key"        # myemailverifier.com
+# Truelist - Unlimited email validation: https://truelist.io/
+export TRUELIST_API_KEY="your_truelist_key"
 
 # LinkedIn Validation (REQUIRED)
 # Uses DuckDuckGo search by default (FREE, no API key needed)

@@ -191,11 +191,13 @@ async def get_epoch_leads(
         except:
             validator_count = 0
         
+        from gateway.config import MAX_LEADS_PER_EPOCH
         return {
             "epoch_id": epoch_id,
             "leads": cached_leads,
             "queue_root": "cached",  # Queue root not needed for cached response
             "validator_count": validator_count,
+            "max_leads_per_epoch": MAX_LEADS_PER_EPOCH,  # Dynamic config for validators
             "cached": True,  # Indicate this was served from cache
             "timestamp": datetime.utcnow().isoformat()
         }
@@ -298,7 +300,8 @@ async def get_epoch_leads(
                 "epoch_id": epoch_id,
                 "leads": [],
                 "queue_root": queue_root,
-                "validator_count": len(validator_set)
+                "validator_count": len(validator_set),
+                "max_leads_per_epoch": MAX_LEADS_PER_EPOCH  # Dynamic config for validators
             }
         
         print(f"🔍 Step 7: Fetching {len(assigned_lead_ids)} leads from leads_private...")
@@ -396,6 +399,7 @@ async def get_epoch_leads(
         "leads": full_leads,
         "queue_root": queue_root,
         "validator_count": len(validator_set),
+        "max_leads_per_epoch": MAX_LEADS_PER_EPOCH,  # Dynamic config for validators
         "cached": False,  # This response was from DB query, not cache
         "timestamp": datetime.utcnow().isoformat()
     }

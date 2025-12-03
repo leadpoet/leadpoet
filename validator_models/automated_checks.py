@@ -9,6 +9,7 @@ import uuid
 import whois
 import json
 import numpy as np
+import unicodedata
 # from pygod.detector import DOMINANT  # DEPRECATED: Only used in unused collusion_check function
 from datetime import datetime
 from urllib.parse import urlparse
@@ -29,6 +30,16 @@ from Leadpoet.utils.utils_lead_extraction import (
 )
 
 MAX_REP_SCORE = 48  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) + Companies House (10) = 48
+
+def normalize_accents(text: str) -> str:
+    """
+    Remove accents/diacritics from text for name matching.
+    e.g., "José" -> "Jose", "François" -> "Francois"
+    """
+    # Normalize to NFD form (decomposes accented chars into base + combining mark)
+    # Then remove combining marks (category 'Mn')
+    normalized = unicodedata.normalize('NFD', text)
+    return ''.join(char for char in normalized if unicodedata.category(char) != 'Mn')
 
 # Custom exception for API infrastructure failures (should skip lead, not submit)
 class EmailVerificationUnavailableError(Exception):
@@ -1729,13 +1740,21 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
                 first_name = name_parts[0] if name_parts else ""
                 last_name = name_parts[-1] if len(name_parts) > 1 else ""
                 
+                # Normalize accents for matching (José -> Jose, François -> Francois)
+                first_name_normalized = normalize_accents(first_name)
+                last_name_normalized = normalize_accents(last_name)
+                
                 target_person_results = []
                 other_person_results = []
                 
                 for item in profile_headlines:
                     title_lower = item.get("title", "").lower()
-                    # Check if target person's name is in the title
-                    if first_name in title_lower and last_name in title_lower:
+                    # Normalize the title too for accent-insensitive matching
+                    title_normalized = normalize_accents(title_lower)
+                    
+                    # Check if target person's name is in the title (accent-insensitive)
+                    # This handles cases like "Jose Varatojo" matching "José Diogo Varatojo"
+                    if first_name_normalized in title_normalized and last_name_normalized in title_normalized:
                         target_person_results.append(item)
                     else:
                         other_person_results.append(item)

@@ -1754,12 +1754,11 @@ class Validator(BaseValidatorNeuron):
                             print(f"      Failed Fields: {', '.join(failed_fields)}")
                     print("")
                     
-                    # Add 20-second delay between leads (except for the last one)
-                    # CRITICAL: Prevents Spamhaus DNSBL rate limiting (free tier: 10 queries/min)
-                    # With 20s delay: ~2.5 queries/min (very safe margin)
+                    # Add 12-second delay between leads (except for the last one)
+                    # Prevents Spamhaus DNSBL rate limiting
                     if idx < len(leads):
-                        print(f"⏳ Waiting 20 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(20)
+                        print(f"⏳ Waiting 12 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(12)
                     
                 except Exception as e:
                     from validator_models.automated_checks import EmailVerificationUnavailableError
@@ -1780,12 +1779,11 @@ class Validator(BaseValidatorNeuron):
                         print(f"[DEBUG] Lead structure: {lead}")
                         print("")
                     
-                    # Add 20-second delay between leads (except for the last one)
-                    # CRITICAL: Prevents Spamhaus DNSBL rate limiting (free tier: 10 queries/min)
-                    # With 20s delay: ~2.5 queries/min (very safe margin)
+                    # Add 12-second delay between leads (except for the last one)
+                    # Prevents Spamhaus DNSBL rate limiting
                     if idx < len(leads):
-                        print(f"⏳ Waiting 20 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(20)
+                        print(f"⏳ Waiting 12 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(12)
                     continue
             
             # Submit hashed validation results to gateway

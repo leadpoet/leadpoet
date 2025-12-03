@@ -4525,8 +4525,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         }
     
     # Wait before DDG searches
-    print(f"   ⏳ Waiting 5s before Stage 5 DDG searches...")
-    await asyncio.sleep(5)
+    print(f"   ⏳ Waiting 3s before Stage 5 DDG searches...")
+    await asyncio.sleep(3)
     
     # STEP 1: DDG SEARCH FOR ROLE
     print(f"   🔍 DDG: Searching for {full_name}'s role at {company}...")
@@ -4536,8 +4536,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     else:
         print(f"   ⚠️ No role results found")
     
-    print(f"   ⏳ Waiting 5s before region search...")
-    await asyncio.sleep(5)
+    print(f"   ⏳ Waiting 3s before region search...")
+    await asyncio.sleep(3)
     
     # STEP 2: DDG SEARCH FOR REGION
     print(f"   🔍 DDG: Searching for {company} headquarters location...")
@@ -4547,8 +4547,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     else:
         print(f"   ⚠️ No region results found")
     
-    print(f"   ⏳ Waiting 5s before industry search...")
-    await asyncio.sleep(5)
+    print(f"   ⏳ Waiting 3s before industry search...")
+    await asyncio.sleep(3)
     
     # STEP 3: DDG SEARCH FOR INDUSTRY
     print(f"   🔍 DDG: Searching for {company} industry...")

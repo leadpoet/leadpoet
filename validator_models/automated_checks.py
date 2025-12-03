@@ -3932,11 +3932,16 @@ def fuzzy_pre_verification_stage5(
     ddg_region_results: List[Dict],
     ddg_industry_results: List[Dict],
     full_name: str = "",
-    company: str = ""
+    company: str = "",
+    role_only: bool = False
 ) -> Dict:
     """
     Pre-verify ROLE and REGION using fuzzy matching BEFORE sending to LLM.
     INDUSTRY is ALWAYS sent to LLM.
+    
+    Args:
+        role_only: If True, only check role and suppress region/industry messages.
+                   Used for early exit check before region/industry DDG searches.
     """
     result = {
         "role_verified": False,
@@ -4133,7 +4138,7 @@ def fuzzy_pre_verification_stage5(
         result["needs_llm"].append("role")
         print(f"   ⚠️ FUZZY ROLE: No DDG results or no claimed role")
     
-    # REGION ANTI-GAMING CHECK
+    # REGION ANTI-GAMING CHECK (runs even in role_only mode for early exit)
     if claimed_region:
         US_STATES_SET = {
             'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado',
@@ -4164,6 +4169,11 @@ def fuzzy_pre_verification_stage5(
             print(f"      Claimed region contains {len(states_found)} different US states - HARD FAIL")
             print(f"      This lead will FAIL regardless of LLM verification")
             ddg_region_results = None
+    
+    # If role_only mode, skip region DDG-based matching and industry checks
+    # (Anti-gaming check above still runs for early exit detection)
+    if role_only:
+        return result
     
     # REGION FUZZY MATCHING
     if ddg_region_results and claimed_region:
@@ -4536,16 +4546,60 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     else:
         print(f"   ⚠️ No role results found")
     
+    # EARLY EXIT CHECK: Do quick role + region anti-gaming check BEFORE region/industry DDG searches
+    # This saves 6+ seconds and 2 DDG API calls when role is definitively wrong OR region is gaming
+    print(f"   🔍 QUICK CHECK: Verifying role and region anti-gaming before continuing...")
+    quick_result = fuzzy_pre_verification_stage5(
+        claimed_role=claimed_role,
+        claimed_region=claimed_region,  # Pass real region for anti-gaming check
+        claimed_industry="",  # Skip industry check
+        ddg_role_results=role_results,
+        ddg_region_results=[],  # Empty - just checking anti-gaming on claimed_region string
+        ddg_industry_results=[],  # Empty - not checking yet
+        full_name=full_name,
+        company=company,
+        role_only=True  # Skip DDG-based region/industry matching, but anti-gaming still runs
+    )
+    
+    # EARLY EXIT: Role definitively failed - skip region/industry DDG searches entirely
+    if quick_result.get("role_definitive_fail"):
+        print(f"   ❌ EARLY EXIT: Role check failed - SKIPPING region and industry DDG searches")
+        return False, {
+            "stage": "Stage 5: Role/Region/Industry",
+            "check_name": "check_stage5_unified",
+            "message": f"Role FAILED: Found '{quick_result.get('role_extracted')}' but miner claimed '{claimed_role}'",
+            "failed_fields": ["role"],
+            "early_exit": "role_failed_before_region_industry",
+            "extracted_role": quick_result.get("role_extracted"),
+            "claimed_role": claimed_role,
+            "ddg_searches_skipped": ["region", "industry"]
+        }
+    
+    # EARLY EXIT: Region anti-gaming (multiple states) - skip region/industry DDG searches
+    if quick_result.get("region_hard_fail"):
+        print(f"   ❌ EARLY EXIT: Region anti-gaming - SKIPPING region and industry DDG searches")
+        return False, {
+            "stage": "Stage 5: Role/Region/Industry",
+            "check_name": "check_stage5_unified",
+            "message": f"Region FAILED (anti-gaming): {quick_result.get('region_reason')}",
+            "failed_fields": ["region"],
+            "early_exit": "region_anti_gaming_before_ddg",
+            "ddg_searches_skipped": ["region", "industry"]
+        }
+    
     print(f"   ⏳ Waiting 3s before region search...")
     await asyncio.sleep(3)
     
-    # STEP 2: DDG SEARCH FOR REGION
+    # STEP 2: DDG SEARCH FOR REGION (only if role didn't definitively fail)
     print(f"   🔍 DDG: Searching for {company} headquarters location...")
     region_results = await _ddg_search_stage5("region", company=company, region_hint=claimed_region)
     if region_results:
         print(f"   ✅ Found {len(region_results)} region search results")
     else:
         print(f"   ⚠️ No region results found")
+    
+    # Note: Region anti-gaming check already done in quick_result above (before region DDG)
+    # No need to check again here
     
     print(f"   ⏳ Waiting 3s before industry search...")
     await asyncio.sleep(3)
@@ -4558,8 +4612,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     else:
         print(f"   ⚠️ No industry results found")
     
-    # STEP 4: FUZZY PRE-VERIFICATION
-    print(f"   🔍 FUZZY: Attempting pre-verification before LLM...")
+    # STEP 4: FULL FUZZY PRE-VERIFICATION (now with all results)
+    print(f"   🔍 FUZZY: Full pre-verification before LLM...")
     
     fuzzy_result = fuzzy_pre_verification_stage5(
         claimed_role=claimed_role,
@@ -4572,18 +4626,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         company=company
     )
     
-    # EARLY EXIT: Role definitively failed
-    if fuzzy_result.get("role_definitive_fail"):
-        print(f"   ❌ EARLY EXIT: Role check failed - skipping region and industry checks")
-        return False, {
-            "stage": "Stage 5: Role/Region/Industry",
-            "check_name": "check_stage5_unified",
-            "message": f"Role FAILED: Found '{fuzzy_result.get('role_extracted')}' but miner claimed '{claimed_role}'",
-            "failed_fields": ["role"],
-            "early_exit": "role_failed",
-            "extracted_role": fuzzy_result.get("role_extracted"),
-            "claimed_role": claimed_role
-        }
+    # Note: role_definitive_fail already checked above (before region/industry DDG)
+    # so we only check region anti-gaming here
     
     # EARLY EXIT: Region anti-gaming AND role already verified
     if fuzzy_result.get("region_hard_fail") and fuzzy_result.get("role_verified"):

@@ -2322,7 +2322,7 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
                 # This prevents gaming: if DDG can't find the profile, it's likely invalid
             except Exception as e:
                 print(f"   ⚠️ DuckDuckGo API/request failed: {e}, falling back to GSE")
-        search_results = await search_linkedin_gse(full_name, company, linkedin_url)
+                search_results = await search_linkedin_gse(full_name, company, linkedin_url)
                 url_match_exact = False  # GSE doesn't return URL match status
         else:
             search_results = await search_linkedin_gse(full_name, company, linkedin_url)

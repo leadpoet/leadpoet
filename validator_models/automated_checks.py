@@ -1557,51 +1557,79 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
 
 # Stage 4: LinkedIn/GSE Validation
 
-async def _ddg_search(query: str, max_results: int = 10, max_retries: int = 3) -> List[Dict[str, str]]:
+async def _ddg_search(query: str, max_results: int = 10, max_retries: int = 3, require_linkedin: bool = False) -> List[Dict[str, str]]:
     """
-    Perform DuckDuckGo search using the ddgs library.
+    Perform DuckDuckGo search using the ddgs library with backend rotation.
     Returns GSE-compatible results: [{title, link, snippet}]
     
     Works on headless servers (VPS) - no GUI required.
     The ddgs library handles DDG's API complexity internally.
     
-    Retries up to 3 times on API/request failure before raising exception.
-    Raises exception on persistent failure (triggers GSE fallback).
+    Backend rotation: yahoo -> yandex -> google (for reliability)
+    
+    Args:
+        query: Search query
+        max_results: Max results per backend
+        max_retries: Retries per backend
+        require_linkedin: If True, rotates backends until LinkedIn URLs found
     
     Requires: pip install ddgs
     """
     if not DDGS_AVAILABLE:
         raise Exception("ddgs library not available - install with: pip install ddgs")
     
-    last_error = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            # Run synchronous ddgs in thread to avoid blocking
-            # Use Yahoo backend for Stage 4 (same as Stage 5 for consistency)
-            def do_search():
-                return DDGS().text(query, max_results=max_results, backend='yahoo')
-            
-            results_raw = await asyncio.to_thread(do_search)
-            
-            # Convert to GSE-compatible format
-            results = []
-            for r in results_raw:
-                results.append({
-                    "title": r.get("title", ""),
-                    "link": r.get("href", ""),
-                    "snippet": r.get("body", "")
-                })
-            
-            return results
-            
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries:
-                print(f"         ⚠️ DDG API error (attempt {attempt}/{max_retries}): {str(e)}, retrying...")
-                await asyncio.sleep(2)  # Wait 2 seconds before retry
-            else:
-                print(f"         ❌ DDG API failed after {max_retries} attempts: {str(e)}")
-                raise Exception(f"DDG API failed after {max_retries} retries: {str(last_error)}")
+    # Backend rotation for reliability (same as Stage 5)
+    backends = ['yahoo', 'yandex', 'google']
+    all_results = []
+    
+    for backend in backends:
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Run synchronous ddgs in thread to avoid blocking
+                def do_search(b=backend):
+                    return DDGS().text(query, max_results=max_results, backend=b)
+                
+                results_raw = await asyncio.to_thread(do_search)
+                
+                # Convert to GSE-compatible format
+                results = []
+                for r in results_raw:
+                    results.append({
+                        "title": r.get("title", ""),
+                        "link": r.get("href", ""),
+                        "snippet": r.get("body", "")
+                    })
+                
+                # Check if we found LinkedIn URLs (if required)
+                if require_linkedin:
+                    linkedin_found = any('linkedin.com' in r.get('link', '').lower() for r in results)
+                    if linkedin_found:
+                        return results  # Success - found LinkedIn URLs
+                    else:
+                        # No LinkedIn URLs, add to pool and try next backend
+                        all_results.extend(results)
+                        if backend != backends[-1]:  # Not last backend
+                            print(f"         ⚠️ {backend}: No LinkedIn URLs, trying next backend...")
+                            await asyncio.sleep(1)  # Brief pause before next backend
+                        break  # Exit retry loop, try next backend
+                else:
+                    return results  # Not requiring LinkedIn, return immediately
+                
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    print(f"         ⚠️ DDG {backend} error (attempt {attempt}/{max_retries}): {str(e)}, retrying...")
+                    await asyncio.sleep(2)  # Wait 2 seconds before retry
+                else:
+                    print(f"         ⚠️ DDG {backend} failed after {max_retries} attempts, trying next backend...")
+                    if backend == backends[-1]:  # Last backend
+                        print(f"         ❌ DDG API failed on all backends: {str(last_error)}")
+                        raise Exception(f"DDG API failed on all backends: {str(last_error)}")
+                    break  # Try next backend
+    
+    # If we got here with require_linkedin=True, return whatever we found
+    return all_results if all_results else []
 
 async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> Tuple[List[dict], bool]:
     """
@@ -1629,15 +1657,13 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     # Track if URL matched exactly (strong identity proof)
     url_match_exact = False
     
-    # 7 variations - try multiple approaches to find the exact LinkedIn profile
+    # 5 variations - optimized based on success rate analysis (removed redundant site:linkedin.com/in patterns)
     query_variations = [
-        f'"{full_name}" linkedin {company}',                  # 1. Quoted name + company (most specific)
-        f"site:linkedin.com/in {full_name} {company}",        # 2. Site-restricted + company
-        f"{full_name} linkedin {company}",                    # 3. Name + LinkedIn + company
-        f"site:linkedin.com/in {full_name}",                  # 4. Site-restricted (broader)
-        f"{full_name} linkedin",                              # 5. Name + LinkedIn (broader)
-        f'"{full_name}" site:linkedin.com',                   # 6. Quoted name + site
-        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 7. Profile slug directly
+        f'"{full_name}" linkedin {company}',                  # 1. Quoted name + company (most specific, highest success)
+        f"{full_name} linkedin {company}",                    # 2. Name + LinkedIn + company (good fuzzy match)
+        f"{full_name} linkedin",                              # 3. Name + LinkedIn (broader fallback)
+        f'"{full_name}" site:linkedin.com',                   # 4. Quoted name + site (site-specific)
+        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 5. Direct profile slug (essential for URL verification)
     ]
     
     # Remove None values
@@ -1646,7 +1672,7 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     # Track API errors to distinguish "no match" from "API failure"
     api_errors = []
     
-    print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile (DuckDuckGo, then LLM verify)...")
+    print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile (rotating backends: yahoo→yandex→google)...")
     
     for variation_idx, query in enumerate(query_variations, 1):
         # 3 second delay between variations (avoid rate limiting)
@@ -1657,7 +1683,8 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
         print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
         
         try:
-            items = await _ddg_search(query)
+            # Use backend rotation for LinkedIn searches (yahoo -> yandex -> google)
+            items = await _ddg_search(query, require_linkedin=True)
             
             if items:
                 print(f"         ✅ Found {len(items)} result(s) with variation {variation_idx}")
@@ -2295,7 +2322,7 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
                 # This prevents gaming: if DDG can't find the profile, it's likely invalid
             except Exception as e:
                 print(f"   ⚠️ DuckDuckGo API/request failed: {e}, falling back to GSE")
-                search_results = await search_linkedin_gse(full_name, company, linkedin_url)
+        search_results = await search_linkedin_gse(full_name, company, linkedin_url)
                 url_match_exact = False  # GSE doesn't return URL match status
         else:
             search_results = await search_linkedin_gse(full_name, company, linkedin_url)
@@ -2379,54 +2406,54 @@ async def check_wayback_machine(lead: dict) -> Tuple[float, dict]:
         
         for attempt in range(3):
             try:
-                async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession() as session:
                     async with session.get(url, params=params, timeout=15) as response:
-                        if response.status != 200:
-                            return 0, {"checked": False, "reason": f"Wayback API error: {response.status}"}
-                        
-                        data = await response.json()
-                        
-                        if len(data) <= 1:  # First row is header
-                            return 0, {"checked": True, "snapshots": 0, "reason": "No archive history"}
-                        
-                        snapshots = len(data) - 1  # Exclude header
-                        
-                        # Parse timestamps to calculate age
-                        timestamps = [row[0] for row in data[1:]]  # Skip header
-                        oldest = timestamps[0] if timestamps else None
-                        newest = timestamps[-1] if timestamps else None
-                        
-                        # Calculate age in years
-                        if oldest:
-                            oldest_year = int(oldest[:4])
-                            current_year = datetime.now().year
-                            age_years = current_year - oldest_year
-                        else:
-                            age_years = 0
-                        
-                        # Scoring logic (UPDATED: max 6 points for Wayback):
-                        if snapshots < 10:
-                            score = min(1.2, snapshots * 0.12)
-                        elif snapshots < 50:
-                            score = 1.8 + (snapshots - 10) * 0.03
-                        elif snapshots < 200:
-                            score = 3.6 + (snapshots - 50) * 0.008
-                        else:
-                            score = 5.4 + min(0.6, (snapshots - 200) * 0.0006)
-                        
-                        # Age bonus
-                        if age_years >= 5:
-                            score = min(6, score + 0.6)
-                        
-                        return score, {
-                            "checked": True,
-                            "snapshots": snapshots,
-                            "age_years": age_years,
-                            "oldest_snapshot": oldest,
-                            "newest_snapshot": newest,
-                            "score": score
-                        }
-            except asyncio.TimeoutError:
+                if response.status != 200:
+                    return 0, {"checked": False, "reason": f"Wayback API error: {response.status}"}
+                
+                data = await response.json()
+                
+                if len(data) <= 1:  # First row is header
+                    return 0, {"checked": True, "snapshots": 0, "reason": "No archive history"}
+                
+                snapshots = len(data) - 1  # Exclude header
+                
+                # Parse timestamps to calculate age
+                timestamps = [row[0] for row in data[1:]]  # Skip header
+                oldest = timestamps[0] if timestamps else None
+                newest = timestamps[-1] if timestamps else None
+                
+                # Calculate age in years
+                if oldest:
+                    oldest_year = int(oldest[:4])
+                    current_year = datetime.now().year
+                    age_years = current_year - oldest_year
+                else:
+                    age_years = 0
+                
+                # Scoring logic (UPDATED: max 6 points for Wayback):
+                if snapshots < 10:
+                    score = min(1.2, snapshots * 0.12)
+                elif snapshots < 50:
+                    score = 1.8 + (snapshots - 10) * 0.03
+                elif snapshots < 200:
+                    score = 3.6 + (snapshots - 50) * 0.008
+                else:
+                    score = 5.4 + min(0.6, (snapshots - 200) * 0.0006)
+                
+                # Age bonus
+                if age_years >= 5:
+                    score = min(6, score + 0.6)
+                
+                return score, {
+                    "checked": True,
+                    "snapshots": snapshots,
+                    "age_years": age_years,
+                    "oldest_snapshot": oldest,
+                    "newest_snapshot": newest,
+                    "score": score
+                }
+    except asyncio.TimeoutError:
                 if attempt < 2:
                     await asyncio.sleep(5)
                     continue

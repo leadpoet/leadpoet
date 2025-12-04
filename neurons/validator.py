@@ -1759,6 +1759,8 @@ class Validator(BaseValidatorNeuron):
                     if idx < len(leads):
                         print(f"⏳ Waiting 12 seconds before processing next lead... ({idx}/{len(leads)} complete)")
                         await asyncio.sleep(12)
+                        # Check if we should submit weights mid-processing (block 345+)
+                        await self.submit_weights_at_epoch_end()
                     
                 except Exception as e:
                     from validator_models.automated_checks import EmailVerificationUnavailableError
@@ -1784,6 +1786,8 @@ class Validator(BaseValidatorNeuron):
                     if idx < len(leads):
                         print(f"⏳ Waiting 12 seconds before processing next lead... ({idx}/{len(leads)} complete)")
                         await asyncio.sleep(12)
+                        # Check if we should submit weights mid-processing (block 345+)
+                        await self.submit_weights_at_epoch_end()
                     continue
             
             # Submit hashed validation results to gateway

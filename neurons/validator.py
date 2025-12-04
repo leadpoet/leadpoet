@@ -1761,6 +1761,17 @@ class Validator(BaseValidatorNeuron):
                         await asyncio.sleep(12)
                         # Check if we should submit weights mid-processing (block 345+)
                         await self.submit_weights_at_epoch_end()
+                        
+                        # Check if epoch changed - if so, stop processing old epoch's leads
+                        new_block = await self.get_current_block_async()
+                        new_epoch = new_block // 360
+                        if new_epoch > current_epoch:
+                            print(f"\n{'='*80}")
+                            print(f"⚠️  EPOCH CHANGED: {current_epoch} → {new_epoch}")
+                            print(f"   Stopping validation of epoch {current_epoch} leads ({idx}/{len(leads)} complete)")
+                            print(f"   Remaining {len(leads) - idx} leads cannot be submitted (epoch closed)")
+                            print(f"{'='*80}\n")
+                            break  # Exit the lead processing loop
                     
                 except Exception as e:
                     from validator_models.automated_checks import EmailVerificationUnavailableError
@@ -1788,13 +1799,33 @@ class Validator(BaseValidatorNeuron):
                         await asyncio.sleep(12)
                         # Check if we should submit weights mid-processing (block 345+)
                         await self.submit_weights_at_epoch_end()
+                        
+                        # Check if epoch changed - if so, stop processing old epoch's leads
+                        new_block = await self.get_current_block_async()
+                        new_epoch = new_block // 360
+                        if new_epoch > current_epoch:
+                            print(f"\n{'='*80}")
+                            print(f"⚠️  EPOCH CHANGED: {current_epoch} → {new_epoch}")
+                            print(f"   Stopping validation of epoch {current_epoch} leads ({idx}/{len(leads)} complete)")
+                            print(f"   Remaining {len(leads) - idx} leads cannot be submitted (epoch closed)")
+                            print(f"{'='*80}\n")
+                            break  # Exit the lead processing loop
                     continue
             
             # Submit hashed validation results to gateway
             print(f"{'='*80}")
-            print(f"📤 Submitting {len(validation_results)} hashed validations to gateway...")
             
-            if validation_results:
+            # Check if epoch changed before attempting submission
+            submit_block = await self.get_current_block_async()
+            submit_epoch = submit_block // 360
+            
+            if submit_epoch > current_epoch:
+                print(f"⚠️  Epoch changed ({current_epoch} → {submit_epoch}) - skipping hash submission")
+                print(f"   {len(validation_results)} validations for epoch {current_epoch} cannot be submitted")
+                print(f"   (Weights already submitted, epoch will be marked as processed)")
+                success = False  # Mark as failed to skip storing reveals
+            elif validation_results:
+                print(f"📤 Submitting {len(validation_results)} hashed validations to gateway...")
                 success = gateway_submit_validation(self.wallet, current_epoch, validation_results)
                 if success:
                     print(f"✅ Successfully submitted {len(validation_results)} validations for epoch {current_epoch}")

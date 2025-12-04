@@ -4301,15 +4301,42 @@ def _ddg_search_stage5_sync(
             queries = [f'{company} company industry']
         fallback_queries = []
     
-    def ddg_search_with_fallback(ddgs_instance, query, max_results, backends=['yahoo', 'yandex', 'google']):
+    def ddg_search_with_fallback(ddgs_instance, query, max_results, backends=['yahoo', 'yandex', 'google'], require_linkedin=False):
+        """Backend rotation: try each backend until success. For role searches, rotate if no LinkedIn URLs."""
         last_error = None
+        all_backend_results = []
+        
         for backend in backends:
             try:
-                return list(ddgs_instance.text(query, max_results=max_results, backend=backend))
+                results = list(ddgs_instance.text(query, max_results=max_results, backend=backend))
+                
+                # For role searches: check if LinkedIn URLs found, else try next backend
+                if require_linkedin:
+                    linkedin_found = any('linkedin.com' in r.get('href', '').lower() for r in results)
+                    if linkedin_found:
+                        return results  # Success - found LinkedIn URLs
+                    else:
+                        # No LinkedIn URLs, accumulate and try next backend
+                        all_backend_results.extend(results)
+                        if backend != backends[-1]:
+                            print(f"      ⚠️ {backend}: No LinkedIn URLs, trying next backend...")
+                            time.sleep(1)
+                        continue
+                else:
+                    return results  # Not requiring LinkedIn, return immediately
+                    
             except Exception as e:
                 last_error = e
+                if backend != backends[-1]:
+                    print(f"      ⚠️ {backend} error: {e}, trying next backend...")
                 continue
-        raise last_error if last_error else Exception("All backends failed")
+        
+        # Return whatever we accumulated (may be empty or non-LinkedIn results)
+        if all_backend_results:
+            return all_backend_results
+        if last_error:
+            raise last_error
+        return []
     
     all_results = []
     try:
@@ -4322,7 +4349,8 @@ def _ddg_search_stage5_sync(
                     time.sleep(2)
                     
                 try:
-                    results = ddg_search_with_fallback(ddgs, query, max_results)
+                    # For role searches, require LinkedIn URLs (rotate backends if not found)
+                    results = ddg_search_with_fallback(ddgs, query, max_results, require_linkedin=(search_type == "role"))
                     for r in results:
                         all_results.append({
                             "title": r.get("title", ""),
@@ -4420,7 +4448,8 @@ def _ddg_search_stage5_sync(
                         query_num = j + 2
                         print(f"   🔍 FALLBACK{query_num-1}: {query[:50]}...")
                         try:
-                            results = ddg_search_with_fallback(ddgs, query, max_results)
+                            # Fallbacks also require LinkedIn URLs for role searches
+                            results = ddg_search_with_fallback(ddgs, query, max_results, require_linkedin=True)
                             for r in results:
                                 all_results.append({
                                     "title": r.get("title", ""),

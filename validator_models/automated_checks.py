@@ -4837,8 +4837,15 @@ RESPOND WITH JSON ONLY:
                 else:
                     role_match = result.get("role_match", False)
                     extracted_role = result.get("extracted_role", "Not found")
+                    
+                    # IMPORTANT: "Not found" means we couldn't verify, NOT that role is wrong
+                    # Give benefit of the doubt - only fail if we found a DIFFERENT role
+                    if not role_match and extracted_role.lower() in ["not found", "unknown", "n/a", ""]:
+                        print(f"   ⚠️  LLM couldn't find role info - giving benefit of the doubt")
+                        role_match = True  # Pass the role check
+                        extracted_role = f"{claimed_role} (unverified)"
                 
-                # EARLY EXIT: Role failed after LLM
+                # EARLY EXIT: Role failed after LLM (only if we found a DIFFERENT role)
                 if not role_match:
                     print(f"   ❌ EARLY EXIT: Role check failed after LLM - skipping region/industry")
                     return False, {

@@ -1803,9 +1803,9 @@ class Validator(BaseValidatorNeuron):
                     self._pending_reveals[current_epoch] = local_validation_data
                 else:
                     print(f"❌ Failed to submit validations for epoch {current_epoch}")
-                    print(f"   Will retry on next iteration")
-                    # Don't mark as processed - retry next time
-                    return
+                    print(f"   Epoch may have changed - skipping to avoid re-processing")
+                    # Still mark as processed to avoid re-validating 80 leads
+                    # Weights will still be submitted at epoch end
             else:
                 print(f"⚠️  No validation results to submit (all leads failed validation)")
             

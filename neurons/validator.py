@@ -1754,11 +1754,11 @@ class Validator(BaseValidatorNeuron):
                             print(f"      Failed Fields: {', '.join(failed_fields)}")
                     print("")
                     
-                    # Add 12-second delay between leads (except for the last one)
-                    # Prevents Spamhaus DNSBL rate limiting
+                    # Add 10-second delay between leads (except for the last one)
+                    # Prevents Spamhaus DNSBL rate limiting (reduced from 12s to compensate for epoch check latency)
                     if idx < len(leads):
-                        print(f"⏳ Waiting 12 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(12)
+                        print(f"⏳ Waiting 10 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(10)
                         # Check if we should submit weights mid-processing (block 345+)
                         await self.submit_weights_at_epoch_end()
                         
@@ -1792,11 +1792,11 @@ class Validator(BaseValidatorNeuron):
                         print(f"[DEBUG] Lead structure: {lead}")
                         print("")
                     
-                    # Add 12-second delay between leads (except for the last one)
-                    # Prevents Spamhaus DNSBL rate limiting
+                    # Add 10-second delay between leads (except for the last one)
+                    # Prevents Spamhaus DNSBL rate limiting (reduced from 12s to compensate for epoch check latency)
                     if idx < len(leads):
-                        print(f"⏳ Waiting 12 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(12)
+                        print(f"⏳ Waiting 10 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(10)
                         # Check if we should submit weights mid-processing (block 345+)
                         await self.submit_weights_at_epoch_end()
                         

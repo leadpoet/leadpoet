@@ -3789,7 +3789,21 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
         if len(potential_role) > 2 and has_role_keyword(potential_role) and not is_company_name(potential_role):
             return potential_role
     
-    # PATTERN 4: Look for role keywords followed by "at" anywhere
+    # PATTERN 4: Look for compound titles in title (e.g., "President & Co-Founder @ Company")
+    compound_patterns = [
+        r'\b((?:co-?)?founder\s+(?:and|&)\s+(?:ceo|cto|cfo|coo|president|cmo))\s*(?:@|at)',
+        r'\b((?:ceo|cto|cfo|coo|president|cmo)\s+(?:and|&)\s+(?:co-?)?founder)\s*(?:@|at)',
+        r'\b(president\s+(?:and|&)\s+(?:co-?)?founder)\s*(?:@|at)',
+        r'\b((?:co-?)?founder\s+(?:and|&)\s+president)\s*(?:@|at)',
+    ]
+    for pattern in compound_patterns:
+        match = re.search(pattern, original_title, re.IGNORECASE)
+        if match:
+            role = match.group(1).strip()
+            if not is_company_name(role):
+                return role
+    
+    # PATTERN 5: Look for role keywords followed by "at" anywhere
     for kw in role_keywords:
         match = re.search(rf'\b({kw}[^|,@]*?)\s+(?:@|at)\s+', original_title, re.IGNORECASE)
         if match:
@@ -3810,32 +3824,123 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
         if any(g in snippet_clean.lower() for g in garbage_indicators):
             return None
         
+        # HIGH-PRIORITY: Look for compound titles first (e.g., "Founder and CEO", "President & Co-Founder")
+        compound_patterns = [
+            # "Founder and CEO John Smith" or "CEO and Founder John Smith"
+            r'\b((?:co-?)?founder\s+(?:and|&)\s+(?:ceo|cto|cfo|coo|president|cmo))\b',
+            r'\b((?:ceo|cto|cfo|coo|president|cmo)\s+(?:and|&)\s+(?:co-?)?founder)\b',
+            # "President and Co-Founder"
+            r'\b(president\s+(?:and|&)\s+(?:co-?)?founder)\b',
+            r'\b((?:co-?)?founder\s+(?:and|&)\s+president)\b',
+            # "Chief Executive Officer and Founder"
+            r'\b(chief\s+\w+\s+officer\s+(?:and|&)\s+(?:co-?)?founder)\b',
+            r'\b((?:co-?)?founder\s+(?:and|&)\s+chief\s+\w+\s+officer)\b',
+        ]
+        for pattern in compound_patterns:
+            match = re.search(pattern, snippet_clean, re.IGNORECASE)
+            if match:
+                role = match.group(1).strip()
+                if not is_company_name(role):
+                    return role
+        
         snippet_patterns = [
+            # "currently a Chief Technology Officer" - capture full C-suite title
+            r'\b(?:currently\s+(?:a|the|an)\s+)(chief\s+\w+\s+officer)\b',
+            r'\b(?:currently\s+(?:a|the|an)\s+)((?:senior\s+)?vice\s+president[^|,.]{0,30})',
+            # "John is the CEO at Company" or "John serves as Director of..."
             r'(?:is\s+(?:the\s+)?|serves?\s+as\s+(?:the\s+)?|works?\s+as\s+(?:the\s+)?)([^.]+?)\s+(?:at|of|for)\s+',
-            r'(?:current|position|title|role)[:\s]+([^|.\n]+)',
-            r'(?:works? as|serving as|currently)[:\s]+([^|.\n]+)',
+            # "from Founder & CEO, Name" or "by CEO Name" (common in press releases)
+            r'(?:from|by)\s+([A-Za-z\s&]+?(?:' + '|'.join(role_keywords[:15]) + r')[A-Za-z\s&]*?),?\s+[A-Z][a-z]+',
+            # "John, CEO at Company" - common in non-LinkedIn sources
+            r',\s*([A-Za-z\s&]+?(?:' + '|'.join(role_keywords[:20]) + r')[A-Za-z\s&]*?)\s+(?:at|of|for)\s+',
+            # "currently serving as Director"
+            r'(?:works? as|serving as|position)[:\s]+([^|.\n]+)',
+            # Academic: "Associate Professor of X at University"
+            r'\b((?:assistant|associate|full|adjunct|visiting)?\s*professor\s+of\s+[^|,.]+)',
+            # "Name is an Associate Professor"
+            r'\b(?:is\s+an?\s+)((?:assistant|associate|full)?\s*professor[^|,.]{0,30})',
         ]
         for pattern in snippet_patterns:
             match = re.search(pattern, snippet_clean, re.IGNORECASE)
             if match:
                 role = match.group(1).strip()
-                if len(role) > 2 and len(role) < 60:
+                if len(role) > 2 and len(role) < 80:
                     # Reject if starts with common garbage words
                     if role.lower().startswith(('now ', 'the ', 'a ', 'an ', 'this ', 'that ', 'is ', 'was ', 'in ', 'of ', 'at ', 'i ')):
                         continue
                     if is_company_name(role):
                         continue
-                    return role
+                    # Final validation
+                    if _is_valid_role_extraction(role):
+                        return role
         
-        # Look for role keywords in snippet
+        # Look for role keywords in snippet - but try to get compound titles
+        found_roles = []
         for kw in role_keywords:
-            match = re.search(rf'\b({kw}(?:\s+(?:and|&)\s+\w+)?(?:\s+of|\s+at)?)', snippet_clean, re.IGNORECASE)
+            # Match keyword and try to get surrounding context (e.g., "Founder and CEO")
+            match = re.search(rf'\b({kw}(?:\s+(?:and|&)\s+(?:' + '|'.join(role_keywords) + r'))?(?:\s+of|\s+at)?)', snippet_clean, re.IGNORECASE)
             if match:
                 role = match.group(1).strip()
                 if len(role) > 2 and len(role) < 60 and not is_company_name(role):
-                    return role
+                    found_roles.append(role)
+        
+        # Return the longest found role (compound titles are longer)
+        if found_roles:
+            best_role = max(found_roles, key=len)
+            # Final validation
+            if _is_valid_role_extraction(best_role):
+                return best_role
     
     return None
+
+
+def _is_valid_role_extraction(role: str) -> bool:
+    """Final validation to filter garbage role extractions."""
+    if not role:
+        return False
+    
+    role_lower = role.lower().strip()
+    
+    # Filter: "assistant to X", "secretary to X" patterns (wrong person's role)
+    if re.search(r'\b(assistant|secretary|aide|exec\s+assistant)\s+to\s+', role_lower):
+        return False
+    
+    # Filter: Single-word garbage that snuck through
+    garbage_single_words = [
+        'enthusiasm', 'passion', 'expert', 'professional', 'leader',
+        'elder', 'son', 'daughter', 'father', 'mother', 'brother', 'sister',
+        'currently', 'former', 'previously', 'now', 'recent',
+        'best', 'top', 'great', 'amazing', 'excellent',
+        'view', 'see', 'click', 'read', 'more', 'about',
+        'profile', 'page', 'website', 'site', 'link',
+        'executive', 'officer', 'director', 'manager',  # Too generic without context
+    ]
+    if role_lower in garbage_single_words:
+        return False
+    
+    # Filter: Family/personal terms
+    if re.search(r'\b(elder|son|daughter|wife|husband|father|mother|brother|sister)\b', role_lower):
+        return False
+    
+    # Filter: Too short and not a known role abbreviation
+    known_short_roles = ['ceo', 'cto', 'cfo', 'coo', 'cmo', 'cio', 'cpo', 'vp', 'svp', 'evp', 'md', 'gm']
+    if len(role_lower) < 4 and role_lower not in known_short_roles:
+        return False
+    
+    # Filter: Starts with articles/prepositions (incomplete extraction)
+    if role_lower.startswith(('the ', 'a ', 'an ', 'to ', 'for ', 'at ', 'in ', 'of ', 'by ', 'as ', 'currently ')):
+        return False
+    
+    # Filter: Contains obvious non-role patterns
+    if re.search(r'(view|click|read|learn|see|show)\s+(more|profile|full)', role_lower):
+        return False
+    
+    # Filter: Single generic role words that need more context (but keep founder, CEO, etc)
+    too_generic_single = ['head', 'lead', 'officer', 'assistant', 'executive']
+    if role_lower in too_generic_single:
+        return False
+    
+    return True
 
 
 def fuzzy_match_role(claimed_role: str, extracted_role: str) -> Tuple[bool, float, str]:
@@ -4101,10 +4206,14 @@ def _is_valid_location(location: str) -> bool:
         'technology', 'entertainment', 'software', 'services', 'solutions',
         'company', 'corporation', 'enterprise', 'business', 'industry',
         'profile', 'overview', 'about', 'description', 'information',
+        'employees', 'staff', 'team', 'board', 'members', 'contacts',
+        'education', 'internet', 'partnerships', 'news', 'media',
+        'silicon', 'bay area',  # Too generic - reject "Silicon Valley" / "Bay Area"
         # Generic web terms
         'linkedin', 'crunchbase', 'wikipedia', 'facebook', 'twitter',
         # Too generic
         'global', 'worldwide', 'international', 'regional',
+        'united states', 'usa',  # Too generic
     ]
     
     if any(garbage in location_lower for garbage in garbage_patterns):
@@ -4129,7 +4238,8 @@ def _is_valid_location(location: str) -> bool:
         'california', 'new york', 'texas', 'florida', 'washington', 'massachusetts',
         'illinois', 'georgia', 'colorado', 'oregon', 'pennsylvania', 'ohio',
         'virginia', 'north carolina', 'michigan', 'arizona', 'maryland', 'tennessee',
-        'canada', 'united kingdom', 'france', 'germany', 'australia', 'singapore'
+        'canada', 'united kingdom', 'france', 'germany', 'australia', 'singapore',
+        'south africa', 'ireland', 'leinster'  # Added for international
     ])
     has_known_city = any(city in location_lower for city in MAJOR_CITIES)
     

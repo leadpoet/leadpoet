@@ -218,13 +218,14 @@ async def get_epoch_leads(
         print(f"🔍 Step 4: Checking EPOCH_INITIALIZATION for epoch {epoch_id}...")
         
         # Query EPOCH_INITIALIZATION from transparency_log
+        # NOTE: epoch_id is stored INSIDE payload JSON, not as a column
         try:
             init_result = await asyncio.wait_for(
                 asyncio.to_thread(
                     lambda: supabase.table("transparency_log")
                         .select("payload")
                         .eq("event_type", "EPOCH_INITIALIZATION")
-                        .eq("epoch_id", epoch_id)
+                        .eq("payload->>epoch_id", str(epoch_id))
                         .limit(1)
                         .execute()
                 ),
@@ -310,12 +311,12 @@ async def get_epoch_leads(
                 
                 try:
                     # Insert EPOCH_INITIALIZATION event (idempotent - will fail if exists)
+                    # NOTE: epoch_id is INSIDE init_payload, not as a column (column doesn't exist)
                     await asyncio.wait_for(
                         asyncio.to_thread(
                             lambda: supabase.table("transparency_log")
                                 .insert({
                                     "event_type": "EPOCH_INITIALIZATION",
-                                    "epoch_id": epoch_id,
                                     "payload": init_payload,
                                     "created_at": datetime.utcnow().isoformat()
                                 })

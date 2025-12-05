@@ -287,8 +287,11 @@ async def get_epoch_leads(
                 # Compute queue_root (hash of lead IDs for verification)
                 queue_root = hashlib.sha256(json.dumps(assigned_lead_ids, sort_keys=True).encode()).hexdigest()
                 
-                # Create EPOCH_INITIALIZATION payload (matches epoch monitor format)
+                # Create EPOCH_INITIALIZATION payload (MUST match epoch_lifecycle format)
+                # CRITICAL: epoch_id must be INSIDE payload because validate.py queries:
+                #   .eq("payload->>epoch_id", str(event.payload.epoch_id))
                 init_payload = {
+                    "epoch_id": epoch_id,  # CRITICAL: Must be inside payload for validate.py query
                     "queue": {
                         "queue_root": queue_root,
                         "lead_count": len(assigned_lead_ids)

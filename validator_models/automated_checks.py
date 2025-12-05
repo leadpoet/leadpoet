@@ -2022,6 +2022,7 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         # Also handle curly apostrophes and other variants
         company_lower = company_lower.replace("'", "'").replace("'", "'").replace("`", "'")
         company_lower = re.sub(r"\s*'\s*", "'", company_lower)  # "mcdonald ' s" → "mcdonald's"
+        company_lower = re.sub(r"\s*-\s*", "-", company_lower)  # "chick - fil - a" → "chick-fil-a"
         
         # Normalize company name by removing common legal suffixes
         # e.g., "Bank Of America Corporation" → "Bank Of America"
@@ -2043,9 +2044,10 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         # Check first result (most authoritative for target person)
         first_title = search_results[0].get("title", "").lower()
         
-        # Normalize apostrophes in title too (DDG returns "mcdonald ' s")
+        # Normalize apostrophes and hyphens in title too (DDG returns "mcdonald ' s" and "chick - fil - a")
         first_title = first_title.replace("'", "'").replace("'", "'").replace("`", "'")
         first_title = re.sub(r"\s*'\s*", "'", first_title)  # "mcdonald ' s" → "mcdonald's"
+        first_title = re.sub(r"\s*-\s*", "-", first_title)  # "chick - fil - a" → "chick-fil-a"
         
         # Extract ONLY the headline part (before "| linkedin")
         # DDG often concatenates descriptions after "| LinkedIn"
@@ -2055,6 +2057,7 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         
         # Also get snippet for additional company matching
         first_snippet = search_results[0].get("snippet", "").lower()
+        first_snippet = re.sub(r"\s*-\s*", "-", first_snippet)  # Normalize hyphens
         
         # Method 1: Exact normalized company name in title
         company_in_title = company_normalized in first_title

@@ -3679,22 +3679,39 @@ ROLE_EQUIVALENCIES = {
 }
 
 
-def extract_role_from_ddg_title(title: str, snippet: str = "") -> Optional[str]:
-    """Extract job role from DDG LinkedIn search result title/snippet."""
+def normalize_for_comparison(text: str) -> str:
+    """Normalize text for comparison: lowercase, remove extra spaces, normalize hyphens/numbers."""
+    if not text:
+        return ""
+    # Lowercase
+    text = text.lower()
+    # Normalize spaces around numbers (J 2 Health -> j2health)
+    text = re.sub(r'\s+(\d+)\s*', r'\1', text)
+    text = re.sub(r'(\d+)\s+', r'\1', text)
+    # Normalize hyphens with spaces
+    text = re.sub(r'\s*-\s*', '-', text)
+    # Remove extra whitespace
+    text = ' '.join(text.split())
+    return text
+
+
+def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str = "") -> Optional[str]:
+    """
+    Extract job role from DDG LinkedIn search result title/snippet.
+    
+    CRITICAL: Only extract ROLES, not company names. LinkedIn titles have two formats:
+    1. "Name - Role @ Company | LinkedIn" (has role)
+    2. "Name - Company | LinkedIn" (NO role, just company)
+    
+    We must distinguish between these and return None for format 2.
+    """
     if not title:
         return None
     
     original_title = title
     
-    # Check for job posting format FIRST: "Company hiring Role [in Location] | LinkedIn"
-    # This handles titles like "Chick-fil-A, Inc. hiring Sr. Lead Technical Product Owner | LinkedIn"
-    job_posting_match = re.search(r'hiring\s+(.+?)(?:\s+in\s+[\w\s,]+)?(?:\s*\||\s*$)', title, re.IGNORECASE)
-    if job_posting_match:
-        role = job_posting_match.group(1).strip()
-        # Clean up trailing location info
-        role = re.sub(r'\s+in\s+[\w\s,]+$', '', role, flags=re.IGNORECASE).strip()
-        if len(role) > 2 and len(role) < 100:
-            return role
+    # Normalize company name for comparison
+    company_normalized = normalize_for_comparison(company_name) if company_name else ""
     
     role_keywords = [
         "ceo", "cto", "cfo", "coo", "cmo", "cio", "cpo",
@@ -3705,41 +3722,90 @@ def extract_role_from_ddg_title(title: str, snippet: str = "") -> Optional[str]:
         "owner", "partner", "principal",
         "executive", "officer", "chief",
         "consultant", "advisor", "specialist",
-        "product owner", "staff", "senior", "sr.",
-        "operations", "business operations", "specialist"
+        "product owner", "staff", "senior", "sr.", "jr.",
+        "associate", "assistant", "coordinator", "supervisor",
+        "professor", "teacher", "instructor", "lecturer",
+        "scientist", "researcher", "architect", "designer",
+        "creative", "marketing", "sales", "hr", "human resources",
+        "operations", "business operations"
     ]
+    
+    def has_role_keyword(text: str) -> bool:
+        """Check if text contains a role keyword."""
+        text_lower = text.lower()
+        return any(kw in text_lower for kw in role_keywords)
+    
+    def is_company_name(text: str) -> bool:
+        """Check if text is likely a company name, not a role."""
+        if not company_name:
+            return False
+        text_norm = normalize_for_comparison(text)
+        # Check if extraction matches company name (normalized)
+        if text_norm == company_normalized:
+            return True
+        # Check if company is contained in extraction
+        if company_normalized and company_normalized in text_norm:
+            return True
+        # Check if extraction is contained in company (e.g., "J2" for "J2 Health")
+        if text_norm and len(text_norm) > 2 and text_norm in company_normalized:
+            return True
+        return False
+    
+    # Check for job posting format FIRST: "Company hiring Role [in Location] | LinkedIn"
+    job_posting_match = re.search(r'hiring\s+(.+?)(?:\s+in\s+[\w\s,]+)?(?:\s*\||\s*$)', title, re.IGNORECASE)
+    if job_posting_match:
+        role = job_posting_match.group(1).strip()
+        role = re.sub(r'\s+in\s+[\w\s,]+$', '', role, flags=re.IGNORECASE).strip()
+        if len(role) > 2 and len(role) < 100 and not is_company_name(role):
+            return role
     
     first_segment = title.split('|')[0].strip()
     first_segment = re.sub(r'\s+-\s*LinkedIn.*$', '', first_segment, flags=re.IGNORECASE).strip()
     first_segment = re.sub(r'\s*\.\.\.\s*$', '', first_segment).strip()
     
-    match = re.search(r'^([^-]+)-\s*(.+?)(?:\s+at\s+|\s*$)', first_segment, re.IGNORECASE)
-    if match:
-        role = match.group(2).strip()
-        role = re.sub(r'\s+at\s*$', '', role, flags=re.IGNORECASE).strip()
-        if len(role) > 2 and not role.startswith("http") and role.lower() not in ["linkedin", "..."]:
+    # PATTERN 1: "Name - Role @ Company" or "Name - Role at Company"
+    # This is the MOST reliable pattern - role has separator before company
+    role_at_match = re.search(r'^[^-]+-\s*(.+?)\s+(?:@|at)\s+', first_segment, re.IGNORECASE)
+    if role_at_match:
+        role = role_at_match.group(1).strip()
+        if len(role) > 2 and not is_company_name(role):
             return role
     
-    role_at_patterns = re.findall(r'(\b(?:' + '|'.join(role_keywords) + r')[^|]*?)\s+at\s+\w', original_title, re.IGNORECASE)
+    # PATTERN 2: Look for "Role @ Company" or "Role at Company" anywhere
+    role_at_patterns = re.findall(r'(\b(?:' + '|'.join(role_keywords) + r')[^|@]*?)\s+(?:@|at)\s+\w', original_title, re.IGNORECASE)
     if role_at_patterns:
         role = role_at_patterns[0].strip()
-        if len(role) > 2:
+        if len(role) > 2 and not is_company_name(role):
             return role
     
+    # PATTERN 3: "Name - Something" where Something contains role keywords
+    # ONLY use this if we find role keywords - otherwise it's probably the company name
+    match = re.search(r'^([^-]+)-\s*(.+?)$', first_segment, re.IGNORECASE)
+    if match:
+        potential_role = match.group(2).strip()
+        # Clean up trailing "at Company" or "@Company"
+        potential_role = re.sub(r'\s+(?:@|at)\s+.*$', '', potential_role, flags=re.IGNORECASE).strip()
+        # ONLY return if it has a role keyword AND is not a company name
+        if len(potential_role) > 2 and has_role_keyword(potential_role) and not is_company_name(potential_role):
+            return potential_role
+    
+    # PATTERN 4: Look for role keywords followed by "at" anywhere
     for kw in role_keywords:
-        match = re.search(rf'\b({kw}[^|,]*?)\s+at\s+', original_title, re.IGNORECASE)
+        match = re.search(rf'\b({kw}[^|,@]*?)\s+(?:@|at)\s+', original_title, re.IGNORECASE)
         if match:
             role = match.group(1).strip()
-            if len(role) > 2:
+            if len(role) > 2 and not is_company_name(role):
                 return role
     
+    # SNIPPET PATTERNS - look in snippet for role info
     if snippet:
         snippet_clean = snippet.strip()
         
         # Skip garbage snippets entirely
         garbage_indicators = [
             "session details", "read more", "click here", "learn more",
-            "view profile", "see the complete", "view full", "show more"
+            "view profile", "see the complete", "view full", "show more",
+            "scientific index", "company profile", "funding", "competitors"
         ]
         if any(g in snippet_clean.lower() for g in garbage_indicators):
             return None
@@ -3753,18 +3819,20 @@ def extract_role_from_ddg_title(title: str, snippet: str = "") -> Optional[str]:
             match = re.search(pattern, snippet_clean, re.IGNORECASE)
             if match:
                 role = match.group(1).strip()
-                # Validate extracted role
                 if len(role) > 2 and len(role) < 60:
                     # Reject if starts with common garbage words
-                    if role.lower().startswith(('now ', 'the ', 'a ', 'an ', 'this ', 'that ', 'is ', 'was ', 'in ', 'of ', 'at ')):
+                    if role.lower().startswith(('now ', 'the ', 'a ', 'an ', 'this ', 'that ', 'is ', 'was ', 'in ', 'of ', 'at ', 'i ')):
+                        continue
+                    if is_company_name(role):
                         continue
                     return role
         
+        # Look for role keywords in snippet
         for kw in role_keywords:
             match = re.search(rf'\b({kw}(?:\s+(?:and|&)\s+\w+)?(?:\s+of|\s+at)?)', snippet_clean, re.IGNORECASE)
             if match:
                 role = match.group(1).strip()
-                if len(role) > 2 and len(role) < 60:
+                if len(role) > 2 and len(role) < 60 and not is_company_name(role):
                     return role
     
     return None
@@ -4146,7 +4214,7 @@ def fuzzy_pre_verification_stage5(
                 if not has_name and not is_company_role:
                     continue
             
-            extracted = extract_role_from_ddg_title(title, snippet)
+            extracted = extract_role_from_ddg_title(title, snippet, company_name=company)
             
             if extracted:
                 extracted_lower = extracted.lower()
@@ -4534,11 +4602,17 @@ def _ddg_search_stage5_sync(
                 for r in all_results[:5]:
                     title = r.get("title", "")
                     snippet = r.get("snippet", r.get("body", ""))
-                    extracted = extract_role_from_ddg_title(title, snippet)
+                    extracted = extract_role_from_ddg_title(title, snippet, company_name=company)
                     if not extracted:
                         continue
                     
                     extracted_lower = extracted.lower()
+                    
+                    # Define has_role_keyword BEFORE it's used
+                    role_keywords = ["ceo", "cto", "cfo", "coo", "founder", "president", "director", 
+                                     "manager", "head", "lead", "vp", "chief", "officer", "owner", "partner",
+                                     "professor", "engineer", "analyst", "specialist", "consultant"]
+                    has_role_keyword = any(kw in extracted_lower for kw in role_keywords)
                     
                     # Filter: Invalid site names and domains (exact match or pattern)
                     # These are business directories/websites, NOT job roles
@@ -4547,7 +4621,8 @@ def _ddg_search_stage5_sync(
                                           "the org", "bloomberg", "forbes", "reuters", "bizapedia",
                                           "rocketreach", "signalhire", "lusha", "apollo", "leadiq",
                                           "hunter.io", "clearbit", "pitchbook", "owler", "dnb", 
-                                          "hoovers", "manta", "yelp", "bbb", "yellowpages"]
+                                          "hoovers", "manta", "yelp", "bbb", "yellowpages",
+                                          "scientific index", "company profile", "stack overflow"]
                     if extracted_lower in invalid_extractions:
                         continue
                     
@@ -4562,6 +4637,7 @@ def _ddg_search_stage5_sync(
                         r'^(the|a|an|this|that|these|those|our|their)\s+',  # Starts with article
                         r'^(and|or|but|if|when|where|what|how|why)\s+',  # Starts with conjunction
                         r'^(in|on|at|to|for|with|from|by|about)\s+',  # Starts with preposition
+                        r'^i\s+',  # Starts with "I " (garbage like "I eligible schools")
                         r'session\s+details',  # Conference/event garbage
                         r'read\s+more',
                         r'click\s+here',
@@ -4570,6 +4646,12 @@ def _ddg_search_stage5_sync(
                         r'see\s+the\s+complete',
                         r'^\d+\s+(years?|months?|days?)',  # Duration patterns
                         r'^of\s+',  # Starts with "of " (truncated)
+                        r'^\d{4}\s+',  # Starts with year (e.g., "2025 Company Profile")
+                        r'company\s+profile',  # Company profile pages
+                        r'team.*funding.*competitors',  # Crunchbase-style garbage
+                        r'scientific\s+index',  # Academic garbage
+                        r'^set\s+to\s+',  # "set to join..."
+                        r'eligible\s+schools',  # Random garbage
                     ]
                     if any(re.search(p, extracted_lower) for p in garbage_patterns):
                         continue
@@ -4586,18 +4668,15 @@ def _ddg_search_stage5_sync(
                             # Only skip if it looks like "assistant to X" or similar
                             if " to " in extracted_lower or "'s " in extracted_lower:
                                 continue
+                    
                     # Filter website domains (anything ending in .com, .co, .io, etc.)
                     if re.match(r'^[\w\-]+\.(com|co|io|org|net)$', extracted_lower):
                         continue
                     
-                    # Filter: Check for role keywords
-                    role_keywords = ["ceo", "cto", "cfo", "coo", "founder", "president", "director", 
-                                     "manager", "head", "lead", "vp", "chief", "officer", "owner", "partner"]
-                    has_role_keyword = any(kw in extracted_lower for kw in role_keywords)
-                    
                     # Filter: Too short/generic extractions (just "Lead", "Head" without context)
                     too_short_generic = ["lead", "head", "manager", "director", "partner", "officer", 
-                                        "engineer", "analyst", "the org", "the company", "org", "inc", "llc"]
+                                        "engineer", "analyst", "the org", "the company", "org", "inc", "llc",
+                                        "senior", "junior", "staff", "the", "neuro", "labs", "tech"]
                     if extracted_lower in too_short_generic:
                         continue
                     
@@ -4627,14 +4706,16 @@ def _ddg_search_stage5_sync(
                         continue
                     
                     # Filter: Company name (exact or contained) without role keyword
+                    # Use normalized comparison to handle spacing differences (J 2 Health vs J2 Health)
                     if not has_role_keyword:
                         if company:
-                            company_lower = company.lower()
-                            # Exact match or company contained in extraction
-                            if extracted_lower == company_lower or company_lower in extracted_lower:
+                            company_norm = normalize_for_comparison(company)
+                            extracted_norm = normalize_for_comparison(extracted)
+                            # Exact match or company contained in extraction (normalized)
+                            if extracted_norm == company_norm or company_norm in extracted_norm:
                                 continue
                             # Extraction contained in company (e.g., "Ori" for "Ori Living")
-                            if extracted_lower in company_lower:
+                            if len(extracted_norm) > 2 and extracted_norm in company_norm:
                                 continue
                         if full_name and extracted_lower == full_name.lower():
                             continue
@@ -4666,7 +4747,7 @@ def _ddg_search_stage5_sync(
                             for r in results:
                                 title = r.get("title", "")
                                 snippet = r.get("body", "")
-                                extracted = extract_role_from_ddg_title(title, snippet)
+                                extracted = extract_role_from_ddg_title(title, snippet, company_name=company)
                                 if not extracted:
                                     continue
                                     
@@ -4674,14 +4755,16 @@ def _ddg_search_stage5_sync(
                                 
                                 # Same filtering as primary
                                 role_keywords = ["ceo", "cto", "cfo", "coo", "founder", "president", "director", 
-                                                 "manager", "head", "lead", "vp", "chief", "officer", "owner", "partner"]
+                                                 "manager", "head", "lead", "vp", "chief", "officer", "owner", "partner",
+                                                 "professor", "engineer", "analyst", "specialist", "consultant"]
                                 has_role_keyword = any(kw in extracted_lower for kw in role_keywords)
                                 
                                 # Filter: Invalid site names and domains
                                 invalid_extractions = ["linkedin", "wikipedia", "facebook", "twitter", "crunchbase", 
                                                       "glassdoor", "indeed", "zoominfo", "craft.co", "theorg.com", 
                                                       "the org", "bloomberg", "forbes", "reuters", "bizapedia",
-                                                      "rocketreach", "signalhire", "lusha", "apollo", "leadiq"]
+                                                      "rocketreach", "signalhire", "lusha", "apollo", "leadiq",
+                                                      "scientific index", "company profile", "stack overflow"]
                                 if extracted_lower in invalid_extractions:
                                     continue
                                 # Filter website domains (anything ending in .com, .co, .io, etc.)
@@ -4698,9 +4781,17 @@ def _ddg_search_stage5_sync(
                                     r'^(the|a|an|this|that|these|those|our|their)\s+',
                                     r'^(and|or|but|if|when|where|what|how|why)\s+',
                                     r'^(in|on|at|to|for|with|from|by|about)\s+',
+                                    r'^i\s+',  # Starts with "I " (garbage like "I eligible schools")
                                     r'session\s+details',
                                     r'^\d+\s+(years?|months?|days?)',
                                     r'^of\s+',
+                                    r'^\d{4}\s+',  # Starts with year (e.g., "2025 Company Profile")
+                                    r'company\s+profile',
+                                    r'team.*funding.*competitors',
+                                    r'scientific\s+index',
+                                    r'^set\s+to\s+',
+                                    r'eligible\s+schools',
+                                    r'research\s+was\s+presented',  # Academic garbage
                                 ]
                                 if any(re.search(p, extracted_lower) for p in garbage_patterns):
                                     continue
@@ -4711,7 +4802,8 @@ def _ddg_search_stage5_sync(
                                 
                                 # Filter: Too short/generic 
                                 too_short_generic = ["lead", "head", "manager", "director", "partner", "officer", 
-                                                    "engineer", "analyst", "the org", "the company", "org", "inc", "llc"]
+                                                    "engineer", "analyst", "the org", "the company", "org", "inc", "llc",
+                                                    "senior", "junior", "staff", "the"]
                                 if extracted_lower in too_short_generic:
                                     continue
                                 if len(extracted) < 5:
@@ -4738,10 +4830,14 @@ def _ddg_search_stage5_sync(
                                 if is_location and not has_role_keyword:
                                     continue
                                 
+                                # Filter: Company name (use normalized comparison)
                                 if not has_role_keyword:
                                     if company:
-                                        company_lower = company.lower()
-                                        if extracted_lower == company_lower or company_lower in extracted_lower or extracted_lower in company_lower:
+                                        company_norm = normalize_for_comparison(company)
+                                        extracted_norm = normalize_for_comparison(extracted)
+                                        if extracted_norm == company_norm or company_norm in extracted_norm:
+                                            continue
+                                        if len(extracted_norm) > 2 and extracted_norm in company_norm:
                                             continue
                                     if full_name and extracted_lower == full_name.lower():
                                         continue

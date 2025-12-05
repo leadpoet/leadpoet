@@ -3949,22 +3949,25 @@ def fuzzy_match_role(claimed_role: str, extracted_role: str) -> Tuple[bool, floa
 # Patterns for location extraction
 # Group 1: Use IGNORECASE (common phrases that can be any case)
 # Group 2: Case-sensitive (require actual capitalization for city/state)
+# Location pattern: matches City or "City, State" or "City, Country"
+_LOC_CITY_STATE = r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*(?:[A-Z]{2}|[A-Z][a-z]+))?'
+
 LOCATION_PATTERNS_IGNORECASE = [
     # Primary patterns - most reliable
-    r'headquarter(?:ed|s)?\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',   # "headquartered in X"
-    r'based\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                   # "based in X"
-    r'located\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                 # "located in X"
-    r'offices?\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                # "office(s) in X"
-    r'hq\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                      # "hq in X"
-    r'hq:\s*([^,\.]+(?:,\s*[^,\.]+)?)',                          # "HQ: City"
+    rf'headquarter(?:ed|s)?\s+in\s+({_LOC_CITY_STATE})\b',   # "headquartered in X"
+    rf'based\s+in\s+({_LOC_CITY_STATE})\b',                  # "based in San Jose, CA"
+    rf'located\s+in\s+({_LOC_CITY_STATE})\b',                # "located in X"
+    rf'offices?\s+in\s+({_LOC_CITY_STATE})\b',               # "office(s) in X"
+    rf'hq\s+in\s+({_LOC_CITY_STATE})\b',                     # "hq in X"
+    rf'hq:\s*({_LOC_CITY_STATE})\b',                         # "HQ: City"
     # Secondary patterns
     r'(?:^|[^\w])([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)-based\s+(?:company|firm|startup)',  # "Paris-based company"
-    r'company\s+(?:from|in)\s+([^,\.]+(?:,\s*[^,\.]+)?)',        # "company from/in X"
+    rf'company\s+(?:from|in)\s+({_LOC_CITY_STATE})\b',       # "company from/in X"
     # Location in context patterns
-    r'founded\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                 # "founded in X"
-    r'started\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                 # "started in X"
-    r'from\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?)\s+(?:is|was|that)',  # "from San Francisco, CA is"
-    r'(?:startup|company|firm)\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',  # "startup in X"
+    rf'founded\s+in\s+({_LOC_CITY_STATE})\b',                # "founded in X"
+    rf'started\s+in\s+({_LOC_CITY_STATE})\b',                # "started in X"
+    rf'from\s+({_LOC_CITY_STATE})\s+(?:is|was|that)',        # "from San Francisco, CA is"
+    rf'(?:startup|company|firm)\s+in\s+({_LOC_CITY_STATE})\b',  # "startup in X"
 ]
 
 # Case-sensitive patterns for "City, ST" format

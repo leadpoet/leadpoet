@@ -4425,10 +4425,19 @@ def _ddg_search_stage5_sync(
             queries = [f'{company} company industry']
         fallback_queries = []
     
-    def ddg_search_with_fallback(ddgs_instance, query, max_results, backends=['yahoo', 'yandex', 'google'], require_linkedin=False):
-        """Backend rotation: try each backend until success. For role searches, rotate if no LinkedIn URLs."""
+    def ddg_search_with_fallback(ddgs_instance, query, max_results, backends=['yahoo', 'yandex', 'google'], require_linkedin=False, company_name=None):
+        """Backend rotation: try each backend until success. 
+        For role searches, rotate if no LinkedIn URLs.
+        For region/industry searches, rotate if no results mention the company."""
         last_error = None
         all_backend_results = []
+        
+        # Normalize company name for matching (handle hyphens like "Chick-fil-A")
+        company_normalized = None
+        company_words = []
+        if company_name:
+            company_normalized = re.sub(r'\s*-\s*', '-', company_name.lower())
+            company_words = [w for w in company_normalized.split() if len(w) > 3][:2]  # First 2 significant words
         
         for backend in backends:
             try:
@@ -4447,7 +4456,33 @@ def _ddg_search_stage5_sync(
                             time.sleep(1)
                         continue
                 else:
-                    return results  # Not requiring LinkedIn, return immediately
+                    # For region/industry: check if any results mention the company
+                    if company_normalized and results:
+                        has_company_result = False
+                        for r in results:
+                            title = re.sub(r'\s*-\s*', '-', r.get('title', '').lower())
+                            body = re.sub(r'\s*-\s*', '-', r.get('body', '').lower())
+                            combined = title + " " + body
+                            
+                            # Check if company name or significant words are in result
+                            if company_normalized in combined:
+                                has_company_result = True
+                                break
+                            elif company_words and any(w in combined for w in company_words):
+                                has_company_result = True
+                                break
+                        
+                        if has_company_result:
+                            return results  # Found results about the right company
+                        else:
+                            # Results don't mention company, try next backend
+                            all_backend_results.extend(results)
+                            if backend != backends[-1]:
+                                print(f"      ⚠️ {backend}: No results about '{company_name}', trying next backend...")
+                                time.sleep(1)
+                            continue
+                    else:
+                        return results  # No company filter or no results
                     
             except Exception as e:
                 last_error = e
@@ -4455,7 +4490,7 @@ def _ddg_search_stage5_sync(
                     print(f"      ⚠️ {backend} error: {e}, trying next backend...")
                 continue
         
-        # Return whatever we accumulated (may be empty or non-LinkedIn results)
+        # Return whatever we accumulated (may be empty or non-company results)
         if all_backend_results:
             return all_backend_results
         if last_error:
@@ -4474,7 +4509,12 @@ def _ddg_search_stage5_sync(
                     
                 try:
                     # For role searches, require LinkedIn URLs (rotate backends if not found)
-                    results = ddg_search_with_fallback(ddgs, query, max_results, require_linkedin=(search_type == "role"))
+                    # For region/industry searches, verify results are about the right company
+                    results = ddg_search_with_fallback(
+                        ddgs, query, max_results, 
+                        require_linkedin=(search_type == "role"),
+                        company_name=company if search_type in ["region", "industry"] else None
+                    )
                     for r in results:
                         all_results.append({
                             "title": r.get("title", ""),

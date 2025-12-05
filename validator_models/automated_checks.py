@@ -3933,19 +3933,53 @@ def fuzzy_match_role(claimed_role: str, extracted_role: str) -> Tuple[bool, floa
 
 
 # Location patterns for extraction
-# Patterns 1-3: Use IGNORECASE (headquartered/based/located can be any case)
-# Patterns 4-5: Case-sensitive (require actual capitalization for city/state)
+# Patterns for location extraction
+# Group 1: Use IGNORECASE (common phrases that can be any case)
+# Group 2: Case-sensitive (require actual capitalization for city/state)
 LOCATION_PATTERNS_IGNORECASE = [
-    r'headquarter(?:ed|s)?\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',
-    r'based\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',
-    r'located\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',
+    # Primary patterns - most reliable
+    r'headquarter(?:ed|s)?\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',   # "headquartered in X"
+    r'based\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                   # "based in X"
+    r'located\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                 # "located in X"
+    r'offices?\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                # "office(s) in X"
+    r'hq\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                      # "hq in X"
+    # Secondary patterns
+    r'(?:^|[^\w])([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)-based\s+(?:company|firm|startup)',  # "Paris-based company"
+    r'company\s+(?:from|in)\s+([^,\.]+(?:,\s*[^,\.]+)?)',        # "company from/in X"
 ]
 
 # Case-sensitive patterns for "City, ST" format
 LOCATION_PATTERNS_CASESENSITIVE = [
     r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\s*[-–—]',  # "New York, NY -"
     r'\|\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\b',     # "| New York, NY" (must end at word boundary)
+    r',\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\s*$',    # ", City, ST" at end
 ]
+
+# Map nationality adjectives to countries (for "American company" → "United States")
+NATIONALITY_TO_COUNTRY = {
+    "american": "United States",
+    "french": "France", 
+    "german": "Germany",
+    "british": "United Kingdom",
+    "canadian": "Canada",
+    "australian": "Australia",
+    "japanese": "Japan",
+    "chinese": "China",
+    "indian": "India",
+    "brazilian": "Brazil",
+    "mexican": "Mexico",
+    "spanish": "Spain",
+    "italian": "Italy",
+    "dutch": "Netherlands",
+    "swiss": "Switzerland",
+    "swedish": "Sweden",
+    "norwegian": "Norway",
+    "danish": "Denmark",
+    "finnish": "Finland",
+    "irish": "Ireland",
+    "singaporean": "Singapore",
+    "korean": "South Korea",
+}
 
 def extract_location_from_text(text: str) -> Optional[str]:
     """Extract location from text using regex patterns."""
@@ -3972,6 +4006,14 @@ def extract_location_from_text(text: str) -> Optional[str]:
             # Validate: should be short (city + state)
             if len(location) <= 40:
                 return location
+    
+    # Try nationality patterns as last resort (e.g., "American company" → "United States")
+    text_lower = text.lower()
+    for nationality, country in NATIONALITY_TO_COUNTRY.items():
+        if re.search(rf'\b{nationality}\b', text_lower):
+            # Make sure it's in context of company description
+            if any(ctx in text_lower for ctx in ['company', 'corporation', 'firm', 'business', 'enterprise', 'multinational']):
+                return country
     
     return None
 
@@ -4402,9 +4444,13 @@ def _ddg_search_stage5_sync(
                     extracted_lower = extracted.lower()
                     
                     # Filter: Invalid site names and domains (exact match or pattern)
+                    # These are business directories/websites, NOT job roles
                     invalid_extractions = ["linkedin", "wikipedia", "facebook", "twitter", "crunchbase", 
                                           "glassdoor", "indeed", "zoominfo", "craft.co", "theorg.com", 
-                                          "the org", "bloomberg", "forbes", "reuters"]
+                                          "the org", "bloomberg", "forbes", "reuters", "bizapedia",
+                                          "rocketreach", "signalhire", "lusha", "apollo", "leadiq",
+                                          "hunter.io", "clearbit", "pitchbook", "owler", "dnb", 
+                                          "hoovers", "manta", "yelp", "bbb", "yellowpages"]
                     if extracted_lower in invalid_extractions:
                         continue
                     # Filter website domains (anything ending in .com, .co, .io, etc.)
@@ -4813,8 +4859,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
    - PASS if city, state, OR country matches reasonably
    - "San Jose, CA" ≈ "San Jose, California" ✓
    - Same-state = match (e.g., Brooklyn, NY ≈ New York, NY)
-   - If you cannot find HQ location → region_match=true, extracted_region="UNKNOWN"
-   - FAIL only if CLEAR evidence of completely different country/state
+   - If you cannot find ANY location info → region_match=false, extracted_region="NOT_FOUND"
+   - FAIL if you cannot verify the claimed region from search results
 """)
     else:
         claims_to_verify.append(f'2. REGION: "{claimed_region}" ✅ (Already verified by fuzzy match)')

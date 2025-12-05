@@ -1559,58 +1559,81 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
 
 async def _ddg_search(query: str, max_results: int = 10, max_retries: int = 3, require_linkedin: bool = False) -> List[Dict[str, str]]:
     """
-    Perform DuckDuckGo search using the ddgs library (Yahoo backend only for Stage 4).
+    Perform DuckDuckGo search using the ddgs library with backend rotation.
     Returns GSE-compatible results: [{title, link, snippet}]
     
     Works on headless servers (VPS) - no GUI required.
     The ddgs library handles DDG's API complexity internally.
     
-    NOTE: Stage 4 uses Yahoo only (no rotation) to avoid rate limiting.
-    Stage 5 has its own search function with backend rotation.
+    Backend rotation for Stage 4: yahoo → yandex → google
+    If require_linkedin=True, rotates to next backend if no LinkedIn URLs found.
     
     Args:
         query: Search query
         max_results: Max results per backend
         max_retries: Retries per backend
-        require_linkedin: Ignored (kept for compatibility) - always uses yahoo
+        require_linkedin: If True, rotate backends when no LinkedIn URLs in results
     
     Requires: pip install ddgs
     """
     if not DDGS_AVAILABLE:
         raise Exception("ddgs library not available - install with: pip install ddgs")
     
-    # Stage 4: Yahoo only (no rotation to avoid rate limiting)
-    # With 5 variations, this is 5 DDG calls per lead (was working before)
-    backend = 'yahoo'
+    # Backend rotation order: yahoo → yandex → google
+    backends = ['yahoo', 'yandex', 'google']
     last_error = None
+    all_accumulated_results = []  # Accumulate non-LinkedIn results as fallback
     
-    for attempt in range(1, max_retries + 1):
-        try:
-            # Run synchronous ddgs in thread to avoid blocking
-            def do_search():
-                return DDGS().text(query, max_results=max_results, backend=backend)
-            
-            results_raw = await asyncio.to_thread(do_search)
-            
-            # Convert to GSE-compatible format
-            results = []
-            for r in results_raw:
-                results.append({
-                    "title": r.get("title", ""),
-                    "link": r.get("href", ""),
-                    "snippet": r.get("body", "")
-                })
-            
-            return results
-            
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries:
-                print(f"         ⚠️ DDG yahoo error (attempt {attempt}/{max_retries}): {str(e)}, retrying...")
-                await asyncio.sleep(2)  # Wait 2 seconds before retry
-            else:
-                print(f"         ❌ DDG yahoo failed after {max_retries} attempts: {str(last_error)}")
-                raise Exception(f"DDG yahoo failed: {str(last_error)}")
+    for backend in backends:
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Run synchronous ddgs in thread to avoid blocking
+                def do_search():
+                    return DDGS().text(query, max_results=max_results, backend=backend)
+                
+                results_raw = await asyncio.to_thread(do_search)
+                
+                # Convert to GSE-compatible format
+                results = []
+                for r in results_raw:
+                    results.append({
+                        "title": r.get("title", ""),
+                        "link": r.get("href", ""),
+                        "snippet": r.get("body", "")
+                    })
+                
+                # If requiring LinkedIn, check if we found any
+                if require_linkedin and results:
+                    linkedin_found = any('linkedin.com' in r.get('link', '').lower() for r in results)
+                    if linkedin_found:
+                        return results  # Success - found LinkedIn URLs
+                    else:
+                        # Accumulate results but try next backend
+                        all_accumulated_results.extend(results)
+                        if backend != backends[-1]:
+                            print(f"         ⚠️ {backend}: No LinkedIn URLs, trying next backend...")
+                            await asyncio.sleep(1)  # Brief delay before next backend
+                        break  # Exit retry loop, try next backend
+                else:
+                    # Not requiring LinkedIn, or found results
+                    return results
+                
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    await asyncio.sleep(1)  # Wait before retry
+                else:
+                    if backend != backends[-1]:
+                        print(f"         ⚠️ {backend} failed, trying next backend...")
+                        await asyncio.sleep(1)
+                    break  # Try next backend
+    
+    # If we accumulated results but none had LinkedIn, return them anyway
+    if all_accumulated_results:
+        return all_accumulated_results
+    
+    if last_error:
+        print(f"         ❌ All DDG backends failed: {str(last_error)}")
     
     return []
 
@@ -1655,7 +1678,7 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     # Track API errors to distinguish "no match" from "API failure"
     api_errors = []
     
-    print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile (yahoo backend)...")
+    print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile (rotating backends: yahoo→yandex→google)...")
     
     for variation_idx, query in enumerate(query_variations, 1):
         # 3 second delay between variations (avoid rate limiting)

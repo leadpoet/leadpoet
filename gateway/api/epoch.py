@@ -16,7 +16,7 @@ from typing import List
 from datetime import datetime
 
 from gateway.utils.epoch import get_current_epoch_id, is_epoch_active, get_epoch_info
-from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
+from gateway.utils.assignment import get_validator_set  # deterministic_lead_assignment no longer needed here
 from gateway.utils.signature import verify_wallet_signature
 from gateway.utils.registry import is_registered_hotkey_async  # Use async version
 from gateway.utils.leads_cache import get_cached_leads  # Import cache for instant lead distribution
@@ -202,97 +202,68 @@ async def get_epoch_leads(
             "timestamp": datetime.utcnow().isoformat()
         }
     
-    # Cache miss - fall back to database query (will happen on first request or if prefetch failed)
-    print(f"⚠️  [CACHE MISS] Epoch {epoch_id} not cached, falling back to database query...")
+    # Cache miss - fall back to EPOCH_INITIALIZATION snapshot (CRITICAL: must match /validate check!)
+    print(f"⚠️  [CACHE MISS] Epoch {epoch_id} not cached, falling back to EPOCH_INITIALIZATION...")
     
-    # Step 4: Query CURRENT queue state (not frozen EPOCH_INITIALIZATION snapshot)
-    # DESIGN DECISION: We query the current queue state dynamically instead of using
-    # the frozen snapshot from EPOCH_INITIALIZATION. This allows leads that are
-    # submitted by miners DURING the epoch to be included in validation.
-    # 
-    # Why? Miners may submit leads at any time during the epoch, and we want
-    # validators to process them in the CURRENT epoch rather than waiting for
-    # the NEXT epoch. This improves throughput and reduces latency.
+    # Step 4: Fetch assigned leads from EPOCH_INITIALIZATION event
+    # CRITICAL FIX: We MUST use the frozen snapshot from EPOCH_INITIALIZATION, NOT the current
+    # queue state. The /validate endpoint checks lead_ids against EPOCH_INITIALIZATION.assignment,
+    # so if we return different leads here, validation will fail with "lead not assigned to epoch".
     #
-    # The trade-off: The queue_root will differ from the EPOCH_INITIALIZATION event,
-    # but this is acceptable because the assignment is still deterministic (all
-    # validators get the same leads for any given query time).
+    # Previous bug: Querying current queue state could return leads from a different epoch
+    # when new leads were submitted after EPOCH_INITIALIZATION.
     try:
-        from gateway.utils.merkle import compute_merkle_root
         import asyncio
+        from gateway.config import MAX_LEADS_PER_EPOCH
         
-        print(f"🔍 Step 4: Querying CURRENT queue state for epoch {epoch_id}...")
+        print(f"🔍 Step 4: Fetching EPOCH_INITIALIZATION for epoch {epoch_id}...")
         
-        # Query pending leads from queue (status = "pending_validation", FIFO by created_ts)
-        # Wrap with timeout to prevent hanging
+        # Query EPOCH_INITIALIZATION from transparency_log
         try:
-            result = await asyncio.wait_for(
+            init_result = await asyncio.wait_for(
                 asyncio.to_thread(
-                    lambda: supabase.table("leads_private")
-                        .select("lead_id")
-                        .eq("status", "pending_validation")
-                        .order("created_ts")
+                    lambda: supabase.table("transparency_log")
+                        .select("payload")
+                        .eq("event_type", "EPOCH_INITIALIZATION")
+                        .eq("epoch_id", epoch_id)
+                        .limit(1)
                         .execute()
                 ),
-                timeout=90.0  # 90 second timeout for queue state query (Supabase very slow on testnet)
+                timeout=30.0
             )
         except asyncio.TimeoutError:
-            print(f"❌ ERROR: Queue state query timed out after 90 seconds")
+            print(f"❌ ERROR: EPOCH_INITIALIZATION query timed out after 30 seconds")
             raise HTTPException(
                 status_code=504,
                 detail="Database query timeout - gateway may be experiencing high load"
             )
         
-        lead_ids = [row["lead_id"] for row in result.data]
-        
-        if not lead_ids:
-            queue_root = "0" * 64  # Empty queue
-            total_pending = 0
-        else:
-            queue_root = compute_merkle_root(lead_ids)
-            total_pending = len(lead_ids)
-        
-        print(f"   📊 Queue State: {queue_root[:16]}... ({total_pending} pending leads)")
-    
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to query current queue state: {str(e)}"
-        )
-    
-    # Step 5: Get validator set
-    try:
-        validator_set = await get_validator_set(epoch_id)
-        
-        if not validator_set:
+        if not init_result.data:
+            print(f"❌ ERROR: No EPOCH_INITIALIZATION found for epoch {epoch_id}")
             raise HTTPException(
-                status_code=500,
-                detail="No validators found in metagraph"
+                status_code=404,
+                detail=f"Epoch {epoch_id} not initialized. No leads assigned yet."
             )
+        
+        # Extract assigned_lead_ids from EPOCH_INITIALIZATION payload
+        epoch_payload = init_result.data[0].get("payload", {})
+        assigned_lead_ids = epoch_payload.get("assignment", {}).get("assigned_lead_ids", [])
+        queue_root = epoch_payload.get("queue", {}).get("queue_root", "unknown")
+        validator_count = epoch_payload.get("assignment", {}).get("validator_count", 0)
+        
+        print(f"   📊 EPOCH_INITIALIZATION: {len(assigned_lead_ids)} leads assigned")
+        print(f"   📊 Queue Root: {queue_root[:16]}...")
+        print(f"   📊 Validators: {validator_count}")
     
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get validator set: {str(e)}"
+            detail=f"Failed to fetch EPOCH_INITIALIZATION: {str(e)}"
         )
     
-    # Step 6: Compute deterministic assignment (returns first MAX_LEADS_PER_EPOCH lead_ids)
-    try:
-        from gateway.config import MAX_LEADS_PER_EPOCH
-        assigned_lead_ids = deterministic_lead_assignment(
-            queue_root=queue_root,
-            validator_set=validator_set,
-            epoch_id=epoch_id,
-            max_leads_per_epoch=MAX_LEADS_PER_EPOCH
-        )
-    
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to compute assignment: {str(e)}"
-        )
-    
-    # Step 7: Fetch full lead data from leads_private (with timeout)
+    # Step 5: Fetch full lead data from leads_private (with timeout)
     try:
         if not assigned_lead_ids:
             # No leads assigned for this epoch
@@ -300,11 +271,11 @@ async def get_epoch_leads(
                 "epoch_id": epoch_id,
                 "leads": [],
                 "queue_root": queue_root,
-                "validator_count": len(validator_set),
+                "validator_count": validator_count,
                 "max_leads_per_epoch": MAX_LEADS_PER_EPOCH  # Dynamic config for validators
             }
         
-        print(f"🔍 Step 7: Fetching {len(assigned_lead_ids)} leads from leads_private...")
+        print(f"🔍 Step 5: Fetching {len(assigned_lead_ids)} leads from leads_private...")
         print(f"   Lead IDs: {assigned_lead_ids[:3]}... (showing first 3)")
         
         # NOTE: miner_hotkey column doesn't exist yet in Supabase
@@ -343,7 +314,7 @@ async def get_epoch_leads(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ ERROR in Step 7: {e}")
+        print(f"❌ ERROR in Step 5: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(
@@ -351,10 +322,10 @@ async def get_epoch_leads(
             detail=f"Failed to fetch lead data: {str(e)}"
         )
     
-    # Step 8: Build full_leads with miner_hotkey extracted from lead_blob
+    # Step 6: Build full_leads with miner_hotkey extracted from lead_blob
     # NOTE: miner_hotkey column doesn't exist yet, so we extract from lead_blob (wallet_ss58)
     try:
-        print(f"🔍 Step 8: Building full lead data for {len(leads_result.data)} leads...")
+        print(f"🔍 Step 6: Building full lead data for {len(leads_result.data)} leads...")
         full_leads = []
         for idx, lead_row in enumerate(leads_result.data):
             try:
@@ -375,10 +346,10 @@ async def get_epoch_leads(
                 print(f"   Lead row: {lead_row}")
                 raise
         
-        print(f"✅ Step 8 complete: Built {len(full_leads)} full lead objects")
+        print(f"✅ Step 6 complete: Built {len(full_leads)} full lead objects")
     
     except Exception as e:
-        print(f"❌ ERROR in Step 8: {e}")
+        print(f"❌ ERROR in Step 6: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(
@@ -386,19 +357,19 @@ async def get_epoch_leads(
             detail=f"Failed to build lead data: {str(e)}"
         )
     
-    # Step 9: Cache leads for subsequent requests (instant response for other validators)
+    # Step 7: Cache leads for subsequent requests (instant response for other validators)
     from gateway.utils.leads_cache import set_cached_leads
     set_cached_leads(epoch_id, full_leads)
     print(f"💾 [CACHE SET] Cached {len(full_leads)} leads for epoch {epoch_id}")
     print(f"   Subsequent validator requests will be instant (<100ms)")
     
-    # Step 10: Return full lead data
-    print(f"✅ Step 10: Returning {len(full_leads)} leads to validator")
+    # Step 8: Return full lead data
+    print(f"✅ Step 8: Returning {len(full_leads)} leads to validator")
     return {
         "epoch_id": epoch_id,
         "leads": full_leads,
         "queue_root": queue_root,
-        "validator_count": len(validator_set),
+        "validator_count": validator_count,
         "max_leads_per_epoch": MAX_LEADS_PER_EPOCH,  # Dynamic config for validators
         "cached": False,  # This response was from DB query, not cache
         "timestamp": datetime.utcnow().isoformat()

@@ -4087,6 +4087,55 @@ NATIONALITY_TO_COUNTRY = {
     "korean": "South Korea",
 }
 
+def _is_valid_location(location: str) -> bool:
+    """Check if extracted text is a valid location (not garbage)."""
+    if not location:
+        return False
+    
+    location_lower = location.lower()
+    
+    # Reject obvious garbage patterns
+    garbage_patterns = [
+        # Business/company terms
+        'products', 'competitors', 'valuation', 'funding', 'revenue',
+        'technology', 'entertainment', 'software', 'services', 'solutions',
+        'company', 'corporation', 'enterprise', 'business', 'industry',
+        'profile', 'overview', 'about', 'description', 'information',
+        # Generic web terms
+        'linkedin', 'crunchbase', 'wikipedia', 'facebook', 'twitter',
+        # Too generic
+        'global', 'worldwide', 'international', 'regional',
+    ]
+    
+    if any(garbage in location_lower for garbage in garbage_patterns):
+        return False
+    
+    # Reject if it's just state codes without city
+    if re.match(r'^[A-Z]{2}$', location):
+        return False
+    
+    # Reject if too long (likely a description, not a location)
+    if len(location) > 50:
+        return False
+    
+    # Reject if starts with articles or prepositions  
+    if location_lower.startswith(('the ', 'a ', 'an ', 'in ', 'at ', 'on ')):
+        return False
+    
+    # Must contain at least some location-like content
+    # Either a known city, state, or comma-separated format
+    has_comma = ',' in location
+    has_known_state = any(state in location_lower for state in [
+        'california', 'new york', 'texas', 'florida', 'washington', 'massachusetts',
+        'illinois', 'georgia', 'colorado', 'oregon', 'pennsylvania', 'ohio',
+        'virginia', 'north carolina', 'michigan', 'arizona', 'maryland', 'tennessee',
+        'canada', 'united kingdom', 'france', 'germany', 'australia', 'singapore'
+    ])
+    has_known_city = any(city in location_lower for city in MAJOR_CITIES)
+    
+    return has_comma or has_known_state or has_known_city
+
+
 def extract_location_from_text(text: str) -> Optional[str]:
     """Extract location from text using regex patterns."""
     if not text:
@@ -4099,9 +4148,9 @@ def extract_location_from_text(text: str) -> Optional[str]:
             location = match.group(1).strip()
             location = re.sub(r'\s*\|.*$', '', location)
             location = re.sub(r'\s*-.*$', '', location)
-            # Validate: should not contain company descriptions
-            if len(location) > 50 or location.lower().startswith(('in the ', 'the ')):
-                continue  # Skip garbage extractions
+            # Validate: reject garbage
+            if not _is_valid_location(location):
+                continue
             return location
     
     # Try case-sensitive patterns (City, ST format)
@@ -4109,8 +4158,7 @@ def extract_location_from_text(text: str) -> Optional[str]:
         match = re.search(pattern, text)  # No IGNORECASE
         if match:
             location = match.group(1).strip()
-            # Validate: should be short (city + state) and not garbage
-            if len(location) <= 40 and not location.lower().startswith(('the ', 'a ', 'an ')):
+            if _is_valid_location(location):
                 return location
     
     # Try nationality patterns (e.g., "American company" → "United States")

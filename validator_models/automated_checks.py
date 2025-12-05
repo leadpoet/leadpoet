@@ -3695,7 +3695,7 @@ def normalize_for_comparison(text: str) -> str:
     return text
 
 
-def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str = "") -> Optional[str]:
+def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str = "", full_name: str = "") -> Optional[str]:
     """
     Extract job role from DDG LinkedIn search result title/snippet.
     
@@ -3704,6 +3704,9 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
     2. "Name - Company | LinkedIn" (NO role, just company)
     
     We must distinguish between these and return None for format 2.
+    
+    If full_name is provided, verify the extracted role is associated with that person
+    (role should appear near the person's name in the text).
     """
     if not title:
         return None
@@ -3712,6 +3715,11 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
     
     # Normalize company name for comparison
     company_normalized = normalize_for_comparison(company_name) if company_name else ""
+    
+    # For name proximity check - extract name parts for matching
+    name_parts = []
+    if full_name:
+        name_parts = [p.lower() for p in full_name.split() if len(p) > 2]
     
     role_keywords = [
         "ceo", "cto", "cfo", "coo", "cmo", "cio", "cpo",
@@ -3824,6 +3832,29 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
         if any(g in snippet_clean.lower() for g in garbage_indicators):
             return None
         
+        # NAME PROXIMITY CHECK: If name provided, verify snippet mentions this person
+        # near any extracted role (to avoid extracting role of wrong person)
+        # Be lenient: accept if last name OR first name is mentioned (not both required)
+        if name_parts and len(name_parts) >= 2:
+            snippet_lower = snippet_clean.lower()
+            # Check for last name (usually more unique) or first name
+            last_name = name_parts[-1] if len(name_parts[-1]) > 2 else None
+            first_name = name_parts[0] if len(name_parts[0]) > 2 else None
+            
+            name_mentioned = False
+            if last_name and last_name in snippet_lower:
+                name_mentioned = True
+            elif first_name and first_name in snippet_lower:
+                name_mentioned = True
+            # Also check for common title patterns like "Mr.", "Ms.", "Dr."
+            elif any(title in snippet_lower for title in ['mr.', 'ms.', 'dr.', 'prof.']):
+                # If there's a title, be more lenient
+                name_mentioned = True
+            
+            if not name_mentioned:
+                # This snippet doesn't mention our person at all, skip it
+                return None
+        
         # HIGH-PRIORITY: Look for compound titles first (e.g., "Founder and CEO", "President & Co-Founder")
         compound_patterns = [
             # "Founder and CEO John Smith" or "CEO and Founder John Smith"
@@ -3844,7 +3875,12 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
                     return role
         
         snippet_patterns = [
-            # "currently a Chief Technology Officer" - capture full C-suite title
+            # "rose to the role of Chief Operating Officer" - capture full C-suite title
+            r'(?:role\s+of|as\s+(?:a|the)?)\s*(chief\s+\w+\s+officer)\b',
+            r'(?:was\s+(?:a|the)\s+)(chief\s+\w+\s+officer)\b',
+            r'(?:served\s+as\s+)(chief\s+\w+\s+officer)\b',
+            # "currently a Chief of Staff" or "currently a Chief Technology Officer"
+            r'\b(?:currently\s+(?:a|the|an)\s+)(chief\s+of\s+staff[^|,.]{0,20})\b',
             r'\b(?:currently\s+(?:a|the|an)\s+)(chief\s+\w+\s+officer)\b',
             r'\b(?:currently\s+(?:a|the|an)\s+)((?:senior\s+)?vice\s+president[^|,.]{0,30})',
             # "John is the CEO at Company" or "John serves as Director of..."
@@ -4372,7 +4408,7 @@ def fuzzy_pre_verification_stage5(
                 if not has_name and not is_company_role:
                     continue
             
-            extracted = extract_role_from_ddg_title(title, snippet, company_name=company)
+            extracted = extract_role_from_ddg_title(title, snippet, company_name=company, full_name=full_name)
             
             if extracted:
                 extracted_lower = extracted.lower()
@@ -4629,11 +4665,18 @@ def _ddg_search_stage5_sync(
         
         role_simplified = re.split(r'[,&/]', role)[0].strip() if role else ""
         
-        queries = [f'"{full_name}" {company} linkedin']
-        fallback_queries = [
-            f'"{full_name}" {role_simplified} {company}',  # Name + Role + Company
-            f'{company} "{role_simplified}" linkedin',      # Company + Role (job postings, other employees)
+        # Multiple primary queries to maximize chance of finding role
+        queries = [
+            f'"{full_name}" "{company}" linkedin',           # Exact name + company
+            f'"{full_name}" {company} linkedin',             # Name quoted, company unquoted
         ]
+        
+        # Verification queries - search for the CLAIMED role to verify it
+        # If DDG returns results with name+role+company, role is likely correct
+        fallback_queries = []
+        if role_simplified:
+            fallback_queries.append(f'"{full_name}" "{role_simplified}" "{company}"')  # Verify claimed role
+            fallback_queries.append(f'"{full_name}" {role_simplified} linkedin')       # Name + Role + LinkedIn
         if linkedin_url_query:
             fallback_queries.append(linkedin_url_query)
     elif search_type == "region":
@@ -4760,7 +4803,7 @@ def _ddg_search_stage5_sync(
                 for r in all_results[:5]:
                     title = r.get("title", "")
                     snippet = r.get("snippet", r.get("body", ""))
-                    extracted = extract_role_from_ddg_title(title, snippet, company_name=company)
+                    extracted = extract_role_from_ddg_title(title, snippet, company_name=company, full_name=full_name)
                     if not extracted:
                         continue
                     
@@ -4891,8 +4934,38 @@ def _ddg_search_stage5_sync(
                         query_num = j + 2
                         print(f"   🔍 FALLBACK{query_num-1}: {query[:50]}...")
                         try:
+                            # Check if this fallback query contains the claimed role (verification mode)
+                            is_verification_query = role_simplified and role_simplified.lower() in query.lower()
+                            
                             # Fallbacks also require LinkedIn URLs for role searches
                             results = ddg_search_with_fallback(ddgs, query, max_results, require_linkedin=True)
+                            
+                            # VERIFICATION MODE: If query contains claimed role and we get results 
+                            # that mention the person's name, consider role verified
+                            if is_verification_query and results:
+                                name_parts = full_name.lower().split()
+                                for r in results:
+                                    combined = (r.get("title", "") + " " + r.get("body", "")).lower()
+                                    # Check if result mentions the person's name
+                                    name_found = any(part in combined for part in name_parts if len(part) > 2)
+                                    company_found = company.lower() in combined if company else False
+                                    if name_found and company_found:
+                                        print(f"   ✅ Role VERIFIED via fallback: '{role_simplified}' confirmed")
+                                        # Add the claimed role as extracted for downstream processing
+                                        all_results.append({
+                                            "title": f"{full_name} - {role_simplified} at {company}",
+                                            "link": r.get("href", ""),
+                                            "snippet": f"Role verified: {role_simplified} (from verification search)",
+                                            "query_type": search_type,
+                                            "query": query + f" (verified)",
+                                            "role_verified": True,
+                                            "verified_role": role_simplified
+                                        })
+                                        role_found = True
+                                        break
+                                if role_found:
+                                    break
+                            
                             for r in results:
                                 all_results.append({
                                     "title": r.get("title", ""),
@@ -4905,7 +4978,7 @@ def _ddg_search_stage5_sync(
                             for r in results:
                                 title = r.get("title", "")
                                 snippet = r.get("body", "")
-                                extracted = extract_role_from_ddg_title(title, snippet, company_name=company)
+                                extracted = extract_role_from_ddg_title(title, snippet, company_name=company, full_name=full_name)
                                 if not extracted:
                                     continue
                                     

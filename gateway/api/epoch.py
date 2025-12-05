@@ -202,21 +202,20 @@ async def get_epoch_leads(
             "timestamp": datetime.utcnow().isoformat()
         }
     
-    # Cache miss - fall back to EPOCH_INITIALIZATION snapshot (CRITICAL: must match /validate check!)
-    print(f"⚠️  [CACHE MISS] Epoch {epoch_id} not cached, falling back to EPOCH_INITIALIZATION...")
+    # Cache miss - try EPOCH_INITIALIZATION first, fall back to direct queue query
+    print(f"⚠️  [CACHE MISS] Epoch {epoch_id} not cached, trying fallback approaches...")
     
-    # Step 4: Fetch assigned leads from EPOCH_INITIALIZATION event
-    # CRITICAL FIX: We MUST use the frozen snapshot from EPOCH_INITIALIZATION, NOT the current
-    # queue state. The /validate endpoint checks lead_ids against EPOCH_INITIALIZATION.assignment,
-    # so if we return different leads here, validation will fail with "lead not assigned to epoch".
-    #
-    # Previous bug: Querying current queue state could return leads from a different epoch
-    # when new leads were submitted after EPOCH_INITIALIZATION.
+    # Step 4: Try to fetch assigned leads from EPOCH_INITIALIZATION event
+    import asyncio
+    from gateway.config import MAX_LEADS_PER_EPOCH
+    
+    assigned_lead_ids = None
+    queue_root = "unknown"
+    validator_count = 0
+    use_direct_query = False
+    
     try:
-        import asyncio
-        from gateway.config import MAX_LEADS_PER_EPOCH
-        
-        print(f"🔍 Step 4: Fetching EPOCH_INITIALIZATION for epoch {epoch_id}...")
+        print(f"🔍 Step 4: Checking EPOCH_INITIALIZATION for epoch {epoch_id}...")
         
         # Query EPOCH_INITIALIZATION from transparency_log
         try:
@@ -232,58 +231,88 @@ async def get_epoch_leads(
                 timeout=30.0
             )
         except asyncio.TimeoutError:
-            print(f"❌ ERROR: EPOCH_INITIALIZATION query timed out after 30 seconds")
+            print(f"⚠️  EPOCH_INITIALIZATION query timed out, falling back to direct query...")
+            use_direct_query = True
+            init_result = None
+        
+        if init_result and init_result.data:
+            # Extract assigned_lead_ids from EPOCH_INITIALIZATION payload
+            epoch_payload = init_result.data[0].get("payload", {})
+            assigned_lead_ids = epoch_payload.get("assignment", {}).get("assigned_lead_ids", [])
+            queue_root = epoch_payload.get("queue", {}).get("queue_root", "unknown")
+            validator_count = epoch_payload.get("assignment", {}).get("validator_count", 0)
+            
+            print(f"   ✅ EPOCH_INITIALIZATION found: {len(assigned_lead_ids)} leads assigned")
+            print(f"   📊 Queue Root: {queue_root[:16] if queue_root != 'unknown' else 'unknown'}...")
+            print(f"   📊 Validators: {validator_count}")
+        else:
+            print(f"   ⚠️  No EPOCH_INITIALIZATION for epoch {epoch_id}, using direct queue query...")
+            use_direct_query = True
+    
+    except Exception as e:
+        print(f"⚠️  Error checking EPOCH_INITIALIZATION: {e}, falling back to direct query...")
+        use_direct_query = True
+    
+    # Fallback: Query leads directly from queue (old behavior)
+    leads_result = None  # Will be set by fallback or Step 5
+    
+    if use_direct_query or assigned_lead_ids is None:
+        try:
+            print(f"🔍 Step 4b: Querying leads directly from leads_private (fallback)...")
+            
+            # Query first MAX_LEADS_PER_EPOCH leads from queue that haven't been validated
+            leads_result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: supabase.table("leads_private")
+                        .select("lead_id, lead_blob, lead_blob_hash")
+                        .eq("status", "pending")
+                        .order("created_at", desc=False)  # FIFO order
+                        .limit(MAX_LEADS_PER_EPOCH)
+                        .execute()
+                ),
+                timeout=90.0
+            )
+            
+            if leads_result.data:
+                assigned_lead_ids = [lead["lead_id"] for lead in leads_result.data]
+                print(f"   ✅ Direct query found {len(assigned_lead_ids)} pending leads")
+            else:
+                assigned_lead_ids = []
+                print(f"   ℹ️  No pending leads in queue")
+                
+        except asyncio.TimeoutError:
+            print(f"❌ ERROR: Direct query timed out after 90 seconds")
             raise HTTPException(
                 status_code=504,
                 detail="Database query timeout - gateway may be experiencing high load"
             )
-        
-        if not init_result.data:
-            print(f"❌ ERROR: No EPOCH_INITIALIZATION found for epoch {epoch_id}")
+        except Exception as e:
+            print(f"❌ ERROR in direct query: {e}")
+            import traceback
+            traceback.print_exc()
             raise HTTPException(
-                status_code=404,
-                detail=f"Epoch {epoch_id} not initialized. No leads assigned yet."
+                status_code=500,
+                detail=f"Failed to fetch leads: {str(e)}"
             )
-        
-        # Extract assigned_lead_ids from EPOCH_INITIALIZATION payload
-        epoch_payload = init_result.data[0].get("payload", {})
-        assigned_lead_ids = epoch_payload.get("assignment", {}).get("assigned_lead_ids", [])
-        queue_root = epoch_payload.get("queue", {}).get("queue_root", "unknown")
-        validator_count = epoch_payload.get("assignment", {}).get("validator_count", 0)
-        
-        print(f"   📊 EPOCH_INITIALIZATION: {len(assigned_lead_ids)} leads assigned")
-        print(f"   📊 Queue Root: {queue_root[:16]}...")
-        print(f"   📊 Validators: {validator_count}")
     
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch EPOCH_INITIALIZATION: {str(e)}"
-        )
+    # Step 5: Fetch full lead data from leads_private (skip if already fetched in fallback)
+    if not assigned_lead_ids:
+        # No leads assigned for this epoch
+        return {
+            "epoch_id": epoch_id,
+            "leads": [],
+            "queue_root": queue_root,
+            "validator_count": validator_count,
+            "max_leads_per_epoch": MAX_LEADS_PER_EPOCH  # Dynamic config for validators
+        }
     
-    # Step 5: Fetch full lead data from leads_private (with timeout)
-    try:
-        if not assigned_lead_ids:
-            # No leads assigned for this epoch
-            return {
-                "epoch_id": epoch_id,
-                "leads": [],
-                "queue_root": queue_root,
-                "validator_count": validator_count,
-                "max_leads_per_epoch": MAX_LEADS_PER_EPOCH  # Dynamic config for validators
-            }
-        
-        print(f"🔍 Step 5: Fetching {len(assigned_lead_ids)} leads from leads_private...")
-        print(f"   Lead IDs: {assigned_lead_ids[:3]}... (showing first 3)")
-        
-        # NOTE: miner_hotkey column doesn't exist yet in Supabase
-        # TODO: Add migration to create miner_hotkey column, then optimize this query
-        
-        # Wrap Supabase query with asyncio timeout (90 seconds)
-        import asyncio
+    # Only query leads_private if we used EPOCH_INITIALIZATION (not fallback)
+    if leads_result is None:
         try:
+            print(f"🔍 Step 5: Fetching {len(assigned_lead_ids)} leads from leads_private...")
+            print(f"   Lead IDs: {assigned_lead_ids[:3]}... (showing first 3)")
+            
+            # Wrap Supabase query with asyncio timeout (90 seconds)
             leads_result = await asyncio.wait_for(
                 asyncio.to_thread(
                     lambda: supabase.table("leads_private")
@@ -291,36 +320,37 @@ async def get_epoch_leads(
                         .in_("lead_id", assigned_lead_ids)
                         .execute()
                 ),
-                timeout=90.0  # 90 second timeout for database query (Supabase very slow on testnet)
+                timeout=90.0  # 90 second timeout for database query
             )
+            
+            print(f"✅ Fetched {len(leads_result.data) if leads_result.data else 0} leads from database")
+            
+            if not leads_result.data:
+                print(f"❌ ERROR: No leads found in database for assigned IDs")
+                print(f"   Assigned IDs: {assigned_lead_ids}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to fetch lead data from private database"
+                )
+        
         except asyncio.TimeoutError:
             print(f"❌ ERROR: Supabase query timed out after 90 seconds")
             raise HTTPException(
                 status_code=504,
                 detail="Database query timeout - gateway may be experiencing high load"
             )
-        
-        print(f"✅ Fetched {len(leads_result.data) if leads_result.data else 0} leads from database")
-        
-        if not leads_result.data:
-            print(f"❌ ERROR: No leads found in database for assigned IDs")
-            print(f"   This means leads were assigned but don't exist in leads_private")
-            print(f"   Assigned IDs: {assigned_lead_ids}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"❌ ERROR in Step 5: {e}")
+            import traceback
+            traceback.print_exc()
             raise HTTPException(
                 status_code=500,
-                detail="Failed to fetch lead data from private database"
+                detail=f"Failed to fetch lead data: {str(e)}"
             )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ ERROR in Step 5: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch lead data: {str(e)}"
-        )
+    else:
+        print(f"✅ Step 5: Skipped (already have {len(leads_result.data)} leads from fallback)")
     
     # Step 6: Build full_leads with miner_hotkey extracted from lead_blob
     # NOTE: miner_hotkey column doesn't exist yet, so we extract from lead_blob (wallet_ss58)

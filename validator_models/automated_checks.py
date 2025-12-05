@@ -3732,6 +3732,15 @@ def extract_role_from_ddg_title(title: str, snippet: str = "") -> Optional[str]:
     
     if snippet:
         snippet_clean = snippet.strip()
+        
+        # Skip garbage snippets entirely
+        garbage_indicators = [
+            "session details", "read more", "click here", "learn more",
+            "view profile", "see the complete", "view full", "show more"
+        ]
+        if any(g in snippet_clean.lower() for g in garbage_indicators):
+            return None
+        
         snippet_patterns = [
             r'(?:is\s+(?:the\s+)?|serves?\s+as\s+(?:the\s+)?|works?\s+as\s+(?:the\s+)?)([^.]+?)\s+(?:at|of|for)\s+',
             r'(?:current|position|title|role)[:\s]+([^|.\n]+)',
@@ -3741,14 +3750,18 @@ def extract_role_from_ddg_title(title: str, snippet: str = "") -> Optional[str]:
             match = re.search(pattern, snippet_clean, re.IGNORECASE)
             if match:
                 role = match.group(1).strip()
-                if len(role) > 2 and len(role) < 100:
+                # Validate extracted role
+                if len(role) > 2 and len(role) < 60:
+                    # Reject if starts with common garbage words
+                    if role.lower().startswith(('now ', 'the ', 'a ', 'an ', 'this ', 'that ', 'is ', 'was ', 'in ', 'of ', 'at ')):
+                        continue
                     return role
         
         for kw in role_keywords:
             match = re.search(rf'\b({kw}(?:\s+(?:and|&)\s+\w+)?(?:\s+of|\s+at)?)', snippet_clean, re.IGNORECASE)
             if match:
                 role = match.group(1).strip()
-                if len(role) > 2:
+                if len(role) > 2 and len(role) < 60:
                     return role
     
     return None
@@ -4453,6 +4466,42 @@ def _ddg_search_stage5_sync(
                                           "hoovers", "manta", "yelp", "bbb", "yellowpages"]
                     if extracted_lower in invalid_extractions:
                         continue
+                    
+                    # Filter: "assistant to X" patterns - extracting wrong person's role
+                    if re.search(r'\b(assistant|secretary|aide)\s+to\s+', extracted_lower):
+                        continue
+                    
+                    # Filter: Sentence fragments that are clearly not roles
+                    # These are garbage from Yandex/Google snippets
+                    garbage_patterns = [
+                        r'^(now|is|was|has|had|will|can|may|should|would)\s+',  # Starts with verb
+                        r'^(the|a|an|this|that|these|those|our|their)\s+',  # Starts with article
+                        r'^(and|or|but|if|when|where|what|how|why)\s+',  # Starts with conjunction
+                        r'^(in|on|at|to|for|with|from|by|about)\s+',  # Starts with preposition
+                        r'session\s+details',  # Conference/event garbage
+                        r'read\s+more',
+                        r'click\s+here',
+                        r'learn\s+more',
+                        r'view\s+profile',
+                        r'see\s+the\s+complete',
+                        r'^\d+\s+(years?|months?|days?)',  # Duration patterns
+                        r'^of\s+',  # Starts with "of " (truncated)
+                    ]
+                    if any(re.search(p, extracted_lower) for p in garbage_patterns):
+                        continue
+                    
+                    # Filter: Very long extractions without role keywords (likely garbage)
+                    if len(extracted) > 50 and not has_role_keyword:
+                        continue
+                    
+                    # Filter: Contains the person's name (likely extracted wrong info)
+                    if full_name:
+                        name_parts = full_name.lower().split()
+                        # If extraction contains any part of the person's name, suspicious
+                        if any(part in extracted_lower and len(part) > 2 for part in name_parts):
+                            # Only skip if it looks like "assistant to X" or similar
+                            if " to " in extracted_lower or "'s " in extracted_lower:
+                                continue
                     # Filter website domains (anything ending in .com, .co, .io, etc.)
                     if re.match(r'^[\w\-]+\.(com|co|io|org|net)$', extracted_lower):
                         continue
@@ -4547,11 +4596,33 @@ def _ddg_search_stage5_sync(
                                 # Filter: Invalid site names and domains
                                 invalid_extractions = ["linkedin", "wikipedia", "facebook", "twitter", "crunchbase", 
                                                       "glassdoor", "indeed", "zoominfo", "craft.co", "theorg.com", 
-                                                      "the org", "bloomberg", "forbes", "reuters"]
+                                                      "the org", "bloomberg", "forbes", "reuters", "bizapedia",
+                                                      "rocketreach", "signalhire", "lusha", "apollo", "leadiq"]
                                 if extracted_lower in invalid_extractions:
                                     continue
                                 # Filter website domains (anything ending in .com, .co, .io, etc.)
                                 if re.match(r'^[\w\-]+\.(com|co|io|org|net)$', extracted_lower):
+                                    continue
+                                
+                                # Filter: "assistant to X" patterns - extracting wrong person's role
+                                if re.search(r'\b(assistant|secretary|aide)\s+to\s+', extracted_lower):
+                                    continue
+                                
+                                # Filter: Sentence fragments that are clearly not roles
+                                garbage_patterns = [
+                                    r'^(now|is|was|has|had|will|can|may|should|would)\s+',
+                                    r'^(the|a|an|this|that|these|those|our|their)\s+',
+                                    r'^(and|or|but|if|when|where|what|how|why)\s+',
+                                    r'^(in|on|at|to|for|with|from|by|about)\s+',
+                                    r'session\s+details',
+                                    r'^\d+\s+(years?|months?|days?)',
+                                    r'^of\s+',
+                                ]
+                                if any(re.search(p, extracted_lower) for p in garbage_patterns):
+                                    continue
+                                
+                                # Filter: Very long extractions without role keywords
+                                if len(extracted) > 50 and not has_role_keyword:
                                     continue
                                 
                                 # Filter: Too short/generic 
@@ -4859,8 +4930,9 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
    - PASS if city, state, OR country matches reasonably
    - "San Jose, CA" ≈ "San Jose, California" ✓
    - Same-state = match (e.g., Brooklyn, NY ≈ New York, NY)
-   - If you cannot find ANY location info → region_match=false, extracted_region="NOT_FOUND"
-   - FAIL if you cannot verify the claimed region from search results
+   - If you cannot find ANY location info in search results → region_match=true, extracted_region="UNVERIFIABLE"
+   - (Small/niche companies often don't have HQ info in search results - that's okay)
+   - ONLY FAIL if search results EXPLICITLY show a DIFFERENT location than claimed
 """)
     else:
         claims_to_verify.append(f'2. REGION: "{claimed_region}" ✅ (Already verified by fuzzy match)')

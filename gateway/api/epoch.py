@@ -253,7 +253,8 @@ async def get_epoch_leads(
         print(f"⚠️  Error checking EPOCH_INITIALIZATION: {e}, falling back to direct query...")
         use_direct_query = True
     
-    # Fallback: Query leads directly from queue (old behavior)
+    # Fallback: Query leads directly AND create EPOCH_INITIALIZATION to ensure consistency
+    # CRITICAL: We must create EPOCH_INITIALIZATION so /validate uses the same snapshot
     leads_result = None  # Will be set by fallback or Step 5
     
     if use_direct_query or assigned_lead_ids is None:
@@ -276,6 +277,57 @@ async def get_epoch_leads(
             if leads_result.data:
                 assigned_lead_ids = [lead["lead_id"] for lead in leads_result.data]
                 print(f"   ✅ Direct query found {len(assigned_lead_ids)} pending leads")
+                
+                # CRITICAL: Create EPOCH_INITIALIZATION event so /validate uses same snapshot
+                # This prevents the mismatch issue where new leads submitted during epoch
+                # would be included in subsequent /leads calls but rejected by /validate
+                import hashlib
+                import json
+                
+                # Compute queue_root (hash of lead IDs for verification)
+                queue_root = hashlib.sha256(json.dumps(assigned_lead_ids, sort_keys=True).encode()).hexdigest()
+                
+                # Create EPOCH_INITIALIZATION payload (matches epoch monitor format)
+                init_payload = {
+                    "queue": {
+                        "queue_root": queue_root,
+                        "lead_count": len(assigned_lead_ids)
+                    },
+                    "assignment": {
+                        "assigned_lead_ids": assigned_lead_ids,
+                        "validator_count": 0,  # Unknown at this point
+                        "leads_per_validator": len(assigned_lead_ids)
+                    },
+                    "created_by": "epoch_leads_fallback",  # Mark as fallback-created
+                    "created_at": datetime.utcnow().isoformat()
+                }
+                
+                print(f"   📝 Creating EPOCH_INITIALIZATION for epoch {epoch_id} (fallback mode)...")
+                print(f"   📊 Queue Root: {queue_root[:16]}...")
+                
+                try:
+                    # Insert EPOCH_INITIALIZATION event (idempotent - will fail if exists)
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            lambda: supabase.table("transparency_log")
+                                .insert({
+                                    "event_type": "EPOCH_INITIALIZATION",
+                                    "epoch_id": epoch_id,
+                                    "payload": init_payload,
+                                    "created_at": datetime.utcnow().isoformat()
+                                })
+                                .execute()
+                        ),
+                        timeout=30.0
+                    )
+                    print(f"   ✅ EPOCH_INITIALIZATION created successfully")
+                except Exception as init_err:
+                    # If it already exists (race condition), that's fine - use existing one
+                    if "duplicate" in str(init_err).lower() or "unique" in str(init_err).lower():
+                        print(f"   ℹ️  EPOCH_INITIALIZATION already exists (created by another request)")
+                    else:
+                        print(f"   ⚠️  Failed to create EPOCH_INITIALIZATION: {init_err}")
+                        # Continue anyway - the leads are still valid for this request
             else:
                 assigned_lead_ids = []
                 print(f"   ℹ️  No pending leads in queue")

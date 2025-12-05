@@ -1920,6 +1920,7 @@ class Validator(BaseValidatorNeuron):
                     "end_block": (current_epoch + 1) * 360,
                     "miner_scores": {},
                     "approved_lead_count": 0,  # Track number of approved leads for linear emissions
+                    "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', 50),  # Persist for restart recovery
                     "last_updated": datetime.utcnow().isoformat()
                 }
                 # Save immediately so epoch exists even if all leads are denied
@@ -1964,6 +1965,7 @@ class Validator(BaseValidatorNeuron):
                 "end_block": (current_epoch + 1) * 360,
                 "miner_scores": epoch_data["miner_scores"].copy(),  # Deep copy of scores
                 "approved_lead_count": epoch_data.get("approved_lead_count", 0),  # Track for linear emissions
+                "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', epoch_data.get("max_leads_per_epoch", 50)),  # Persist for restart recovery
                 "last_updated": datetime.utcnow().isoformat()
             }
             
@@ -2043,7 +2045,23 @@ class Validator(BaseValidatorNeuron):
             MAX_CURRENT_EPOCH_SHARE = 0.15 # 15% max to miners (current epoch)
             MAX_ROLLING_EPOCH_SHARE = 0.20 # 20% max to miners (rolling 30 epochs)
             # Dynamic MAX_LEADS_PER_EPOCH from gateway (fetched during process_gateway_validation_workflow)
-            MAX_LEADS_PER_EPOCH = getattr(self, '_max_leads_per_epoch', 50)  # Default to 50 for backwards compat
+            # If not in memory (e.g., after restart), try to recover from history file
+            MAX_LEADS_PER_EPOCH = getattr(self, '_max_leads_per_epoch', None)
+            if MAX_LEADS_PER_EPOCH is None:
+                # Try to recover from history file (survives restarts)
+                try:
+                    history_file = Path("validator_weights") / "validator_weights_history"
+                    if history_file.exists():
+                        with open(history_file, 'r') as f:
+                            history_data = json.load(f)
+                        epoch_data = history_data.get(str(current_epoch), {})
+                        MAX_LEADS_PER_EPOCH = epoch_data.get("max_leads_per_epoch", 50)
+                        print(f"   ℹ️  Recovered max_leads_per_epoch={MAX_LEADS_PER_EPOCH} from history file")
+                    else:
+                        MAX_LEADS_PER_EPOCH = 50
+                except Exception as e:
+                    print(f"   ⚠️  Could not recover max_leads_per_epoch from history: {e}")
+                    MAX_LEADS_PER_EPOCH = 50
             ROLLING_WINDOW = 30
             
             # ═══════════════════════════════════════════════════════════════════

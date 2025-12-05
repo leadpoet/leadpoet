@@ -3956,9 +3956,15 @@ LOCATION_PATTERNS_IGNORECASE = [
     r'located\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                 # "located in X"
     r'offices?\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                # "office(s) in X"
     r'hq\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                      # "hq in X"
+    r'hq:\s*([^,\.]+(?:,\s*[^,\.]+)?)',                          # "HQ: City"
     # Secondary patterns
     r'(?:^|[^\w])([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)-based\s+(?:company|firm|startup)',  # "Paris-based company"
     r'company\s+(?:from|in)\s+([^,\.]+(?:,\s*[^,\.]+)?)',        # "company from/in X"
+    # Location in context patterns
+    r'founded\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                 # "founded in X"
+    r'started\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',                 # "started in X"
+    r'from\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:,\s*[A-Z]{2})?)\s+(?:is|was|that)',  # "from San Francisco, CA is"
+    r'(?:startup|company|firm)\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',  # "startup in X"
 ]
 
 # Case-sensitive patterns for "City, ST" format
@@ -3966,7 +3972,20 @@ LOCATION_PATTERNS_CASESENSITIVE = [
     r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\s*[-–—]',  # "New York, NY -"
     r'\|\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\b',     # "| New York, NY" (must end at word boundary)
     r',\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\s*$',    # ", City, ST" at end
+    # Match standalone "City, State" or "City, Country" patterns in text
+    r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*(?:[A-Z]{2}|[A-Z][a-z]+))\b',  # "San Francisco, CA" or "Lyon, France"
 ]
+
+# Major tech hub cities - for direct city name matching when patterns fail
+MAJOR_CITIES = {
+    "san francisco", "new york", "los angeles", "chicago", "seattle", "austin", "boston",
+    "denver", "atlanta", "miami", "dallas", "houston", "phoenix", "philadelphia",
+    "san jose", "san diego", "portland", "baltimore", "washington", "detroit",
+    # International
+    "london", "paris", "berlin", "amsterdam", "tokyo", "singapore", "sydney",
+    "toronto", "vancouver", "dublin", "tel aviv", "bangalore", "mumbai", "beijing",
+    "shanghai", "hong kong", "seoul", "lyon", "munich", "zurich", "stockholm"
+}
 
 # Map nationality adjectives to countries (for "American company" → "United States")
 NATIONALITY_TO_COUNTRY = {
@@ -4016,17 +4035,36 @@ def extract_location_from_text(text: str) -> Optional[str]:
         match = re.search(pattern, text)  # No IGNORECASE
         if match:
             location = match.group(1).strip()
-            # Validate: should be short (city + state)
-            if len(location) <= 40:
+            # Validate: should be short (city + state) and not garbage
+            if len(location) <= 40 and not location.lower().startswith(('the ', 'a ', 'an ')):
                 return location
     
-    # Try nationality patterns as last resort (e.g., "American company" → "United States")
+    # Try nationality patterns (e.g., "American company" → "United States")
     text_lower = text.lower()
     for nationality, country in NATIONALITY_TO_COUNTRY.items():
         if re.search(rf'\b{nationality}\b', text_lower):
             # Make sure it's in context of company description
             if any(ctx in text_lower for ctx in ['company', 'corporation', 'firm', 'business', 'enterprise', 'multinational']):
                 return country
+    
+    # Last resort: Look for major tech hub cities mentioned in text
+    for city in MAJOR_CITIES:
+        # Match city as whole word with possible state/country after
+        pattern = rf'\b({re.escape(city)}(?:,?\s*[A-Z]{{2}})?)\b'
+        match = re.search(pattern, text_lower)
+        if match:
+            # Find the actual case-preserved text from original
+            start = match.start(1)
+            end = match.end(1)
+            original_match = text[start:end]
+            # Only return if it looks like a location reference (not part of company name)
+            # Check context: should have location-related context nearby
+            context_start = max(0, start - 30)
+            context_end = min(len(text), end + 30)
+            context = text[context_start:context_end].lower()
+            location_context_words = ['based', 'headquarter', 'located', 'office', 'hq', 'from', 'in', 'city', 'area']
+            if any(word in context for word in location_context_words):
+                return original_match.title()
     
     return None
 
@@ -4930,9 +4968,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
    - PASS if city, state, OR country matches reasonably
    - "San Jose, CA" ≈ "San Jose, California" ✓
    - Same-state = match (e.g., Brooklyn, NY ≈ New York, NY)
-   - If you cannot find ANY location info in search results → region_match=true, extracted_region="UNVERIFIABLE"
-   - (Small/niche companies often don't have HQ info in search results - that's okay)
-   - ONLY FAIL if search results EXPLICITLY show a DIFFERENT location than claimed
+   - If you cannot find ANY location info → region_match=false, extracted_region="NOT_FOUND"
+   - FAIL if you cannot verify the claimed region from search results
 """)
     else:
         claims_to_verify.append(f'2. REGION: "{claimed_region}" ✅ (Already verified by fuzzy match)')

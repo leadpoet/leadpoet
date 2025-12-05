@@ -3933,12 +3933,18 @@ def fuzzy_match_role(claimed_role: str, extracted_role: str) -> Tuple[bool, floa
 
 
 # Location patterns for extraction
-LOCATION_PATTERNS = [
+# Patterns 1-3: Use IGNORECASE (headquartered/based/located can be any case)
+# Patterns 4-5: Case-sensitive (require actual capitalization for city/state)
+LOCATION_PATTERNS_IGNORECASE = [
     r'headquarter(?:ed|s)?\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',
     r'based\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',
     r'located\s+in\s+([^,\.]+(?:,\s*[^,\.]+)?)',
-    r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\s*[-–—]',
-    r'\|\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2,})',
+]
+
+# Case-sensitive patterns for "City, ST" format
+LOCATION_PATTERNS_CASESENSITIVE = [
+    r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\s*[-–—]',  # "New York, NY -"
+    r'\|\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\b',     # "| New York, NY" (must end at word boundary)
 ]
 
 def extract_location_from_text(text: str) -> Optional[str]:
@@ -3946,13 +3952,26 @@ def extract_location_from_text(text: str) -> Optional[str]:
     if not text:
         return None
     
-    for pattern in LOCATION_PATTERNS:
+    # Try case-insensitive patterns first (headquartered in, based in, located in)
+    for pattern in LOCATION_PATTERNS_IGNORECASE:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             location = match.group(1).strip()
             location = re.sub(r'\s*\|.*$', '', location)
             location = re.sub(r'\s*-.*$', '', location)
+            # Validate: should not contain company descriptions
+            if len(location) > 50 or location.lower().startswith(('in the ', 'the ')):
+                continue  # Skip garbage extractions
             return location
+    
+    # Try case-sensitive patterns (City, ST format)
+    for pattern in LOCATION_PATTERNS_CASESENSITIVE:
+        match = re.search(pattern, text)  # No IGNORECASE
+        if match:
+            location = match.group(1).strip()
+            # Validate: should be short (city + state)
+            if len(location) <= 40:
+                return location
     
     return None
 

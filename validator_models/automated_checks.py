@@ -161,6 +161,38 @@ ICP_DEFINITIONS = [
     },
     
     {
+        "sub_industries": ["single family office", "family office", "sfo", "private family office",
+                          "ultra high net worth", "uhnw", "private wealth office", "family wealth management",
+                          "family investment office", "private investment office"],
+        "role_details": [
+            # Leadership
+            "ceo", "chief executive officer", "president", "managing director", "managing partner",
+            "principal", "partner", "founder", "co-founder",
+            # Investment Leadership
+            "cio", "chief investment officer", "director of investments", "vp of investments",
+            "vp investments", "head of investments", "investment director", "investment manager",
+            "portfolio manager", "head of portfolio management", "director of portfolio management",
+            "senior portfolio manager", "lead portfolio manager",
+            # Private Markets
+            "head of private equity", "director of private equity", "vp private equity",
+            "vp of private equity", "head of venture capital", "director of venture capital",
+            "vp of venture capital", "vp venture capital", "head of vc", "director of vc",
+            "head of real estate", "director of real estate", "vp real estate", "vp of real estate",
+            "head of alternatives", "director of alternatives", "vp of alternatives", "vp alternatives",
+            "head of direct investments", "director of direct investments",
+            # Operations & Finance
+            "coo", "chief operating officer", "director of operations", "vp of operations",
+            "vp operations", "head of operations", "operations director",
+            "cfo", "chief financial officer", "director of finance", "vp of finance",
+            "vp finance", "head of finance", "finance director",
+            # Wealth & Asset Management
+            "family office manager", "wealth manager", "director of wealth management",
+            "head of family office", "family office director", "head of wealth management",
+            "asset manager", "head of asset management", "director of asset management"
+        ]
+    },
+    
+    {
         "sub_industries": ["fintech", "bank", "banking", "sponsor bank", "sponsor banking",
                           "financial technology", "digital banking", "neobank", "challenger bank",
                           "payment processor", "payment processing", "financial services"],

@@ -37,7 +37,7 @@ with codecs.open(os.path.join(here, "Leadpoet/__init__.py"), encoding="utf-8") a
 
 requirements = [
     # Core Bittensor
-    "bittensor>=9.10",
+    "bittensor>=9.10,<10.0.0",
     
     # HTTP and networking
     "requests>=2.31.0",

@@ -784,6 +784,27 @@ async def compute_epoch_consensus(epoch_id: int):
                 # Final rep_score (CRITICAL FIX: 0 for denied, not NULL)
                 final_rep_score = outcome['final_rep_score'] if outcome['final_decision'] == 'approve' else 0
                 
+                # Extract ICP multiplier from lead_blob
+                is_icp_multiplier = 1.0  # Default for legacy leads
+                try:
+                    lead_blob_result = await asyncio.to_thread(
+                        lambda: supabase.table("leads_private")
+                            .select("lead_blob")
+                            .eq("lead_id", lead_id)
+                            .execute()
+                    )
+                    
+                    if lead_blob_result.data and len(lead_blob_result.data) > 0:
+                        lead_blob = lead_blob_result.data[0].get("lead_blob", {})
+                        if isinstance(lead_blob, str):
+                            lead_blob = json.loads(lead_blob)
+                        
+                        # Extract ICP multiplier from lead_blob (set by validator during validation)
+                        is_icp_multiplier = lead_blob.get("is_icp_multiplier", 1.0)
+                        print(f"         🎯 ICP Multiplier: {is_icp_multiplier}x")
+                except Exception as e:
+                    print(f"         ⚠️  Could not extract ICP multiplier: {e}")
+                
                 # ========================================================================
                 # Update leads_private with ALL aggregated data
                 # ========================================================================
@@ -793,6 +814,7 @@ async def compute_epoch_consensus(epoch_id: int):
                 print(f"            - validator_responses: {len(validator_responses)} responses")
                 print(f"            - consensus_votes: {consensus_votes.get('approve', 0)} approve, {consensus_votes.get('deny', 0)} deny")
                 print(f"            - rep_score: {final_rep_score}")
+                print(f"            - is_icp_multiplier: {is_icp_multiplier}")
                 
                 try:
                     update_result = await asyncio.to_thread(
@@ -803,7 +825,8 @@ async def compute_epoch_consensus(epoch_id: int):
                                 "validator_responses": validator_responses,
                                 "consensus_votes": consensus_votes,
                                 "rep_score": final_rep_score,
-                                "rep_score_version": "v1",
+                                "is_icp_multiplier": is_icp_multiplier,
+                                "rep_score_version": "v1/checksv2",
                                 "epoch_summary": outcome  # Keep existing epoch_summary for backwards compatibility
                             })
                             .eq("lead_id", lead_id)
@@ -904,15 +927,16 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
         outcome: Consensus result from compute_weighted_consensus()
     """
     try:
-        # Fetch lead_blob to compute email_hash
+        # Fetch lead_blob to compute email_hash and get ICP multiplier
         lead_result = await asyncio.to_thread(
             lambda: supabase.table("leads_private")
-                .select("lead_blob")
+                .select("lead_blob, is_icp_multiplier")
                 .eq("lead_id", lead_id)
                 .execute()
         )
         
         email_hash = None
+        is_icp_multiplier = 1.0  # Default for old leads
         if lead_result.data and len(lead_result.data) > 0:
             lead_blob = lead_result.data[0].get("lead_blob", {})
             if isinstance(lead_blob, str):
@@ -922,12 +946,16 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
             email = lead_blob.get("email", "").strip().lower()
             if email:
                 email_hash = hashlib.sha256(email.encode()).hexdigest()
+            
+            # Get ICP multiplier (from DB column, falls back to 1.0 if missing)
+            is_icp_multiplier = lead_result.data[0].get("is_icp_multiplier", 1.0)
         
         payload = {
             "lead_id": lead_id,
             "epoch_id": epoch_id,
             "final_decision": outcome["final_decision"],
             "final_rep_score": outcome["final_rep_score"],
+            "is_icp_multiplier": is_icp_multiplier,
             "primary_rejection_reason": outcome["primary_rejection_reason"],
             "validator_count": outcome["validator_count"],
             "consensus_weight": outcome["consensus_weight"]

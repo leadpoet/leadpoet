@@ -31,6 +31,160 @@ from Leadpoet.utils.utils_lead_extraction import (
 
 MAX_REP_SCORE = 48  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) + Companies House (10) = 48
 
+# ========================================================================
+# ICP (Ideal Customer Profile) Definitions
+# ========================================================================
+# These are the target customer profiles we want to incentivize miners to find.
+# Leads matching these criteria receive a 1.5x multiplier on their rep_score during emissions.
+# Format: Each ICP is defined by Sub-Industry + Role Details
+# ========================================================================
+
+ICP_DEFINITIONS = [
+    {
+        "sub_industries": ["gas station", "fuel retail", "fuel distribution", "petroleum retail"],
+        "role_details": [
+            # Operations
+            "coo", "chief operating officer", "director of operations", "vp of operations", 
+            "vp operations", "head of operations", "operations manager", "operations director",
+            # Technology
+            "cto", "chief technology officer", "director of technology", "vp of technology", 
+            "vp technology", "head of technology", "vp of engineering", "vp engineering",
+            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
+            "cio", "chief information officer"
+        ]
+    },
+    
+    {
+        "sub_industries": ["fruit farmer", "crop farmer", "produce grower", "agricultural production"],
+        "role_details": [
+            # Operations
+            "coo", "chief operating officer", "director of operations", "vp of operations",
+            "vp operations", "head of operations", "operations manager", "operations director",
+            # Technology
+            "cto", "chief technology officer", "director of technology", "vp of technology",
+            "vp technology", "head of technology", "vp of engineering", "vp engineering",
+            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
+            "cio", "chief information officer"
+        ]
+    },
+    
+    {
+        "sub_industries": ["solar farm", "wind farm", "independent power producer", "ipp", 
+                          "renewable asset manager", "clean energy", "solar energy", "wind energy"],
+        "role_details": [
+            # Operations
+            "coo", "chief operating officer", "director of operations", "vp of operations",
+            "vp operations", "head of operations", "operations manager", "operations director",
+            # Technology
+            "cto", "chief technology officer", "director of technology", "vp of technology",
+            "vp technology", "head of technology", "vp of engineering", "vp engineering",
+            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
+            "cio", "chief information officer",
+            # Asset Management & Site Operations 
+            "asset manager", "director of operation", "performance engineer", "site manager",
+            "plant manager", "facility manager", "solar farm manager", "wind farm manager"
+        ]
+    },
+    
+    {
+        "sub_industries": ["vineyard", "orchard", "large crop producer", "greenhouse", 
+                          "agri-tech farm", "agritech", "commercial farm", "wine producer"],
+        "role_details": [
+            # Operations
+            "coo", "chief operating officer", "director of operations", "vp of operations",
+            "vp operations", "head of operations", "operations manager", "operations director",
+            # Technology
+            "cto", "chief technology officer", "director of technology", "vp of technology",
+            "vp technology", "head of technology", "vp of engineering", "vp engineering",
+            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
+            "cio", "chief information officer",
+            # Farm Management & Precision Agriculture 
+            "farm manager", "vineyard manager", "precision agriculture manager", 
+            "head grower", "chief agronomist", "viticulturist", "horticulturist",
+            "greenhouse manager", "crop manager", "production manager"
+        ]
+    },
+    
+    {
+        "sub_industries": ["shopify", "dtc", "direct to consumer", "retail", "e-commerce", "ecommerce"],
+        "role_details": [
+            # Marketing/Growth
+            "vp ecommerce", "vp e-commerce", "vp of ecommerce", "director of ecommerce",
+            "head of ecommerce", "ecommerce director", "head of growth", "director of growth",
+            "vp of growth", "vp growth", "chief growth officer", "cmo", "chief marketing officer",
+            "vp of marketing", "vp marketing", "director of marketing", "head of marketing",
+            "vp of digital marketing", "director of digital marketing",
+            # Leadership
+            "founder", "co-founder", "ceo", "chief executive officer"
+        ]
+    },
+    
+    {
+        "sub_industries": ["shopify agenc", "shopify partner", "paid ads", "paid advertising",
+                          "cro", "conversion optimization", "email", "email marketing", 
+                          "sms", "sms marketing", "digital marketing"],
+        "role_details": [
+            # Leadership/Strategy
+            "founder", "co-founder", "ceo", "chief executive officer", 
+            "director of partnerships", "vp of partnerships", "vp partnerships",
+            "head of partnerships", "partnerships director",
+            "head of strategy", "director of strategy", "vp of strategy", "vp strategy",
+            "chief strategy officer", "cmo", "chief marketing officer",
+            "managing director", "president", "managing partner"
+        ]
+    },
+    
+    {
+        "sub_industries": ["ai startup", "artificial intelligence", "machine learning", 
+                          "ai company", "ml startup", "deep learning"],
+        "role_details": [
+            # Leadership
+            "ceo", "chief executive officer", "founder", "co-founder",
+            # Technology
+            "cto", "chief technology officer", "vp of engineering", "vp engineering",
+            "head of engineering", "engineering director", "vp of ai", "vp ai",
+            "head of ai", "director of ai", "vp of machine learning", "vp machine learning",
+            "head of machine learning", "director of machine learning", 
+            "chief ai officer", "chief data officer"
+        ]
+    },
+    
+    {
+        "sub_industries": ["single family", "multi-family", "multi family", "multifamily",
+                          "real estate investor", "real estate investment", "property investor"],
+        "role_details": [
+            # Owner/Leadership
+            "ceo", "chief executive officer", "owner", "co-owner", "sole operator",
+            "founder", "co-founder", "managing partner", "managing director",
+            "principal", "president", "partner"
+        ]
+    },
+    
+    {
+        "sub_industries": ["fintech", "bank", "banking", "sponsor bank", "sponsor banking",
+                          "financial technology", "digital banking", "neobank", "challenger bank",
+                          "payment processor", "payment processing", "financial services"],
+        "role_details": [
+            # Risk & Compliance Leadership
+            "cro", "chief risk officer", "vp of risk", "vp risk", "head of risk", 
+            "director of risk", "risk director", "vp of risk management", "vp risk management",
+            "director of risk management", "head of risk management",
+            "cco", "chief compliance officer", "vp of compliance", "vp compliance", 
+            "head of compliance", "director of compliance", "compliance director",
+            "vp of regulatory compliance", "director of regulatory compliance",
+            "head of regulatory affairs", "director of regulatory affairs",
+            # Compliance Operations
+            "compliance officer", "senior compliance officer", "compliance manager",
+            "bsa officer", "aml officer", "kyc manager", "director of aml",
+            "vp of bsa", "head of bsa", "anti-money laundering officer",
+            "financial crimes manager", "director of financial crimes",
+            # Risk Operations
+            "risk officer", "senior risk officer", "risk manager", "enterprise risk manager",
+            "operational risk manager", "credit risk manager", "director of operational risk"
+        ]
+    }
+]
+
 def normalize_accents(text: str) -> str:
     """
     Remove accents/diacritics from text for name matching.
@@ -50,25 +204,11 @@ load_dotenv()
 MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "")
 TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 
-# NEW: Stage 4 API keys (Google Search Engine + OpenRouter LLM)
-GSE_CX = os.getenv("GSE_CX", "")
-GSE_API_KEY = os.getenv("GSE_API_KEY", "")
+# Stage 4 & 5: ScrapingDog GSE API + OpenRouter LLM
+SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY", "")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
 
-# DuckDuckGo Search (FREE, no API key needed)
-# Uses the 'ddgs' Python library which handles DDG's API properly
-# Set to "true" to enable DuckDuckGo, otherwise uses GSE
-USE_DDG_SEARCH = os.getenv("USE_DDG_SEARCH", "true").lower() == "true"
-
-# Try to import ddgs library
-try:
-    from ddgs import DDGS
-    DDGS_AVAILABLE = True
-except ImportError:
-    DDGS_AVAILABLE = False
-    print("⚠️ ddgs library not installed. Run: pip install ddgs")
-
-# NEW: Rep Score API keys (Companies House)
+# Rep Score API keys (Companies House)
 COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY", "")
 
 EMAIL_CACHE_FILE = "email_verification_cache.pkl"
@@ -1265,8 +1405,8 @@ async def check_truelist_email(lead: dict) -> Tuple[bool, dict]:
         print(f"   💾 Using cached TrueList result for: {email}")
         return validation_cache[cache_key]
 
-    max_retries = 3
-    retry_delay = 10
+    max_retries = 2
+    retry_delay = 3
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -1557,99 +1697,21 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
 
 # Stage 4: LinkedIn/GSE Validation
 
-async def _ddg_search(query: str, max_results: int = 10, max_retries: int = 3, require_linkedin: bool = False) -> List[Dict[str, str]]:
+async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> Tuple[List[dict], bool]:
     """
-    Perform DuckDuckGo search using the ddgs library with backend rotation.
-    Returns GSE-compatible results: [{title, link, snippet}]
+    Search LinkedIn using ScrapingDog Google Search API.
     
-    Works on headless servers (VPS) - no GUI required.
-    The ddgs library handles DDG's API complexity internally.
-    
-    Backend rotation for Stage 4: yahoo → yandex → google
-    If require_linkedin=True, rotates to next backend if no LinkedIn URLs found.
-    
-    Args:
-        query: Search query
-        max_results: Max results per backend
-        max_retries: Retries per backend
-        require_linkedin: If True, rotate backends when no LinkedIn URLs in results
-    
-    Requires: pip install ddgs
-    """
-    if not DDGS_AVAILABLE:
-        raise Exception("ddgs library not available - install with: pip install ddgs")
-    
-    # Backend rotation order: yahoo → yandex → google
-    backends = ['yahoo', 'yandex', 'google']
-    last_error = None
-    all_accumulated_results = []  # Accumulate non-LinkedIn results as fallback
-    
-    for backend in backends:
-        for attempt in range(1, max_retries + 1):
-            try:
-                # Run synchronous ddgs in thread to avoid blocking
-                def do_search():
-                    return DDGS().text(query, max_results=max_results, backend=backend)
-                
-                results_raw = await asyncio.to_thread(do_search)
-                
-                # Convert to GSE-compatible format
-                results = []
-                for r in results_raw:
-                    results.append({
-                        "title": r.get("title", ""),
-                        "link": r.get("href", ""),
-                        "snippet": r.get("body", "")
-                    })
-                
-                # If requiring LinkedIn, check if we found any
-                if require_linkedin and results:
-                    linkedin_found = any('linkedin.com' in r.get('link', '').lower() for r in results)
-                    if linkedin_found:
-                        return results  # Success - found LinkedIn URLs
-                    else:
-                        # Accumulate results but try next backend
-                        all_accumulated_results.extend(results)
-                        if backend != backends[-1]:
-                            print(f"         ⚠️ {backend}: No LinkedIn URLs, trying next backend...")
-                            await asyncio.sleep(1)  # Brief delay before next backend
-                        break  # Exit retry loop, try next backend
-                else:
-                    # Not requiring LinkedIn, or found results
-                    return results
-                
-            except Exception as e:
-                last_error = e
-                if attempt < max_retries:
-                    await asyncio.sleep(1)  # Wait before retry
-                else:
-                    if backend != backends[-1]:
-                        print(f"         ⚠️ {backend} failed, trying next backend...")
-                        await asyncio.sleep(1)
-                    break  # Try next backend
-    
-    # If we accumulated results but none had LinkedIn, return them anyway
-    if all_accumulated_results:
-        return all_accumulated_results
-    
-    if last_error:
-        print(f"         ❌ All DDG backends failed: {str(last_error)}")
-    
-    return []
+    Uses 3 search variations:
+    1. Exact URL in quotes (most specific)
+    2. Profile slug only (handles www/protocol differences)
+    3. Name + company + "linkedin" (broadest fallback)
 
-async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> Tuple[List[dict], bool]:
-    """
-    Search LinkedIn using DuckDuckGo (FREE, no API key needed).
-    
-    Directly scrapes DuckDuckGo - no server required.
-    Returns results in same format as GSE: [{title, link, snippet}]
-    
     Args:
         full_name: Person's full name
         company: Company name
         linkedin_url: LinkedIn URL provided by miner (required)
         max_results: Max search results to return
-    
+
     Returns:
         Tuple of (List of search results with title, link, snippet, url_match_exact: bool)
     """
@@ -1657,231 +1719,25 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
         print(f"   ⚠️ No LinkedIn URL provided")
         return [], False
     
+    if not SCRAPINGDOG_API_KEY:
+        raise Exception("SCRAPINGDOG_API_KEY not set")
+    
     # Extract profile slug from LinkedIn URL
     profile_slug = linkedin_url.split("/in/")[-1].strip("/") if "/in/" in linkedin_url else None
     
     # Track if URL matched exactly (strong identity proof)
     url_match_exact = False
     
-    # 5 variations - optimized based on success rate analysis (removed redundant site:linkedin.com/in patterns)
-    query_variations = [
-        f'"{full_name}" linkedin {company}',                  # 1. Quoted name + company (most specific, highest success)
-        f"{full_name} linkedin {company}",                    # 2. Name + LinkedIn + company (good fuzzy match)
-        f"{full_name} linkedin",                              # 3. Name + LinkedIn (broader fallback)
-        f'"{full_name}" site:linkedin.com',                   # 4. Quoted name + site (site-specific)
-        f"linkedin.com/in/{profile_slug}" if profile_slug else None,  # 5. Direct profile slug (essential for URL verification)
-    ]
-    
-    # Remove None values
-    query_variations = [q for q in query_variations if q]
-    
-    # Track API errors to distinguish "no match" from "API failure"
-    api_errors = []
-    
-    print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile (rotating backends: yahoo→yandex→google)...")
-    
-    for variation_idx, query in enumerate(query_variations, 1):
-        # 3 second delay between variations (avoid rate limiting)
-        if variation_idx > 1:
-            print(f"      ⏳ Waiting 3s before next variation...")
-            await asyncio.sleep(3)
-        
-        print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
-        
-        try:
-            # Use backend rotation for LinkedIn searches (yahoo -> yandex -> google)
-            items = await _ddg_search(query, require_linkedin=True)
-            
-            if items:
-                print(f"         ✅ Found {len(items)} result(s) with variation {variation_idx}")
-                
-                # FILTER: Only keep LinkedIn results (profile URLs)
-                linkedin_results = []
-                found_profile_urls = []
-                
-                for item in items:
-                    link = item.get("link", "")
-                    if "linkedin.com/in/" in link:
-                        result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
-                        found_profile_urls.append(result_slug)
-                        linkedin_results.append(item)
-                    elif "linkedin.com" in link:
-                        # Include other LinkedIn pages (company, posts) for context
-                        linkedin_results.append(item)
-                
-                if not linkedin_results:
-                    print(f"         ⚠️ No LinkedIn URLs in results, trying next variation...")
-                    continue
-                
-                print(f"         ✅ Found {len(linkedin_results)} LinkedIn result(s)")
-                
-                # URL matching logic - all variations are name-based, verify profile matches
-                if profile_slug:
-                    if found_profile_urls:
-                        # Check exact match first
-                        exact_match = any(
-                            profile_slug.lower() == result_slug.lower()
-                            for result_slug in found_profile_urls
-                        )
-                        # Also check partial match (profile slug contained in result)
-                        partial_match = any(
-                            profile_slug.lower() in result_slug.lower() or result_slug.lower() in profile_slug.lower()
-                            for result_slug in found_profile_urls
-                        )
-                        
-                        if exact_match:
-                            print(f"         ✅ URL MATCH: Profile '{profile_slug}' confirmed (exact)")
-                            url_match_exact = True  # Strong identity proof!
-                        elif partial_match:
-                            print(f"         ✅ URL MATCH: Profile '{profile_slug}' confirmed (partial)")
-                        else:
-                            print(f"         ⚠️  URL MISMATCH: Expected '{profile_slug}' but found: {found_profile_urls[:3]}")
-                            continue
-                
-                # FILTER 1: Clean up concatenated titles and separate profile headlines from posts
-                # DDG often concatenates multiple result titles together
-                profile_headlines = []
-                posts = []
-                
-                for item in linkedin_results:
-                    title = item.get("title", "")
-                    
-                    # DDG concatenates titles - extract only the FIRST profile
-                    # Pattern: "Name - Title | LinkedIn Name2 - Title2"
-                    if " | LinkedIn " in title:
-                        # Take only the first profile (before the concatenation)
-                        title = title.split(" | LinkedIn ")[0] + " | LinkedIn"
-                        item = dict(item)  # Copy to avoid modifying original
-                        item["title"] = title
-                    
-                    # Skip non-profile results (posts, intro requests, etc.)
-                    if " on LinkedIn:" in title or " on LinkedIn :" in title:
-                        posts.append(item)
-                        continue
-                    if title.lower().startswith("seeking intro"):
-                        posts.append(item)
-                        continue
-                    if "profiles | LinkedIn" in title:
-                        # Generic "X profiles" page, not authoritative
-                        continue
-                        
-                    profile_headlines.append(item)
-                
-                # FILTER 2: Only keep results for TARGET PERSON (filter out other people)
-                # DDG often returns concatenated results with multiple profiles
-                name_parts = full_name.lower().split()
-                first_name = name_parts[0] if name_parts else ""
-                last_name = name_parts[-1] if len(name_parts) > 1 else ""
-                
-                # Normalize accents for matching (José -> Jose, François -> Francois)
-                first_name_normalized = normalize_accents(first_name)
-                last_name_normalized = normalize_accents(last_name)
-                
-                target_person_results = []
-                other_person_results = []
-                
-                for item in profile_headlines:
-                    title_lower = item.get("title", "").lower()
-                    # Normalize the title too for accent-insensitive matching
-                    title_normalized = normalize_accents(title_lower)
-                    
-                    # Check if target person's name is in the title (accent-insensitive)
-                    # This handles cases like "Jose Varatojo" matching "José Diogo Varatojo"
-                    if first_name_normalized in title_normalized and last_name_normalized in title_normalized:
-                        target_person_results.append(item)
-                    else:
-                        other_person_results.append(item)
-                
-                # Prioritize target person's profile headlines
-                if target_person_results:
-                    print(f"      📊 DDG Profile Headlines for {full_name}:")
-                    for i, item in enumerate(target_person_results[:3], 1):
-                        print(f"         {i}. {item.get('title', '')[:70]}")
-                    if other_person_results:
-                        print(f"      📊 Other profiles filtered out: {len(other_person_results)}")
-                    if posts:
-                        print(f"      📊 Posts filtered out: {len(posts)}")
-                    # Return only target person's profile headlines (with URL match status)
-                    return target_person_results[:max_results], url_match_exact
-                elif profile_headlines:
-                    # No exact name match - TRY NEXT VARIATION instead of returning wrong person
-                    # This is important because Yahoo sometimes returns different people first
-                    print(f"      ⚠️ No name match in results (found: {profile_headlines[0].get('title', '')[:50]}...)")
-                    print(f"      ⏳ Trying next variation to find correct person...")
-                    await asyncio.sleep(3)  # Wait before next variation
-                    continue  # Try next query variation
-                elif posts:
-                    # Only posts found (no profile headlines) - return posts
-                    print(f"      📊 DDG Posts only (no profile headlines found):")
-                    for i, item in enumerate(posts[:3], 1):
-                        print(f"         {i}. {item.get('title', '')[:70]}")
-                    return posts[:max_results], url_match_exact
-                else:
-                    # No results at all - try next variation
-                    print(f"         ⚠️ No usable results, trying next variation...")
-                    continue
-            else:
-                print(f"         ❌ No results with variation {variation_idx}")
-        
-        except Exception as e:
-            # API/request error - try next variation, but track that API failed
-            print(f"         ❌ DDG API error: {str(e)}")
-            api_errors.append(str(e))
-            continue
-    
-    # If ALL variations had API errors → raise exception (triggers GSE fallback)
-    if len(api_errors) == len(query_variations):
-        raise Exception(f"DDG API failed for all {len(query_variations)} variations: {api_errors[0]}")
-    
-    # DDG worked for at least one variation but no URL match → return empty (NO GSE fallback)
-    print(f"   ❌ DDG: No matching profile found after trying {len(query_variations)} variations")
-    return [], False
-
-async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> List[dict]:
-    """
-    Search LinkedIn using Google Custom Search Engine for person's profile.
-    
-    OPTIMIZED: Uses 3 search variations (reduced from 5 for 60% fewer API calls):
-    1. Exact URL in quotes (most specific)
-    2. Profile slug only (handles www/protocol differences)
-    3. Name + site:linkedin.com (broadest fallback)
-    
-    This provides same coverage as 5 variations but uses fewer API calls:
-    - Free tier: 100 queries/day ÷ 3 = ~33 leads/day (vs 20 with 5 variations)
-    - Paid tier: 10,000 queries/day ÷ 3 = ~3,333 leads/day
-
-    Args:
-        full_name: Person's full name
-        company: Company name
-        linkedin_url: LinkedIn URL provided by miner (required)
-        max_results: Max search results to return
-
-    Returns:
-        List of search results with title, link, snippet
-    """
-    if not linkedin_url:
-        print(f"   ⚠️ No LinkedIn URL provided")
-        return []
-    
-    # Extract profile slug from LinkedIn URL
-    # Example: https://www.linkedin.com/in/tanja-reese-cpa-31477926 → tanja-reese-cpa-31477926
-    profile_slug = linkedin_url.split("/in/")[-1].strip("/") if "/in/" in linkedin_url else None
-    
     # Build search query variations (in order of specificity)
-    # OPTIMIZED: Reduced from 5 to 3 variations (60% fewer API calls)
-    # - Removed variation #2 (URL without protocol) - redundant with #3
-    # - Removed variation #4 (name + company) - redundant with #5 (broader)
-    # Result: 100 queries/day free tier = ~33 leads/day (vs 20 with 5 variations)
     query_variations = [
-        # 1. Exact URL in quotes (most specific - handles exact Google index)
+        # 1. Exact URL in quotes (most specific)
         f'"{linkedin_url}"',
         
-        # 2. Profile slug only (handles www/protocol differences - REPLACES old #2 and #3)
+        # 2. Profile slug only (handles www/protocol differences)
         f'"linkedin.com/in/{profile_slug}"' if profile_slug else None,
         
-        # 4. Name + LinkedIn + company (more context)
+        # 3. Name + LinkedIn + company (more context)
         f'"{full_name}" linkedin "{company}"',
-        
     ]
     
     # Remove None values
@@ -1889,112 +1745,216 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
     
     print(f"   🔍 Trying {len(query_variations)} search variations for LinkedIn profile...")
     
-    try:
-        url = "https://www.googleapis.com/customsearch/v1"
-        
-        async with aiohttp.ClientSession() as session:
-            # Try each query variation until we get results
-            for variation_idx, query in enumerate(query_variations, 1):
-                print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
-                
-                params = {
-                    "key": GSE_API_KEY,
-                    "cx": GSE_CX,
-                    "q": query,
-                    "num": max_results
-                }
-                
-                async with session.get(url, params=params, timeout=10) as response:
-                    if response.status != 200:
-                        print(f"         ⚠️ GSE API error: HTTP {response.status}")
-                        continue  # Try next variation
-                    
-                    data = await response.json()
-                    results = []
-                    
-                    for item in data.get("items", []):
-                        results.append({
+    def _search_linkedin_sync(query: str) -> List[dict]:
+        """Synchronous ScrapingDog search helper for Stage 4"""
+        try:
+            url = "https://api.scrapingdog.com/google"
+            params = {
+                "api_key": SCRAPINGDOG_API_KEY,
+                "query": query,
+                "results": max_results
+            }
+            
+            response = requests.get(url, params=params, timeout=30)
+            if response.status_code != 200:
+                print(f"         ⚠️ GSE API error: HTTP {response.status_code}: {response.text}")
+                return []
+            
+            data = response.json()
+            items = []
+            
+            # Convert ScrapingDog format to standard format
+            for item in data.get("organic_results", []):
+                items.append({
                             "title": item.get("title", ""),
                             "link": item.get("link", ""),
                             "snippet": item.get("snippet", "")
                         })
                     
-                    if results:
-                        # Found results! Now check if we need URL verification
-                        print(f"         ✅ Found {len(results)} result(s) with variation {variation_idx}")
-                        
-                        # Extract all LinkedIn profile URLs from search results
-                        found_profile_urls = []
-                        found_directory_urls = []
-                        
-                        for result in results:
-                            link = result.get("link", "")
-                            if "linkedin.com/in/" in link:
-                                # Direct profile link (e.g., /in/john-smith-123)
-                                result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
-                                found_profile_urls.append(result_slug)
-                            elif "linkedin.com/pub/dir/" in link or "/pub/dir/" in link:
-                                # Directory page (e.g., /pub/dir/Tanja/Reese)
-                                found_directory_urls.append(link)
-                        
-                        # DECISION LOGIC (UPDATED FOR 4 VARIATIONS):
-                        # - Variations 1-2: Searched for exact URL/slug → Always accept (they found the URL)
-                        # - Variations 3-4: Searched by name + site OR name + linkedin + company
-                        #     → If results contain direct profiles (/in/), verify URL match
-                        #     → If results only contain directory pages (/pub/dir/), SKIP URL check
-                        #       (directory pages will NEVER match /in/ URLs, so check is useless)
-                        #       Instead, rely on LLM to verify person + company from snippets
-                        
-                        if variation_idx >= 3 and profile_slug:
-                            # Using fallback variations (name + company search)
+            return items
+        except Exception as e:
+            print(f"         ⚠️ Request error: {str(e)}")
+            return []
+    
+    try:
+        # Try each query variation until we get results
+        for variation_idx, query in enumerate(query_variations, 1):
+            print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
+            
+            try:
+                # Execute sync request in thread pool to keep function async
+                items = await asyncio.to_thread(_search_linkedin_sync, query)
+                
+                if items:
+                    print(f"         ✅ Found {len(items)} result(s) with variation {variation_idx}")
+                    
+                    # FILTER: Only keep LinkedIn results (profile URLs)
+                    linkedin_results = []
+                    found_profile_urls = []
+                    
+                    for item in items:
+                        link = item.get("link", "")
+                        if "linkedin.com/in/" in link:
+                            result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
+                            found_profile_urls.append(result_slug)
+                            linkedin_results.append(item)
+                        elif "linkedin.com" in link:
+                            # Include other LinkedIn pages (company, posts) for context
+                            linkedin_results.append(item)
+                    
+                    if not linkedin_results:
+                        print(f"         ⚠️ No LinkedIn URLs in results, trying next variation...")
+                        continue
+                    
+                    print(f"         ✅ Found {len(linkedin_results)} LinkedIn result(s)")
+                    
+                    # URL matching logic - all variations are name-based, verify profile matches
+                    if profile_slug:
+                        if found_profile_urls:
+                            # Normalize slugs for comparison (remove hyphens/underscores)
+                            profile_slug_norm = profile_slug.lower().replace("-", "").replace("_", "")
                             
-                            if found_profile_urls:
-                                # Google returned direct profile links - verify URL match
-                                url_match_found = any(
-                                    profile_slug.lower() == result_slug.lower() 
+                            # Check exact match first (normalized)
+                            exact_match = any(
+                                profile_slug_norm == result_slug.lower().replace("-", "").replace("_", "")
+                                for result_slug in found_profile_urls
+                            )
+                            # Also check partial match (profile slug contained in result, normalized)
+                            partial_match = any(
+                                profile_slug_norm in result_slug.lower().replace("-", "").replace("_", "") or 
+                                result_slug.lower().replace("-", "").replace("_", "") in profile_slug_norm
                                     for result_slug in found_profile_urls
                                 )
                                 
-                                if not url_match_found:
-                                    print(f"         ⚠️  URL MISMATCH: Miner provided '{profile_slug}'")
-                                    print(f"         ⚠️  But Google found: {found_profile_urls[:3]}")
-                                    print(f"         ❌ Failing - different profile")
-                                    continue  # Try next variation
-                                else:
-                                    print(f"         ✅ URL MATCH: Miner's profile '{profile_slug}' confirmed")
-                            
-                            elif found_directory_urls:
-                                # Google returned directory pages only - SKIP URL check
-                                # (Directory pages like /pub/dir/ will never match /in/ profiles)
-                                # LLM will verify person + company from snippets instead
-                                print(f"         ℹ️  Google returned directory pages (not direct profiles)")
-                                print(f"         ℹ️  Skipping URL verification - will rely on LLM to verify person+company")
-                            
+                            if exact_match:
+                                print(f"         ✅ URL MATCH: Profile '{profile_slug}' confirmed (exact)")
+                                url_match_exact = True  # Strong identity proof!
+                            elif partial_match:
+                                print(f"         ✅ URL MATCH: Profile '{profile_slug}' confirmed (partial)")
+                                url_match_exact = "partial"  # Partial match
                             else:
-                                # No LinkedIn links at all (shouldn't happen, but handle it)
-                                print(f"         ⚠️  No LinkedIn links found in results")
-                                continue  # Try next variation
+                                print(f"         ⚠️  URL MISMATCH: Expected '{profile_slug}' but found: {found_profile_urls[:3]}")
+                                continue
+                    
+                    # FILTER 1: Clean up concatenated titles and separate profile headlines from posts
+                    # ScrapingDog often concatenates multiple result titles together
+                    profile_headlines = []
+                    posts = []
+                    
+                    for item in linkedin_results:
+                        title = item.get("title", "")
                         
-                        # Results are valid - log and return
-                        print(f"      📊 GSE results:")
-                        for i, result in enumerate(results[:3], 1):  # Show top 3
-                            print(f"         {i}. {result['title'][:80]}")
-                            print(f"            {result['snippet'][:100]}...")
+                        # ScrapingDog concatenates titles - extract only the FIRST profile
+                        # Pattern: "Name - Title | LinkedIn Name2 - Title2"
+                        if " | LinkedIn " in title:
+                            # Take only the first profile (before the concatenation)
+                            title = title.split(" | LinkedIn ")[0] + " | LinkedIn"
+                            item = dict(item)  # Copy to avoid modifying original
+                            item["title"] = title
                         
-                        return results
+                        # Skip non-profile results (posts, intro requests, etc.)
+                        if " on LinkedIn:" in title or " on LinkedIn :" in title:
+                            posts.append(item)
+                            continue
+                        if title.lower().startswith("seeking intro"):
+                            posts.append(item)
+                            continue
+                        # Skip directory pages (but not profiles that just have this text concatenated)
+                        # Check both: title pattern AND link pattern
+                        # Check for various LinkedIn directory page patterns
+                        is_directory_title = ("profiles | LinkedIn" in title or 
+                                             "profiles - LinkedIn" in title or
+                                             "profiles on LinkedIn" in title)
+                        
+                        if is_directory_title:
+                            # Only skip if it's actually a directory page (/pub/dir/) or starts with "N+ profiles"
+                            link = item.get("link", "")
+                            is_directory_link = "/pub/dir/" in link or "/directory/" in link
+                            starts_with_profiles = re.match(r'^\d+\+?\s+"?[^"]*"?\s+profiles', title.lower())
+                            
+                            if is_directory_link or starts_with_profiles:
+                                continue  # Skip directory pages
+                            # Otherwise, keep it - might be a valid profile with concatenated text
+                            
+                        profile_headlines.append(item)
+                    
+                    # FILTER 2: Only keep results for TARGET PERSON (filter out other people)
+                    # ScrapingDog often returns concatenated results with multiple profiles
+                    name_parts = full_name.lower().split()
+                    first_name = name_parts[0] if name_parts else ""
+                    last_name = name_parts[-1] if len(name_parts) > 1 else ""
+                    
+                    # Normalize accents for matching (José -> Jose, François -> Francois)
+                    first_name_normalized = normalize_accents(first_name)
+                    last_name_normalized = normalize_accents(last_name)
+                    
+                    target_person_results = []
+                    other_person_results = []
+                    
+                    for item in profile_headlines:
+                        title_lower = item.get("title", "").lower()
+                        link = item.get("link", "")
+                        
+                        # Normalize the title too for accent-insensitive matching
+                        title_normalized = normalize_accents(title_lower)
+                        
+                        # PRIORITY: If this result's URL matches our target profile slug, it's THE profile!
+                        # Skip name-in-title check - URL match is authoritative proof of identity
+                        if profile_slug and "linkedin.com/in/" in link:
+                            result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
+                            if profile_slug.lower() == result_slug.lower():
+                                target_person_results.append(item)
+                                continue  # Skip name check - URL match is definitive
+                        
+                        # Check if target person's name is in the title (accent-insensitive)
+                        # This handles cases like "Jose Varatojo" matching "José Diogo Varatojo"
+                        if first_name_normalized in title_normalized and last_name_normalized in title_normalized:
+                            target_person_results.append(item)
+                        else:
+                            other_person_results.append(item)
+                    
+                    # Prioritize target person's profile headlines
+                    if target_person_results:
+                        print(f"      📊 GSE Profile Headlines for {full_name}:")
+                        for i, item in enumerate(target_person_results[:3], 1):
+                            print(f"         {i}. {item.get('title', '')[:70]}")
+                        if other_person_results:
+                            print(f"      📊 Other profiles filtered out: {len(other_person_results)}")
+                        if posts:
+                            print(f"      📊 Posts filtered out: {len(posts)}")
+                        # Return only target person's profile headlines (with URL match status)
+                        return target_person_results[:max_results], url_match_exact
+                    elif profile_headlines:
+                        # No exact name match - TRY NEXT VARIATION instead of returning wrong person
+                        # This is important because ScrapingDog sometimes returns different people first
+                        print(f"      ⚠️ No name match in results (found: {profile_headlines[0].get('title', '')[:50]}...)")
+                        print(f"      🔄 Trying next variation to find correct person...")
+                        # No delay needed - ScrapingDog has no rate limiting
+                        continue  # Try next query variation
+                    elif posts:
+                        # Only posts found (no profile headlines) - return posts
+                        print(f"      📊 ScrapingDog Posts only (no profile headlines found):")
+                        for i, item in enumerate(posts[:3], 1):
+                            print(f"         {i}. {item.get('title', '')[:70]}")
+                        return posts[:max_results], url_match_exact
                     else:
-                        print(f"         ❌ No results with variation {variation_idx}")
+                        # No results at all - try next variation
+                        print(f"         ⚠️ No usable results, trying next variation...")
+                        continue
+                else:
+                    print(f"         ❌ No results with variation {variation_idx}")
+            
+            except Exception as e:
+                print(f"         ⚠️ Error for variation {variation_idx}: {str(e)}")
+                continue
             
             # All variations exhausted
             print(f"   ❌ GSE: No results found after trying {len(query_variations)} variations")
-            return []
+        return [], False
     
-    except asyncio.TimeoutError:
-        print(f"   ⚠️ GSE API timeout")
-        return []
     except Exception as e:
         print(f"   ⚠️ GSE API error: {str(e)}")
-        return []
+        return [], False
 
 async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: str, search_results: List[dict], url_match_exact: bool = False) -> Tuple[bool, str]:
     """
@@ -2018,7 +1978,7 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         # This avoids LLM hallucination issues
         company_lower = company.lower().strip()
         
-        # Normalize apostrophes (DDG returns "mcdonald ' s" with spaces, we need "mcdonald's")
+        # Normalize apostrophes (ScrapingDog returns "mcdonald ' s" with spaces, we need "mcdonald's")
         # Also handle curly apostrophes and other variants
         company_lower = company_lower.replace("'", "'").replace("'", "'").replace("`", "'")
         company_lower = re.sub(r"\s*'\s*", "'", company_lower)  # "mcdonald ' s" → "mcdonald's"
@@ -2044,13 +2004,13 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         # Check first result (most authoritative for target person)
         first_title = search_results[0].get("title", "").lower()
         
-        # Normalize apostrophes and hyphens in title too (DDG returns "mcdonald ' s" and "chick - fil - a")
+        # Normalize apostrophes and hyphens in title too (ScrapingDog returns "mcdonald ' s" and "chick - fil - a")
         first_title = first_title.replace("'", "'").replace("'", "'").replace("`", "'")
         first_title = re.sub(r"\s*'\s*", "'", first_title)  # "mcdonald ' s" → "mcdonald's"
         first_title = re.sub(r"\s*-\s*", "-", first_title)  # "chick - fil - a" → "chick-fil-a"
         
         # Extract ONLY the headline part (before "| linkedin")
-        # DDG often concatenates descriptions after "| LinkedIn"
+        # ScrapingDog often concatenates descriptions after "| LinkedIn"
         # e.g., "Name - Title @ Company | LinkedIn About Company: ..."
         if "| linkedin" in first_title:
             first_title = first_title.split("| linkedin")[0].strip()
@@ -2058,6 +2018,10 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         # Also get snippet for additional company matching
         first_snippet = search_results[0].get("snippet", "").lower()
         first_snippet = re.sub(r"\s*-\s*", "-", first_snippet)  # Normalize hyphens
+        
+        # Check if title is truncated (contains "...")
+        # If truncated, we may be missing the company name
+        title_truncated = "..." in first_title
         
         # Method 1: Exact normalized company name in title
         company_in_title = company_normalized in first_title
@@ -2067,6 +2031,48 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         if not company_in_title and len(company_words) > 1:
             significant_words = [w for w in company_words if len(w) > 2]  # Skip "of", "the", etc.
             company_in_title = all(word in first_title for word in significant_words)
+        
+        # Method 2b: FUZZY MATCH - Handle shortened company names
+        # e.g., "Sirona" in title matches "Sirona Hygiene" claimed
+        # Extract company name from title (typically after "at " or "@ ")
+        if not company_in_title:
+            # Try to extract company from title patterns like "Name - Title at Company" or "Name @ Company"
+            title_company_match = re.search(r'(?:at|@)\s+([^|\-]+?)(?:\s*[\|\-]|$)', first_title, re.IGNORECASE)
+            if title_company_match:
+                extracted_company = title_company_match.group(1).strip().lower()
+                # Remove common trailing words that aren't part of company name
+                extracted_company = re.sub(r'\s+(linkedin|profile|page).*$', '', extracted_company)
+                # Remove parenthetical content and other junk after company name
+                extracted_company = re.sub(r'\s*\([^)]*\).*$', '', extracted_company)  # Remove "(anything)" and everything after
+                extracted_company = re.sub(r'\s*\|.*$', '', extracted_company)  # Remove "|" and everything after
+                extracted_company = extracted_company.strip()
+                
+                # Normalize the extracted company name (remove legal suffixes)
+                extracted_company_normalized = extracted_company
+                for suffix in LEGAL_SUFFIXES:
+                    if extracted_company_normalized.endswith(suffix):
+                        extracted_company_normalized = extracted_company_normalized[:-len(suffix)].strip()
+                        break
+                
+                # Check if either is a substring of the other (fuzzy match)
+                # e.g., "sirona" ⊆ "sirona hygiene" OR "sirona hygiene" ⊇ "sirona"
+                if len(extracted_company_normalized) >= 4 and len(company_normalized) >= 4:  # Both must be substantial
+                    # Bidirectional containment check
+                    if (extracted_company_normalized in company_normalized or 
+                        company_normalized in extracted_company_normalized):
+                        # Additional safety: must share at least 80% of longer word if both are single words
+                        # This prevents "Meta" matching "Metamorph" 
+                        if ' ' in extracted_company_normalized or ' ' in company_normalized:
+                            # Multi-word: accept substring match
+                            company_in_title = True
+                            print(f"   ✅ FUZZY MATCH: '{extracted_company_normalized}' ≈ '{company_normalized}' (substring match)")
+                        else:
+                            # Single-word: check similarity
+                            longer = max(extracted_company_normalized, company_normalized, key=len)
+                            shorter = min(extracted_company_normalized, company_normalized, key=len)
+                            if len(shorter) / len(longer) >= 0.6:  # At least 60% length ratio
+                                company_in_title = True
+                                print(f"   ✅ FUZZY MATCH: '{extracted_company_normalized}' ≈ '{company_normalized}' (similar length)")
         
         # Method 3: Check snippet for company name
         # First try strict "Experience: [Company]" pattern (LinkedIn profile format)
@@ -2103,6 +2109,33 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
                     if all(word in first_snippet for word in significant_words):
                         company_in_snippet = True
                         print(f"   ℹ️  Company words found in snippet (general mention)")
+        
+        # Method 4: If first result is truncated and no company found, check OTHER results
+        # ScrapingDog often truncates titles, so we need to look at more results
+        if not company_in_title and not company_in_snippet and title_truncated and len(search_results) > 1:
+            print(f"   ℹ️  First title truncated, checking other results for company...")
+            for idx, result in enumerate(search_results[1:4], start=2):  # Check next 3 results
+                other_title = result.get("title", "").lower()
+                other_snippet = result.get("snippet", "").lower()
+                
+                # Normalize the other title/snippet
+                other_title = other_title.replace("'", "'").replace("'", "'").replace("`", "'")
+                other_title = re.sub(r"\s*'\s*", "'", other_title)
+                other_title = re.sub(r"\s*-\s*", "-", other_title)
+                
+                # Check if company in this result
+                if company_normalized in other_title or company_normalized in other_snippet:
+                    company_in_title = True
+                    print(f"   ✅ Company found in result #{idx}: {other_title[:60]}...")
+                    break
+                
+                # Check multi-word company
+                if len(company_words) > 1:
+                    significant_words = [w for w in company_words if len(w) > 2]
+                    if all(word in other_title or word in other_snippet for word in significant_words):
+                        company_in_title = True
+                        print(f"   ✅ Company words found in result #{idx}: {other_title[:60]}...")
+                        break
         
         # Deterministic company match decision (title OR snippet)
         deterministic_company_match = company_in_title or company_in_snippet
@@ -2212,15 +2245,15 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
                 # override LLM's name_match and confidence decisions.
                 # 
                 # WHY THIS IS SAFE:
-                # - URL can only match if DDG found that URL when searching for the CLAIMED NAME
-                # - DDG searches "Pranav Ramesh" → only returns results for that name
+                # - URL can only match if ScrapingDog found that URL when searching for the CLAIMED NAME
+                # - ScrapingDog searches "Pranav Ramesh" → only returns results for that name
                 # - If miner gave a different person's URL, it wouldn't appear in those results
                 # - So exact URL match = the profile IS for the claimed person
                 # 
                 # WHY THIS IS NEEDED:
-                # - DDG often returns concatenated results with OTHER people's headlines
+                # - ScrapingDog often returns concatenated results with OTHER people's headlines
                 # - LLM compares those wrong headlines against claimed name → false negative
-                # - Example: Search "Melissa Carberry" → DDG returns correct URL but 
+                # - Example: Search "Melissa Carberry" → ScrapingDog returns correct URL but 
                 #   headlines mixed with other people → LLM says "name mismatch"
                 #
                 # REQUIRES BOTH:
@@ -2234,6 +2267,40 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
                         confidence = max(confidence, 0.8)  # Boost confidence for strong deterministic proof
                         profile_valid = True  # URL exists = profile is valid
                         reasoning = f"[URL exact match + company verified - identity confirmed] {reasoning}"
+                
+                # OVERRIDE 3: If URL matched (exact OR partial) + name matches, but company not in results
+                # (due to ScrapingDog returning truncated titles/posts), PASS Stage 4 and let Stage 5 verify company.
+                #
+                # WHY THIS IS SAFE:
+                # - URL match (even partial) + name match = we verified the profile exists and belongs to right person
+                # - Profile slug matching means ScrapingDog found that URL when searching for the person's name
+                # - If miner gave wrong URL, it wouldn't appear in name-based search results
+                # - Stage 4's job = verify IDENTITY (person exists on LinkedIn)
+                # - Stage 5's job = verify EMPLOYMENT (person works at claimed company/role/region)
+                # - If company not found in title, likely due to ScrapingDog truncation ("Chief Technology ...")
+                # - Stage 5 will independently verify company by searching "Name + Company + Role"
+                # - If miner lied about company, Stage 5 will catch it
+                #
+                # REQUIRES:
+                # - url_match_exact=True OR we found the URL in results (partial match)
+                # - name_match=True (identity confirmed)
+                # - company_match=False (company not in results, but will be verified in Stage 5)
+                # Extract profile slug from linkedin_url to check for partial matches
+                profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0] if linkedin_url and "/in/" in linkedin_url else None
+                profile_slug_norm = profile_slug.lower().replace("-", "").replace("_", "") if profile_slug else ""
+                has_url_match = url_match_exact or any(
+                    profile_slug_norm in result.get("link", "").lower().replace("-", "").replace("_", "")
+                    for result in search_results[:5] if "linkedin.com/in/" in result.get("link", "")
+                )
+                
+                if has_url_match and name_match and not company_match:
+                    print(f"   ⚠️ OVERRIDE: URL + Name match, but company not in GSE results")
+                    print(f"      → Passing Stage 4 (identity verified)")
+                    print(f"      → Stage 5 will verify company/role/region")
+                    company_match = True  # Override to pass Stage 4
+                    profile_valid = True
+                    confidence = max(confidence, 0.7)
+                    reasoning = f"[URL + name verified, company check deferred to Stage 5] {reasoning}"
                 
                 # DEBUG: Print LLM analysis with all 3 checks
                 print(f"   🤖 LLM Analysis:")
@@ -2318,24 +2385,11 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
                 "failed_fields": ["linkedin"]
             }
         
-        # Step 1: Search LinkedIn via DuckDuckGo (FREE, default) or Google Custom Search (fallback)
+        # Step 1: Search LinkedIn via ScrapingDog GSE
         print(f"   🔍 Stage 4: Verifying LinkedIn profile for {full_name} at {company}")
         
-        # DuckDuckGo is FREE and default - no API key needed
-        # GSE is fallback ONLY if DDG has API/request error (not URL mismatch)
-        url_match_exact = False  # Track if URL slug matched exactly (strong identity proof)
-        if USE_DDG_SEARCH:
-            try:
-                search_results, url_match_exact = await search_linkedin_ddg(full_name, company, linkedin_url)
-                # NO GSE fallback if DDG returns empty (URL mismatch or no results)
-                # This prevents gaming: if DDG can't find the profile, it's likely invalid
-            except Exception as e:
-                print(f"   ⚠️ DuckDuckGo API/request failed: {e}, falling back to GSE")
-                search_results = await search_linkedin_gse(full_name, company, linkedin_url)
-                url_match_exact = False  # GSE doesn't return URL match status
-        else:
-            search_results = await search_linkedin_gse(full_name, company, linkedin_url)
-            url_match_exact = False  # GSE doesn't return URL match status
+        # ScrapingDog GSE search for LinkedIn profile (returns url_match_exact status)
+        search_results, url_match_exact = await search_linkedin_gse(full_name, company, linkedin_url)
         
         # Store search count in lead for data collection
         lead["gse_search_count"] = len(search_results)
@@ -2364,6 +2418,45 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
                 "message": f"LinkedIn verification failed: {reasoning}",
                 "failed_fields": ["linkedin"]
             }
+        
+        # Extract role from Stage 4's confirmed profile title for use in Stage 5
+        # This provides an authoritative role source directly from the LinkedIn profile
+        stage4_extracted_role = None
+        if search_results and len(search_results) > 0:
+            # Try extracting role from ALL search results (not just first one)
+            # This handles cases where the first result's title is malformed/concatenated
+            # but subsequent results have cleaner titles with the role
+            for result in search_results[:3]:  # Try first 3 results
+                result_title = result.get("title", "")
+                result_snippet = result.get("snippet", "")
+                
+                # Try title first (most reliable)
+                role_from_title = extract_role_from_search_title(
+                    result_title, "", company_name=company, full_name=full_name
+                )
+                
+                if role_from_title:
+                    # Sanity check: Role should be reasonable length (not garbage from concatenation)
+                    if len(role_from_title) < 100 and " ... " not in role_from_title:
+                        stage4_extracted_role = role_from_title
+                        break  # Found a clean role, stop searching
+            
+            # If title extraction failed, try snippet as fallback
+            # Snippets often contain LinkedIn's meta description with role info
+            if not stage4_extracted_role:
+                for result in search_results[:3]:
+                    result_snippet = result.get("snippet", "")
+                    if result_snippet:
+                        role_from_snippet = extract_role_from_search_title(
+                            "", result_snippet, company_name=company, full_name=full_name
+                        )
+                        if role_from_snippet and len(role_from_snippet) < 100:
+                            stage4_extracted_role = role_from_snippet
+                            break
+            
+            if stage4_extracted_role:
+                lead["stage4_extracted_role"] = stage4_extracted_role
+                print(f"   📝 Stage 4: Extracted role from profile: '{stage4_extracted_role}'")
         
         print(f"   ✅ Stage 4: LinkedIn verified for {full_name} at {company}")
         return True, {}
@@ -2535,6 +2628,9 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
             company.split()[0] if len(company.split()) > 1 else company,  # First word only (e.g., "Microsoft")
         ]
         
+        # Remove duplicates while preserving order (e.g., if abbreviated = original)
+        company_variations = list(dict.fromkeys(company_variations))
+        
         print(f"      🔍 Trying {len(company_variations)} name variations: {company_variations}")
         
         # Use SEC.gov company search endpoint to find CIK
@@ -2558,7 +2654,7 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
                     "count": "100"  # Get up to 100 recent filings
                 }
                 
-                async with session.get(search_url, headers=headers, params=params, timeout=15) as response:
+                async with session.get(search_url, headers=headers, params=params, timeout=7) as response:
                     if response.status != 200:
                         print(f"      ❌ SEC API returned HTTP {response.status}")
                         continue  # Try next variation
@@ -2604,7 +2700,7 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
                                 "count": "100"
                             }
                             
-                            async with session.get(search_url, headers=headers, params=cik_params, timeout=15) as cik_response:
+                            async with session.get(search_url, headers=headers, params=cik_params, timeout=7) as cik_response:
                                 if cik_response.status == 200:
                                     cik_html = await cik_response.text()
                                     print(f"      📄 CIK response length: {len(cik_html)} bytes")
@@ -3428,12 +3524,12 @@ async def check_licensed_resale_proof(lead: dict) -> Tuple[bool, dict]:
 # STAGE 5: UNIFIED VERIFICATION (Role, Region, Industry)
 # ============================================================================
 # Verifies role, region, and industry in ONE LLM call after Stage 4 passes
-# Uses DDG search results + fuzzy matching + LLM verification
+# Uses ScrapingDog search results + fuzzy matching + LLM verification
 # 
 # Flow:
-# 1. DDG search for ROLE (name + company + linkedin)
-# 2. DDG search for REGION (company headquarters)
-# 3. DDG search for INDUSTRY (what company does)
+# 1. ScrapingDog search for ROLE (name + company + linkedin)
+# 2. ScrapingDog search for REGION (company headquarters)
+# 3. ScrapingDog search for INDUSTRY (what company does)
 # 4. Fuzzy pre-verification (deterministic matching)
 # 5. LLM verification (only for fields that need it)
 # 6. Early exit if role fails → skip region/industry
@@ -3646,6 +3742,13 @@ C_SUITE_EXPANSIONS = {
     "cdo": "chief data officer",
     "cno": "chief nursing officer",
     "cao": "chief administrative officer",
+    # Additional C-suite roles (conservative additions)
+    "ciso": "chief information security officer",
+    "clo": "chief legal officer",
+    "cco": "chief compliance officer",
+    "cgo": "chief growth officer",
+    "ctpo": "chief technology product officer",
+    "csco": "chief supply chain officer",
 }
 
 ROLE_ABBREVIATIONS = {
@@ -3667,15 +3770,24 @@ ROLE_ABBREVIATIONS = {
     "md": "managing director",
     "gp": "general partner",
     "pm": "product manager",
+    # Additional common abbreviations (conservative additions)
+    "acct": "accountant",
+    "admin": "administrator",
+    "asst": "assistant",
+    "coord": "coordinator",
+    "rep": "representative",
+    "supv": "supervisor",
+    "tech": "technician",
 }
 
 ROLE_EQUIVALENCIES = {
-    "founder": ["founder", "co-founder", "co founder", "cofounder", "founding member"],
+    "founder": ["founder", "co-founder", "co founder", "cofounder", "founding", "founding member", "founding partner"],
     "owner": ["owner", "business owner", "franchise owner", "store owner", "agent owner", "owner operator"],
     "president": ["president", "pres", "pres."],
-    "partner": ["partner", "managing partner", "general partner", "senior partner", "equity partner"],
+    "partner": ["partner", "managing partner", "general partner", "senior partner", "equity partner", "founding partner"],
     "board": ["board member", "board director", "director", "board of directors"],
     "chair": ["chairman", "chairwoman", "chair", "chairperson", "executive chair", "executive chairman"],
+    "attorney": ["attorney", "counsel", "lawyer", "legal counsel", "associate attorney", "staff attorney"],
 }
 
 
@@ -3695,9 +3807,9 @@ def normalize_for_comparison(text: str) -> str:
     return text
 
 
-def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str = "", full_name: str = "") -> Optional[str]:
+def extract_role_from_search_title(title: str, snippet: str = "", company_name: str = "", full_name: str = "") -> Optional[str]:
     """
-    Extract job role from DDG LinkedIn search result title/snippet.
+    Extract job role from ScrapingDog LinkedIn search result title/snippet.
     
     CRITICAL: Only extract ROLES, not company names. LinkedIn titles have two formats:
     1. "Name - Role @ Company | LinkedIn" (has role)
@@ -3707,11 +3819,14 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
     
     If full_name is provided, verify the extracted role is associated with that person
     (role should appear near the person's name in the text).
+    
+    PRIORITY: If title is truncated ("..."), prioritize snippet extraction for complete data.
     """
-    if not title:
+    # Need at least title OR snippet to extract from
+    if not title and not snippet:
         return None
     
-    original_title = title
+    original_title = title if title else ""
     
     # Normalize company name for comparison
     company_normalized = normalize_for_comparison(company_name) if company_name else ""
@@ -3722,20 +3837,47 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
         name_parts = [p.lower() for p in full_name.split() if len(p) > 2]
     
     role_keywords = [
+        # C-suite and executive
         "ceo", "cto", "cfo", "coo", "cmo", "cio", "cpo",
         "founder", "co-founder", "cofounder", "co founder",
         "president", "vice president", "vp",
-        "director", "manager", "lead", "head",
-        "engineer", "developer", "analyst",
-        "owner", "partner", "principal",
         "executive", "officer", "chief",
+        
+        # Management and leadership
+        "director", "manager", "lead", "head",
+        "owner", "partner", "principal",
+        "supervisor", "coordinator",
+        
+        # Technical roles
+        "engineer", "developer", "analyst", "architect", "designer",
+        "technician", "programmer", "administrator", "sysadmin",
+        
+        # Professional services
         "consultant", "advisor", "specialist",
-        "product owner", "staff", "senior", "sr.", "jr.",
-        "associate", "assistant", "coordinator", "supervisor",
+        "attorney", "lawyer", "counsel", "paralegal",  # Legal
+        "accountant", "auditor", "controller", "treasurer", "bookkeeper", "comptroller",  # Finance/Accounting
+        
+        # Healthcare (specific, low false positive risk)
+        "physician", "surgeon", "nurse", "pharmacist", "dentist", "therapist",
+        
+        # Academic
         "professor", "teacher", "instructor", "lecturer",
-        "scientist", "researcher", "architect", "designer",
+        "scientist", "researcher",
+        
+        # Sales and customer-facing
+        "representative", "agent", "broker", "account executive",
+        
+        # General professional
+        "product owner", "staff", "senior", "sr.", "jr.",
+        "associate", "assistant",
         "creative", "marketing", "sales", "hr", "human resources",
-        "operations", "business operations"
+        "operations", "business operations",
+        
+        # Administrative
+        "receptionist", "secretary", "clerk", "registrar",
+        
+        # Finance/Investment
+        "investor", "trader", "banker",
     ]
     
     def has_role_keyword(text: str) -> bool:
@@ -3764,26 +3906,35 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
     if job_posting_match:
         role = job_posting_match.group(1).strip()
         role = re.sub(r'\s+in\s+[\w\s,]+$', '', role, flags=re.IGNORECASE).strip()
-        if len(role) > 2 and len(role) < 100 and not is_company_name(role):
+        if len(role) > 2 and len(role) < 100 and not is_company_name(role) and _is_valid_role_extraction(role):
             return role
     
     first_segment = title.split('|')[0].strip()
     first_segment = re.sub(r'\s+-\s*LinkedIn.*$', '', first_segment, flags=re.IGNORECASE).strip()
     first_segment = re.sub(r'\s*\.\.\.\s*$', '', first_segment).strip()
     
+    # Common role abbreviations that are valid even if ≤2 chars
+    common_abbreviations = ['vp', 'ceo', 'cto', 'cfo', 'coo', 'cmo', 'cio', 'cpo', 'svp', 'evp']
+    
     # PATTERN 1: "Name - Role @ Company" or "Name - Role at Company"
     # This is the MOST reliable pattern - role has separator before company
     role_at_match = re.search(r'^[^-]+-\s*(.+?)\s+(?:@|at)\s+', first_segment, re.IGNORECASE)
     if role_at_match:
         role = role_at_match.group(1).strip()
-        if len(role) > 2 and not is_company_name(role):
+        # Allow common abbreviations even if ≤2 chars (VP, CEO, CTO, etc.)
+        is_common_abbrev = role.lower() in common_abbreviations
+        
+        if (len(role) > 2 or is_common_abbrev) and not is_company_name(role) and _is_valid_role_extraction(role):
             return role
     
     # PATTERN 2: Look for "Role @ Company" or "Role at Company" anywhere
     role_at_patterns = re.findall(r'(\b(?:' + '|'.join(role_keywords) + r')[^|@]*?)\s+(?:@|at)\s+\w', original_title, re.IGNORECASE)
     if role_at_patterns:
         role = role_at_patterns[0].strip()
-        if len(role) > 2 and not is_company_name(role):
+        # Allow common abbreviations even if ≤2 chars
+        is_common_abbrev = role.lower() in common_abbreviations
+        
+        if (len(role) > 2 or is_common_abbrev) and not is_company_name(role) and _is_valid_role_extraction(role):
             return role
     
     # PATTERN 3: "Name - Something" where Something contains role keywords
@@ -3793,8 +3944,24 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
         potential_role = match.group(2).strip()
         # Clean up trailing "at Company" or "@Company"
         potential_role = re.sub(r'\s+(?:@|at)\s+.*$', '', potential_role, flags=re.IGNORECASE).strip()
+        
+        # NEW: If company name appears at the end (e.g., "Managing Director Wajer Yachts"),
+        # try to strip it off to isolate the role
+        if company_name and company_normalized:
+            # Check if company name is at the end of potential_role
+            potential_role_norm = normalize_for_comparison(potential_role)
+            if potential_role_norm.endswith(company_normalized):
+                # Strip company from end: "Managing Director Wajer Yachts" → "Managing Director"
+                potential_role = potential_role[:-(len(company_name))].strip()
+            elif company_normalized in potential_role_norm:
+                # Company somewhere in the middle/end, try to remove it
+                # Split on company name and take the part before it
+                parts = re.split(re.escape(company_name), potential_role, flags=re.IGNORECASE)
+                if parts and parts[0].strip():
+                    potential_role = parts[0].strip()
+        
         # ONLY return if it has a role keyword AND is not a company name
-        if len(potential_role) > 2 and has_role_keyword(potential_role) and not is_company_name(potential_role):
+        if len(potential_role) > 2 and has_role_keyword(potential_role) and not is_company_name(potential_role) and _is_valid_role_extraction(potential_role):
             return potential_role
     
     # PATTERN 4: Look for compound titles in title (e.g., "President & Co-Founder @ Company")
@@ -3808,7 +3975,7 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
         match = re.search(pattern, original_title, re.IGNORECASE)
         if match:
             role = match.group(1).strip()
-            if not is_company_name(role):
+            if not is_company_name(role) and _is_valid_role_extraction(role):
                 return role
     
     # PATTERN 5: Look for role keywords followed by "at" anywhere
@@ -3816,7 +3983,7 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
         match = re.search(rf'\b({kw}[^|,@]*?)\s+(?:@|at)\s+', original_title, re.IGNORECASE)
         if match:
             role = match.group(1).strip()
-            if len(role) > 2 and not is_company_name(role):
+            if len(role) > 2 and not is_company_name(role) and _is_valid_role_extraction(role):
                 return role
     
     # SNIPPET PATTERNS - look in snippet for role info
@@ -3834,8 +4001,21 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
         
         # NAME PROXIMITY CHECK: If name provided, verify snippet mentions this person
         # near any extracted role (to avoid extracting role of wrong person)
-        # Be lenient: accept if last name OR first name is mentioned (not both required)
-        if name_parts and len(name_parts) >= 2:
+        # 
+        # EXCEPTION: Skip this check for LinkedIn PROFILE snippets where:
+        # - The person's name IS in the title (confirms it's their profile)
+        # - But NOT in snippet (because profile speaks in first person)
+        # This is common for LinkedIn profiles: "Responsible AI Lead... As a technical advisor..."
+        is_linkedin_profile_snippet = False
+        if name_parts and len(name_parts) >= 2 and original_title:
+            title_lower = original_title.lower()
+            # Check if name is in title (LinkedIn format: "Name - Role")
+            name_in_title = any(part in title_lower for part in name_parts if len(part) > 2)
+            if name_in_title:
+                is_linkedin_profile_snippet = True
+        
+        # Only do name proximity check if NOT a LinkedIn profile snippet
+        if name_parts and len(name_parts) >= 2 and not is_linkedin_profile_snippet:
             snippet_lower = snippet_clean.lower()
             # Check for last name (usually more unique) or first name
             last_name = name_parts[-1] if len(name_parts[-1]) > 2 else None
@@ -3875,6 +4055,9 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
                     return role
         
         snippet_patterns = [
+            # LinkedIn snippet pattern: "is currently a Director of Partnerships and Growth at akoyaGO"
+            # This must come FIRST to avoid the shorter "is [Role] at" pattern below matching too early
+            r'\b(?:is|was)\s+currently\s+(?:a|an|the)\s+([A-Za-z\s&,\-]+?)\s+at\s+',
             # "rose to the role of Chief Operating Officer" - capture full C-suite title
             r'(?:role\s+of|as\s+(?:a|the)?)\s*(chief\s+\w+\s+officer)\b',
             r'(?:was\s+(?:a|the)\s+)(chief\s+\w+\s+officer)\b',
@@ -3910,14 +4093,15 @@ def extract_role_from_ddg_title(title: str, snippet: str = "", company_name: str
                     if _is_valid_role_extraction(role):
                         return role
         
-        # Look for role keywords in snippet - but try to get compound titles
+        # Look for role keywords in snippet - capture FULL role up to "at Company"
         found_roles = []
         for kw in role_keywords:
-            # Match keyword and try to get surrounding context (e.g., "Founder and CEO")
-            match = re.search(rf'\b({kw}(?:\s+(?:and|&)\s+(?:' + '|'.join(role_keywords) + r'))?(?:\s+of|\s+at)?)', snippet_clean, re.IGNORECASE)
+            # Match FULL ROLE: capture everything from word boundary to keyword, stopping at "at Company"
+            # E.g., "Chief Technology and Security Advisor at Microsoft" → "Chief Technology and Security Advisor"
+            match = re.search(rf'((?:[A-Za-z]+\s+){{0,6}}{kw})\s+at\s+', snippet_clean, re.IGNORECASE)
             if match:
                 role = match.group(1).strip()
-                if len(role) > 2 and len(role) < 60 and not is_company_name(role):
+                if len(role) > 2 and len(role) < 100 and not is_company_name(role):
                     found_roles.append(role)
         
         # Return the longest found role (compound titles are longer)
@@ -3963,8 +4147,8 @@ def _is_valid_role_extraction(role: str) -> bool:
     if len(role_lower) < 4 and role_lower not in known_short_roles:
         return False
     
-    # Filter: Starts with articles/prepositions (incomplete extraction)
-    if role_lower.startswith(('the ', 'a ', 'an ', 'to ', 'for ', 'at ', 'in ', 'of ', 'by ', 'as ', 'currently ')):
+    # Filter: Starts with articles/prepositions/conjunctions (incomplete extraction)
+    if role_lower.startswith(('the ', 'a ', 'an ', 'to ', 'for ', 'at ', 'in ', 'of ', 'by ', 'as ', 'currently ', 'and ', 'or ', 'but ', 'with ', 'from ', 'on ')):
         return False
     
     # Filter: Contains obvious non-role patterns
@@ -3975,6 +4159,102 @@ def _is_valid_role_extraction(role: str) -> bool:
     too_generic_single = ['head', 'lead', 'officer', 'assistant', 'executive']
     if role_lower in too_generic_single:
         return False
+    
+    # Filter: Known invalid tool/site names
+    invalid_tools = ['contactout', 'rocketreach', 'apollo', 'leadiq', 'lusha', 
+                     'seamless', 'hunter', 'clearbit', 'datanyze', 'discoverorg',
+                     'insideview', 'owler', 'zoominfo', 'crunchbase']
+    if role_lower in invalid_tools or any(tool in role_lower for tool in invalid_tools):
+        return False
+    
+    # Filter: Garbage descriptive phrases (not roles)
+    garbage_phrases = [
+        'practice on the', 'focuses on the', 'specializes in the',
+        'expertise in the', 'experience in the', 'works in the',
+        'involved in the', 'engaged in the', 'active in the',
+        'known for the', 'recognized for', 'awarded for',
+        'session details', 'read more about', 'learn more',
+        'areas of', 'field of', 'domain of', 'realm of'
+    ]
+    if any(phrase in role_lower for phrase in garbage_phrases):
+        return False
+    
+    # Filter: Web UI text patterns (browser/website interface text)
+    web_ui_patterns = [
+        'opens in', 'new window', 'new tab', 'click to', 'click here',
+        'tap to', 'swipe to', 'scroll to', 'navigate to',
+        'opens a new', 'link opens', 'external link',
+        'download', 'print', 'share', 'save', 'bookmark',
+        'sign in', 'log in', 'register', 'subscribe',
+        'terms of', 'privacy policy', 'cookies', 'consent'
+    ]
+    if any(pattern in role_lower for pattern in web_ui_patterns):
+        return False
+    
+    # Filter: "licensed to" patterns (legal/regulatory text, not roles)
+    if 'licensed' in role_lower and ('to practice' in role_lower or 'by the state' in role_lower):
+        return False
+    
+    # Filter: Department/Region patterns (e.g., "Public Sector, Canada", "Healthcare, UK")
+    # These appear in LinkedIn when showing department + location, not job titles
+    # Pattern: "[Department/Sector], [Country/Region]"
+    country_indicators = [
+        ', canada', ', uk', ', usa', ', us', ', united states', ', united kingdom',
+        ', india', ', australia', ', germany', ', france', ', spain', ', italy',
+        ', mexico', ', brazil', ', china', ', japan', ', singapore', ', ireland'
+    ]
+    if any(indicator in role_lower for indicator in country_indicators):
+        # Exception: If it has clear role keywords, it might be "VP Sales, Canada" (valid)
+        clear_role_keywords = ['vice president', 'director', 'manager', 'ceo', 'cto', 'cfo', 
+                               'head', 'lead', 'engineer', 'analyst', 'consultant']
+        has_clear_role = any(kw in role_lower for kw in clear_role_keywords)
+        if not has_clear_role:
+            return False
+    
+    # Filter: "Sector" without role keywords (e.g., "Public Sector", "Private Sector", "Healthcare Sector")
+    # These are department/industry descriptors, not job titles
+    if 'sector' in role_lower:
+        # Must have a clear role keyword to be valid (e.g., "Public Sector Director" is valid)
+        sector_role_keywords = ['director', 'manager', 'head', 'lead', 'coordinator', 
+                                'specialist', 'analyst', 'consultant', 'officer']
+        if not any(kw in role_lower for kw in sector_role_keywords):
+            return False
+    
+    # Filter: Truncated/malformed role endings (e.g., "Executive Assistant Human" from "Human Resources")
+    # These indicate concatenation errors or incomplete extraction
+    suspicious_endings = [
+        ' human$',  # "Executive Assistant Human" (should be "Human Resources")
+        ' resources$',  # Standalone (should be paired with department)
+        ' services$',  # Standalone (should be paired with type)
+        ' operations$',  # Standalone (should be paired with type)
+        ' support$',  # Too generic alone
+        ' team$',  # "Marketing Team" is not a role
+        ' department$',  # Department name, not role
+    ]
+    
+    for ending in suspicious_endings:
+        # Only filter if it's a trailing word that doesn't make sense as a role
+        if re.search(ending, role_lower):
+            # Exception: "Human Resources" together is valid
+            if ending == ' human$' and role_lower.endswith(' human'):
+                # Check if it's "Executive Assistant Human" type pattern (invalid)
+                # vs "Director of Human Relations" (valid with "of")
+                if ' of ' not in role_lower and ' for ' not in role_lower:
+                    return False
+            # Exception: "Customer Support" is valid
+            elif ending == ' support$' and any(prefix in role_lower for prefix in ['customer', 'technical', 'client', 'it ']):
+                continue
+            # Exception: "Business Operations" is valid  
+            elif ending == ' operations$' and any(prefix in role_lower for prefix in ['business', 'field', 'plant', 'network']):
+                continue
+            # Exception: "Professional Services" is valid
+            elif ending == ' services$' and any(prefix in role_lower for prefix in ['professional', 'managed', 'cloud', 'customer']):
+                continue
+            # Exception: "Human Resources" together is valid
+            elif ending == ' resources$' and 'human resources' in role_lower:
+                continue
+            else:
+                return False
     
     return True
 
@@ -4235,7 +4515,11 @@ def _is_valid_location(location: str) -> bool:
     
     location_lower = location.lower()
     
-    # Reject obvious garbage patterns
+    # Check if it's in "City, State/Country" format (e.g., "Media, US")
+    # If so, skip garbage pattern checks for city names that might match garbage words
+    is_city_state_format = bool(re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2,}$', location))
+    
+    # Reject obvious garbage patterns (but not if it's a valid City, State format)
     garbage_patterns = [
         # Business/company terms
         'products', 'competitors', 'valuation', 'funding', 'revenue',
@@ -4243,21 +4527,73 @@ def _is_valid_location(location: str) -> bool:
         'company', 'corporation', 'enterprise', 'business', 'industry',
         'profile', 'overview', 'about', 'description', 'information',
         'employees', 'staff', 'team', 'board', 'members', 'contacts',
-        'education', 'internet', 'partnerships', 'news', 'media',
+        'education', 'internet', 'partnerships', 'news',
+        # NOTE: 'media' removed from here - it's a valid city name (Media, PA)
         'silicon', 'bay area',  # Too generic - reject "Silicon Valley" / "Bay Area"
         # Generic web terms
         'linkedin', 'crunchbase', 'wikipedia', 'facebook', 'twitter',
         # Too generic
         'global', 'worldwide', 'international', 'regional',
         'united states', 'usa',  # Too generic
+        # Business departments/units (CRITICAL NEW FILTERS)
+        'sales', 'marketing', 'operations', 'engineering', 'hr', 'finance',
+        'accounting', 'legal', 'it', 'support', 'customer', 'business development',
+        # Street address indicators (NOT locations)
+        'street', 'avenue', 'boulevard', 'drive', 'road', 'lane', 'way',
+        'court', 'circle', 'plaza', 'square', 'parkway', 'highway',
+        'suite', 'floor', 'building', 'tower', 'complex', 'center',
+        'crescent', 'block', 'terrace', 'mews', 'close', 'grove',
+        'ste', 'apt', 'unit', 'room', 'no.', '#',
+        # Product/material names
+        'glass', 'steel', 'wood', 'metal', 'plastic', 'ceramic',
+        'stained', 'colored', 'painted',
+        # CRITICAL: Company suffixes (NOT locations!)
+        ' inc', ' inc.', ' llc', ' corp', ' corp.', ' ltd', ' ltd.',
+        ' co.', ' company', ' group', ' enterprises', ' holdings',
     ]
     
-    if any(garbage in location_lower for garbage in garbage_patterns):
-        return False
+    # Only apply garbage filters if NOT in City, State format
+    if not is_city_state_format:
+        if any(garbage in location_lower for garbage in garbage_patterns):
+            return False
     
     # Reject if it's just state codes without city
     if re.match(r'^[A-Z]{2}$', location):
         return False
+    
+    # CRITICAL: Reject duplicate words (e.g., "Modotech Modotech")
+    # Check before comma (to catch "Modotech Modotech, Inc")
+    first_part = location.split(',')[0].strip()
+    words = first_part.split()
+    if len(words) >= 2 and words[0].lower() == words[1].lower():
+        return False
+    
+    # CRITICAL: Reject person name patterns (e.g., "Mike Shaughnessy, Mike")
+    # Pattern: "FirstName LastName, FirstName" - person name with repeated first name
+    if ',' in location:
+        parts = location.split(',')
+        before_comma = parts[0].strip()
+        after_comma = parts[1].strip() if len(parts) > 1 else ""
+        
+        # Check if it looks like "FirstName LastName, FirstName"
+        before_words = before_comma.split()
+        after_words = after_comma.split() if after_comma else []
+        
+        if len(before_words) == 2 and len(after_words) >= 1:
+            # Check if first word before comma matches first word after comma (e.g., "Mike Shaughnessy, Mike")
+            if before_words[0].lower() == after_words[0].lower():
+                return False
+    
+    # CRITICAL: Reject reversed city/state (e.g., "York, New" should be "New York")
+    # Check if it's "Word, Word" where the second word is a common city prefix
+    if ', ' in location:
+        parts = location.split(', ')
+        if len(parts) == 2:
+            first, second = parts
+            # Common city first-word patterns
+            common_city_prefixes = ['new', 'san', 'los', 'fort', 'mount', 'saint', 'st.', 'port', 'lake']
+            if second.lower() in common_city_prefixes:
+                return False  # This is reversed! (e.g., "York, New" instead of "New York")
     
     # Reject if too long (likely a description, not a location)
     if len(location) > 50:
@@ -4341,9 +4677,9 @@ def fuzzy_pre_verification_stage5(
     claimed_role: str,
     claimed_region: str,
     claimed_industry: str,
-    ddg_role_results: List[Dict],
-    ddg_region_results: List[Dict],
-    ddg_industry_results: List[Dict],
+    role_search_results: List[Dict],
+    region_search_results: List[Dict],
+    industry_search_results: List[Dict],
     full_name: str = "",
     company: str = "",
     role_only: bool = False
@@ -4354,7 +4690,7 @@ def fuzzy_pre_verification_stage5(
     
     Args:
         role_only: If True, only check role and suppress region/industry messages.
-                   Used for early exit check before region/industry DDG searches.
+                   Used for early exit check before region/industry ScrapingDog searches.
     """
     result = {
         "role_verified": False,
@@ -4378,178 +4714,230 @@ def fuzzy_pre_verification_stage5(
     }
     
     # ROLE FUZZY MATCHING
-    if ddg_role_results and claimed_role:
-        name_lower = full_name.lower() if full_name else ""
-        first_name = name_lower.split()[0] if name_lower else ""
-        last_name = name_lower.split()[-1] if name_lower else ""
-        
-        best_extracted_role = None
-        best_match = False
-        best_confidence = 0.0
-        best_reason = "No role found in DDG results"
-        
-        # Look at up to 15 results to include fallback results (5 primary + 5 fallback1 + 5 fallback2)
-        for r in ddg_role_results[:15]:
-            title = r.get("title", "")
-            snippet = r.get("snippet", r.get("body", ""))
-            
-            title_lower = title.lower()
-            
-            # Check if title contains the person's name OR is a job posting/company role listing
-            # Job postings like "Company hiring Role" don't contain the person's name but prove the role exists
-            is_job_posting = "hiring" in title_lower
-            is_company_role = company and company.lower() in title_lower
-            
-            if first_name and last_name and not is_job_posting:
-                first_pattern = rf'\b{re.escape(first_name)}\b'
-                last_pattern = rf'\b{re.escape(last_name)}\b'
-                has_name = re.search(first_pattern, title_lower) and re.search(last_pattern, title_lower)
-                # Allow if: has person's name, OR is a job posting, OR is a company role listing with role keywords
-                if not has_name and not is_company_role:
-                    continue
-            
-            extracted = extract_role_from_ddg_title(title, snippet, company_name=company, full_name=full_name)
-            
-            if extracted:
-                extracted_lower = extracted.lower()
-                
-                # Pre-compute: Check for strong role keywords (used in multiple filters)
-                role_keywords_quick = ["ceo", "cto", "cfo", "coo", "founder", "president", "director", 
-                                       "manager", "head", "lead", "vp", "chief", "officer"]
-                has_strong_role_keyword = any(kw in extracted_lower for kw in role_keywords_quick)
-                
-                # Filter 1: Known invalid site names and domains
-                invalid_extractions = ["wikipedia", "linkedin", "facebook", "twitter", "crunchbase", 
-                                       "glassdoor", "indeed", "zoominfo", "bloomberg", "forbes", "reuters",
-                                       "craft.co", "theorg.com", "the org"]
-                if extracted_lower in invalid_extractions:
-                    continue
-                # Filter website domains (anything ending in .com, .co, .io, etc.)
-                if re.match(r'^[\w\-]+\.(com|co|io|org|net)$', extracted_lower):
-                    continue
-                
-                # Filter 1b: Too short/generic extractions
-                too_short_generic = ["lead", "head", "manager", "director", "partner", "officer", 
-                                    "engineer", "analyst", "the org", "the company", "org", "inc", "llc"]
-                if extracted_lower in too_short_generic:
-                    continue
-                if len(extracted) < 5:
-                    continue
-                
-                # Filter 1c: Truncated/garbage extractions
-                if "..." in extracted or extracted_lower.endswith("- linkedin") or extracted_lower.endswith("| linkedin"):
-                    continue
-                
-                # Filter 2: Garbage patterns that contain role keywords but aren't roles
-                # Be specific to avoid false positives (e.g., "email example" in titles shouldn't block)
-                garbage_patterns = [
-                    "work history", "executive bio", "company profile", "contact info",
-                    "phone number", "email address", "company overview", "about us",
-                    "company headquarters", "company website", "biography of"
-                ]
-                # Only filter if these patterns appear AND no strong role keyword exists
-                has_garbage = any(pattern in extracted_lower for pattern in garbage_patterns)
-                if has_garbage and not has_strong_role_keyword:
-                    continue
-                
-                # Filter 3: Location patterns (US states, countries, cities)
-                # If extraction contains US state names or common location words, skip
-                location_indicators = [
-                    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
-                    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
-                    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
-                    "maine", "maryland", "massachusetts", "michigan", "minnesota",
-                    "mississippi", "missouri", "montana", "nebraska", "nevada",
-                    "new hampshire", "new jersey", "new mexico", "new york", "north carolina",
-                    "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
-                    "rhode island", "south carolina", "south dakota", "tennessee", "texas",
-                    "utah", "vermont", "virginia", "washington", "west virginia",
-                    "wisconsin", "wyoming", "united states", "united kingdom", "canada",
-                    "australia", "germany", "france", "spain", "italy", "netherlands"
-                ]
-                is_location = any(loc in extracted_lower for loc in location_indicators)
-                # Only skip if it ONLY looks like a location (no role keywords)
-                if is_location and not has_strong_role_keyword:
-                    continue
-                
-                # Filter 4: Too long to be a job title (likely garbage)
-                # But allow longer strings if they contain clear role indicators
-                # (Yahoo sometimes concatenates multiple results which still contain valid roles)
-                # Note: Yahoo can produce VERY long concatenated titles (300+ chars) but still contain valid roles
-                if len(extracted) > 500:
-                    continue
-                if len(extracted) > 100 and not has_strong_role_keyword:
-                    continue
-                
-                # Filter 5: Company name check (stricter)
-                if company:
-                    company_lower = company.lower()
-                    
-                    role_keywords = ["ceo", "cto", "cfo", "coo", "cio", "chief", "president", "director", 
-                                     "manager", "founder", "owner", "partner", "head", "lead", "vp", 
-                                     "vice", "executive", "officer", "analyst", "engineer", "developer"]
-                    
-                    has_role_keyword = any(kw in extracted_lower for kw in role_keywords)
-                    
-                    if not has_role_keyword:
-                        # Exact match or company in extraction or extraction in company
-                        if extracted_lower == company_lower:
-                            continue
-                        if company_lower in extracted_lower:
-                            continue
-                        if extracted_lower in company_lower:  # e.g., "Ori" for company "Ori Living"
-                            continue
-                
-                # Filter 6: Full name check
-                if full_name and extracted_lower == full_name.lower():
-                    continue
-                
-                is_match, confidence, reason = fuzzy_match_role(claimed_role, extracted)
-                
-                if confidence > best_confidence or (not best_extracted_role and extracted):
-                    best_extracted_role = extracted
-                    best_match = is_match
-                    best_confidence = confidence
-                    best_reason = reason
-        
-        if best_extracted_role:
-            result["role_extracted"] = best_extracted_role
-            result["role_confidence"] = best_confidence
-            result["role_reason"] = best_reason
-            
-            if best_match and best_confidence >= 0.8:
+    if role_search_results and claimed_role:
+        # Check if role was VERIFIED by fallback search (name+company+role confirmed)
+        for r in role_search_results[:3]:  # Check first few results
+            if r.get("role_verified") and r.get("verified_role"):
+                verified_role = r["verified_role"]
+                print(f"   ✅ ROLE PRE-VERIFIED: '{verified_role}' (from fallback verification)")
                 result["role_verified"] = True
-                print(f"   ✅ FUZZY ROLE MATCH: '{claimed_role}' ≈ '{best_extracted_role}'")
-                print(f"      Confidence: {best_confidence:.0%} | Reason: {best_reason}")
-            else:
-                if best_match:
+                result["role_extracted"] = verified_role
+                result["role_confidence"] = 1.0
+                result["role_reason"] = f"Role verified via fallback search (name+company+role confirmed)"
+                result["needs_llm"] = [x for x in result["needs_llm"] if x != "role"]  # Don't need LLM
+                # Still continue to check region/industry
+                break
+        
+        if not result["role_verified"]:  # Only do fuzzy matching if not already verified
+            name_lower = full_name.lower() if full_name else ""
+            first_name = name_lower.split()[0] if name_lower else ""
+            last_name = name_lower.split()[-1] if name_lower else ""
+            
+            best_extracted_role = None
+            best_match = False
+            best_confidence = 0.0
+            best_reason = "No role found in ScrapingDog results"
+            
+            # Look at up to 15 results to include fallback results (5 primary + 5 fallback1 + 5 fallback2)
+            for r in role_search_results[:15]:
+                title = r.get("title", "")
+                snippet = r.get("snippet", r.get("body", ""))
+                link = r.get("href", r.get("link", ""))
+                
+                # CRITICAL: Filter out LinkedIn POSTS - they contain garbage text
+                # Posts have URLs like: linkedin.com/posts/username/activity-123456
+                # We only want PROFILES: linkedin.com/in/username
+                if "/posts/" in link or "/feed/" in link or "/pulse/" in link:
+                    continue  # Skip posts, only process profiles and company pages
+                
+                title_lower = title.lower()
+                
+                # Check if title contains the person's name OR is a job posting/company role listing
+                # Job postings like "Company hiring Role" don't contain the person's name but prove the role exists
+                is_job_posting = "hiring" in title_lower
+                is_company_role = company and company.lower() in title_lower
+                
+                if first_name and last_name and not is_job_posting:
+                    first_pattern = rf'\b{re.escape(first_name)}\b'
+                    last_pattern = rf'\b{re.escape(last_name)}\b'
+                    has_name = re.search(first_pattern, title_lower) and re.search(last_pattern, title_lower)
+                    # Allow if: has person's name, OR is a job posting, OR is a company role listing with role keywords
+                    if not has_name and not is_company_role:
+                        continue
+                
+                extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
+                
+                if extracted:
+                    extracted_lower = extracted.lower()
+                    
+                    # Pre-compute: Check for strong role keywords (used in multiple filters)
+                    role_keywords_quick = ["ceo", "cto", "cfo", "coo", "founder", "president", "director", 
+                                           "manager", "head", "lead", "vp", "chief", "officer", "attorney",
+                                           "engineer", "accountant", "physician", "partner", "principal"]
+                    has_strong_role_keyword = any(kw in extracted_lower for kw in role_keywords_quick)
+                    
+                    # Filter 1: Known invalid site names and domains
+                    invalid_extractions = ["wikipedia", "linkedin", "facebook", "twitter", "crunchbase", 
+                                           "glassdoor", "indeed", "zoominfo", "bloomberg", "forbes", "reuters",
+                                           "craft.co", "theorg.com", "the org", "contactout", "rocketreach",
+                                           "apollo.io", "leadiq", "lusha", "seamless.ai", "hunter.io",
+                                           "clearbit", "datanyze", "discoverorg", "insideview", "owler"]
+                    if extracted_lower in invalid_extractions:
+                        continue
+                    # Filter website domains (anything ending in .com, .co, .io, etc.)
+                    if re.match(r'^[\w\-]+\.(com|co|io|org|net)$', extracted_lower):
+                        continue
+                    
+                    # Filter 1b: Too short/generic extractions
+                    # Common role abbreviations that are valid even if ≤2 chars
+                    common_abbreviations = ['vp', 'ceo', 'cto', 'cfo', 'coo', 'cmo', 'cio', 'cpo', 'svp', 'evp']
+                    is_common_abbrev = extracted_lower in common_abbreviations
+                    
+                    too_short_generic = ["lead", "head", "manager", "director", "partner", "officer", 
+                                        "engineer", "analyst", "the org", "the company", "org", "inc", "llc"]
+                    if extracted_lower in too_short_generic:
+                        continue
+                    if len(extracted) < 5 and not is_common_abbrev:
+                        continue
+                    
+                    # Filter 1c: Truncated/garbage extractions
+                    if "..." in extracted or extracted_lower.endswith("- linkedin") or extracted_lower.endswith("| linkedin"):
+                        continue
+                    
+                    # Filter 2: Garbage patterns that contain role keywords but aren't roles
+                    # Be specific to avoid false positives (e.g., "email example" in titles shouldn't block)
+                    garbage_patterns = [
+                        "work history", "executive bio", "company profile", "contact info",
+                        "phone number", "email address", "company overview", "about us",
+                        "company headquarters", "company website", "biography of",
+                        "practice on the", "focuses on the", "specializes in the",
+                        "expertise in the", "experience in the", "works in the",
+                        "involved in the", "engaged in the", "active in the",
+                        "known for the", "recognized for", "awarded for",
+                        "session details", "read more", "click here", "learn more",
+                        "view profile", "see the complete", "view full", "show more"
+                    ]
+                    # Only filter if these patterns appear AND no strong role keyword exists
+                    has_garbage = any(pattern in extracted_lower for pattern in garbage_patterns)
+                    if has_garbage and not has_strong_role_keyword:
+                        continue
+                    
+                    # Filter 3: Location patterns (US states, countries, cities)
+                    # If extraction contains US state names or common location words, skip
+                    location_indicators = [
+                        "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+                        "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+                        "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+                        "maine", "maryland", "massachusetts", "michigan", "minnesota",
+                        "mississippi", "missouri", "montana", "nebraska", "nevada",
+                        "new hampshire", "new jersey", "new mexico", "new york", "north carolina",
+                        "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
+                        "rhode island", "south carolina", "south dakota", "tennessee", "texas",
+                        "utah", "vermont", "virginia", "washington", "west virginia",
+                        "wisconsin", "wyoming", "united states", "united kingdom", "canada",
+                        "australia", "germany", "france", "spain", "italy", "netherlands"
+                    ]
+                    is_location = any(loc in extracted_lower for loc in location_indicators)
+                    # Only skip if it ONLY looks like a location (no role keywords)
+                    if is_location and not has_strong_role_keyword:
+                        continue
+                    
+                    # Filter 4: Too long to be a job title (likely garbage)
+                    # But allow longer strings if they contain clear role indicators
+                    # (Yahoo sometimes concatenates multiple results which still contain valid roles)
+                    # Note: Yahoo can produce VERY long concatenated titles (300+ chars) but still contain valid roles
+                    if len(extracted) > 500:
+                        continue
+                    if len(extracted) > 100 and not has_strong_role_keyword:
+                        continue
+                    
+                    # Filter 5: Company name check (stricter)
+                    if company:
+                        company_lower = company.lower()
+                        
+                        role_keywords = ["ceo", "cto", "cfo", "coo", "cio", "chief", "president", "director", 
+                                         "manager", "founder", "owner", "partner", "head", "lead", "vp", 
+                                         "vice", "executive", "officer", "analyst", "engineer", "developer"]
+                        
+                        has_role_keyword = any(kw in extracted_lower for kw in role_keywords)
+                        
+                        if not has_role_keyword:
+                            # Exact match or company in extraction or extraction in company
+                            if extracted_lower == company_lower:
+                                continue
+                            if company_lower in extracted_lower:
+                                continue
+                            if extracted_lower in company_lower:  # e.g., "Ori" for company "Ori Living"
+                                continue
+                    
+                    # Filter 6: Full name check
+                    if full_name and extracted_lower == full_name.lower():
+                        continue
+                    
+                    is_match, confidence, reason = fuzzy_match_role(claimed_role, extracted)
+                    
+                    # Check if this result mentions the target person's name
+                    has_target_name = False
+                    if first_name and last_name and title_lower:
+                        first_pattern = rf'\b{re.escape(first_name)}\b'
+                        last_pattern = rf'\b{re.escape(last_name)}\b'
+                        has_target_name = re.search(first_pattern, title_lower) and re.search(last_pattern, title_lower)
+                    
+                    # Prioritize results that:
+                    # 1. Have higher confidence
+                    # 2. Mention the target person's name (avoids extracting from wrong person)
+                    # 3. Have strong role keywords
+                    # CRITICAL: Don't accept low-confidence extractions without name match
+                    should_update = False
+                    
+                    if confidence > best_confidence:
+                        # Always update if confidence is better
+                        should_update = True
+                    elif not best_extracted_role and extracted:
+                        # Accept first extraction ONLY if:
+                        # - It has the target person's name, OR
+                        # - It has strong role keywords AND reasonable confidence
+                        if has_target_name:
+                            should_update = True
+                        elif has_strong_role_keyword and confidence >= 0.3:
+                            should_update = True
+                        # If no strong role keyword and no name match, reject
+                    elif has_target_name and not best_match:
+                        # Prefer results with target name over generic extractions
+                        should_update = True
+                    
+                    if should_update:
+                        best_extracted_role = extracted
+                        best_match = is_match
+                        best_confidence = confidence
+                        best_reason = reason
+            
+            if best_extracted_role:
+                result["role_extracted"] = best_extracted_role
+                result["role_confidence"] = best_confidence
+                result["role_reason"] = best_reason
+                
+                if best_match and best_confidence >= 0.8:
+                    result["role_verified"] = True
+                    print(f"   ✅ FUZZY ROLE MATCH: '{claimed_role}' ≈ '{best_extracted_role}'")
+                    print(f"      Confidence: {best_confidence:.0%} | Reason: {best_reason}")
+                elif best_match:
                     result["needs_llm"].append("role")
                     print(f"   ⚠️ FUZZY ROLE: Low confidence match ({best_confidence:.0%}), sending to LLM")
                 else:
-                    role_keywords = ["ceo", "cto", "cfo", "coo", "cio", "chief", "president", "director", 
-                                     "manager", "founder", "owner", "partner", "head", "lead", "vp", 
-                                     "vice", "executive", "officer", "analyst", "engineer", "developer",
-                                     "consultant", "specialist", "coordinator", "supervisor", "administrator"]
-                    
-                    extracted_lower = best_extracted_role.lower()
-                    looks_like_role = any(kw in extracted_lower for kw in role_keywords)
-                    
-                    if looks_like_role:
-                        result["role_definitive_fail"] = True
-                        print(f"   ❌ FUZZY ROLE DEFINITIVE MISMATCH: '{claimed_role}' ≠ '{best_extracted_role}'")
-                        print(f"      Reason: {best_reason}")
-                        print(f"      This is a HARD FAIL - will skip region/industry checks")
-                    else:
-                        result["needs_llm"].append("role")
-                        print(f"   ⚠️ FUZZY ROLE: Extracted '{best_extracted_role}' doesn't look like a role, sending to LLM")
-                        print(f"      Reason: {best_reason}")
+                    # Match failed - check if extraction looks like a valid role
+                    print(f"   ❌ FUZZY ROLE: No match - '{claimed_role}' vs '{best_extracted_role}' ({best_confidence:.0%})")
+            else:
+                # No role extracted at all from search results
+                result["needs_llm"].append("role")
+                print(f"   ⚠️ FUZZY ROLE: No role extracted from ScrapingDog results")
         else:
             result["needs_llm"].append("role")
-            result["role_reason"] = "Could not extract role from DDG results"
-            print(f"   ⚠️ FUZZY ROLE: Could not extract role from DDG, sending to LLM")
+            result["role_reason"] = "Could not extract role from ScrapingDog results"
+            print(f"   ⚠️ FUZZY ROLE: Could not extract role from search results, sending to LLM")
     else:
         result["needs_llm"].append("role")
-        print(f"   ⚠️ FUZZY ROLE: No DDG results or no claimed role")
+        print(f"   ⚠️ FUZZY ROLE: No ScrapingDog results or no claimed role")
     
     # REGION ANTI-GAMING CHECK (runs even in role_only mode for early exit)
     if claimed_region:
@@ -4581,19 +4969,25 @@ def fuzzy_pre_verification_stage5(
             print(f"   ❌ ANTI-GAMING HARD FAIL: Multiple states detected in region: {states_found}")
             print(f"      Claimed region contains {len(states_found)} different US states - HARD FAIL")
             print(f"      This lead will FAIL regardless of LLM verification")
-            ddg_region_results = None
+            region_search_results = None
     
-    # If role_only mode, skip region DDG-based matching and industry checks
+    # If role_only mode, skip region GSE-based matching and industry checks
     # (Anti-gaming check above still runs for early exit detection)
     if role_only:
         return result
     
     # REGION FUZZY MATCHING
-    if ddg_region_results and claimed_region:
+    if region_search_results and claimed_region:
         company_lower = company.lower() if company else ""
         extracted_region = None
         
-        for r in ddg_region_results[:5]:
+        for r in region_search_results[:5]:
+            link = r.get("href", r.get("link", ""))
+            
+            # Filter out LinkedIn posts for region extraction too
+            if "/posts/" in link or "/feed/" in link or "/pulse/" in link:
+                continue
+            
             title = r.get("title", "")
             snippet = r.get("snippet", r.get("body", ""))
             combined = title + " " + snippet
@@ -4625,19 +5019,19 @@ def fuzzy_pre_verification_stage5(
         else:
             if not result.get("region_hard_fail"):
                 result["needs_llm"].append("region")
-                result["region_reason"] = "Could not extract region from DDG results"
+                result["region_reason"] = "Could not extract region from ScrapingDog results"
                 print(f"   ⚠️ FUZZY REGION: Could not extract location, sending to LLM")
     else:
         if not result.get("region_hard_fail"):
             result["needs_llm"].append("region")
-            print(f"   ⚠️ FUZZY REGION: No DDG results or no claimed region")
+            print(f"   ⚠️ FUZZY REGION: No ScrapingDog results or no claimed region")
     
     print(f"   🤖 INDUSTRY: Always verified by LLM (too subjective for fuzzy match)")
     
     return result
 
 
-def _ddg_search_stage5_sync(
+def _gse_search_stage5_sync(
     search_type: str,
     full_name: str = "",
     company: str = "",
@@ -4645,15 +5039,14 @@ def _ddg_search_stage5_sync(
     max_results: int = 5,
     **kwargs
 ) -> List[Dict]:
-    """Stage 5 DDG search helper with backend fallback."""
+    """
+    Stage 5 search helper using ScrapingDog GSE.
+    MODIFIED: Replaced ScrapingDog with ScrapingDog for consistency.
+    """
     
-    try:
-        from ddgs import DDGS
-    except ImportError:
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError:
-            return []
+    api_key = os.getenv("SCRAPINGDOG_API_KEY")
+    if not api_key:
+        return []
     
     if search_type == "role":
         linkedin_url = kwargs.get("linkedin_url", "")
@@ -4665,18 +5058,17 @@ def _ddg_search_stage5_sync(
         
         role_simplified = re.split(r'[,&/]', role)[0].strip() if role else ""
         
-        # Multiple primary queries to maximize chance of finding role
+        # Multiple primary queries
         queries = [
-            f'"{full_name}" "{company}" linkedin',           # Exact name + company
-            f'"{full_name}" {company} linkedin',             # Name quoted, company unquoted
+            f'"{full_name}" "{company}" linkedin',
+            f'"{full_name}" {company} linkedin',
         ]
         
-        # Verification queries - search for the CLAIMED role to verify it
-        # If DDG returns results with name+role+company, role is likely correct
+        # Verification queries
         fallback_queries = []
         if role_simplified:
-            fallback_queries.append(f'"{full_name}" "{role_simplified}" "{company}"')  # Verify claimed role
-            fallback_queries.append(f'"{full_name}" {role_simplified} linkedin')       # Name + Role + LinkedIn
+            fallback_queries.append(f'"{full_name}" "{role_simplified}" "{company}"')
+            fallback_queries.append(f'"{full_name}" {role_simplified} linkedin')
         if linkedin_url_query:
             fallback_queries.append(linkedin_url_query)
     elif search_type == "region":
@@ -4694,406 +5086,128 @@ def _ddg_search_stage5_sync(
             queries = [f'{company} company industry']
         fallback_queries = []
     
-    def ddg_search_with_fallback(ddgs_instance, query, max_results, backends=['yahoo', 'yandex', 'google'], require_linkedin=False, company_name=None):
-        """Backend rotation: try each backend until success. 
-        For role searches, rotate if no LinkedIn URLs.
-        For region/industry searches, rotate if no results mention the company."""
-        last_error = None
-        all_backend_results = []
-        
-        # Normalize company name for matching (handle hyphens like "Chick-fil-A")
-        company_normalized = None
-        company_words = []
-        if company_name:
-            company_normalized = re.sub(r'\s*-\s*', '-', company_name.lower())
-            company_words = [w for w in company_normalized.split() if len(w) > 3][:2]  # First 2 significant words
-        
-        for backend in backends:
-            try:
-                results = list(ddgs_instance.text(query, max_results=max_results, backend=backend))
+    def gse_search_with_fallback(query, max_results, company_name=None):
+        """GSE search with company verification"""
+        try:
+            url = "https://api.scrapingdog.com/google"
+            params = {
+                "api_key": api_key,
+                "query": query,
+                "results": max_results
+            }
+            
+            response = requests.get(url, params=params, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                results = []
                 
-                # For role searches: check if LinkedIn URLs found, else try next backend
-                if require_linkedin:
-                    linkedin_found = any('linkedin.com' in r.get('href', '').lower() for r in results)
-                    if linkedin_found:
-                        return results  # Success - found LinkedIn URLs
-                    else:
-                        # No LinkedIn URLs, accumulate and try next backend
-                        all_backend_results.extend(results)
-                        if backend != backends[-1]:
-                            print(f"      ⚠️ {backend}: No LinkedIn URLs, trying next backend...")
-                            time.sleep(1)
-                        continue
-                else:
-                    # For region/industry: check if any results mention the company
-                    if company_normalized and results:
-                        has_company_result = False
-                        for r in results:
-                            title = re.sub(r'\s*-\s*', '-', r.get('title', '').lower())
-                            body = re.sub(r'\s*-\s*', '-', r.get('body', '').lower())
-                            combined = title + " " + body
-                            
-                            # Check if company name or significant words are in result
-                            if company_normalized in combined:
-                                has_company_result = True
-                                break
-                            elif company_words and any(w in combined for w in company_words):
-                                has_company_result = True
-                                break
-                        
-                        if has_company_result:
-                            return results  # Found results about the right company
-                        else:
-                            # Results don't mention company, try next backend
-                            all_backend_results.extend(results)
-                            if backend != backends[-1]:
-                                print(f"      ⚠️ {backend}: No results about '{company_name}', trying next backend...")
-                                time.sleep(1)
-                            continue
-                    else:
-                        return results  # No company filter or no results
+                # Convert to standard format
+                for item in data.get("organic_results", []):
+                    results.append({
+                        "title": item.get("title", ""),
+                        "href": item.get("link", ""),
+                        "body": item.get("snippet", "")
+                    })
+                
+                # For region/industry: verify company mentioned
+                if company_name and search_type in ["region", "industry"]:
+                    company_normalized = re.sub(r'\s*-\s*', '-', company_name.lower())
+                    company_words = [w for w in company_normalized.split() if len(w) > 3][:2]
                     
-            except Exception as e:
-                last_error = e
-                if backend != backends[-1]:
-                    print(f"      ⚠️ {backend} error: {e}, trying next backend...")
-                continue
+                    for r in results:
+                        text = f"{r.get('title', '')} {r.get('body', '')}".lower()
+                        if company_name.lower() in text or any(word in text for word in company_words):
+                            return results  # Company mentioned, good results
+                    
+                    return []  # Company not mentioned
+                
+                return results
+        except Exception:
+            return []
         
-        # Return whatever we accumulated (may be empty or non-company results)
-        if all_backend_results:
-            return all_backend_results
-        if last_error:
-            raise last_error
         return []
     
+    # Try primary queries first
     all_results = []
-    try:
-        with DDGS() as ddgs:
-            if search_type == "role":
-                print(f"   🔍 PRIMARY: Searching '{full_name}' + '{company}' + linkedin...")
-            
-            for i, query in enumerate(queries):
-                if i > 0:
-                    time.sleep(2)
-                    
-                try:
-                    # For role searches, require LinkedIn URLs (rotate backends if not found)
-                    # For region/industry searches, verify results are about the right company
-                    results = ddg_search_with_fallback(
-                        ddgs, query, max_results, 
-                        require_linkedin=(search_type == "role"),
-                        company_name=company if search_type in ["region", "industry"] else None
-                    )
-                    for r in results:
-                        all_results.append({
-                            "title": r.get("title", ""),
-                            "link": r.get("href", ""),
-                            "snippet": r.get("body", ""),
-                            "query_type": search_type,
-                            "query": query
-                        })
-                    if len(all_results) >= max_results:
-                        break
-                except Exception as e:
-                    print(f"   ⚠️ DDG {search_type} query failed: {query[:40]}... ({e})")
-                    continue
-            
-            if search_type == "role" and fallback_queries:
-                role_found = False
-                for r in all_results[:5]:
-                    title = r.get("title", "")
-                    snippet = r.get("snippet", r.get("body", ""))
-                    extracted = extract_role_from_ddg_title(title, snippet, company_name=company, full_name=full_name)
-                    if not extracted:
-                        continue
-                    
-                    extracted_lower = extracted.lower()
-                    
-                    # Define has_role_keyword BEFORE it's used
-                    role_keywords = ["ceo", "cto", "cfo", "coo", "founder", "president", "director", 
-                                     "manager", "head", "lead", "vp", "chief", "officer", "owner", "partner",
-                                     "professor", "engineer", "analyst", "specialist", "consultant"]
-                    has_role_keyword = any(kw in extracted_lower for kw in role_keywords)
-                    
-                    # Filter: Invalid site names and domains (exact match or pattern)
-                    # These are business directories/websites, NOT job roles
-                    invalid_extractions = ["linkedin", "wikipedia", "facebook", "twitter", "crunchbase", 
-                                          "glassdoor", "indeed", "zoominfo", "craft.co", "theorg.com", 
-                                          "the org", "bloomberg", "forbes", "reuters", "bizapedia",
-                                          "rocketreach", "signalhire", "lusha", "apollo", "leadiq",
-                                          "hunter.io", "clearbit", "pitchbook", "owler", "dnb", 
-                                          "hoovers", "manta", "yelp", "bbb", "yellowpages",
-                                          "scientific index", "company profile", "stack overflow"]
-                    if extracted_lower in invalid_extractions:
-                        continue
-                    
-                    # Filter: "assistant to X" patterns - extracting wrong person's role
-                    if re.search(r'\b(assistant|secretary|aide)\s+to\s+', extracted_lower):
-                        continue
-                    
-                    # Filter: Sentence fragments that are clearly not roles
-                    # These are garbage from Yandex/Google snippets
-                    garbage_patterns = [
-                        r'^(now|is|was|has|had|will|can|may|should|would)\s+',  # Starts with verb
-                        r'^(the|a|an|this|that|these|those|our|their)\s+',  # Starts with article
-                        r'^(and|or|but|if|when|where|what|how|why)\s+',  # Starts with conjunction
-                        r'^(in|on|at|to|for|with|from|by|about)\s+',  # Starts with preposition
-                        r'^i\s+',  # Starts with "I " (garbage like "I eligible schools")
-                        r'session\s+details',  # Conference/event garbage
-                        r'read\s+more',
-                        r'click\s+here',
-                        r'learn\s+more',
-                        r'view\s+profile',
-                        r'see\s+the\s+complete',
-                        r'^\d+\s+(years?|months?|days?)',  # Duration patterns
-                        r'^of\s+',  # Starts with "of " (truncated)
-                        r'^\d{4}\s+',  # Starts with year (e.g., "2025 Company Profile")
-                        r'company\s+profile',  # Company profile pages
-                        r'team.*funding.*competitors',  # Crunchbase-style garbage
-                        r'scientific\s+index',  # Academic garbage
-                        r'^set\s+to\s+',  # "set to join..."
-                        r'eligible\s+schools',  # Random garbage
-                    ]
-                    if any(re.search(p, extracted_lower) for p in garbage_patterns):
-                        continue
-                    
-                    # Filter: Very long extractions without role keywords (likely garbage)
-                    if len(extracted) > 50 and not has_role_keyword:
-                        continue
-                    
-                    # Filter: Contains the person's name (likely extracted wrong info)
-                    if full_name:
-                        name_parts = full_name.lower().split()
-                        # If extraction contains any part of the person's name, suspicious
-                        if any(part in extracted_lower and len(part) > 2 for part in name_parts):
-                            # Only skip if it looks like "assistant to X" or similar
-                            if " to " in extracted_lower or "'s " in extracted_lower:
-                                continue
-                    
-                    # Filter website domains (anything ending in .com, .co, .io, etc.)
-                    if re.match(r'^[\w\-]+\.(com|co|io|org|net)$', extracted_lower):
-                        continue
-                    
-                    # Filter: Too short/generic extractions (just "Lead", "Head" without context)
-                    too_short_generic = ["lead", "head", "manager", "director", "partner", "officer", 
-                                        "engineer", "analyst", "the org", "the company", "org", "inc", "llc",
-                                        "senior", "junior", "staff", "the", "neuro", "labs", "tech"]
-                    if extracted_lower in too_short_generic:
-                        continue
-                    
-                    # Filter: Very short extractions (less than 5 chars) 
-                    if len(extracted) < 5:
-                        continue
-                    
-                    # Filter: Truncated/garbage extractions (contain "..." or end with "- LinkedIn")
-                    if "..." in extracted or extracted_lower.endswith("- linkedin") or extracted_lower.endswith("| linkedin"):
-                        continue
-                    
-                    # Filter: Location patterns (US states, countries) without role keyword
-                    location_indicators = [
-                        "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
-                        "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
-                        "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
-                        "maine", "maryland", "massachusetts", "michigan", "minnesota",
-                        "mississippi", "missouri", "montana", "nebraska", "nevada",
-                        "new hampshire", "new jersey", "new mexico", "new york", "north carolina",
-                        "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
-                        "rhode island", "south carolina", "south dakota", "tennessee", "texas",
-                        "utah", "vermont", "virginia", "washington", "west virginia",
-                        "wisconsin", "wyoming", "united states", "united kingdom"
-                    ]
-                    is_location = any(loc in extracted_lower for loc in location_indicators)
-                    if is_location and not has_role_keyword:
-                        continue
-                    
-                    # Filter: Company name (exact or contained) without role keyword
-                    # Use normalized comparison to handle spacing differences (J 2 Health vs J2 Health)
-                    if not has_role_keyword:
-                        if company:
-                            company_norm = normalize_for_comparison(company)
-                            extracted_norm = normalize_for_comparison(extracted)
-                            # Exact match or company contained in extraction (normalized)
-                            if extracted_norm == company_norm or company_norm in extracted_norm:
-                                continue
-                            # Extraction contained in company (e.g., "Ori" for "Ori Living")
-                            if len(extracted_norm) > 2 and extracted_norm in company_norm:
-                                continue
-                        if full_name and extracted_lower == full_name.lower():
-                            continue
-                    
-                    role_found = True
-                    print(f"   ✅ Found role in results: {extracted[:50]}")
-                    break
-                
-                if not role_found:
-                    print(f"   ⚠️ No role in primary results, trying fallbacks...")
-                    time.sleep(3)
-                    
-                    # Run ALL fallbacks to collect all possible role sources
-                    for j, query in enumerate(fallback_queries):
-                        query_num = j + 2
-                        print(f"   🔍 FALLBACK{query_num-1}: {query[:50]}...")
-                        try:
-                            # Check if this fallback query contains the claimed role (verification mode)
-                            is_verification_query = role_simplified and role_simplified.lower() in query.lower()
-                            
-                            # Fallbacks also require LinkedIn URLs for role searches
-                            results = ddg_search_with_fallback(ddgs, query, max_results, require_linkedin=True)
-                            
-                            # VERIFICATION MODE: If query contains claimed role and we get results 
-                            # that mention the person's name, consider role verified
-                            if is_verification_query and results:
-                                name_parts = full_name.lower().split()
-                                for r in results:
-                                    combined = (r.get("title", "") + " " + r.get("body", "")).lower()
-                                    # Check if result mentions the person's name
-                                    name_found = any(part in combined for part in name_parts if len(part) > 2)
-                                    company_found = company.lower() in combined if company else False
-                                    if name_found and company_found:
-                                        print(f"   ✅ Role VERIFIED via fallback: '{role_simplified}' confirmed")
-                                        # Add the claimed role as extracted for downstream processing
-                                        all_results.append({
-                                            "title": f"{full_name} - {role_simplified} at {company}",
-                                            "link": r.get("href", ""),
-                                            "snippet": f"Role verified: {role_simplified} (from verification search)",
-                                            "query_type": search_type,
-                                            "query": query + f" (verified)",
-                                            "role_verified": True,
-                                            "verified_role": role_simplified
-                                        })
-                                        role_found = True
-                                        break
-                                if role_found:
-                                    break
-                            
-                            for r in results:
-                                all_results.append({
-                                    "title": r.get("title", ""),
-                                    "link": r.get("href", ""),
-                                    "snippet": r.get("body", ""),
-                                    "query_type": search_type,
-                                    "query": query + f" (fallback{query_num-1})"
-                                })
-                            
-                            for r in results:
-                                title = r.get("title", "")
-                                snippet = r.get("body", "")
-                                extracted = extract_role_from_ddg_title(title, snippet, company_name=company, full_name=full_name)
-                                if not extracted:
-                                    continue
-                                    
-                                extracted_lower = extracted.lower()
-                                
-                                # Same filtering as primary
-                                role_keywords = ["ceo", "cto", "cfo", "coo", "founder", "president", "director", 
-                                                 "manager", "head", "lead", "vp", "chief", "officer", "owner", "partner",
-                                                 "professor", "engineer", "analyst", "specialist", "consultant"]
-                                has_role_keyword = any(kw in extracted_lower for kw in role_keywords)
-                                
-                                # Filter: Invalid site names and domains
-                                invalid_extractions = ["linkedin", "wikipedia", "facebook", "twitter", "crunchbase", 
-                                                      "glassdoor", "indeed", "zoominfo", "craft.co", "theorg.com", 
-                                                      "the org", "bloomberg", "forbes", "reuters", "bizapedia",
-                                                      "rocketreach", "signalhire", "lusha", "apollo", "leadiq",
-                                                      "scientific index", "company profile", "stack overflow"]
-                                if extracted_lower in invalid_extractions:
-                                    continue
-                                # Filter website domains (anything ending in .com, .co, .io, etc.)
-                                if re.match(r'^[\w\-]+\.(com|co|io|org|net)$', extracted_lower):
-                                    continue
-                                
-                                # Filter: "assistant to X" patterns - extracting wrong person's role
-                                if re.search(r'\b(assistant|secretary|aide)\s+to\s+', extracted_lower):
-                                    continue
-                                
-                                # Filter: Sentence fragments that are clearly not roles
-                                garbage_patterns = [
-                                    r'^(now|is|was|has|had|will|can|may|should|would)\s+',
-                                    r'^(the|a|an|this|that|these|those|our|their)\s+',
-                                    r'^(and|or|but|if|when|where|what|how|why)\s+',
-                                    r'^(in|on|at|to|for|with|from|by|about)\s+',
-                                    r'^i\s+',  # Starts with "I " (garbage like "I eligible schools")
-                                    r'session\s+details',
-                                    r'^\d+\s+(years?|months?|days?)',
-                                    r'^of\s+',
-                                    r'^\d{4}\s+',  # Starts with year (e.g., "2025 Company Profile")
-                                    r'company\s+profile',
-                                    r'team.*funding.*competitors',
-                                    r'scientific\s+index',
-                                    r'^set\s+to\s+',
-                                    r'eligible\s+schools',
-                                    r'research\s+was\s+presented',  # Academic garbage
-                                ]
-                                if any(re.search(p, extracted_lower) for p in garbage_patterns):
-                                    continue
-                                
-                                # Filter: Very long extractions without role keywords
-                                if len(extracted) > 50 and not has_role_keyword:
-                                    continue
-                                
-                                # Filter: Too short/generic 
-                                too_short_generic = ["lead", "head", "manager", "director", "partner", "officer", 
-                                                    "engineer", "analyst", "the org", "the company", "org", "inc", "llc",
-                                                    "senior", "junior", "staff", "the"]
-                                if extracted_lower in too_short_generic:
-                                    continue
-                                if len(extracted) < 5:
-                                    continue
-                                
-                                # Filter: Truncated/garbage
-                                if "..." in extracted or extracted_lower.endswith("- linkedin") or extracted_lower.endswith("| linkedin"):
-                                    continue
-                                
-                                # Filter: Location patterns
-                                location_indicators = [
-                                    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
-                                    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
-                                    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
-                                    "maine", "maryland", "massachusetts", "michigan", "minnesota",
-                                    "mississippi", "missouri", "montana", "nebraska", "nevada",
-                                    "new hampshire", "new jersey", "new mexico", "new york", "north carolina",
-                                    "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
-                                    "rhode island", "south carolina", "south dakota", "tennessee", "texas",
-                                    "utah", "vermont", "virginia", "washington", "west virginia",
-                                    "wisconsin", "wyoming", "united states", "united kingdom"
-                                ]
-                                is_location = any(loc in extracted_lower for loc in location_indicators)
-                                if is_location and not has_role_keyword:
-                                    continue
-                                
-                                # Filter: Company name (use normalized comparison)
-                                if not has_role_keyword:
-                                    if company:
-                                        company_norm = normalize_for_comparison(company)
-                                        extracted_norm = normalize_for_comparison(extracted)
-                                        if extracted_norm == company_norm or company_norm in extracted_norm:
-                                            continue
-                                        if len(extracted_norm) > 2 and extracted_norm in company_norm:
-                                            continue
-                                    if full_name and extracted_lower == full_name.lower():
-                                        continue
-                                
-                                print(f"   ✅ Fallback{query_num-1} found role: {extracted[:50]}")
-                                break  # Found a role in this fallback, move to next fallback
-                            else:
-                                pass  # No role found in this fallback's results
-                            
-                            time.sleep(2)  # Wait between fallbacks
-                            
-                        except Exception as e:
-                            print(f"   ⚠️ Fallback query failed: {e}")
-                            time.sleep(2)
-                            continue
-                            
-    except Exception as e:
-        print(f"⚠️ DDG {search_type} search failed: {e}")
+    role_found = False
     
-    # Return all results including fallbacks (don't limit to max_results)
-    # max_results only controls how many results per query, but we want all queries' results
-    return all_results
+    for query in queries:
+        results = gse_search_with_fallback(query, max_results, company_name=company if search_type != "role" else None)
+        if results:
+            all_results.extend(results)
+            # For role searches, check if we actually found a role
+            if search_type == "role":
+                for r in results:
+                    title = r.get("title", "")
+                    snippet = r.get("body", "")
+                    extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
+                    if extracted and len(extracted) > 3:  # Found valid role
+                        role_found = True
+                        break
+                if role_found:
+                    return all_results
+            else:
+                return results
+    
+    # ALWAYS try fallback queries for role verification (even if role was extracted)
+    # Fallback verification provides additional evidence to confirm the claimed role
+    # This is crucial when primary extraction finds a different/old role title
+    if search_type == "role" and fallback_queries:
+        if not role_found:
+            print(f"   ⚠️ No role in primary results, trying fallbacks...")
+        else:
+            print(f"   🔍 Running fallback verification to confirm claimed role...")
+        
+        for j, query in enumerate(fallback_queries):
+            query_num = j + 2
+            print(f"   🔍 FALLBACK{query_num-1}: {query[:50]}...")
+            
+            # Check if this fallback query contains the claimed role (verification mode)
+            is_verification_query = role_simplified and role_simplified.lower() in query.lower()
+            
+            results = gse_search_with_fallback(query, max_results)
+            
+            # VERIFICATION MODE: If query contains claimed role and results mention name+company, 
+            # mark role as VERIFIED
+            if is_verification_query and results:
+                name_parts = full_name.lower().split()
+                for r in results:
+                    combined = (r.get("title", "") + " " + r.get("body", "")).lower()
+                    # Check if result mentions the person's name
+                    name_found = any(part in combined for part in name_parts if len(part) > 2)
+                    company_found = company.lower() in combined if company else False
+                    
+                    if name_found and company_found:
+                        print(f"   ✅ Role VERIFIED via fallback: '{role_simplified}' confirmed")
+                        # Add a synthetic result indicating verification
+                        verified_result = {
+                            "title": f"{full_name} - {role_simplified} at {company}",
+                            "href": r.get("href", ""),
+                            "body": f"Role verified: {role_simplified} (from verification search)",
+                            "role_verified": True,
+                            "verified_role": role_simplified
+                        }
+                        return [verified_result] + results
+            
+            # If no verification, just add results for standard extraction
+            if results:
+                all_results.extend(results)
+    
+    # For non-role searches or if fallbacks didn't verify, return all collected results
+    if all_results:
+        return all_results
+    
+    # Try remaining fallback queries for non-role searches
+    if search_type != "role":
+        for query in fallback_queries:
+            results = gse_search_with_fallback(query, max_results)
+            if results:
+                return results
+    
+    return []
 
 
-async def _ddg_search_stage5(
+async def _gse_search_stage5(
     search_type: str,
     full_name: str = "",
     company: str = "",
@@ -5101,10 +5215,10 @@ async def _ddg_search_stage5(
     max_results: int = 5,
     **kwargs
 ) -> List[Dict]:
-    """Async wrapper for Stage 5 DDG search."""
+    """Async wrapper for Stage 5 ScrapingDog search."""
     try:
         return await asyncio.to_thread(
-            _ddg_search_stage5_sync,
+            _gse_search_stage5_sync,
             search_type,
             full_name,
             company,
@@ -5113,7 +5227,7 @@ async def _ddg_search_stage5(
             **kwargs
         )
     except Exception as e:
-        print(f"⚠️ DDG {search_type} search thread failed: {e}")
+        print(f"⚠️ ScrapingDog {search_type} search thread failed: {e}")
         return []
 
 
@@ -5121,7 +5235,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     """
     Stage 5: Unified verification of role, region, and industry.
     
-    Uses DDG searches + fuzzy matching + LLM verification.
+    Uses ScrapingDog searches + fuzzy matching + LLM verification.
     Called AFTER Stage 4 LinkedIn verification passes.
     
     Returns:
@@ -5143,79 +5257,105 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             "failed_fields": ["company"]
         }
     
-    # Wait before DDG searches
-    print(f"   ⏳ Waiting 3s before Stage 5 DDG searches...")
-    await asyncio.sleep(3)
+    # PRIORITY: Check if Stage 4 extracted a role from the confirmed LinkedIn profile
+    stage4_role = lead.get("stage4_extracted_role")
+    role_verified_by_stage4 = False
     
-    # STEP 1: DDG SEARCH FOR ROLE
-    print(f"   🔍 DDG: Searching for {full_name}'s role at {company}...")
-    role_results = await _ddg_search_stage5("role", full_name, company, claimed_role, linkedin_url=linkedin_url)
-    if role_results:
-        print(f"   ✅ Found {len(role_results)} role search results")
+    if stage4_role and claimed_role:
+        print(f"   📝 Stage 4 provided role: '{stage4_role}'")
+        print(f"   📝 Miner claimed role: '{claimed_role}'")
+        
+        # Try fuzzy matching Stage 4's role against miner's claimed role
+        match, confidence, reason = fuzzy_match_role(claimed_role, stage4_role)
+        
+        if match:
+            print(f"   ✅ ROLE VERIFIED by Stage 4 profile: '{stage4_role}' ≈ '{claimed_role}'")
+            print(f"      Confidence: {int(confidence*100)}% | Reason: {reason}")
+            role_verified_by_stage4 = True
+        else:
+            print(f"   ⚠️ Stage 4 role mismatch: '{stage4_role}' ≠ '{claimed_role}' (Confidence: {int(confidence*100)}%)")
+            print(f"   🔍 Falling back to Stage 5 GSE searches for independent verification...")
+    
+    # No delay needed between Stage 4 and Stage 5 (ScrapingDog GSE has no rate limiting)
+    
+    # STEP 1: GSE SEARCH FOR ROLE (only if Stage 4 didn't verify it)
+    role_results = []
+    if not role_verified_by_stage4:
+        print(f"   🔍 GSE: Searching for {full_name}'s role at {company}...")
+        role_results = await _gse_search_stage5("role", full_name, company, claimed_role, linkedin_url=linkedin_url)
+        if role_results:
+            print(f"   ✅ Found {len(role_results)} role search results")
+        else:
+            print(f"   ⚠️ No role results found")
+    
+    # EARLY EXIT CHECK: Do quick role + region anti-gaming check BEFORE region/industry GSE searches
+    # This saves 6+ seconds and 2 GSE API calls when role is definitively wrong OR region is gaming
+    # Skip this if role was already verified by Stage 4
+    if not role_verified_by_stage4:
+        print(f"   🔍 QUICK CHECK: Verifying role and region anti-gaming before continuing...")
+        quick_result = fuzzy_pre_verification_stage5(
+            claimed_role=claimed_role,
+            claimed_region=claimed_region,  # Pass real region for anti-gaming check
+            claimed_industry="",  # Skip industry check
+            role_search_results=role_results,
+            region_search_results=[],  # Empty - just checking anti-gaming on claimed_region string
+            industry_search_results=[],  # Empty - not checking yet
+            full_name=full_name,
+            company=company,
+            role_only=True  # Skip GSE-based region/industry matching, but anti-gaming still runs
+        )
+        
+        # EARLY EXIT: Role definitively failed - skip region/industry GSE searches entirely
+        if quick_result.get("role_definitive_fail"):
+            print(f"   ❌ EARLY EXIT: Role check failed - SKIPPING region and industry GSE searches")
+            return False, {
+                "stage": "Stage 5: Role/Region/Industry",
+                "check_name": "check_stage5_unified",
+                "message": f"Role FAILED: Found '{quick_result.get('role_extracted')}' but miner claimed '{claimed_role}'",
+                "failed_fields": ["role"],
+                "early_exit": "role_failed_before_region_industry",
+                "extracted_role": quick_result.get("role_extracted"),
+                "claimed_role": claimed_role,
+                "gse_searches_skipped": ["region", "industry"]
+            }
     else:
-        print(f"   ⚠️ No role results found")
+        # Role already verified by Stage 4 - just check region anti-gaming
+        print(f"   🔍 QUICK CHECK: Verifying region anti-gaming (role already verified by Stage 4)...")
+        quick_result = fuzzy_pre_verification_stage5(
+            claimed_role="",  # Skip role check
+            claimed_region=claimed_region,
+            claimed_industry="",
+            role_search_results=[],
+            region_search_results=[],
+            industry_search_results=[],
+            full_name=full_name,
+            company=company,
+            role_only=True  # Just anti-gaming checks
+        )
     
-    # EARLY EXIT CHECK: Do quick role + region anti-gaming check BEFORE region/industry DDG searches
-    # This saves 6+ seconds and 2 DDG API calls when role is definitively wrong OR region is gaming
-    print(f"   🔍 QUICK CHECK: Verifying role and region anti-gaming before continuing...")
-    quick_result = fuzzy_pre_verification_stage5(
-        claimed_role=claimed_role,
-        claimed_region=claimed_region,  # Pass real region for anti-gaming check
-        claimed_industry="",  # Skip industry check
-        ddg_role_results=role_results,
-        ddg_region_results=[],  # Empty - just checking anti-gaming on claimed_region string
-        ddg_industry_results=[],  # Empty - not checking yet
-        full_name=full_name,
-        company=company,
-        role_only=True  # Skip DDG-based region/industry matching, but anti-gaming still runs
-    )
-    
-    # EARLY EXIT: Role definitively failed - skip region/industry DDG searches entirely
-    if quick_result.get("role_definitive_fail"):
-        print(f"   ❌ EARLY EXIT: Role check failed - SKIPPING region and industry DDG searches")
-        return False, {
-            "stage": "Stage 5: Role/Region/Industry",
-            "check_name": "check_stage5_unified",
-            "message": f"Role FAILED: Found '{quick_result.get('role_extracted')}' but miner claimed '{claimed_role}'",
-            "failed_fields": ["role"],
-            "early_exit": "role_failed_before_region_industry",
-            "extracted_role": quick_result.get("role_extracted"),
-            "claimed_role": claimed_role,
-            "ddg_searches_skipped": ["region", "industry"]
-        }
-    
-    # EARLY EXIT: Region anti-gaming (multiple states) - skip region/industry DDG searches
+    # EARLY EXIT: Region anti-gaming (multiple states) - skip region/industry GSE searches
     if quick_result.get("region_hard_fail"):
-        print(f"   ❌ EARLY EXIT: Region anti-gaming - SKIPPING region and industry DDG searches")
+        print(f"   ❌ EARLY EXIT: Region anti-gaming - SKIPPING region and industry GSE searches")
         return False, {
             "stage": "Stage 5: Role/Region/Industry",
             "check_name": "check_stage5_unified",
             "message": f"Region FAILED (anti-gaming): {quick_result.get('region_reason')}",
             "failed_fields": ["region"],
-            "early_exit": "region_anti_gaming_before_ddg",
-            "ddg_searches_skipped": ["region", "industry"]
+            "early_exit": "region_anti_gaming_before_gse",
+            "gse_searches_skipped": ["region", "industry"]
         }
     
-    print(f"   ⏳ Waiting 3s before region search...")
-    await asyncio.sleep(3)
+    # STEP 2 & 3: PARALLEL GSE SEARCHES FOR REGION + INDUSTRY (no delays needed with ScrapingDog)
+    print(f"   🔍 GSE: Parallel searches for region and industry...")
+    region_task = _gse_search_stage5("region", company=company, region_hint=claimed_region)
+    industry_task = _gse_search_stage5("industry", company=company, region_hint=claimed_region)
+    region_results, industry_results = await asyncio.gather(region_task, industry_task)
     
-    # STEP 2: DDG SEARCH FOR REGION (only if role didn't definitively fail)
-    print(f"   🔍 DDG: Searching for {company} headquarters location...")
-    region_results = await _ddg_search_stage5("region", company=company, region_hint=claimed_region)
     if region_results:
         print(f"   ✅ Found {len(region_results)} region search results")
     else:
         print(f"   ⚠️ No region results found")
     
-    # Note: Region anti-gaming check already done in quick_result above (before region DDG)
-    # No need to check again here
-    
-    print(f"   ⏳ Waiting 3s before industry search...")
-    await asyncio.sleep(3)
-    
-    # STEP 3: DDG SEARCH FOR INDUSTRY
-    print(f"   🔍 DDG: Searching for {company} industry...")
-    industry_results = await _ddg_search_stage5("industry", company=company, region_hint=claimed_region)
     if industry_results:
         print(f"   ✅ Found {len(industry_results)} industry search results")
     else:
@@ -5225,17 +5365,26 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     print(f"   🔍 FUZZY: Full pre-verification before LLM...")
     
     fuzzy_result = fuzzy_pre_verification_stage5(
-        claimed_role=claimed_role,
+        claimed_role=claimed_role if not role_verified_by_stage4 else "",  # Skip role fuzzy check if Stage 4 verified
         claimed_region=claimed_region,
         claimed_industry=claimed_industry,
-        ddg_role_results=role_results,
-        ddg_region_results=region_results,
-        ddg_industry_results=industry_results,
+        role_search_results=role_results if not role_verified_by_stage4 else [],  # Empty if Stage 4 verified
+        region_search_results=region_results,
+        industry_search_results=industry_results,
         full_name=full_name,
         company=company
     )
     
-    # Note: role_definitive_fail already checked above (before region/industry DDG)
+    # If Stage 4 verified role, mark it as verified in fuzzy_result
+    if role_verified_by_stage4:
+        fuzzy_result["role_verified"] = True
+        fuzzy_result["role_extracted"] = stage4_role
+        fuzzy_result["role_reason"] = "Verified by Stage 4 profile title"
+        # Remove "role" from needs_llm if Stage 4 already verified it
+        if "role" in fuzzy_result.get("needs_llm", []):
+            fuzzy_result["needs_llm"].remove("role")
+    
+    # Note: role_definitive_fail already checked above (before region/industry GSE)
     # so we only check region anti-gaming here
     
     # EARLY EXIT: Region anti-gaming AND role already verified
@@ -5264,6 +5413,19 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     # STEP 5: LLM VERIFICATION for remaining fields
     needs_llm = fuzzy_result["needs_llm"]
     print(f"   🤖 LLM: Need to verify: {needs_llm}")
+    
+    # Show what extracted values are being passed to LLM
+    if "role" in needs_llm:
+        extracted_role = fuzzy_result.get("role_extracted", "NOT_EXTRACTED")
+        print(f"      📝 ROLE → Passing to LLM: Claimed='{claimed_role}' | Extracted='{extracted_role}'")
+    
+    if "region" in needs_llm:
+        extracted_region = fuzzy_result.get("region_extracted", "NOT_EXTRACTED")
+        print(f"      📝 REGION → Passing to LLM: Claimed='{claimed_region}' | Extracted='{extracted_region}'")
+    
+    if "industry" in needs_llm:
+        # Industry is always sent to LLM (too subjective for fuzzy matching)
+        print(f"      📝 INDUSTRY → Passing to LLM: Claimed='{claimed_industry}' | Search results will be analyzed")
     
     # Build context
     role_context = ""
@@ -5294,7 +5456,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     
     # AUTO-FAIL if role needs LLM but no context
     if "role" in needs_llm and not role_context.strip():
-        print(f"   ❌ AUTO-FAIL: No DDG data for role verification")
+        print(f"   ❌ AUTO-FAIL: No ScrapingDog data for role verification")
         return False, {
             "stage": "Stage 5: Role/Region/Industry",
             "check_name": "check_stage5_unified",
@@ -5303,7 +5465,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         }
     
     if not all_search_context.strip():
-        print(f"   ❌ AUTO-FAIL: No DDG search results at all")
+        print(f"   ❌ AUTO-FAIL: No ScrapingDog search results at all")
         return False, {
             "stage": "Stage 5: Role/Region/Industry",
             "check_name": "check_stage5_unified",
@@ -5544,6 +5706,49 @@ RESPOND WITH JSON ONLY:
         }
 
 
+# ========================================================================
+# ICP (Ideal Customer Profile) Multiplier Determination
+# ========================================================================
+
+def determine_icp_multiplier(lead: dict) -> float:
+    """
+    Determine if a lead matches our ICP (Ideal Customer Profile) criteria.
+    
+    Uses the ICP_DEFINITIONS table (defined at top of file) to check if a lead matches
+    any target customer profile based on:
+    - Sub-Industry (e.g., "Gas Stations", "AI Startups")
+    - Role Type (e.g., "Operations", "Technology", "Leadership")
+    - Role Details (specific titles like "CEO", "CTO", "VP of Operations")
+    
+    Returns:
+        1.5 if lead matches ICP criteria
+        1.0 if lead is standard (non-ICP)
+    """
+    # Extract lead fields (case-insensitive)
+    sub_industry = lead.get("sub_industry", "").strip().lower()
+    role = lead.get("role", "").strip().lower()
+    
+    # Helper function to check if any keyword matches in text
+    def matches_any(text: str, keywords: list) -> bool:
+        """Check if any keyword from the list is found in the text (case-insensitive)"""
+        text_lower = text.lower()
+        return any(keyword.lower() in text_lower for keyword in keywords)
+    
+    # Iterate through all ICP definitions
+    for icp in ICP_DEFINITIONS:
+        # Step 1: Check if sub_industry matches
+        if not matches_any(sub_industry, icp["sub_industries"]):
+            continue  # No match, try next ICP
+        
+        # Step 2: Check if role contains role_details (specific titles)
+        # Role details are the most specific check (e.g., "CEO", "CTO", "VP of Operations")
+        if matches_any(role, icp["role_details"]):
+            return 1.5  # ICP match found!
+    
+    # No ICP match found
+    return 1.0
+
+
 # Main validation pipeline
 
 async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
@@ -5687,17 +5892,19 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # - Deduplication (handled in validate_lead_list)
     # ========================================================================
     print(f"🔍 Stage 0: Hardcoded checks for {email} @ {company}")
-    checks_stage0 = [
+    
+    # OPTIMIZATION: Run instant checks first, then overlap HEAD request with Stage 1 DNS checks
+    # Instant checks (run sequentially - they're <0.01s each anyway)
+    checks_stage0_instant = [
         check_required_fields,      # Required fields validation (HARD)
         check_email_regex,          # RFC-5322 regex validation (HARD)
         check_name_email_match,     # Name in email check (HARD) - NEW
         check_general_purpose_email,# General purpose email filter (HARD) - NEW
         check_free_email_domain,    # Reject free email domains (HARD) - NEW
         check_disposable,           # Filter throwaway email providers (HARD)
-        check_head_request,         # Test website accessibility (HARD)
     ]
 
-    for check_func in checks_stage0:
+    for check_func in checks_stage0_instant:
         passed, rejection_reason = await check_func(lead)
         if not passed:
             msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
@@ -5706,11 +5913,15 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
             automated_checks_data["rejection_reason"] = rejection_reason
             return False, automated_checks_data
 
-    # Collect Stage 0 data after successful checks
+    # Collect Stage 0 data after successful instant checks
     automated_checks_data["stage_0_hardcoded"]["name_in_email"] = True  # Passed name-email match
     automated_checks_data["stage_0_hardcoded"]["is_general_purpose_email"] = False  # Not general purpose
 
-    print("   ✅ Stage 0 passed")
+    print("   ✅ Stage 0 instant checks passed")
+    
+    # OPTIMIZATION: Start HEAD request as background task (will check result after Stage 1)
+    # This overlaps the 5-10s HEAD request with 1-3s Stage 1 DNS checks
+    head_request_task = asyncio.create_task(check_head_request(lead))
 
     # ========================================================================
     # Stage 1: DNS Layer (MIXED)
@@ -5718,14 +5929,43 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # - SPF/DMARC (SOFT - always passes, appends data)
     # ========================================================================
     print(f"🔍 Stage 1: DNS layer checks for {email} @ {company}")
-    checks_stage1 = [
-        check_domain_age,       # WHOIS lookup, must be ≥7 days old (HARD)
-        check_mx_record,        # Verify email domain has mail server (HARD)
-        check_spf_dmarc,        # DNS TXT records for SPF/DMARC (SOFT)
-    ]
-
-    for check_func in checks_stage1:
-        passed, rejection_reason = await check_func(lead)
+    
+    # OPTIMIZATION: Run all Stage 1 DNS checks in parallel to save time
+    # Old: Sequential execution = 2-5s total
+    # New: Parallel execution = 1-3s (time of slowest check)
+    results = await asyncio.gather(
+        check_domain_age(lead),
+        check_mx_record(lead),
+        check_spf_dmarc(lead),
+        return_exceptions=True  # Don't fail entire batch if one check fails
+    )
+    
+    # Check results
+    check_names = ["check_domain_age", "check_mx_record", "check_spf_dmarc"]
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            # Handle exception
+            print(f"   ❌ Stage 1 failed: {str(result)}")
+            automated_checks_data["passed"] = False
+            automated_checks_data["rejection_reason"] = {
+                "stage": "Stage 1: DNS Layer",
+                "check_name": check_names[i],
+                "message": f"Check failed: {str(result)}",
+                "failed_fields": ["domain"]
+            }
+            # Collect partial Stage 1 data even on failure
+            automated_checks_data["stage_1_dns"]["has_mx"] = lead.get("has_mx", False)
+            automated_checks_data["stage_1_dns"]["has_spf"] = lead.get("has_spf", False)
+            automated_checks_data["stage_1_dns"]["has_dmarc"] = lead.get("has_dmarc", False)
+            automated_checks_data["stage_1_dns"]["dmarc_policy"] = "strict" if lead.get("dmarc_policy_strict") else "none"
+            # Collect partial Stage 2 data (WHOIS)
+            automated_checks_data["stage_2_domain"]["domain_age_days"] = lead.get("domain_age_days")
+            automated_checks_data["stage_2_domain"]["domain_registrar"] = lead.get("domain_registrar")
+            automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
+            automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
+            return False, automated_checks_data
+        
+        passed, rejection_reason = result
         if not passed:
             msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
             print(f"   ❌ Stage 1 failed: {msg}")
@@ -5750,6 +5990,21 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     automated_checks_data["stage_1_dns"]["dmarc_policy"] = "strict" if lead.get("dmarc_policy_strict") else "none"
 
     print("   ✅ Stage 1 passed")
+
+    # ========================================================================
+    # Stage 0 (continued): HEAD Request Check
+    # Check result of background HEAD request task that was started before Stage 1
+    # ========================================================================
+    print(f"🔍 Stage 0: Website HEAD request check for {email} @ {company}")
+    passed, rejection_reason = await head_request_task
+    if not passed:
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 0 (HEAD request) failed: {msg}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
+    
+    print("   ✅ Stage 0 (HEAD request) passed")
 
     # ========================================================================
     # Stage 2: Lightweight Domain Reputation Checks (HARD)
@@ -5838,7 +6093,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
 
     # ========================================================================
     # Stage 5: Role/Region/Industry Verification (HARD)
-    # - Uses DDG search + fuzzy matching + LLM to verify role, region, industry
+    # - Uses ScrapingDog search + fuzzy matching + LLM to verify role, region, industry
     # - Early exit: if role fails → skip region/industry
     # - Early exit: if region fails → skip industry
     # - Anti-gaming: rejects if miner puts multiple states in region
@@ -5873,14 +6128,26 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # - Always passes, appends scores to lead
     # - Total: 0-48 points
     # ========================================================================
-    print(f"📊 Rep Score: Running soft checks for {email} @ {company}")
+    print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
     
-    wayback_score, wayback_data = await check_wayback_machine(lead)
-    # uspto_score, uspto_data = await check_uspto_trademarks(lead)  # DISABLED
-    sec_score, sec_data = await check_sec_edgar(lead)
-    whois_dnsbl_score, whois_dnsbl_data = await check_whois_dnsbl_reputation(lead)
-    gdelt_score, gdelt_data = await check_gdelt_mentions(lead)
-    companies_house_score, companies_house_data = await check_companies_house(lead)
+    # OPTIMIZATION: Run all rep score checks in parallel to save time
+    # Old: Sequential execution = 6-12s total
+    # New: Parallel execution = 3-4s total (time of slowest API)
+    results = await asyncio.gather(
+        check_wayback_machine(lead),
+        check_sec_edgar(lead),
+        check_whois_dnsbl_reputation(lead),
+        check_gdelt_mentions(lead),
+        check_companies_house(lead),
+        return_exceptions=True  # Don't fail entire batch if one check fails
+    )
+    
+    # Unpack results (handle exceptions gracefully)
+    wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
+    sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
+    whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
+    gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
+    companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
     
     total_rep_score = (
         wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
@@ -5912,6 +6179,18 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     
     print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
+    # ========================================================================
+    # ICP Multiplier Determination
+    # ========================================================================
+    is_icp_multiplier = determine_icp_multiplier(lead)
+    lead["is_icp_multiplier"] = is_icp_multiplier
+    automated_checks_data["is_icp_multiplier"] = is_icp_multiplier
+    
+    if is_icp_multiplier > 1.0:
+        print(f"   🎯 ICP MATCH: Multiplier {is_icp_multiplier}x applied!")
+    else:
+        print(f"   📋 Standard lead: Multiplier {is_icp_multiplier}x")
+    
     print(f"🎉 All stages passed for {email} @ {company}")
 
     # All checks passed - return structured success data
@@ -5942,7 +6221,8 @@ async def save_email_cache(cache):
     except Exception:
         pass
 
-EMAIL_CACHE = asyncio.run(load_email_cache())
+# EMAIL_CACHE = asyncio.run(load_email_cache())  # Disabled to avoid event loop issues
+EMAIL_CACHE = {}
 
 async def is_disposable_email(email: str) -> Tuple[bool, str]:
     domain = email.split("@")[1].lower() if "@" in email else ""

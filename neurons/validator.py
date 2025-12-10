@@ -1813,6 +1813,8 @@ class Validator(BaseValidatorNeuron):
                             print(f"   Remaining {len(leads) - idx} leads cannot be submitted (epoch closed)")
                             print(f"{'='*80}\n")
                             break  # Exit the lead processing loop
+                    
+                    # Continue to next lead after error
                     continue
             
             # Submit hashed validation results to gateway

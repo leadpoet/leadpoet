@@ -116,4 +116,4 @@ websockets>=15.0.1
 
 # gRPC communication (for miner/validator nodes)
 grpcio>=1.60.0
-ddgs>=6.0.0
+# ddgs>=6.0.0  # REMOVED - using ScrapingDog API instead

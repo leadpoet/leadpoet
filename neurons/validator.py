@@ -1841,6 +1841,10 @@ class Validator(BaseValidatorNeuron):
                     if not hasattr(self, '_pending_reveals'):
                         self._pending_reveals = {}
                     self._pending_reveals[current_epoch] = local_validation_data
+                    
+                    # 🚨 CRITICAL: Save reveals to disk immediately (crash protection)
+                    self._save_pending_reveals()
+                    print(f"   💾 Saved {len(local_validation_data)} pending reveals to disk for epoch {current_epoch}")
                 else:
                     print(f"❌ Failed to submit validations for epoch {current_epoch}")
                     print(f"   Epoch may have changed - skipping to avoid re-processing")

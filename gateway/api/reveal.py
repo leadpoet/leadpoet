@@ -12,7 +12,7 @@ This implements the REVEAL phase of commit-reveal:
 
 from fastapi import APIRouter, HTTPException, Body
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, List
 from datetime import datetime
 from uuid import uuid4
 import hashlib
@@ -39,7 +39,7 @@ class RevealPayload(BaseModel):
     evidence_id: str = Field(..., description="Evidence ID from commit phase")
     epoch_id: int = Field(..., description="Epoch number")
     decision: Literal["approve", "deny"] = Field(..., description="Validation decision: 'approve' or 'deny'")
-    rep_score: float = Field(..., ge=0.0, le=1.0, description="Reputation score (0.0 to 1.0)")
+    rep_score: float = Field(..., ge=0.0, le=48.0, description="Reputation score (0-48, raw score not normalized)")
     rejection_reason: str = Field(..., description="Rejection reason: 'pass' if approved, or specific failure reason if denied")
     salt: str = Field(..., description="Hex-encoded salt used in commitment")
 
@@ -482,286 +482,6 @@ async def reveal_validation_result(
         "timestamp": reveal_timestamp,
         "message": "Validation revealed successfully. Proof available in next hourly Arweave checkpoint."
     }
-
-
-@router.post("/batch")
-async def reveal_validation_batch(
-    epoch_id: int = Body(..., description="Epoch ID"),
-    validator_hotkey: str = Body(..., description="Validator's SS58 address"),
-    signature: str = Body(..., description="Ed25519 signature over message"),
-    nonce: str = Body(..., description="Nonce used in signature"),
-    reveals: list = Body(..., description="List of reveal objects")
-):
-    """
-    Batch reveal endpoint for validators to reveal multiple validations at once.
-    
-    This is more efficient than calling /reveal once per lead.
-    
-    Args:
-        epoch_id: Epoch ID
-        validator_hotkey: Validator's SS58 address
-        signature: Ed25519 signature over "reveal:{hotkey}:{epoch_id}:{nonce}"
-        nonce: Nonce (timestamp)
-        reveals: List of {lead_id, decision, rep_score, rejection_reason, salt}
-    
-    Returns:
-        {
-            "status": "revealed",
-            "epoch_id": int,
-            "revealed_count": int,
-            "failed_count": int,
-            "errors": List[str]
-        }
-    """
-    # Verify signature
-    message = f"reveal:{validator_hotkey}:{epoch_id}:{nonce}"
-    if not verify_wallet_signature(message, signature, validator_hotkey):
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid signature"
-        )
-    
-    # Verify epoch is closed AND reveal window is valid
-    # CRITICAL: Validators can ONLY reveal in epoch N+1 (not N, not N+2)
-    from gateway.utils.epoch import get_current_epoch_id_async
-    
-    current_epoch = await get_current_epoch_id_async()
-    validation_epoch = epoch_id
-    
-    # Check 1: Cannot reveal during same epoch (must wait for epoch to close)
-    if current_epoch <= validation_epoch:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Epoch {validation_epoch} is not closed yet. Wait until epoch {validation_epoch + 1} to reveal."
-        )
-    
-    # Check 2: Must reveal in epoch N+1 (reveal window expires after that)
-    if current_epoch > validation_epoch + 1:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Reveal window expired. Validations from epoch {validation_epoch} must be revealed in epoch {validation_epoch + 1}. Current epoch is {current_epoch}."
-        )
-    
-    # Check 3: Must reveal BEFORE block 350 of epoch N+1 (consensus deadline)
-    from gateway.utils.epoch import get_block_within_epoch_async
-    block_within_epoch = await get_block_within_epoch_async()
-    
-    if block_within_epoch >= 350:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Reveal deadline passed. Reveals for epoch {validation_epoch} must be submitted before block 350 of epoch {validation_epoch + 1}. Current block: {block_within_epoch}/360."
-        )
-    
-    print(f"\n{'='*80}")
-    print(f"📥 BATCH REVEAL: {len(reveals)} reveals from {validator_hotkey[:20]}...")
-    print(f"   Block {block_within_epoch}/360 of epoch {current_epoch} (deadline: block 350)")
-    print(f"{'='*80}")
-    
-    import time
-    start_time = time.time()
-    
-    revealed_count = 0
-    failed_count = 0
-    errors = []
-    
-    # ============================================================================
-    # OPTIMIZATION: Bulk database operations (1 SELECT + 1 UPDATE for all leads)
-    # Instead of N queries per lead, do 2 queries total
-    # ============================================================================
-    
-    # Step 1: Build lead_id list for bulk SELECT
-    lead_ids = [reveal["lead_id"] for reveal in reveals]
-    
-    print(f"   📊 Fetching evidence for {len(lead_ids)} leads in bulk...")
-    
-    # Step 2: Bulk SELECT all evidence for this validator + epoch
-    import asyncio
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: supabase.table("validation_evidence_private")
-                    .select("*")
-                    .eq("validator_hotkey", validator_hotkey)
-                    .eq("epoch_id", epoch_id)
-                    .in_("lead_id", lead_ids)
-                    .execute()
-            ),
-            timeout=90.0  # 90 second timeout for bulk query (Supabase can be very slow on testnet)
-        )
-        evidence_records = result.data
-        print(f"   ✅ Fetched {len(evidence_records)} evidence records from database")
-    except asyncio.TimeoutError:
-        error_msg = f"Database timeout during bulk SELECT (90s)"
-        print(f"   ❌ {error_msg}")
-        errors.append(error_msg)
-        return {
-            "status": "error",
-            "epoch_id": epoch_id,
-            "revealed_count": 0,
-            "failed_count": len(reveals),
-            "errors": [error_msg]
-        }
-    except Exception as e:
-        error_msg = f"Database error during bulk SELECT: {str(e)}"
-        print(f"   ❌ {error_msg}")
-        errors.append(error_msg)
-        return {
-            "status": "error",
-            "epoch_id": epoch_id,
-            "revealed_count": 0,
-            "failed_count": len(reveals),
-            "errors": [error_msg]
-        }
-    
-    # Step 3: Build evidence lookup map (lead_id -> evidence)
-    evidence_map = {evidence["lead_id"]: evidence for evidence in evidence_records}
-    
-    # Step 4: Verify hashes and build bulk update list
-    valid_updates = []
-    
-    for idx, reveal in enumerate(reveals, 1):
-        try:
-            lead_id = reveal["lead_id"]
-            decision = reveal["decision"]
-            rep_score = reveal["rep_score"]
-            rejection_reason = reveal["rejection_reason"]
-            salt = reveal["salt"]
-            
-            print(f"   [{idx}/{len(reveals)}] Verifying lead {lead_id[:8]}... - Decision: {decision}")
-            
-            # Check if evidence exists in bulk query results
-            if lead_id not in evidence_map:
-                error_msg = f"Evidence not found for lead {lead_id[:8]}..."
-                print(f"      ❌ {error_msg}")
-                errors.append(error_msg)
-                failed_count += 1
-                continue
-            
-            evidence = evidence_map[lead_id]
-            
-            # Verify hashes
-            computed_decision_hash = hashlib.sha256((decision + salt).encode()).hexdigest()
-            computed_rep_score_hash = hashlib.sha256((str(rep_score) + salt).encode()).hexdigest()
-            computed_rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason) + salt).encode()).hexdigest()
-            
-            if computed_decision_hash != evidence["decision_hash"]:
-                error_msg = f"Decision hash mismatch for lead {lead_id[:8]}..."
-                print(f"      ❌ {error_msg}")
-                errors.append(error_msg)
-                failed_count += 1
-                continue
-            
-            if computed_rep_score_hash != evidence["rep_score_hash"]:
-                error_msg = f"Rep score hash mismatch for lead {lead_id[:8]}..."
-                print(f"      ❌ {error_msg}")
-                errors.append(error_msg)
-                failed_count += 1
-                continue
-            
-            if computed_rejection_reason_hash != evidence["rejection_reason_hash"]:
-                error_msg = f"Rejection reason hash mismatch for lead {lead_id[:8]}..."
-                print(f"      ❌ {error_msg}")
-                errors.append(error_msg)
-                failed_count += 1
-                continue
-            
-            # Hash verification passed - add to bulk update list
-            valid_updates.append({
-                "evidence_id": evidence["evidence_id"],
-                "lead_id": lead_id,
-                "decision": decision,
-                "rep_score": rep_score,
-                "rejection_reason": json.dumps(rejection_reason),
-                "salt": salt
-            })
-            
-            print(f"      ✅ Hash verified: {decision} (rep_score={rep_score})")
-            
-        except Exception as e:
-            error_msg = f"Error verifying lead {reveal.get('lead_id', 'unknown')[:8]}...: {str(e)}"
-            print(f"      ❌ {error_msg}")
-            errors.append(error_msg)
-            failed_count += 1
-    
-    # Step 5: Bulk UPDATE all valid reveals
-    if valid_updates:
-        print(f"   📊 Performing bulk UPDATE for {len(valid_updates)} validated reveals...")
-        
-        revealed_ts = datetime.utcnow().isoformat()
-        
-        # Update each evidence record
-        # Note: Supabase Python client doesn't support true bulk updates with different values per row,
-        # so we need to update individually but in a tight loop (still faster than original N queries)
-        for idx, update in enumerate(valid_updates, 1):
-            try:
-                # Extract values explicitly (avoid lambda closure issues)
-                evidence_id = update["evidence_id"]
-                decision = update["decision"]
-                rep_score = update["rep_score"]
-                rejection_reason_json = update["rejection_reason"]
-                salt = update["salt"]
-                lead_id = update["lead_id"]
-                
-                # Define update function
-                def do_update():
-                    return supabase.table("validation_evidence_private")\
-                        .update({
-                            "decision": decision,
-                            "rep_score": rep_score,
-                            "rejection_reason": rejection_reason_json,
-                            "salt": salt,
-                            "revealed_ts": revealed_ts
-                        })\
-                        .eq("evidence_id", evidence_id)\
-                        .execute()
-                
-                # Execute update with timeout
-                await asyncio.wait_for(
-                    asyncio.to_thread(do_update),
-                    timeout=15.0  # 15 second timeout per update (Supabase can be slow)
-                )
-                
-                # ════════════════════════════════════════════════════════════════════
-                # REAL-TIME CONSENSUS REMOVED (Option B)
-                # ════════════════════════════════════════════════════════════════════
-                # Consensus is now calculated ONCE at block 350 of reveal epoch (batch mode)
-                # This reduces database writes from 50+ per epoch to 1 per epoch
-                # and ensures all reveals are captured before consensus runs
-                
-                print(f"      [{idx}/{len(valid_updates)}] ✅ Reveal recorded for lead {lead_id[:8]}...")
-                print(f"         📊 Consensus will be computed at block 350 of epoch {epoch_id + 1}")
-                revealed_count += 1
-                
-            except asyncio.TimeoutError:
-                error_msg = f"Database timeout updating lead {update['lead_id'][:8]}..."
-                print(f"      ❌ {error_msg}")
-                errors.append(error_msg)
-                failed_count += 1
-            except Exception as e:
-                error_msg = f"Database error updating lead {update['lead_id'][:8]}...: {str(e)}"
-                print(f"      ❌ {error_msg}")
-                errors.append(error_msg)
-                failed_count += 1
-        
-        print(f"   ✅ Bulk UPDATE complete: {revealed_count} successful, {failed_count} failed")
-    else:
-        print(f"   ⚠️  No valid reveals to update (all failed hash verification)")
-    
-    elapsed_time = time.time() - start_time
-    print(f"{'='*80}")
-    print(f"✅ Batch reveal complete: {revealed_count} revealed, {failed_count} failed")
-    print(f"   ⏱️  Total time: {elapsed_time:.2f}s")
-    print(f"{'='*80}\n")
-    
-    return {
-        "status": "revealed",
-        "epoch_id": epoch_id,
-        "revealed_count": revealed_count,
-        "failed_count": failed_count,
-        "errors": errors if errors else None
-    }
-
-
 @router.get("/stats")
 async def get_reveal_stats(epoch_id: int):
     """
@@ -867,4 +587,268 @@ async def get_evidence_status(evidence_id: str):
             status_code=500,
             detail=f"Failed to get evidence status: {str(e)}"
         )
+
+
+# ============================================================================
+# BATCH REVEAL ENDPOINT (Fast Path)
+# ============================================================================
+
+class RevealItem(BaseModel):
+    """Single reveal item within a batch"""
+    lead_id: str  # Validator sends lead_id, not evidence_id
+    decision: Literal["approve", "deny"]
+    rep_score: float = Field(..., ge=0.0, le=48.0)  # Raw score 0-48, not normalized
+    rejection_reason: dict  # Can be dict (e.g. {"message": "pass"}) or detailed failure dict
+    salt: str
+
+
+class BatchRevealRequest(BaseModel):
+    """Batch reveal request (matches validator format)"""
+    validator_hotkey: str
+    epoch_id: int
+    signature: str
+    nonce: str
+    reveals: List[RevealItem]
+
+
+@router.post("/batch")
+async def batch_reveal_validation_results(request: BatchRevealRequest):
+    """
+    Batch reveal endpoint - processes multiple reveals in one request.
+    
+    This is MUCH faster than individual reveals:
+    - 1 HTTP request instead of N
+    - 1 signature verification instead of N
+    - Bulk database UPDATEs (parallel)
+    - Batch consensus calculation
+    
+    Validator format:
+    {
+        "validator_hotkey": "5...",
+        "epoch_id": 123,
+        "signature": "0x...",
+        "nonce": "timestamp",
+        "reveals": [...]
+    }
+    
+    Returns:
+        {
+            "status": "success",
+            "revealed_count": int,
+            "consensus_updated": int
+        }
+    """
+    import asyncio
+    import time
+    start_time = time.time()
+    
+    # ========================================
+    # Step 1: Verify signature
+    # ========================================
+    message = f"reveal:{request.validator_hotkey}:{request.epoch_id}:{request.nonce}"
+    if not verify_wallet_signature(message, request.signature, request.validator_hotkey):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    
+    # ========================================
+    # Step 2: Verify epoch is closed and reveal window is valid
+    # ========================================
+    from gateway.utils.epoch import get_current_epoch_id_async, get_block_within_epoch_async
+    
+    current_epoch = await get_current_epoch_id_async()
+    validation_epoch = request.epoch_id
+    
+    # Check 1: Cannot reveal during same epoch
+    if current_epoch <= validation_epoch:
+        error_msg = f"Epoch {validation_epoch} not closed. Wait until epoch {validation_epoch + 1}. Current: {current_epoch}"
+        print(f"❌ REVEAL REJECTED: {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
+    
+    # Check 2: Must reveal in epoch N+1
+    if current_epoch > validation_epoch + 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reveal window expired. Must reveal in epoch {validation_epoch + 1}."
+        )
+    
+    # Check 3: Must reveal before block 350
+    block_within_epoch = await get_block_within_epoch_async()
+    if block_within_epoch > 350:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reveal deadline passed (block {block_within_epoch} > 350)."
+        )
+    
+    print(f"\n{'='*80}")
+    print(f"📦 BATCH REVEAL REQUEST")
+    print(f"{'='*80}")
+    print(f"   Validator: {request.validator_hotkey[:20]}...")
+    print(f"   Epoch: {request.epoch_id}")
+    print(f"   Current Epoch: {current_epoch}")
+    print(f"   Block: {block_within_epoch}/350")
+    print(f"   Reveals: {len(request.reveals)}")
+    print(f"{'='*80}")
+    
+    # ========================================
+    # Step 3: Fetch ALL evidence records in ONE query
+    # ========================================
+    lead_ids = [r.lead_id for r in request.reveals]
+    
+    try:
+        result = await asyncio.to_thread(
+            lambda: supabase.table("validation_evidence_private")
+                .select("*")
+                .in_("lead_id", lead_ids)
+                .eq("validator_hotkey", request.validator_hotkey)
+                .eq("epoch_id", request.epoch_id)
+                .execute()
+        )
+        
+        if not result.data or len(result.data) != len(lead_ids):
+            error_msg = f"Not all evidence found. Expected {len(lead_ids)}, got {len(result.data) if result.data else 0}"
+            print(f"❌ REVEAL REJECTED: {error_msg}")
+            print(f"   Validator: {request.validator_hotkey[:20]}...")
+            print(f"   Epoch: {request.epoch_id}")
+            print(f"   Lead IDs requested: {lead_ids[:3]}..." if lead_ids else "   Lead IDs: []")
+            raise HTTPException(status_code=404, detail=error_msg)
+        
+        # Create evidence lookup dict (key by lead_id)
+        evidence_map = {e["lead_id"]: e for e in result.data}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch evidence: {str(e)}")
+    
+    # ========================================
+    # Step 4: Verify ALL hashes
+    # ========================================
+    verified_reveals = []
+    
+    for reveal in request.reveals:
+        evidence = evidence_map.get(reveal.lead_id)
+        if not evidence:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Evidence for lead {reveal.lead_id} not found or not owned by validator"
+            )
+        
+        # Check if already revealed
+        if evidence["decision"] is not None:
+            print(f"⚠️  Lead {reveal.lead_id[:8]}... already revealed, skipping")
+            continue
+        
+        # Verify decision hash
+        computed_decision_hash = hashlib.sha256((reveal.decision + reveal.salt).encode()).hexdigest()
+        if computed_decision_hash != evidence["decision_hash"]:
+            print(f"❌ DECISION HASH MISMATCH for lead {reveal.lead_id[:8]}...")
+            print(f"   Expected: {evidence['decision_hash']}")
+            print(f"   Computed: {computed_decision_hash}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Decision hash mismatch for lead {reveal.lead_id}"
+            )
+        
+        # Verify rep_score hash
+        computed_rep_score_hash = hashlib.sha256((str(reveal.rep_score) + reveal.salt).encode()).hexdigest()
+        if computed_rep_score_hash != evidence["rep_score_hash"]:
+            print(f"❌ REP_SCORE HASH MISMATCH for lead {reveal.lead_id[:8]}...")
+            print(f"   Expected: {evidence['rep_score_hash']}")
+            print(f"   Computed: {computed_rep_score_hash}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rep score hash mismatch for lead {reveal.lead_id}"
+            )
+        
+        # Verify rejection_reason hash
+        # CRITICAL: Must use json.dumps() to match validator's hash creation
+        computed_rejection_reason_hash = hashlib.sha256((json.dumps(reveal.rejection_reason) + reveal.salt).encode()).hexdigest()
+        if computed_rejection_reason_hash != evidence["rejection_reason_hash"]:
+            print(f"❌ REJECTION_REASON HASH MISMATCH for lead {reveal.lead_id[:8]}...")
+            print(f"   Expected: {evidence['rejection_reason_hash']}")
+            print(f"   Computed: {computed_rejection_reason_hash}")
+            print(f"   Rejection reason: {reveal.rejection_reason}")
+            print(f"   Serialized: {json.dumps(reveal.rejection_reason)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rejection reason hash mismatch for lead {reveal.lead_id}"
+            )
+        
+        # Validate rejection_reason logic
+        # For approved leads, rejection_reason should be {"message": "pass"}
+        if reveal.decision == "approve":
+            if not isinstance(reveal.rejection_reason, dict) or reveal.rejection_reason.get("message") != "pass":
+                print(f"❌ REVEAL REJECTED: Invalid rejection_reason for approved lead")
+                print(f"   Expected: {{'message': 'pass'}}")
+                print(f"   Got: {reveal.rejection_reason}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"If approved, rejection_reason must be {{'message': 'pass'}} (got: {reveal.rejection_reason})"
+                )
+        
+        verified_reveals.append({
+            "evidence_id": evidence["evidence_id"],  # Get evidence_id from database record
+            "lead_id": reveal.lead_id,
+            "decision": reveal.decision,
+            "rep_score": reveal.rep_score,
+            "rejection_reason": json.dumps(reveal.rejection_reason),  # Serialize dict to JSON string for TEXT column
+            "salt": reveal.salt
+        })
+    
+    if not verified_reveals:
+        return {
+            "status": "success",
+            "revealed_count": 0,
+            "consensus_updated": 0,
+            "message": "All reveals already processed"
+        }
+    
+    print(f"✅ Verified {len(verified_reveals)} reveals")
+    
+    # ========================================
+    # Step 5: Bulk UPDATE all reveals in ONE database operation
+    # ========================================
+    try:
+        revealed_ts = datetime.utcnow().isoformat()
+        
+        # Perform individual updates (Supabase doesn't support bulk update with different values)
+        # But we do them all in asyncio.gather for parallelism
+        async def update_one(reveal_data):
+            return await asyncio.to_thread(
+                lambda: supabase.table("validation_evidence_private")
+                    .update({
+                        "decision": reveal_data["decision"],
+                        "rep_score": reveal_data["rep_score"],
+                        "rejection_reason": reveal_data["rejection_reason"],
+                        "salt": reveal_data["salt"],
+                        "revealed_ts": revealed_ts
+                    })
+                    .eq("evidence_id", reveal_data["evidence_id"])
+                    .execute()
+            )
+        
+        # Update all in parallel
+        await asyncio.gather(*[update_one(r) for r in verified_reveals])
+        
+        print(f"✅ Updated {len(verified_reveals)} evidence records in database")
+        
+    except Exception as e:
+        print(f"❌ Error during bulk update: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update evidence: {str(e)}")
+    
+    # ========================================
+    # Step 6: Consensus deferred to block 350 (batch mode)
+    # ========================================
+    # IMPORTANT: Consensus is calculated ONCE at block 348-350 by epoch_monitor
+    # This ensures ALL reveals are captured before consensus runs
+    # and reduces database writes from N per epoch to 1 per epoch
+    
+    elapsed = time.time() - start_time
+    print(f"✅ Batch reveal complete: {len(verified_reveals)} reveals in {elapsed:.2f}s")
+    print(f"   📊 Consensus will be computed at block 350 of epoch {request.epoch_id + 1}")
+    
+    return {
+        "status": "success",
+        "revealed_count": len(verified_reveals),
+        "processing_time": f"{elapsed:.2f}s"
+    }
 

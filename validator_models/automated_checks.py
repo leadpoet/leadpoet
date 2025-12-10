@@ -2171,7 +2171,10 @@ CHECK THREE CRITERIA SEPARATELY:
 
 1. NAME MATCH: Does the person name in search results match "{full_name}"?
    - Look at the profile title (e.g., "John Smith - CEO" vs "Jane Doe - VP")
-   - Names must substantially match
+   - Names must substantially match, but allow common variants:
+     * Spelling variants (e.g., "Jacobson" = "Jacobsen", "Smith" = "Smyth", "Steven" = "Stephen")
+     * Shortened names (e.g., "Ben" = "Benjamin", "Mike" = "Michael", "Chris" = "Christopher")
+     * Middle names/initials present or absent (e.g., "John Smith" = "John A. Smith")
    - Different people = name_match FALSE (e.g., "John Black" ≠ "Pranav Ramesh")
 
 2. COMPANY MATCH: Does the profile TITLE show "{company}" as current employer?
@@ -4098,6 +4101,25 @@ def extract_role_from_search_title(title: str, snippet: str = "", company_name: 
                     if _is_valid_role_extraction(role):
                         return role
         
+        # PATTERN: "Company [C-Suite Abbreviation]" (e.g., "Eucalyptus CSO", "Microsoft CFO")
+        # Common in LinkedIn directory listings where format is "Name. Company ROLE."
+        if company_name:
+            # Check for C-suite abbreviations right after company name
+            c_suite_abbrevs = ['ceo', 'cfo', 'cto', 'coo', 'cmo', 'cio', 'cpo', 'cso', 'ciso', 'clo', 'cco', 'cgo', 'ctpo', 'csco']
+            company_escaped = re.escape(company_name)
+            for abbrev in c_suite_abbrevs:
+                # Match "Company ABBREV" where ABBREV is at word boundary
+                pattern = rf'{company_escaped}\s+({abbrev})\b'
+                match = re.search(pattern, snippet_clean, re.IGNORECASE)
+                if match:
+                    role_abbrev = match.group(1).strip()
+                    # Expand abbreviation to full title for validation
+                    if role_abbrev.lower() in C_SUITE_EXPANSIONS:
+                        return C_SUITE_EXPANSIONS[role_abbrev.lower()].title()
+                    elif role_abbrev.upper() in ['CSO', 'CISO', 'CLO', 'CCO', 'CGO', 'CTPO', 'CSCO']:
+                        # Return as-is for less common abbreviations
+                        return role_abbrev.upper()
+        
         # Look for role keywords in snippet - capture FULL role up to "at Company"
         found_roles = []
         for kw in role_keywords:
@@ -4478,13 +4500,19 @@ LOCATION_PATTERNS_CASESENSITIVE = [
 
 # Major tech hub cities - for direct city name matching when patterns fail
 MAJOR_CITIES = {
+    # US Major Cities
     "san francisco", "new york", "los angeles", "chicago", "seattle", "austin", "boston",
     "denver", "atlanta", "miami", "dallas", "houston", "phoenix", "philadelphia",
     "san jose", "san diego", "portland", "baltimore", "washington", "detroit",
+    "kansas city", "minneapolis", "tampa", "nashville", "cleveland", "pittsburgh",
+    "cincinnati", "indianapolis", "columbus", "milwaukee", "salt lake city",
+    "charlotte", "raleigh", "sacramento", "las vegas", "orlando", "st. louis",
+    "richmond", "jacksonville", "memphis", "omaha", "new orleans", "buffalo",
     # International
     "london", "paris", "berlin", "amsterdam", "tokyo", "singapore", "sydney",
     "toronto", "vancouver", "dublin", "tel aviv", "bangalore", "mumbai", "beijing",
-    "shanghai", "hong kong", "seoul", "lyon", "munich", "zurich", "stockholm"
+    "shanghai", "hong kong", "seoul", "lyon", "munich", "zurich", "stockholm",
+    "melbourne", "auckland", "copenhagen", "oslo", "helsinki", "prague", "vienna"
 }
 
 # Map nationality adjectives to countries (for "American company" → "United States")
@@ -4612,11 +4640,22 @@ def _is_valid_location(location: str) -> bool:
     # Either a known city, state, or comma-separated format
     has_comma = ',' in location
     has_known_state = any(state in location_lower for state in [
+        # US States (comprehensive list)
         'california', 'new york', 'texas', 'florida', 'washington', 'massachusetts',
         'illinois', 'georgia', 'colorado', 'oregon', 'pennsylvania', 'ohio',
         'virginia', 'north carolina', 'michigan', 'arizona', 'maryland', 'tennessee',
+        'alabama', 'alaska', 'arkansas', 'connecticut', 'delaware', 'hawaii', 'idaho',
+        'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana', 'maine', 'minnesota',
+        'mississippi', 'missouri', 'montana', 'nebraska', 'nevada', 'new hampshire',
+        'new jersey', 'new mexico', 'north dakota', 'oklahoma', 'rhode island',
+        'south carolina', 'south dakota', 'utah', 'vermont', 'west virginia',
+        'wisconsin', 'wyoming',
+        # International Countries/Regions
         'canada', 'united kingdom', 'france', 'germany', 'australia', 'singapore',
-        'south africa', 'ireland', 'leinster'  # Added for international
+        'south africa', 'ireland', 'leinster', 'denmark', 'sweden', 'norway',
+        'finland', 'netherlands', 'belgium', 'switzerland', 'austria', 'spain',
+        'italy', 'portugal', 'japan', 'china', 'india', 'brazil', 'mexico',
+        'argentina', 'chile', 'colombia'
     ])
     has_known_city = any(city in location_lower for city in MAJOR_CITIES)
     
@@ -4777,10 +4816,18 @@ def fuzzy_pre_verification_stage5(
                 if first_name and last_name and not is_job_posting:
                     first_pattern = rf'\b{re.escape(first_name)}\b'
                     last_pattern = rf'\b{re.escape(last_name)}\b'
-                    has_name = re.search(first_pattern, title_lower) and re.search(last_pattern, title_lower)
-                    # Allow if: has person's name, OR is a job posting, OR is a company role listing with role keywords
+                    has_name_in_title = re.search(first_pattern, title_lower) and re.search(last_pattern, title_lower)
+                    
+                    # ALSO check if name is in snippet (for directory-style listings)
+                    # e.g., Title: "Steven Rimpici - VP Sales", Snippet: "Ty Horner. Senior VP, Marketing. Email..."
+                    snippet_lower = snippet.lower() if snippet else ""
+                    has_name_in_snippet = snippet_lower and re.search(first_pattern, snippet_lower) and re.search(last_pattern, snippet_lower)
+                    
+                    has_name = has_name_in_title or has_name_in_snippet
+                    
+                    # Allow if: has person's name (in title OR snippet), OR is a job posting, OR is a company role listing
                     if not has_name and not is_company_role:
-                        print(f"                 SKIPPED (name '{full_name}' not found in title)")
+                        print(f"                 SKIPPED (name '{full_name}' not found in title or snippet)")
                         continue
                 
                 extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)

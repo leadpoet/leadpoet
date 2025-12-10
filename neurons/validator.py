@@ -2628,6 +2628,16 @@ class Validator(BaseValidatorNeuron):
         """
         Check if previous epochs need reveal submission (after epoch closes).
         
+        REVEAL WINDOW LOGIC:
+        - Epoch N: Submit hashes → Save reveals to pending_reveals.json
+        - Epoch N+1: Submit hashes for N+1 → Reveal epoch N → Remove N from pending_reveals.json
+        - Epoch N+2+: If epoch N wasn't revealed, DELETE as expired (too late)
+        
+        CRITICAL RULES:
+        1. Reveals can ONLY be submitted in epoch N+1 (not N+2, N+3, etc.)
+        2. If current_epoch > epoch_id + 1, the reveal window is EXPIRED → DELETE
+        3. pending_reveals.json should only contain current epoch and previous epoch at most
+        
         ASYNC VERSION: Uses async subtensor for block queries.
         """
         if not hasattr(self, '_pending_reveals'):
@@ -2696,10 +2706,12 @@ class Validator(BaseValidatorNeuron):
                     print(f"   📤 Submitting {len(reveals)} reveals to gateway...")
                     success = gateway_submit_reveal(self.wallet, epoch_id, reveals)
                     if success:
-                        print(f"   ✅ Revealed {len(reveals)} validations for epoch {epoch_id}")
+                        print(f"   ✅ Successfully revealed {len(reveals)} validations for epoch {epoch_id}")
+                        print(f"   🗑️  Removing epoch {epoch_id} from pending_reveals.json")
                         bt.logging.info(f"✅ Revealed validation for epoch {epoch_id}")
                         del self._pending_reveals[epoch_id]
-                        self.save_state()  # Save state after successful reveal
+                        self._save_pending_reveals()  # Save immediately after successful reveal
+                        print(f"   💾 Updated pending_reveals.json (remaining epochs: {list(self._pending_reveals.keys())})")
                     else:
                         print(f"   ❌ Failed to reveal validation for epoch {epoch_id}")
                         bt.logging.error(f"Failed to reveal validation for epoch {epoch_id}")

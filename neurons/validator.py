@@ -1732,9 +1732,12 @@ class Validator(BaseValidatorNeuron):
                     })
                     
                     # Accumulate weights in real-time for approved leads
+                    # Apply ICP multiplier to rep_score for emissions
+                    is_icp_multiplier = lead.get("is_icp_multiplier", 1.0)
                     await self.accumulate_miner_weights(
                         miner_hotkey=lead.get("miner_hotkey"),
                         rep_score=rep_score,
+                        is_icp_multiplier=is_icp_multiplier,
                         decision=decision
                     )
                     
@@ -1754,11 +1757,11 @@ class Validator(BaseValidatorNeuron):
                             print(f"      Failed Fields: {', '.join(failed_fields)}")
                     print("")
                     
-                    # Add 10-second delay between leads (except for the last one)
-                    # Prevents Spamhaus DNSBL rate limiting (reduced from 12s to compensate for epoch check latency)
+``                    # Add 2-second delay between leads (except for the last one)
+                    # Prevents rate limiting while keeping validation fast
                     if idx < len(leads):
-                        print(f"⏳ Waiting 10 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(10)
+                        print(f"⏳ Waiting 2 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(2)
                         # Check if we should submit weights mid-processing (block 345+)
                         await self.submit_weights_at_epoch_end()
                         
@@ -1792,11 +1795,11 @@ class Validator(BaseValidatorNeuron):
                         print(f"[DEBUG] Lead structure: {lead}")
                         print("")
                     
-                    # Add 10-second delay between leads (except for the last one)
-                    # Prevents Spamhaus DNSBL rate limiting (reduced from 12s to compensate for epoch check latency)
+                    # Add 2-second delay between leads (except for the last one)
+                    # Prevents rate limiting while keeping validation fast
                     if idx < len(leads):
-                        print(f"⏳ Waiting 10 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(10)
+                        print(f"⏳ Waiting 2 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(2)
                         # Check if we should submit weights mid-processing (block 345+)
                         await self.submit_weights_at_epoch_end()
                         
@@ -1871,7 +1874,7 @@ class Validator(BaseValidatorNeuron):
             import traceback
             bt.logging.error(traceback.format_exc())
     
-    async def accumulate_miner_weights(self, miner_hotkey: str, rep_score: int, decision: str):
+    async def accumulate_miner_weights(self, miner_hotkey: str, rep_score: int, is_icp_multiplier: float, decision: str):
         """
         Accumulate weights for approved leads in real-time as validation happens.
         
@@ -1885,12 +1888,19 @@ class Validator(BaseValidatorNeuron):
         the latest weights are already saved in history.
         
         Tracks both:
-        - miner_scores: Sum of rep_scores per miner (for weight distribution)
+        - miner_scores: Sum of (rep_score * is_icp_multiplier) per miner (for weight distribution)
         - approved_lead_count: Number of approved leads (for linear emissions scaling)
+        
+        ICP Multiplier:
+        - Base rep_score is always stored in DB (never inflated)
+        - Multiplier is applied ONLY during emissions calculation
+        - effective_rep_score = base_rep_score * is_icp_multiplier
+        - ICP leads get 1.5x weight, standard leads get 1.0x weight
         
         Args:
             miner_hotkey: Miner's hotkey who submitted the lead
-            rep_score: Reputation score (0-50) from automated checks
+            rep_score: Base reputation score (0-48) from automated checks (NOT inflated)
+            is_icp_multiplier: ICP multiplier (1.0 for standard, 1.5 for ICP)
             decision: "approve" or "deny"
         """
         try:
@@ -1931,12 +1941,16 @@ class Validator(BaseValidatorNeuron):
             if decision != "approve":
                 return
             
-            # Add score to miner's total (only for approved leads)
+            # Apply ICP multiplier to rep_score for emissions weight
+            # effective_rep_score = base_rep_score * is_icp_multiplier
+            effective_rep_score = rep_score * is_icp_multiplier
+            
+            # Add effective score to miner's total (only for approved leads)
             epoch_data = weights_data[str(current_epoch)]
             if miner_hotkey not in epoch_data["miner_scores"]:
                 epoch_data["miner_scores"][miner_hotkey] = 0
             
-            epoch_data["miner_scores"][miner_hotkey] += rep_score
+            epoch_data["miner_scores"][miner_hotkey] += effective_rep_score
             
             # Increment approved lead count for linear emissions
             if "approved_lead_count" not in epoch_data:
@@ -2041,9 +2055,9 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
             EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
-            BASE_BURN_SHARE = 0.65         # 65% base burn to UID 0
-            MAX_CURRENT_EPOCH_SHARE = 0.15 # 15% max to miners (current epoch)
-            MAX_ROLLING_EPOCH_SHARE = 0.20 # 20% max to miners (rolling 30 epochs)
+            BASE_BURN_SHARE = 0.40         # 50% base burn to UID 0
+            MAX_CURRENT_EPOCH_SHARE = 0.0  # 0% max to miners (current epoch)
+            MAX_ROLLING_EPOCH_SHARE = 0.60 # 60% max to miners (rolling 30 epochs)
             # Dynamic MAX_LEADS_PER_EPOCH from gateway (fetched during process_gateway_validation_workflow)
             # If not in memory (e.g., after restart), try to recover from history file
             MAX_LEADS_PER_EPOCH = getattr(self, '_max_leads_per_epoch', None)

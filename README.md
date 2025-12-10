@@ -34,8 +34,7 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 # Required for Dynamic Lead Generation
 export FIRECRAWL_API_KEY="your_firecrawl_key"        # Web scraping
 export OPENROUTER_KEY="your_openrouter_key"          # AI classification
-export GSE_API_KEY="your_google_api_key"             # Google Search
-export GSE_CX="your_search_engine_id"                # Custom Search ID
+export SCRAPINGDOG_API_KEY="your_scrapingdog_key"    # Google Search (via ScrapingDog)
 
 ```
 
@@ -50,14 +49,10 @@ export GSE_CX="your_search_engine_id"                # Custom Search ID
 export TRUELIST_API_KEY="your_truelist_key"
 
 # LinkedIn Validation (REQUIRED)
-# Uses DuckDuckGo search by default (FREE, no API key needed)
-# Requires: pip install ddgs
+# Uses ScrapingDog API for Google Search Engine results
+# Get your API key at: https://www.scrapingdog.com/
+export SCRAPINGDOG_API_KEY="your_scrapingdog_key"   # ScrapingDog API (for GSE searches)
 export OPENROUTER_KEY="your_openrouter_key"          # openrouter.ai (for LLM verification)
-
-# Google Custom Search (fallback if DDG fails)
-# configure since we want GSE as backup:
-export GSE_API_KEY="your_google_api_key"           # Google Custom Search API
-export GSE_CX="your_search_engine_id"              # Custom Search Engine ID
 
 # Reputation Score APIs (OPTIONAL - soft checks use mostly free public APIs)
 # Note: Most reputation checks use free public APIs (Wayback, SEC, GDELT)
@@ -202,10 +197,10 @@ These strict requirements at initial go-live demonstrate our dedication to quali
 
 ### Reward System
 
-Miners earn rewards based on the **quality and validity** of leads they submit, with 10% of emissions weighted by current epoch performance and 15% weighted by a rolling 30-epoch history:
+Miners earn rewards based on the **quality and validity** of leads they submit, with rewards weighted entirely by a rolling 30-epoch history to incentivize consistent long-term quality:
 
 **How It Works:**
-1. Each epoch, validators receive ~50 leads to validate
+1. Each epoch, validators receive leads to validate
 2. Validators run automated checks on all leads (email verification, domain checks, LinkedIn validation, reputation scoring)
 3. Each validator calculates weights proportionally: miners who submitted **VALID** (approved) leads receive rewards
 4. Rewards are weighted by each lead's reputation score (0-48 points: domain history, regulatory filings, and press coverage)

@@ -4936,8 +4936,16 @@ def fuzzy_pre_verification_stage5(
             result["role_reason"] = "Could not extract role from ScrapingDog results"
             print(f"   ⚠️ FUZZY ROLE: Could not extract role from search results, sending to LLM")
     else:
+        # This triggers when role_search_results is empty (intentionally not searched)
+        # OR when claimed_role is empty
+        if not role_search_results and claimed_role:
+            # Role search was intentionally skipped (verified by Stage 4)
+            print(f"   ℹ️  FUZZY ROLE: Skipped (role search not performed)")
+        elif not claimed_role:
+            print(f"   ℹ️  FUZZY ROLE: Skipped (no role claimed by miner)")
+        else:
+            print(f"   ⚠️ FUZZY ROLE: No ScrapingDog results")
         result["needs_llm"].append("role")
-        print(f"   ⚠️ FUZZY ROLE: No ScrapingDog results or no claimed role")
     
     # REGION ANTI-GAMING CHECK (runs even in role_only mode for early exit)
     if claimed_region:
@@ -4981,24 +4989,37 @@ def fuzzy_pre_verification_stage5(
         company_lower = company.lower() if company else ""
         extracted_region = None
         
-        for r in region_search_results[:5]:
+        # DEBUG: Show what we're trying to extract from
+        print(f"   🔍 DEBUG REGION: Attempting to extract location from {len(region_search_results)} search results")
+        print(f"      Claimed region: '{claimed_region}'")
+        
+        for idx, r in enumerate(region_search_results[:5], 1):
             link = r.get("href", r.get("link", ""))
             
             # Filter out LinkedIn posts for region extraction too
             if "/posts/" in link or "/feed/" in link or "/pulse/" in link:
+                print(f"      Result {idx}: SKIPPED (LinkedIn post/feed)")
                 continue
             
             title = r.get("title", "")
             snippet = r.get("snippet", r.get("body", ""))
             combined = title + " " + snippet
             
+            # DEBUG: Show what text we're extracting from
+            print(f"      Result {idx}: Title: '{title[:80]}{'...' if len(title) > 80 else ''}'")
+            print(f"                Snippet: '{snippet[:80]}{'...' if len(snippet) > 80 else ''}'")
+            
             if company_lower and company_lower not in combined.lower():
+                print(f"                SKIPPED (company '{company}' not in text)")
                 continue
             
             loc = extract_location_from_text(combined)
             if loc:
+                print(f"                ✅ EXTRACTED: '{loc}'")
                 extracted_region = loc
                 break
+            else:
+                print(f"                ❌ NO LOCATION extracted (filters rejected or no location found)")
         
         if extracted_region:
             geo_match, geo_reason = locations_match_geopy(claimed_region, extracted_region)
@@ -5024,7 +5045,12 @@ def fuzzy_pre_verification_stage5(
     else:
         if not result.get("region_hard_fail"):
             result["needs_llm"].append("region")
-            print(f"   ⚠️ FUZZY REGION: No ScrapingDog results or no claimed region")
+            if not region_search_results and claimed_region:
+                print(f"   ℹ️  FUZZY REGION: Skipped (no search results available)")
+            elif not claimed_region:
+                print(f"   ℹ️  FUZZY REGION: Skipped (no region claimed by miner)")
+            else:
+                print(f"   ⚠️ FUZZY REGION: No ScrapingDog results")
     
     print(f"   🤖 INDUSTRY: Always verified by LLM (too subjective for fuzzy match)")
     

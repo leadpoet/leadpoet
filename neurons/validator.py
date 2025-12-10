@@ -1757,7 +1757,7 @@ class Validator(BaseValidatorNeuron):
                             print(f"      Failed Fields: {', '.join(failed_fields)}")
                     print("")
                     
-``                    # Add 2-second delay between leads (except for the last one)
+                    # Add 2-second delay between leads (except for the last one)
                     # Prevents rate limiting while keeping validation fast
                     if idx < len(leads):
                         print(f"⏳ Waiting 2 seconds before processing next lead... ({idx}/{len(leads)} complete)")

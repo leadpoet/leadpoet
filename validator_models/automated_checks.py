@@ -4738,16 +4738,26 @@ def fuzzy_pre_verification_stage5(
             best_confidence = 0.0
             best_reason = "No role found in ScrapingDog results"
             
+            # DEBUG: Show what we're trying to extract from
+            print(f"   🔍 DEBUG ROLE: Attempting to extract role from {len(role_search_results)} search results")
+            print(f"      Claimed role: '{claimed_role}'")
+            print(f"      Person: '{full_name}' at '{company}'")
+            
             # Look at up to 15 results to include fallback results (5 primary + 5 fallback1 + 5 fallback2)
-            for r in role_search_results[:15]:
+            for idx, r in enumerate(role_search_results[:15], 1):
                 title = r.get("title", "")
                 snippet = r.get("snippet", r.get("body", ""))
                 link = r.get("href", r.get("link", ""))
+                
+                # DEBUG: Show what text we're processing
+                print(f"      Result {idx}: Title: '{title[:80]}{'...' if len(title) > 80 else ''}'")
+                print(f"                 Snippet: '{snippet[:80]}{'...' if len(snippet) > 80 else ''}'")
                 
                 # CRITICAL: Filter out LinkedIn POSTS - they contain garbage text
                 # Posts have URLs like: linkedin.com/posts/username/activity-123456
                 # We only want PROFILES: linkedin.com/in/username
                 if "/posts/" in link or "/feed/" in link or "/pulse/" in link:
+                    print(f"                 SKIPPED (LinkedIn post/feed)")
                     continue  # Skip posts, only process profiles and company pages
                 
                 title_lower = title.lower()
@@ -4763,9 +4773,15 @@ def fuzzy_pre_verification_stage5(
                     has_name = re.search(first_pattern, title_lower) and re.search(last_pattern, title_lower)
                     # Allow if: has person's name, OR is a job posting, OR is a company role listing with role keywords
                     if not has_name and not is_company_role:
+                        print(f"                 SKIPPED (name '{full_name}' not found in title)")
                         continue
                 
                 extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
+                
+                if extracted:
+                    print(f"                 📝 EXTRACTED: '{extracted}'")
+                else:
+                    print(f"                 ❌ NO ROLE extracted (filters rejected or no role found)")
                 
                 if extracted:
                     extracted_lower = extracted.lower()
@@ -4783,9 +4799,11 @@ def fuzzy_pre_verification_stage5(
                                            "apollo.io", "leadiq", "lusha", "seamless.ai", "hunter.io",
                                            "clearbit", "datanyze", "discoverorg", "insideview", "owler"]
                     if extracted_lower in invalid_extractions:
+                        print(f"                 REJECTED (invalid site name: '{extracted}')")
                         continue
                     # Filter website domains (anything ending in .com, .co, .io, etc.)
                     if re.match(r'^[\w\-]+\.(com|co|io|org|net)$', extracted_lower):
+                        print(f"                 REJECTED (looks like domain: '{extracted}')")
                         continue
                     
                     # Filter 1b: Too short/generic extractions
@@ -4796,12 +4814,15 @@ def fuzzy_pre_verification_stage5(
                     too_short_generic = ["lead", "head", "manager", "director", "partner", "officer", 
                                         "engineer", "analyst", "the org", "the company", "org", "inc", "llc"]
                     if extracted_lower in too_short_generic:
+                        print(f"                 REJECTED (too generic/short: '{extracted}')")
                         continue
                     if len(extracted) < 5 and not is_common_abbrev:
+                        print(f"                 REJECTED (too short: {len(extracted)} chars)")
                         continue
                     
                     # Filter 1c: Truncated/garbage extractions
                     if "..." in extracted or extracted_lower.endswith("- linkedin") or extracted_lower.endswith("| linkedin"):
+                        print(f"                 REJECTED (truncated/garbage)")
                         continue
                     
                     # Filter 2: Garbage patterns that contain role keywords but aren't roles
@@ -4820,6 +4841,7 @@ def fuzzy_pre_verification_stage5(
                     # Only filter if these patterns appear AND no strong role keyword exists
                     has_garbage = any(pattern in extracted_lower for pattern in garbage_patterns)
                     if has_garbage and not has_strong_role_keyword:
+                        print(f"                 REJECTED (garbage pattern found, no role keyword)")
                         continue
                     
                     # Filter 3: Location patterns (US states, countries, cities)
@@ -4840,6 +4862,7 @@ def fuzzy_pre_verification_stage5(
                     is_location = any(loc in extracted_lower for loc in location_indicators)
                     # Only skip if it ONLY looks like a location (no role keywords)
                     if is_location and not has_strong_role_keyword:
+                        print(f"                 REJECTED (looks like location, no role keyword)")
                         continue
                     
                     # Filter 4: Too long to be a job title (likely garbage)
@@ -4847,8 +4870,10 @@ def fuzzy_pre_verification_stage5(
                     # (Yahoo sometimes concatenates multiple results which still contain valid roles)
                     # Note: Yahoo can produce VERY long concatenated titles (300+ chars) but still contain valid roles
                     if len(extracted) > 500:
+                        print(f"                 REJECTED (too long: {len(extracted)} chars)")
                         continue
                     if len(extracted) > 100 and not has_strong_role_keyword:
+                        print(f"                 REJECTED (long but no role keyword: {len(extracted)} chars)")
                         continue
                     
                     # Filter 5: Company name check (stricter)
@@ -4907,10 +4932,20 @@ def fuzzy_pre_verification_stage5(
                         should_update = True
                     
                     if should_update:
+                        print(f"                 ✅ ACCEPTED: '{extracted}' (confidence: {confidence:.0%})")
                         best_extracted_role = extracted
                         best_match = is_match
                         best_confidence = confidence
                         best_reason = reason
+                    else:
+                        if extracted:
+                            print(f"                 REJECTED (not better than current best)")
+            
+            # DEBUG: Summary of role extraction
+            if not best_extracted_role:
+                print(f"      ❌ FINAL: No valid role extracted from {len(role_search_results)} results")
+            else:
+                print(f"      ✅ FINAL: Best role = '{best_extracted_role}' (confidence: {best_confidence:.0%})")
             
             if best_extracted_role:
                 result["role_extracted"] = best_extracted_role

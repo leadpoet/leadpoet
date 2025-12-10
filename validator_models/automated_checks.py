@@ -4682,7 +4682,8 @@ def fuzzy_pre_verification_stage5(
     industry_search_results: List[Dict],
     full_name: str = "",
     company: str = "",
-    role_only: bool = False
+    role_only: bool = False,
+    role_verified_stage4: bool = False
 ) -> Dict:
     """
     Pre-verify ROLE and REGION using fuzzy matching BEFORE sending to LLM.
@@ -4691,6 +4692,7 @@ def fuzzy_pre_verification_stage5(
     Args:
         role_only: If True, only check role and suppress region/industry messages.
                    Used for early exit check before region/industry ScrapingDog searches.
+        role_verified_stage4: If True, role was already verified in Stage 4 (don't print confusing warnings).
     """
     result = {
         "role_verified": False,
@@ -4973,14 +4975,20 @@ def fuzzy_pre_verification_stage5(
     else:
         # This triggers when role_search_results is empty (intentionally not searched)
         # OR when claimed_role is empty
-        if not role_search_results and claimed_role:
-            # Role search was intentionally skipped (verified by Stage 4)
+        if role_verified_stage4:
+            # Role was already verified in Stage 4 - don't print any warning
+            print(f"   ℹ️  FUZZY ROLE: Skipped (already verified by Stage 4)")
+        elif not role_search_results and claimed_role:
+            # Role search was intentionally skipped for some other reason
             print(f"   ℹ️  FUZZY ROLE: Skipped (role search not performed)")
         elif not claimed_role:
             print(f"   ℹ️  FUZZY ROLE: Skipped (no role claimed by miner)")
         else:
             print(f"   ⚠️ FUZZY ROLE: No ScrapingDog results")
-        result["needs_llm"].append("role")
+        
+        # Don't add to needs_llm if already verified by Stage 4
+        if not role_verified_stage4:
+            result["needs_llm"].append("role")
     
     # REGION ANTI-GAMING CHECK (runs even in role_only mode for early exit)
     if claimed_region:
@@ -5391,7 +5399,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             industry_search_results=[],
             full_name=full_name,
             company=company,
-            role_only=True  # Just anti-gaming checks
+            role_only=True,  # Just anti-gaming checks
+            role_verified_stage4=True  # Don't print confusing warnings about role
         )
     
     # EARLY EXIT: Region anti-gaming (multiple states) - skip region/industry GSE searches

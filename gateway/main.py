@@ -313,6 +313,27 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers
 )
 
+# ============================================================
+# Request Priority Middleware (Validator > Miner)
+# ============================================================
+# Prioritize validator requests (/epoch/, /validate) over miner requests (/presign, /submit)
+# This prevents validators from timing out during high miner submission traffic.
+# 
+# Configuration:
+# - max_concurrent_miners: Max concurrent miner requests (default: 20)
+#   * Lower = more aggressive throttling (better validator protection)
+#   * Higher = less throttling (more miner throughput)
+#   * Recommended: 15-25 based on your Supabase pool size (15) and max connections (200)
+#
+# Safe to deploy: Only adds async waiting, no logic changes.
+
+from gateway.middleware.priority import PriorityMiddleware
+
+app.add_middleware(
+    PriorityMiddleware,
+    max_concurrent_miners=20  # Throttle miners to max 20 concurrent requests
+)
+
 # Production middleware: Only log errors and critical paths
 # Comment out request logging to reduce overhead in production
 # @app.middleware("http")

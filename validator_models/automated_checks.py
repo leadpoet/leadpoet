@@ -3788,6 +3788,7 @@ ROLE_EQUIVALENCIES = {
     "board": ["board member", "board director", "director", "board of directors"],
     "chair": ["chairman", "chairwoman", "chair", "chairperson", "executive chair", "executive chairman"],
     "attorney": ["attorney", "counsel", "lawyer", "legal counsel", "associate attorney", "staff attorney"],
+    "recruiting": ["recruiting", "recruitment", "recruitments", "recruiter", "talent acquisition", "staffing"],
 }
 
 
@@ -4066,12 +4067,16 @@ def extract_role_from_search_title(title: str, snippet: str = "", company_name: 
             r'\b(?:currently\s+(?:a|the|an)\s+)(chief\s+of\s+staff[^|,.]{0,20})\b',
             r'\b(?:currently\s+(?:a|the|an)\s+)(chief\s+\w+\s+officer)\b',
             r'\b(?:currently\s+(?:a|the|an)\s+)((?:senior\s+)?vice\s+president[^|,.]{0,30})',
-            # "John is the CEO at Company" or "John serves as Director of..."
-            r'(?:is\s+(?:the\s+)?|serves?\s+as\s+(?:the\s+)?|works?\s+as\s+(?:the\s+)?)([^.]+?)\s+(?:at|of|for)\s+',
+            # SPECIAL: "serves as the Director of [Department/Area] at Company"
+            # This must come BEFORE the generic "serves as X at" pattern to capture full "Director of X" roles
+            r'(?:serves?\s+as\s+(?:the\s+)?)((?:director|head|vp|vice\s+president|manager|leader|chief)\s+of\s+[A-Za-z\s&,\-]+?)\s+at\s+',
+            # "John is the CEO at Company" or "John serves as Director at..." (without "of")
+            # NOTE: Only match " at " here, not "of" or "for" which can appear WITHIN roles (e.g., "Director of Sales")
+            r'(?:is\s+(?:the\s+)?|serves?\s+as\s+(?:the\s+)?|works?\s+as\s+(?:the\s+)?)([^.]+?)\s+at\s+',
             # "from Founder & CEO, Name" or "by CEO Name" (common in press releases)
             r'(?:from|by)\s+([A-Za-z\s&]+?(?:' + '|'.join(role_keywords[:15]) + r')[A-Za-z\s&]*?),?\s+[A-Z][a-z]+',
-            # "John, CEO at Company" - common in non-LinkedIn sources
-            r',\s*([A-Za-z\s&]+?(?:' + '|'.join(role_keywords[:20]) + r')[A-Za-z\s&]*?)\s+(?:at|of|for)\s+',
+            # "John, CEO at Company" - common in non-LinkedIn sources  
+            r',\s*([A-Za-z\s&]+?(?:' + '|'.join(role_keywords[:20]) + r')[A-Za-z\s&]*?)\s+at\s+',
             # "currently serving as Director"
             r'(?:works? as|serving as|position)[:\s]+([^|.\n]+)',
             # Academic: "Associate Professor of X at University"

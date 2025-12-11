@@ -39,7 +39,7 @@ class RevealPayload(BaseModel):
     evidence_id: str = Field(..., description="Evidence ID from commit phase")
     epoch_id: int = Field(..., description="Epoch number")
     decision: Literal["approve", "deny"] = Field(..., description="Validation decision: 'approve' or 'deny'")
-    rep_score: float = Field(..., ge=0.0, le=48.0, description="Reputation score (0-48, raw score not normalized)")
+    rep_score: int = Field(..., ge=0, le=48, description="Reputation score (0-48 as INTEGER, not float!)")
     rejection_reason: str = Field(..., description="Rejection reason: 'pass' if approved, or specific failure reason if denied")
     salt: str = Field(..., description="Hex-encoded salt used in commitment")
 
@@ -597,7 +597,7 @@ class RevealItem(BaseModel):
     """Single reveal item within a batch"""
     lead_id: str  # Validator sends lead_id, not evidence_id
     decision: Literal["approve", "deny"]
-    rep_score: float = Field(..., ge=0.0, le=48.0)  # Raw score 0-48, not normalized
+    rep_score: int = Field(..., ge=0, le=48)  # Raw score 0-48 as INTEGER (not float!)
     rejection_reason: dict  # Can be dict (e.g. {"message": "pass"}) or detailed failure dict
     salt: str
 

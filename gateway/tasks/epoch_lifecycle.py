@@ -826,7 +826,7 @@ async def compute_epoch_consensus(epoch_id: int):
                                 "consensus_votes": consensus_votes,
                                 "rep_score": final_rep_score,
                                 "is_icp_multiplier": is_icp_multiplier,
-                                "rep_score_version": "v1/checksv2",
+                                "rep_score_version": "v1/chksv2",  # Shortened to 9 chars (VARCHAR(10) limit)
                                 "epoch_summary": outcome  # Keep existing epoch_summary for backwards compatibility
                             })
                             .eq("lead_id", lead_id)

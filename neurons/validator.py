@@ -249,8 +249,28 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1":
                 print("")
                 print("✅ Containerized deployment complete!")
                 print("   3 validator containers are now running in parallel")
-                print("   Main process exiting (containers will continue in background)")
+                print("")
+                print("📺 Following main validator logs...")
+                print("   (Press Ctrl+C to detach - containers will keep running)")
                 print("════════════════════════════════════════════════════════════════")
+                print("")
+                
+                # Follow main container logs (blocking call)
+                try:
+                    subprocess.run(
+                        ["docker", "logs", "-f", "leadpoet-validator-main"],
+                        check=False  # Don't raise exception on Ctrl+C
+                    )
+                except KeyboardInterrupt:
+                    print("")
+                    print("════════════════════════════════════════════════════════════════")
+                    print("🔌 Detached from logs (containers still running)")
+                    print("")
+                    print("📋 To reattach: docker logs -f leadpoet-validator-main")
+                    print("📊 Check status: docker ps")
+                    print("🛑 Stop all: docker stop leadpoet-validator-main leadpoet-validator-worker-1 leadpoet-validator-worker-2")
+                    print("════════════════════════════════════════════════════════════════")
+                
                 sys.exit(0)
                 
             except subprocess.CalledProcessError as e:

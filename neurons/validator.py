@@ -1644,9 +1644,15 @@ class Validator(BaseValidatorNeuron):
                 leads, max_leads_per_epoch = gateway_get_epoch_leads(self.wallet, current_epoch)
                 
                 # Write to shared volume for workers to read
+                # Include epoch_id in file for validation
                 leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
                 with open(leads_file, 'w') as f:
-                    json.dump({"leads": leads, "max_leads_per_epoch": max_leads_per_epoch}, f)
+                    json.dump({
+                        "epoch_id": current_epoch,
+                        "leads": leads, 
+                        "max_leads_per_epoch": max_leads_per_epoch,
+                        "created_at_block": current_block
+                    }, f)
                 print(f"   💾 Saved {len(leads) if leads else 0} leads to {leads_file} for workers")
                 
             elif container_mode == "worker":
@@ -1654,8 +1660,7 @@ class Validator(BaseValidatorNeuron):
                 print(f"⏳ Worker waiting for coordinator to fetch leads for epoch {current_epoch}...")
                 leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
                 
-                # Keep checking indefinitely (coordinator might be slow)
-                # Log every 5 minutes to show we're still waiting
+                # Keep checking but with epoch boundary protection
                 waited = 0
                 log_interval = 300  # Log every 5 minutes
                 check_interval = 5  # Check every 5 seconds
@@ -1664,16 +1669,46 @@ class Validator(BaseValidatorNeuron):
                     await asyncio.sleep(check_interval)
                     waited += check_interval
                     
+                    # CRITICAL: Check current block and epoch
+                    check_block = await self.get_current_block_async()
+                    check_epoch = check_block // 360
+                    blocks_into_epoch = check_block % 360
+                    
+                    # Epoch changed while waiting - abort this epoch
+                    if check_epoch > current_epoch:
+                        print(f"❌ Worker: Epoch changed ({current_epoch} → {check_epoch}) while waiting")
+                        print(f"   Aborting - will process epoch {check_epoch} in next iteration")
+                        await asyncio.sleep(10)
+                        return
+                    
+                    # Too late to start validation (block 120+ cutoff)
+                    if blocks_into_epoch >= 120:
+                        print(f"❌ Worker: Too late to start validation (block {blocks_into_epoch}/360)")
+                        print(f"   Cutoff is block 120 - not enough time to complete before epoch end")
+                        print(f"   Skipping epoch {current_epoch}, will process next epoch")
+                        await asyncio.sleep(10)
+                        return
+                    
                     # Log progress every 5 minutes
                     if waited % log_interval == 0:
-                        print(f"   ⏳ Still waiting for coordinator... ({waited}s elapsed)")
+                        print(f"   ⏳ Still waiting for coordinator... ({waited}s elapsed, block {blocks_into_epoch}/360)")
                         print(f"      Checking for: {leads_file}")
                 
                 # Read leads from shared file
                 with open(leads_file, 'r') as f:
                     data = json.load(f)
+                    file_epoch = data.get("epoch_id")
                     leads = data.get("leads")
                     max_leads_per_epoch = data.get("max_leads_per_epoch")
+                
+                # Verify epoch matches (safety check)
+                if file_epoch != current_epoch:
+                    print(f"❌ Worker: Epoch mismatch in leads file!")
+                    print(f"   Expected epoch: {current_epoch}")
+                    print(f"   File has epoch: {file_epoch}")
+                    print(f"   Skipping - stale file detected")
+                    await asyncio.sleep(10)
+                    return
                 
                 print(f"✅ Worker loaded {len(leads) if leads else 0} leads from coordinator (waited {waited}s)")
                 
@@ -1861,6 +1896,8 @@ class Validator(BaseValidatorNeuron):
                         # Check if epoch changed - if so, stop processing old epoch's leads
                         new_block = await self.get_current_block_async()
                         new_epoch = new_block // 360
+                        blocks_into_epoch = new_block % 360
+                        
                         if new_epoch > current_epoch:
                             print(f"\n{'='*80}")
                             print(f"⚠️  EPOCH CHANGED: {current_epoch} → {new_epoch}")
@@ -1868,6 +1905,18 @@ class Validator(BaseValidatorNeuron):
                             print(f"   Remaining {len(leads) - idx} leads cannot be submitted (epoch closed)")
                             print(f"{'='*80}\n")
                             break  # Exit the lead processing loop
+                        
+                        # FORCE STOP at block 345 for WORKERS (weight submission time)
+                        # Coordinator needs to submit weights, workers must finish before that
+                        container_mode = getattr(self.config.neuron, 'mode', None)
+                        if container_mode == "worker" and blocks_into_epoch >= 345:
+                            print(f"\n{'='*80}")
+                            print(f"⏰ WORKER FORCE STOP: Block 345+ reached (block {blocks_into_epoch}/360)")
+                            print(f"   Workers must complete before coordinator submits weights")
+                            print(f"   Completed: {idx}/{len(leads)} leads")
+                            print(f"   📦 Saving partial results for coordinator to aggregate")
+                            print(f"{'='*80}\n")
+                            break  # Exit the lead processing loop and proceed to worker JSON write
                     
                 except Exception as e:
                     from validator_models.automated_checks import EmailVerificationUnavailableError
@@ -1899,6 +1948,8 @@ class Validator(BaseValidatorNeuron):
                         # Check if epoch changed - if so, stop processing old epoch's leads
                         new_block = await self.get_current_block_async()
                         new_epoch = new_block // 360
+                        blocks_into_epoch = new_block % 360
+                        
                         if new_epoch > current_epoch:
                             print(f"\n{'='*80}")
                             print(f"⚠️  EPOCH CHANGED: {current_epoch} → {new_epoch}")
@@ -1906,6 +1957,18 @@ class Validator(BaseValidatorNeuron):
                             print(f"   Remaining {len(leads) - idx} leads cannot be submitted (epoch closed)")
                             print(f"{'='*80}\n")
                             break  # Exit the lead processing loop
+                        
+                        # FORCE STOP at block 345 for WORKERS (weight submission time)
+                        # Coordinator needs to submit weights, workers must finish before that
+                        container_mode_check = getattr(self.config.neuron, 'mode', None)
+                        if container_mode_check == "worker" and blocks_into_epoch >= 345:
+                            print(f"\n{'='*80}")
+                            print(f"⏰ WORKER FORCE STOP: Block 345+ reached (block {blocks_into_epoch}/360)")
+                            print(f"   Workers must complete before coordinator submits weights")
+                            print(f"   Completed: {idx}/{len(leads)} leads")
+                            print(f"   📦 Saving partial results for coordinator to aggregate")
+                            print(f"{'='*80}\n")
+                            break  # Exit the lead processing loop and proceed to worker JSON write
                     
                     # Continue to next lead after error
                     continue
@@ -2024,6 +2087,21 @@ class Validator(BaseValidatorNeuron):
                 if leads_file.exists():
                     os.remove(leads_file)
                     print(f"   🧹 Cleaned up {leads_file.name}")
+                
+                # Clean up any stale leads files from previous epochs
+                try:
+                    weights_dir = Path("validator_weights")
+                    for old_file in weights_dir.glob("epoch_*_leads.json"):
+                        # Extract epoch from filename
+                        try:
+                            file_epoch = int(old_file.stem.split('_')[1])
+                            if file_epoch < current_epoch:
+                                os.remove(old_file)
+                                print(f"   🧹 Cleaned up stale file: {old_file.name}")
+                        except (IndexError, ValueError):
+                            pass
+                except Exception as e:
+                    print(f"   ⚠️  Could not clean up stale files: {e}")
                 
                 # ═══════════════════════════════════════════════════════════════════
                 # COORDINATOR: Accumulate weights for ALL leads (coordinator + workers)

@@ -723,37 +723,9 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             raise Exception(f"Failed to read shared block file: {e}")
     
-    def _start_block_file_updater(self):
-        """
-        Start background thread to update shared block file every 12 seconds (coordinator only).
-        
-        This allows worker containers to check block/epoch without Bittensor connection.
-        """
-        import threading
-        import time
-        
-        def update_loop():
-            """Background thread that updates shared block file every 12 seconds."""
-            while True:
-                try:
-                    # Get current block/epoch from Bittensor
-                    current_block = self.subtensor.block
-                    current_epoch = current_block // 360
-                    blocks_into_epoch = current_block % 360
-                    
-                    # Write to shared file
-                    self._write_shared_block_file(current_block, current_epoch, blocks_into_epoch)
-                    
-                except Exception as e:
-                    bt.logging.warning(f"Block file updater error: {e}")
-                
-                # Wait 12 seconds before next update
-                time.sleep(12)
-        
-        # Start background thread (daemon so it exits when main process exits)
-        updater_thread = threading.Thread(target=update_loop, daemon=True)
-        updater_thread.start()
-        bt.logging.info("📊 Started shared block file updater (every 12 seconds)")
+    # _start_block_file_updater() removed - no longer needed
+    # Block file is now updated inline in process_gateway_validation_workflow()
+    # This eliminates the separate background thread and prevents websocket concurrency issues
     
     async def cleanup_async_subtensor(self):
         """Clean up async subtensor on shutdown."""
@@ -1645,12 +1617,8 @@ class Validator(BaseValidatorNeuron):
             # ════════════════════════════════════════════════════════════
             # SHARED BLOCK FILE UPDATER: For worker containers
             # ════════════════════════════════════════════════════════════
-            # Only coordinator needs to update the shared block file
-            # Workers read from it instead of connecting to Bittensor
-            container_mode_init = getattr(self.config.neuron, 'mode', None)
-            if container_mode_init != "worker":
-                # Coordinator or single-validator mode: Start block file updater
-                self._start_block_file_updater()
+            # Block file is now updated inline in process_gateway_validation_workflow()
+            # (No separate background thread needed - eliminates websocket concurrency)
             
             try:
                 # Keep the validator running and continuously process leads
@@ -1824,6 +1792,12 @@ class Validator(BaseValidatorNeuron):
                 current_block = await self.get_current_block_async()
                 epoch_length = 360  # blocks per epoch
                 current_epoch = current_block // epoch_length
+                blocks_into_epoch = current_block % epoch_length
+                
+                # Write block info to shared file for workers (if coordinator/single mode)
+                # This happens inline (no separate thread) to avoid websocket concurrency issues
+                if container_mode_check != "worker":
+                    self._write_shared_block_file(current_block, current_epoch, blocks_into_epoch)
             
             # DEBUG: Always log epoch status
             print(f"[DEBUG] Current epoch: {current_epoch}, Block: {current_block}, Last processed: {getattr(self, '_last_processed_epoch', 'None')}")

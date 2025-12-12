@@ -194,6 +194,70 @@ echo "🛑 Auto-updater stopped"
 
 # normal validator code starts below
 
+# ════════════════════════════════════════════════════════════════════════════
+# AUTO-CONTAINERIZATION: Automatically containerize if proxies detected
+# ════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1":
+    # Check if proxies are configured for containerization
+    proxies_found = []
+    for i in range(1, 21):  # Check for up to 20 proxies
+        proxy_var = f"WEBSHARE_PROXY_{i}"
+        proxy_value = os.getenv(proxy_var)
+        if proxy_value and proxy_value != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80":
+            proxies_found.append((proxy_var, proxy_value))
+    
+    if proxies_found:
+        print("════════════════════════════════════════════════════════════════")
+        print("🐳 AUTO-CONTAINERIZATION ACTIVATED")
+        print("════════════════════════════════════════════════════════════════")
+        print(f"📊 Detected {len(proxies_found)} proxy URLs in environment")
+        print(f"   Total containers: {len(proxies_found) + 1} (1 coordinator + {len(proxies_found)} workers)")
+        print("")
+        print("🔧 Building Docker image and spawning containers...")
+        print("   (This may take a few minutes on first run)")
+        print("")
+        
+        # Determine paths
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(script_dir)
+        containerizing_dir = os.path.join(repo_root, "validator_models", "containerizing")
+        deploy_script = os.path.join(containerizing_dir, "deploy_dynamic.sh")
+        
+        # Check if deploy script exists
+        if not os.path.exists(deploy_script):
+            print(f"❌ ERROR: Deploy script not found: {deploy_script}")
+            print("   Falling back to non-containerized mode...")
+            print("")
+        else:
+            # Execute deployment script
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["/bin/bash", deploy_script],
+                    cwd=containerizing_dir,
+                    check=True,
+                    capture_output=False
+                )
+                
+                print("")
+                print("✅ Containerized deployment complete!")
+                print("   3 validator containers are now running in parallel")
+                print("   Main process exiting (containers will continue in background)")
+                print("════════════════════════════════════════════════════════════════")
+                sys.exit(0)
+                
+            except subprocess.CalledProcessError as e:
+                print(f"❌ ERROR: Deployment failed with exit code {e.returncode}")
+                print("   Falling back to non-containerized mode...")
+                print("")
+            except Exception as e:
+                print(f"❌ ERROR: {e}")
+                print("   Falling back to non-containerized mode...")
+                print("")
+
+# ════════════════════════════════════════════════════════════════════════════
+
 AVAILABLE_MODELS = [
     "openai/o3-mini:online",                    
     "openai/gpt-4o-mini:online",                 

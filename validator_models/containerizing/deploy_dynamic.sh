@@ -152,6 +152,8 @@ start_container() {
       --restart unless-stopped \
       -v ~/.bittensor/wallets:/root/.bittensor/wallets:ro \
       -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
+      -e LEADPOET_CONTAINER_MODE=1 \
+      -e LEADPOET_WRAPPER_ACTIVE=1 \
       -e TRUELIST_API_KEY="$TRUELIST_API_KEY" \
       -e SCRAPINGDOG_API_KEY="$SCRAPINGDOG_API_KEY" \
       -e OPENROUTER_KEY="$OPENROUTER_KEY" \

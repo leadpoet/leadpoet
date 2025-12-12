@@ -224,6 +224,38 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1":
         containerizing_dir = os.path.join(repo_root, "validator_models", "containerizing")
         deploy_script = os.path.join(containerizing_dir, "deploy_dynamic.sh")
         
+        # Check if containers are already running
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "name=leadpoet-validator", "--format", "{{.Names}}"],
+                capture_output=True,
+                text=True
+            )
+            existing_containers = [name for name in result.stdout.strip().split('\n') if name]
+            
+            if existing_containers:
+                print(f"✅ Containers already running: {len(existing_containers)}")
+                for container in existing_containers:
+                    print(f"   - {container}")
+                print("")
+                print("🔄 Monitoring existing containers (auto-updater compatible)")
+                print("   Containers handle their own updates")
+                print("════════════════════════════════════════════════════════════════")
+                print("")
+                
+                # Keep main process alive to work with auto-updater wrapper
+                try:
+                    while True:
+                        time.sleep(3600)  # Sleep 1 hour at a time
+                except KeyboardInterrupt:
+                    print("\n🛑 Received interrupt signal")
+                    print("   Containers will continue running in background")
+                    sys.exit(0)
+        except Exception as e:
+            print(f"⚠️  Could not check for existing containers: {e}")
+            print("   Proceeding with deployment...")
+        
         # Check if deploy script exists
         if not os.path.exists(deploy_script):
             print(f"❌ ERROR: Deploy script not found: {deploy_script}")
@@ -243,9 +275,23 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1":
                 print("")
                 print("✅ Containerized deployment complete!")
                 print("   3 validator containers are now running in parallel")
-                print("   Main process exiting (containers will continue in background)")
+                print("")
+                print("🔄 Main process will now monitor containers (auto-updater compatible)")
+                print("   Containers will be updated automatically every 5 minutes")
                 print("════════════════════════════════════════════════════════════════")
-                sys.exit(0)
+                print("")
+                
+                # Keep main process alive to work with auto-updater wrapper
+                # The wrapper expects the validator to keep running
+                # We just monitor containers and wait forever
+                try:
+                    while True:
+                        time.sleep(3600)  # Sleep 1 hour at a time
+                except KeyboardInterrupt:
+                    print("\n🛑 Received interrupt signal")
+                    print("   Containers will continue running in background")
+                    print("   Use 'docker ps' to view them")
+                    sys.exit(0)
                 
             except subprocess.CalledProcessError as e:
                 print(f"❌ ERROR: Deployment failed with exit code {e.returncode}")

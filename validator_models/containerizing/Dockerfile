@@ -3,10 +3,11 @@ FROM python:3.9-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies (including build tools for compiling Rust packages like bittensor-drand)
 RUN apt-get update && apt-get install -y \
     git \
     curl \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies

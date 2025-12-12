@@ -75,7 +75,7 @@ class StorageProofPayload(BaseModel):
     lead_id: str
     lead_blob_hash: str
     email_hash: str = Field(..., description="SHA256 of email field - for duplicate detection")
-    mirror: str = Field(..., description="s3 or minio")
+    mirror: str = Field(..., description="Storage backend (currently only s3 is supported)")
     verified: bool
 
 

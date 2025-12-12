@@ -53,20 +53,6 @@ if not AWS_SECRET_ACCESS_KEY:
     import warnings
     warnings.warn("AWS_SECRET_ACCESS_KEY environment variable not set - S3 storage will fail")
 
-# ============================================================
-# MinIO (Self-Hosted Mirror)
-# ============================================================
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "leadpoet-leads")
-
-if not MINIO_ACCESS_KEY:
-    import warnings
-    warnings.warn("MINIO_ACCESS_KEY environment variable not set - MinIO storage will fail")
-if not MINIO_SECRET_KEY:
-    import warnings
-    warnings.warn("MINIO_SECRET_KEY environment variable not set - MinIO storage will fail")
 
 # ============================================================
 # Bittensor Network
@@ -149,12 +135,6 @@ def validate_config():
     if not AWS_SECRET_ACCESS_KEY:
         errors.append("AWS_SECRET_ACCESS_KEY is not set")
     
-    # Check MinIO
-    if not MINIO_ACCESS_KEY:
-        errors.append("MINIO_ACCESS_KEY is not set")
-    if not MINIO_SECRET_KEY:
-        errors.append("MINIO_SECRET_KEY is not set")
-    
     if errors:
         raise ValueError(f"Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))
     
@@ -173,8 +153,6 @@ def print_config_summary():
     print(f"GitHub Commit: {GITHUB_COMMIT}")
     print(f"Supabase URL: {SUPABASE_URL}")
     print(f"AWS S3 Bucket: {AWS_S3_BUCKET} ({AWS_S3_REGION})")
-    print(f"MinIO Endpoint: {MINIO_ENDPOINT}")
-    print(f"MinIO Bucket: {MINIO_BUCKET}")
     print(f"Arweave Gateway: {ARWEAVE_GATEWAY_URL}")
     print(f"Arweave Keyfile: {ARWEAVE_KEYFILE_PATH}")
     print(f"Bittensor Network: {BITTENSOR_NETWORK} (netuid={BITTENSOR_NETUID})")

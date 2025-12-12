@@ -24,7 +24,6 @@ class PresignedURLResponse(BaseModel):
     s3_url: str  # Alias for backward compatibility
     expires_in: int
     timestamp: Optional[str] = None  # ISO 8601 timestamp when request was accepted
-    # Note: MinIO mirroring happens gateway-side after S3 upload verification
 
 
 class SubmissionResponse(BaseModel):

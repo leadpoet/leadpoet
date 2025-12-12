@@ -233,6 +233,37 @@ class EmailVerificationUnavailableError(Exception):
     pass
 
 load_dotenv()
+
+# ════════════════════════════════════════════════════════════════════
+# PROXY CONFIGURATION: Support for containerized validators with proxies
+# ════════════════════════════════════════════════════════════════════
+
+# Read proxy configuration from environment variables
+HTTP_PROXY_URL = os.environ.get('HTTP_PROXY')
+HTTPS_PROXY_URL = os.environ.get('HTTPS_PROXY', HTTP_PROXY_URL)
+
+# Global proxy configuration for all HTTP requests
+PROXY_CONFIG = None
+if HTTP_PROXY_URL:
+    PROXY_CONFIG = {
+        'http': HTTP_PROXY_URL,
+        'https': HTTPS_PROXY_URL or HTTP_PROXY_URL
+    }
+    print(f"🌐 Proxy enabled: {HTTP_PROXY_URL[:50]}... (all API requests will use this IP)")
+
+def get_aiohttp_connector():
+    """
+    Create aiohttp connector with proxy support if configured.
+    
+    Returns connector that should be passed to aiohttp.ClientSession()
+    """
+    if HTTP_PROXY_URL:
+        # aiohttp handles proxies via request parameters, not connector
+        return None
+    return None
+
+# ════════════════════════════════════════════════════════════════════
+
 MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "")
 TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 
@@ -431,7 +462,8 @@ async def api_call_with_retry(session, url, params=None, max_retries=3, base_del
     """Make API call with exponential backoff retry logic"""
     for attempt in range(max_retries):
         try:
-            async with session.get(url, params=params, timeout=10) as response:
+            # Pass proxy if configured (aiohttp accepts proxy as string URL)
+            async with session.get(url, params=params, timeout=10, proxy=HTTP_PROXY_URL) as response:
                 return response
         except Exception as e:
             if attempt == max_retries - 1:
@@ -1455,7 +1487,7 @@ async def check_truelist_email(lead: dict) -> Tuple[bool, dict]:
                     else:
                         print(f"   🔄 Retry {attempt}/{max_retries} for: {email}")
                     
-                    async with session.post(url, headers=headers, json=payload, timeout=30) as response:
+                    async with session.post(url, headers=headers, json=payload, timeout=30, proxy=HTTP_PROXY_URL) as response:
                         if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:
                             print(f"   🚨 TrueList API error (HTTP {response.status})")
                             raise EmailVerificationUnavailableError(f"TrueList API unavailable (HTTP {response.status})")
@@ -1587,7 +1619,7 @@ async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
                     else:
                         print(f"   🔄 Retry {attempt}/{max_retries} for: {email}")
                     
-                    async with session.get(url, timeout=30) as response:
+                    async with session.get(url, timeout=30, proxy=HTTP_PROXY_URL) as response:
                         # Check for API error responses (no credits, invalid key, etc.)
                         # These should SKIP the lead entirely (not submit to Supabase)
                         if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:
@@ -1787,7 +1819,7 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
                 "results": max_results
             }
             
-            response = requests.get(url, params=params, timeout=30)
+            response = requests.get(url, params=params, timeout=30, proxies=PROXY_CONFIG)
             if response.status_code != 200:
                 print(f"         ⚠️ GSE API error: HTTP {response.status_code}: {response.text}")
                 return []
@@ -2544,7 +2576,7 @@ async def check_wayback_machine(lead: dict) -> Tuple[float, dict]:
         for attempt in range(3):
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url, params=params, timeout=15) as response:
+                    async with session.get(url, params=params, timeout=15, proxy=HTTP_PROXY_URL) as response:
                         if response.status != 200:
                             return 0, {"checked": False, "reason": f"Wayback API error: {response.status}"}
                         
@@ -2689,7 +2721,7 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
                     "count": "100"  # Get up to 100 recent filings
                 }
                 
-                async with session.get(search_url, headers=headers, params=params, timeout=7) as response:
+                async with session.get(search_url, headers=headers, params=params, timeout=7, proxy=HTTP_PROXY_URL) as response:
                     if response.status != 200:
                         print(f"      ❌ SEC API returned HTTP {response.status}")
                         continue  # Try next variation
@@ -2735,7 +2767,7 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
                                 "count": "100"
                             }
                             
-                            async with session.get(search_url, headers=headers, params=cik_params, timeout=7) as cik_response:
+                            async with session.get(search_url, headers=headers, params=cik_params, timeout=7, proxy=HTTP_PROXY_URL) as cik_response:
                                 if cik_response.status == 200:
                                     cik_html = await cik_response.text()
                                     print(f"      📄 CIK response length: {len(cik_html)} bytes")
@@ -2882,7 +2914,7 @@ async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
                 "sort": "datedesc"
             }
             
-            async with session.get(gdelt_url, params=params, timeout=15) as response:
+            async with session.get(gdelt_url, params=params, timeout=15, proxy=HTTP_PROXY_URL) as response:
                 if response.status != 200:
                     print(f"      ❌ GDELT API returned HTTP {response.status}")
                     return 0, {
@@ -3104,7 +3136,8 @@ async def check_companies_house(lead: dict) -> Tuple[float, dict]:
                 search_url,
                 headers=headers,
                 params={"q": company, "items_per_page": 5},
-                timeout=10
+                timeout=10,
+                proxy=HTTP_PROXY_URL
             ) as response:
                 if response.status != 200:
                     return 0, {"checked": False, "reason": f"Companies House API error: HTTP {response.status}"}
@@ -5249,7 +5282,7 @@ def _gse_search_stage5_sync(
                 "results": max_results
             }
             
-            response = requests.get(url, params=params, timeout=30)
+            response = requests.get(url, params=params, timeout=30, proxies=PROXY_CONFIG)
             if response.status_code == 200:
                 data = response.json()
                 results = []

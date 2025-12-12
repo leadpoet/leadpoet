@@ -81,9 +81,15 @@ class PriorityMiddleware(BaseHTTPMiddleware):
         """
         path = request.url.path
         
+        # DEBUG: Log EVERY request to diagnose validator detection
+        print(f"🔍 MIDDLEWARE: {request.method} {path}")
+        
         # Check request type
         is_validator = self._is_validator_request(path)
         is_miner = self._is_miner_request(path)
+        
+        # DEBUG: Show classification
+        print(f"   → Validator={is_validator}, Miner={is_miner}")
         
         # PRIORITY 1: Validators bypass throttling
         if is_validator:

@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # Container 1: Main validator (uses EC2's native IP, no proxy)
+  # Processes leads 0-169 (170 leads)
+  validator-main:
+    build: .
+    container_name: leadpoet-validator-main
+    network_mode: host
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets:ro  # Read-only wallet access
+      - ./validator_weights:/app/validator_weights  # Shared weights directory
+    environment:
+      - TRUELIST_API_KEY=${TRUELIST_API_KEY}
+      - SCRAPINGDOG_API_KEY=${SCRAPINGDOG_API_KEY}
+      - OPENROUTER_KEY=${OPENROUTER_KEY}
+      - COMPANIES_HOUSE_API_KEY=${COMPANIES_HOUSE_API_KEY}
+      # No HTTP_PROXY - uses EC2's native IP
+    command: >
+      --netuid 71
+      --subtensor_network finney
+      --wallet_name validator_72
+      --wallet_hotkey default
+      --lead-range 0-170
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # Container 2: Worker 1 (uses Webshare Proxy #1)
+  # Processes leads 170-339 (170 leads)
+  validator-worker-1:
+    build: .
+    container_name: leadpoet-validator-worker-1
+    network_mode: host
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
+      - ./validator_weights:/app/validator_weights
+    environment:
+      - TRUELIST_API_KEY=${TRUELIST_API_KEY}
+      - SCRAPINGDOG_API_KEY=${SCRAPINGDOG_API_KEY}
+      - OPENROUTER_KEY=${OPENROUTER_KEY}
+      - COMPANIES_HOUSE_API_KEY=${COMPANIES_HOUSE_API_KEY}
+      - HTTP_PROXY=${WEBSHARE_PROXY_1}  # Webshare proxy #1
+      - HTTPS_PROXY=${WEBSHARE_PROXY_1}
+    command: >
+      --netuid 71
+      --subtensor_network finney
+      --wallet_name validator_72
+      --wallet_hotkey default
+      --lead-range 170-340
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # Container 3: Worker 2 (uses Webshare Proxy #2)
+  # Processes leads 340-509 (170 leads)
+  validator-worker-2:
+    build: .
+    container_name: leadpoet-validator-worker-2
+    network_mode: host
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
+      - ./validator_weights:/app/validator_weights
+    environment:
+      - TRUELIST_API_KEY=${TRUELIST_API_KEY}
+      - SCRAPINGDOG_API_KEY=${SCRAPINGDOG_API_KEY}
+      - OPENROUTER_KEY=${OPENROUTER_KEY}
+      - COMPANIES_HOUSE_API_KEY=${COMPANIES_HOUSE_API_KEY}
+      - HTTP_PROXY=${WEBSHARE_PROXY_2}  # Webshare proxy #2
+      - HTTPS_PROXY=${WEBSHARE_PROXY_2}
+    command: >
+      --netuid 71
+      --subtensor_network finney
+      --wallet_name validator_72
+      --wallet_hotkey default
+      --lead-range 340-510
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+

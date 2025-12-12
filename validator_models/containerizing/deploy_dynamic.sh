@@ -36,9 +36,16 @@ if [ ! -f ".env.docker" ]; then
     exit 1
 fi
 
-# Load environment variables
-echo "📋 Loading environment variables from .env.docker..."
+# Load proxy URLs from .env.docker
+echo "📋 Loading proxy configuration from .env.docker..."
 source .env.docker
+
+# Load API keys from main .env file if it exists (fallback if not in .env.docker)
+if [ -z "$TRUELIST_API_KEY" ] && [ -f "../../.env" ]; then
+    echo "📋 Loading API keys from main .env file..."
+    source ../../.env
+fi
+
 echo "✅ Environment variables loaded"
 echo ""
 

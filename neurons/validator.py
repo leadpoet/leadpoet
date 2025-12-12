@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Suppress multiprocessing warnings BEFORE any imports
+# Auto-update trigger: 2025-12-12
 import os
 import sys
 os.environ["PYTHONWARNINGS"] = "ignore::UserWarning"

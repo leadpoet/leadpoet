@@ -60,7 +60,6 @@ requirements = [
     "redis>=5.0.0",
     "pickle-mixin>=1.0.2",
     "boto3>=1.40.0",
-    "minio>=7.2.0",
     "arweave-python-client>=1.0.19",
     
     # Configuration

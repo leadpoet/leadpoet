@@ -5,6 +5,7 @@ bittensor>=9.10,<10.0.0
 requests>=2.31.0
 aiohttp>=3.9.5
 aiodns>=3.1.1
+pysocks>=1.7.1  # SOCKS5 proxy support for DNS queries
 
 # Data processing and ML
 numpy>=1.24.0
@@ -20,7 +21,6 @@ dnspython>=2.6.1
 redis>=5.0.0
 pickle-mixin>=1.0.2
 boto3>=1.40.0
-minio>=7.2.0
 arweave-python-client>=1.0.19
 
 # Monitoring and metrics

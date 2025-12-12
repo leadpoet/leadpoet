@@ -45,7 +45,6 @@ from gateway.api import epoch, validate, reveal, manifest, submit, attest
 from gateway.tasks.reveal_collector import reveal_collector_task
 from gateway.tasks.checkpoints import checkpoint_task
 from gateway.tasks.anchor import daily_anchor_task
-from gateway.tasks.mirror_monitor import mirror_integrity_task
 from gateway.tasks.hourly_batch import start_hourly_batch_task
 
 # Import epoch monitor (polling-based, like validator)
@@ -69,19 +68,6 @@ async def lifespan(app: FastAPI):
     - Zero memory leaks (async context manager handles cleanup)
     - Bulletproof: No WebSocket subscriptions = No WebSocket failures
     """
-    # Initialize MinIO bucket (must happen before background tasks)
-    print("\n" + "="*80)
-    print("🔧 INITIALIZING MINIO")
-    print("="*80)
-    from gateway.init_minio import init_minio_bucket
-    # Run synchronous MinIO init in thread pool to avoid blocking event loop
-    import asyncio
-    loop = asyncio.get_event_loop()
-    success = await loop.run_in_executor(None, init_minio_bucket)
-    if not success:
-        print("⚠️  WARNING: MinIO bucket initialization failed")
-        print("   Presigned URL generation may fail until bucket is created")
-    print("="*80 + "\n")
     
     # Load gateway keypair for signed receipts
     print("="*80)
@@ -331,7 +317,7 @@ from gateway.middleware.priority import PriorityMiddleware
 
 app.add_middleware(
     PriorityMiddleware,
-    max_concurrent_miners=20  # Throttle miners to max 20 concurrent requests
+    max_concurrent_miners=40  # Micro compute can handle higher throughput
 )
 
 # Production middleware: Only log errors and critical paths
@@ -391,9 +377,7 @@ async def health():
 @app.post("/presign", response_model=PresignedURLResponse)
 async def presign_urls(event: SubmissionRequestEvent):
     """
-    Generate presigned PUT URL for miner submission (S3 only).
-    
-    Gateway automatically mirrors to MinIO after S3 upload verification.
+    Generate presigned PUT URL for miner submission to S3.
     
     Flow:
     1. Verify wallet signature (MUST be first to prove identity)
@@ -410,7 +394,7 @@ async def presign_urls(event: SubmissionRequestEvent):
         event: SubmissionRequestEvent with signature
     
     Returns:
-        PresignedURLResponse with S3 URL (MinIO mirroring happens gateway-side)
+        PresignedURLResponse with S3 URL
     
     Raises:
         HTTPException: 400 (bad request), 403 (forbidden), 429 (rate limited)
@@ -612,7 +596,7 @@ async def presign_urls(event: SubmissionRequestEvent):
     # - Verify gateway code integrity: GET /attest
     request_timestamp = datetime.now(tz.utc).isoformat()
     
-    print("✅ /presign SUCCESS - returning S3 presigned URL (MinIO will be mirrored by gateway)")
+    print("✅ /presign SUCCESS - returning S3 presigned URL")
     return PresignedURLResponse(
         lead_id=event.payload.lead_id,
         presigned_url=urls["s3_url"],  # Miner uploads to S3

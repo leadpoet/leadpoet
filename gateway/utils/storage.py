@@ -1,17 +1,14 @@
 """
-Storage Utility (Multi-Mirror)
-==============================
+Storage Utility
+===============
 
-Presigned URL generation and storage verification for:
-- AWS S3 (primary storage)
-- MinIO (self-hosted mirror)
+Presigned URL generation and storage verification for AWS S3.
 
 Provides integrity verification by checking SHA256 hashes match CIDs.
 """
 
 import boto3
 from botocore.client import Config
-from minio import Minio
 import hashlib
 import sys
 import os
@@ -23,10 +20,6 @@ from gateway.config import (
     AWS_SECRET_ACCESS_KEY,
     AWS_S3_BUCKET,
     AWS_S3_REGION,
-    MINIO_ENDPOINT,
-    MINIO_ACCESS_KEY,
-    MINIO_SECRET_KEY,
-    MINIO_BUCKET,
     PRESIGNED_URL_EXPIRY_SECONDS
 )
 
@@ -41,30 +34,10 @@ s3_client = boto3.client(
     config=Config(signature_version='s3v4')
 )
 
-# ============================================================
-# Initialize MinIO Client
-# ============================================================
-# Remove http:// or https:// prefix for MinIO client
-minio_endpoint = MINIO_ENDPOINT.replace("http://", "").replace("https://", "")
-minio_secure = MINIO_ENDPOINT.startswith("https")
-
-# Single MinIO client - connects to internal Docker hostname
-# MinIO is configured via MINIO_SERVER_URL env var to generate presigned URLs
-# with the public IP, ensuring external clients (miners) can access them
-minio_client = Minio(
-    minio_endpoint,
-    access_key=MINIO_ACCESS_KEY,
-    secret_key=MINIO_SECRET_KEY,
-    secure=minio_secure
-)
-
 
 def generate_presigned_put_urls(cid: str) -> dict:
     """
     Generate presigned PUT URL for S3.
-    
-    MinIO mirroring happens gateway-side after S3 upload verification.
-    This avoids presigned URL signature issues with Docker networking.
     
     Args:
         cid: Content identifier (SHA256 hash of lead blob)
@@ -80,13 +53,10 @@ def generate_presigned_put_urls(cid: str) -> dict:
         >>> urls = generate_presigned_put_urls(cid)
         >>> # Miner uploads to S3
         >>> requests.put(urls['s3_url'], data=lead_blob)
-        >>> # Gateway mirrors to MinIO after verification
     
     Notes:
         - Object key format: leads/{cid}.json
         - URLs expire after PRESIGNED_URL_EXPIRY_SECONDS (default 60s)
-        - Miner only uploads to S3 (public cloud)
-        - Gateway automatically mirrors to MinIO (internal backup)
     """
     # Object key format: leads/{cid}.json
     object_key = f"leads/{cid}.json"
@@ -102,7 +72,7 @@ def generate_presigned_put_urls(cid: str) -> dict:
         ExpiresIn=PRESIGNED_URL_EXPIRY_SECONDS
     )
     
-    print(f"🔍 Presigned URL generated for S3 (MinIO will be mirrored by gateway)")
+    print(f"🔍 Presigned URL generated for S3")
     
     return {
         "s3_url": s3_url,
@@ -110,16 +80,16 @@ def generate_presigned_put_urls(cid: str) -> dict:
     }
 
 
-def verify_storage_proof(cid: str, mirror: str) -> bool:
+def verify_storage_proof(cid: str, mirror: str = "s3") -> bool:
     """
-    Verify that blob exists in storage mirror and matches CID.
+    Verify that blob exists in S3 storage and matches CID.
     
-    Downloads the blob from the specified mirror, computes SHA256 hash,
+    Downloads the blob from S3, computes SHA256 hash,
     and verifies it matches the expected CID.
     
     Args:
         cid: Expected content hash (SHA256)
-        mirror: "s3" or "minio"
+        mirror: Storage backend (only "s3" is supported)
     
     Returns:
         True if blob exists and hash matches CID
@@ -129,11 +99,9 @@ def verify_storage_proof(cid: str, mirror: str) -> bool:
         >>> cid = "abc123def456..."
         >>> verify_storage_proof(cid, "s3")
         True
-        >>> verify_storage_proof(cid, "minio")
-        True
     
     Notes:
-        - This is called AFTER miner uploads to presigned URLs
+        - This is called AFTER miner uploads to presigned URL
         - Gateway fetches and recomputes hash independently
         - Prevents blob substitution attacks
         - Used for STORAGE_PROOF event logging
@@ -141,87 +109,39 @@ def verify_storage_proof(cid: str, mirror: str) -> bool:
     object_key = f"leads/{cid}.json"
     
     try:
-        if mirror == "s3":
-            # Fetch from S3
-            response = s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=object_key)
-            blob = response['Body'].read()
-        
-        elif mirror == "minio":
-            # Fetch from MinIO
-            response = minio_client.get_object(MINIO_BUCKET, object_key)
-            blob = response.read()
-            response.close()
-            response.release_conn()
-        
-        else:
-            print(f"❌ Unknown mirror: {mirror}")
+        if mirror != "s3":
+            print(f"❌ Only S3 storage is supported (requested: {mirror})")
             return False
+        
+        # Fetch from S3
+        response = s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=object_key)
+        blob = response['Body'].read()
         
         # Compute SHA256 hash of downloaded blob
         computed_hash = hashlib.sha256(blob).hexdigest()
         
         # Verify hash matches expected CID
         if computed_hash != cid:
-            print(f"⚠️  Hash mismatch in {mirror}: expected {cid[:16]}..., got {computed_hash[:16]}...")
+            print(f"⚠️  Hash mismatch in S3: expected {cid[:16]}..., got {computed_hash[:16]}...")
             return False
         
-        print(f"✅ Storage proof verified for {mirror}: {cid[:16]}...")
+        print(f"✅ Storage proof verified for S3: {cid[:16]}...")
         return True
     
     except Exception as e:
-        print(f"❌ Storage verification error ({mirror}): {e}")
+        print(f"❌ Storage verification error (S3): {e}")
         return False
 
 
-def mirror_s3_to_minio(cid: str) -> bool:
+def check_blob_exists(cid: str, mirror: str = "s3") -> bool:
     """
-    Mirror blob from S3 to MinIO after S3 upload verification.
-    
-    This is called automatically by the gateway after S3 verification succeeds.
-    Ensures data redundancy without requiring miners to upload twice.
-    
-    Args:
-        cid: Content identifier (SHA256 hash)
-    
-    Returns:
-        True if mirroring succeeded, False otherwise
-    """
-    object_key = f"leads/{cid}.json"
-    
-    try:
-        # Fetch from S3
-        print(f"📥 Fetching blob from S3 for MinIO mirroring: {cid[:16]}...")
-        response = s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=object_key)
-        blob = response['Body'].read()
-        
-        # Upload to MinIO
-        print(f"📤 Mirroring blob to MinIO: {cid[:16]}...")
-        from io import BytesIO
-        minio_client.put_object(
-            MINIO_BUCKET,
-            object_key,
-            BytesIO(blob),
-            length=len(blob),
-            content_type="application/json"
-        )
-        
-        print(f"✅ Successfully mirrored {cid[:16]}... to MinIO")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Failed to mirror to MinIO: {e}")
-        return False
-
-
-def check_blob_exists(cid: str, mirror: str) -> bool:
-    """
-    Check if blob exists in storage mirror (without downloading).
+    Check if blob exists in S3 storage (without downloading).
     
     Faster than verify_storage_proof() but doesn't verify hash.
     
     Args:
         cid: Content identifier
-        mirror: "s3" or "minio"
+        mirror: Storage backend (only "s3" is supported)
     
     Returns:
         True if blob exists, False otherwise
@@ -233,34 +153,28 @@ def check_blob_exists(cid: str, mirror: str) -> bool:
     object_key = f"leads/{cid}.json"
     
     try:
-        if mirror == "s3":
-            # Check if object exists in S3
-            s3_client.head_object(Bucket=AWS_S3_BUCKET, Key=object_key)
-            return True
-        
-        elif mirror == "minio":
-            # Check if object exists in MinIO
-            minio_client.stat_object(MINIO_BUCKET, object_key)
-            return True
-        
-        else:
+        if mirror != "s3":
             return False
+        
+        # Check if object exists in S3
+        s3_client.head_object(Bucket=AWS_S3_BUCKET, Key=object_key)
+        return True
     
     except Exception as e:
         # Object doesn't exist or error occurred
         return False
 
 
-def delete_blob(cid: str, mirror: str) -> bool:
+def delete_blob(cid: str, mirror: str = "s3") -> bool:
     """
-    Delete blob from storage mirror.
+    Delete blob from S3 storage.
     
     WARNING: Use with caution! Transparency log is append-only,
     but blobs can be deleted for GDPR compliance.
     
     Args:
         cid: Content identifier
-        mirror: "s3" or "minio"
+        mirror: Storage backend (only "s3" is supported)
     
     Returns:
         True if deleted successfully
@@ -272,35 +186,25 @@ def delete_blob(cid: str, mirror: str) -> bool:
     object_key = f"leads/{cid}.json"
     
     try:
-        if mirror == "s3":
-            s3_client.delete_object(Bucket=AWS_S3_BUCKET, Key=object_key)
-            print(f"🗑️  Deleted {object_key} from S3")
-            return True
-        
-        elif mirror == "minio":
-            minio_client.remove_object(MINIO_BUCKET, object_key)
-            print(f"🗑️  Deleted {object_key} from MinIO")
-            return True
-        
-        else:
+        if mirror != "s3":
             return False
+        
+        s3_client.delete_object(Bucket=AWS_S3_BUCKET, Key=object_key)
+        print(f"🗑️  Deleted {object_key} from S3")
+        return True
     
     except Exception as e:
-        print(f"❌ Delete error ({mirror}): {e}")
+        print(f"❌ Delete error (S3): {e}")
         return False
 
 
 def get_storage_stats() -> dict:
     """
-    Get storage statistics for all mirrors.
+    Get storage statistics for S3.
     
     Returns:
         {
             "s3": {
-                "total_objects": 123,
-                "total_size_bytes": 456789
-            },
-            "minio": {
                 "total_objects": 123,
                 "total_size_bytes": 456789
             }
@@ -331,21 +235,6 @@ def get_storage_stats() -> dict:
         print(f"❌ S3 stats error: {e}")
         stats['s3'] = {"total_objects": 0, "total_size_bytes": 0}
     
-    # MinIO statistics
-    try:
-        minio_objects = list(minio_client.list_objects(MINIO_BUCKET, prefix="leads/"))
-        
-        minio_count = len(minio_objects)
-        minio_size = sum(obj.size for obj in minio_objects)
-        
-        stats['minio'] = {
-            "total_objects": minio_count,
-            "total_size_bytes": minio_size
-        }
-    except Exception as e:
-        print(f"❌ MinIO stats error: {e}")
-        stats['minio'] = {"total_objects": 0, "total_size_bytes": 0}
-    
     return stats
 
 
@@ -359,10 +248,6 @@ def print_storage_stats():
         Storage Statistics
         ============================================================
         AWS S3 (leadpoet-leads-primary):
-          Objects: 123
-          Size: 456.7 KB
-        
-        MinIO (leadpoet-leads):
           Objects: 123
           Size: 456.7 KB
         ============================================================
@@ -381,16 +266,6 @@ def print_storage_stats():
     print(f"AWS S3 ({AWS_S3_BUCKET}):")
     print(f"  Objects: {s3_objects}")
     print(f"  Size: {s3_size_kb:.1f} KB")
-    print()
-    
-    # MinIO
-    minio_objects = stats['minio']['total_objects']
-    minio_size = stats['minio']['total_size_bytes']
-    minio_size_kb = minio_size / 1024
-    
-    print(f"MinIO ({MINIO_BUCKET}):")
-    print(f"  Objects: {minio_objects}")
-    print(f"  Size: {minio_size_kb:.1f} KB")
     
     print("=" * 60)
 

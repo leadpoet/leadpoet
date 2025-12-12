@@ -6,7 +6,7 @@ Open-source, reproducible gateway for lead validation.
 
 Features:
 - Wallet signature-based authentication (no JWT)
-- Multi-mirror storage (S3 + MinIO + IPFS)
+- S3 storage with integrity verification
 - Public transparency log (Merkle tree)
 - Private PII storage with RLS
 - Deterministic lead assignment

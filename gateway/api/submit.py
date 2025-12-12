@@ -2,7 +2,7 @@
 POST /submit - Verify lead upload and finalize submission
 =========================================================
 
-After miner uploads lead blob to S3/MinIO via presigned URLs,
+After miner uploads lead blob to S3 via presigned URL,
 they call this endpoint to trigger verification.
 
 Flow per BRD Section 4.1:
@@ -66,8 +66,8 @@ class SubmitLeadEvent(BaseModel):
     """
     Event for finalizing lead submission after upload.
     
-    Miner signs this event after uploading to S3/MinIO.
-    Gateway verifies uploaded blobs match committed hash.
+    Miner signs this event after uploading to S3.
+    Gateway verifies uploaded blob matches committed hash.
     """
     event_type: str = "SUBMIT_LEAD"
     actor_hotkey: str = Field(..., description="Miner's SS58 address")
@@ -86,9 +86,9 @@ class SubmitLeadEvent(BaseModel):
 @router.post("/")
 async def submit_lead(event: SubmitLeadEvent):
     """
-    Verify uploaded lead blobs and finalize submission.
+    Verify uploaded lead blob and finalize submission.
     
-    Called by miner after uploading lead blob to S3/MinIO via presigned URLs.
+    Called by miner after uploading lead blob to S3 via presigned URL.
     
     Flow (BRD Section 4.1, Steps 5-6):
     1. Verify payload hash
@@ -98,14 +98,12 @@ async def submit_lead(event: SubmitLeadEvent):
     5. Verify timestamp within tolerance
     6. Fetch SUBMISSION_REQUEST event to get committed lead_blob_hash
     7. Verify uploaded blob from S3 matches lead_blob_hash
-    8. Verify uploaded blob from MinIO matches lead_blob_hash
-    9a. SUCCESS PATH (if both mirrors verify):
+    8. SUCCESS PATH (if S3 verifies):
         - Log STORAGE_PROOF event for S3
-        - Log STORAGE_PROOF event for MinIO
         - Store lead in leads_private table
         - Log SUBMISSION event
         - Return {status: "accepted", lead_id, merkle_proof}
-    9b. FAILURE PATH (if verification fails):
+    9. FAILURE PATH (if verification fails):
         - Log UPLOAD_FAILED event
         - Return HTTPException 400
     
@@ -116,7 +114,7 @@ async def submit_lead(event: SubmitLeadEvent):
         {
             "status": "accepted",
             "lead_id": "uuid",
-            "storage_backends": ["s3", "minio"],
+            "storage_backends": ["s3"],
             "merkle_proof": ["hash1", "hash2", ...],
             "submission_ts": "ISO timestamp"
         }
@@ -509,74 +507,47 @@ async def submit_lead(event: SubmitLeadEvent):
         print(f"❌ S3 verification failed")
     
     # ========================================
-    # Step 8: Mirror S3 to MinIO (gateway-side)
-    # ========================================
-    minio_verified = False
-    if s3_verified:
-        print(f"🔍 Step 8: Mirroring S3 to MinIO (gateway-side)...")
-        from gateway.utils.storage import mirror_s3_to_minio
-        mirror_success = mirror_s3_to_minio(committed_lead_blob_hash)
-        
-        if mirror_success:
-            # Verify MinIO mirror
-            print(f"🔍 Step 8b: Verifying MinIO mirror...")
-            minio_verified = verify_storage_proof(committed_lead_blob_hash, "minio")
-            if minio_verified:
-                print(f"✅ MinIO mirror verified")
-            else:
-                print(f"⚠️  MinIO mirror verification failed (but S3 is OK)")
-        else:
-            print(f"⚠️  MinIO mirroring failed (but S3 is OK)")
-    
-    # ========================================
-    # Step 9a: SUCCESS PATH - S3 verified (MinIO is optional backup)
+    # Step 8: SUCCESS PATH - S3 verified
     # ========================================
     if s3_verified:
-        print(f"🔍 Step 9a: SUCCESS PATH - S3 verified (MinIO {'verified' if minio_verified else 'optional'})")
+        print(f"🔍 Step 8: SUCCESS PATH - S3 verified")
         
         try:
-            # Log STORAGE_PROOF events to TEE buffer (hardware-protected)
+            # Log STORAGE_PROOF event to TEE buffer (hardware-protected)
             from gateway.utils.logger import log_event
             import asyncio
             
-            storage_proof_events = []
             storage_proof_tee_seqs = {}
             
-            # Only log for verified mirrors
-            verified_mirrors = ["s3"]
-            if minio_verified:
-                verified_mirrors.append("minio")
+            # Log S3 storage proof
+            mirror = "s3"
+            storage_proof_payload = {
+                "lead_id": event.payload.lead_id,
+                "lead_blob_hash": committed_lead_blob_hash,
+                "email_hash": committed_email_hash,
+                "mirror": mirror,
+                "verified": True
+            }
             
-            for mirror in verified_mirrors:
-                storage_proof_payload = {
-                    "lead_id": event.payload.lead_id,
-                    "lead_blob_hash": committed_lead_blob_hash,
-                    "email_hash": committed_email_hash,
-                    "mirror": mirror,
-                    "verified": True
-                }
-                
-                storage_proof_log_entry = {
-                    "event_type": "STORAGE_PROOF",
-                    "actor_hotkey": "gateway",
-                    "nonce": str(uuid.uuid4()),  # Generate fresh UUID for each event
-                    "ts": datetime.now(tz.utc).isoformat(),
-                    "payload_hash": hashlib.sha256(
-                        json.dumps(storage_proof_payload, sort_keys=True).encode()
-                    ).hexdigest(),
-                    "build_id": "gateway",
-                    "signature": "gateway_internal",
-                    "payload": storage_proof_payload
-                }
-                
-                print(f"   🔍 Logging STORAGE_PROOF for {mirror} to TEE buffer...")
-                result = await log_event(storage_proof_log_entry)
-                
-                tee_sequence = result.get("sequence")
-                storage_proof_tee_seqs[mirror] = tee_sequence
-                print(f"   ✅ STORAGE_PROOF buffered in TEE for {mirror}: seq={tee_sequence}")
-                
-                storage_proof_events.append(mirror)
+            storage_proof_log_entry = {
+                "event_type": "STORAGE_PROOF",
+                "actor_hotkey": "gateway",
+                "nonce": str(uuid.uuid4()),  # Generate fresh UUID for this event
+                "ts": datetime.now(tz.utc).isoformat(),
+                "payload_hash": hashlib.sha256(
+                    json.dumps(storage_proof_payload, sort_keys=True).encode()
+                ).hexdigest(),
+                "build_id": "gateway",
+                "signature": "gateway_internal",
+                "payload": storage_proof_payload
+            }
+            
+            print(f"   🔍 Logging STORAGE_PROOF for {mirror} to TEE buffer...")
+            result = await log_event(storage_proof_log_entry)
+            
+            tee_sequence = result.get("sequence")
+            storage_proof_tee_seqs[mirror] = tee_sequence
+            print(f"   ✅ STORAGE_PROOF buffered in TEE for {mirror}: seq={tee_sequence}")
                 
         except Exception as e:
             print(f"❌ Error logging STORAGE_PROOF: {e}")
@@ -948,8 +919,7 @@ async def submit_lead(event: SubmitLeadEvent):
                 "email_hash": committed_email_hash,
                 "miner_hotkey": event.actor_hotkey,
                 "submission_timestamp": datetime.now(tz.utc).isoformat(),
-                "s3_proof_tee_seq": storage_proof_tee_seqs.get("s3"),
-                "minio_proof_tee_seq": storage_proof_tee_seqs.get("minio")
+                "s3_proof_tee_seq": storage_proof_tee_seqs.get("s3")
             }
             
             submission_log_entry = {
@@ -1004,7 +974,7 @@ async def submit_lead(event: SubmitLeadEvent):
         return {
             "status": "accepted",
             "lead_id": event.payload.lead_id,
-            "storage_backends": storage_proof_events,
+            "storage_backends": ["s3"],  # Only S3 storage is used
             "submission_timestamp": submission_timestamp,
             "queue_position": queue_position,
             "message": "Lead accepted. Proof available in next hourly Arweave checkpoint.",
@@ -1021,13 +991,7 @@ async def submit_lead(event: SubmitLeadEvent):
     # Step 9b: FAILURE PATH - Verification failed
     # ========================================
     else:
-        print(f"🔍 Step 9b: FAILURE PATH - Verification failed")
-        
-        failed_mirrors = []
-        if not s3_verified:
-            failed_mirrors.append("s3")
-        if not minio_verified:
-            failed_mirrors.append("minio")
+        print(f"🔍 Step 9: FAILURE PATH - S3 verification failed")
         
         # Log UPLOAD_FAILED event to Arweave FIRST
         upload_failed_payload = {
@@ -1035,8 +999,8 @@ async def submit_lead(event: SubmitLeadEvent):
             "lead_blob_hash": committed_lead_blob_hash,
             "email_hash": committed_email_hash,
             "miner_hotkey": event.actor_hotkey,
-            "failed_mirrors": failed_mirrors,
-            "reason": "Hash mismatch or blob not found",
+            "failed_mirrors": ["s3"],
+            "reason": "Hash mismatch or blob not found in S3",
             "timestamp": datetime.now(tz.utc).isoformat()
         }
         

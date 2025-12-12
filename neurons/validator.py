@@ -1667,6 +1667,25 @@ class Validator(BaseValidatorNeuron):
                 return
             
             print(f"✅ Received {len(leads)} leads from gateway")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # LEAD RANGE SLICING: Support for containerized parallel processing
+            # ═══════════════════════════════════════════════════════════════════
+            lead_range = getattr(self.config.neuron, 'lead_range', None)
+            if lead_range:
+                try:
+                    # Parse lead range (e.g., "0-170" or "170-340")
+                    start, end = map(int, lead_range.split('-'))
+                    original_count = len(leads)
+                    leads = leads[start:end]
+                    print(f"📦 Container processing leads {start}-{end} ({len(leads)}/{original_count} leads)")
+                    print(f"   (Containerized parallel processing mode)")
+                except Exception as e:
+                    print(f"⚠️  Invalid --lead-range format: {lead_range}")
+                    print(f"   Expected format: '0-170' or '170-340'")
+                    print(f"   Error: {e}")
+                    print(f"   Processing ALL {len(leads)} leads instead...")
+            
             print(f"🔍 Running automated checks on each lead...")
             print("")
             
@@ -4010,6 +4029,7 @@ def main():
     parser.add_argument("--netuid", type=int, default=71, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default=os.getenv("SUBTENSOR_NETWORK", "finney"), help="Subtensor network (default: finney, or from SUBTENSOR_NETWORK env var)")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
+    parser.add_argument("--lead-range", type=str, help="Lead range to process (e.g., '0-170' or '170-340'). Used for containerized parallel processing. If not set, processes ALL leads.")
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -4036,6 +4056,7 @@ def main():
     config.subtensor.network = args.subtensor_network
     config.neuron = bt.Config()
     config.neuron.disable_set_weights = getattr(args, 'neuron_disable_set_weights', False)
+    config.neuron.lead_range = getattr(args, 'lead_range', None)  # Lead range for containerized processing
 
     # Start the background epoch monitor AFTER config is set (so network is correct)
     start_epoch_monitor(network=args.subtensor_network)

@@ -1751,10 +1751,10 @@ class Validator(BaseValidatorNeuron):
                         await asyncio.sleep(10)
                         return
                     
-                    # Too late to start validation (block 120+ cutoff)
-                    if blocks_into_epoch >= 120:
+                    # Too late to start validation (block 200+ cutoff)
+                    if blocks_into_epoch >= 200:
                         print(f"❌ Worker: Too late to start validation (block {blocks_into_epoch}/360)")
-                        print(f"   Cutoff is block 120 - not enough time to complete before epoch end")
+                        print(f"   Cutoff is block 200 - not enough time to complete before epoch end")
                         print(f"   Skipping epoch {current_epoch}, will process next epoch")
                         await asyncio.sleep(10)
                         return

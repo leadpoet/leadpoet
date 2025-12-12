@@ -1836,6 +1836,130 @@ class Validator(BaseValidatorNeuron):
                     # Continue to next lead after error
                     continue
             
+            # ═══════════════════════════════════════════════════════════════════
+            # CONTAINER MODE HANDLING: Worker vs Coordinator
+            # ═══════════════════════════════════════════════════════════════════
+            container_mode = getattr(self.config.neuron, 'mode', None)
+            lead_range = getattr(self.config.neuron, 'lead_range', None)
+            
+            if container_mode == "worker" and lead_range:
+                # WORKER MODE: Write results to JSON and exit (don't submit to gateway)
+                print(f"{'='*80}")
+                print(f"👷 WORKER MODE: Writing validation results to shared file")
+                print(f"{'='*80}")
+                
+                worker_results = {
+                    "validation_results": validation_results,  # For gateway submission
+                    "local_validation_data": local_validation_data,  # For reveals
+                    "epoch_id": current_epoch,
+                    "lead_range": lead_range,
+                    "timestamp": time.time()
+                }
+                
+                # Write to shared volume (validator_weights/worker_results_<range>.json)
+                range_slug = lead_range.replace('-', '_')
+                worker_file = os.path.join("validator_weights", f"worker_results_{range_slug}.json")
+                with open(worker_file, 'w') as f:
+                    json.dump(worker_results, f, indent=2)
+                
+                print(f"✅ Worker wrote {len(validation_results)} validation results to {worker_file}")
+                print(f"   Epoch: {current_epoch}")
+                print(f"   Lead range: {lead_range}")
+                print(f"   Worker exiting (coordinator will submit to gateway)")
+                print(f"{'='*80}\n")
+                
+                # Mark epoch as processed so we don't repeat this work
+                self._last_processed_epoch = current_epoch
+                
+                # Exit worker process
+                import sys
+                sys.exit(0)
+            
+            elif container_mode == "coordinator" and lead_range:
+                # COORDINATOR MODE: Wait for workers, aggregate results, then submit
+                print(f"{'='*80}")
+                print(f"📡 COORDINATOR MODE: Waiting for worker results")
+                print(f"{'='*80}")
+                
+                # Parse own lead range to determine how many workers to wait for
+                start, end = map(int, lead_range.split('-'))
+                total_leads = len(leads) if leads else 170  # Total leads in epoch
+                
+                # Calculate expected worker ranges
+                # If coordinator is 0-57, workers should be 57-114 and 114-170
+                worker_ranges = []
+                if end < total_leads:
+                    # There are workers
+                    remaining_leads = total_leads - end
+                    if remaining_leads > 0:
+                        # Calculate how many workers based on lead distribution
+                        # Assuming 3 containers total: 1 coordinator + 2 workers
+                        leads_per_container = total_leads // 3
+                        worker_ranges.append(f"{end}-{end + leads_per_container}")
+                        if end + leads_per_container < total_leads:
+                            worker_ranges.append(f"{end + leads_per_container}-{total_leads}")
+                
+                print(f"   Coordinator processed: {lead_range} ({len(validation_results)} results)")
+                print(f"   Waiting for {len(worker_ranges)} workers: {worker_ranges}")
+                
+                # Wait for worker result files (with timeout)
+                import time as time_module
+                max_wait = 3600  # 60 minutes max wait
+                check_interval = 5  # Check every 5 seconds
+                waited = 0
+                
+                worker_files = []
+                for worker_range in worker_ranges:
+                    range_slug = worker_range.replace('-', '_')
+                    worker_file = os.path.join("validator_weights", f"worker_results_{range_slug}.json")
+                    worker_files.append((worker_range, worker_file))
+                
+                all_workers_ready = False
+                while waited < max_wait and not all_workers_ready:
+                    all_workers_ready = all(os.path.exists(wf[1]) for wf in worker_files)
+                    if not all_workers_ready:
+                        missing = [wf[0] for wf in worker_files if not os.path.exists(wf[1])]
+                        print(f"   ⏳ Waiting for workers: {missing} ({waited}s / {max_wait}s)")
+                        await asyncio.sleep(check_interval)
+                        waited += check_interval
+                    else:
+                        print(f"   ✅ All {len(worker_files)} workers finished ({waited}s)")
+                
+                if not all_workers_ready:
+                    print(f"   ⚠️  TIMEOUT: Not all workers finished after {max_wait}s")
+                    print(f"   Proceeding with coordinator results only")
+                
+                # Aggregate results from all workers
+                aggregated_validation_results = list(validation_results)  # Copy coordinator's results
+                aggregated_local_validation_data = list(local_validation_data)  # Copy coordinator's reveals
+                
+                for worker_range, worker_file in worker_files:
+                    if os.path.exists(worker_file):
+                        try:
+                            with open(worker_file, 'r') as f:
+                                worker_data = json.load(f)
+                            
+                            worker_validations = worker_data.get("validation_results", [])
+                            worker_reveals = worker_data.get("local_validation_data", [])
+                            
+                            aggregated_validation_results.extend(worker_validations)
+                            aggregated_local_validation_data.extend(worker_reveals)
+                            
+                            print(f"   ✅ Aggregated {len(worker_validations)} results from worker {worker_range}")
+                            
+                            # Delete worker file after successful aggregation
+                            os.remove(worker_file)
+                        except Exception as e:
+                            print(f"   ⚠️  Failed to load worker {worker_range}: {e}")
+                
+                # Replace local lists with aggregated results
+                validation_results = aggregated_validation_results
+                local_validation_data = aggregated_local_validation_data
+                
+                print(f"   📊 Total aggregated: {len(validation_results)} validations")
+                print(f"   Proceeding with gateway submission...")
+                print(f"{'='*80}\n")
+            
             # Submit hashed validation results to gateway
             print(f"{'='*80}")
             
@@ -4029,7 +4153,8 @@ def main():
     parser.add_argument("--netuid", type=int, default=71, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default=os.getenv("SUBTENSOR_NETWORK", "finney"), help="Subtensor network (default: finney, or from SUBTENSOR_NETWORK env var)")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
-    parser.add_argument("--lead-range", type=str, help="Lead range to process (e.g., '0-170' or '170-340'). Used for containerized parallel processing. If not set, processes ALL leads.")
+    parser.add_argument("--lead-range", type=str, help="Lead range to process (e.g., '0-57' or '57-114'). Used for containerized parallel processing. If not set, processes ALL leads.")
+    parser.add_argument("--mode", type=str, choices=["coordinator", "worker"], help="Container mode: 'coordinator' waits for workers and submits to gateway, 'worker' validates and writes results to JSON")
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -4057,6 +4182,7 @@ def main():
     config.neuron = bt.Config()
     config.neuron.disable_set_weights = getattr(args, 'neuron_disable_set_weights', False)
     config.neuron.lead_range = getattr(args, 'lead_range', None)  # Lead range for containerized processing
+    config.neuron.mode = getattr(args, 'mode', None)  # Container mode: coordinator/worker
 
     # Start the background epoch monitor AFTER config is set (so network is correct)
     start_epoch_monitor(network=args.subtensor_network)

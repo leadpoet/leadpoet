@@ -4,25 +4,22 @@
 # DYNAMIC LeadPoet Containerized Validator Deployment
 # ==============================================================================
 # This script automatically detects ALL proxies in .env.docker and spawns
-# the correct number of containers with auto-calculated lead ranges.
+# the correct number of containers with FULLY DYNAMIC lead distribution.
+#
+# Lead distribution is calculated at runtime based on gateway MAX_LEADS_PER_EPOCH.
+# No need to specify lead counts - it adapts automatically!
 #
 # Usage:
-#   ./deploy_dynamic.sh [MAX_LEADS]
+#   ./deploy_dynamic.sh
 #
-# Example:
-#   ./deploy_dynamic.sh 510        # Deploy for 510 leads
-#   ./deploy_dynamic.sh 1000       # Deploy for 1000 leads
 # ==============================================================================
 
 set -e
 
-# Default max leads (override with CLI arg)
-MAX_LEADS=${1:-510}
-
 echo "============================================================"
 echo "🐳 DYNAMIC CONTAINERIZED VALIDATOR DEPLOYMENT"
 echo "============================================================"
-echo "📊 Max leads to process: $MAX_LEADS"
+echo "📊 Lead distribution: FULLY DYNAMIC (adapts to gateway setting)"
 echo ""
 
 # Check if .env.docker exists
@@ -87,9 +84,7 @@ if [ $PROXY_COUNT -eq 0 ]; then
     echo ""
 fi
 
-# Calculate leads per container
-LEADS_PER_CONTAINER=$((MAX_LEADS / TOTAL_CONTAINERS))
-echo "📊 Distribution: ~$LEADS_PER_CONTAINER leads per container"
+echo "📊 Lead distribution: DYNAMIC (each container auto-calculates based on gateway setting)"
 echo ""
 
 # Verify required API keys
@@ -121,26 +116,26 @@ echo ""
 start_container() {
     local CONTAINER_NAME=$1
     local PROXY_URL=$2
-    local START_LEAD=$3
-    local END_LEAD=$4
-    local DISPLAY_NAME=$5
+    local CONTAINER_ID=$3
+    local DISPLAY_NAME=$4
     
     echo "🚀 Starting $DISPLAY_NAME..."
-    echo "   Range: leads $START_LEAD-$END_LEAD ($((END_LEAD - START_LEAD)) leads)"
+    echo "   Container ID: $CONTAINER_ID / $TOTAL_CONTAINERS"
     if [ -n "$PROXY_URL" ]; then
         echo "   Proxy: ${PROXY_URL:0:30}..."
     else
         echo "   Proxy: None (EC2 native IP)"
     fi
+    echo "   Lead distribution: AUTO (gateway MAX_LEADS_PER_EPOCH ÷ $TOTAL_CONTAINERS)"
     
     local PROXY_ARGS=""
     if [ -n "$PROXY_URL" ]; then
         PROXY_ARGS="-e HTTP_PROXY=$PROXY_URL -e HTTPS_PROXY=$PROXY_URL"
     fi
     
-    # Determine container mode (main = coordinator, workers = worker)
+    # Determine container mode (ID 0 = coordinator, others = worker)
     local MODE_ARG=""
-    if [ "$CONTAINER_NAME" = "leadpoet-validator-main" ]; then
+    if [ "$CONTAINER_ID" -eq 0 ]; then
         MODE_ARG="--mode coordinator"
     else
         MODE_ARG="--mode worker"
@@ -162,7 +157,8 @@ start_container() {
       --subtensor_network finney \
       --wallet_name validator_72 \
       --wallet_hotkey default \
-      --lead-range "$START_LEAD-$END_LEAD" \
+      --container-id "$CONTAINER_ID" \
+      --total-containers "$TOTAL_CONTAINERS" \
       $MODE_ARG > /dev/null
     
     echo "   ✅ Started: $CONTAINER_NAME"
@@ -175,24 +171,14 @@ echo "🚀 DEPLOYING CONTAINERS"
 echo "============================================================"
 echo ""
 
-# Container 1: Main validator (no proxy)
-START_LEAD=0
-END_LEAD=$LEADS_PER_CONTAINER
-start_container "leadpoet-validator-main" "" $START_LEAD $END_LEAD "Container 1: Main Validator"
+# Container 0: Coordinator (no proxy, ID=0)
+start_container "leadpoet-validator-main" "" 0 "Container 0: Coordinator"
 
-# Deploy worker containers (one per proxy)
+# Deploy worker containers (one per proxy, ID=1, 2, 3, ...)
 for i in $(seq 1 $PROXY_COUNT); do
-    CONTAINER_NUM=$((i + 1))
     PROXY_URL="${PROXIES[$((i-1))]}"
-    START_LEAD=$((i * LEADS_PER_CONTAINER))
-    END_LEAD=$(((i + 1) * LEADS_PER_CONTAINER))
-    
-    # Last container gets any remaining leads
-    if [ $i -eq $PROXY_COUNT ]; then
-        END_LEAD=$MAX_LEADS
-    fi
-    
-    start_container "leadpoet-validator-worker-$i" "$PROXY_URL" $START_LEAD $END_LEAD "Container $CONTAINER_NUM: Worker #$i"
+    CONTAINER_ID=$i
+    start_container "leadpoet-validator-worker-$i" "$PROXY_URL" "$CONTAINER_ID" "Container $CONTAINER_ID: Worker #$i"
 done
 
 # Wait for containers to start
@@ -257,19 +243,23 @@ echo "============================================================"
 echo ""
 echo "📊 Summary:"
 echo "   - Total containers: $TOTAL_CONTAINERS"
-echo "   - Leads per epoch: $MAX_LEADS"
-echo "   - Leads per container: ~$LEADS_PER_CONTAINER"
+echo "   - Lead distribution: FULLY DYNAMIC (adapts to gateway MAX_LEADS_PER_EPOCH)"
 echo "   - Unique IPs: $UNIQUE_COUNT / $TOTAL_COUNT"
+echo ""
+echo "   Examples of auto-scaling:"
+echo "   - Gateway @ 170 leads → Each container: ~57 leads"
+echo "   - Gateway @ 900 leads → Each container: 300 leads"
+echo "   - Gateway @ 1200 leads → Each container: 400 leads"
 echo ""
 echo "📋 Next Steps:"
 echo "   1. Monitor logs: docker logs -f leadpoet-validator-main"
 echo "   2. Check resource usage: docker stats"
-echo "   3. View all logs: docker-compose logs -f (if using docker-compose)"
+echo "   3. Verify lead distribution in logs (each container shows its range)"
 echo ""
 echo "🔧 To scale up (add more containers):"
 echo "   1. Get another proxy from https://www.webshare.io/"
 echo "   2. Add WEBSHARE_PROXY_$((PROXY_COUNT + 1))=... to .env.docker"
-echo "   3. Run: ./deploy_dynamic.sh $MAX_LEADS"
-echo "   Done! New container will auto-deploy with auto-calculated lead range."
+echo "   3. Run: ./deploy_dynamic.sh"
+echo "   Done! New container auto-joins and gets its share of leads."
 echo ""
 

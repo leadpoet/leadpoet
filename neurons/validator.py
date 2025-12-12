@@ -1669,22 +1669,38 @@ class Validator(BaseValidatorNeuron):
             print(f"✅ Received {len(leads)} leads from gateway")
             
             # ═══════════════════════════════════════════════════════════════════
-            # LEAD RANGE SLICING: Support for containerized parallel processing
+            # DYNAMIC LEAD DISTRIBUTION: Auto-calculate ranges for containers
             # ═══════════════════════════════════════════════════════════════════
-            lead_range = getattr(self.config.neuron, 'lead_range', None)
-            if lead_range:
-                try:
-                    # Parse lead range (e.g., "0-170" or "170-340")
-                    start, end = map(int, lead_range.split('-'))
-                    original_count = len(leads)
-                    leads = leads[start:end]
-                    print(f"📦 Container processing leads {start}-{end} ({len(leads)}/{original_count} leads)")
-                    print(f"   (Containerized parallel processing mode)")
-                except Exception as e:
-                    print(f"⚠️  Invalid --lead-range format: {lead_range}")
-                    print(f"   Expected format: '0-170' or '170-340'")
-                    print(f"   Error: {e}")
-                    print(f"   Processing ALL {len(leads)} leads instead...")
+            container_id = getattr(self.config.neuron, 'container_id', None)
+            total_containers = getattr(self.config.neuron, 'total_containers', None)
+            
+            if container_id is not None and total_containers is not None:
+                # DYNAMIC CALCULATION: Auto-distribute leads across containers
+                original_count = len(leads)
+                
+                # Calculate this container's slice
+                leads_per_container = original_count // total_containers
+                remainder = original_count % total_containers
+                
+                # First 'remainder' containers get 1 extra lead to distribute remainder evenly
+                if container_id < remainder:
+                    start = container_id * (leads_per_container + 1)
+                    end = start + leads_per_container + 1
+                else:
+                    start = (remainder * (leads_per_container + 1)) + ((container_id - remainder) * leads_per_container)
+                    end = start + leads_per_container
+                
+                leads = leads[start:end]
+                lead_range_str = f"{start}-{end}"
+                
+                print(f"📦 Container {container_id}/{total_containers}: Processing leads {start}-{end}")
+                print(f"   ({len(leads)}/{original_count} leads assigned to this container)")
+                print(f"   Gateway MAX_LEADS_PER_EPOCH: {max_leads_per_epoch}")
+                print(f"   (Dynamic distribution - adapts to any gateway setting)")
+                print("")
+            else:
+                # No containerization - process all leads
+                lead_range_str = None
             
             print(f"🔍 Running automated checks on each lead...")
             print("")
@@ -1840,9 +1856,8 @@ class Validator(BaseValidatorNeuron):
             # CONTAINER MODE HANDLING: Worker vs Coordinator
             # ═══════════════════════════════════════════════════════════════════
             container_mode = getattr(self.config.neuron, 'mode', None)
-            lead_range = getattr(self.config.neuron, 'lead_range', None)
             
-            if container_mode == "worker" and lead_range:
+            if container_mode == "worker" and lead_range_str:
                 # WORKER MODE: Write results to JSON and exit (don't submit to gateway)
                 print(f"{'='*80}")
                 print(f"👷 WORKER MODE: Writing validation results to shared file")
@@ -1852,19 +1867,20 @@ class Validator(BaseValidatorNeuron):
                     "validation_results": validation_results,  # For gateway submission
                     "local_validation_data": local_validation_data,  # For reveals
                     "epoch_id": current_epoch,
-                    "lead_range": lead_range,
+                    "lead_range": lead_range_str,
+                    "container_id": container_id,
                     "timestamp": time.time()
                 }
                 
-                # Write to shared volume (validator_weights/worker_results_<range>.json)
-                range_slug = lead_range.replace('-', '_')
-                worker_file = os.path.join("validator_weights", f"worker_results_{range_slug}.json")
+                # Write to shared volume (validator_weights/worker_results_<container_id>.json)
+                worker_file = os.path.join("validator_weights", f"worker_results_container_{container_id}.json")
                 with open(worker_file, 'w') as f:
                     json.dump(worker_results, f, indent=2)
                 
                 print(f"✅ Worker wrote {len(validation_results)} validation results to {worker_file}")
                 print(f"   Epoch: {current_epoch}")
-                print(f"   Lead range: {lead_range}")
+                print(f"   Container ID: {container_id}")
+                print(f"   Lead range: {lead_range_str}")
                 print(f"   Worker exiting (coordinator will submit to gateway)")
                 print(f"{'='*80}\n")
                 
@@ -1875,32 +1891,18 @@ class Validator(BaseValidatorNeuron):
                 import sys
                 sys.exit(0)
             
-            elif container_mode == "coordinator" and lead_range:
+            elif container_mode == "coordinator" and container_id is not None and total_containers is not None:
                 # COORDINATOR MODE: Wait for workers, aggregate results, then submit
                 print(f"{'='*80}")
                 print(f"📡 COORDINATOR MODE: Waiting for worker results")
                 print(f"{'='*80}")
                 
-                # Parse own lead range to determine how many workers to wait for
-                start, end = map(int, lead_range.split('-'))
-                total_leads = len(leads) if leads else 170  # Total leads in epoch
+                # Determine worker IDs (all containers except coordinator)
+                worker_ids = [i for i in range(total_containers) if i != container_id]
+                num_workers = len(worker_ids)
                 
-                # Calculate expected worker ranges
-                # If coordinator is 0-57, workers should be 57-114 and 114-170
-                worker_ranges = []
-                if end < total_leads:
-                    # There are workers
-                    remaining_leads = total_leads - end
-                    if remaining_leads > 0:
-                        # Calculate how many workers based on lead distribution
-                        # Assuming 3 containers total: 1 coordinator + 2 workers
-                        leads_per_container = total_leads // 3
-                        worker_ranges.append(f"{end}-{end + leads_per_container}")
-                        if end + leads_per_container < total_leads:
-                            worker_ranges.append(f"{end + leads_per_container}-{total_leads}")
-                
-                print(f"   Coordinator processed: {lead_range} ({len(validation_results)} results)")
-                print(f"   Waiting for {len(worker_ranges)} workers: {worker_ranges}")
+                print(f"   Coordinator (Container {container_id}): Processed {lead_range_str} ({len(validation_results)} results)")
+                print(f"   Waiting for {num_workers} workers: Container IDs {worker_ids}")
                 
                 # Wait for worker result files (with timeout)
                 import time as time_module
@@ -1909,21 +1911,21 @@ class Validator(BaseValidatorNeuron):
                 waited = 0
                 
                 worker_files = []
-                for worker_range in worker_ranges:
-                    range_slug = worker_range.replace('-', '_')
-                    worker_file = os.path.join("validator_weights", f"worker_results_{range_slug}.json")
-                    worker_files.append((worker_range, worker_file))
+                for worker_id in worker_ids:
+                    worker_file = os.path.join("validator_weights", f"worker_results_container_{worker_id}.json")
+                    worker_files.append((worker_id, worker_file))
                 
                 all_workers_ready = False
                 while waited < max_wait and not all_workers_ready:
                     all_workers_ready = all(os.path.exists(wf[1]) for wf in worker_files)
                     if not all_workers_ready:
-                        missing = [wf[0] for wf in worker_files if not os.path.exists(wf[1])]
+                        missing = [f"Container-{wf[0]}" for wf in worker_files if not os.path.exists(wf[1])]
                         print(f"   ⏳ Waiting for workers: {missing} ({waited}s / {max_wait}s)")
                         await asyncio.sleep(check_interval)
                         waited += check_interval
                     else:
-                        print(f"   ✅ All {len(worker_files)} workers finished ({waited}s)")
+                        print(f"   ✅ All {len(worker_files)} workers finished in {waited}s")
+                        break
                 
                 if not all_workers_ready:
                     print(f"   ⚠️  TIMEOUT: Not all workers finished after {max_wait}s")
@@ -1933,7 +1935,7 @@ class Validator(BaseValidatorNeuron):
                 aggregated_validation_results = list(validation_results)  # Copy coordinator's results
                 aggregated_local_validation_data = list(local_validation_data)  # Copy coordinator's reveals
                 
-                for worker_range, worker_file in worker_files:
+                for worker_id, worker_file in worker_files:
                     if os.path.exists(worker_file):
                         try:
                             with open(worker_file, 'r') as f:
@@ -1941,16 +1943,17 @@ class Validator(BaseValidatorNeuron):
                             
                             worker_validations = worker_data.get("validation_results", [])
                             worker_reveals = worker_data.get("local_validation_data", [])
+                            worker_range = worker_data.get("lead_range", "unknown")
                             
                             aggregated_validation_results.extend(worker_validations)
                             aggregated_local_validation_data.extend(worker_reveals)
                             
-                            print(f"   ✅ Aggregated {len(worker_validations)} results from worker {worker_range}")
+                            print(f"   ✅ Aggregated {len(worker_validations)} results from Container-{worker_id} (range: {worker_range})")
                             
                             # Delete worker file after successful aggregation
                             os.remove(worker_file)
                         except Exception as e:
-                            print(f"   ⚠️  Failed to load worker {worker_range}: {e}")
+                            print(f"   ⚠️  Failed to load worker Container-{worker_id}: {e}")
                 
                 # Replace local lists with aggregated results
                 validation_results = aggregated_validation_results
@@ -4153,7 +4156,8 @@ def main():
     parser.add_argument("--netuid", type=int, default=71, help="Network UID")
     parser.add_argument("--subtensor_network", type=str, default=os.getenv("SUBTENSOR_NETWORK", "finney"), help="Subtensor network (default: finney, or from SUBTENSOR_NETWORK env var)")
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
-    parser.add_argument("--lead-range", type=str, help="Lead range to process (e.g., '0-57' or '57-114'). Used for containerized parallel processing. If not set, processes ALL leads.")
+    parser.add_argument("--container-id", type=int, help="Container ID (0, 1, 2, etc.) for dynamic lead distribution. Container 0 is coordinator.")
+    parser.add_argument("--total-containers", type=int, help="Total number of containers running (for dynamic lead distribution)")
     parser.add_argument("--mode", type=str, choices=["coordinator", "worker"], help="Container mode: 'coordinator' waits for workers and submits to gateway, 'worker' validates and writes results to JSON")
     args = parser.parse_args()
 
@@ -4181,7 +4185,8 @@ def main():
     config.subtensor.network = args.subtensor_network
     config.neuron = bt.Config()
     config.neuron.disable_set_weights = getattr(args, 'neuron_disable_set_weights', False)
-    config.neuron.lead_range = getattr(args, 'lead_range', None)  # Lead range for containerized processing
+    config.neuron.container_id = getattr(args, 'container_id', None)  # Container ID (0, 1, 2, ...)
+    config.neuron.total_containers = getattr(args, 'total_containers', None)  # Total containers
     config.neuron.mode = getattr(args, 'mode', None)  # Container mode: coordinator/worker
 
     # Start the background epoch monitor AFTER config is set (so network is correct)

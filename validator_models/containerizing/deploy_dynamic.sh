@@ -105,8 +105,20 @@ cd "$(dirname "$0")"  # Go to script directory
 SCRIPT_DIR=$(pwd)
 REPO_ROOT=$(cd ../.. && pwd)  # Go to repo root
 
-docker build -f "$SCRIPT_DIR/Dockerfile" -t leadpoet-validator:latest "$REPO_ROOT" 2>&1 | grep -E "(Step|Successfully|FINISHED)" || true
-echo "✅ Docker image built"
+if docker build -f "$SCRIPT_DIR/Dockerfile" -t leadpoet-validator:latest "$REPO_ROOT"; then
+    echo "✅ Docker image built successfully"
+else
+    echo "❌ ERROR: Docker build failed"
+    echo "   This usually means:"
+    echo "   1. Dockerfile syntax error"
+    echo "   2. Missing dependencies in requirements.txt"
+    echo "   3. Network issues downloading packages"
+    echo ""
+    echo "   Run manually to see full error:"
+    echo "   cd ~/leadpoet/leadpoet"
+    echo "   docker build -f validator_models/containerizing/Dockerfile -t leadpoet-validator:latest ."
+    exit 1
+fi
 echo ""
 
 # Stop and remove existing containers

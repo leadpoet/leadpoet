@@ -2104,6 +2104,17 @@ class Validator(BaseValidatorNeuron):
                         new_epoch = new_block // 360
                         blocks_into_epoch = new_block % 360
                         
+                        # Update block file for workers every ~12 seconds during validation
+                        container_mode_check = getattr(self.config.neuron, 'mode', None)
+                        if container_mode_check != "worker":
+                            if not hasattr(self, '_block_file_write_counter_validation'):
+                                self._block_file_write_counter_validation = 0
+                            
+                            self._block_file_write_counter_validation += 1
+                            if self._block_file_write_counter_validation >= 6:  # Every ~12s (6 leads × 2s)
+                                self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
+                                self._block_file_write_counter_validation = 0
+                        
                         if new_epoch > current_epoch:
                             print(f"\n{'='*80}")
                             print(f"⚠️  EPOCH CHANGED: {current_epoch} → {new_epoch}")
@@ -2155,6 +2166,17 @@ class Validator(BaseValidatorNeuron):
                         new_block = await self.get_current_block_async()
                         new_epoch = new_block // 360
                         blocks_into_epoch = new_block % 360
+                        
+                        # Update block file for workers every ~12 seconds during validation
+                        container_mode_check = getattr(self.config.neuron, 'mode', None)
+                        if container_mode_check != "worker":
+                            if not hasattr(self, '_block_file_write_counter_validation'):
+                                self._block_file_write_counter_validation = 0
+                            
+                            self._block_file_write_counter_validation += 1
+                            if self._block_file_write_counter_validation >= 6:  # Every ~12s (6 leads × 2s)
+                                self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
+                                self._block_file_write_counter_validation = 0
                         
                         if new_epoch > current_epoch:
                             print(f"\n{'='*80}")

@@ -618,15 +618,32 @@ class Validator(BaseValidatorNeuron):
         Call this from run() before entering main validation loop.
         """
         import bittensor as bt
+        import os
         
         bt.logging.info(f"🔗 Initializing AsyncSubtensor for network: {self.config.subtensor.network}")
         
-        # Create async subtensor (single instance for entire lifecycle)
-        self.async_subtensor = bt.AsyncSubtensor(network=self.config.subtensor.network)
+        # ════════════════════════════════════════════════════════════
+        # PROXY BYPASS FOR ASYNC BITTENSOR WEBSOCKET
+        # ════════════════════════════════════════════════════════════
+        # Temporarily unset proxy env vars for async Bittensor init
+        proxy_env_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
+        saved_proxies = {}
+        for var in proxy_env_vars:
+            if var in os.environ:
+                saved_proxies[var] = os.environ[var]
+                del os.environ[var]
         
-        bt.logging.info(f"✅ AsyncSubtensor initialized")
-        bt.logging.info(f"   Endpoint: {self.async_subtensor.chain_endpoint}")
-        bt.logging.info(f"   Network: {self.async_subtensor.network}")
+        try:
+            # Create async subtensor (single instance for entire lifecycle)
+            self.async_subtensor = bt.AsyncSubtensor(network=self.config.subtensor.network)
+            
+            bt.logging.info(f"✅ AsyncSubtensor initialized")
+            bt.logging.info(f"   Endpoint: {self.async_subtensor.chain_endpoint}")
+            bt.logging.info(f"   Network: {self.async_subtensor.network}")
+        finally:
+            # Restore proxy environment variables for API calls
+            for var, value in saved_proxies.items():
+                os.environ[var] = value
     
     async def get_current_block_async(self) -> int:
         """
@@ -644,6 +661,98 @@ class Validator(BaseValidatorNeuron):
         # This avoids WebSocket subscription conflicts from AsyncSubtensor
         # Block queries are frequent (every few seconds) and fast, so sync is preferred
         return self.subtensor.block
+    
+    def _write_shared_block_file(self, block: int, epoch: int, blocks_into_epoch: int):
+        """
+        Write current block/epoch info to shared file for worker containers.
+        
+        This allows workers to check block/epoch without connecting to Bittensor.
+        Only coordinator calls this (every 12 seconds).
+        """
+        import json
+        import time
+        from pathlib import Path
+        
+        block_file = Path("validator_weights") / "current_block.json"
+        data = {
+            "block": block,
+            "epoch": epoch,
+            "blocks_into_epoch": blocks_into_epoch,
+            "timestamp": int(time.time())
+        }
+        
+        try:
+            with open(block_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            bt.logging.warning(f"Failed to write shared block file: {e}")
+    
+    def _read_shared_block_file(self) -> tuple:
+        """
+        Read current block/epoch info from shared file (for worker containers).
+        
+        Returns:
+            (block, epoch, blocks_into_epoch) tuple
+        
+        Raises:
+            Exception: If file doesn't exist, is too old (>30s), or is corrupted
+        """
+        import json
+        import time
+        from pathlib import Path
+        
+        block_file = Path("validator_weights") / "current_block.json"
+        
+        if not block_file.exists():
+            raise Exception("Shared block file not found (coordinator hasn't written it yet)")
+        
+        try:
+            with open(block_file, 'r') as f:
+                data = json.load(f)
+            
+            # Check if data is stale (>30 seconds old)
+            current_time = int(time.time())
+            file_age = current_time - data.get("timestamp", 0)
+            
+            if file_age > 30:
+                raise Exception(f"Shared block file is stale ({file_age}s old)")
+            
+            return (data["block"], data["epoch"], data["blocks_into_epoch"])
+        
+        except Exception as e:
+            raise Exception(f"Failed to read shared block file: {e}")
+    
+    def _start_block_file_updater(self):
+        """
+        Start background thread to update shared block file every 12 seconds (coordinator only).
+        
+        This allows worker containers to check block/epoch without Bittensor connection.
+        """
+        import threading
+        import time
+        
+        def update_loop():
+            """Background thread that updates shared block file every 12 seconds."""
+            while True:
+                try:
+                    # Get current block/epoch from Bittensor
+                    current_block = self.subtensor.block
+                    current_epoch = current_block // 360
+                    blocks_into_epoch = current_block % 360
+                    
+                    # Write to shared file
+                    self._write_shared_block_file(current_block, current_epoch, blocks_into_epoch)
+                    
+                except Exception as e:
+                    bt.logging.warning(f"Block file updater error: {e}")
+                
+                # Wait 12 seconds before next update
+                time.sleep(12)
+        
+        # Start background thread (daemon so it exits when main process exits)
+        updater_thread = threading.Thread(target=update_loop, daemon=True)
+        updater_thread.start()
+        bt.logging.info("📊 Started shared block file updater (every 12 seconds)")
     
     async def cleanup_async_subtensor(self):
         """Clean up async subtensor on shutdown."""
@@ -1532,6 +1641,16 @@ class Validator(BaseValidatorNeuron):
             )
             bt.logging.info("✅ Block subscription started (WebSocket will stay alive)")
             
+            # ════════════════════════════════════════════════════════════
+            # SHARED BLOCK FILE UPDATER: For worker containers
+            # ════════════════════════════════════════════════════════════
+            # Only coordinator needs to update the shared block file
+            # Workers read from it instead of connecting to Bittensor
+            container_mode_init = getattr(self.config.neuron, 'mode', None)
+            if container_mode_init != "worker":
+                # Coordinator or single-validator mode: Start block file updater
+                self._start_block_file_updater()
+            
             try:
                 # Keep the validator running and continuously process leads
                 while not self.should_exit:
@@ -1687,10 +1806,23 @@ class Validator(BaseValidatorNeuron):
             return
         
         try:
-            # Get current epoch_id from Bittensor block using async subtensor
-            current_block = await self.get_current_block_async()
-            epoch_length = 360  # blocks per epoch
-            current_epoch = current_block // epoch_length
+            # Get current epoch_id from Bittensor block
+            # Workers read from shared file (no Bittensor connection), coordinator uses Bittensor
+            container_mode_check = getattr(self.config.neuron, 'mode', None)
+            
+            if container_mode_check == "worker":
+                # WORKER: Read from shared block file (no Bittensor connection)
+                try:
+                    current_block, current_epoch, blocks_into_epoch = self._read_shared_block_file()
+                except Exception as e:
+                    print(f"⏳ Worker: Waiting for coordinator to write block file... ({e})")
+                    await asyncio.sleep(5)
+                    return
+            else:
+                # COORDINATOR or SINGLE: Use Bittensor connection
+                current_block = await self.get_current_block_async()
+                epoch_length = 360  # blocks per epoch
+                current_epoch = current_block // epoch_length
             
             # DEBUG: Always log epoch status
             print(f"[DEBUG] Current epoch: {current_epoch}, Block: {current_block}, Last processed: {getattr(self, '_last_processed_epoch', 'None')}")
@@ -1759,10 +1891,12 @@ class Validator(BaseValidatorNeuron):
                     await asyncio.sleep(check_interval)
                     waited += check_interval
                     
-                    # CRITICAL: Check current block and epoch
-                    check_block = await self.get_current_block_async()
-                    check_epoch = check_block // 360
-                    blocks_into_epoch = check_block % 360
+                    # CRITICAL: Check current block and epoch from shared file
+                    try:
+                        check_block, check_epoch, blocks_into_epoch = self._read_shared_block_file()
+                    except Exception as e:
+                        # Coordinator hasn't updated file yet, keep waiting
+                        continue
                     
                     # Epoch changed while waiting - abort this epoch
                     if check_epoch > current_epoch:
@@ -1771,10 +1905,10 @@ class Validator(BaseValidatorNeuron):
                         await asyncio.sleep(10)
                         return
                     
-                    # Too late to start validation (block 200+ cutoff)
-                    if blocks_into_epoch >= 200:
+                    # Too late to start validation (block 275+ cutoff)
+                    if blocks_into_epoch >= 275:
                         print(f"❌ Worker: Too late to start validation (block {blocks_into_epoch}/360)")
-                        print(f"   Cutoff is block 200 - not enough time to complete before epoch end")
+                        print(f"   Cutoff is block 275 - not enough time to complete before epoch end")
                         print(f"   Skipping epoch {current_epoch}, will process next epoch")
                         await asyncio.sleep(10)
                         return

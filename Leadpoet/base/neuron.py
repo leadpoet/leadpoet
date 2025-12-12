@@ -13,6 +13,21 @@ class BaseNeuron:
         self.config = config
         self.wallet = bt.wallet(config=self.config)
         bt.logging.debug("Initializing subtensor for real network")
+        
+        # ════════════════════════════════════════════════════════════
+        # PROXY BYPASS FOR BITTENSOR WEBSOCKET
+        # ════════════════════════════════════════════════════════════
+        # Workers use HTTP proxies for API calls (different IPs), but websocket
+        # connections to Bittensor must bypass the proxy (proxies don't support websockets)
+        # Temporarily unset proxy env vars for Bittensor init, then restore them
+        import os
+        proxy_env_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
+        saved_proxies = {}
+        for var in proxy_env_vars:
+            if var in os.environ:
+                saved_proxies[var] = os.environ[var]
+                del os.environ[var]
+        
         try:
             if not hasattr(self.config, 'subtensor') or not hasattr(self.config.subtensor, 'chain_endpoint'):
                 self.config.subtensor = bt.Config()
@@ -23,6 +38,11 @@ class BaseNeuron:
         except Exception as e:
             bt.logging.error(f"Failed to initialize bt.subtensor: {e}")
             raise RuntimeError(f"Subtensor initialization failed: {e}")
+        finally:
+            # Restore proxy environment variables for API calls
+            for var, value in saved_proxies.items():
+                os.environ[var] = value
+        
         self.metagraph = bt.metagraph(netuid=self.config.netuid, subtensor=self.subtensor)
         self.step = 0
         self.block = self.subtensor.get_current_block()

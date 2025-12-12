@@ -267,8 +267,8 @@ async def get_epoch_leads(
                 asyncio.to_thread(
                     lambda: supabase.table("leads_private")
                         .select("lead_id, lead_blob, lead_blob_hash")
-                        .eq("status", "pending")
-                        .order("created_at", desc=False)  # FIFO order
+                        .eq("status", "pending_validation")  # FIX: Use correct status
+                        .order("created_ts", desc=False)  # FIX: Use consistent column (FIFO)
                         .limit(MAX_LEADS_PER_EPOCH)
                         .execute()
                 ),

@@ -22,8 +22,9 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
-# Global cache: {epoch_id: [lead1, lead2, ...]}
-_epoch_leads_cache: Dict[int, List[Dict[str, Any]]] = {}
+# Global cache: {epoch_id: {"epoch_id": int, "leads": [lead1, lead2, ...]}}
+# Changed to store epoch_id inside cache value for validation
+_epoch_leads_cache: Dict[int, Dict[str, Any]] = {}
 _cache_lock = threading.Lock()
 _prefetch_in_progress = False
 _prefetch_lock = threading.Lock()
@@ -46,7 +47,17 @@ def get_cached_leads(epoch_id: int) -> Optional[List[Dict[str, Any]]]:
     """
     with _cache_lock:
         if epoch_id in _epoch_leads_cache:
-            leads = _epoch_leads_cache[epoch_id]
+            cache_entry = _epoch_leads_cache[epoch_id]
+            cached_epoch_id = cache_entry.get("epoch_id")
+            leads = cache_entry.get("leads", [])
+            
+            # CRITICAL: Validate cached epoch_id matches requested epoch_id
+            if cached_epoch_id != epoch_id:
+                print(f"❌ [CACHE CORRUPTION] Requested epoch {epoch_id} but cache contains epoch {cached_epoch_id}!")
+                print(f"   Removing corrupted cache entry to prevent serving wrong data")
+                del _epoch_leads_cache[epoch_id]
+                return None
+            
             print(f"✅ [CACHE HIT] Serving {len(leads)} leads for epoch {epoch_id} from cache")
             return leads
         else:
@@ -67,7 +78,11 @@ def set_cached_leads(epoch_id: int, leads: List[Dict[str, Any]]):
         >>> set_cached_leads(16221, leads)
     """
     with _cache_lock:
-        _epoch_leads_cache[epoch_id] = leads
+        # Store epoch_id alongside leads for validation on retrieval
+        _epoch_leads_cache[epoch_id] = {
+            "epoch_id": epoch_id,
+            "leads": leads
+        }
         print(f"💾 [CACHE SET] Stored {len(leads)} leads for epoch {epoch_id}")
         print(f"   Cache now contains epochs: {sorted(_epoch_leads_cache.keys())}")
 
@@ -84,7 +99,8 @@ def clear_epoch_cache(epoch_id: int):
     """
     with _cache_lock:
         if epoch_id in _epoch_leads_cache:
-            lead_count = len(_epoch_leads_cache[epoch_id])
+            cache_entry = _epoch_leads_cache[epoch_id]
+            lead_count = len(cache_entry.get("leads", []))
             del _epoch_leads_cache[epoch_id]
             print(f"🧹 [CACHE CLEAR] Removed {lead_count} leads for epoch {epoch_id}")
             print(f"   Cache now contains epochs: {sorted(_epoch_leads_cache.keys())}")
@@ -108,7 +124,8 @@ def cleanup_old_epochs(current_epoch: int):
     with _cache_lock:
         old_epochs = [e for e in _epoch_leads_cache if e < current_epoch - 1]
         for epoch in old_epochs:
-            lead_count = len(_epoch_leads_cache[epoch])
+            cache_entry = _epoch_leads_cache[epoch]
+            lead_count = len(cache_entry.get("leads", []))
             del _epoch_leads_cache[epoch]
             print(f"🧹 [CACHE CLEANUP] Removed {lead_count} leads for old epoch {epoch}")
         
@@ -154,7 +171,7 @@ def get_cache_stats() -> Dict[str, Any]:
     with _cache_lock:
         stats = {
             "cached_epochs": sorted(_epoch_leads_cache.keys()),
-            "total_cached_leads": sum(len(leads) for leads in _epoch_leads_cache.values()),
+            "total_cached_leads": sum(len(entry.get("leads", [])) for entry in _epoch_leads_cache.values()),
             "epoch_count": len(_epoch_leads_cache)
         }
         return stats

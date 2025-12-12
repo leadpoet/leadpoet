@@ -1796,8 +1796,15 @@ class Validator(BaseValidatorNeuron):
                 
                 # Write block info to shared file for workers (if coordinator/single mode)
                 # This happens inline (no separate thread) to avoid websocket concurrency issues
+                # Only write every 12 seconds to reduce disk I/O
                 if container_mode_check != "worker":
-                    self._write_shared_block_file(current_block, current_epoch, blocks_into_epoch)
+                    if not hasattr(self, '_block_file_write_counter'):
+                        self._block_file_write_counter = 0
+                    
+                    self._block_file_write_counter += 1
+                    if self._block_file_write_counter >= 12:
+                        self._write_shared_block_file(current_block, current_epoch, blocks_into_epoch)
+                        self._block_file_write_counter = 0
             
             # DEBUG: Always log epoch status
             print(f"[DEBUG] Current epoch: {current_epoch}, Block: {current_block}, Last processed: {getattr(self, '_last_processed_epoch', 'None')}")

@@ -11,6 +11,7 @@ services:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro  # Read-only wallet access
       - ./validator_weights:/app/validator_weights  # Shared weights directory
     environment:
+      - MEV_API_KEY=${MEV_API_KEY}
       - TRUELIST_API_KEY=${TRUELIST_API_KEY}
       - SCRAPINGDOG_API_KEY=${SCRAPINGDOG_API_KEY}
       - OPENROUTER_KEY=${OPENROUTER_KEY}
@@ -39,6 +40,7 @@ services:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
       - ./validator_weights:/app/validator_weights
     environment:
+      - MEV_API_KEY=${MEV_API_KEY}
       - TRUELIST_API_KEY=${TRUELIST_API_KEY}
       - SCRAPINGDOG_API_KEY=${SCRAPINGDOG_API_KEY}
       - OPENROUTER_KEY=${OPENROUTER_KEY}
@@ -68,6 +70,7 @@ services:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
       - ./validator_weights:/app/validator_weights
     environment:
+      - MEV_API_KEY=${MEV_API_KEY}
       - TRUELIST_API_KEY=${TRUELIST_API_KEY}
       - SCRAPINGDOG_API_KEY=${SCRAPINGDOG_API_KEY}
       - OPENROUTER_KEY=${OPENROUTER_KEY}

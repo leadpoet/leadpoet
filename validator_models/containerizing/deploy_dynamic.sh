@@ -93,9 +93,21 @@ echo "📊 Lead distribution: DYNAMIC (each container auto-calculates based on g
 echo ""
 
 # Verify required API keys
-if [ -z "$TRUELIST_API_KEY" ] || [ -z "$SCRAPINGDOG_API_KEY" ]; then
-    echo "❌ ERROR: Required API keys not set in .env.docker"
-    echo "   Please set: TRUELIST_API_KEY, SCRAPINGDOG_API_KEY, OPENROUTER_KEY"
+# Email verification: Require EITHER MEV_API_KEY OR TRUELIST_API_KEY (not both)
+if [ -z "$MEV_API_KEY" ] && [ -z "$TRUELIST_API_KEY" ]; then
+    echo "❌ ERROR: No email verification API key configured in .env"
+    echo "   Please set EITHER:"
+    echo "   - MEV_API_KEY (MyEmailVerifier) OR"
+    echo "   - TRUELIST_API_KEY (TrueList)"
+    echo ""
+    echo "   The validator will automatically use whichever is available."
+    exit 1
+fi
+
+# Other required API keys
+if [ -z "$SCRAPINGDOG_API_KEY" ] || [ -z "$OPENROUTER_KEY" ]; then
+    echo "❌ ERROR: Required API keys not set in .env"
+    echo "   Please set: SCRAPINGDOG_API_KEY, OPENROUTER_KEY"
     exit 1
 fi
 
@@ -166,6 +178,7 @@ start_container() {
       -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
       -e LEADPOET_CONTAINER_MODE=1 \
       -e LEADPOET_WRAPPER_ACTIVE=1 \
+      -e MEV_API_KEY="$MEV_API_KEY" \
       -e TRUELIST_API_KEY="$TRUELIST_API_KEY" \
       -e SCRAPINGDOG_API_KEY="$SCRAPINGDOG_API_KEY" \
       -e OPENROUTER_KEY="$OPENROUTER_KEY" \

@@ -2040,17 +2040,18 @@ class Validator(BaseValidatorNeuron):
                 while waited < max_wait and not all_workers_ready:
                     all_workers_ready = all(os.path.exists(wf[1]) for wf in worker_files)
                     if not all_workers_ready:
-                        # Check if we're approaching block 350 (weight submission deadline)
+                        # Check if we're approaching block 342 (safety net for weight submission)
                         current_block_check = await self.get_current_block_async()
                         blocks_into_epoch_check = current_block_check % 360
                         
-                        # FORCE PROCEED at block 350 (even if workers not done)
-                        if blocks_into_epoch_check >= 350:
-                            print(f"   ⏰ BLOCK 350+ REACHED: Force proceeding with available results")
+                        # FORCE PROCEED at block 342 (safety net - workers normally finish much earlier)
+                        if blocks_into_epoch_check >= 342:
+                            print(f"   ⏰ BLOCK 342+ REACHED: Force proceeding with available results")
                             print(f"      Block: {blocks_into_epoch_check}/360")
+                            print(f"      (Safety net only - workers normally finish by block 100)")
                             missing = [f"Container-{wf[0]}" for wf in worker_files if not os.path.exists(wf[1])]
                             print(f"      Missing workers: {missing}")
-                            print(f"      Proceeding with partial results to meet weight deadline")
+                            print(f"      Proceeding with partial results")
                             break
                         
                         missing = [f"Container-{wf[0]}" for wf in worker_files if not os.path.exists(wf[1])]

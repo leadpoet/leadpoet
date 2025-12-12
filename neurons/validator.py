@@ -1654,16 +1654,20 @@ class Validator(BaseValidatorNeuron):
                 print(f"⏳ Worker waiting for coordinator to fetch leads for epoch {current_epoch}...")
                 leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
                 
-                max_wait = 300  # 5 minutes max
+                # Keep checking indefinitely (coordinator might be slow)
+                # Log every 5 minutes to show we're still waiting
                 waited = 0
-                while not leads_file.exists() and waited < max_wait:
-                    await asyncio.sleep(2)
-                    waited += 2
+                log_interval = 300  # Log every 5 minutes
+                check_interval = 5  # Check every 5 seconds
                 
-                if not leads_file.exists():
-                    print(f"❌ Timeout waiting for coordinator to fetch leads (waited {max_wait}s)")
-                    await asyncio.sleep(30)
-                    return
+                while not leads_file.exists():
+                    await asyncio.sleep(check_interval)
+                    waited += check_interval
+                    
+                    # Log progress every 5 minutes
+                    if waited % log_interval == 0:
+                        print(f"   ⏳ Still waiting for coordinator... ({waited}s elapsed)")
+                        print(f"      Checking for: {leads_file}")
                 
                 # Read leads from shared file
                 with open(leads_file, 'r') as f:
@@ -1671,7 +1675,7 @@ class Validator(BaseValidatorNeuron):
                     leads = data.get("leads")
                     max_leads_per_epoch = data.get("max_leads_per_epoch")
                 
-                print(f"✅ Worker loaded {len(leads) if leads else 0} leads from coordinator")
+                print(f"✅ Worker loaded {len(leads) if leads else 0} leads from coordinator (waited {waited}s)")
                 
             else:
                 # DEFAULT: Single validator mode (no containers)

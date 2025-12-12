@@ -62,7 +62,7 @@ for i in {1..20}; do
     
     if [ -n "$PROXY_VALUE" ] && [ "$PROXY_VALUE" != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80" ]; then
         PROXIES+=("$PROXY_VALUE")
-        ((PROXY_COUNT++))
+        PROXY_COUNT=$((PROXY_COUNT + 1))
     fi
 done
 

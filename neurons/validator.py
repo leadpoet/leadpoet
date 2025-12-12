@@ -101,6 +101,12 @@ while true; do
         CURRENT_COMMIT=$(git rev-parse --short HEAD)
         echo "✅ Repository updated"
         echo "   Current commit: $CURRENT_COMMIT"
+        
+        # Auto-install new/updated Python packages if requirements.txt changed
+        if git diff HEAD@{1} HEAD --name-only | grep -q "requirements.txt"; then
+            echo "📦 requirements.txt changed - updating packages..."
+            pip3 install -r requirements.txt --quiet || echo "   ⚠️  Package install failed (continuing anyway)"
+        fi
     else
         echo "⏭️  Could not update (offline or not a git repo)"
         echo "   Continuing with current version..."

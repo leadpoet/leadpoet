@@ -10,13 +10,12 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt setup.py ./
+# Copy entire codebase first (setup.py needs README.md)
+COPY . .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir -e .
-
-# Copy entire codebase
-COPY . .
 
 # Create validator_weights directory for state persistence
 RUN mkdir -p validator_weights

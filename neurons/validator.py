@@ -1631,10 +1631,52 @@ class Validator(BaseValidatorNeuron):
             # Fetch assigned leads from gateway
             from Leadpoet.utils.cloud_db import gateway_get_epoch_leads, gateway_submit_validation, gateway_submit_reveal
             
-            print(f"📡 Fetching leads from gateway for epoch {current_epoch}...")
+            # ═══════════════════════════════════════════════════════════════════
+            # OPTIMIZED LEAD FETCHING: Only coordinator calls gateway
+            # Workers read from shared file to avoid N duplicate API calls
+            # ═══════════════════════════════════════════════════════════════════
+            container_mode = getattr(self.config.neuron, 'mode', None)
+            container_id = getattr(self.config.neuron, 'container_id', None)
             
-            # Unpack tuple: (leads, max_leads_per_epoch)
-            leads, max_leads_per_epoch = gateway_get_epoch_leads(self.wallet, current_epoch)
+            if container_mode == "coordinator":
+                # COORDINATOR: Fetch from gateway and share via file
+                print(f"📡 Coordinator fetching leads from gateway for epoch {current_epoch}...")
+                leads, max_leads_per_epoch = gateway_get_epoch_leads(self.wallet, current_epoch)
+                
+                # Write to shared volume for workers to read
+                leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
+                with open(leads_file, 'w') as f:
+                    json.dump({"leads": leads, "max_leads_per_epoch": max_leads_per_epoch}, f)
+                print(f"   💾 Saved {len(leads) if leads else 0} leads to {leads_file} for workers")
+                
+            elif container_mode == "worker":
+                # WORKER: Wait for coordinator to fetch and share
+                print(f"⏳ Worker waiting for coordinator to fetch leads for epoch {current_epoch}...")
+                leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
+                
+                max_wait = 300  # 5 minutes max
+                waited = 0
+                while not leads_file.exists() and waited < max_wait:
+                    await asyncio.sleep(2)
+                    waited += 2
+                
+                if not leads_file.exists():
+                    print(f"❌ Timeout waiting for coordinator to fetch leads (waited {max_wait}s)")
+                    await asyncio.sleep(30)
+                    return
+                
+                # Read leads from shared file
+                with open(leads_file, 'r') as f:
+                    data = json.load(f)
+                    leads = data.get("leads")
+                    max_leads_per_epoch = data.get("max_leads_per_epoch")
+                
+                print(f"✅ Worker loaded {len(leads) if leads else 0} leads from coordinator")
+                
+            else:
+                # DEFAULT: Single validator mode (no containers)
+                print(f"📡 Fetching leads from gateway for epoch {current_epoch}...")
+                leads, max_leads_per_epoch = gateway_get_epoch_leads(self.wallet, current_epoch)
             
             # Store max_leads_per_epoch for use in submit_weights_at_epoch_end
             # This value comes dynamically from the gateway config
@@ -1972,6 +2014,12 @@ class Validator(BaseValidatorNeuron):
                 local_validation_data = aggregated_local_validation_data
                 
                 print(f"   📊 Total aggregated: {len(validation_results)} validations")
+                
+                # Clean up shared leads file (no longer needed)
+                leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
+                if leads_file.exists():
+                    os.remove(leads_file)
+                    print(f"   🧹 Cleaned up {leads_file.name}")
                 
                 # ═══════════════════════════════════════════════════════════════════
                 # COORDINATOR: Accumulate weights for ALL leads (coordinator + workers)

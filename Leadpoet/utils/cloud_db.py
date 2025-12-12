@@ -2025,8 +2025,20 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
         response.raise_for_status()
         
         result = response.json()
+        returned_epoch = result.get("epoch_id")
         leads = result.get("leads", [])
         max_leads_per_epoch = result.get("max_leads_per_epoch", 50)  # Default to 50 for backwards compatibility
+        
+        # CRITICAL: Validate gateway returned the correct epoch
+        if returned_epoch != epoch_id:
+            bt.logging.error(f"❌ EPOCH MISMATCH! Requested epoch {epoch_id} but gateway returned epoch {returned_epoch}")
+            bt.logging.error(f"   This is a critical gateway bug - rejecting leads to prevent validation failures")
+            return ([], max_leads_per_epoch)  # Return empty to trigger retry
+        
+        # DEBUG: Log first 3 lead IDs to help diagnose epoch mismatch bugs
+        if leads and len(leads) > 0:
+            lead_ids_sample = [lead.get('lead_id', 'unknown') for lead in leads[:3]]
+            bt.logging.info(f"   Lead IDs sample (first 3): {lead_ids_sample}")
         
         # Check if gateway returned a message (e.g., "already submitted")
         message = result.get("message", "")

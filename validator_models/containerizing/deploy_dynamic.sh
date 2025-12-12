@@ -22,28 +22,33 @@ echo "============================================================"
 echo "📊 Lead distribution: FULLY DYNAMIC (adapts to gateway setting)"
 echo ""
 
-# Check if .env.docker exists
-if [ ! -f ".env.docker" ]; then
-    echo "❌ ERROR: .env.docker file not found!"
+# SIMPLIFIED CONFIGURATION: Read from main .env file
+# Validators just add WEBSHARE_PROXY_1 and WEBSHARE_PROXY_2 to their existing .env
+MAIN_ENV_PATH="../../.env"
+
+if [ -f "$MAIN_ENV_PATH" ]; then
+    echo "📋 Loading configuration from main .env file..."
+    source "$MAIN_ENV_PATH"
+    echo "✅ Loaded from $MAIN_ENV_PATH"
+else
+    echo "❌ ERROR: Main .env file not found at $MAIN_ENV_PATH"
     echo ""
-    echo "Please create .env.docker with your configuration:"
-    echo "  cp docker.env.example .env.docker"
-    echo "  nano .env.docker"
+    echo "Expected location: ~/leadpoet/leadpoet/.env"
+    echo ""
+    echo "Please ensure your .env file exists with:"
+    echo "  - API keys (TRUELIST_API_KEY, SCRAPINGDOG_API_KEY, etc.)"
+    echo "  - Proxy URLs (WEBSHARE_PROXY_1, WEBSHARE_PROXY_2)"
     echo ""
     exit 1
 fi
 
-# Load proxy URLs from .env.docker
-echo "📋 Loading proxy configuration from .env.docker..."
-source .env.docker
-
-# Load API keys from main .env file if it exists (fallback if not in .env.docker)
-if [ -z "$TRUELIST_API_KEY" ] && [ -f "../../.env" ]; then
-    echo "📋 Loading API keys from main .env file..."
-    source ../../.env
+# OPTIONAL: Allow .env.docker to override main .env settings
+if [ -f ".env.docker" ]; then
+    echo "📋 Loading overrides from .env.docker..."
+    source .env.docker
+    echo "✅ Overrides loaded from .env.docker"
 fi
 
-echo "✅ Environment variables loaded"
 echo ""
 
 # Auto-detect proxies from .env.docker

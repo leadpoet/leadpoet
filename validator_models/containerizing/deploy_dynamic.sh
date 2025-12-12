@@ -131,6 +131,14 @@ start_container() {
         PROXY_ARGS="-e HTTP_PROXY=$PROXY_URL -e HTTPS_PROXY=$PROXY_URL"
     fi
     
+    # Determine container mode (main = coordinator, workers = worker)
+    local MODE_ARG=""
+    if [ "$CONTAINER_NAME" = "leadpoet-validator-main" ]; then
+        MODE_ARG="--mode coordinator"
+    else
+        MODE_ARG="--mode worker"
+    fi
+    
     docker run -d \
       --name "$CONTAINER_NAME" \
       --network host \
@@ -147,7 +155,8 @@ start_container() {
       --subtensor_network finney \
       --wallet_name validator_72 \
       --wallet_hotkey default \
-      --lead-range "$START_LEAD-$END_LEAD" > /dev/null
+      --lead-range "$START_LEAD-$END_LEAD" \
+      $MODE_ARG > /dev/null
     
     echo "   ✅ Started: $CONTAINER_NAME"
     echo ""

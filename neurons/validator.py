@@ -1766,15 +1766,27 @@ class Validator(BaseValidatorNeuron):
                         "salt": salt.hex()
                     })
                     
-                    # Accumulate weights in real-time for approved leads
-                    # Apply ICP multiplier to rep_score for emissions
-                    is_icp_multiplier = lead.get("is_icp_multiplier", 1.0)
-                    await self.accumulate_miner_weights(
-                        miner_hotkey=lead.get("miner_hotkey"),
-                        rep_score=rep_score,
-                        is_icp_multiplier=is_icp_multiplier,
-                        decision=decision
-                    )
+                    # Store weight data for later accumulation
+                    # Workers: Save in JSON for coordinator to aggregate
+                    # Coordinator/Default: Accumulate immediately (single validator)
+                    # Coordinator in containerized mode: Will re-accumulate all after aggregation
+                    container_mode = getattr(self.config.neuron, 'mode', None)
+                    
+                    # Store weight info in local_validation_data for aggregation
+                    if len(local_validation_data) > 0:
+                        local_validation_data[-1]["is_icp_multiplier"] = lead.get("is_icp_multiplier", 1.0)
+                    
+                    # Only accumulate now if NOT in container mode (backward compatibility)
+                    # In container mode, coordinator will accumulate ALL leads after aggregation
+                    if container_mode is None:
+                        # Traditional single-validator mode
+                        is_icp_multiplier = lead.get("is_icp_multiplier", 1.0)
+                        await self.accumulate_miner_weights(
+                            miner_hotkey=lead.get("miner_hotkey"),
+                            rep_score=rep_score,
+                            is_icp_multiplier=is_icp_multiplier,
+                            decision=decision
+                        )
                     
                     # Pretty output
                     status_icon = "✅" if is_valid else "❌"
@@ -1960,6 +1972,26 @@ class Validator(BaseValidatorNeuron):
                 local_validation_data = aggregated_local_validation_data
                 
                 print(f"   📊 Total aggregated: {len(validation_results)} validations")
+                
+                # ═══════════════════════════════════════════════════════════════════
+                # COORDINATOR: Accumulate weights for ALL leads (coordinator + workers)
+                # This ensures all leads are counted in validator_weights_history
+                # ═══════════════════════════════════════════════════════════════════
+                print(f"   ⚖️  Accumulating weights for all {len(local_validation_data)} leads...")
+                for val_data in local_validation_data:
+                    miner_hotkey = val_data.get("miner_hotkey")
+                    decision = val_data.get("decision")
+                    rep_score = val_data.get("rep_score", 0)
+                    is_icp_multiplier = val_data.get("is_icp_multiplier", 1.0)
+                    
+                    await self.accumulate_miner_weights(
+                        miner_hotkey=miner_hotkey,
+                        rep_score=rep_score,
+                        is_icp_multiplier=is_icp_multiplier,
+                        decision=decision
+                    )
+                print(f"   ✅ Weight accumulation complete")
+                
                 print(f"   Proceeding with gateway submission...")
                 print(f"{'='*80}\n")
             
@@ -1999,12 +2031,13 @@ class Validator(BaseValidatorNeuron):
             else:
                 print(f"⚠️  No validation results to submit (all leads failed validation)")
             
-            # Accumulate weights (already done per-lead above)
-            # calculate_and_submit_weights_local() is now called per-lead via accumulate_miner_weights()
-            print(f"\n{'='*80}")
-            print(f"⚖️  Weights accumulated for this epoch")
-            print(f"   (Will submit at block 345+ via submit_weights_at_epoch_end())")
-            print(f"{'='*80}")
+            # Weights already accumulated (coordinator mode) or accumulation skipped (container mode)
+            # Weight submission to blockchain happens at block 345+ via submit_weights_at_epoch_end()
+            if container_mode is None:
+                print(f"\n{'='*80}")
+                print(f"⚖️  Weights accumulated for this epoch")
+                print(f"   (Will submit at block 345+ via submit_weights_at_epoch_end())")
+                print(f"{'='*80}")
             
             # Mark epoch as processed
             self._last_processed_epoch = current_epoch

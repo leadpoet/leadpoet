@@ -4552,6 +4552,204 @@ def add_validated_leads_to_pool(leads):
     lead_pool.add_to_pool(mapped_leads)
 
 
+def run_lightweight_worker(config):
+    """
+    Lightweight worker loop for containerized validators.
+    
+    Workers skip ALL heavy initialization and only:
+    1. Read current_block.json for epoch timing
+    2. Read epoch_{N}_leads.json for lead data
+    3. Validate leads (CPU/IO work)
+    4. Write results to JSON file
+    
+    No Bittensor connection, no axon, no epoch monitor, no weight setting.
+    """
+    import asyncio
+    import json
+    from pathlib import Path
+    
+    print("🚀 Starting lightweight worker...")
+    print(f"   Container ID: {config.neuron.container_id}")
+    print(f"   Total containers: {config.neuron.total_containers}")
+    print("")
+    
+    # Create minimal validator-like object for process_gateway_validation_workflow
+    class LightweightWorker:
+        def __init__(self, config):
+            self.config = config
+            self.should_exit = False
+            
+        def _read_shared_block_file(self):
+            """Read current block from shared file (written by coordinator)"""
+            block_file = Path("validator_weights") / "current_block.json"
+            
+            if not block_file.exists():
+                raise FileNotFoundError("Coordinator hasn't written block file yet")
+            
+            # Check if file is stale (> 60 seconds old)
+            import time
+            file_age = time.time() - block_file.stat().st_mtime
+            if file_age > 60:
+                raise Exception(f"Shared block file is stale ({int(file_age)}s old)")
+            
+            with open(block_file, 'r') as f:
+                data = json.load(f)
+                return data['block'], data['epoch'], data['blocks_into_epoch']
+        
+        async def process_gateway_validation_workflow(self):
+            """
+            Simplified worker validation loop.
+            
+            This is a COPY of the worker-specific logic from Validator.process_gateway_validation_workflow(),
+            but without any Bittensor dependencies.
+            """
+            import time
+            from validator_models.automated_checks import validate_single_lead
+            
+            print("🔄 Worker validation loop started")
+            
+            while not self.should_exit:
+                try:
+                    # Read current epoch from coordinator's shared file
+                    try:
+                        current_block, current_epoch, blocks_into_epoch = self._read_shared_block_file()
+                    except FileNotFoundError:
+                        print("⏳ Worker: Waiting for coordinator to write block file...")
+                        await asyncio.sleep(5)
+                        continue
+                    except Exception as e:
+                        print(f"⏳ Worker: Waiting for coordinator to write block file... (Shared block file is stale ({int(e.args[0] if e.args else 0)}s old))")
+                        await asyncio.sleep(5)
+                        continue
+                    
+                    print(f"\n🔍 WORKER EPOCH {current_epoch}: Starting validation (block {blocks_into_epoch}/360)")
+                    
+                    # Wait for coordinator to fetch and share leads
+                    leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
+                    
+                    waited = 0
+                    log_interval = 300  # Log every 5 minutes
+                    check_interval = 5  # Check every 5 seconds
+                    
+                    while not leads_file.exists():
+                        await asyncio.sleep(check_interval)
+                        waited += check_interval
+                        
+                        # Check current block and epoch from shared file
+                        try:
+                            check_block, check_epoch, blocks_into_epoch = self._read_shared_block_file()
+                        except Exception:
+                            continue
+                        
+                        # Epoch changed while waiting - abort
+                        if check_epoch > current_epoch:
+                            print(f"❌ Worker: Epoch changed ({current_epoch} → {check_epoch}) while waiting")
+                            await asyncio.sleep(10)
+                            break
+                        
+                        # Too late to start validation
+                        if blocks_into_epoch >= 275:
+                            print(f"❌ Worker: Too late to start validation (block {blocks_into_epoch}/360)")
+                            await asyncio.sleep(10)
+                            break
+                        
+                        # Log progress
+                        if waited % log_interval == 0 and waited > 0:
+                            print(f"⏳ Worker: Still waiting for coordinator ({waited}s elapsed)...")
+                    
+                    if not leads_file.exists():
+                        continue  # Epoch changed or too late
+                    
+                    # Read leads from file
+                    with open(leads_file, 'r') as f:
+                        data = json.load(f)
+                        all_leads = data.get('leads', [])
+                        epoch_id = data.get('epoch_id')
+                    
+                    if epoch_id != current_epoch:
+                        print(f"⚠️  Worker: Leads file epoch mismatch ({epoch_id} != {current_epoch})")
+                        await asyncio.sleep(10)
+                        continue
+                    
+                    # Calculate worker's lead subset
+                    container_id = self.config.neuron.container_id
+                    total_containers = self.config.neuron.total_containers
+                    
+                    worker_leads = []
+                    for i, lead in enumerate(all_leads):
+                        if i % total_containers == container_id:
+                            worker_leads.append(lead)
+                    
+                    print(f"   Worker {container_id}: Processing {len(worker_leads)}/{len(all_leads)} leads")
+                    
+                    # Validate leads
+                    validated_leads = []
+                    for idx, lead_data in enumerate(worker_leads, 1):
+                        lead_id = lead_data.get('lead_id', 'unknown')
+                        lead_blob = lead_data.get('lead_blob', {})
+                        
+                        email = lead_blob.get('email', 'unknown')
+                        company = lead_blob.get('company', 'unknown')
+                        
+                        print(f"   Lead {idx}/{len(worker_leads)}: {email} @ {company}")
+                        
+                        try:
+                            result = await validate_single_lead(lead_blob)
+                            
+                            validated_leads.append({
+                                'lead_id': lead_id,
+                                'is_valid': result['is_valid'],
+                                'validation_reasons': result.get('validation_reasons', []),
+                                'validation_details': result.get('validation_details', {}),
+                                'lead_blob': lead_blob
+                            })
+                            
+                        except Exception as e:
+                            print(f"      ❌ Validation error: {e}")
+                            validated_leads.append({
+                                'lead_id': lead_id,
+                                'is_valid': False,
+                                'validation_reasons': [f'validation_error: {str(e)}'],
+                                'validation_details': {},
+                                'lead_blob': lead_blob
+                            })
+                        
+                        # Sleep between leads
+                        await asyncio.sleep(2)
+                    
+                    # Write results to file for coordinator
+                    results_file = Path("validator_weights") / f"worker_{container_id}_epoch_{current_epoch}_results.json"
+                    with open(results_file, 'w') as f:
+                        json.dump({
+                            'epoch_id': current_epoch,
+                            'container_id': container_id,
+                            'validated_leads': validated_leads,
+                            'timestamp': time.time()
+                        }, f)
+                    
+                    print(f"✅ Worker {container_id}: Completed {len(validated_leads)} validations")
+                    print(f"   Results saved to {results_file}")
+                    
+                    # Wait before checking for next epoch
+                    await asyncio.sleep(30)
+                    
+                except Exception as e:
+                    print(f"❌ Worker error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    await asyncio.sleep(30)
+    
+    # Create worker and run
+    worker = LightweightWorker(config)
+    
+    # Run async loop
+    try:
+        asyncio.run(worker.process_gateway_validation_workflow())
+    except KeyboardInterrupt:
+        print("\n🛑 Worker shutting down...")
+        worker.should_exit = True
+
+
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Validator")
     add_validator_args(None, parser)
@@ -4571,6 +4769,54 @@ def main():
 
     ensure_data_files()
 
+    # ════════════════════════════════════════════════════════════════════════════
+    # WORKER MODE: Skip ALL heavy initialization
+    # ════════════════════════════════════════════════════════════════════════════
+    # Workers don't need:
+    # - Bittensor wallet/subtensor/metagraph (no chain connection)
+    # - Axon serving (no API endpoints)
+    # - Epoch monitor thread (coordinator writes current_block.json)
+    # - Dendrite (no outgoing Bittensor requests)
+    # - Weight setting (only coordinator submits weights)
+    # 
+    # Workers ONLY need:
+    # - Read current_block.json (for epoch timing)
+    # - Read epoch_{N}_leads.json (for lead data)
+    # - Validate leads (CPU/IO work)
+    # - Write results to JSON file
+    # ════════════════════════════════════════════════════════════════════════════
+    if getattr(args, 'mode', None) == "worker":
+        print("════════════════════════════════════════════════════════════════")
+        print("🔧 LIGHTWEIGHT WORKER MODE")
+        print("════════════════════════════════════════════════════════════════")
+        print("   Skipping heavy initialization:")
+        print("   ✗ Bittensor wallet/subtensor/metagraph")
+        print("   ✗ Axon serving")
+        print("   ✗ Epoch monitor thread")
+        print("   ✗ Weight setting")
+        print("")
+        print("   Worker responsibilities:")
+        print("   ✓ Read current_block.json for epoch timing")
+        print("   ✓ Read epoch_{N}_leads.json for lead data")
+        print("   ✓ Validate leads (CPU/IO work)")
+        print("   ✓ Write results to JSON file")
+        print("════════════════════════════════════════════════════════════════")
+        print("")
+        
+        # Create minimal config for worker
+        config = bt.Config()
+        config.neuron = bt.Config()
+        config.neuron.container_id = getattr(args, 'container_id', None)
+        config.neuron.total_containers = getattr(args, 'total_containers', None)
+        config.neuron.mode = "worker"
+        
+        # Run lightweight worker loop
+        run_lightweight_worker(config)
+        return  # Exit early - don't initialize full validator
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # COORDINATOR MODE: Full initialization
+    # ════════════════════════════════════════════════════════════════════════════
     # Add this near the beginning of your validator startup, after imports
     from Leadpoet.validator.reward import start_epoch_monitor
 

@@ -146,14 +146,14 @@ async def reveal_validation_result(
             detail=f"Reveal window expired. Validations from epoch {validation_epoch} must be revealed in epoch {validation_epoch + 1}. Current epoch is {current_epoch}."
         )
     
-    # Check 3: Must reveal BEFORE block 350 of epoch N+1 (consensus deadline)
+    # Check 3: Must reveal BEFORE block 340 of epoch N+1 (consensus deadline)
     from gateway.utils.epoch import get_block_within_epoch_async
     block_within_epoch = await get_block_within_epoch_async()
     
-    if block_within_epoch >= 350:
+    if block_within_epoch >= 340:
         raise HTTPException(
             status_code=400,
-            detail=f"Reveal deadline passed. Reveals for epoch {validation_epoch} must be submitted before block 350 of epoch {validation_epoch + 1}. Current block: {block_within_epoch}/360."
+            detail=f"Reveal deadline passed. Reveals for epoch {validation_epoch} must be submitted before block 340 of epoch {validation_epoch + 1}. Current block: {block_within_epoch}/360."
         )
     
     # ========================================
@@ -670,12 +670,12 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
             detail=f"Reveal window expired. Must reveal in epoch {validation_epoch + 1}."
         )
     
-    # Check 3: Must reveal before block 350
+    # Check 3: Must reveal before block 340
     block_within_epoch = await get_block_within_epoch_async()
-    if block_within_epoch > 350:
+    if block_within_epoch > 340:
         raise HTTPException(
             status_code=400,
-            detail=f"Reveal deadline passed (block {block_within_epoch} > 350)."
+            detail=f"Reveal deadline passed (block {block_within_epoch} > 340)."
         )
     
     print(f"\n{'='*80}")
@@ -684,7 +684,7 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
     print(f"   Validator: {request.validator_hotkey[:20]}...")
     print(f"   Epoch: {request.epoch_id}")
     print(f"   Current Epoch: {current_epoch}")
-    print(f"   Block: {block_within_epoch}/350")
+    print(f"   Block: {block_within_epoch}/340")
     print(f"   Reveals: {len(request.reveals)}")
     print(f"{'='*80}")
     

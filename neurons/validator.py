@@ -2034,7 +2034,7 @@ class Validator(BaseValidatorNeuron):
                     is_valid = result.get("is_legitimate", False)
                     decision = "approve" if is_valid else "deny"
                     rep_score = int(lead_blob.get("rep_score", 0))  # Default 0 for rejected leads
-                    rejection_reason = result.get("reason", {}) if not is_valid else {"message": "pass"}
+                    rejection_reason = result.get("reason") or {} if not is_valid else {"message": "pass"}
                     evidence_blob = json.dumps(result)
                     
                     # Compute hashes (SHA256 with salt)
@@ -4767,7 +4767,7 @@ def run_lightweight_worker(config):
                         is_valid = lead['is_valid']
                         decision = "approve" if is_valid else "deny"
                         rep_score = int(lead['lead_blob'].get("rep_score", 0))
-                        rejection_reason = lead.get('rejection_reason') if not is_valid else {"message": "pass"}
+                        rejection_reason = lead.get('rejection_reason') or {} if not is_valid else {"message": "pass"}
                         evidence_blob = json.dumps(lead.get('automated_checks_data', {}))
                         
                         # Compute hashes (SHA256 with salt) - EXACT same as coordinator lines 2036-2040

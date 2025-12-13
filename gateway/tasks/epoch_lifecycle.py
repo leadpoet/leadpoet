@@ -809,7 +809,11 @@ async def compute_epoch_consensus(epoch_id: int):
                             if isinstance(evidence_blob, str):
                                 evidence_blob = json.loads(evidence_blob)
                             
-                            multiplier = evidence_blob.get("is_icp_multiplier", 1.0)
+                            # Navigate to automated_checks data
+                            # Structure: evidence_blob -> enhanced_lead -> automated_checks -> is_icp_multiplier
+                            enhanced_lead = evidence_blob.get("enhanced_lead", {})
+                            automated_checks = enhanced_lead.get("automated_checks", {})
+                            multiplier = automated_checks.get("is_icp_multiplier", 1.0)
                             multipliers.append(multiplier)
                         
                         # Use the most common value (or average if all different)

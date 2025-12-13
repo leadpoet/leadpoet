@@ -249,7 +249,8 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1":
                 
                 print("")
                 print("✅ Containerized deployment complete!")
-                print("   3 validator containers are now running in parallel")
+                print(f"   {len(proxies_found) + 1} validator containers are now running in parallel")
+                print(f"   (1 coordinator + {len(proxies_found)} workers)")
                 print("")
                 print("📺 Following main validator logs...")
                 print("   (Press Ctrl+C to detach - containers will keep running)")
@@ -4700,6 +4701,14 @@ def run_lightweight_worker(config):
                     if not salt_hex:
                         print(f"❌ Worker: No salt in leads file! Cannot hash results.")
                         await asyncio.sleep(10)
+                        continue
+                    
+                    # Check if leads were actually fetched by coordinator
+                    if all_leads is None or len(all_leads) == 0:
+                        print(f"ℹ️  Worker: No leads in file for epoch {current_epoch} (coordinator returned null/empty)")
+                        print(f"   This happens when: already submitted, gateway queue empty, or epoch just started")
+                        print(f"   Waiting for next epoch...")
+                        await asyncio.sleep(30)
                         continue
                     
                     # Calculate worker's lead subset (moved before salt print to avoid UnboundLocalError)

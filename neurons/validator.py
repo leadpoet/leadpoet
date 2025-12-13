@@ -1842,6 +1842,10 @@ class Validator(BaseValidatorNeuron):
             container_mode = getattr(self.config.neuron, 'mode', None)
             container_id = getattr(self.config.neuron, 'container_id', None)
             
+            # Import os and hashlib early (needed for salt generation)
+            import os
+            import hashlib
+            
             # CRITICAL: Generate salt ONCE for entire epoch (coordinator + all workers use same salt)
             # This must happen BEFORE coordinator writes leads file so workers can access it
             salt = os.urandom(32)
@@ -2000,12 +2004,11 @@ class Validator(BaseValidatorNeuron):
             print("")
             
             # Validate each lead using automated_checks
-            import os
-            import hashlib
+            # (os and hashlib already imported at line 1845)
             validation_results = []
             local_validation_data = []  # Store for weight calculation
             
-            # Salt already generated earlier (line 1848) and shared with workers via leads file
+            # Salt already generated earlier (line 1850) and shared with workers via leads file
             # Convert back from hex for coordinator's own validation
             salt = bytes.fromhex(salt_hex)
             

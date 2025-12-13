@@ -4618,7 +4618,8 @@ def run_lightweight_worker(config):
                         await asyncio.sleep(5)
                         continue
                     except Exception as e:
-                        print(f"⏳ Worker: Waiting for coordinator to write block file... (Shared block file is stale ({int(e.args[0] if e.args else 0)}s old))")
+                        # Extract just the error message, don't try to parse it
+                        print(f"⏳ Worker: Waiting for coordinator to write block file... ({str(e)})")
                         await asyncio.sleep(5)
                         continue
                     

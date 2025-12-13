@@ -2261,7 +2261,8 @@ class Validator(BaseValidatorNeuron):
                 
                 worker_files = []
                 for worker_id in worker_ids:
-                    worker_file = os.path.join("validator_weights", f"worker_results_container_{worker_id}.json")
+                    # Lightweight workers write: worker_{worker_id}_epoch_{epoch}_results.json
+                    worker_file = os.path.join("validator_weights", f"worker_{worker_id}_epoch_{current_epoch}_results.json")
                     worker_files.append((worker_id, worker_file))
                 
                 all_workers_ready = False

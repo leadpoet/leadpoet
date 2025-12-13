@@ -4690,13 +4690,13 @@ def run_lightweight_worker(config):
                         await asyncio.sleep(10)
                         continue
                     
+                    # Calculate worker's lead subset (moved before salt print to avoid UnboundLocalError)
+                    container_id = self.config.neuron.container_id
+                    total_containers = self.config.neuron.total_containers
+                    
                     # Convert salt from hex
                     salt = bytes.fromhex(salt_hex)
                     print(f"   Worker {container_id}: Using shared salt {salt_hex[:16]}...")
-                    
-                    # Calculate worker's lead subset
-                    container_id = self.config.neuron.container_id
-                    total_containers = self.config.neuron.total_containers
                     
                     worker_leads = []
                     for i, lead in enumerate(all_leads):

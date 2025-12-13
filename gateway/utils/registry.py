@@ -87,17 +87,42 @@ async def get_metagraph_async() -> bt.metagraph:
         )
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 1: Quick cache check (lock held only for read)
+    # STEP 1: Get current epoch FIRST (before cache check)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CRITICAL: We need to check epoch to know if cache is valid
+    # Do this OUTSIDE the lock since it's an async call
+    try:
+        from gateway.utils.epoch import get_current_epoch_id_async
+        current_epoch = await get_current_epoch_id_async()
+    except Exception as e:
+        # If we can't get current epoch, fall back to cache if available
+        with _cache_lock:
+            if _metagraph_cache is not None:
+                print(f"⚠️  Failed to get current epoch: {e}")
+                print(f"   Using cached metagraph for epoch {_cache_epoch} (fallback)")
+                return _metagraph_cache
+        raise  # No cache and can't get epoch - fail
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # STEP 2: Quick cache check (lock held only for read)
     # ═══════════════════════════════════════════════════════════════════════════
     with _cache_lock:
-        # Fast path: Check if cache is still valid based on time
+        # Fast path: Check if cache is still valid based on BOTH time AND epoch
         if _metagraph_cache is not None and _cache_epoch_timestamp is not None:
             time_since_cache = time.time() - _cache_epoch_timestamp
             
-            # If less than 72 minutes (one epoch) have passed, cache is definitely still valid
-            if time_since_cache < EPOCH_DURATION_SECONDS:
-                print(f"✅ Using cached metagraph for epoch {_cache_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - {int(time_since_cache)}s old")
-                return _metagraph_cache
+            # CRITICAL FIX: Check epoch first! Even if cache is "fresh" time-wise,
+            # it's invalid if epoch changed. This ensures metagraph refreshes every epoch.
+            if _cache_epoch == current_epoch:
+                # Same epoch - check if cache is fresh enough
+                if time_since_cache < EPOCH_DURATION_SECONDS:
+                    print(f"✅ Using cached metagraph for epoch {_cache_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - {int(time_since_cache)}s old")
+                    return _metagraph_cache
+            else:
+                # Epoch changed - need to refresh!
+                print(f"🔄 Epoch changed: {_cache_epoch} → {current_epoch}")
+                print(f"   Cached metagraph is {int(time_since_cache)}s old but from wrong epoch")
+                print(f"   Will attempt to fetch new metagraph...")
         
         # Check if another task is already fetching
         if _fetch_in_progress:
@@ -111,32 +136,17 @@ async def get_metagraph_async() -> bt.metagraph:
         _fetch_in_progress = True
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 2: Get current epoch (OUTSIDE the lock - this is async!)
+    # STEP 3: Fetch new metagraph (OUTSIDE the lock - this is async!)
     # ═══════════════════════════════════════════════════════════════════════════
-    try:
-        from gateway.utils.epoch import get_current_epoch_id_async
-        current_epoch = await get_current_epoch_id_async()
-        
-        # Quick check: maybe cache is still valid for this epoch
-        with _cache_lock:
-            if _metagraph_cache is not None and _cache_epoch == current_epoch:
-                _cache_epoch_timestamp = time.time()
-                _fetch_in_progress = False
-                print(f"✅ Using cached metagraph for epoch {current_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - refreshed timestamp")
-                return _metagraph_cache
-        
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 3: Fetch new metagraph (OUTSIDE the lock - this is async!)
-        # ═══════════════════════════════════════════════════════════════════════
-        max_retries = 3
-        retry_delay = 2
-        last_error = None
-        cached_epoch = None
-        
-        with _cache_lock:
-            cached_epoch = _cache_epoch
-        
-        for attempt in range(max_retries):
+    max_retries = 3
+    retry_delay = 2
+    last_error = None
+    cached_epoch = None
+    
+    with _cache_lock:
+        cached_epoch = _cache_epoch
+    
+    for attempt in range(max_retries):
             try:
                 if cached_epoch is not None and cached_epoch != current_epoch:
                     print(f"🔄 Epoch changed: {cached_epoch} → {current_epoch}")

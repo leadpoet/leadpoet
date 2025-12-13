@@ -1842,22 +1842,29 @@ class Validator(BaseValidatorNeuron):
             container_mode = getattr(self.config.neuron, 'mode', None)
             container_id = getattr(self.config.neuron, 'container_id', None)
             
+            # CRITICAL: Generate salt ONCE for entire epoch (coordinator + all workers use same salt)
+            # This must happen BEFORE coordinator writes leads file so workers can access it
+            salt = os.urandom(32)
+            salt_hex = salt.hex()
+            print(f"🔐 Generated epoch salt: {salt_hex[:16]}... (shared across all containers)")
+            
             if container_mode == "coordinator":
                 # COORDINATOR: Fetch from gateway and share via file
                 print(f"📡 Coordinator fetching leads from gateway for epoch {current_epoch}...")
                 leads, max_leads_per_epoch = gateway_get_epoch_leads(self.wallet, current_epoch)
                 
                 # Write to shared volume for workers to read
-                # Include epoch_id in file for validation
+                # Include epoch_id AND salt in file for workers
                 leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
                 with open(leads_file, 'w') as f:
                     json.dump({
                         "epoch_id": current_epoch,
                         "leads": leads, 
                         "max_leads_per_epoch": max_leads_per_epoch,
-                        "created_at_block": current_block
+                        "created_at_block": current_block,
+                        "salt": salt_hex  # CRITICAL: Workers need this to hash results
                     }, f)
-                print(f"   💾 Saved {len(leads) if leads else 0} leads to {leads_file} for workers")
+                print(f"   💾 Saved {len(leads) if leads else 0} leads + salt to {leads_file} for workers")
                 
             elif container_mode == "worker":
                 # WORKER: Wait for coordinator to fetch and share
@@ -1998,8 +2005,9 @@ class Validator(BaseValidatorNeuron):
             validation_results = []
             local_validation_data = []  # Store for weight calculation
             
-            # Generate salt for this validation batch
-            salt = os.urandom(32)
+            # Salt already generated earlier (line 1848) and shared with workers via leads file
+            # Convert back from hex for coordinator's own validation
+            salt = bytes.fromhex(salt_hex)
             
             for idx, lead in enumerate(leads, 1):
                 try:
@@ -4667,11 +4675,21 @@ def run_lightweight_worker(config):
                         data = json.load(f)
                         all_leads = data.get('leads', [])
                         epoch_id = data.get('epoch_id')
+                        salt_hex = data.get('salt')  # CRITICAL: Read shared salt
                     
                     if epoch_id != current_epoch:
                         print(f"⚠️  Worker: Leads file epoch mismatch ({epoch_id} != {current_epoch})")
                         await asyncio.sleep(10)
                         continue
+                    
+                    if not salt_hex:
+                        print(f"❌ Worker: No salt in leads file! Cannot hash results.")
+                        await asyncio.sleep(10)
+                        continue
+                    
+                    # Convert salt from hex
+                    salt = bytes.fromhex(salt_hex)
+                    print(f"   Worker {container_id}: Using shared salt {salt_hex[:16]}...")
                     
                     # Calculate worker's lead subset
                     container_id = self.config.neuron.container_id
@@ -4726,36 +4744,53 @@ def run_lightweight_worker(config):
                         await asyncio.sleep(2)
                     
                     # Write results to file for coordinator
-                    # CRITICAL: Use exact keys that coordinator expects (validation_results, local_validation_data)
+                    # CRITICAL: Hash results using shared salt (EXACT same format as coordinator)
                     results_file = Path("validator_weights") / f"worker_{container_id}_epoch_{current_epoch}_results.json"
                     
-                    # Transform validated_leads to match coordinator's expected format
+                    import hashlib
                     validation_results = []
                     local_validation_data = []
                     
                     for lead in validated_leads:
-                        # Format for validation_results (for gateway hash submission)
+                        # Extract data
+                        is_valid = lead['is_valid']
+                        decision = "approve" if is_valid else "deny"
+                        rep_score = int(lead['lead_blob'].get("rep_score", 0))
+                        rejection_reason = lead.get('rejection_reason') if not is_valid else {"message": "pass"}
+                        evidence_blob = json.dumps(lead.get('automated_checks_data', {}))
+                        
+                        # Compute hashes (SHA256 with salt) - EXACT same as coordinator lines 2036-2040
+                        decision_hash = hashlib.sha256((decision + salt.hex()).encode()).hexdigest()
+                        rep_score_hash = hashlib.sha256((str(rep_score) + salt.hex()).encode()).hexdigest()
+                        rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason) + salt.hex()).encode()).hexdigest()
+                        evidence_hash = hashlib.sha256(evidence_blob.encode()).hexdigest()
+                        
+                        # Format for validation_results (for gateway hash submission) - EXACT format
                         validation_results.append({
                             'lead_id': lead['lead_id'],
-                            'is_valid': lead['is_valid'],
-                            'miner_hotkey': lead.get('miner_hotkey', lead['lead_blob'].get('wallet_ss58', 'unknown'))
+                            'decision_hash': decision_hash,
+                            'rep_score_hash': rep_score_hash,
+                            'rejection_reason_hash': rejection_reason_hash,
+                            'evidence_hash': evidence_hash,
+                            'evidence_blob': lead.get('automated_checks_data', {})
                         })
                         
-                        # Format for local_validation_data (for gateway reveal submission)
+                        # Format for local_validation_data (for gateway reveal submission) - EXACT format
                         local_validation_data.append({
                             'lead_id': lead['lead_id'],
-                            'is_valid': lead['is_valid'],
-                            'rejection_reason': lead.get('rejection_reason'),
-                            'validation_details': lead.get('automated_checks_data', {}),
-                            'lead_blob': lead['lead_blob']
+                            'miner_hotkey': lead.get('miner_hotkey'),
+                            'decision': decision,
+                            'rep_score': rep_score,
+                            'rejection_reason': rejection_reason,
+                            'salt': salt.hex()
                         })
                     
                     with open(results_file, 'w') as f:
                         json.dump({
                             'epoch_id': current_epoch,
                             'container_id': container_id,
-                            'validation_results': validation_results,  # CORRECT KEY
-                            'local_validation_data': local_validation_data,  # CORRECT KEY
+                            'validation_results': validation_results,
+                            'local_validation_data': local_validation_data,
                             'lead_range': f"{len(validated_leads)} leads",
                             'timestamp': time.time()
                         }, f)

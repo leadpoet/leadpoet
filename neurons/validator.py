@@ -3257,11 +3257,19 @@ class Validator(BaseValidatorNeuron):
                     # Format reveals for gateway
                     reveals = []
                     for validation in reveal_data:
+                        # CRITICAL: Validate required fields before sending
+                        # Gateway will reject with 422 if any required field is null
+                        rejection_reason = validation.get("rejection_reason")
+                        if rejection_reason is None:
+                            # Data corruption - skip this entry
+                            print(f"   ⚠️  Skipping lead {validation.get('lead_id', 'unknown')[:8]}... (null rejection_reason)")
+                            continue
+                        
                         reveals.append({
                             "lead_id": validation["lead_id"],
                             "decision": validation["decision"],
                             "rep_score": validation["rep_score"],
-                            "rejection_reason": validation["rejection_reason"],
+                            "rejection_reason": rejection_reason,
                             "salt": validation["salt"]
                         })
                     

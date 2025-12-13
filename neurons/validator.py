@@ -3257,13 +3257,17 @@ class Validator(BaseValidatorNeuron):
                     # Format reveals for gateway
                     reveals = []
                     for validation in reveal_data:
-                        # CRITICAL: Validate required fields before sending
-                        # Gateway will reject with 422 if any required field is null
+                        # DEFENSE IN DEPTH: Provide fallback for any remaining null rejection_reasons
+                        # (Should not happen with current code, but handles old corrupted data in pending_reveals)
                         rejection_reason = validation.get("rejection_reason")
                         if rejection_reason is None:
-                            # Data corruption - skip this entry
-                            print(f"   ⚠️  Skipping lead {validation.get('lead_id', 'unknown')[:8]}... (null rejection_reason)")
-                            continue
+                            print(f"   ⚠️  Fixing null rejection_reason for lead {validation.get('lead_id', 'unknown')[:8]}...")
+                            rejection_reason = {
+                                "stage": "Unknown",
+                                "check_name": "data_corruption",
+                                "message": "Rejection reason was null (corrupted data from previous epoch)",
+                                "failed_fields": []
+                            }
                         
                         reveals.append({
                             "lead_id": validation["lead_id"],

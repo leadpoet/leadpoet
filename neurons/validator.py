@@ -4689,6 +4689,7 @@ def run_lightweight_worker(config):
                     for idx, lead_data in enumerate(worker_leads, 1):
                         lead_id = lead_data.get('lead_id', 'unknown')
                         lead_blob = lead_data.get('lead_blob', {})
+                        miner_hotkey = lead_data.get('miner_hotkey', lead_blob.get('wallet_ss58', 'unknown'))
                         
                         email = lead_blob.get('email', 'unknown')
                         company = lead_blob.get('company', 'unknown')
@@ -4707,7 +4708,8 @@ def run_lightweight_worker(config):
                                 'is_valid': passed,
                                 'rejection_reason': rejection_reason,
                                 'automated_checks_data': automated_checks_data,
-                                'lead_blob': lead_blob
+                                'lead_blob': lead_blob,
+                                'miner_hotkey': miner_hotkey
                             })
                             
                         except Exception as e:
@@ -4724,12 +4726,37 @@ def run_lightweight_worker(config):
                         await asyncio.sleep(2)
                     
                     # Write results to file for coordinator
+                    # CRITICAL: Use exact keys that coordinator expects (validation_results, local_validation_data)
                     results_file = Path("validator_weights") / f"worker_{container_id}_epoch_{current_epoch}_results.json"
+                    
+                    # Transform validated_leads to match coordinator's expected format
+                    validation_results = []
+                    local_validation_data = []
+                    
+                    for lead in validated_leads:
+                        # Format for validation_results (for gateway hash submission)
+                        validation_results.append({
+                            'lead_id': lead['lead_id'],
+                            'is_valid': lead['is_valid'],
+                            'miner_hotkey': lead.get('miner_hotkey', lead['lead_blob'].get('wallet_ss58', 'unknown'))
+                        })
+                        
+                        # Format for local_validation_data (for gateway reveal submission)
+                        local_validation_data.append({
+                            'lead_id': lead['lead_id'],
+                            'is_valid': lead['is_valid'],
+                            'rejection_reason': lead.get('rejection_reason'),
+                            'validation_details': lead.get('automated_checks_data', {}),
+                            'lead_blob': lead['lead_blob']
+                        })
+                    
                     with open(results_file, 'w') as f:
                         json.dump({
                             'epoch_id': current_epoch,
                             'container_id': container_id,
-                            'validated_leads': validated_leads,
+                            'validation_results': validation_results,  # CORRECT KEY
+                            'local_validation_data': local_validation_data,  # CORRECT KEY
+                            'lead_range': f"{len(validated_leads)} leads",
                             'timestamp': time.time()
                         }, f)
                     

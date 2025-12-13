@@ -4604,7 +4604,7 @@ def run_lightweight_worker(config):
             but without any Bittensor dependencies.
             """
             import time
-            from validator_models.automated_checks import validate_single_lead
+            from validator_models.automated_checks import run_automated_checks
             
             print("🔄 Worker validation loop started")
             
@@ -4694,13 +4694,17 @@ def run_lightweight_worker(config):
                         print(f"   Lead {idx}/{len(worker_leads)}: {email} @ {company}")
                         
                         try:
-                            result = await validate_single_lead(lead_blob)
+                            # Use run_automated_checks (returns tuple: passed, automated_checks_data)
+                            passed, automated_checks_data = await run_automated_checks(lead_blob)
+                            
+                            # Extract rejection reason if failed
+                            rejection_reason = automated_checks_data.get("rejection_reason") if not passed else None
                             
                             validated_leads.append({
                                 'lead_id': lead_id,
-                                'is_valid': result['is_valid'],
-                                'validation_reasons': result.get('validation_reasons', []),
-                                'validation_details': result.get('validation_details', {}),
+                                'is_valid': passed,
+                                'rejection_reason': rejection_reason,
+                                'automated_checks_data': automated_checks_data,
                                 'lead_blob': lead_blob
                             })
                             

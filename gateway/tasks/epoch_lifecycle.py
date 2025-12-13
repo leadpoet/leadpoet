@@ -784,26 +784,46 @@ async def compute_epoch_consensus(epoch_id: int):
                 # Final rep_score (CRITICAL FIX: 0 for denied, not NULL)
                 final_rep_score = outcome['final_rep_score'] if outcome['final_decision'] == 'approve' else 0
                 
-                # Extract ICP multiplier from lead_blob
-                is_icp_multiplier = 1.0  # Default for legacy leads
+                # Extract ICP multiplier from validator evidence_blob (CRITICAL FIX)
+                # Validators calculate is_icp_multiplier during automated_checks based on ICP_DEFINITIONS
+                # We need to extract it from the consensus-winning validators' evidence
+                is_icp_multiplier = 1.0  # Default for legacy/denied leads
                 try:
-                    lead_blob_result = await asyncio.to_thread(
-                        lambda: supabase.table("leads_private")
-                            .select("lead_blob")
+                    # Query evidence_blobs from validators who approved this lead
+                    # We'll take the average if validators disagree (shouldn't happen)
+                    evidence_result = await asyncio.to_thread(
+                        lambda: supabase.table("validation_evidence_private")
+                            .select("evidence_blob")
                             .eq("lead_id", lead_id)
+                            .eq("epoch_id", epoch_id)
+                            .eq("decision", "approve")  # Only from approving validators
+                            .not_.is_("evidence_blob", "null")
                             .execute()
                     )
                     
-                    if lead_blob_result.data and len(lead_blob_result.data) > 0:
-                        lead_blob = lead_blob_result.data[0].get("lead_blob", {})
-                        if isinstance(lead_blob, str):
-                            lead_blob = json.loads(lead_blob)
+                    if evidence_result.data and len(evidence_result.data) > 0:
+                        # Extract is_icp_multiplier from each validator's evidence_blob
+                        multipliers = []
+                        for record in evidence_result.data:
+                            evidence_blob = record.get("evidence_blob", {})
+                            if isinstance(evidence_blob, str):
+                                evidence_blob = json.loads(evidence_blob)
+                            
+                            multiplier = evidence_blob.get("is_icp_multiplier", 1.0)
+                            multipliers.append(multiplier)
                         
-                        # Extract ICP multiplier from lead_blob (set by validator during validation)
-                        is_icp_multiplier = lead_blob.get("is_icp_multiplier", 1.0)
-                        print(f"         🎯 ICP Multiplier: {is_icp_multiplier}x")
+                        # Use the most common value (or average if all different)
+                        if multipliers:
+                            from collections import Counter
+                            counter = Counter(multipliers)
+                            is_icp_multiplier = counter.most_common(1)[0][0]
+                            print(f"         🎯 ICP Multiplier: {is_icp_multiplier}x (from {len(multipliers)} approving validators)")
+                    else:
+                        print(f"         📋 No approving validators with evidence_blob - using default multiplier 1.0x")
+                        
                 except Exception as e:
-                    print(f"         ⚠️  Could not extract ICP multiplier: {e}")
+                    print(f"         ⚠️  Could not extract ICP multiplier from evidence: {e}")
+                    print(f"            Using default multiplier 1.0x")
                 
                 # ========================================================================
                 # Update leads_private with ALL aggregated data

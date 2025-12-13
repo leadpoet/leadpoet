@@ -197,19 +197,19 @@ class EpochMonitor:
                     self._cleanup_epochs.add(current_epoch)
             
             # ════════════════════════════════════════════════════════════════
-            # Check 5: Batch consensus at blocks 348-350 (captures ALL reveals)
+            # Check 5: Batch consensus at blocks 338-340 (captures ALL reveals)
             # ════════════════════════════════════════════════════════════════
-            # Run consensus at blocks 348-350 of epoch N (for epoch N-1 reveals)
+            # Run consensus at blocks 338-340 of epoch N (for epoch N-1 reveals)
             # Using a 3-block window to handle polling misses (poll every 12s, blocks ~12s)
-            # This ensures ALL reveals from blocks 0-347 are included
+            # This ensures ALL reveals from blocks 0-337 are included
             print(f"   🔍 Check 5: block_within_epoch={block_within_epoch}, current_epoch={current_epoch}")
-            if 348 <= block_within_epoch <= 350 and current_epoch > 0:
+            if 338 <= block_within_epoch <= 340 and current_epoch > 0:
                 consensus_epoch = current_epoch - 1  # Calculate consensus for previous epoch
-                print(f"   ✅ BLOCK 350 DETECTED! Will check epoch {consensus_epoch}")
+                print(f"   ✅ BLOCK 340 DETECTED! Will check epoch {consensus_epoch}")
                 
                 if consensus_epoch not in self.closed_epochs:
                     print(f"\n{'='*80}")
-                    print(f"📊 BATCH CONSENSUS TRIGGER: Block 350 of epoch {current_epoch}")
+                    print(f"📊 BATCH CONSENSUS TRIGGER: Block 340 of epoch {current_epoch}")
                     print(f"   Computing consensus for epoch {consensus_epoch} reveals...")
                     print(f"{'='*80}")
                     
@@ -394,8 +394,8 @@ class EpochMonitor:
             # Trigger reveal phase notification
             await trigger_reveal_phase(epoch_id)
             
-            # NO WAIT: Consensus triggered at block 350, all reveals should be in already
-            # (Reveals accepted from block 0-349 only, enforced by reveal endpoint)
+            # NO WAIT: Consensus triggered at block 340, all reveals should be in already
+            # (Reveals accepted from block 0-339 only, enforced by reveal endpoint)
             print(f"   📊 Running batch consensus for epoch {epoch_id}...")
             print(f"   Closed {time_since_close/60:.1f} minutes ago")
             await compute_epoch_consensus(epoch_id)

@@ -416,25 +416,63 @@ async def get_epoch_leads(
     # Only query leads_private if we used EPOCH_INITIALIZATION (not fallback)
     if leads_result is None:
         try:
-            print(f"🔍 Step 5: Fetching {len(assigned_lead_ids)} leads from leads_private...")
+            total_leads = len(assigned_lead_ids)
+            print(f"🔍 Step 5: Fetching {total_leads} leads from leads_private...")
             print(f"   Lead IDs: {assigned_lead_ids[:3]}... (showing first 3)")
             
-            # Wrap Supabase query with asyncio timeout (90 seconds)
-            leads_result = await asyncio.wait_for(
+            # CRITICAL: Split into 2 equal batches to avoid PostgREST response size limits
+            # PostgREST has ~1-2MB limit, large lead_blob fields can exceed this
+            batch_size = total_leads // 2
+            batch_1_ids = assigned_lead_ids[:batch_size]
+            batch_2_ids = assigned_lead_ids[batch_size:]
+            
+            print(f"   📦 Splitting into 2 batches: {len(batch_1_ids)} + {len(batch_2_ids)} leads")
+            
+            # Fetch batch 1
+            print(f"   🔍 Fetching batch 1/2 ({len(batch_1_ids)} leads)...")
+            batch_1_result = await asyncio.wait_for(
                 asyncio.to_thread(
                     lambda: supabase.table("leads_private")
                         .select("lead_id, lead_blob, lead_blob_hash")
-                        .in_("lead_id", assigned_lead_ids)
+                        .in_("lead_id", batch_1_ids)
                         .execute()
                 ),
-                timeout=90.0  # 90 second timeout for database query
+                timeout=90.0
             )
+            print(f"   ✅ Batch 1/2: Fetched {len(batch_1_result.data) if batch_1_result.data else 0} leads")
             
-            print(f"✅ Fetched {len(leads_result.data) if leads_result.data else 0} leads from database")
+            # Fetch batch 2
+            print(f"   🔍 Fetching batch 2/2 ({len(batch_2_ids)} leads)...")
+            batch_2_result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: supabase.table("leads_private")
+                        .select("lead_id, lead_blob, lead_blob_hash")
+                        .in_("lead_id", batch_2_ids)
+                        .execute()
+                ),
+                timeout=90.0
+            )
+            print(f"   ✅ Batch 2/2: Fetched {len(batch_2_result.data) if batch_2_result.data else 0} leads")
+            
+            # Aggregate batches into single result
+            all_leads_data = []
+            if batch_1_result.data:
+                all_leads_data.extend(batch_1_result.data)
+            if batch_2_result.data:
+                all_leads_data.extend(batch_2_result.data)
+            
+            # Create mock result object with aggregated data
+            class MockResult:
+                def __init__(self, data):
+                    self.data = data
+            
+            leads_result = MockResult(all_leads_data)
+            
+            print(f"✅ Aggregated {len(leads_result.data)} total leads from 2 batches")
             
             if not leads_result.data:
                 print(f"❌ ERROR: No leads found in database for assigned IDs")
-                print(f"   Assigned IDs: {assigned_lead_ids}")
+                print(f"   Assigned IDs: {assigned_lead_ids[:5]}...")
                 raise HTTPException(
                     status_code=500,
                     detail="Failed to fetch lead data from private database"

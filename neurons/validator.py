@@ -4710,12 +4710,23 @@ def run_lightweight_worker(config):
                     salt = bytes.fromhex(salt_hex)
                     print(f"   Worker {container_id}: Using shared salt {salt_hex[:16]}...")
                     
-                    worker_leads = []
-                    for i, lead in enumerate(all_leads):
-                        if i % total_containers == container_id:
-                            worker_leads.append(lead)
+                    # CRITICAL: Use SAME range slicing as coordinator (lines 1975-1991)
+                    # NOT modulo - modulo causes overlap with coordinator's range!
+                    original_count = len(all_leads)
+                    leads_per_container = original_count // total_containers
+                    remainder = original_count % total_containers
                     
-                    print(f"   Worker {container_id}: Processing {len(worker_leads)}/{len(all_leads)} leads")
+                    # First 'remainder' containers get 1 extra lead to distribute remainder evenly
+                    if container_id < remainder:
+                        start = container_id * (leads_per_container + 1)
+                        end = start + leads_per_container + 1
+                    else:
+                        start = (remainder * (leads_per_container + 1)) + ((container_id - remainder) * leads_per_container)
+                        end = start + leads_per_container
+                    
+                    worker_leads = all_leads[start:end]
+                    
+                    print(f"   Worker {container_id}: Processing leads {start}-{end} ({len(worker_leads)}/{original_count} leads)")
                     
                     # Validate leads
                     validated_leads = []

@@ -1849,11 +1849,26 @@ class Validator(BaseValidatorNeuron):
             import os
             import hashlib
             
-            # CRITICAL: Generate salt ONCE for entire epoch (coordinator + all workers use same salt)
-            # This must happen BEFORE coordinator writes leads file so workers can access it
-            salt = os.urandom(32)
-            salt_hex = salt.hex()
-            print(f"🔐 Generated epoch salt: {salt_hex[:16]}... (shared across all containers)")
+            # CRITICAL: Check if leads file already exists with salt for this epoch
+            # This prevents salt mismatch if coordinator restarts mid-epoch
+            leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
+            salt_hex = None
+            
+            if leads_file.exists():
+                try:
+                    with open(leads_file, 'r') as f:
+                        existing_data = json.load(f)
+                    if existing_data.get("epoch_id") == current_epoch and existing_data.get("salt"):
+                        salt_hex = existing_data["salt"]
+                        print(f"🔐 Reusing existing epoch salt: {salt_hex[:16]}... (from leads file)")
+                except Exception as e:
+                    print(f"⚠️  Could not read existing leads file: {e}")
+            
+            # Generate new salt only if we don't have one
+            if not salt_hex:
+                salt = os.urandom(32)
+                salt_hex = salt.hex()
+                print(f"🔐 Generated new epoch salt: {salt_hex[:16]}... (shared across all containers)")
             
             if container_mode == "coordinator":
                 # COORDINATOR: Fetch from gateway and share via file

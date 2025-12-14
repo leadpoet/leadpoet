@@ -2180,6 +2180,7 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
 def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List[Dict]) -> bool:
     """
     Submit revealed validation results after epoch closes (POST /reveal).
+    Batches large reveal sets to prevent gateway timeouts.
     Retries up to 3 times with fresh nonce/signature on gateway timeout.
     
     Args:
@@ -2190,6 +2191,54 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
     Returns:
         bool: Success status
     """
+    # BATCHING: Split large reveal sets to prevent gateway 500 errors
+    # Gateway struggles with 900+ reveals in one request (DB query/update bottleneck)
+    BATCH_SIZE = 300  # Optimal batch size based on testing
+    
+    total_reveals = len(reveal_results)
+    
+    if total_reveals <= BATCH_SIZE:
+        # Single batch - no splitting needed
+        return _submit_reveal_batch(wallet, epoch_id, reveal_results, 1, 1)
+    
+    # Multiple batches
+    num_batches = (total_reveals + BATCH_SIZE - 1) // BATCH_SIZE  # Ceiling division
+    bt.logging.info(f"📦 Splitting {total_reveals} reveals into {num_batches} batches of ~{BATCH_SIZE} each")
+    
+    all_success = True
+    for batch_num in range(num_batches):
+        start_idx = batch_num * BATCH_SIZE
+        end_idx = min(start_idx + BATCH_SIZE, total_reveals)
+        batch = reveal_results[start_idx:end_idx]
+        
+        bt.logging.info(f"📤 Batch {batch_num + 1}/{num_batches}: Submitting {len(batch)} reveals...")
+        
+        success = _submit_reveal_batch(wallet, epoch_id, batch, batch_num + 1, num_batches)
+        
+        if not success:
+            bt.logging.error(f"❌ Batch {batch_num + 1}/{num_batches} failed!")
+            all_success = False
+            # Continue with other batches - partial reveal is better than none
+        else:
+            bt.logging.info(f"✅ Batch {batch_num + 1}/{num_batches} succeeded")
+        
+        # Brief delay between batches to avoid overwhelming gateway
+        if batch_num < num_batches - 1:
+            time.sleep(2)
+    
+    if all_success:
+        bt.logging.info(f"✅ All {num_batches} batches submitted successfully ({total_reveals} total reveals)")
+    else:
+        bt.logging.warning(f"⚠️  Some batches failed - partial reveal submitted")
+    
+    return all_success
+
+
+def _submit_reveal_batch(wallet: bt.wallet, epoch_id: int, reveal_batch: List[Dict], batch_num: int, total_batches: int) -> bool:
+    """
+    Submit a single batch of reveals to the gateway.
+    Internal helper for gateway_submit_reveal.
+    """
     # Retry loop: Up to 3 attempts with fresh nonce/signature
     for attempt in range(1, 4):
         try:
@@ -2198,10 +2247,8 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
             message = f"reveal:{wallet.hotkey.ss58_address}:{epoch_id}:{nonce}"
             signature = wallet.hotkey.sign(message.encode()).hex()
             
-            if attempt == 1:
-                bt.logging.info(f"📤 Submitting {len(reveal_results)} reveals to gateway...")
-            else:
-                bt.logging.warning(f"🔄 Retry {attempt}/3: Submitting with fresh nonce/signature...")
+            if attempt > 1:
+                bt.logging.warning(f"🔄 Retry {attempt}/3 for batch {batch_num}/{total_batches}...")
             
             # Submit reveal batch
             response = requests.post(
@@ -2211,25 +2258,20 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
                     "epoch_id": epoch_id,
                     "signature": signature,
                     "nonce": nonce,
-                    "reveals": reveal_results
+                    "reveals": reveal_batch
                 },
-                timeout=600  # 10 minutes timeout (gateway needs time for consensus re-calculation + database operations)
+                timeout=300  # 5 minutes timeout per batch
             )
             response.raise_for_status()
             
-            if attempt > 1:
-                bt.logging.info(f"✅ Retry {attempt}/3 succeeded!")
-            bt.logging.info(f"✅ Submitted reveal for {len(reveal_results)} leads")
             return True
             
         except Exception as e:
             if attempt < 3:
-                bt.logging.warning(f"⚠️  Attempt {attempt}/3 failed: {e}")
-                bt.logging.warning(f"   Retrying with fresh nonce/signature...")
+                bt.logging.warning(f"⚠️  Batch {batch_num} attempt {attempt}/3 failed: {e}")
                 time.sleep(2)  # Brief delay before retry
                 continue  # Try again
             else:
                 # All attempts exhausted
-                bt.logging.error(f"❌ All 3 attempts failed. Last error: {e}")
-                bt.logging.error(f"Failed to reveal validation for epoch {epoch_id}")
+                bt.logging.error(f"❌ Batch {batch_num} all 3 attempts failed. Last error: {e}")
                 return False

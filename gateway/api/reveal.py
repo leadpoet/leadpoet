@@ -703,16 +703,23 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
                 .execute()
         )
         
-        if not result.data or len(result.data) != len(lead_ids):
-            error_msg = f"Not all evidence found. Expected {len(lead_ids)}, got {len(result.data) if result.data else 0}"
+        # Create evidence lookup dict (key by lead_id)
+        # Note: If duplicates exist, dict takes the last one for each lead_id
+        evidence_map = {e["lead_id"]: e for e in result.data}
+        
+        # Check we found evidence for all requested lead_ids
+        # Allow duplicates (more records is OK), but all lead_ids must be present
+        missing_leads = set(lead_ids) - set(evidence_map.keys())
+        if missing_leads:
+            error_msg = f"Evidence not found for {len(missing_leads)} leads. Requested {len(lead_ids)}, found {len(evidence_map)} unique"
             print(f"❌ REVEAL REJECTED: {error_msg}")
             print(f"   Validator: {request.validator_hotkey[:20]}...")
             print(f"   Epoch: {request.epoch_id}")
-            print(f"   Lead IDs requested: {lead_ids[:3]}..." if lead_ids else "   Lead IDs: []")
+            print(f"   Missing lead IDs: {list(missing_leads)[:3]}...")
             raise HTTPException(status_code=404, detail=error_msg)
         
-        # Create evidence lookup dict (key by lead_id)
-        evidence_map = {e["lead_id"]: e for e in result.data}
+        if len(result.data) > len(lead_ids):
+            print(f"⚠️  Found {len(result.data)} records for {len(lead_ids)} lead_ids (duplicates exist, using latest)")
         
     except HTTPException:
         raise

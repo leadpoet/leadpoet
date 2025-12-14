@@ -805,13 +805,12 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
     print(f"✅ Verified {len(verified_reveals)} reveals")
     
     # ========================================
-    # Step 5: Bulk UPDATE all reveals in ONE database operation
+    # Step 5: Bulk UPDATE all reveals in CHUNKED database operations
     # ========================================
     try:
         revealed_ts = datetime.utcnow().isoformat()
         
         # Perform individual updates (Supabase doesn't support bulk update with different values)
-        # But we do them all in asyncio.gather for parallelism
         async def update_one(reveal_data):
             return await asyncio.to_thread(
                 lambda: supabase.table("validation_evidence_private")
@@ -826,10 +825,21 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
                     .execute()
             )
         
-        # Update all in parallel
-        await asyncio.gather(*[update_one(r) for r in verified_reveals])
+        # CHUNKED UPDATES: Process in batches of 50 to avoid connection pool exhaustion
+        # [Errno 11] Resource temporarily unavailable occurs with 300+ parallel connections
+        DB_CHUNK_SIZE = 50
+        total_updated = 0
         
-        print(f"✅ Updated {len(verified_reveals)} evidence records in database")
+        for i in range(0, len(verified_reveals), DB_CHUNK_SIZE):
+            chunk = verified_reveals[i:i + DB_CHUNK_SIZE]
+            await asyncio.gather(*[update_one(r) for r in chunk])
+            total_updated += len(chunk)
+            
+            # Brief pause between chunks to let connection pool recover
+            if i + DB_CHUNK_SIZE < len(verified_reveals):
+                await asyncio.sleep(0.1)
+        
+        print(f"✅ Updated {total_updated} evidence records in database ({len(verified_reveals)} verified, chunked in {DB_CHUNK_SIZE}s)")
         
     except Exception as e:
         print(f"❌ Error during bulk update: {e}")

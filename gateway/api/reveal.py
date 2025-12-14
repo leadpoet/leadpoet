@@ -150,10 +150,10 @@ async def reveal_validation_result(
     from gateway.utils.epoch import get_block_within_epoch_async
     block_within_epoch = await get_block_within_epoch_async()
     
-    if block_within_epoch >= 328:
+    if block_within_epoch > 328:
         raise HTTPException(
             status_code=400,
-            detail=f"Reveal deadline passed. Reveals for epoch {validation_epoch} must be submitted before block 328 of epoch {validation_epoch + 1}. Current block: {block_within_epoch}/360."
+            detail=f"Reveal deadline passed. Reveals for epoch {validation_epoch} must be submitted before block 329 of epoch {validation_epoch + 1}. Current block: {block_within_epoch}/360."
         )
     
     # ========================================

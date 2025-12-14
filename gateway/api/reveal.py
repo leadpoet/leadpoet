@@ -146,14 +146,14 @@ async def reveal_validation_result(
             detail=f"Reveal window expired. Validations from epoch {validation_epoch} must be revealed in epoch {validation_epoch + 1}. Current epoch is {current_epoch}."
         )
     
-    # Check 3: Must reveal BEFORE block 340 of epoch N+1 (consensus deadline)
+    # Check 3: Must reveal BEFORE block 328 of epoch N+1 (consensus deadline at 330)
     from gateway.utils.epoch import get_block_within_epoch_async
     block_within_epoch = await get_block_within_epoch_async()
     
-    if block_within_epoch >= 340:
+    if block_within_epoch >= 328:
         raise HTTPException(
             status_code=400,
-            detail=f"Reveal deadline passed. Reveals for epoch {validation_epoch} must be submitted before block 340 of epoch {validation_epoch + 1}. Current block: {block_within_epoch}/360."
+            detail=f"Reveal deadline passed. Reveals for epoch {validation_epoch} must be submitted before block 328 of epoch {validation_epoch + 1}. Current block: {block_within_epoch}/360."
         )
     
     # ========================================
@@ -670,12 +670,12 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
             detail=f"Reveal window expired. Must reveal in epoch {validation_epoch + 1}."
         )
     
-    # Check 3: Must reveal before block 340
+    # Check 3: Must reveal before block 328 (consensus at 330)
     block_within_epoch = await get_block_within_epoch_async()
-    if block_within_epoch > 340:
+    if block_within_epoch > 328:
         raise HTTPException(
             status_code=400,
-            detail=f"Reveal deadline passed (block {block_within_epoch} > 340)."
+            detail=f"Reveal deadline passed (block {block_within_epoch} > 328)."
         )
     
     print(f"\n{'='*80}")
@@ -684,7 +684,7 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
     print(f"   Validator: {request.validator_hotkey[:20]}...")
     print(f"   Epoch: {request.epoch_id}")
     print(f"   Current Epoch: {current_epoch}")
-    print(f"   Block: {block_within_epoch}/340")
+    print(f"   Block: {block_within_epoch}/328")
     print(f"   Reveals: {len(request.reveals)}")
     print(f"{'='*80}")
     
@@ -846,15 +846,15 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
         raise HTTPException(status_code=500, detail=f"Failed to update evidence: {str(e)}")
     
     # ========================================
-    # Step 6: Consensus deferred to block 350 (batch mode)
+    # Step 6: Consensus deferred to block 330 (batch mode)
     # ========================================
-    # IMPORTANT: Consensus is calculated ONCE at block 348-350 by epoch_monitor
+    # IMPORTANT: Consensus is calculated ONCE at block 328-330 by epoch_monitor
     # This ensures ALL reveals are captured before consensus runs
     # and reduces database writes from N per epoch to 1 per epoch
     
     elapsed = time.time() - start_time
     print(f"✅ Batch reveal complete: {len(verified_reveals)} reveals in {elapsed:.2f}s")
-    print(f"   📊 Consensus will be computed at block 350 of epoch {request.epoch_id + 1}")
+    print(f"   📊 Consensus will be computed at block 330 of epoch {request.epoch_id + 1}")
     
     return {
         "status": "success",

@@ -1801,6 +1801,8 @@ class Validator(BaseValidatorNeuron):
                 if container_mode_check != "worker":
                     if not hasattr(self, '_block_file_write_counter'):
                         self._block_file_write_counter = 0
+                        # CRITICAL: Write immediately on first run to prevent worker deadlock
+                        self._write_shared_block_file(current_block, current_epoch, blocks_into_epoch)
                     
                     self._block_file_write_counter += 1
                     if self._block_file_write_counter >= 12:
@@ -2283,7 +2285,12 @@ class Validator(BaseValidatorNeuron):
                     if not all_workers_ready:
                         # Check if we're approaching block 335 (hash submission deadline)
                         current_block_check = await self.get_current_block_async()
+                        current_epoch_check = current_block_check // 360
                         blocks_into_epoch_check = current_block_check % 360
+                        
+                        # CRITICAL: Update block file so workers get fresh epoch/block info
+                        # Without this, workers see stale data and get stuck in "too late" loop
+                        self._write_shared_block_file(current_block_check, current_epoch_check, blocks_into_epoch_check)
                         
                         # FORCE PROCEED at block 335 (must submit before reveal deadline at block 340)
                         if blocks_into_epoch_check >= 335:

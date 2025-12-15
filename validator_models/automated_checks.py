@@ -264,7 +264,8 @@ def get_aiohttp_connector():
 
 # ════════════════════════════════════════════════════════════════════
 
-MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "")
+# MEV removed - always use TrueList for email verification
+MYEMAILVERIFIER_API_KEY = ""  # Disabled - TrueList is now the primary email verifier
 TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 
 # Stage 4 & 5: ScrapingDog GSE API + OpenRouter LLM

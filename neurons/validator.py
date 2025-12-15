@@ -2647,9 +2647,9 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
             EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
-            BASE_BURN_SHARE = 0.40         # 50% base burn to UID 0
+            BASE_BURN_SHARE = 0.25         # 25% base burn to UID 0
             MAX_CURRENT_EPOCH_SHARE = 0.0  # 0% max to miners (current epoch)
-            MAX_ROLLING_EPOCH_SHARE = 0.60 # 60% max to miners (rolling 30 epochs)
+            MAX_ROLLING_EPOCH_SHARE = 0.75 # 75% max to miners (rolling 30 epochs)
             # Dynamic MAX_LEADS_PER_EPOCH from gateway (fetched during process_gateway_validation_workflow)
             # If not in memory (e.g., after restart), try to recover from history file
             MAX_LEADS_PER_EPOCH = getattr(self, '_max_leads_per_epoch', None)

@@ -119,14 +119,11 @@ class MetagraphMonitor(BlockListener):
             # Import cache globals from registry.py
             # We'll update these directly (atomic with lock)
             from gateway.utils.registry import _metagraph_cache, _cache_epoch, _cache_epoch_timestamp, _cache_lock
-            from gateway.config import BITTENSOR_NETUID, BITTENSOR_NETWORK
-            import bittensor as bt
+            from gateway.config import BITTENSOR_NETUID
             
             max_retries = 8
             retry_delay = 10  # Initial delay (seconds)
             timeout_per_attempt = 60  # 60 second timeout per attempt (matches old sync version)
-            reconnect_after_failures = 3  # Reconnect WebSocket after this many failures
-            consecutive_failures = 0
             
             for attempt in range(1, max_retries + 1):
                 try:
@@ -136,8 +133,8 @@ class MetagraphMonitor(BlockListener):
                     logger.info(f"   Timeout: {timeout_per_attempt}s per attempt")
                     
                     # ════════════════════════════════════════════════════════
-                    # Use async_subtensor to fetch metagraph
-                    # Wrap with 60-second timeout to prevent hanging
+                    # CRITICAL: Use injected async_subtensor (NO new instances!)
+                    # Wrap with 60-second timeout to prevent hanging (matches old sync version)
                     # ════════════════════════════════════════════════════════
                     metagraph = await asyncio.wait_for(
                         self.async_subtensor.metagraph(BITTENSOR_NETUID),
@@ -160,55 +157,43 @@ class MetagraphMonitor(BlockListener):
                     logger.info(f"   Validators: {sum(1 for i in range(len(metagraph.validator_permit)) if metagraph.validator_permit[i])}")
                     logger.info(f"   Cache updated atomically (thread-safe)")
                     
-                    consecutive_failures = 0  # Reset on success
                     return True
                     
                 except asyncio.TimeoutError:
-                    consecutive_failures += 1
-                    logger.warning(f"🔥 ⚠️  Warming attempt {attempt}/{max_retries} timed out after {timeout_per_attempt}s")
+                    # Timeout after 60 seconds
+                    if attempt < max_retries:
+                        logger.warning(f"🔥 ⚠️  Warming attempt {attempt}/{max_retries} timed out after {timeout_per_attempt}s")
+                        logger.warning(f"   Retrying in {retry_delay}s...")
+                        
+                        # Exponential backoff with cap
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 1.5, 30)  # Cap at 30s
+                        continue
+                    else:
+                        # Last attempt timed out
+                        logger.error(f"🔥 ❌ All {max_retries} warming attempts timed out for epoch {epoch_id}")
+                        logger.error(f"   Workflow will continue using epoch {epoch_id - 1} cache as fallback")
+                        return False
                     
                 except Exception as e:
-                    consecutive_failures += 1
-                    logger.warning(f"🔥 ⚠️  Warming attempt {attempt}/{max_retries} failed: {e}")
-                
-                # ════════════════════════════════════════════════════════
-                # RECONNECT: If multiple consecutive failures, WebSocket may be stale
-                # Create a fresh AsyncSubtensor instance
-                # ════════════════════════════════════════════════════════
-                if consecutive_failures >= reconnect_after_failures:
-                    logger.warning(f"🔥 🔄 {consecutive_failures} consecutive failures - reconnecting WebSocket...")
-                    try:
-                        # Close old connection
-                        try:
-                            await self.async_subtensor.__aexit__(None, None, None)
-                        except Exception:
-                            pass  # Ignore close errors
+                    if attempt < max_retries:
+                        logger.warning(f"🔥 ⚠️  Warming attempt {attempt}/{max_retries} failed: {e}")
+                        logger.warning(f"   Retrying in {retry_delay}s...")
                         
-                        # Create fresh connection
-                        self.async_subtensor = await asyncio.wait_for(
-                            bt.AsyncSubtensor(network=BITTENSOR_NETWORK).__aenter__(),
-                            timeout=30
-                        )
-                        logger.info(f"🔥 ✅ WebSocket reconnected to {BITTENSOR_NETWORK}")
-                        consecutive_failures = 0  # Reset after reconnect
+                        # Exponential backoff with cap
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 1.5, 30)  # Cap at 30s
+                        continue
+                    else:
+                        # Last attempt failed
+                        logger.error(f"🔥 ❌ All {max_retries} warming attempts failed for epoch {epoch_id}")
+                        logger.error(f"   Last error: {e}")
+                        logger.error(f"   Workflow will continue using epoch {epoch_id - 1} cache as fallback")
                         
-                        # Also update the injected reference in registry
-                        import gateway.utils.registry as registry_module
-                        registry_module._async_subtensor = self.async_subtensor
+                        import traceback
+                        traceback.print_exc()
                         
-                    except Exception as reconnect_error:
-                        logger.error(f"🔥 ❌ Reconnection failed: {reconnect_error}")
-                        # Continue with retries anyway
-                
-                if attempt < max_retries:
-                    logger.warning(f"   Retrying in {retry_delay}s...")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 1.5, 30)  # Cap at 30s
-                else:
-                    # Last attempt failed
-                    logger.error(f"🔥 ❌ All {max_retries} warming attempts failed for epoch {epoch_id}")
-                    logger.error(f"   Workflow will continue using epoch {epoch_id - 1} cache as fallback")
-                    return False
+                        return False
             
             # Should never reach here (loop always returns)
             return False

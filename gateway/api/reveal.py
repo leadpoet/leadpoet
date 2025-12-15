@@ -707,16 +707,16 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
         # Note: If duplicates exist, dict takes the last one for each lead_id
         evidence_map = {e["lead_id"]: e for e in result.data}
         
-        # Check we found evidence for all requested lead_ids
-        # Allow duplicates (more records is OK), but all lead_ids must be present
+        # Check for missing lead_ids - WARN but don't fail (partial reveals OK)
+        # This handles race conditions where hash submission partially failed
         missing_leads = set(lead_ids) - set(evidence_map.keys())
         if missing_leads:
-            error_msg = f"Evidence not found for {len(missing_leads)} leads. Requested {len(lead_ids)}, found {len(evidence_map)} unique"
-            print(f"❌ REVEAL REJECTED: {error_msg}")
+            print(f"⚠️  PARTIAL REVEAL: {len(missing_leads)} leads have no evidence (will skip)")
             print(f"   Validator: {request.validator_hotkey[:20]}...")
             print(f"   Epoch: {request.epoch_id}")
-            print(f"   Missing lead IDs: {list(missing_leads)[:3]}...")
-            raise HTTPException(status_code=404, detail=error_msg)
+            print(f"   Requested: {len(lead_ids)}, Found: {len(evidence_map)}")
+            print(f"   Missing lead IDs: {list(missing_leads)[:5]}...")
+            # DON'T fail - just skip the missing ones below
         
         if len(result.data) > len(lead_ids):
             print(f"⚠️  Found {len(result.data)} records for {len(lead_ids)} lead_ids (duplicates exist, using latest)")
@@ -731,13 +731,13 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
     # ========================================
     verified_reveals = []
     
+    skipped_missing = 0
     for reveal in request.reveals:
         evidence = evidence_map.get(reveal.lead_id)
         if not evidence:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Evidence for lead {reveal.lead_id} not found or not owned by validator"
-            )
+            # Skip missing leads (hash submission may have partially failed)
+            skipped_missing += 1
+            continue
         
         # Check if already revealed
         if evidence["decision"] is not None:
@@ -861,11 +861,14 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
     
     elapsed = time.time() - start_time
     print(f"✅ Batch reveal complete: {len(verified_reveals)} reveals in {elapsed:.2f}s")
+    if skipped_missing > 0:
+        print(f"   ⚠️  Skipped {skipped_missing} leads (no evidence found - hash submission may have failed)")
     print(f"   📊 Consensus will be computed at block 330 of epoch {request.epoch_id + 1}")
     
     return {
         "status": "success",
         "revealed_count": len(verified_reveals),
+        "skipped_missing": skipped_missing,
         "processing_time": f"{elapsed:.2f}s"
     }
 

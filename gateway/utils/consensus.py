@@ -124,7 +124,11 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
     total_weight = 0.0
     weighted_rep_score = 0.0
     weighted_approval = 0.0
-    rejection_reasons = []
+    # Track rejection reasons with their cumulative weights (for weighted selection)
+    rejection_reason_weights = {}  # {reason_string: total_weight}
+    
+    # Invalid rejection reasons to filter out (empty dicts, nulls, etc.)
+    INVALID_REJECTION_REASONS = {'{}', '""', 'null', '', None, '{"message": "pass"}'}
     
     for v in validations:
         v_trust = float(v["v_trust"])
@@ -140,10 +144,16 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
         if v["decision"] == "approve":
             weighted_approval += weight
         else:  # decision == "deny"
-            # Collect rejection reasons for denied leads
-            rejection_reason = v.get("rejection_reason", "unknown")
-            if rejection_reason:
-                rejection_reasons.append(rejection_reason)
+            # Collect rejection reasons with weights for denied leads
+            rejection_reason = v.get("rejection_reason")
+            
+            # Filter out empty/invalid rejection reasons
+            if rejection_reason and rejection_reason not in INVALID_REJECTION_REASONS:
+                # Accumulate weight for this rejection reason
+                if rejection_reason in rejection_reason_weights:
+                    rejection_reason_weights[rejection_reason] += weight
+                else:
+                    rejection_reason_weights[rejection_reason] = weight
     
     # ========================================
     # Step 4: Calculate final values
@@ -158,14 +168,23 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
     # Final decision: approve if >50% weighted approval
     final_decision = "approve" if approval_ratio > 0.5 else "deny"
     
-    # Calculate primary rejection reason (most common among denials)
-    from collections import Counter
+    # ========================================
+    # Step 4.5: Calculate primary rejection reason (WEIGHTED selection)
+    # ========================================
+    # Uses sum of (v_trust × stake) for each unique rejection reason
+    # The reason with highest total weight wins (not most common by count)
     if final_decision == "approve":
         primary_rejection_reason = "pass"
-    elif rejection_reasons:
-        primary_rejection_reason = Counter(rejection_reasons).most_common(1)[0][0]
+    elif rejection_reason_weights:
+        # Select rejection reason with highest cumulative weight
+        primary_rejection_reason = max(rejection_reason_weights.items(), key=lambda x: x[1])[0]
+        print(f"   📋 Rejection reason selection (weighted):")
+        for reason, weight in sorted(rejection_reason_weights.items(), key=lambda x: -x[1])[:3]:
+            marker = "✓" if reason == primary_rejection_reason else " "
+            print(f"      {marker} {reason[:50]}... → weight: {weight:.2f}")
     else:
         primary_rejection_reason = "unknown"
+        print(f"   ⚠️  No valid rejection reasons found (all were empty/null)")
     
     # ========================================
     # Step 5: Log consensus result

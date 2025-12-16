@@ -128,33 +128,65 @@ async def get_metagraph_async() -> bt.metagraph:
         # ═══════════════════════════════════════════════════════════════════════
         # STEP 3: Fetch new metagraph (OUTSIDE the lock - this is async!)
         # ═══════════════════════════════════════════════════════════════════════
-        max_retries = 3
+        # Strategy:
+        # - Attempts 1-4: Use shared AsyncSubtensor (fast path, reuses WebSocket)
+        # - Attempts 5-8: Use fresh sync Subtensor in thread pool (reliable fallback)
+        # 
+        # The sync fallback runs in asyncio.to_thread() so it does NOT block the
+        # event loop. Gateway continues processing other requests while this runs.
+        # ═══════════════════════════════════════════════════════════════════════
+        max_retries = 8
+        switch_to_sync_after = 4  # Switch to sync fallback after 4 async failures
         retry_delay = 2
+        timeout_per_attempt = 60  # 60 second timeout per attempt
         last_error = None
         cached_epoch = None
         
         with _cache_lock:
             cached_epoch = _cache_epoch
         
-        for attempt in range(max_retries):
+        for attempt in range(1, max_retries + 1):
+            use_sync_fallback = attempt > switch_to_sync_after
+            
             try:
-                if cached_epoch is not None and cached_epoch != current_epoch:
-                    print(f"🔄 Epoch changed: {cached_epoch} → {current_epoch}")
-                    print(f"🔄 Refreshing metagraph for new epoch... (attempt {attempt + 1}/{max_retries})")
+                if use_sync_fallback:
+                    # ════════════════════════════════════════════════════════════
+                    # SYNC FALLBACK: Fresh Subtensor in thread pool
+                    # Runs in separate thread - does NOT block event loop
+                    # ════════════════════════════════════════════════════════════
+                    print(f"🔄 Attempt {attempt}/{max_retries}: Using SYNC FALLBACK (thread pool)")
+                    print(f"   AsyncSubtensor may be stale, using fresh Subtensor...")
+                    print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
+                    print(f"   Timeout: {timeout_per_attempt}s")
+                    
+                    def fetch_metagraph_sync():
+                        """Runs in thread pool - does not block event loop"""
+                        subtensor = bt.Subtensor(network=BITTENSOR_NETWORK)
+                        return subtensor.metagraph(BITTENSOR_NETUID)
+                    
+                    # Run sync code in thread pool with timeout
+                    metagraph = await asyncio.wait_for(
+                        asyncio.to_thread(fetch_metagraph_sync),
+                        timeout=timeout_per_attempt
+                    )
+                    print(f"✅ Sync fallback succeeded!")
                 else:
-                    print(f"🔄 Fetching metagraph for epoch {current_epoch}... (attempt {attempt + 1}/{max_retries})")
-                
-                print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
-                
-                # ════════════════════════════════════════════════════════════
-                # CRITICAL: Use injected async subtensor (NO new instance!)
-                # Add 60-second timeout to prevent blocking entire gateway
-                # THIS IS OUTSIDE THE LOCK - async timeouts work correctly!
-                # ════════════════════════════════════════════════════════════
-                metagraph = await asyncio.wait_for(
-                    _async_subtensor.metagraph(netuid=BITTENSOR_NETUID),
-                    timeout=60.0  # 60s timeout - prevents hanging gateway
-                )
+                    # ════════════════════════════════════════════════════════════
+                    # ASYNC PATH: Use shared AsyncSubtensor (fast when healthy)
+                    # ════════════════════════════════════════════════════════════
+                    if cached_epoch is not None and cached_epoch != current_epoch:
+                        print(f"🔄 Epoch changed: {cached_epoch} → {current_epoch}")
+                        print(f"🔄 Refreshing metagraph for new epoch... (attempt {attempt}/{max_retries})")
+                    else:
+                        print(f"🔄 Fetching metagraph for epoch {current_epoch}... (attempt {attempt}/{max_retries})")
+                    
+                    print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
+                    print(f"   Timeout: {timeout_per_attempt}s")
+                    
+                    metagraph = await asyncio.wait_for(
+                        _async_subtensor.metagraph(netuid=BITTENSOR_NETUID),
+                        timeout=timeout_per_attempt
+                    )
                 
                 # ═══════════════════════════════════════════════════════════
                 # STEP 4: Update cache (lock held only for write)
@@ -165,29 +197,41 @@ async def get_metagraph_async() -> bt.metagraph:
                     _cache_epoch_timestamp = time.time()
                     _fetch_in_progress = False
                 
-                print(f"✅ Metagraph cached for epoch {current_epoch}: {len(metagraph.hotkeys)} neurons registered")
+                method = "sync fallback" if use_sync_fallback else "async"
+                print(f"✅ Metagraph cached for epoch {current_epoch}: {len(metagraph.hotkeys)} neurons registered (via {method})")
                 return metagraph
             
             except asyncio.TimeoutError:
-                last_error = TimeoutError(f"Metagraph fetch timed out after 60s")
-                print(f"⚠️  Metagraph fetch attempt {attempt + 1}/{max_retries} TIMEOUT (60s)")
-                if attempt < max_retries - 1:
-                    print(f"   Bittensor chain might be overloaded - retrying in {retry_delay}s...")
+                last_error = TimeoutError(f"Metagraph fetch timed out after {timeout_per_attempt}s")
+                method = "sync fallback" if use_sync_fallback else "async"
+                print(f"⚠️  Metagraph fetch attempt {attempt}/{max_retries} ({method}) TIMEOUT ({timeout_per_attempt}s)")
+                
+                if attempt < max_retries:
+                    if attempt == switch_to_sync_after:
+                        print(f"   → Next attempt will use SYNC FALLBACK (fresh Subtensor in thread pool)")
+                    else:
+                        print(f"   Retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
+                    retry_delay = min(retry_delay * 1.5, 10)  # Exponential backoff, cap at 10s
                     continue
                 
             except Exception as e:
                 last_error = e
-                print(f"⚠️  Metagraph fetch attempt {attempt + 1}/{max_retries} failed: {e}")
-                if attempt < max_retries - 1:
-                    print(f"   Retrying in {retry_delay}s...")
+                method = "sync fallback" if use_sync_fallback else "async"
+                print(f"⚠️  Metagraph fetch attempt {attempt}/{max_retries} ({method}) failed: {e}")
+                
+                if attempt < max_retries:
+                    if attempt == switch_to_sync_after:
+                        print(f"   → Next attempt will use SYNC FALLBACK (fresh Subtensor in thread pool)")
+                    else:
+                        print(f"   Retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
+                    retry_delay = min(retry_delay * 1.5, 10)  # Exponential backoff, cap at 10s
                     continue
         
         # All retries exhausted
         print(f"❌ Error fetching metagraph after {max_retries} attempts: {last_error}")
+        print(f"   Async attempts: {switch_to_sync_after}, Sync fallback attempts: {max_retries - switch_to_sync_after}")
         
         # Use fallback cache
         with _cache_lock:

@@ -4678,6 +4678,15 @@ def run_lightweight_worker(config):
                     
                     print(f"\n🔍 WORKER EPOCH {current_epoch}: Starting validation (block {blocks_into_epoch}/360)")
                     
+                    # CRITICAL FIX: Check if we already completed this epoch
+                    # Prevents re-processing the same epoch while waiting for coordinator to aggregate
+                    container_id = self.config.neuron.container_id
+                    results_file = Path("validator_weights") / f"worker_{container_id}_epoch_{current_epoch}_results.json"
+                    if results_file.exists():
+                        print(f"⏭️  Worker {container_id}: Already completed epoch {current_epoch}, waiting for next epoch...")
+                        await asyncio.sleep(30)
+                        continue
+                    
                     # Wait for coordinator to fetch and share leads
                     leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
                     

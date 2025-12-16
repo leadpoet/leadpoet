@@ -109,6 +109,13 @@ class MetagraphMonitor(BlockListener):
         This runs in the background (via asyncio.create_task) so it doesn't block
         the block publisher or other monitors.
         
+        Strategy:
+        - Attempts 1-4: Use shared AsyncSubtensor (fast path)
+        - Attempts 5-8: Fall back to fresh sync Subtensor in thread pool (reliable path)
+        
+        The sync fallback runs in asyncio.to_thread() so it does NOT block the event loop.
+        Gateway continues processing requests while this runs in background.
+        
         Args:
             epoch_id: The new epoch to fetch metagraph for
         
@@ -119,32 +126,54 @@ class MetagraphMonitor(BlockListener):
             # Import cache globals from registry.py
             # We'll update these directly (atomic with lock)
             from gateway.utils.registry import _metagraph_cache, _cache_epoch, _cache_epoch_timestamp, _cache_lock
-            from gateway.config import BITTENSOR_NETUID
+            from gateway.config import BITTENSOR_NETUID, BITTENSOR_NETWORK
             
             max_retries = 8
+            switch_to_sync_after = 4  # Switch to sync fallback after 4 async failures
             retry_delay = 10  # Initial delay (seconds)
-            timeout_per_attempt = 60  # 60 second timeout per attempt (matches old sync version)
+            timeout_per_attempt = 60  # 60 second timeout per attempt
             
             for attempt in range(1, max_retries + 1):
                 try:
-                    logger.info(f"🔥 Warming attempt {attempt}/{max_retries} for epoch {epoch_id}...")
-                    logger.info(f"   Network: {self.async_subtensor.network}")
-                    logger.info(f"   NetUID: {BITTENSOR_NETUID}")
-                    logger.info(f"   Timeout: {timeout_per_attempt}s per attempt")
+                    use_sync_fallback = attempt > switch_to_sync_after
                     
-                    # ════════════════════════════════════════════════════════
-                    # CRITICAL: Use injected async_subtensor (NO new instances!)
-                    # Wrap with 60-second timeout to prevent hanging (matches old sync version)
-                    # ════════════════════════════════════════════════════════
-                    metagraph = await asyncio.wait_for(
-                        self.async_subtensor.metagraph(BITTENSOR_NETUID),
-                        timeout=timeout_per_attempt
-                    )
+                    if use_sync_fallback:
+                        # ════════════════════════════════════════════════════════
+                        # SYNC FALLBACK: Fresh Subtensor in thread pool
+                        # Runs in separate thread - does NOT block event loop
+                        # ════════════════════════════════════════════════════════
+                        logger.warning(f"🔥 Attempt {attempt}/{max_retries}: Using SYNC FALLBACK (thread pool)")
+                        logger.warning(f"   AsyncSubtensor may be stale, using fresh Subtensor...")
+                        
+                        def fetch_metagraph_sync():
+                            """Runs in thread pool - does not block event loop"""
+                            import bittensor as bt
+                            subtensor = bt.Subtensor(network=BITTENSOR_NETWORK)
+                            return subtensor.metagraph(BITTENSOR_NETUID)
+                        
+                        # Run sync code in thread pool with timeout
+                        metagraph = await asyncio.wait_for(
+                            asyncio.to_thread(fetch_metagraph_sync),
+                            timeout=timeout_per_attempt
+                        )
+                        logger.info(f"🔥 ✅ Sync fallback succeeded!")
+                    else:
+                        # ════════════════════════════════════════════════════════
+                        # ASYNC PATH: Use shared AsyncSubtensor (fast when healthy)
+                        # ════════════════════════════════════════════════════════
+                        logger.info(f"🔥 Attempt {attempt}/{max_retries} for epoch {epoch_id}...")
+                        logger.info(f"   Network: {self.async_subtensor.network}")
+                        logger.info(f"   NetUID: {BITTENSOR_NETUID}")
+                        logger.info(f"   Timeout: {timeout_per_attempt}s")
+                        
+                        metagraph = await asyncio.wait_for(
+                            self.async_subtensor.metagraph(BITTENSOR_NETUID),
+                            timeout=timeout_per_attempt
+                        )
                     
                     # ════════════════════════════════════════════════════════
                     # Update global cache atomically (thread-safe)
                     # ════════════════════════════════════════════════════════
-                    # Import as globals to modify them
                     import gateway.utils.registry as registry_module
                     
                     with _cache_lock:
@@ -155,40 +184,43 @@ class MetagraphMonitor(BlockListener):
                     logger.info(f"🔥 ✅ Cache warmed for epoch {epoch_id}")
                     logger.info(f"   Neurons: {len(metagraph.hotkeys)}")
                     logger.info(f"   Validators: {sum(1 for i in range(len(metagraph.validator_permit)) if metagraph.validator_permit[i])}")
-                    logger.info(f"   Cache updated atomically (thread-safe)")
+                    logger.info(f"   Method: {'sync fallback' if use_sync_fallback else 'async'}")
                     
                     return True
                     
                 except asyncio.TimeoutError:
-                    # Timeout after 60 seconds
                     if attempt < max_retries:
-                        logger.warning(f"🔥 ⚠️  Warming attempt {attempt}/{max_retries} timed out after {timeout_per_attempt}s")
-                        logger.warning(f"   Retrying in {retry_delay}s...")
+                        method = "sync fallback" if attempt > switch_to_sync_after else "async"
+                        logger.warning(f"🔥 ⚠️  Attempt {attempt}/{max_retries} ({method}) timed out after {timeout_per_attempt}s")
+                        if attempt == switch_to_sync_after:
+                            logger.warning(f"   → Next attempt will use SYNC FALLBACK (fresh Subtensor)")
+                        else:
+                            logger.warning(f"   Retrying in {retry_delay}s...")
                         
-                        # Exponential backoff with cap
                         await asyncio.sleep(retry_delay)
-                        retry_delay = min(retry_delay * 1.5, 30)  # Cap at 30s
+                        retry_delay = min(retry_delay * 1.5, 30)
                         continue
                     else:
-                        # Last attempt timed out
-                        logger.error(f"🔥 ❌ All {max_retries} warming attempts timed out for epoch {epoch_id}")
-                        logger.error(f"   Workflow will continue using epoch {epoch_id - 1} cache as fallback")
+                        logger.error(f"🔥 ❌ All {max_retries} attempts failed for epoch {epoch_id}")
+                        logger.error(f"   Workflow will continue using epoch {epoch_id - 1} cache")
                         return False
                     
                 except Exception as e:
                     if attempt < max_retries:
-                        logger.warning(f"🔥 ⚠️  Warming attempt {attempt}/{max_retries} failed: {e}")
-                        logger.warning(f"   Retrying in {retry_delay}s...")
+                        method = "sync fallback" if attempt > switch_to_sync_after else "async"
+                        logger.warning(f"🔥 ⚠️  Attempt {attempt}/{max_retries} ({method}) failed: {e}")
+                        if attempt == switch_to_sync_after:
+                            logger.warning(f"   → Next attempt will use SYNC FALLBACK (fresh Subtensor)")
+                        else:
+                            logger.warning(f"   Retrying in {retry_delay}s...")
                         
-                        # Exponential backoff with cap
                         await asyncio.sleep(retry_delay)
-                        retry_delay = min(retry_delay * 1.5, 30)  # Cap at 30s
+                        retry_delay = min(retry_delay * 1.5, 30)
                         continue
                     else:
-                        # Last attempt failed
-                        logger.error(f"🔥 ❌ All {max_retries} warming attempts failed for epoch {epoch_id}")
+                        logger.error(f"🔥 ❌ All {max_retries} attempts failed for epoch {epoch_id}")
                         logger.error(f"   Last error: {e}")
-                        logger.error(f"   Workflow will continue using epoch {epoch_id - 1} cache as fallback")
+                        logger.error(f"   Workflow will continue using epoch {epoch_id - 1} cache")
                         
                         import traceback
                         traceback.print_exc()

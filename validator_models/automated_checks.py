@@ -214,6 +214,46 @@ ICP_DEFINITIONS = [
             "risk officer", "senior risk officer", "risk manager", "enterprise risk manager",
             "operational risk manager", "credit risk manager", "director of operational risk"
         ]
+    },
+    
+    {
+        "sub_industries": ["video on demand", "vod", "broadcaster", "tv channel", "television", 
+                          "telecommunications", "telecom", "content delivery network", "cdn",
+                          "streaming", "ott", "over the top", "media streaming", "video streaming",
+                          "broadcast", "broadcasting", "media company", "digital media"],
+        "role_details": [
+            # Technology Leadership
+            "cto", "chief technology officer", "cfo", "chief financial officer",
+            "head of engineering", "vp of engineering", "vp engineering", "engineering director",
+            "director of engineering",
+            # Video/Streaming Specific
+            "head of video", "head of streaming", "director of video", "director of streaming",
+            "vp of video", "vp video", "vp of streaming", "vp streaming",
+            "head of ott", "director of ott", "vp of ott", "vp ott", "ott director",
+            "cdn architect", "video architect", "streaming architect", "media architect",
+            "head of cdn", "director of cdn", "vp of cdn",
+            # Content Operations
+            "head of content operations", "director of content operations", "vp of content operations",
+            "content operations manager", "head of media operations", "director of media operations",
+            # Broadcast Operations
+            "broadcast ops manager", "broadcast operations manager", "director of broadcast operations",
+            "head of broadcast operations", "vp of broadcast operations",
+            # Post-Production/Media Ops
+            "post-production manager", "head of post-production", "director of post-production",
+            "media ops manager", "media operations manager", "head of media ops",
+            # Product (OTT)
+            "head of product", "director of product", "vp of product", "vp product",
+            "product director", "chief product officer", "cpo"
+        ],
+        # Region filter - only match leads from Africa
+        "regions": ["africa", "african", "nigeria", "south africa", "kenya", "ghana", "egypt",
+                    "morocco", "ethiopia", "tanzania", "uganda", "algeria", "sudan", "angola",
+                    "mozambique", "cameroon", "ivory coast", "côte d'ivoire", "senegal", "zambia",
+                    "zimbabwe", "rwanda", "tunisia", "libya", "democratic republic of congo", "drc",
+                    "botswana", "namibia", "mauritius", "gabon", "malawi", "mali", "burkina faso",
+                    "niger", "chad", "somalia", "benin", "togo", "sierra leone", "liberia",
+                    "central african republic", "congo", "eritrea", "gambia", "guinea", "lesotho",
+                    "madagascar", "mauritania", "swaziland", "eswatini"]
     }
 ]
 
@@ -265,7 +305,8 @@ def get_aiohttp_connector():
 # ════════════════════════════════════════════════════════════════════
 
 # MEV removed - always use TrueList for email verification
-MYEMAILVERIFIER_API_KEY = ""  # Disabled - TrueList is now the primary email verifier
+# Even if MYEMAILVERIFIER_API_KEY is set in environment, we ignore it
+MYEMAILVERIFIER_API_KEY = ""  # Hardcoded empty - TrueList is the only email verifier
 TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 
 # Stage 4 & 5: ScrapingDog GSE API + OpenRouter LLM
@@ -5907,6 +5948,7 @@ def determine_icp_multiplier(lead: dict) -> float:
     - Sub-Industry (e.g., "Gas Stations", "AI Startups")
     - Role Type (e.g., "Operations", "Technology", "Leadership")
     - Role Details (specific titles like "CEO", "CTO", "VP of Operations")
+    - Region (optional - e.g., "Africa" for streaming/broadcast ICP)
     
     Returns:
         1.5 if lead matches ICP criteria
@@ -5915,6 +5957,7 @@ def determine_icp_multiplier(lead: dict) -> float:
     # Extract lead fields (case-insensitive)
     sub_industry = lead.get("sub_industry", "").strip().lower()
     role = lead.get("role", "").strip().lower()
+    region = lead.get("region", "").strip().lower()
     
     # Helper function to check if any keyword matches in text
     def matches_any(text: str, keywords: list) -> bool:
@@ -5928,7 +5971,13 @@ def determine_icp_multiplier(lead: dict) -> float:
         if not matches_any(sub_industry, icp["sub_industries"]):
             continue  # No match, try next ICP
         
-        # Step 2: Check if role contains role_details (specific titles)
+        # Step 2: Check region if specified in ICP definition
+        # If "regions" is defined, lead must be from one of those regions
+        if "regions" in icp:
+            if not matches_any(region, icp["regions"]):
+                continue  # Region doesn't match, try next ICP
+        
+        # Step 3: Check if role contains role_details (specific titles)
         # Role details are the most specific check (e.g., "CEO", "CTO", "VP of Operations")
         if matches_any(role, icp["role_details"]):
             return 1.5  # ICP match found!

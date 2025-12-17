@@ -221,44 +221,14 @@ async def submit_lead(event: SubmitLeadEvent):
     print("🔍 Step 2 complete: Signature valid")
     
     # ========================================
-    # Step 2.5: ATOMIC Rate Limit Reservation (after identity verified)
     # ========================================
-    # Now that we've verified the signature, we KNOW this is the real miner.
-    # We atomically reserve a submission slot to prevent race conditions.
-    # 
-    # RACE CONDITION FIX:
-    # Previously, check_rate_limit() and increment_submission() were separate,
-    # allowing multiple simultaneous requests to all pass the check before any
-    # incremented. Now we atomically check AND increment in one operation.
-    print("🔍 Step 2.5: Reserving submission slot (atomic)...")
-    from gateway.utils.rate_limiter import reserve_submission_slot, mark_submission_failed
-    
-    slot_reserved, reservation_reason, reservation_stats = reserve_submission_slot(event.actor_hotkey)
-    if not slot_reserved:
-        print(f"❌ Could not reserve submission slot for {event.actor_hotkey[:20]}...")
-        print(f"   Reason: {reservation_reason}")
-        print(f"   Stats: {reservation_stats}")
-        
-        # Return 429 Too Many Requests
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "rate_limit_exceeded",
-                "message": reservation_reason,
-                "stats": reservation_stats
-            }
-        )
-    
-    print(f"🔍 Step 2.5 complete: Slot reserved (submissions={reservation_stats['submissions']}/{reservation_stats['max_submissions']})")
-    
-    # From this point on, a slot is RESERVED. If processing fails, we must call
-    # mark_submission_failed() to increment the rejections counter.
-    # If processing succeeds, the slot is already consumed (no further action needed).
-    
+    # Step 2.5: Check actor is registered miner BEFORE reserving slot
     # ========================================
-    # Step 3: Check actor is registered miner
-    # ========================================
-    print("🔍 Step 3: Checking registration...")
+    # CRITICAL: Registration check MUST happen BEFORE reserve_submission_slot()
+    # Otherwise, unregistered hotkeys get their submissions counter incremented
+    # even though they fail registration (causing 216 hotkeys with submissions > 0
+    # when only 128 UIDs exist in the subnet)
+    print("🔍 Step 2.5: Checking registration...")
     import asyncio
     try:
         is_registered, role = await asyncio.wait_for(
@@ -283,7 +253,42 @@ async def submit_lead(event: SubmitLeadEvent):
             status_code=403,
             detail="Only miners can submit leads"
         )
-    print(f"🔍 Step 3 complete: Miner registered (hotkey={event.actor_hotkey[:10]}...)")
+    print(f"🔍 Step 2.5 complete: Miner registered (hotkey={event.actor_hotkey[:10]}...)")
+    
+    # ========================================
+    # Step 3: Reserve submission slot (atomic)
+    # ========================================
+    # Now that we've verified the signature AND registration, we KNOW this is a real registered miner.
+    # We atomically reserve a submission slot to prevent race conditions.
+    # 
+    # RACE CONDITION FIX:
+    # Previously, check_rate_limit() and increment_submission() were separate,
+    # allowing multiple simultaneous requests to all pass the check before any
+    # incremented. Now we atomically check AND increment in one operation.
+    print("🔍 Step 3: Reserving submission slot (atomic)...")
+    from gateway.utils.rate_limiter import reserve_submission_slot, mark_submission_failed
+    
+    slot_reserved, reservation_reason, reservation_stats = reserve_submission_slot(event.actor_hotkey)
+    if not slot_reserved:
+        print(f"❌ Could not reserve submission slot for {event.actor_hotkey[:20]}...")
+        print(f"   Reason: {reservation_reason}")
+        print(f"   Stats: {reservation_stats}")
+        
+        # Return 429 Too Many Requests
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "rate_limit_exceeded",
+                "message": reservation_reason,
+                "stats": reservation_stats
+            }
+        )
+    
+    print(f"🔍 Step 3 complete: Slot reserved (submissions={reservation_stats['submissions']}/{reservation_stats['max_submissions']})")
+    
+    # From this point on, a slot is RESERVED. If processing fails, we must call
+    # mark_submission_failed() to increment the rejections counter.
+    # If processing succeeds, the slot is already consumed (no further action needed).
     
     # ========================================
     # Step 4: Verify nonce format and freshness
@@ -596,7 +601,9 @@ async def submit_lead(event: SubmitLeadEvent):
             "sub_industry",  # Sub-industry/niche
             "region",        # Location
             "linkedin",      # LinkedIn URL
-            "source_url"     # Source URL where lead was found
+            "source_url",    # Source URL where lead was found
+            "description",   # Company description (for Stage 5 verification)
+            "employee_count" # Company size/headcount (for Stage 5 verification)
         ]
         
         missing_fields = []

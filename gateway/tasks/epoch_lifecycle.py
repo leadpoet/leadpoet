@@ -60,12 +60,14 @@ async def fetch_full_leads_for_epoch(epoch_id: int) -> list:
     
     try:
         # Step 1: Query pending leads from queue (FIFO order)
+        # IMPORTANT: Add .range(0, 10000) to override Supabase's default 1000 row limit
         print(f"   🔍 Querying pending leads for epoch {epoch_id}...")
         result = await asyncio.to_thread(
             lambda: supabase.table("leads_private")
                 .select("lead_id")
                 .eq("status", "pending_validation")
                 .order("created_ts")
+                .range(0, 10000)
                 .execute()
         )
         
@@ -405,12 +407,14 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         
         # ========================================================================
         # 1. Query pending leads from queue (FIFO order) - RUN IN THREAD
+        # IMPORTANT: Add .range(0, 10000) to override Supabase's default 1000 row limit
         # ========================================================================
         result = await asyncio.to_thread(
             lambda: supabase.table("leads_private")
                 .select("lead_id")
                 .eq("status", "pending_validation")
                 .order("created_ts")
+                .range(0, 10000)
                 .execute()
         )
         
@@ -594,11 +598,14 @@ async def compute_epoch_consensus(epoch_id: int):
             metagraph = await get_metagraph_async()
             
             # Query all evidence for this epoch that has been revealed - RUN IN THREAD
+            # IMPORTANT: Add .range(0, 10000) to override Supabase's default 1000 row limit
+            # With 900 leads × 5 validators = 4500 rows, we need more than default
             evidence_result = await asyncio.to_thread(
                 lambda: supabase.table("validation_evidence_private")
                     .select("evidence_id, validator_hotkey")
                     .eq("epoch_id", epoch_id)
                     .not_.is_("decision", "null")
+                    .range(0, 10000)
                     .execute()
             )
             
@@ -648,10 +655,13 @@ async def compute_epoch_consensus(epoch_id: int):
         # PRIORITY 3: Weighted consensus calculation (already implemented in consensus.py)
         # ========================================================================
         # Query all leads validated in this epoch - RUN IN THREAD
+        # IMPORTANT: Add .range(0, 10000) to override Supabase's default 1000 row limit
+        # With 900 leads × 5 validators = 4500 rows, we need more than default
         result = await asyncio.to_thread(
             lambda: supabase.table("validation_evidence_private")
                 .select("lead_id")
                 .eq("epoch_id", epoch_id)
+                .range(0, 10000)
                 .execute()
         )
         

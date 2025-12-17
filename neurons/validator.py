@@ -2052,15 +2052,7 @@ class Validator(BaseValidatorNeuron):
                     is_valid = result.get("is_legitimate", False)
                     decision = "approve" if is_valid else "deny"
                     rep_score = int(lead_blob.get("rep_score", 0))  # Default 0 for rejected leads
-                    # CRITICAL: Never send empty rejection reason - miners need to know why leads failed
-                    rejection_reason = result.get("reason") if not is_valid else {"message": "pass"}
-                    if not is_valid and (not rejection_reason or rejection_reason == {}):
-                        rejection_reason = {
-                            "stage": "Unknown",
-                            "check_name": "validation_error",
-                            "message": "Lead failed validation but no specific reason was captured",
-                            "failed_fields": []
-                        }
+                    rejection_reason = result.get("reason") or {} if not is_valid else {"message": "pass"}
                     evidence_blob = json.dumps(result)
                     
                     # Compute hashes (SHA256 with salt)
@@ -2148,7 +2140,7 @@ class Validator(BaseValidatorNeuron):
                                 self._block_file_write_counter_validation = 0
                             
                             self._block_file_write_counter_validation += 1
-                            if self._block_file_write_counter_validation >= 6:  # Every ~12s (6 leads × 2s)
+                            if self._block_file_write_counter_validation >= 1:  # Every lead (prevents 3+ min staleness)
                                 self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
                                 self._block_file_write_counter_validation = 0
                         
@@ -2211,7 +2203,7 @@ class Validator(BaseValidatorNeuron):
                                 self._block_file_write_counter_validation = 0
                             
                             self._block_file_write_counter_validation += 1
-                            if self._block_file_write_counter_validation >= 6:  # Every ~12s (6 leads × 2s)
+                            if self._block_file_write_counter_validation >= 1:  # Every lead (prevents 3+ min staleness)
                                 self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
                                 self._block_file_write_counter_validation = 0
                         
@@ -4836,15 +4828,7 @@ def run_lightweight_worker(config):
                         is_valid = lead['is_valid']
                         decision = "approve" if is_valid else "deny"
                         rep_score = int(lead['lead_blob'].get("rep_score", 0))
-                        # CRITICAL: Never send empty rejection reason - miners need to know why leads failed
-                        rejection_reason = lead.get('rejection_reason') if not is_valid else {"message": "pass"}
-                        if not is_valid and (not rejection_reason or rejection_reason == {}):
-                            rejection_reason = {
-                                "stage": "Unknown",
-                                "check_name": "validation_error", 
-                                "message": "Lead failed validation but no specific reason was captured",
-                                "failed_fields": []
-                            }
+                        rejection_reason = lead.get('rejection_reason') or {} if not is_valid else {"message": "pass"}
                         evidence_blob = json.dumps(lead.get('automated_checks_data', {}))
                         
                         # Compute hashes (SHA256 with salt) - EXACT same as coordinator lines 2036-2040

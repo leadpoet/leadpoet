@@ -597,17 +597,39 @@ async def compute_epoch_consensus(epoch_id: int):
             # Get metagraph to fetch v_trust and stake for all validators
             metagraph = await get_metagraph_async()
             
-            # Query all evidence for this epoch that has been revealed - RUN IN THREAD
-            # IMPORTANT: Add .range(0, 10000) to override Supabase's default 1000 row limit
-            # With 900 leads × 5 validators = 4500 rows, we need more than default
-            evidence_result = await asyncio.to_thread(
-                lambda: supabase.table("validation_evidence_private")
-                    .select("evidence_id, validator_hotkey")
-                    .eq("epoch_id", epoch_id)
-                    .not_.is_("decision", "null")
-                    .range(0, 10000)
-                    .execute()
-            )
+            # Query all evidence for this epoch that has been revealed - USE PAGINATION
+            # CRITICAL: .range() does NOT override Supabase's 1000-row limit per request!
+            # We must paginate through results in batches of 1000 to get all rows.
+            all_evidence = []
+            offset = 0
+            batch_size = 1000
+            
+            while True:
+                evidence_batch = await asyncio.to_thread(
+                    lambda o=offset: supabase.table("validation_evidence_private")
+                        .select("evidence_id, validator_hotkey")
+                        .eq("epoch_id", epoch_id)
+                        .not_.is_("decision", "null")
+                        .range(o, o + batch_size - 1)
+                        .execute()
+                )
+                
+                if not evidence_batch.data:
+                    break
+                
+                all_evidence.extend(evidence_batch.data)
+                
+                if len(evidence_batch.data) < batch_size:
+                    break  # Last batch
+                
+                offset += batch_size
+            
+            # Use the paginated results
+            class PaginatedResult:
+                def __init__(self, data):
+                    self.data = data
+            
+            evidence_result = PaginatedResult(all_evidence)
             
             print(f"   📊 Found {len(evidence_result.data)} revealed validation records")
             
@@ -654,19 +676,37 @@ async def compute_epoch_consensus(epoch_id: int):
         # ========================================================================
         # PRIORITY 3: Weighted consensus calculation (already implemented in consensus.py)
         # ========================================================================
-        # Query all leads validated in this epoch - RUN IN THREAD
-        # IMPORTANT: Add .range(0, 10000) to override Supabase's default 1000 row limit
-        # With 900 leads × 5 validators = 4500 rows, we need more than default
-        result = await asyncio.to_thread(
-            lambda: supabase.table("validation_evidence_private")
-                .select("lead_id")
-                .eq("epoch_id", epoch_id)
-                .range(0, 10000)
-                .execute()
-        )
+        # Query all leads validated in this epoch - USE PAGINATION
+        # CRITICAL: .range() does NOT override Supabase's 1000-row limit per request!
+        # We must paginate through results in batches of 1000 to get all rows.
+        # With 900 leads × 3 validators = 2700 rows, we need 3 batches.
+        
+        all_lead_ids = []
+        offset = 0
+        batch_size = 1000
+        
+        while True:
+            result = await asyncio.to_thread(
+                lambda o=offset: supabase.table("validation_evidence_private")
+                    .select("lead_id")
+                    .eq("epoch_id", epoch_id)
+                    .range(o, o + batch_size - 1)
+                    .execute()
+            )
+            
+            if not result.data:
+                break
+            
+            all_lead_ids.extend([row["lead_id"] for row in result.data])
+            print(f"   📥 Fetched batch {offset // batch_size + 1}: {len(result.data)} rows (total: {len(all_lead_ids)})")
+            
+            if len(result.data) < batch_size:
+                break  # Last batch
+            
+            offset += batch_size
         
         # Get unique lead IDs
-        unique_leads = list(set([row["lead_id"] for row in result.data]))
+        unique_leads = list(set(all_lead_ids))
         
         if not unique_leads:
             print(f"   ℹ️  No leads to compute consensus for in epoch {epoch_id}")

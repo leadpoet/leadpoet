@@ -59,7 +59,8 @@ class EpochMonitor:
         self.subtensor = None  # Will be initialized in start()
         self.last_epoch = None
         self.validation_ended_epochs = set()
-        self.closed_epochs = set()
+        self.closed_epochs = set()  # Epochs that completed consensus successfully
+        self.processing_epochs = set()  # Epochs currently being processed (prevents duplicate tasks)
         self.startup_block_count = 0  # Count blocks since startup
         
         print("🔄 EpochMonitor initialized (polling-based, like validator)")
@@ -207,7 +208,17 @@ class EpochMonitor:
                 consensus_epoch = current_epoch - 1  # Calculate consensus for previous epoch
                 print(f"   ✅ BLOCK 330 DETECTED! Will check epoch {consensus_epoch}")
                 
-                if consensus_epoch not in self.closed_epochs:
+                # Check if epoch is already being processed OR already completed
+                # This prevents the race condition where polling loop triggers
+                # consensus multiple times (once per block in 328-330 window)
+                if consensus_epoch in self.processing_epochs:
+                    print(f"   ⚠️  Epoch {consensus_epoch} already being processed (task running)")
+                elif consensus_epoch in self.closed_epochs:
+                    print(f"   ⚠️  Epoch {consensus_epoch} already completed (in closed_epochs)")
+                else:
+                    # Mark as processing BEFORE creating task (prevents duplicate tasks)
+                    self.processing_epochs.add(consensus_epoch)
+                    
                     print(f"\n{'='*80}")
                     print(f"📊 BATCH CONSENSUS TRIGGER: Block 330 of epoch {current_epoch}")
                     print(f"   Computing consensus for epoch {consensus_epoch} reveals...")
@@ -215,8 +226,6 @@ class EpochMonitor:
                     
                     # Trigger consensus (non-blocking)
                     asyncio.create_task(self._check_for_reveals(consensus_epoch))
-                else:
-                    print(f"   ⚠️  Epoch {consensus_epoch} already processed (in closed_epochs set)")
         
         except Exception as e:
             print(f"❌ Error in EpochMonitor._process_block: {e}")
@@ -336,14 +345,16 @@ class EpochMonitor:
         This is called for previous epochs to handle delayed reveals.
         Only processes each epoch once.
         
+        NOTE: Deduplication is handled in _process_block() by adding
+        epoch to processing_epochs BEFORE creating this task. This prevents
+        the race condition where multiple tasks were created for the same epoch.
+        On success, epoch moves from processing_epochs to closed_epochs.
+        On failure, epoch is removed from processing_epochs (allows retry).
+        
         Args:
             epoch_id: Epoch to check for reveals
         """
         try:
-            # Skip if already processed
-            if epoch_id in self.closed_epochs:
-                return
-            
             # Import utilities
             from gateway.utils.epoch import is_epoch_closed_async
             
@@ -375,7 +386,8 @@ class EpochMonitor:
             
             if not has_evidence:
                 print(f"   ℹ️  No validation evidence for epoch {epoch_id} - skipping")
-                # Mark as closed so we don't check again
+                # Mark as closed so we don't check again (and remove from processing)
+                self.processing_epochs.discard(epoch_id)
                 self.closed_epochs.add(epoch_id)
                 return
             
@@ -402,7 +414,8 @@ class EpochMonitor:
             
             print(f"   ✅ Epoch {epoch_id} fully processed")
             
-            # Mark as closed
+            # SUCCESS: Move from processing to closed
+            self.processing_epochs.discard(epoch_id)
             self.closed_epochs.add(epoch_id)
             
             # Clean up old tracking sets to prevent memory growth
@@ -414,6 +427,10 @@ class EpochMonitor:
                 recent = sorted(list(self.closed_epochs))[-50:]
                 self.closed_epochs = set(recent)
             
+            if len(self.processing_epochs) > 100:
+                recent = sorted(list(self.processing_epochs))[-50:]
+                self.processing_epochs = set(recent)
+            
             if hasattr(self, '_cleanup_epochs') and len(self._cleanup_epochs) > 100:
                 recent = sorted(list(self._cleanup_epochs))[-50:]
                 self._cleanup_epochs = set(recent)
@@ -422,7 +439,9 @@ class EpochMonitor:
             print(f"❌ Error checking reveals for epoch {epoch_id}: {e}")
             import traceback
             traceback.print_exc()
-            # Don't mark as closed on error - will retry on next block
+            # FAILURE: Remove from processing so it can retry on next poll cycle
+            self.processing_epochs.discard(epoch_id)
+            print(f"   🔄 Epoch {epoch_id} will retry on next poll cycle")
     
     async def _run_miner_cleanup(self, epoch_id: int):
         """
@@ -457,6 +476,8 @@ class EpochMonitor:
             "last_epoch": self.last_epoch,
             "validation_ended_count": len(self.validation_ended_epochs),
             "validation_ended_recent": sorted(list(self.validation_ended_epochs))[-10:] if self.validation_ended_epochs else [],
+            "processing_count": len(self.processing_epochs),
+            "processing_current": sorted(list(self.processing_epochs)) if self.processing_epochs else [],
             "closed_count": len(self.closed_epochs),
             "closed_recent": sorted(list(self.closed_epochs))[-10:] if self.closed_epochs else []
         }

@@ -451,13 +451,22 @@ async def submit_validation(event: ValidationEvent):
     try:
         lead_ids = [v.lead_id for v in event.payload.validations]
         
-        # Update all leads to "validating" status
-        supabase.table("leads_private")\
-            .update({"status": "validating"})\
-            .in_("lead_id", lead_ids)\
-            .execute()
+        # Update leads in batches of 300 to avoid Supabase .in_() limit
+        # (Same batch size as reveal submissions - proven to work)
+        BATCH_SIZE = 300
+        total_updated = 0
         
-        print(f"✅ Marked {len(lead_ids)} leads as 'validating' (removed from pending queue)")
+        for i in range(0, len(lead_ids), BATCH_SIZE):
+            batch = lead_ids[i:i + BATCH_SIZE]
+            
+            supabase.table("leads_private")\
+                .update({"status": "validating"})\
+                .in_("lead_id", batch)\
+                .execute()
+            
+            total_updated += len(batch)
+        
+        print(f"✅ Marked {total_updated} leads as 'validating' (removed from pending queue)")
         
         # CRITICAL: Invalidate epoch cache after status change
         # Without this, cached leads will still show as "pending_validation"

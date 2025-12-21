@@ -2647,7 +2647,7 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
             EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
-            BASE_BURN_SHARE = 0.25         # 25% base burn to UID 0
+            BASE_BURN_SHARE = 0.20         # 20% base burn to UID 0
             MAX_CURRENT_EPOCH_SHARE = 0.0  # 0% max to miners (current epoch)
             MAX_ROLLING_EPOCH_SHARE = 0.75 # 75% max to miners (rolling 30 epochs)
             # Dynamic MAX_LEADS_PER_EPOCH from gateway (fetched during process_gateway_validation_workflow)

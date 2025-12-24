@@ -767,14 +767,14 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
             )
         
         # Verify rejection_reason hash
-        # CRITICAL: Must use json.dumps() to match validator's hash creation
-        computed_rejection_reason_hash = hashlib.sha256((json.dumps(reveal.rejection_reason) + reveal.salt).encode()).hexdigest()
+        # CRITICAL: Must use json.dumps(default=str) to match validator's hash creation (handles datetime objects)
+        computed_rejection_reason_hash = hashlib.sha256((json.dumps(reveal.rejection_reason, default=str) + reveal.salt).encode()).hexdigest()
         if computed_rejection_reason_hash != evidence["rejection_reason_hash"]:
             print(f"❌ REJECTION_REASON HASH MISMATCH for lead {reveal.lead_id[:8]}...")
             print(f"   Expected: {evidence['rejection_reason_hash']}")
             print(f"   Computed: {computed_rejection_reason_hash}")
             print(f"   Rejection reason: {reveal.rejection_reason}")
-            print(f"   Serialized: {json.dumps(reveal.rejection_reason)}")
+            print(f"   Serialized: {json.dumps(reveal.rejection_reason, default=str)}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Rejection reason hash mismatch for lead {reveal.lead_id}"
@@ -797,7 +797,7 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
             "lead_id": reveal.lead_id,
             "decision": reveal.decision,
             "rep_score": reveal.rep_score,
-            "rejection_reason": json.dumps(reveal.rejection_reason),  # Serialize dict to JSON string for TEXT column
+            "rejection_reason": json.dumps(reveal.rejection_reason, default=str),  # Serialize dict to JSON string for TEXT column, handle datetime
             "salt": reveal.salt
         })
     

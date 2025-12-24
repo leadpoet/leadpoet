@@ -2060,7 +2060,7 @@ class Validator(BaseValidatorNeuron):
                     # Compute hashes (SHA256 with salt)
                     decision_hash = hashlib.sha256((decision + salt.hex()).encode()).hexdigest()
                     rep_score_hash = hashlib.sha256((str(rep_score) + salt.hex()).encode()).hexdigest()
-                    rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason) + salt.hex()).encode()).hexdigest()
+                    rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason, default=str) + salt.hex()).encode()).hexdigest()  # Handle datetime
                     evidence_hash = hashlib.sha256(evidence_blob.encode()).hexdigest()
                     
                     # Store hashed result for gateway submission
@@ -4842,7 +4842,7 @@ def run_lightweight_worker(config):
                         # Compute hashes (SHA256 with salt) - EXACT same as coordinator lines 2036-2040
                         decision_hash = hashlib.sha256((decision + salt.hex()).encode()).hexdigest()
                         rep_score_hash = hashlib.sha256((str(rep_score) + salt.hex()).encode()).hexdigest()
-                        rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason) + salt.hex()).encode()).hexdigest()
+                        rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason, default=str) + salt.hex()).encode()).hexdigest()  # Handle datetime
                         evidence_hash = hashlib.sha256(evidence_blob.encode()).hexdigest()
                         
                         # Format for validation_results (for gateway hash submission) - EXACT format

@@ -179,14 +179,14 @@ async def get_metagraph_async() -> bt.metagraph:
                         print(f"🔄 Refreshing metagraph for new epoch... (attempt {attempt}/{max_retries})")
                     else:
                         print(f"🔄 Fetching metagraph for epoch {current_epoch}... (attempt {attempt}/{max_retries})")
-                    
-                    print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
-                    print(f"   Timeout: {timeout_per_attempt}s")
-                    
-                    metagraph = await asyncio.wait_for(
-                        _async_subtensor.metagraph(netuid=BITTENSOR_NETUID),
-                        timeout=timeout_per_attempt
-                    )
+                
+                print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
+                print(f"   Timeout: {timeout_per_attempt}s")
+                
+                metagraph = await asyncio.wait_for(
+                    _async_subtensor.metagraph(netuid=BITTENSOR_NETUID),
+                    timeout=timeout_per_attempt
+                )
                 
                 # ═══════════════════════════════════════════════════════════
                 # STEP 4: Update cache (lock held only for write)

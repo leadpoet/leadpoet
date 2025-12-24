@@ -858,7 +858,7 @@ async def compute_epoch_consensus(epoch_id: int):
                             evidence_blob = record.get("evidence_blob", {})
                             if isinstance(evidence_blob, str):
                                 evidence_blob = json.loads(evidence_blob)
-                            
+                        
                             # Navigate to automated_checks data
                             # Structure: evidence_blob -> enhanced_lead -> automated_checks -> is_icp_multiplier
                             enhanced_lead = evidence_blob.get("enhanced_lead", {})

@@ -484,7 +484,7 @@ def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
         # continue – do NOT raise
 
     ts      = str(int(time.time()) // 300)
-    payload = (ts + json.dumps(leads, sort_keys=True)).encode()
+    payload = (ts + json.dumps(leads, sort_keys=True, default=str)).encode()  # Handle datetime objects
     sig_b64 = base64.b64encode(wallet.hotkey.sign(payload)).decode()
 
     body = {
@@ -1709,7 +1709,7 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
     
     # Compute lead_id and hashes ONCE (reused across retries)
     lead_id = str(uuid.uuid4())
-    lead_blob = json.dumps(lead_data, sort_keys=True)
+    lead_blob = json.dumps(lead_data, sort_keys=True, default=str)  # Handle datetime objects
     lead_blob_hash = hashlib.sha256(lead_blob.encode()).hexdigest()
     email = lead_data.get("email", "").strip().lower()
     email_hash = hashlib.sha256(email.encode()).hexdigest()
@@ -1830,7 +1830,7 @@ def gateway_upload_lead(presigned_url: str, lead_data: Dict) -> bool:
         # Upload lead JSON to storage (MUST use sort_keys=True to match hash computation)
         response = requests.put(
             presigned_url,
-            data=json.dumps(lead_data, sort_keys=True),
+            data=json.dumps(lead_data, sort_keys=True, default=str),  # Handle datetime objects
             headers={"Content-Type": "application/json"},
             timeout=30
         )

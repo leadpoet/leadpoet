@@ -5204,6 +5204,38 @@ def validate_role_format(role: str, full_name: str = "", company: str = "") -> T
         return False, f"Role contains both C-suite and Director titles. Submit one role per lead."
     
     # ========================================================================
+    # CHECK 6b: Multiple comma-separated distinct roles (non-C-suite stuffing)
+    # ========================================================================
+    # Pattern: "Director of Marketing, Analyst, Operations Manager"
+    # This catches cases where miner stuffs multiple different job titles
+    # CAREFUL: Don't catch "VP of Sales and Marketing" (one role, multiple depts)
+    # CAREFUL: Don't catch "Senior Engineer, Backend" (role + specialization)
+    # ========================================================================
+    # Role keywords that indicate a distinct job title
+    role_title_keywords = [
+        'manager', 'director', 'analyst', 'engineer', 'developer', 'designer',
+        'coordinator', 'specialist', 'consultant', 'advisor', 'associate',
+        'executive', 'officer', 'president', 'owner', 'partner', 'principal',
+        'lead', 'head', 'supervisor', 'administrator', 'representative'
+    ]
+    
+    # Split by comma and check each segment for role keywords
+    if ',' in role:
+        segments = [s.strip().lower() for s in role.split(',') if s.strip()]
+        segments_with_roles = []
+        for seg in segments:
+            # Check if this segment contains a role keyword
+            for keyword in role_title_keywords:
+                if re.search(rf'\b{keyword}\b', seg):
+                    segments_with_roles.append(seg)
+                    break  # Only count once per segment
+        
+        # If 3+ comma-separated segments each contain a role keyword, reject
+        # (Using 3+ to avoid false positives on "Director of Marketing, Sales")
+        if len(segments_with_roles) >= 3:
+            return False, f"Role contains {len(segments_with_roles)} distinct job titles. Submit one role per lead."
+    
+    # ========================================================================
     # CHECK 7: Trailing dashes/garbage formatting
     # ========================================================================
     # Pattern: "Associate Director -" or "- VP Sales -"
@@ -6052,6 +6084,43 @@ def fuzzy_pre_verification_stage5(
             result["region_extracted"] = "REJECTED - multiple states detected"
             print(f"   ❌ ANTI-GAMING HARD FAIL: Multiple states detected in region: {states_found}")
             print(f"      Claimed region contains {len(states_found)} different US states - HARD FAIL")
+            print(f"      This lead will FAIL regardless of LLM verification")
+            region_search_results = None
+        
+        # ANTI-GAMING: Check for multiple major US cities (comma-separated)
+        # Pattern: "Los Angeles, Chicago, Houston" - clearly gaming
+        # CAREFUL: Don't catch "San Francisco" (one city with space)
+        # CAREFUL: Don't catch "New York, NY" (city + state abbreviation)
+        MAJOR_US_CITIES = {
+            'new york', 'los angeles', 'chicago', 'houston', 'phoenix', 'philadelphia',
+            'san antonio', 'san diego', 'dallas', 'san jose', 'austin', 'jacksonville',
+            'fort worth', 'columbus', 'charlotte', 'san francisco', 'indianapolis',
+            'seattle', 'denver', 'washington', 'boston', 'el paso', 'nashville',
+            'detroit', 'oklahoma city', 'portland', 'las vegas', 'memphis', 'louisville',
+            'baltimore', 'milwaukee', 'albuquerque', 'tucson', 'fresno', 'sacramento',
+            'kansas city', 'mesa', 'atlanta', 'omaha', 'colorado springs', 'raleigh',
+            'miami', 'cleveland', 'tulsa', 'oakland', 'minneapolis', 'wichita',
+            'arlington', 'tampa', 'new orleans', 'bakersfield', 'honolulu', 'anaheim',
+            'aurora', 'santa ana', 'st louis', 'riverside', 'pittsburgh', 'cincinnati'
+        }
+        
+        cities_found = set()
+        for city in MAJOR_US_CITIES:
+            # Use word boundary to avoid "Portland" matching in "Portlandville"
+            if re.search(rf'\b{re.escape(city)}\b', claimed_lower):
+                cities_found.add(city)
+        
+        # Only fail if 2+ DIFFERENT major cities found (gaming pattern)
+        # This catches: "Los Angeles, Chicago, Houston"
+        # But allows: "New York, NY" (only 1 city)
+        if len(cities_found) >= 2 and not result.get("region_hard_fail"):
+            result["region_verified"] = False
+            result["region_hard_fail"] = True
+            result["region_confidence"] = 0.0
+            result["region_reason"] = f"HARD FAIL: Multiple major cities in claimed region: {cities_found}"
+            result["region_extracted"] = "REJECTED - multiple cities detected"
+            print(f"   ❌ ANTI-GAMING HARD FAIL: Multiple cities detected in region: {cities_found}")
+            print(f"      Claimed region contains {len(cities_found)} different major cities - HARD FAIL")
             print(f"      This lead will FAIL regardless of LLM verification")
             region_search_results = None
     

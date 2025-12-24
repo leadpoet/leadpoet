@@ -245,6 +245,38 @@ def get_prospect_id(lead: Dict[str, Any], default: str = "") -> str:
     return get_field(lead, "prospect_id", "id", default=default)
 
 
+def get_employee_count(lead: Dict[str, Any], default: str = "") -> str:
+    """
+    Extract employee count from lead.
+    
+    Tries: "employee_count" → "Employee Count" → "company_size" → "headcount"
+    
+    Args:
+        lead: Lead dictionary
+        default: Default value if no employee count found
+    
+    Returns:
+        Employee count/company size string or default
+    """
+    return get_field(lead, "employee_count", "Employee Count", "company_size", "headcount", default=default)
+
+
+def get_description(lead: Dict[str, Any], default: str = "") -> str:
+    """
+    Extract company description from lead.
+    
+    Tries: "description" → "Description" → "company_description"
+    
+    Args:
+        lead: Lead dictionary
+        default: Default value if no description found
+    
+    Returns:
+        Company description or default
+    """
+    return get_field(lead, "description", "Description", "company_description", default=default)
+
+
 def get_score(lead: Dict[str, Any], default: float = 0.0) -> float:
     """
     Extract score from lead (handles multiple score field names).

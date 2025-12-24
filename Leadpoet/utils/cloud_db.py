@@ -2106,7 +2106,7 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
     }
     
     # Compute payload hash (deterministic JSON, constant for all attempts)
-    payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
     
     # Retry loop: Up to 3 attempts with fresh nonce/timestamp

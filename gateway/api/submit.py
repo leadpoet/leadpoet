@@ -941,6 +941,48 @@ async def submit_lead(event: SubmitLeadEvent):
                 }
             )
         
+        # Validation 4: City and State fields cannot contain commas (anti-gaming)
+        # This prevents miners from stuffing multiple cities/states into a single field
+        if city and ',' in city:
+            print(f"❌ City field contains comma (gaming attempt): '{city}'")
+            
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_city_format",
+                    "message": "City field should contain only one city (no commas allowed)",
+                    "city": city,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY
+                    }
+                }
+            )
+        
+        if state and ',' in state:
+            print(f"❌ State field contains comma (gaming attempt): '{state}'")
+            
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_state_format",
+                    "message": "State field should contain only one state (no commas allowed)",
+                    "state": state,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY
+                    }
+                }
+            )
+        
         # Update lead_blob with normalized country (in case alias was used)
         lead_blob["country"] = country
         

@@ -2051,7 +2051,9 @@ class Validator(BaseValidatorNeuron):
                     # Extract results
                     is_valid = result.get("is_legitimate", False)
                     decision = "approve" if is_valid else "deny"
-                    rep_score = int(lead_blob.get("rep_score", 0))  # Default 0 for rejected leads
+                    # CRITICAL: Use validator-calculated rep_score, NOT miner's submitted value
+                    # Denied leads get 0, approved leads get score from automated checks
+                    rep_score = int(result.get('enhanced_lead', {}).get('rep_score', 0)) if is_valid else 0
                     rejection_reason = result.get("reason") or {} if not is_valid else {"message": "pass"}
                     evidence_blob = json.dumps(result)
                     
@@ -4155,8 +4157,8 @@ class Validator(BaseValidatorNeuron):
                         lead["manual_review_required"] = True
                         bt.logging.info(f"📋 Lead flagged for manual review")
 
-            # IMPORTANT: Copy rep_score from mapped_lead back to original lead
-            # The calling code reads from lead_blob.get("rep_score"), not from mapped_lead
+            # Copy validator-calculated rep_score from mapped_lead back to original lead
+            # This ensures the rep_score in enhanced_lead is from automated checks, not miner data
             if "rep_score" in mapped_lead:
                 lead["rep_score"] = mapped_lead["rep_score"]
             
@@ -4248,6 +4250,9 @@ class Validator(BaseValidatorNeuron):
                     "industry": lead.get("industry", ""),
                     "sub_industry": lead.get("sub_industry", ""),
                     "region": lead.get("region", ""),
+                    "region_country": lead.get("region_country", ""),
+                    "region_state": lead.get("region_state", ""),
+                    "region_city": lead.get("region_city", ""),
                     "role": lead.get("role", ""),
                     "description": lead.get("description", ""),
                     "phone_numbers": lead.get("phone_numbers", []),
@@ -4827,7 +4832,10 @@ def run_lightweight_worker(config):
                         # Extract data
                         is_valid = lead['is_valid']
                         decision = "approve" if is_valid else "deny"
-                        rep_score = int(lead['lead_blob'].get("rep_score", 0))
+                        # CRITICAL: Use validator-calculated rep_score, NOT miner's submitted value
+                        # Denied leads get 0, approved leads get score from automated checks
+                        automated_checks_data = lead.get('automated_checks_data', {})
+                        rep_score = int(automated_checks_data.get('rep_score', {}).get('total_score', 0)) if is_valid else 0
                         rejection_reason = lead.get('rejection_reason') or {} if not is_valid else {"message": "pass"}
                         evidence_blob = json.dumps(lead.get('automated_checks_data', {}))
                         

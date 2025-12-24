@@ -304,7 +304,7 @@ INDUSTRY_TAXONOMY = {
         "definition": "Companies that perform general repairs to buildings and preventative maintenance of systems."
     },
     "Building Material": {
-        "industries": ['Real Estate'],
+        "industries": ['Real Estate', 'Manufacturing'],
         "definition": "Companies that produce materials used for construction."
     },
     "Business Development": {
@@ -420,7 +420,7 @@ INDUSTRY_TAXONOMY = {
         "definition": "Companies that carry out research studies with volunteer participants to evaluate new treatments or diagnostic tests."
     },
     "Cloud Computing": {
-        "industries": ['Internet Services', 'Software'],
+        "industries": ['Internet Services', 'Software', 'Information Technology'],
         "definition": "Companies that provide on-demand availability of computer system resources, especially data storage and computing power, over the internet and without direct active management by the user."
     },
     "Cloud Data Services": {
@@ -1640,7 +1640,7 @@ INDUSTRY_TAXONOMY = {
         "definition": "Companies that help organizations gather information about target markets and customers to identify and analyze needs, opportunities, and competition."
     },
     "Marketing": {
-        "industries": ['Sales and Marketing'],
+        "industries": ['Sales and Marketing', 'Advertising'],
         "definition": "Companies that help their clients promote their brand, products, or services; this includes advertising."
     },
     "Marketing Automation": {
@@ -2500,7 +2500,7 @@ INDUSTRY_TAXONOMY = {
         "definition": "Companies that provide, support, or are dedicated to a centralized location where the shares of publicly traded companies are bought and sold."
     },
     "Supply Chain Management": {
-        "industries": ['Transportation'],
+        "industries": ['Transportation', 'Software', 'Information Technology'],
         "definition": "Companies that manage the flow of goods and services, involving the movement and storage of raw materials, of work-in-process inventory, and of finished goods from point-of-origin to point-of-consumption."
     },
     "Surfing": {

@@ -844,6 +844,15 @@ def get_company_linkedin_from_cache(company_slug: str) -> Optional[Dict]:
     cached_time = cached.get("timestamp")
     
     if cached_time:
+        # Handle both string (new) and datetime (old/in-memory) formats
+        if isinstance(cached_time, str):
+            try:
+                cached_time = datetime.fromisoformat(cached_time)
+            except ValueError:
+                # Invalid timestamp, remove from cache
+                del COMPANY_LINKEDIN_CACHE[company_slug]
+                return None
+        
         # Check if cache has expired
         age_hours = (datetime.now() - cached_time).total_seconds() / 3600
         if age_hours > COMPANY_LINKEDIN_CACHE_TTL_HOURS:
@@ -861,8 +870,8 @@ def set_company_linkedin_cache(company_slug: str, data: Dict):
         company_slug: The company slug from LinkedIn URL
         data: Dict with company data to cache
     """
-    # Add timestamp for TTL
-    data["timestamp"] = datetime.now()
+    # Add timestamp for TTL (use isoformat string, not datetime object, to avoid JSON serialization issues)
+    data["timestamp"] = datetime.now().isoformat()
     COMPANY_LINKEDIN_CACHE[company_slug] = data
     
     # Limit cache size (simple LRU - remove oldest if over 500 entries)

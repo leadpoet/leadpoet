@@ -298,7 +298,7 @@ async def _fallback_log_to_file(event: dict, error: str = ""):
     except Exception as e:
         logger.critical(
             f"❌ CRITICAL: Fallback logging also failed: {e}\n"
-            f"   Event data: {json.dumps(event, indent=2)}"
+            f"   Event data: {json.dumps(event, indent=2, default=str)}"  # Handle datetime objects
         )
 
 

@@ -2763,7 +2763,7 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
             print(f"      First snippet: {first_snippet[:80]}...")
         
         # Prepare search results for LLM
-        results_text = json.dumps(search_results, indent=2)
+        results_text = json.dumps(search_results, indent=2, default=str)  # Handle any datetime objects
         
         # Build LinkedIn URL line (only if provided)
         linkedin_url_line = f"LinkedIn URL Provided: {linkedin_url}\n" if linkedin_url else ""

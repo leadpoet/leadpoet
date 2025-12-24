@@ -2055,7 +2055,18 @@ class Validator(BaseValidatorNeuron):
                     # Denied leads get 0, approved leads get score from automated checks
                     rep_score = int(result.get('enhanced_lead', {}).get('rep_score', 0)) if is_valid else 0
                     rejection_reason = result.get("reason") or {} if not is_valid else {"message": "pass"}
-                    evidence_blob = json.dumps(result, default=str)  # Handle datetime objects
+                    
+                    # Strip internal cache fields from evidence (they contain datetime objects and aren't needed)
+                    # These are Stage 4 optimization artifacts, not part of the validation evidence
+                    clean_result = result.copy()
+                    if "enhanced_lead" in clean_result and isinstance(clean_result["enhanced_lead"], dict):
+                        clean_enhanced = clean_result["enhanced_lead"].copy()
+                        # Remove internal cache fields that shouldn't be in evidence
+                        for internal_field in ["company_linkedin_data", "company_linkedin_slug", "company_linkedin_from_cache"]:
+                            clean_enhanced.pop(internal_field, None)
+                        clean_result["enhanced_lead"] = clean_enhanced
+                    
+                    evidence_blob = json.dumps(clean_result, default=str)  # Handle any remaining datetime objects
                     
                     # Compute hashes (SHA256 with salt)
                     decision_hash = hashlib.sha256((decision + salt.hex()).encode()).hexdigest()

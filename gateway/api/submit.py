@@ -54,6 +54,56 @@ router = APIRouter(prefix="/submit", tags=["Submission"])
 
 
 # ============================================================
+# Field Normalization Helper
+# ============================================================
+
+def normalize_lead_fields(lead_blob: dict) -> dict:
+    """
+    Normalize lead fields for standardized storage in the database.
+    
+    This function title-cases specific fields while preserving:
+    - URLs (linkedin, website, source_url, company_linkedin)
+    - Email (kept lowercase)
+    - Technical fields (hashes, IDs, etc.)
+    
+    Called BEFORE storing lead in leads_private to ensure consistent formatting.
+    
+    NOTE: This does NOT affect validation - automated_checks.py uses .lower()
+    for all comparisons, so capitalization doesn't impact verification.
+    """
+    # Fields to title-case (capitalize first letter of each word)
+    TITLE_CASE_FIELDS = [
+        "industry",         # e.g., "financial services" → "Financial Services"
+        "sub_industry",     # e.g., "investment banking" → "Investment Banking"
+        "role",             # e.g., "vice president of sales" → "Vice President Of Sales"
+        "full_name",        # e.g., "john smith" → "John Smith"
+        "first",            # e.g., "john" → "John"
+        "last",             # e.g., "smith" → "Smith"
+        "city",             # e.g., "san francisco" → "San Francisco"
+        "state",            # e.g., "california" → "California"
+        "business",         # e.g., "acme corporation" → "Acme Corporation"
+    ]
+    
+    # Fields to lowercase (email should always be lowercase)
+    LOWERCASE_FIELDS = [
+        "email",
+    ]
+    
+    # Fields to preserve as-is (URLs, hashes, technical data)
+    # These are NOT modified: linkedin, website, source_url, company_linkedin, etc.
+    
+    for field in TITLE_CASE_FIELDS:
+        if field in lead_blob and isinstance(lead_blob[field], str) and lead_blob[field].strip():
+            lead_blob[field] = lead_blob[field].strip().title()
+    
+    for field in LOWERCASE_FIELDS:
+        if field in lead_blob and isinstance(lead_blob[field], str) and lead_blob[field].strip():
+            lead_blob[field] = lead_blob[field].strip().lower()
+    
+    return lead_blob
+
+
+# ============================================================
 # Request Models
 # ============================================================
 
@@ -330,35 +380,25 @@ async def submit_lead(event: SubmitLeadEvent):
     # ========================================
     print(f"🔍 Step 6: Fetching SUBMISSION_REQUEST for lead_id={event.payload.lead_id}...")
     try:
+        # Query directly for the specific lead_id using JSONB operator
+        # This avoids the Supabase 1000 row default limit issue when miners have many submissions
         result = supabase.table("transparency_log") \
             .select("*") \
             .eq("event_type", "SUBMISSION_REQUEST") \
             .eq("actor_hotkey", event.actor_hotkey) \
+            .eq("payload->>lead_id", event.payload.lead_id) \
+            .limit(1) \
             .execute()
         
-        print(f"🔍 Found {len(result.data) if result.data else 0} SUBMISSION_REQUEST events for actor {event.actor_hotkey[:8]}...")
+        print(f"🔍 Found {len(result.data) if result.data else 0} SUBMISSION_REQUEST events for lead_id={event.payload.lead_id[:8]}...")
         
         if not result.data:
             raise HTTPException(
                 status_code=404,
-                detail=f"No SUBMISSION_REQUEST found for actor {event.actor_hotkey[:8]}... (lead_id={event.payload.lead_id[:8]}...)"
-            )
-        
-        # Find the specific SUBMISSION_REQUEST for this lead_id
-        submission_request = None
-        for log in result.data:
-            payload = log.get("payload", {})
-            if isinstance(payload, str):
-                payload = json.loads(payload)
-            if payload.get("lead_id") == event.payload.lead_id:
-                submission_request = log
-                break
-        
-        if not submission_request:
-            raise HTTPException(
-                status_code=404,
                 detail=f"SUBMISSION_REQUEST not found for lead_id={event.payload.lead_id}"
             )
+        
+        submission_request = result.data[0]
         
         # Extract committed lead_blob_hash and email_hash
         payload = submission_request.get("payload", {})
@@ -416,77 +456,77 @@ async def submit_lead(event: SubmitLeadEvent):
             submitted_email = None
         
         # Check leads_private directly for duplicate email
+        # OPTIMIZED: Uses unique index leads_private_email_unique instead of full table scan
         if submitted_email:
+            # Query using the indexed email field (JSONB ->> operator)
+            # This uses idx: leads_private_email_unique - O(log n) instead of O(n)
             duplicate_check = supabase.table("leads_private") \
-                .select("lead_id, miner_hotkey, created_ts, lead_blob") \
+                .select("lead_id, miner_hotkey, created_ts") \
+                .eq("lead_blob->>email", submitted_email) \
+                .limit(1) \
                 .execute()
             
-            # Check if any existing lead has the same email
-            for existing_lead in duplicate_check.data:
-                existing_blob = existing_lead.get("lead_blob", {})
-                if isinstance(existing_blob, str):
-                    existing_blob = json.loads(existing_blob)
-                existing_email = existing_blob.get("email", "").strip().lower() if existing_blob else ""
+            # Check if duplicate found (should be 0 or 1 result now)
+            if duplicate_check.data:
+                existing_lead = duplicate_check.data[0]
+                print(f"❌ Duplicate email detected!")
+                print(f"   Email: {submitted_email}")
+                print(f"   Original lead: {existing_lead.get('lead_id')[:10]}..., miner={existing_lead.get('miner_hotkey', 'unknown')[:10]}..., ts={existing_lead.get('created_ts')}")
                 
-                if existing_email == submitted_email:
-                    print(f"❌ Duplicate email detected!")
-                    print(f"   Email: {submitted_email}")
-                    print(f"   Original lead: {existing_lead.get('lead_id')[:10]}..., miner={existing_lead.get('miner_hotkey', 'unknown')[:10]}..., ts={existing_lead.get('created_ts')}")
+                # Mark submission as failed (FAILURE - duplicate)
+                # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+                
+                # Log VALIDATION_FAILED event to TEE (consistent with required fields check)
+                try:
+                    from gateway.utils.logger import log_event
                     
-                    # Mark submission as failed (FAILURE - duplicate)
-                    # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
-                    updated_stats = mark_submission_failed(event.actor_hotkey)
-                    print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
-                    
-                    # Log VALIDATION_FAILED event to TEE (consistent with required fields check)
-                    try:
-                        from gateway.utils.logger import log_event
-                        
-                        validation_failed_event = {
-                            "event_type": "VALIDATION_FAILED",
-                            "actor_hotkey": event.actor_hotkey,
-                            "nonce": str(uuid.uuid4()),
-                            "ts": datetime.now(tz.utc).isoformat(),
-                            "payload_hash": hashlib.sha256(json.dumps({
-                                "lead_id": event.payload.lead_id,
-                                "reason": "duplicate_email",
-                                "email_hash": committed_email_hash
-                            }, sort_keys=True).encode()).hexdigest(),
-                            "build_id": "gateway",
-                            "signature": "duplicate_check",  # Gateway-generated
-                            "payload": {
-                                "lead_id": event.payload.lead_id,
-                                "reason": "duplicate_email",
-                                "email_hash": committed_email_hash,
-                                "original_lead_id": existing_lead.get("lead_id"),
-                                "miner_hotkey": event.actor_hotkey
-                            }
-                        }
-                        
-                        await log_event(validation_failed_event)
-                        print(f"   ✅ Logged VALIDATION_FAILED (duplicate) to TEE buffer")
-                    except Exception as e:
-                        print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
-                    
-                    raise HTTPException(
-                        status_code=409,  # 409 Conflict
-                        detail={
-                            "error": "duplicate_email",
-                            "message": "This email has already been submitted to the network",
+                    validation_failed_event = {
+                        "event_type": "VALIDATION_FAILED",
+                        "actor_hotkey": event.actor_hotkey,
+                        "nonce": str(uuid.uuid4()),
+                        "ts": datetime.now(tz.utc).isoformat(),
+                        "payload_hash": hashlib.sha256(json.dumps({
+                            "lead_id": event.payload.lead_id,
+                            "reason": "duplicate_email",
+                            "email_hash": committed_email_hash
+                        }, sort_keys=True).encode()).hexdigest(),
+                        "build_id": "gateway",
+                        "signature": "duplicate_check",  # Gateway-generated
+                        "payload": {
+                            "lead_id": event.payload.lead_id,
+                            "reason": "duplicate_email",
                             "email_hash": committed_email_hash,
-                            "original_submission": {
-                                "lead_id": existing_lead.get("lead_id"),
-                                "submitted_at": existing_lead.get("created_ts")
-                            },
-                            "rate_limit_stats": {
-                                "submissions": updated_stats["submissions"],
-                                "max_submissions": MAX_SUBMISSIONS_PER_DAY,
-                                "rejections": updated_stats["rejections"],
-                                "max_rejections": MAX_REJECTIONS_PER_DAY,
-                                "reset_at": updated_stats["reset_at"]
-                            }
+                            "original_lead_id": existing_lead.get("lead_id"),
+                            "miner_hotkey": event.actor_hotkey
                         }
-                    )
+                    }
+                    
+                    await log_event(validation_failed_event)
+                    print(f"   ✅ Logged VALIDATION_FAILED (duplicate) to TEE buffer")
+                except Exception as e:
+                    print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+                
+                raise HTTPException(
+                    status_code=409,  # 409 Conflict
+                    detail={
+                        "error": "duplicate_email",
+                        "message": "This email has already been submitted to the network",
+                        "email_hash": committed_email_hash,
+                        "original_submission": {
+                            "lead_id": existing_lead.get("lead_id"),
+                            "submitted_at": existing_lead.get("created_ts")
+                        },
+                        "rate_limit_stats": {
+                            "submissions": updated_stats["submissions"],
+                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                            "rejections": updated_stats["rejections"],
+                            "max_rejections": MAX_REJECTIONS_PER_DAY,
+                            "reset_at": updated_stats["reset_at"]
+                        }
+                    }
+                )
         
         print(f"✅ No duplicate found - lead is unique")
         
@@ -590,20 +630,23 @@ async def submit_lead(event: SubmitLeadEvent):
         print(f"   🔍 Validating required fields...")
         
         REQUIRED_FIELDS = [
-            "business",      # Company name
-            "full_name",     # Contact full name
-            "first",         # First name
-            "last",          # Last name
-            "email",         # Email address
-            "role",          # Job title
-            "website",       # Company website
-            "industry",      # Primary industry
-            "sub_industry",  # Sub-industry/niche
-            "region",        # Location
-            "linkedin",      # LinkedIn URL
-            "source_url",    # Source URL where lead was found
-            "description",   # Company description (for Stage 5 verification)
-            "employee_count" # Company size/headcount (for Stage 5 verification)
+            "business",         # Company name
+            "full_name",        # Contact full name
+            "first",            # First name
+            "last",             # Last name
+            "email",            # Email address
+            "role",             # Job title
+            "website",          # Company website
+            "industry",         # Primary industry (must match Crunchbase industry_group)
+            "sub_industry",     # Sub-industry/niche (must match Crunchbase industry key)
+            "country",          # Country (REQUIRED) - e.g., "United States", "Canada"
+            "city",             # City (REQUIRED for all leads) - e.g., "San Francisco", "London"
+            # "state" - REQUIRED for US only (validated in region validation section below)
+            "linkedin",         # LinkedIn URL (person)
+            "company_linkedin", # Company LinkedIn URL (for industry/sub_industry/description verification)
+            "source_url",       # Source URL where lead was found
+            "description",      # Company description 
+            "employee_count"    # Company size/headcount 
         ]
         
         missing_fields = []
@@ -668,6 +711,274 @@ async def submit_lead(event: SubmitLeadEvent):
             )
         
         print(f"   ✅ All required fields present")
+        
+        # ========================================
+        # Validate country/state/city logic
+        # ========================================
+        # COUNTRY ALIASES: Map common variants to standard names
+        # This allows miners to submit "UK" and have it normalized to "United Kingdom"
+        COUNTRY_ALIASES = {
+            # United States variants
+            "usa": "united states",
+            "us": "united states",
+            "u.s.": "united states",
+            "u.s.a.": "united states",
+            "america": "united states",
+            "united states of america": "united states",
+            # United Kingdom variants
+            "uk": "united kingdom",
+            "u.k.": "united kingdom",
+            "great britain": "united kingdom",
+            "britain": "united kingdom",
+            "england": "united kingdom",
+            "scotland": "united kingdom",
+            "wales": "united kingdom",
+            "northern ireland": "united kingdom",
+            # Other common aliases
+            "uae": "united arab emirates",
+            "u.a.e.": "united arab emirates",
+            "emirates": "united arab emirates",
+            "korea": "south korea",
+            "republic of korea": "south korea",
+            "holland": "netherlands",
+            "the netherlands": "netherlands",
+            "ivory coast": "ivory coast",
+            "côte d'ivoire": "ivory coast",
+            "cote d'ivoire": "ivory coast",
+            "czech": "czech republic",
+            "russia": "russia",
+            "russian federation": "russia",
+            "vatican": "vatican city",
+            "holy see": "vatican city",
+            "eesti": "estonia",
+            "deutschland": "germany",
+            "brasil": "brazil",
+            "espana": "spain",
+            "españa": "spain",
+            "italia": "italy",
+            "nippon": "japan",
+            "nihon": "japan",
+            "prc": "china",
+            "peoples republic of china": "china",
+            "people's republic of china": "china",
+            "roc": "taiwan",
+            "republic of china": "taiwan",
+            "burma": "myanmar",
+            "persia": "iran",
+            "swaziland": "eswatini",
+            "the gambia": "gambia",
+            "congo": "republic of the congo",
+            "drc": "democratic republic of the congo",
+            "dr congo": "democratic republic of the congo",
+            "zaire": "democratic republic of the congo",
+        }
+        
+        # STANDARDIZED COUNTRY LIST (199 countries - excludes North Korea)
+        # Miners MUST submit country exactly as listed (case-insensitive) OR use an alias
+        # This prevents gaming (e.g., submitting random text to bypass US state requirement)
+        VALID_COUNTRIES = {
+            # North America
+            "united states", "canada", "mexico",
+            # Central America & Caribbean
+            "guatemala", "belize", "honduras", "el salvador", "nicaragua", "costa rica", "panama",
+            "cuba", "jamaica", "haiti", "dominican republic", "bahamas", "barbados", "trinidad and tobago",
+            "saint lucia", "grenada", "saint vincent and the grenadines", "antigua and barbuda",
+            "dominica", "saint kitts and nevis",
+            # South America
+            "brazil", "argentina", "colombia", "peru", "venezuela", "chile", "ecuador", "bolivia",
+            "paraguay", "uruguay", "guyana", "suriname",
+            # Western Europe
+            "united kingdom", "germany", "france", "italy", "spain", "portugal", "netherlands",
+            "belgium", "switzerland", "austria", "ireland", "luxembourg", "monaco", "andorra",
+            "liechtenstein", "san marino", "vatican city",
+            # Northern Europe
+            "sweden", "norway", "denmark", "finland", "iceland",
+            # Eastern Europe
+            "poland", "czech republic", "czechia", "hungary", "romania", "bulgaria", "ukraine",
+            "belarus", "moldova", "slovakia", "slovenia", "croatia", "serbia", "bosnia and herzegovina",
+            "montenegro", "north macedonia", "albania", "kosovo", "lithuania", "latvia", "estonia",
+            # Southern Europe
+            "greece", "cyprus", "malta",
+            # Russia & Central Asia
+            "russia", "kazakhstan", "uzbekistan", "turkmenistan", "tajikistan", "kyrgyzstan",
+            "georgia", "armenia", "azerbaijan",
+            # Middle East
+            "turkey", "israel", "palestine", "lebanon", "jordan", "syria", "iraq", "iran",
+            "saudi arabia", "united arab emirates", "qatar", "kuwait", "bahrain", "oman", "yemen",
+            # South Asia
+            "india", "pakistan", "bangladesh", "sri lanka", "nepal", "bhutan", "maldives", "afghanistan",
+            # Southeast Asia
+            "indonesia", "malaysia", "singapore", "thailand", "vietnam", "philippines", "myanmar",
+            "cambodia", "laos", "brunei", "timor-leste",
+            # East Asia
+            "china", "japan", "south korea", "taiwan", "mongolia", "hong kong", "macau",
+            # Oceania
+            "australia", "new zealand", "fiji", "papua new guinea", "solomon islands", "vanuatu",
+            "samoa", "tonga", "kiribati", "micronesia", "palau", "marshall islands", "nauru", "tuvalu",
+            # North Africa
+            "egypt", "libya", "tunisia", "algeria", "morocco",
+            # West Africa
+            "nigeria", "ghana", "senegal", "ivory coast", "mali", "burkina faso", "niger", "guinea",
+            "benin", "togo", "sierra leone", "liberia", "mauritania", "gambia", "guinea-bissau",
+            "cape verde",
+            # Central Africa
+            "democratic republic of the congo", "cameroon", "central african republic", "chad",
+            "republic of the congo", "gabon", "equatorial guinea", "sao tome and principe",
+            # East Africa
+            "kenya", "ethiopia", "tanzania", "uganda", "rwanda", "burundi", "south sudan", "sudan",
+            "eritrea", "djibouti", "somalia", "comoros", "mauritius", "seychelles", "madagascar",
+            # Southern Africa
+            "south africa", "namibia", "botswana", "zimbabwe", "zambia", "malawi", "mozambique",
+            "angola", "lesotho", "eswatini"
+        }
+        
+        country_raw = lead_blob.get("country", "").strip()
+        state = lead_blob.get("state", "").strip()
+        city = lead_blob.get("city", "").strip()
+        
+        # Normalize country using aliases (e.g., "UK" → "United Kingdom")
+        country_lower = country_raw.lower()
+        if country_lower in COUNTRY_ALIASES:
+            country = COUNTRY_ALIASES[country_lower].title()  # Normalize to title case
+            # Special handling for countries with specific capitalization
+            if country.lower() == "united states":
+                country = "United States"
+            elif country.lower() == "united kingdom":
+                country = "United Kingdom"
+            elif country.lower() == "united arab emirates":
+                country = "United Arab Emirates"
+            elif country.lower() == "south korea":
+                country = "South Korea"
+            elif country.lower() == "north macedonia":
+                country = "North Macedonia"
+            elif country.lower() == "south africa":
+                country = "South Africa"
+            elif country.lower() == "south sudan":
+                country = "South Sudan"
+            elif country.lower() == "saudi arabia":
+                country = "Saudi Arabia"
+            elif country.lower() == "sri lanka":
+                country = "Sri Lanka"
+            elif country.lower() == "new zealand":
+                country = "New Zealand"
+            elif country.lower() == "papua new guinea":
+                country = "Papua New Guinea"
+            print(f"   📝 Country alias normalized: '{country_raw}' → '{country}'")
+        else:
+            country = country_raw
+        
+        # Validation 1: Country must be in the approved list
+        if country.lower() not in VALID_COUNTRIES:
+            print(f"❌ Invalid country: '{country}' not in approved list")
+            
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_country",
+                    "message": f"Country '{country_raw}' is not recognized. Please use a standard country name.",
+                    "country": country_raw,
+                    "hint": "Use standard names like 'United States', 'United Kingdom', 'Germany', etc. Aliases like 'USA', 'UK', 'UAE' are also accepted.",
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY
+                    }
+                }
+            )
+        
+        # Validation 2: US leads require ALL THREE fields (country, state, city)
+        if country.lower() == "united states":
+            if not state or not city:
+                missing = []
+                if not state:
+                    missing.append("state")
+                if not city:
+                    missing.append("city")
+                print(f"❌ US lead missing required fields: {missing}")
+                
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_region_format",
+                        "message": f"United States leads require country, state, AND city. Missing: {', '.join(missing)}",
+                        "country": country,
+                        "state": state,
+                        "city": city,
+                        "rate_limit_stats": {
+                            "submissions": updated_stats["submissions"],
+                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                            "rejections": updated_stats["rejections"],
+                            "max_rejections": MAX_REJECTIONS_PER_DAY
+                        }
+                    }
+                )
+        
+        # Validation 3: Non-US leads require country + city (state optional)
+        if country.lower() != "united states" and not city:
+            print(f"❌ Non-US lead missing required city field")
+            
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_region_format",
+                    "message": "All leads require country and city. State is optional for non-US leads.",
+                    "country": country,
+                    "state": state,
+                    "city": city,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY
+                    }
+                }
+            )
+        
+        # Update lead_blob with normalized country (in case alias was used)
+        lead_blob["country"] = country
+        
+        state_display = state if state else "(empty)"
+        city_display = city if city else "(empty)"
+        print(f"   ✅ Region fields validated: country='{country}', state='{state_display}', city='{city_display}'")
+        
+        # ========================================
+        # Validate employee_count format
+        # ========================================
+        VALID_EMPLOYEE_COUNTS = [
+            "0-1", "2-10", "11-50", "51-200", "201-500", 
+            "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
+        ]
+        
+        employee_count = lead_blob.get("employee_count", "").strip()
+        if employee_count not in VALID_EMPLOYEE_COUNTS:
+            print(f"❌ Invalid employee_count: '{employee_count}'")
+            
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_employee_count",
+                    "message": f"employee_count must be one of the valid ranges",
+                    "provided": employee_count,
+                    "valid_values": VALID_EMPLOYEE_COUNTS,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY
+                    }
+                }
+            )
+        
+        print(f"   ✅ employee_count '{employee_count}' is valid")
         
         # ========================================
         # Verify source_type and source_url consistency
@@ -861,6 +1172,16 @@ async def submit_lead(event: SubmitLeadEvent):
                 status_code=500,
                 detail=f"Attestation verification failed: {str(e)}"
             )
+        
+        # ========================================
+        # Normalize lead fields for standardized storage
+        # ========================================
+        # Title-case fields like industry, role, full_name, city, etc.
+        # This ensures consistent formatting in the database
+        # NOTE: Does NOT affect validation (automated_checks uses .lower() for comparisons)
+        print(f"   🔍 Normalizing lead fields for standardized storage...")
+        lead_blob = normalize_lead_fields(lead_blob)
+        print(f"   ✅ Lead fields normalized (industry='{lead_blob.get('industry', '')}', role='{lead_blob.get('role', '')[:30]}...')")
         
         # Store lead in leads_private table
         print(f"   🔍 Storing lead in leads_private database...")

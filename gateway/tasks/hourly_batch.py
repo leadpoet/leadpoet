@@ -80,9 +80,9 @@ async def hourly_batch_task():
     
     next_batch = next_hour
     
-    # Add countdown progress every hour
+    # Add countdown progress every 30 minutes
     remaining_time = wait_seconds
-    progress_interval = 3600  # 1 hour in seconds
+    progress_interval = 1800  # 30 minutes in seconds
     
     while remaining_time > 0:
         wait_time = min(progress_interval, remaining_time)
@@ -333,9 +333,9 @@ async def hourly_batch_task():
         
         # Implement emergency batch check during wait
         # Check buffer size every 5 minutes during wait
-        # Print countdown every hour
+        # Print countdown and check emergency threshold every 30 minutes
         check_interval = 300  # 5 minutes (check buffer size)
-        progress_interval = 3600  # 1 hour (print countdown every hour)
+        progress_interval = 1800  # 30 minutes (print countdown + emergency check)
         checks_per_interval = wait_seconds // check_interval
         
         last_progress_print = 0

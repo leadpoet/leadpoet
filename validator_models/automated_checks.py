@@ -26,8 +26,11 @@ from Leadpoet.utils.utils_lead_extraction import (
     get_industry,
     get_role,
     get_linkedin,
-    get_field
+    get_field,
+    get_employee_count,
+    get_description
 )
+from validator_models.industry_taxonomy import INDUSTRY_TAXONOMY
 
 MAX_REP_SCORE = 48  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) + Companies House (10) = 48
 
@@ -39,9 +42,18 @@ MAX_REP_SCORE = 48  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) + C
 # Format: Each ICP is defined by Sub-Industry + Role Details
 # ========================================================================
 
+# ========================================================================
+# ICP (IDEAL CUSTOMER PROFILE) DEFINITIONS
+# ========================================================================
+# These definitions specify high-value lead profiles for ICP multiplier scoring.
+# IMPORTANT: sub_industries must use EXACT names from INDUSTRY_TAXONOMY keys
+# (case-sensitive, e.g., "FinTech" not "fintech", "E-Commerce" not "ecommerce")
+# ========================================================================
+
 ICP_DEFINITIONS = [
     {
-        "sub_industries": ["gas station", "fuel retail", "fuel distribution", "petroleum retail"],
+        # Fuel/Energy - Operations & Technology Leaders
+        "sub_industries": ["Fuel", "Oil and Gas", "Fossil Fuels", "Energy"],
         "role_details": [
             # Operations
             "coo", "chief operating officer", "director of operations", "vp of operations", 
@@ -55,7 +67,8 @@ ICP_DEFINITIONS = [
     },
     
     {
-        "sub_industries": ["fruit farmer", "crop farmer", "produce grower", "agricultural production"],
+        # Agriculture/Farming - Operations & Technology Leaders
+        "sub_industries": ["Agriculture", "Farming", "AgTech", "Livestock", "Aquaculture"],
         "role_details": [
             # Operations
             "coo", "chief operating officer", "director of operations", "vp of operations",
@@ -69,8 +82,9 @@ ICP_DEFINITIONS = [
     },
     
     {
-        "sub_industries": ["solar farm", "wind farm", "independent power producer", "ipp", 
-                          "renewable asset manager", "clean energy", "solar energy", "wind energy"],
+        # Renewable Energy - Operations, Technology & Asset Management
+        "sub_industries": ["Solar", "Wind Energy", "Renewable Energy", "Clean Energy", 
+                          "Biomass Energy", "Energy Storage", "Energy Efficiency"],
         "role_details": [
             # Operations
             "coo", "chief operating officer", "director of operations", "vp of operations",
@@ -87,8 +101,9 @@ ICP_DEFINITIONS = [
     },
     
     {
-        "sub_industries": ["vineyard", "orchard", "large crop producer", "greenhouse", 
-                          "agri-tech farm", "agritech", "commercial farm", "wine producer"],
+        # Winery/Horticulture - Farm & Operations Leaders
+        "sub_industries": ["Winery", "Wine And Spirits", "Horticulture", "Farming", 
+                          "Agriculture", "AgTech", "Hydroponics"],
         "role_details": [
             # Operations
             "coo", "chief operating officer", "director of operations", "vp of operations",
@@ -106,7 +121,8 @@ ICP_DEFINITIONS = [
     },
     
     {
-        "sub_industries": ["shopify", "dtc", "direct to consumer", "retail", "e-commerce", "ecommerce"],
+        # E-Commerce/Retail - Marketing & Growth Leaders
+        "sub_industries": ["E-Commerce", "E-Commerce Platforms", "Retail", "Retail Technology"],
         "role_details": [
             # Marketing/Growth
             "vp ecommerce", "vp e-commerce", "vp of ecommerce", "director of ecommerce",
@@ -120,9 +136,10 @@ ICP_DEFINITIONS = [
     },
     
     {
-        "sub_industries": ["shopify agenc", "shopify partner", "paid ads", "paid advertising",
-                          "cro", "conversion optimization", "email", "email marketing", 
-                          "sms", "sms marketing", "digital marketing"],
+        # Digital Marketing/Advertising - Agency & Strategy Leaders
+        "sub_industries": ["Digital Marketing", "Email Marketing", "Marketing", 
+                          "Marketing Automation", "Advertising", "Advertising Platforms",
+                          "Affiliate Marketing", "Content Marketing"],
         "role_details": [
             # Leadership/Strategy
             "founder", "co-founder", "ceo", "chief executive officer", 
@@ -135,8 +152,9 @@ ICP_DEFINITIONS = [
     },
     
     {
-        "sub_industries": ["ai startup", "artificial intelligence", "machine learning", 
-                          "ai company", "ml startup", "deep learning"],
+        # AI/ML - Technical & Leadership Roles
+        "sub_industries": ["Artificial Intelligence", "Machine Learning", 
+                          "Natural Language Processing", "Predictive Analytics"],
         "role_details": [
             # Leadership
             "ceo", "chief executive officer", "founder", "co-founder",
@@ -145,13 +163,18 @@ ICP_DEFINITIONS = [
             "head of engineering", "engineering director", "vp of ai", "vp ai",
             "head of ai", "director of ai", "vp of machine learning", "vp machine learning",
             "head of machine learning", "director of machine learning", 
-            "chief ai officer", "chief data officer"
+            "chief ai officer", "chief data officer",
+            # Engineering
+            "software engineer", "swe", "senior software engineer", "sr swe", 
+            "staff software engineer", "principal software engineer", "lead software engineer",
+            "software developer", "senior software developer", "sr software developer"
         ]
     },
     
     {
-        "sub_industries": ["single family", "multi-family", "multi family", "multifamily",
-                          "real estate investor", "real estate investment", "property investor"],
+        # Real Estate Investment - Owners & Investment Leaders
+        "sub_industries": ["Real Estate", "Real Estate Investment", "Residential", 
+                          "Commercial Real Estate", "Property Development", "Property Management"],
         "role_details": [
             # Owner/Leadership
             "ceo", "chief executive officer", "owner", "co-owner", "sole operator",
@@ -161,9 +184,10 @@ ICP_DEFINITIONS = [
     },
     
     {
-        "sub_industries": ["single family office", "family office", "sfo", "private family office",
-                          "ultra high net worth", "uhnw", "private wealth office", "family wealth management",
-                          "family investment office", "private investment office"],
+        # Wealth Management/Family Office - Investment & Operations Leaders
+        # Note: No "Family Office" sub-industry in taxonomy, using closest matches
+        "sub_industries": ["Asset Management", "Venture Capital", "Hedge Funds", 
+                          "Financial Services", "Impact Investing"],
         "role_details": [
             # Leadership
             "ceo", "chief executive officer", "president", "managing director", "managing partner",
@@ -193,9 +217,9 @@ ICP_DEFINITIONS = [
     },
     
     {
-        "sub_industries": ["fintech", "bank", "banking", "sponsor bank", "sponsor banking",
-                          "financial technology", "digital banking", "neobank", "challenger bank",
-                          "payment processor", "payment processing", "financial services"],
+        # FinTech/Banking - Risk & Compliance Leaders
+        "sub_industries": ["FinTech", "Banking", "Payments", "Financial Services",
+                          "Credit Cards", "Mobile Payments", "Transaction Processing"],
         "role_details": [
             # Risk & Compliance Leadership
             "cro", "chief risk officer", "vp of risk", "vp risk", "head of risk", 
@@ -217,10 +241,62 @@ ICP_DEFINITIONS = [
     },
     
     {
-        "sub_industries": ["video on demand", "vod", "broadcaster", "tv channel", "television", 
-                          "telecommunications", "telecom", "content delivery network", "cdn",
-                          "streaming", "ott", "over the top", "media streaming", "video streaming",
-                          "broadcast", "broadcasting", "media company", "digital media"],
+        # Clinical Research/Labs - Data & Research Leaders
+        "sub_industries": ["Clinical Trials", "Biotechnology", "Pharmaceutical", 
+                          "Biopharma", "Life Science"],
+        "role_details": [
+            # Data & Research
+            "data scientist", "senior data scientist", "lead data scientist", "principal data scientist",
+            "data manager", "clinical data manager", "data management lead", "head of data management",
+            "director of data management", "vp of data management", "vp data management",
+            "biostatistician", "senior biostatistician", "lead biostatistician",
+            "data analyst", "clinical data analyst", "research data analyst",
+            # Leadership
+            "ceo", "chief executive officer", "cto", "chief technology officer",
+            "coo", "chief operating officer", "cso", "chief scientific officer",
+            "vp of operations", "vp operations", "director of operations"
+        ]
+    },
+    
+    {
+        # Research/Academic - Principal Investigators & Researchers
+        "sub_industries": ["Higher Education", "Life Science", "Biotechnology", 
+                          "Neuroscience", "Genetics"],
+        "role_details": [
+            # Principal Investigators & Researchers
+            "principal investigator", "pi", "lead researcher", "senior researcher",
+            "research director", "director of research", "head of research",
+            "associate professor", "assistant professor", "professor",
+            "research scientist", "senior research scientist", "staff scientist",
+            "research fellow", "senior research fellow", "postdoctoral researcher",
+            "lab director", "laboratory director", "research group leader",
+            "department head", "department chair", "division chief"
+        ]
+    },
+    
+    {
+        # Biotech/Pharma - Business Development & Scientific Leadership
+        "sub_industries": ["Biotechnology", "Biopharma", "Pharmaceutical", 
+                          "Genetics", "Life Science", "Bioinformatics"],
+        "role_details": [
+            # Business Development & Leadership
+            "ceo", "chief executive officer", "founder", "co-founder",
+            "cto", "chief technology officer", "cso", "chief scientific officer",
+            "coo", "chief operating officer", "cmo", "chief medical officer",
+            "vp of business development", "vp business development", "head of business development",
+            "director of business development", "business development director",
+            "bd lead", "business development lead", "business development manager",
+            "vp of partnerships", "vp partnerships", "head of partnerships",
+            "director of partnerships", "partnerships director",
+            "vp of corporate development", "director of corporate development"
+        ]
+    },
+    
+    {
+        # Broadcasting/Media (Africa Focus) - Technology & Content Leaders
+        "sub_industries": ["Broadcasting", "Video", "Digital Media", "Content", 
+                          "Content Delivery Network", "Telecommunications", 
+                          "Digital Entertainment"],
         "role_details": [
             # Technology Leadership
             "cto", "chief technology officer", "cfo", "chief financial officer",
@@ -253,9 +329,320 @@ ICP_DEFINITIONS = [
                     "botswana", "namibia", "mauritius", "gabon", "malawi", "mali", "burkina faso",
                     "niger", "chad", "somalia", "benin", "togo", "sierra leone", "liberia",
                     "central african republic", "congo", "eritrea", "gambia", "guinea", "lesotho",
-                    "madagascar", "mauritania", "swaziland", "eswatini"]
+                    "madagascar", "mauritania", "swaziland", "eswatini"],
+        # Custom multiplier for Africa leads (higher value than default 1.5x)
+        "multiplier": 5.0
     }
 ]
+
+# ========================================================================
+# INDUSTRY TAXONOMY VALIDATION HELPERS
+# ========================================================================
+
+def get_all_valid_industries() -> set:
+    """
+    Get all valid industry names from industry taxonomy.
+    These are the unique industry_groups across all sub-industries.
+    
+    Returns:
+        Set of valid industry names (case-preserved)
+    """
+    industries = set()
+    for sub_industry, data in INDUSTRY_TAXONOMY.items():
+        for group in data.get("industries", []):
+            industries.add(group)
+    return industries
+
+
+def get_all_valid_sub_industries() -> set:
+    """
+    Get all valid sub-industry names from industry taxonomy.
+    These are the keys of the INDUSTRY_TAXONOMY dictionary.
+    
+    Returns:
+        Set of valid sub-industry names (case-preserved)
+    """
+    return set(INDUSTRY_TAXONOMY.keys())
+
+
+def validate_exact_industry_match(claimed_industry: str) -> Tuple[bool, str, Optional[str]]:
+    """
+    Validate that the claimed industry EXACTLY matches a valid industry.
+    
+    Args:
+        claimed_industry: The industry submitted by the miner
+        
+    Returns:
+        (is_valid, reason, matched_industry)
+    """
+    if not claimed_industry or not claimed_industry.strip():
+        return False, "Industry is empty or missing", None
+    
+    claimed_clean = claimed_industry.strip()
+    valid_industries = get_all_valid_industries()
+    
+    # Check exact match (case-insensitive)
+    for valid in valid_industries:
+        if valid.lower() == claimed_clean.lower():
+            return True, f"Industry '{valid}' is valid (exact match)", valid
+    
+    # Not found - provide helpful error with valid options
+    return False, f"Industry '{claimed_clean}' is NOT in industry taxonomy. Valid industries: {sorted(valid_industries)}", None
+
+
+def validate_exact_sub_industry_match(claimed_sub_industry: str) -> Tuple[bool, str, Optional[str], Optional[Dict]]:
+    """
+    Validate that the claimed sub_industry EXACTLY matches a valid sub-industry.
+    
+    Args:
+        claimed_sub_industry: The sub_industry submitted by the miner
+        
+    Returns:
+        (is_valid, reason, matched_sub_industry, taxonomy_entry)
+    """
+    if not claimed_sub_industry or not claimed_sub_industry.strip():
+        return False, "Sub-industry is empty or missing", None, None
+    
+    claimed_clean = claimed_sub_industry.strip()
+    
+    # Check exact match (case-insensitive)
+    for sub_ind, data in INDUSTRY_TAXONOMY.items():
+        if sub_ind.lower() == claimed_clean.lower():
+            return True, f"Sub-industry '{sub_ind}' is valid (exact match)", sub_ind, data
+    
+    # Not found - provide helpful error
+    return False, f"Sub-industry '{claimed_clean}' is NOT in industry taxonomy", None, None
+
+
+def validate_industry_sub_industry_exact_pairing(matched_industry: str, matched_sub_industry: str) -> Tuple[bool, str]:
+    """
+    Validate that the industry is a valid industry_group for the sub_industry.
+    Both must have already been validated as exact matches.
+    
+    Args:
+        matched_industry: The validated industry name
+        matched_sub_industry: The validated sub_industry name
+        
+    Returns:
+        (is_valid, reason)
+    """
+    if not matched_sub_industry or matched_sub_industry not in INDUSTRY_TAXONOMY:
+        return False, f"Sub-industry '{matched_sub_industry}' not found in taxonomy"
+    
+    valid_groups = INDUSTRY_TAXONOMY[matched_sub_industry].get("industries", [])
+    
+    if not valid_groups:
+        # Some entries have empty industry_groups - allow any industry
+        return True, f"Sub-industry '{matched_sub_industry}' has no specific industry restrictions"
+    
+    # Check if matched_industry is in the valid groups (case-insensitive)
+    for group in valid_groups:
+        if group.lower() == matched_industry.lower():
+            return True, f"Industry '{matched_industry}' is valid for sub-industry '{matched_sub_industry}'"
+    
+    return False, f"Industry '{matched_industry}' is NOT valid for sub-industry '{matched_sub_industry}'. Valid: {valid_groups}"
+
+
+# ========================================================================
+# SUB-INDUSTRY VERIFICATION HELPERS (Using Industry Taxonomy) - LEGACY
+# ========================================================================
+
+def fuzzy_match_sub_industry(claimed_sub_industry: str) -> Tuple[Optional[str], Optional[Dict], float]:
+    """
+    LEGACY: Fuzzy match the miner's claimed sub_industry against the industry taxonomy.
+    NOTE: Use validate_exact_sub_industry_match() for strict validation instead.
+    
+    Returns:
+        (matched_key, taxonomy_entry, confidence) where:
+        - matched_key: The exact key in INDUSTRY_TAXONOMY (or None if no match)
+        - taxonomy_entry: Dict with 'industry_groups' and 'definition' (or None)
+        - confidence: 0.0 to 1.0
+    """
+    if not claimed_sub_industry:
+        return None, None, 0.0
+    
+    claimed_lower = claimed_sub_industry.strip().lower()
+    
+    # Try exact match first (case-insensitive)
+    for key in INDUSTRY_TAXONOMY:
+        if key.lower() == claimed_lower:
+            return key, INDUSTRY_TAXONOMY[key], 1.0
+    
+    # Try contains match (if claimed is substring of taxonomy entry or vice versa)
+    best_match = None
+    best_confidence = 0.0
+    
+    for key in INDUSTRY_TAXONOMY:
+        key_lower = key.lower()
+        
+        # Check if one contains the other
+        if claimed_lower in key_lower or key_lower in claimed_lower:
+            # Calculate similarity based on length ratio
+            longer = max(len(claimed_lower), len(key_lower))
+            shorter = min(len(claimed_lower), len(key_lower))
+            confidence = shorter / longer
+            
+            if confidence > best_confidence:
+                best_match = key
+                best_confidence = confidence
+        
+        # Check for word overlap
+        claimed_words = set(claimed_lower.replace('-', ' ').replace('/', ' ').split())
+        key_words = set(key_lower.replace('-', ' ').replace('/', ' ').split())
+        
+        if claimed_words and key_words:
+            overlap = len(claimed_words & key_words)
+            total = len(claimed_words | key_words)
+            word_confidence = overlap / total if total > 0 else 0
+            
+            if word_confidence > best_confidence:
+                best_match = key
+                best_confidence = word_confidence
+    
+    if best_match and best_confidence >= 0.5:
+        return best_match, INDUSTRY_TAXONOMY[best_match], best_confidence
+    
+    return None, None, 0.0
+
+
+def validate_industry_sub_industry_pairing(claimed_industry: str, matched_sub_industry: str) -> Tuple[bool, str]:
+    """
+    Validate that the miner's claimed industry is a valid industry_group for the sub_industry.
+    
+    Returns:
+        (is_valid, reason)
+    """
+    if not matched_sub_industry or matched_sub_industry not in INDUSTRY_TAXONOMY:
+        return False, f"Sub-industry '{matched_sub_industry}' not found in industry taxonomy"
+    
+    valid_groups = INDUSTRY_TAXONOMY[matched_sub_industry].get("industries", [])
+    
+    if not valid_groups:
+        # Some entries have empty industry_groups (like "Association", "Commercial")
+        return True, f"Sub-industry '{matched_sub_industry}' has no specific industry group requirements"
+    
+    # Normalize claimed industry for comparison
+    claimed_lower = claimed_industry.strip().lower()
+    
+    for group in valid_groups:
+        if group.lower() == claimed_lower:
+            return True, f"Industry '{claimed_industry}' is valid for sub-industry '{matched_sub_industry}'"
+        # Allow partial matches (e.g., "Technology" matches "Information Technology")
+        if claimed_lower in group.lower() or group.lower() in claimed_lower:
+            return True, f"Industry '{claimed_industry}' loosely matches valid group '{group}' for sub-industry '{matched_sub_industry}'"
+    
+    return False, f"Industry '{claimed_industry}' is NOT valid for sub-industry '{matched_sub_industry}'. Valid groups: {valid_groups}"
+
+
+async def verify_sub_industry_with_llm(
+    company: str,
+    claimed_sub_industry: str,
+    matched_sub_industry: str,
+    definition: str,
+    industry_search_results: List[Dict],
+    openrouter_key: str
+) -> Tuple[bool, str, float]:
+    """
+    Use LLM to verify that the company actually matches the claimed sub_industry,
+    using the industry definition as the ground truth.
+    
+    Args:
+        company: Company name
+        claimed_sub_industry: What the miner claimed
+        matched_sub_industry: The matched industry taxonomy key
+        definition: sub-industry definition of the sub_industry
+        industry_search_results: GSE search results about the company's industry
+        openrouter_key: API key for OpenRouter
+    
+    Returns:
+        (is_match, reasoning, confidence)
+    """
+    if not industry_search_results:
+        return False, "No industry search results to verify against", 0.0
+    
+    # Build context from search results
+    search_context = ""
+    for i, result in enumerate(industry_search_results[:5], 1):
+        title = result.get("title", "")
+        snippet = result.get("snippet", result.get("body", ""))
+        search_context += f"{i}. {title}\n   {snippet[:200]}\n"
+    
+    prompt = f"""You are verifying if a company matches a specific sub-industry classification.
+
+COMPANY: {company}
+
+CLAIMED SUB-INDUSTRY: {claimed_sub_industry}
+MATCHED SUB-INDUSTRY CATEGORY: {matched_sub_industry}
+
+SUB-INDUSTRY DEFINITION FOR THIS SUB-INDUSTRY:
+"{definition}"
+
+SEARCH RESULTS ABOUT THE COMPANY:
+{search_context}
+
+TASK: Based on the search results, does this company match the sub-industry definition above?
+
+RULES:
+1. The company's actual business must match the industry definition
+2. Be STRICT - the company must genuinely fit the sub-industry category
+3. If search results don't clearly show what the company does, return false
+4. If the company operates in a DIFFERENT industry than claimed, return false
+
+RESPOND WITH JSON ONLY:
+{{
+    "sub_industry_match": true/false,
+    "extracted_business_type": "what the company actually does based on search results",
+    "confidence": 0.0-1.0,
+    "reasoning": "Brief explanation"
+}}"""
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 300,
+                    "temperature": 0
+                },
+                timeout=20
+            ) as response:
+                if response.status != 200:
+                    return False, f"LLM API error: HTTP {response.status}", 0.0
+                
+                data = await response.json()
+                llm_response = data["choices"][0]["message"]["content"].strip()
+                
+                # Parse JSON response
+                if llm_response.startswith("```"):
+                    lines = llm_response.split("\n")
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    llm_response = "\n".join(lines).strip()
+                
+                result = json.loads(llm_response)
+                
+                is_match = result.get("sub_industry_match", False)
+                reasoning = result.get("reasoning", "No reasoning provided")
+                confidence = float(result.get("confidence", 0.0))
+                extracted_type = result.get("extracted_business_type", "Unknown")
+                
+                full_reasoning = f"{reasoning} (Detected: {extracted_type})"
+                
+                return is_match, full_reasoning, confidence
+                
+    except json.JSONDecodeError as e:
+        return False, f"Failed to parse LLM response: {str(e)}", 0.0
+    except Exception as e:
+        return False, f"LLM verification failed: {str(e)}", 0.0
+
 
 def normalize_accents(text: str) -> str:
     """
@@ -429,6 +816,67 @@ class LRUCache:
 # Global cache instance
 validation_cache = LRUCache(max_size=1000)
 
+# ========================================================================
+# GLOBAL COMPANY LINKEDIN CACHE
+# ========================================================================
+# Caches company LinkedIn data to avoid re-scraping the same company page.
+# Key: company_linkedin slug (e.g., "microsoft")
+# Value: Dict with company_name, industry, description, employee_count, location, timestamp
+# TTL: 24 hours (companies don't change frequently)
+# ========================================================================
+COMPANY_LINKEDIN_CACHE: Dict[str, Dict] = {}
+COMPANY_LINKEDIN_CACHE_TTL_HOURS = 24
+
+def get_company_linkedin_from_cache(company_slug: str) -> Optional[Dict]:
+    """
+    Get company LinkedIn data from global cache if not expired.
+    
+    Args:
+        company_slug: The company slug from LinkedIn URL (e.g., "microsoft")
+        
+    Returns:
+        Cached data dict or None if not cached/expired
+    """
+    if company_slug not in COMPANY_LINKEDIN_CACHE:
+        return None
+    
+    cached = COMPANY_LINKEDIN_CACHE[company_slug]
+    cached_time = cached.get("timestamp")
+    
+    if cached_time:
+        # Check if cache has expired
+        age_hours = (datetime.now() - cached_time).total_seconds() / 3600
+        if age_hours > COMPANY_LINKEDIN_CACHE_TTL_HOURS:
+            # Expired, remove from cache
+            del COMPANY_LINKEDIN_CACHE[company_slug]
+            return None
+    
+    return cached
+
+def set_company_linkedin_cache(company_slug: str, data: Dict):
+    """
+    Store company LinkedIn data in global cache.
+    
+    Args:
+        company_slug: The company slug from LinkedIn URL
+        data: Dict with company data to cache
+    """
+    # Add timestamp for TTL
+    data["timestamp"] = datetime.now()
+    COMPANY_LINKEDIN_CACHE[company_slug] = data
+    
+    # Limit cache size (simple LRU - remove oldest if over 500 entries)
+    if len(COMPANY_LINKEDIN_CACHE) > 500:
+        # Remove oldest entry
+        oldest_slug = None
+        oldest_time = datetime.now()
+        for slug, cached_data in COMPANY_LINKEDIN_CACHE.items():
+            if cached_data.get("timestamp", datetime.now()) < oldest_time:
+                oldest_time = cached_data["timestamp"]
+                oldest_slug = slug
+        if oldest_slug:
+            del COMPANY_LINKEDIN_CACHE[oldest_slug]
+
 def get_cache_key(prefix: str, identifier: str) -> str:
     """Generate consistent cache key for validation results"""
     return f"{prefix}_{identifier}"
@@ -540,12 +988,19 @@ def extract_root_domain(website: str) -> str:
 # Stage 0: Basic Hardcoded Checks
 
 async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
-    """Check that all required fields are present and non-empty"""
+    """Check that all required fields are present and non-empty.
+    
+    Region validation:
+    - country and city are ALWAYS required
+    - state is required ONLY for United States leads
+    - The validator builds the region string internally from country/state/city
+    """
     required_fields = {
         "industry": ["industry", "Industry"],
         "sub_industry": ["sub_industry", "sub-industry", "Sub-industry", "Sub_industry"],
         "role": ["role", "Role"],
-        "region": ["region", "Region", "location", "Location"],
+        "country": ["country", "Country"],
+        "city": ["city", "City"],
     }
     
     missing_fields = []
@@ -570,6 +1025,16 @@ async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
         
         if not found:
             missing_fields.append(field_name)
+    
+    # Special check: state is required for US leads
+    country = lead.get("country") or lead.get("Country") or ""
+    country_lower = country.lower().strip() if country else ""
+    us_aliases = ["united states", "usa", "us", "u.s.", "u.s.a.", "america", "united states of america"]
+    
+    if country_lower in us_aliases:
+        state = lead.get("state") or lead.get("State") or ""
+        if not state or not str(state).strip():
+            missing_fields.append("state (required for US leads)")
     
     # Return structured rejection if any fields are missing
     if missing_fields:
@@ -616,6 +1081,21 @@ async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
                 "stage": "Stage 0: Hardcoded Checks",
                 "check_name": "check_email_regex",
                 "message": f"Invalid email format: {email}",
+                "failed_fields": ["email"]
+            }
+            # Cache result
+            cache_key = f"email_regex:{email}"
+            validation_cache[cache_key] = (False, rejection_reason)
+            await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
+            return False, rejection_reason
+        
+        # Reject emails with "+" sign (prevents duplicate submission exploit via email aliasing)
+        # Example: jwest+alias1@domain.com and jwest+alias2@domain.com are the same email
+        if "+" in email.split("@")[0]:
+            rejection_reason = {
+                "stage": "Stage 0: Hardcoded Checks",
+                "check_name": "check_email_regex",
+                "message": f"Email contains '+' alias character (not allowed): {email}",
                 "failed_fields": ["email"]
             }
             # Cache result
@@ -1495,7 +1975,7 @@ async def check_truelist_email(lead: dict) -> Tuple[bool, dict]:
     TrueList API: https://apidocs.truelist.io/#tag/Single-email-validation
     Only accepts "email_ok" status (equivalent to MEV "Valid").
     
-    Retry logic: Up to 3 attempts with 10s wait between retries.
+    Retry logic: Up to 2 attempts with 4s wait between retries.
     """
     email = get_email(lead)
     if not email:
@@ -1569,8 +2049,18 @@ async def check_truelist_email(lead: dict) -> Tuple[bool, dict]:
                                 "message": "Email is from a disposable provider",
                                 "failed_fields": ["email"]
                             })
+                        elif status in ["unknown_error", "unknown", "timeout", "error"]:
+                            # API couldn't determine email status - should retry, not reject
+                            print(f"   ⚠️ TrueList returned '{status}' - inconclusive result")
+                            if attempt < max_retries:
+                                print(f"   🔄 Retrying due to inconclusive status ({attempt}/{max_retries})...")
+                                await asyncio.sleep(retry_delay)
+                                continue  # Retry the verification
+                            else:
+                                # All retries exhausted - raise exception to SKIP lead, not reject
+                                raise EmailVerificationUnavailableError(f"TrueList returned inconclusive status '{status}' after {max_retries} retries")
                         else:
-                            # Reject all other statuses (unknown, invalid, failed_*, etc.)
+                            # Reject definitively invalid statuses (failed_no_mailbox, invalid_syntax, etc.)
                             result = (False, {
                                 "stage": "Stage 3: TrueList",
                                 "check_name": "check_truelist_email",
@@ -2107,8 +2597,24 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         
         company_words = company_normalized.split()  # ["bank", "of", "america"]
         
-        # Check first result (most authoritative for target person)
-        first_title = search_results[0].get("title", "").lower()
+        # CRITICAL FIX: When URL matched exactly, use the result with matching URL
+        # for company verification, NOT just the first result.
+        # This handles common names where multiple people have the same name.
+        target_result = search_results[0]  # Default to first
+        
+        if url_match_exact and linkedin_url:
+            # Find the result with the matching URL
+            profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0].lower() if "/in/" in linkedin_url else None
+            if profile_slug:
+                for result in search_results:
+                    result_url = result.get("link", "").lower()
+                    if f"/in/{profile_slug}" in result_url:
+                        target_result = result
+                        print(f"   🎯 Using URL-matched result for company check: {result_url[:50]}")
+                        break
+        
+        # Check the TARGET result (URL-matched or first)
+        first_title = target_result.get("title", "").lower()
         
         # Normalize apostrophes and hyphens in title too (ScrapingDog returns "mcdonald ' s" and "chick - fil - a")
         first_title = first_title.replace("'", "'").replace("'", "'").replace("`", "'")
@@ -2122,7 +2628,7 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
             first_title = first_title.split("| linkedin")[0].strip()
         
         # Also get snippet for additional company matching
-        first_snippet = search_results[0].get("snippet", "").lower()
+        first_snippet = target_result.get("snippet", "").lower()
         first_snippet = re.sub(r"\s*-\s*", "-", first_snippet)  # Normalize hyphens
         
         # Check if title is truncated (contains "...")
@@ -2306,7 +2812,7 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
         payload = {
             "model": "openai/gpt-4o-mini",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1  # Low temperature for consistency
+            "temperature": 0  # Zero temperature for deterministic results
         }
         
         async with aiohttp.ClientSession() as session:
@@ -2566,6 +3072,140 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
             if stage4_extracted_role:
                 lead["stage4_extracted_role"] = stage4_extracted_role
                 print(f"   📝 Stage 4: Extracted role from profile: '{stage4_extracted_role}'")
+        
+        # ========================================================================
+        # STAGE 4: COMPANY LINKEDIN VALIDATION (NEW)
+        # ========================================================================
+        # Validates company_linkedin URL, verifies company name matches, and caches
+        # company data (industry, description, employee_count) for Stage 5.
+        # FAIL HERE = Stage 5 never runs = saves all Stage 5 API costs
+        # ========================================================================
+        
+        company_linkedin = lead.get("company_linkedin", "") or ""
+        
+        if company_linkedin:
+            print(f"   🏢 Stage 4: Validating company LinkedIn URL...")
+            
+            # Step 1: Validate URL format (must be /company/, not /in/)
+            url_valid, url_reason, company_slug = validate_company_linkedin_url(company_linkedin)
+            
+            if not url_valid:
+                print(f"   ❌ Stage 4: Company LinkedIn URL INVALID: {url_reason}")
+                return False, {
+                    "stage": "Stage 4: Company LinkedIn Validation",
+                    "check_name": "check_linkedin_gse",
+                    "message": f"Company LinkedIn URL is invalid: {url_reason}",
+                    "failed_fields": ["company_linkedin"],
+                    "provided_url": company_linkedin,
+                    "expected_format": "https://linkedin.com/company/{company-name}"
+                }
+            
+            print(f"   ✅ Stage 4: Company LinkedIn URL format valid: /company/{company_slug}")
+            
+            # Step 2: Check global cache first
+            cached_data = get_company_linkedin_from_cache(company_slug)
+            
+            if cached_data:
+                print(f"   📦 Stage 4: Using CACHED company LinkedIn data for '{company_slug}'")
+                
+                # Verify company name still matches (cache might have different company)
+                cached_company_name = cached_data.get("company_name_from_linkedin", "")
+                if cached_company_name:
+                    # Check if cached company matches current company claim
+                    cached_lower = cached_company_name.lower().strip()
+                    claimed_lower = company.lower().strip()
+                    
+                    if cached_lower != claimed_lower and cached_lower not in claimed_lower and claimed_lower not in cached_lower:
+                        print(f"   ❌ Stage 4: Cached company name '{cached_company_name}' doesn't match claimed '{company}'")
+                        return False, {
+                            "stage": "Stage 4: Company LinkedIn Validation",
+                            "check_name": "check_linkedin_gse",
+                            "message": f"Company LinkedIn page shows '{cached_company_name}' but miner claimed '{company}'",
+                            "failed_fields": ["company_linkedin", "company"],
+                            "linkedin_company": cached_company_name,
+                            "claimed_company": company
+                        }
+                
+                # Store cached data on lead for Stage 5
+                lead["company_linkedin_verified"] = True
+                lead["company_linkedin_slug"] = company_slug
+                lead["company_linkedin_data"] = cached_data
+                lead["company_linkedin_from_cache"] = True
+                
+                # Log what data we have cached
+                if cached_data.get("employee_count"):
+                    print(f"   📊 Cached employee count: {cached_data['employee_count']}")
+                if cached_data.get("industry"):
+                    print(f"   🏭 Cached industry: {cached_data['industry']}")
+                if cached_data.get("description"):
+                    print(f"   📝 Cached description: {cached_data['description'][:80]}...")
+            else:
+                # Step 3: Not cached - scrape company LinkedIn page via GSE
+                print(f"   🔍 Stage 4: Scraping company LinkedIn page for '{company_slug}'...")
+                scraped_data = await scrape_company_linkedin_gse(company_slug, company)
+                
+                if scraped_data.get("success"):
+                    # Step 4: Verify company name matches
+                    if not scraped_data.get("company_name_match"):
+                        linkedin_company = scraped_data.get("company_name_from_linkedin", "Unknown")
+                        print(f"   ❌ Stage 4: Company name MISMATCH: LinkedIn shows '{linkedin_company}' but miner claimed '{company}'")
+                        return False, {
+                            "stage": "Stage 4: Company LinkedIn Validation",
+                            "check_name": "check_linkedin_gse",
+                            "message": f"Company LinkedIn page shows '{linkedin_company}' but miner claimed '{company}'",
+                            "failed_fields": ["company_linkedin", "company"],
+                            "linkedin_company": linkedin_company,
+                            "claimed_company": company
+                        }
+                    
+                    print(f"   ✅ Stage 4: Company name verified: '{company}'")
+                    
+                    # Step 5: Cache the data globally (only on success)
+                    set_company_linkedin_cache(company_slug, scraped_data)
+                    print(f"   💾 Stage 4: Cached company LinkedIn data for future leads")
+                    
+                    # Store on lead for Stage 5
+                    lead["company_linkedin_verified"] = True
+                    lead["company_linkedin_slug"] = company_slug
+                    lead["company_linkedin_data"] = scraped_data
+                    lead["company_linkedin_from_cache"] = False
+                    
+                    # Log what data we scraped
+                    if scraped_data.get("employee_count"):
+                        print(f"   📊 Scraped employee count: {scraped_data['employee_count']}")
+                    if scraped_data.get("industry"):
+                        print(f"   🏭 Scraped industry: {scraped_data['industry']}")
+                    if scraped_data.get("description"):
+                        print(f"   📝 Scraped description: {scraped_data['description'][:80]}...")
+                else:
+                    # Scraping failed - check if it's a URL mismatch (reject) or just scraping error (warn)
+                    error_msg = scraped_data.get('error', 'Unknown')
+                    
+                    # If URL doesn't match, this is a CRITICAL error - reject immediately
+                    if "does not match expected slug" in error_msg or "URL mismatch" in error_msg:
+                        print(f"   ❌ Stage 4: Company LinkedIn URL mismatch: {error_msg}")
+                        return False, {
+                            "stage": "Stage 4: Company LinkedIn Validation",
+                            "check_name": "check_linkedin_gse",
+                            "message": f"Company LinkedIn URL is incorrect or ambiguous: {error_msg}",
+                            "failed_fields": ["company_linkedin"],
+                            "provided_url": company_linkedin,
+                            "hint": "The URL provided returns a different company page. Ensure you're using the exact LinkedIn company slug."
+                        }
+                    
+                    # Other scraping errors (network, API, etc.) - warn but don't fail
+                    # Stage 5 will use fallback GSE searches
+                    print(f"   ⚠️ Stage 4: Could not scrape company LinkedIn: {error_msg}")
+                    print(f"   ⚠️ Stage 4: Stage 5 will use fallback GSE searches for industry/employee data")
+                    lead["company_linkedin_verified"] = True  # URL was valid format
+                    lead["company_linkedin_slug"] = company_slug
+                    lead["company_linkedin_data"] = None  # No data - Stage 5 will fallback
+                    lead["company_linkedin_from_cache"] = False
+        else:
+            # No company_linkedin provided - Stage 5 will use fallback GSE searches
+            print(f"   ⚠️ Stage 4: No company_linkedin URL provided")
+            lead["company_linkedin_verified"] = False
+            lead["company_linkedin_data"] = None
         
         print(f"   ✅ Stage 4: LinkedIn verified for {full_name} at {company}")
         return True, {}
@@ -3899,6 +4539,20 @@ ROLE_EQUIVALENCIES = {
     "chair": ["chairman", "chairwoman", "chair", "chairperson", "executive chair", "executive chairman"],
     "attorney": ["attorney", "counsel", "lawyer", "legal counsel", "associate attorney", "staff attorney"],
     "recruiting": ["recruiting", "recruitment", "recruitments", "recruiter", "talent acquisition", "staffing"],
+    # Sales and Business Development are often used interchangeably
+    "sales": ["sales", "business development", "bd", "biz dev", "revenue", "commercial"],
+    "business development": ["business development", "sales", "bd", "biz dev", "revenue", "commercial"],
+    # HR/People - all refer to the same function
+    "hr": ["hr", "human resources", "people", "talent", "people operations", "people ops"],
+    "human resources": ["human resources", "hr", "people", "talent", "people operations", "people ops"],
+    "people": ["people", "hr", "human resources", "talent", "people operations"],
+    # Operations abbreviation
+    "ops": ["ops", "operations"],
+    "operations": ["operations", "ops"],
+    # Customer-facing roles - often overlap
+    "customer success": ["customer success", "customer service", "client success", "account management", "client services"],
+    "customer service": ["customer service", "customer success", "support", "client services", "client support"],
+    "support": ["support", "customer service", "customer support", "technical support", "client support"],
 }
 
 
@@ -4227,12 +4881,24 @@ def extract_role_from_search_title(title: str, snippet: str = "", company_name: 
                         # Return as-is for less common abbreviations
                         return role_abbrev.upper()
         
-        # Look for role keywords in snippet - capture FULL role up to "at Company"
+        # PRIORITY: LinkedIn directory format: "Name. Role @ Company"
+        # E.g., "Allison Constable. VP of Sales, Ad Measurement @ DISQO"
+        # This pattern allows commas in the role title
+        linkedin_dir_pattern = r'\.\s+([A-Za-z\s,]+?)\s+@\s+'
+        match = re.search(linkedin_dir_pattern, snippet_clean)
+        if match:
+            potential_role = match.group(1).strip()
+            # Remove any trailing commas
+            potential_role = potential_role.rstrip(',').strip()
+            if len(potential_role) > 2 and has_role_keyword(potential_role) and not is_company_name(potential_role):
+                if _is_valid_role_extraction(potential_role):
+                    return potential_role
+        
         found_roles = []
         for kw in role_keywords:
-            # Match FULL ROLE: capture everything from word boundary to keyword, stopping at "at Company"
-            # E.g., "Chief Technology and Security Advisor at Microsoft" → "Chief Technology and Security Advisor"
-            match = re.search(rf'((?:[A-Za-z]+\s+){{0,6}}{kw})\s+at\s+', snippet_clean, re.IGNORECASE)
+            # Match FULL ROLE: capture everything from word boundary to keyword, stopping at "at/@"
+            # E.g., "VP of Sales @ DISQO" or "Chief Technology Advisor at Microsoft"
+            match = re.search(rf'((?:[A-Za-z,]+\s+){{0,6}}{kw})\s+(?:at|@)\s+', snippet_clean, re.IGNORECASE)
             if match:
                 role = match.group(1).strip()
                 if len(role) > 2 and len(role) < 100 and not is_company_name(role):
@@ -4393,6 +5059,162 @@ def _is_valid_role_extraction(role: str) -> bool:
     return True
 
 
+def validate_role_format(role: str, full_name: str = "", company: str = "") -> Tuple[bool, str]:
+    """
+    Validate role FORMAT for gaming patterns BEFORE fuzzy matching.
+    
+    This catches malformed roles that might pass content matching:
+    - Person's name embedded in role
+    - Company name embedded in role ("at Cloudfactory", "Morgan Stanley Wealth Management")
+    - Marketing taglines/sentences
+    - Geographic locations at end (should be in region field)
+    - Excessively long roles (> 80 chars)
+    
+    Returns: (is_valid: bool, rejection_reason: str)
+    """
+    if not role or not role.strip():
+        return False, "Empty role"
+    
+    role = role.strip()
+    role_lower = role.lower()
+    
+    # ========================================================================
+    # CHECK 1: Role too long (legitimate titles are < 80 chars)
+    # ========================================================================
+    # Examples of valid long roles:
+    #   - "Vice President of Global Sales and Marketing" (47 chars)
+    #   - "Senior Director of Enterprise Customer Success" (47 chars)
+    # Examples of gaming (stuffed roles):
+    #   - "CEO/Board Member at Cloudfactory. Unlocking the Disruptive Potential..." (130+ chars)
+    # ========================================================================
+    if len(role) > 80:
+        return False, f"Role too long ({len(role)} chars > 80). Remove taglines and extra info."
+    
+    # ========================================================================
+    # CHECK 2: Marketing sentences/taglines (period followed by sentence)
+    # ========================================================================
+    # Pattern: ". X" where X is capital letter starting a sentence
+    # Examples:
+    #   - "CEO. Unlocking the potential of AI for the world" → FAIL
+    #   - "Sr. Director" → PASS (abbreviation)
+    #   - "V.P. of Sales" → PASS (abbreviation)
+    # ========================================================================
+    # Look for sentence patterns (period + space + 3+ words)
+    if re.search(r'\.\s+[A-Z][a-z]+\s+[a-z]+\s+[a-z]+', role):
+        return False, "Role contains marketing sentence/tagline. Use just the job title."
+    
+    # ========================================================================
+    # CHECK 3: Role ends with country/city names (geographic gaming)
+    # ========================================================================
+    # Pattern: "- Vietnam, Cambodia" or "- Asia Pacific"
+    # These should be in the region field, not role
+    # ========================================================================
+    geographic_endings = [
+        # Countries
+        r'[-–,]\s*(Vietnam|Cambodia|India|China|Philippines|Indonesia|Thailand|Malaysia|Singapore)',
+        r'[-–,]\s*(Mexico|Canada|Brazil|Argentina|Chile|Colombia)',
+        r'[-–,]\s*(Germany|France|UK|Spain|Italy|Netherlands|Belgium|Switzerland|Austria)',
+        r'[-–,]\s*(Japan|Korea|Taiwan|Hong Kong)',
+        r'[-–,]\s*(Australia|New Zealand)',
+        r'[-–,]\s*(Nigeria|Kenya|Egypt|South Africa|Morocco)',
+        r'[-–,]\s*(UAE|Saudi Arabia|Qatar|Kuwait)',
+        r'[-–,]\s*(United States|United Kingdom)',
+        # Regions (if at end of role)
+        r'[-–]\s*(APAC|EMEA|LATAM|MENA)\s*$',
+        r'[-–]\s*(Asia Pacific|Asia-Pacific)\s*$',
+    ]
+    for pattern in geographic_endings:
+        if re.search(pattern, role, re.IGNORECASE):
+            return False, "Role ends with geographic location. Put location in region/country field."
+    
+    # ========================================================================
+    # CHECK 4: "at [Company]" pattern embedded in role
+    # ========================================================================
+    # Pattern: "CEO at CloudFactory" or "CEO/Board Member at Cloudfactory"
+    # The role should NOT include where the person works
+    # ========================================================================
+    if company:
+        company_lower = company.lower().strip()
+        # Escape regex special characters in company name
+        company_escaped = re.escape(company_lower)
+        # Check for "at {company}" pattern
+        if re.search(rf'\bat\s+{company_escaped}', role_lower):
+            return False, f"Role contains 'at {company}'. Just provide the job title."
+        # Also check for company name at the end of role
+        # E.g., "Managing Director, Chief Operating Officer- Field Management, Morgan Stanley Wealth Management"
+        if role_lower.rstrip().endswith(company_lower):
+            return False, f"Role ends with company name '{company}'. Just provide the job title."
+        # Check for company name anywhere with a comma separator
+        # E.g., "VP Sales, Morgan Stanley"
+        if re.search(rf',\s*{company_escaped}\s*$', role_lower):
+            return False, f"Role ends with ', {company}'. Just provide the job title."
+    
+    # ========================================================================
+    # CHECK 5: Person's name embedded in role
+    # ========================================================================
+    # Pattern: "Jones - Associate Director -" where "Jones" is the person's last name
+    # The role should NOT include the person's name
+    # Exception: Very short name parts (< 3 chars) might match legitimate words
+    # ========================================================================
+    if full_name:
+        name_parts = full_name.lower().split()
+        for name_part in name_parts:
+            # Skip very short name parts (might match words like "VP", "IT", etc.)
+            if len(name_part) < 3:
+                continue
+            # Skip common name parts that could be legitimate words in roles
+            # E.g., "Grant" (name) vs "Grant Manager" (role)
+            common_role_words = ['grant', 'case', 'mark', 'bill', 'will', 'ray', 'joy', 'hope', 'faith', 'grace', 'dean', 'chase']
+            if name_part in common_role_words:
+                continue
+            # Check if name appears as a standalone word in role
+            if re.search(rf'\b{re.escape(name_part)}\b', role_lower):
+                return False, f"Role contains person's name '{name_part}'. Just provide the job title."
+    
+    # ========================================================================
+    # CHECK 6: Multiple distinct roles (job title stuffing)
+    # ========================================================================
+    # Pattern: "Managing Director, Chief Operating Officer- Field Management"
+    # Multiple C-suite or Director-level titles in one field suggests gaming
+    # CAREFUL: "Co-Founder & CEO" is valid (Founder + 1 role)
+    # ========================================================================
+    c_suite_count = 0
+    director_count = 0
+    # Use word boundary matching to avoid false positives like 'cto' in 'director'
+    c_suite_patterns = ['ceo', 'cto', 'cfo', 'coo', 'cmo', 'cio', 'cpo', 'chief executive', 'chief technology', 
+                        'chief financial', 'chief operating', 'chief marketing', 'chief information', 'chief product']
+    director_patterns = ['managing director', 'executive director', 'senior director', 'director of']
+    
+    for pattern in c_suite_patterns:
+        # Use word boundary to avoid matching 'cto' in 'director' or 'coo' in 'coordinator'
+        if re.search(rf'\b{re.escape(pattern)}\b', role_lower):
+            c_suite_count += 1
+    for pattern in director_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', role_lower):
+            director_count += 1
+    
+    # Allow: "CEO & Co-Founder" (1 c-suite + founder)
+    # Allow: "VP of Sales & Marketing" (1 role, multiple functions)
+    # Fail: "CEO, CFO" (2 c-suite roles)
+    # Fail: "Managing Director, Chief Operating Officer" (director + c-suite)
+    has_founder = 'founder' in role_lower
+    if c_suite_count > 1:
+        return False, f"Role contains multiple C-suite titles. Submit one role per lead."
+    if c_suite_count >= 1 and director_count >= 1 and not has_founder:
+        return False, f"Role contains both C-suite and Director titles. Submit one role per lead."
+    
+    # ========================================================================
+    # CHECK 7: Trailing dashes/garbage formatting
+    # ========================================================================
+    # Pattern: "Associate Director -" or "- VP Sales -"
+    # Clean formatting shouldn't have leading/trailing dashes
+    # ========================================================================
+    if re.search(r'^\s*[-–]\s*|\s*[-–]\s*$', role):
+        return False, "Role has trailing/leading dashes. Clean up formatting."
+    
+    return True, ""
+
+
 def fuzzy_match_role(claimed_role: str, extracted_role: str) -> Tuple[bool, float, str]:
     """
     Fuzzy match two roles with STRICT rules to prevent false positives.
@@ -4472,11 +5294,44 @@ def fuzzy_match_role(claimed_role: str, extracted_role: str) -> Tuple[bool, floa
     if is_product_owner(claimed_role) and is_business_owner(extracted_role):
         return False, 0.0, "MISMATCH: Product Owner (tech role) ≠ Owner (business)"
     
+    # ANTI-GAMING: Expanded department/function list to catch role finessing
+    # E.g., "VP of Risk" vs "VP of Treasury" should FAIL (different functions)
+    # NOTE: Multi-word departments MUST come first so "business development" matches before "business"
     departments = [
+        # Multi-word departments first (check these before single words)
+        "business development", "supply chain", "human resources",
+        "customer success", "customer service", "account management",
+        "change management", "project management",
+        "information security", "cybersecurity",
+        # Single-word departments
         "sales", "marketing", "engineering", "finance", "operations",
-        "product", "hr", "human resources", "legal", "it", "technology",
-        "customer", "business", "development", "research", "data"
+        "product", "hr", "legal", "it", "technology",
+        "customer", "business", "development", "research", "data",
+        # Financial functions
+        "risk", "treasury", "accounting", "audit", "compliance",
+        # Operations functions
+        "logistics", "procurement", "readiness",
+        # Strategy/Leadership functions
+        "strategy", "transformation",
+        # Security/Tech functions
+        "security", "infrastructure",
+        # Customer-facing
+        "support"
     ]
+    
+    # Equivalent department pairs - these are interchangeable (GTM functions)
+    EQUIVALENT_DEPT_PAIRS = {
+        frozenset({"sales", "business development"}),
+        frozenset({"sales", "business"}),  # "business development" sometimes matches "business"
+        frozenset({"business development", "business"}),
+        frozenset({"hr", "human resources"}),
+    }
+    
+    def are_equivalent_depts(dept1: str, dept2: str) -> bool:
+        """Check if two departments are considered equivalent."""
+        if dept1 == dept2:
+            return True
+        return frozenset({dept1, dept2}) in EQUIVALENT_DEPT_PAIRS
     
     def get_department(r: str) -> Optional[str]:
         r_lower = r.lower()
@@ -4489,7 +5344,25 @@ def fuzzy_match_role(claimed_role: str, extracted_role: str) -> Tuple[bool, floa
     extracted_dept = get_department(extracted_role)
     
     if claimed_dept and extracted_dept and claimed_dept != extracted_dept:
-        return False, 0.0, f"DEPARTMENT MISMATCH: {claimed_dept} ≠ {extracted_dept}"
+        # First check: Are these equivalent departments? (e.g., sales ≈ business development)
+        if are_equivalent_depts(claimed_dept, extracted_dept):
+            pass  # Equivalent departments, continue to other checks
+        else:
+            # Second check: Multi-function roles that share a department
+            # ANTI-GAMING: Only allow this if EXTRACTED has 2+ departments
+            # (miner can't control what LinkedIn shows, so this prevents padding)
+            extracted_depts = [d for d in departments if d in extracted_role.lower()]
+            
+            if len(extracted_depts) >= 2:
+                # LinkedIn shows a genuine multi-function role
+                # Check if there's overlap with claimed role
+                common_depts = [d for d in extracted_depts if d in claimed_role.lower()]
+                if not common_depts:
+                    return False, 0.0, f"DEPARTMENT MISMATCH: {claimed_dept} ≠ {extracted_dept}"
+                # else: common_depts exist, bypass allowed - continue to other checks
+            else:
+                # LinkedIn shows single-function role, miner claims different dept
+                return False, 0.0, f"DEPARTMENT MISMATCH: {claimed_dept} ≠ {extracted_dept}"
     
     def has_founder(r: str) -> bool:
         r_lower = r.lower()
@@ -5122,6 +5995,7 @@ def fuzzy_pre_verification_stage5(
                     print(f"   ⚠️ FUZZY ROLE: Low confidence match ({best_confidence:.0%}), sending to LLM")
                 else:
                     # Match failed - check if extraction looks like a valid role
+                    result["needs_llm"].append("role")
                     print(f"   ❌ FUZZY ROLE: No match - '{claimed_role}' vs '{best_extracted_role}' ({best_confidence:.0%})")
             else:
                 # No role extracted at all from search results
@@ -5257,6 +6131,426 @@ def fuzzy_pre_verification_stage5(
     print(f"   🤖 INDUSTRY: Always verified by LLM (too subjective for fuzzy match)")
     
     return result
+
+
+# ========================================================================
+# Employee Count Verification Functions
+# ========================================================================
+
+# LinkedIn employee count ranges (standardized)
+LINKEDIN_EMPLOYEE_RANGES = [
+    (0, 1, "0-1"),
+    (2, 10, "2-10"),
+    (11, 50, "11-50"),
+    (51, 200, "51-200"),
+    (201, 500, "201-500"),
+    (501, 1000, "501-1,000"),
+    (1001, 5000, "1,001-5,000"),
+    (5001, 10000, "5,001-10,000"),
+    (10001, float('inf'), "10,001+"),
+]
+
+
+def parse_employee_count(text: str) -> Optional[Tuple[int, int]]:
+    """
+    Parse employee count from various text formats.
+    
+    Returns (min, max) tuple or None if not parseable.
+    
+    Handles formats like:
+    - "2-10 employees"
+    - "11-50"
+    - "Company size: 51-200 employees"
+    - "1,001-5,000"
+    - "10001+"
+    - "500+"
+    - "Self-employed"
+    - "50"
+    """
+    if not text:
+        return None
+    
+    text = text.strip().lower()
+    
+    # Handle "self-employed"
+    if "self-employed" in text or "self employed" in text:
+        return (1, 1)
+    
+    # Remove commas from numbers
+    text = text.replace(",", "")
+    
+    # Handle "10001+" or "500+" format
+    plus_match = re.search(r'(\d+)\+', text)
+    if plus_match:
+        min_val = int(plus_match.group(1))
+        return (min_val, 100000)  # Assume large upper bound
+    
+    # Handle range format: "X-Y" or "X - Y"
+    range_match = re.search(r'(\d+)\s*[-–—]\s*(\d+)', text)
+    if range_match:
+        min_val = int(range_match.group(1))
+        max_val = int(range_match.group(2))
+        return (min_val, max_val)
+    
+    # Handle single number
+    single_match = re.search(r'(\d+)', text)
+    if single_match:
+        val = int(single_match.group(1))
+        # If it's a single number, treat it as exact
+        return (val, val)
+    
+    return None
+
+
+def is_valid_employee_count_extraction(extracted: str) -> bool:
+    """
+    Post-extraction validation to filter out invalid employee counts.
+    
+    This prevents bugs where regex patterns partially match numbers and extract
+    invalid values like "000" from "2000 employees" or years like "2024".
+    
+    Rejects:
+    - "000" or "00" (partial matches from years like 2000)
+    - Single years like "2000", "2024" (not employee counts)
+    - "0" or values that would parse to 0
+    
+    Accepts:
+    - "2,000" (comma indicates it's a formatted number, not a year)
+    - "51-200" (ranges are valid)
+    - "500", "5000", "10000+" (counts outside year range or with + suffix)
+    """
+    if not extracted or not extracted.strip():
+        return False
+    
+    extracted = extracted.strip()
+    
+    # Remove commas for parsing
+    clean = extracted.replace(",", "").replace("+", "").strip()
+    
+    # Handle ranges like "51-200"
+    if "-" in clean or "–" in clean:
+        parts = re.split(r'[-–]', clean)
+        if len(parts) == 2:
+            try:
+                min_val = int(parts[0].strip())
+                max_val = int(parts[1].strip())
+                # Valid if both parts are reasonable employee counts (not zero)
+                return min_val > 0 and max_val >= min_val
+            except ValueError:
+                return False
+    
+    # Single value
+    try:
+        val = int(clean)
+        
+        # Reject 0 or values like "000"
+        if val == 0:
+            return False
+        
+        # Reject likely years (1900-2099) UNLESS formatted with comma
+        # Employee counts of 1900-2099 are valid only if written as "1,900" or "2,000"
+        if 1900 <= val <= 2099:
+            # If original has comma (like "2,000"), it's employee count
+            if "," in extracted:
+                return True
+            # If original is 4 digits without comma, likely a year
+            if len(clean) == 4:
+                return False
+        
+        return True
+    except ValueError:
+        return False
+
+
+def extract_employee_count_from_results(search_results: List[Dict], company: str = "", company_slug: str = "") -> Optional[str]:
+    """
+    Extract employee count from LinkedIn company page search results.
+    
+    IMPORTANT: Only extracts from results that match the EXACT company slug to prevent
+    false positives from subsidiaries or wrong companies.
+    
+    Looks for patterns like:
+    - "Company size: 2-10 employees"
+    - "11-50 employees"
+    - "Company size: 51-200"
+    
+    Args:
+        search_results: List of search result dicts with 'title', 'body/snippet', 'href'
+        company: Company name for validation
+        company_slug: The LinkedIn company slug (e.g., "bp") to verify exact page match
+        
+    Returns:
+        Extracted employee range string (e.g., "11-50") or None
+    """
+    if not search_results:
+        return None
+    
+    company_lower = company.lower() if company else ""
+    
+    # Patterns to look for (ordered by specificity)
+    patterns = [
+        # "Company size: 2-10 employees" or "Company size: 1,001-5,000 employees"
+        r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*[\s,-–—]+\d{1,3}(?:,\d{3})*)\s*employees?',
+        # "Company size: 10,001+" or "Company size: 2-10"
+        r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*[\s,-–—]+\d{1,3}(?:,\d{3})*|\d+\+)',
+        # "1,001-5,000 employees" with commas
+        r'(\d{1,3}(?:,\d{3})*[\s,-–—]+\d{1,3}(?:,\d{3})*)\s*employees?',
+        # "2-10 employees" simple range
+        r'(\d+[\s,-–—]+\d+)\s*employees?',
+        # "10,001+ employees" with comma
+        r'(\d{1,3}(?:,\d{3})*\+)\s*employees?',
+        # "10001+ employees" or "2-10 employees"
+        r'(\d+\+|\d+[\s,-–—]+\d+)\s*employees?',
+        # "· 2-10 employees" (after followers on LinkedIn)
+        r'·\s*(\d{1,2}[\s,-–—]+\d{1,3}(?:,\d{3})*)\s*employees?',
+        # International: German "Mitarbeiter"
+        r'(\d{1,3}(?:,\d{3})*[\s,-–—]+\d{1,3}(?:,\d{3})*)\s*mitarbeiter',
+        r'(\d+[\s,-–—]+\d+)\s*mitarbeiter',
+        # International: French "employés"
+        r'(\d{1,3}(?:,\d{3})*[\s,-–—]+\d{1,3}(?:,\d{3})*)\s*employés',
+        # International: Spanish "empleados"
+        r'(\d{1,3}(?:,\d{3})*[\s,-–—]+\d{1,3}(?:,\d{3})*)\s*empleados',
+        # International: Italian "dipendenti"
+        r'(\d{1,3}(?:,\d{3})*[\s,-–—]+\d{1,3}(?:,\d{3})*)\s*dipendenti',
+        # International: Dutch "werknemers" / "medewerkers"
+        r'(\d{1,3}(?:,\d{3})*[\s,-–—]+\d{1,3}(?:,\d{3})*)\s*(?:werknemers|medewerkers)',
+        # International: Portuguese "funcionários"
+        r'(\d{1,3}(?:,\d{3})*[\s,-–—]+\d{1,3}(?:,\d{3})*)\s*funcionários',
+        # LinkedIn standard ranges after separator (match exact standard ranges)
+        r'·\s*(2[-–]10|11[-–]50|51[-–]200|201[-–]500|501[-–]1,?000|1,?001[-–]5,?000|5,?001[-–]10,?000|10,?001\+)',
+    ]
+    
+    for result in search_results:
+        title = result.get("title", "")
+        snippet = result.get("body", result.get("snippet", ""))
+        href = result.get("href", "").lower()
+        
+        combined = f"{title} {snippet}".lower()
+        
+        # Only consider LinkedIn company pages
+        if "linkedin.com" not in href:
+            continue
+        
+        # CRITICAL: Verify this result is from the EXACT company slug
+        # e.g., for slug "bp", accept "/company/bp/" but NOT "/company/bp-america/"
+        if company_slug:
+            expected_url_patterns = [
+                f'/company/{company_slug}/',  # With trailing slash
+                f'/company/{company_slug}?',  # With query params
+                f'/company/{company_slug}#',  # With hash
+            ]
+            
+            is_exact_match = False
+            if f'/company/{company_slug}' in href:
+                for pattern in expected_url_patterns:
+                    if pattern in href:
+                        is_exact_match = True
+                        break
+                
+                # Also accept if it ends with the slug
+                if href.endswith(f'/company/{company_slug}'):
+                    is_exact_match = True
+            
+            if not is_exact_match:
+                continue  # Skip - not from exact company page
+        
+        # Verify it's about the right company (if company name provided)
+        if company_lower:
+            company_words = [word for word in company_lower.split()[:2] if len(word) > 3]
+            company_match = company_lower in combined or any(word in combined for word in company_words)
+            if not company_match:
+                continue
+        
+        # Try each pattern
+        for pattern in patterns:
+            match = re.search(pattern, combined, re.IGNORECASE)
+            if match:
+                extracted = match.group(1).strip()
+                # Normalize the range format
+                extracted = re.sub(r'[\s]+', '', extracted)  # Remove spaces
+                extracted = re.sub(r'[–—]', '-', extracted)  # Normalize dashes
+                # Validate extraction to prevent bugs like "2000 employees" -> "000"
+                if is_valid_employee_count_extraction(extracted):
+                    return extracted
+                # Invalid extraction - try next pattern
+    
+    return None
+
+
+def normalize_to_linkedin_range(min_val: int, max_val: int) -> Optional[str]:
+    """
+    Normalize a parsed (min, max) range to the standard LinkedIn range string.
+    
+    LinkedIn has these standard ranges:
+    - 0-1, 2-10, 11-50, 51-200, 201-500, 501-1,000, 1,001-5,000, 5,001-10,000, 10,001+
+    """
+    # Standard LinkedIn ranges with their boundaries
+    LINKEDIN_RANGES = [
+        ((0, 1), "0-1"),
+        ((2, 10), "2-10"),
+        ((11, 50), "11-50"),
+        ((51, 200), "51-200"),
+        ((201, 500), "201-500"),
+        ((501, 1000), "501-1,000"),
+        ((1001, 5000), "1,001-5,000"),
+        ((5001, 10000), "5,001-10,000"),
+        ((10001, 100000), "10,001+"),  # 10,001+ uses high upper bound
+    ]
+    
+    # Check if the range falls within a standard LinkedIn range
+    for (range_min, range_max), range_str in LINKEDIN_RANGES:
+        # For exact match of range boundaries
+        if min_val == range_min and (max_val == range_max or (range_str == "10,001+" and max_val >= 10001)):
+            return range_str
+        # For single values (min == max), check if they fall within a range
+        if min_val == max_val:
+            if range_min <= min_val <= range_max:
+                return range_str
+    
+    return None
+
+
+def fuzzy_match_employee_count(claimed: str, extracted: str) -> Tuple[bool, str]:
+    """
+    STRICT match employee count ranges - requires exact LinkedIn range match.
+    
+    Args:
+        claimed: Miner's claimed employee count (e.g., "51-200")
+        extracted: Extracted from company LinkedIn (e.g., "51-200")
+    
+    Returns:
+        (match: bool, reason: str)
+    """
+    if not claimed or not extracted:
+        return False, "Missing data for comparison"
+    
+    claimed_range = parse_employee_count(claimed)
+    extracted_range = parse_employee_count(extracted)
+    
+    if not claimed_range:
+        return False, f"Could not parse claimed employee count: '{claimed}'"
+    
+    if not extracted_range:
+        return False, f"Could not parse extracted employee count: '{extracted}'"
+    
+    claimed_min, claimed_max = claimed_range
+    extracted_min, extracted_max = extracted_range
+    
+    # Normalize both to standard LinkedIn ranges
+    claimed_linkedin = normalize_to_linkedin_range(claimed_min, claimed_max)
+    extracted_linkedin = normalize_to_linkedin_range(extracted_min, extracted_max)
+    
+    if not claimed_linkedin:
+        return False, f"Claimed value '{claimed}' doesn't map to standard LinkedIn range"
+    
+    if not extracted_linkedin:
+        return False, f"Extracted value '{extracted}' doesn't map to standard LinkedIn range"
+    
+    # STRICT: Require same LinkedIn range
+    if claimed_linkedin == extracted_linkedin:
+        return True, f"LinkedIn range match: '{claimed_linkedin}'"
+    
+    # No match - different LinkedIn ranges
+    return False, f"Different LinkedIn ranges: claimed '{claimed_linkedin}' vs extracted '{extracted_linkedin}'"
+
+
+def _gse_search_employee_count_sync(company: str, company_linkedin_slug: str = None, max_results: int = 5) -> List[Dict]:
+    """
+    Search for company employee count on LinkedIn using ScrapingDog.
+    
+    Uses the miner's provided company LinkedIn URL to ensure we only get data
+    from that specific company page, not other sources.
+    
+    Args:
+        company: Company name to search
+        company_linkedin_slug: The slug from the miner's company_linkedin URL (e.g., "brivo-inc")
+        max_results: Maximum results to return
+        
+    Returns:
+        List of search results
+    """
+    api_key = os.getenv("SCRAPINGDOG_API_KEY")
+    if not api_key:
+        print(f"   ⚠️ SCRAPINGDOG_API_KEY not set - skipping employee count search")
+        return []
+    
+    if not company:
+        return []
+    
+    # If we have the company LinkedIn slug, search specifically on that page
+    # This ensures we only get data from the miner's provided company LinkedIn
+    if company_linkedin_slug:
+        queries = [
+            f'site:linkedin.com/company/{company_linkedin_slug} company size',  # Primary - includes "company size" for better extraction
+            f'site:linkedin.com/company/{company_linkedin_slug} employees',  # Fallback 1
+            # IMPORTANT: For smaller companies, the site: restriction may not return employee count
+            # in the snippet. This broader query returns better metadata. The URL validation in
+            # extract_employee_count_from_results ensures we ONLY extract from the exact company slug,
+            # preventing false positives from other companies with similar names.
+            f'"{company}" linkedin company size employees',  # Fallback 2 - broader search
+        ]
+    else:
+        # Fallback to generic search if no slug provided (shouldn't happen)
+        queries = [
+            f'{company} linkedin company size',
+            f'"{company}" linkedin employees',
+        ]
+    
+    for query in queries:
+        print(f"   🔍 GSE Employee Count: {query}")
+        
+        try:
+            url = "https://api.scrapingdog.com/google"
+            params = {
+                "api_key": api_key,
+                "query": query,
+                "results": max_results
+            }
+            
+            response = requests.get(url, params=params, timeout=30, proxies=PROXY_CONFIG if PROXY_CONFIG else None)
+            
+            if response.status_code == 200:
+                data = response.json()
+                query_results = []
+                
+                for item in data.get("organic_results", []):
+                    result = {
+                        "title": item.get("title", ""),
+                        "href": item.get("link", ""),
+                        "body": item.get("snippet", "")
+                    }
+                    query_results.append(result)
+                
+                if query_results:
+                    # Try extraction immediately - only return if we find the RIGHT company's data
+                    extracted = extract_employee_count_from_results(query_results, company, company_linkedin_slug)
+                    if extracted:
+                        print(f"   ✅ Found employee count: {extracted}")
+                        return query_results
+                    else:
+                        print(f"   ⚠️ Query returned results but couldn't extract for '{company}' - trying next query...")
+            else:
+                print(f"   ⚠️ ScrapingDog API error: HTTP {response.status_code}")
+                
+        except Exception as e:
+            print(f"   ⚠️ Employee count search failed: {e}")
+    
+    print(f"   ❌ All queries exhausted - could not find employee count for '{company}'")
+    return []
+
+
+async def _gse_search_employee_count(company: str, company_linkedin_slug: str = None, max_results: int = 3) -> List[Dict]:
+    """Async wrapper for employee count search."""
+    try:
+        return await asyncio.to_thread(
+            _gse_search_employee_count_sync,
+            company,
+            company_linkedin_slug,
+            max_results
+        )
+    except Exception as e:
+        print(f"   ⚠️ Employee count search thread failed: {e}")
+        return []
 
 
 def _gse_search_stage5_sync(
@@ -5459,12 +6753,489 @@ async def _gse_search_stage5(
         return []
 
 
+# ========================================================================
+# COMPANY LINKEDIN VERIFICATION
+# ========================================================================
+# Validates company_linkedin URL, scrapes company data, and uses it to verify
+# industry, sub_industry, description, and employee count.
+# ========================================================================
+
+def validate_company_linkedin_url(url: str) -> Tuple[bool, str, Optional[str]]:
+    """
+    Validate that a URL is a valid LinkedIn company page (not a profile page).
+    
+    Args:
+        url: The company_linkedin URL to validate
+        
+    Returns:
+        (is_valid, reason, company_slug)
+        - is_valid: True if URL is a valid company page
+        - reason: Description of why validation passed/failed
+        - company_slug: Extracted company slug (e.g., "microsoft" from linkedin.com/company/microsoft)
+    """
+    if not url or not url.strip():
+        return False, "No company_linkedin URL provided", None
+    
+    url = url.strip().lower()
+    
+    # Must contain linkedin.com
+    if "linkedin.com" not in url:
+        return False, "URL is not a LinkedIn URL", None
+    
+    # Must be a company page, NOT a profile page
+    if "/in/" in url:
+        return False, "URL is a personal profile (/in/), not a company page (/company/)", None
+    
+    # Must contain /company/
+    if "/company/" not in url:
+        return False, "URL is not a company page (missing /company/)", None
+    
+    # Extract company slug
+    try:
+        # Handle various formats:
+        # - linkedin.com/company/microsoft
+        # - linkedin.com/company/microsoft/
+        # - linkedin.com/company/microsoft/about
+        # - https://www.linkedin.com/company/microsoft?param=value
+        parts = url.split("/company/")
+        if len(parts) < 2:
+            return False, "Could not extract company slug from URL", None
+        
+        slug_part = parts[1]
+        # Remove trailing slashes and query params
+        slug = slug_part.split("/")[0].split("?")[0].strip()
+        
+        if not slug or len(slug) < 2:
+            return False, "Company slug is too short or empty", None
+        
+        return True, f"Valid company page: /company/{slug}", slug
+        
+    except Exception as e:
+        return False, f"Error parsing URL: {str(e)}", None
+
+
+def _scrape_company_linkedin_gse_sync(company_slug: str, company_name: str, max_results: int = 3) -> Dict:
+    """
+    Scrape company LinkedIn page data using ScrapingDog GSE.
+    
+    Uses site:linkedin.com/company/{slug} to get company page data from search results.
+    
+    Args:
+        company_slug: The company slug from the LinkedIn URL
+        company_name: The company name claimed by the miner (for verification)
+        max_results: Max results to fetch
+        
+    Returns:
+        Dict with:
+        - success: bool
+        - company_name_from_linkedin: str (extracted company name)
+        - company_name_match: bool (does it match miner's company?)
+        - industry: str (if found)
+        - description: str (if found)
+        - employee_count: str (if found, e.g., "1,001-5,000 employees")
+        - location: str (if found)
+        - raw_results: list (original search results)
+        - error: str (if any)
+    """
+    api_key = os.getenv("SCRAPINGDOG_API_KEY")
+    if not api_key:
+        return {
+            "success": False,
+            "error": "SCRAPINGDOG_API_KEY not set",
+            "raw_results": []
+        }
+    
+    result = {
+        "success": False,
+        "company_name_from_linkedin": None,
+        "company_name_match": False,
+        "industry": None,
+        "description": None,
+        "employee_count": None,
+        "location": None,
+        "raw_results": [],
+        "error": None
+    }
+    
+    # Search for the company LinkedIn page
+    query = f'site:linkedin.com/company/{company_slug}'
+    
+    try:
+        url = "https://api.scrapingdog.com/google"
+        params = {
+            "api_key": api_key,
+            "query": query,
+            "results": max_results
+        }
+        
+        print(f"   🔍 COMPANY LINKEDIN: Searching for {query}")
+        
+        response = requests.get(url, params=params, timeout=30, proxies=PROXY_CONFIG)
+        
+        if response.status_code != 200:
+            result["error"] = f"GSE API returned status {response.status_code}"
+            return result
+        
+        data = response.json()
+        organic_results = data.get("organic_results", [])
+        
+        if not organic_results:
+            result["error"] = "No search results found for company LinkedIn page"
+            return result
+        
+        # Store raw results
+        result["raw_results"] = [
+            {
+                "title": r.get("title", ""),
+                "href": r.get("link", ""),
+                "snippet": r.get("snippet", "")
+            }
+            for r in organic_results
+        ]
+        
+        # Extract data from the first result (main company page)
+        first_result = organic_results[0]
+        title = first_result.get("title", "")
+        snippet = first_result.get("snippet", "")
+        link = first_result.get("link", "")
+        
+        # CRITICAL: Verify the URL matches the exact slug provided by the miner
+        # This prevents accepting similar company names from different LinkedIn pages
+        link_lower = link.lower()
+        expected_url_patterns = [
+            f'/company/{company_slug}/',  # With trailing slash
+            f'/company/{company_slug}?',  # With query params
+            f'/company/{company_slug}#',  # With hash
+        ]
+        
+        url_matches = False
+        if f'/company/{company_slug}' in link_lower:
+            # Check if it's an exact match (not a longer slug that contains our slug)
+            for pattern in expected_url_patterns:
+                if pattern in link_lower:
+                    url_matches = True
+                    break
+            # Also accept if URL ends with the slug
+            if link_lower.endswith(f'/company/{company_slug}'):
+                url_matches = True
+        
+        if not url_matches:
+            result["error"] = f"Search result URL '{link}' does not match expected slug '/company/{company_slug}'"
+            result["company_name_match"] = False
+            print(f"   ❌ COMPANY LINKEDIN: URL mismatch - Expected /company/{company_slug}, got {link}")
+            return result
+        
+        print(f"   ✅ COMPANY LINKEDIN: URL verified - {link}")
+        
+        # Combine all text for extraction
+        all_text = f"{title} {snippet}"
+        for r in organic_results[1:]:
+            all_text += f" {r.get('snippet', '')}"
+        
+        # Extract company name from title
+        # Format: "Company Name | LinkedIn" or "Company Name - LinkedIn" or "Company Name: Overview | LinkedIn"
+        company_name_from_linkedin = None
+        
+        if "|" in title:
+            company_name_from_linkedin = title.split("|")[0].strip()
+        elif " - LinkedIn" in title:
+            # Handle "Company Name - LinkedIn" format
+            company_name_from_linkedin = title.replace(" - LinkedIn", "").strip()
+        elif " LinkedIn" in title and title.endswith("LinkedIn"):
+            # Handle "Company Name LinkedIn" format (no separator)
+            company_name_from_linkedin = title.replace(" LinkedIn", "").strip()
+        
+        if company_name_from_linkedin:
+            # Remove "Overview", "About", etc.
+            for suffix in [": Overview", " - Overview", ": About", " - About", ": Jobs", " - Jobs"]:
+                if suffix in company_name_from_linkedin:
+                    company_name_from_linkedin = company_name_from_linkedin.replace(suffix, "").strip()
+            result["company_name_from_linkedin"] = company_name_from_linkedin
+        
+        # Verify company name matches
+        if result["company_name_from_linkedin"] and company_name:
+            linkedin_name = result["company_name_from_linkedin"].lower().strip()
+            claimed_name = company_name.lower().strip()
+            
+            # Direct match or one contains the other
+            if linkedin_name == claimed_name:
+                result["company_name_match"] = True
+            elif linkedin_name in claimed_name or claimed_name in linkedin_name:
+                result["company_name_match"] = True
+            else:
+                # Try fuzzy matching - extract key words
+                linkedin_words = set(re.sub(r'[^\w\s]', '', linkedin_name).split())
+                claimed_words = set(re.sub(r'[^\w\s]', '', claimed_name).split())
+                # Remove common words
+                common_words = {'inc', 'llc', 'corp', 'corporation', 'company', 'co', 'ltd', 'limited', 'the', 'group'}
+                linkedin_words -= common_words
+                claimed_words -= common_words
+                
+                if linkedin_words and claimed_words:
+                    # Check if main words overlap
+                    overlap = linkedin_words & claimed_words
+                    if overlap and len(overlap) >= min(len(linkedin_words), len(claimed_words)) * 0.5:
+                        result["company_name_match"] = True
+            
+            # ADDITIONAL CHECK: If name still doesn't match, check if claimed name appears 
+            # anywhere in the company LinkedIn snippet/description (handles abbreviations like OWI Inc. = Old World Industries)
+            if not result["company_name_match"]:
+                all_text_lower = all_text.lower()
+                # Check if the full claimed name appears in the snippet
+                if claimed_name in all_text_lower:
+                    result["company_name_match"] = True
+                    result["company_name_match_source"] = "snippet_contains_claimed_name"
+                else:
+                    # Check if key words from claimed name appear together in snippet
+                    claimed_key_words = claimed_words  # Already computed above, minus common words
+                    if claimed_key_words and len(claimed_key_words) >= 2:
+                        # Check if at least 2 key words from claimed name appear in snippet
+                        words_found = sum(1 for w in claimed_key_words if w in all_text_lower)
+                        if words_found >= min(2, len(claimed_key_words)):
+                            result["company_name_match"] = True
+                            result["company_name_match_source"] = "snippet_contains_key_words"
+        
+        # Extract employee count - ONLY from results that match the EXACT company slug
+        # This prevents extracting employee counts from subsidiaries or wrong companies
+        employee_patterns = [
+            # English patterns
+            r'company\s+size[:\s]+(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*employees',  # "Company size: X employees"
+            r'(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*employees',  # "X employees" or "X-Y employees"
+            r'(\d+(?:,\d{3})*\+?)\s+employees',  # "X+ employees"
+            r'employees[:\s]+(\d{1,3}(?:,\d{3})*(?:\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)',  # "employees: X"
+            r'·\s*(\d{1,2}[-–]\d{1,3}(?:,\d{3})*)\s*employees',  # "· 2-10 employees" (after followers)
+            r'(\d{1,2}\s*(?:to|bis|à|a)\s*\d{1,3})\s*employees',  # "2 to 10 employees"
+            # International patterns (German, French, Spanish, Italian, Dutch, Portuguese)
+            r'(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*mitarbeiter',  # German
+            r'(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*employés',  # French
+            r'(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*empleados',  # Spanish
+            r'(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*dipendenti',  # Italian
+            r'(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*werknemers',  # Dutch
+            r'(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*funcionários',  # Portuguese
+            r'(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*medewerkers',  # Dutch alt
+            # LinkedIn standard ranges - only match exact standard ranges for safety
+            r'·\s*(2[-–]10|11[-–]50|51[-–]200|201[-–]500|501[-–]1,?000|1,?001[-–]5,?000|5,?001[-–]10,?000|10,?001\+)',
+        ]
+        
+        # Check each result individually to ensure we're getting data from the CORRECT company page
+        for r in organic_results:
+            result_link = r.get("link", "").lower()
+            result_snippet = r.get("snippet", "")
+            
+            # CRITICAL: Only extract employee count if this result is from the EXACT company slug
+            # e.g., for slug "bp", accept "/company/bp" or "/company/bp/" but NOT "/company/bp-america"
+            expected_url_patterns = [
+                f'/company/{company_slug}/',  # With trailing slash
+                f'/company/{company_slug}?',  # With query params
+                f'/company/{company_slug}#',  # With hash
+            ]
+            
+            # Check if this result is from the exact company page (not a subsidiary)
+            is_exact_match = False
+            if f'/company/{company_slug}' in result_link:
+                # Check it's not a longer slug (e.g., "bp-america" when we want "bp")
+                for pattern in expected_url_patterns:
+                    if pattern in result_link:
+                        is_exact_match = True
+                        break
+                
+                # Also accept if it ends with the slug (e.g., "linkedin.com/company/bp")
+                if result_link.endswith(f'/company/{company_slug}'):
+                    is_exact_match = True
+            
+            if not is_exact_match:
+                continue  # Skip this result - not from the exact company page
+            
+            # Try to extract employee count from THIS result's snippet
+            for pattern in employee_patterns:
+                match = re.search(pattern, result_snippet.lower())
+                if match:
+                    extracted = match.group(1).strip()
+                    # Validate extraction to prevent bugs like "2000 employees" -> "000"
+                    if is_valid_employee_count_extraction(extracted):
+                        result["employee_count"] = extracted
+                        break
+                    else:
+                        print(f"      ⚠️ Rejected invalid employee count extraction: '{extracted}'")
+            
+            if result["employee_count"]:
+                break  # Found employee count from correct company page
+        
+        # Extract industry from snippet
+        # Often appears after company name or in description
+        industry_patterns = [
+            r'(?:industry|sector|in the)\s*[:\s]*([A-Z][a-zA-Z\s&]+?)(?:\.|,|\||employees|founded|location)',
+            r'\|\s*([A-Z][a-zA-Z\s&]+?)\s*\|',
+        ]
+        for pattern in industry_patterns:
+            match = re.search(pattern, all_text, re.IGNORECASE)
+            if match:
+                potential_industry = match.group(1).strip()
+                # Filter out non-industry text
+                if len(potential_industry) < 50 and potential_industry.lower() not in ['linkedin', 'overview', 'about']:
+                    result["industry"] = potential_industry
+                    break
+        
+        # Extract location/headquarters
+        location_patterns = [
+            r'(?:headquarters|headquartered|based|located)\s*(?:in|at)?\s*[:\s]*([A-Z][a-zA-Z\s,]+?)(?:\.|,|\||employees)',
+            r'([A-Z][a-z]+(?:,\s*[A-Z]{2})?)\s*(?:area|region|metropolitan)',
+        ]
+        for pattern in location_patterns:
+            match = re.search(pattern, all_text)
+            if match:
+                result["location"] = match.group(1).strip()
+                break
+        
+        # Extract description - look through ALL results for the best company description
+        # Filter out job postings, non-English content, and updates
+        best_description = None
+        best_score = 0
+        
+        for r in organic_results:
+            candidate = r.get("snippet", "").strip()
+            if not candidate or len(candidate) < 30:
+                continue
+            
+            # Skip job postings and updates
+            job_posting_indicators = [
+                "i'm hiring", "we're hiring", "looking for", "job opening",
+                "big news", "my team is growing", "join us", "apply now",
+                "we are looking", "open position", "career opportunity"
+            ]
+            if any(indicator in candidate.lower() for indicator in job_posting_indicators):
+                continue
+            
+            # Skip non-English content (check for common non-ASCII patterns)
+            non_english_indicators = [
+                "·", "sobre nós", "sobre nosotros", "о нас", "über uns",
+                "עוקבים", "網站", "会社概要", "관하여"
+            ]
+            if any(indicator in candidate.lower() for indicator in non_english_indicators):
+                continue
+            
+            # Score the snippet - prefer ones that describe the company
+            score = 0
+            description_patterns = [
+                r'\bis the\b', r'\bis a\b', r'\bprovides\b', r'\boffers\b',
+                r'\bspecializes\b', r'\bleader in\b', r'\bfocuses on\b',
+                r'\bhelps\b', r'\benables\b', r'\bpowers\b', r'\bbuilds\b'
+            ]
+            for pattern in description_patterns:
+                if re.search(pattern, candidate, re.IGNORECASE):
+                    score += 10
+            
+            # Prefer longer, more descriptive snippets
+            score += min(len(candidate) / 20, 10)
+            
+            if score > best_score:
+                best_score = score
+                best_description = candidate
+        
+        # Fallback to first snippet if no good description found
+        if not best_description and snippet:
+            best_description = snippet
+        
+        if best_description:
+            # Clean up the description
+            description = best_description.strip()
+            description = re.sub(r'\d{1,3}(?:,\d{3})*(?:\+|\s*-\s*\d{1,3}(?:,\d{3})*)?\s*employees', '', description)
+            description = re.sub(r'\s+', ' ', description).strip()
+            if len(description) > 20:
+                result["description"] = description
+        
+        result["success"] = True
+        return result
+        
+    except Exception as e:
+        result["error"] = f"Exception during scraping: {str(e)}"
+        return result
+
+
+async def scrape_company_linkedin_gse(company_slug: str, company_name: str, max_results: int = 3) -> Dict:
+    """Async wrapper for company LinkedIn GSE scraping."""
+    try:
+        return await asyncio.to_thread(
+            _scrape_company_linkedin_gse_sync,
+            company_slug,
+            company_name,
+            max_results
+        )
+    except Exception as e:
+        print(f"⚠️ Company LinkedIn scraping thread failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "raw_results": []
+        }
+
+
+def verify_company_linkedin_data(
+    scraped_data: Dict,
+    claimed_company: str,
+    claimed_industry: str,
+    claimed_sub_industry: str,
+    claimed_description: str,
+    claimed_employee_count: str,
+    sub_industry_definition: str = ""
+) -> Dict:
+    """
+    Verify miner's claims against scraped company LinkedIn data.
+    
+    Returns:
+        Dict with verification results for each field
+    """
+    result = {
+        "company_name_verified": False,
+        "company_name_reason": "",
+        "has_useful_data": False,
+        "industry_from_linkedin": None,
+        "description_from_linkedin": None,
+        "employee_count_from_linkedin": None,
+        "location_from_linkedin": None,
+    }
+    
+    if not scraped_data.get("success"):
+        result["company_name_reason"] = scraped_data.get("error", "Scraping failed")
+        return result
+    
+    # Verify company name
+    result["company_name_verified"] = scraped_data.get("company_name_match", False)
+    linkedin_company = scraped_data.get("company_name_from_linkedin", "")
+    
+    if result["company_name_verified"]:
+        result["company_name_reason"] = f"Company name matches: '{linkedin_company}' ≈ '{claimed_company}'"
+    else:
+        result["company_name_reason"] = f"Company name mismatch: LinkedIn shows '{linkedin_company}' but miner claimed '{claimed_company}'"
+    
+    # Store extracted data for verification
+    if scraped_data.get("industry"):
+        result["industry_from_linkedin"] = scraped_data["industry"]
+        result["has_useful_data"] = True
+    
+    if scraped_data.get("description"):
+        result["description_from_linkedin"] = scraped_data["description"]
+        result["has_useful_data"] = True
+    
+    if scraped_data.get("employee_count"):
+        result["employee_count_from_linkedin"] = scraped_data["employee_count"]
+        result["has_useful_data"] = True
+    
+    if scraped_data.get("location"):
+        result["location_from_linkedin"] = scraped_data["location"]
+        result["has_useful_data"] = True
+    
+    return result
+
+
 async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     """
-    Stage 5: Unified verification of role, region, and industry.
+    Stage 5: Unified verification of role, region, employee count, and industry.
     
     Uses ScrapingDog searches + fuzzy matching + LLM verification.
     Called AFTER Stage 4 LinkedIn verification passes.
+    
+    Order of checks: Role → Region → Employee Count → Industry
     
     Returns:
         (passed: bool, rejection_reason: dict or None)
@@ -5472,10 +7243,28 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     full_name = get_field(lead, "full_name") or ""
     company = get_company(lead) or ""
     claimed_role = get_role(lead) or ""
-    claimed_region = get_location(lead) or ""
+    
+    # Build claimed_region from country/state/city fields (new format from gateway)
+    # Falls back to legacy "region" field for backward compatibility
+    country = lead.get("country", "").strip()
+    state = lead.get("state", "").strip()
+    city = lead.get("city", "").strip()
+    
+    if country:
+        # New format: Build region from components (no trailing commas)
+        region_parts = [p for p in [country, state, city] if p]
+        claimed_region = ", ".join(region_parts)
+    else:
+        # Fallback: Use legacy region field
+        claimed_region = get_location(lead) or ""
+    
     claimed_industry = get_industry(lead) or ""
+    claimed_sub_industry = lead.get("sub_industry", "") or lead.get("Sub_industry", "") or ""
+    claimed_employee_count = get_employee_count(lead) or ""
     linkedin_url = get_linkedin(lead) or ""
     website = get_website(lead) or ""
+    claimed_description = lead.get("description", "") or ""
+    company_linkedin = lead.get("company_linkedin", "") or ""
     
     if not company:
         return False, {
@@ -5484,6 +7273,120 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             "message": "No company name provided",
             "failed_fields": ["company"]
         }
+    
+    # ========================================================================
+    # ROLE FORMAT VALIDATION (ANTI-GAMING)
+    # ========================================================================
+    # Check role format BEFORE any content matching to catch stuffed/malformed roles:
+    # - Person's name in role (e.g., "Jones - Associate Director")
+    # - Company name in role (e.g., "CEO at CloudFactory")
+    # - Marketing taglines (e.g., "CEO. Unlocking the potential of AI...")
+    # - Geographic locations at end (e.g., "VP Sales - Vietnam, Cambodia")
+    # - Excessively long roles (> 80 chars)
+    # ========================================================================
+    
+    if claimed_role:
+        role_format_valid, role_format_reason = validate_role_format(claimed_role, full_name, company)
+        if not role_format_valid:
+            print(f"   ❌ ROLE FORMAT INVALID: {role_format_reason}")
+            return False, {
+                "stage": "Stage 5: Role Format",
+                "check_name": "check_stage5_unified",
+                "message": f"Role format invalid: {role_format_reason}",
+                "failed_fields": ["role"],
+                "claimed_role": claimed_role,
+                "anti_gaming": "role_format"
+            }
+        print(f"   ✅ ROLE FORMAT: Valid format for '{claimed_role}'")
+    
+    # ========================================================================
+    # INDUSTRY TAXONOMY VALIDATION (EXACT MATCH REQUIRED)
+    # ========================================================================
+    # Miners must submit industry and sub_industry that EXACTLY match industry taxonomy.
+    # This happens BEFORE any LLM verification to fail fast on invalid submissions.
+    # ========================================================================
+    
+    print(f"   🔍 TAXONOMY VALIDATION: Checking exact matches...")
+    
+    # Step 1: Validate industry is an exact match to valid industry
+    industry_valid, industry_reason, matched_industry = validate_exact_industry_match(claimed_industry)
+    if not industry_valid:
+        print(f"   ❌ INDUSTRY EXACT MATCH FAILED: {industry_reason}")
+        return False, {
+            "stage": "Stage 5: Industry Taxonomy",
+            "check_name": "check_stage5_unified",
+            "message": f"Industry '{claimed_industry}' is not a valid industry. Must be exact match.",
+            "failed_fields": ["industry"],
+            "valid_industries": sorted(get_all_valid_industries())
+        }
+    print(f"   ✅ INDUSTRY: '{matched_industry}' is valid")
+    
+    # Step 2: Validate sub_industry is an exact match to valid sub-industry
+    sub_industry_valid, sub_industry_reason, matched_sub_industry, taxonomy_entry = validate_exact_sub_industry_match(claimed_sub_industry)
+    if not sub_industry_valid:
+        print(f"   ❌ SUB-INDUSTRY EXACT MATCH FAILED: {sub_industry_reason}")
+        return False, {
+            "stage": "Stage 5: Industry Taxonomy",
+            "check_name": "check_stage5_unified",
+            "message": f"Sub-industry '{claimed_sub_industry}' is not a valid sub-industry. Must be exact match.",
+            "failed_fields": ["sub_industry"]
+        }
+    print(f"   ✅ SUB-INDUSTRY: '{matched_sub_industry}' is valid")
+    
+    # Step 3: Validate industry ↔ sub_industry pairing
+    pairing_valid, pairing_reason = validate_industry_sub_industry_exact_pairing(matched_industry, matched_sub_industry)
+    if not pairing_valid:
+        print(f"   ❌ INDUSTRY/SUB-INDUSTRY PAIRING FAILED: {pairing_reason}")
+        valid_groups = taxonomy_entry.get("industries", []) if taxonomy_entry else []
+        return False, {
+            "stage": "Stage 5: Industry Taxonomy",
+            "check_name": "check_stage5_unified",
+            "message": f"Industry '{matched_industry}' is not valid for sub-industry '{matched_sub_industry}'. {pairing_reason}",
+            "failed_fields": ["industry", "sub_industry"],
+            "valid_industries_for_sub_industry": valid_groups
+        }
+    print(f"   ✅ PAIRING: '{matched_industry}' is valid for '{matched_sub_industry}'")
+    
+    # Store taxonomy validation results
+    lead["taxonomy_industry_valid"] = True
+    lead["taxonomy_matched_industry"] = matched_industry
+    lead["taxonomy_sub_industry_valid"] = True
+    lead["taxonomy_matched_sub_industry"] = matched_sub_industry
+    lead["taxonomy_pairing_valid"] = True
+    sub_industry_definition = taxonomy_entry.get("definition", "") if taxonomy_entry else ""
+    
+    # ========================================================================
+    # COMPANY LINKEDIN DATA (FROM STAGE 4 CACHE)
+    # ========================================================================
+    # Stage 4 already validated company_linkedin URL, verified company name,
+    # and cached the data. We just retrieve it here and determine what
+    # additional GSE queries (if any) are needed.
+    # ========================================================================
+    
+    # Get cached company LinkedIn data from Stage 4
+    company_linkedin_data = lead.get("company_linkedin_data")
+    company_linkedin_verified = lead.get("company_linkedin_verified", False)
+    company_linkedin_from_cache = lead.get("company_linkedin_from_cache", False)
+    
+    # Determine what data is available from company LinkedIn
+    has_industry_description = False
+    has_employee_count = False
+    use_company_linkedin_for_verification = False
+    
+    if company_linkedin_data:
+        has_industry_description = bool(
+            company_linkedin_data.get("industry") or 
+            company_linkedin_data.get("description")
+        )
+        has_employee_count = bool(company_linkedin_data.get("employee_count"))
+        use_company_linkedin_for_verification = has_industry_description or has_employee_count
+        
+        cache_status = "from global cache" if company_linkedin_from_cache else "freshly scraped"
+        print(f"   📦 COMPANY LINKEDIN DATA ({cache_status}):")
+        print(f"      Has industry/description: {has_industry_description}")
+        print(f"      Has employee count: {has_employee_count}")
+    else:
+        print(f"   ⚠️ COMPANY LINKEDIN: No data available from Stage 4 - will use fallback GSE searches")
     
     # PRIORITY: Check if Stage 4 extracted a role from the confirmed LinkedIn profile
     stage4_role = lead.get("stage4_extracted_role")
@@ -5574,21 +7477,94 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             "gse_searches_skipped": ["region", "industry"]
         }
     
-    # STEP 2 & 3: PARALLEL GSE SEARCHES FOR REGION + INDUSTRY (no delays needed with ScrapingDog)
-    print(f"   🔍 GSE: Parallel searches for region and industry...")
-    region_task = _gse_search_stage5("region", company=company, region_hint=claimed_region)
-    industry_task = _gse_search_stage5("industry", company=company, region_hint=claimed_region)
-    region_results, industry_results = await asyncio.gather(region_task, industry_task)
+    # ========================================================================
+    # SMART CONDITIONAL GSE QUERIES
+    # ========================================================================
+    # Only run GSE queries for data NOT available from company LinkedIn cache.
+    # Order: Region (always) → Industry/Description (if needed) → Employee Count (if needed)
+    # Employee count GSE search uses the miner's company LinkedIn URL specifically
+    # ========================================================================
     
+    industry_results = []
+    employee_count_results = []
+    
+    # Determine which GSE queries to run
+    need_industry_gse = not has_industry_description
+    need_employee_count_gse = not has_employee_count  # Need GSE if Stage 4 didn't get employee count
+    
+    # Get company LinkedIn slug for targeted employee count search
+    company_linkedin_slug = None
+    company_linkedin = lead.get("company_linkedin", "") or ""
+    if company_linkedin:
+        # Extract slug from URL like "linkedin.com/company/brivo-inc/"
+        import re
+        match = re.search(r'linkedin\.com/company/([^/]+)', company_linkedin)
+        if match:
+            company_linkedin_slug = match.group(1)
+    
+    # REGION search always runs (independent of company LinkedIn)
+    print(f"   🔍 GSE: Starting conditional searches...")
+    print(f"      Region search: ALWAYS (independent)")
+    print(f"      Industry/description search: {'SKIP (have from company LinkedIn)' if has_industry_description else 'RUN (need fallback)'}")
+    print(f"      Employee count search: {'SKIP (have from company LinkedIn)' if has_employee_count else f'RUN (targeting {company_linkedin_slug})'}")
+    
+    # Build task list based on what we need
+    tasks = []
+    task_names = []
+    
+    # Region search always runs
+    region_task = _gse_search_stage5("region", company=company, region_hint=claimed_region)
+    tasks.append(region_task)
+    task_names.append("region")
+    
+    # Industry search only if we don't have data from company LinkedIn
+    if need_industry_gse:
+        industry_task = _gse_search_stage5("industry", company=company, region_hint=claimed_region)
+        tasks.append(industry_task)
+        task_names.append("industry")
+    
+    # Employee count search using the miner's company LinkedIn URL
+    if need_employee_count_gse and company_linkedin_slug:
+        employee_count_task = _gse_search_employee_count(company=company, company_linkedin_slug=company_linkedin_slug)
+        tasks.append(employee_count_task)
+        task_names.append("employee_count")
+    
+    # Run all needed searches in parallel
+    results = await asyncio.gather(*tasks)
+    
+    # Parse results based on task order
+    region_results = results[0]  # Region is always first
+    result_idx = 1
+    
+    if need_industry_gse:
+        industry_results = results[result_idx]
+        result_idx += 1
+    
+    if need_employee_count_gse and company_linkedin_slug:
+        employee_count_results = results[result_idx]
+        result_idx += 1
+    
+    # Log results
     if region_results:
         print(f"   ✅ Found {len(region_results)} region search results")
     else:
         print(f"   ⚠️ No region results found")
     
-    if industry_results:
-        print(f"   ✅ Found {len(industry_results)} industry search results")
+    if need_industry_gse:
+        if industry_results:
+            print(f"   ✅ Found {len(industry_results)} industry search results (fallback)")
+        else:
+            print(f"   ⚠️ No industry results found (fallback)")
     else:
-        print(f"   ⚠️ No industry results found")
+        print(f"   📦 Using company LinkedIn data for industry/description")
+    
+    if need_employee_count_gse:
+        if employee_count_results:
+            print(f"   ✅ Found {len(employee_count_results)} employee count results (from company LinkedIn GSE)")
+        else:
+            print(f"   ⚠️ No employee count found in company LinkedIn GSE")
+    else:
+        print(f"   📦 Using company LinkedIn data for employee count (from Stage 4)")
     
     # STEP 4: FULL FUZZY PRE-VERIFICATION (now with all results)
     print(f"   🔍 FUZZY: Full pre-verification before LLM...")
@@ -5618,9 +7594,9 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     
     # EARLY EXIT: Region anti-gaming AND role already verified
     if fuzzy_result.get("region_hard_fail") and fuzzy_result.get("role_verified"):
-        print(f"   ❌ EARLY EXIT: Region anti-gaming triggered - skipping industry check")
+        print(f"   ❌ EARLY EXIT: Region anti-gaming triggered - skipping employee count and industry checks")
         return False, {
-            "stage": "Stage 5: Role/Region/Industry",
+            "stage": "Stage 5: Role/Region/Employee Count/Industry",
             "check_name": "check_stage5_unified",
             "message": f"Region FAILED (anti-gaming): {fuzzy_result.get('region_reason')}",
             "failed_fields": ["region"],
@@ -5628,6 +7604,90 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             "role_passed": True,
             "extracted_role": fuzzy_result.get("role_extracted")
         }
+    
+    # STEP: EMPLOYEE COUNT VERIFICATION (after region, before industry)
+    # Sources: (1) Stage 4 company LinkedIn data, (2) GSE search of company LinkedIn
+    # Employee count MUST match exactly (same LinkedIn range)
+    employee_count_match = False
+    extracted_employee_count = None
+    employee_count_reason = ""
+    employee_count_source = None
+    
+    if claimed_employee_count:
+        print(f"   🔍 EMPLOYEE COUNT: Verifying claimed '{claimed_employee_count}'...")
+        
+        # PRIORITY 1: Company LinkedIn data (from Stage 4 scraping)
+        if use_company_linkedin_for_verification and company_linkedin_data:
+            linkedin_employee_count = company_linkedin_data.get("employee_count")
+            if linkedin_employee_count:
+                print(f"   📊 EMPLOYEE COUNT: Using Stage 4 company LinkedIn data: '{linkedin_employee_count}'")
+                extracted_employee_count = linkedin_employee_count
+                employee_count_source = "company_linkedin_stage4"
+        
+        # PRIORITY 2: GSE search of company LinkedIn (if Stage 4 didn't have it)
+        if not extracted_employee_count and employee_count_results:
+            gse_employee_count = extract_employee_count_from_results(employee_count_results, company, company_linkedin_slug)
+            if gse_employee_count:
+                print(f"   📊 EMPLOYEE COUNT: Using GSE search of company LinkedIn: '{gse_employee_count}'")
+                extracted_employee_count = gse_employee_count
+                employee_count_source = "company_linkedin_gse"
+        
+        if extracted_employee_count:
+            # STRICT: Require exact range match
+            employee_count_match, employee_count_reason = fuzzy_match_employee_count(
+                claimed_employee_count, 
+                extracted_employee_count
+            )
+            
+            if employee_count_match:
+                print(f"   ✅ EMPLOYEE COUNT MATCH: {employee_count_reason} (source: {employee_count_source})")
+            else:
+                print(f"   ❌ EMPLOYEE COUNT MISMATCH: {employee_count_reason}")
+                # EARLY EXIT: Employee count failed - skip industry check
+                return False, {
+                    "stage": "Stage 5: Employee Count Verification",
+                    "check_name": "check_stage5_unified",
+                    "message": f"Employee Count FAILED: Miner claimed '{claimed_employee_count}' but company LinkedIn shows '{extracted_employee_count}'",
+                    "failed_fields": ["employee_count"],
+                    "early_exit": "employee_count_mismatch",
+                    "claimed_employee_count": claimed_employee_count,
+                    "extracted_employee_count": extracted_employee_count,
+                    "match_reason": employee_count_reason,
+                    "data_source": employee_count_source
+                }
+        else:
+            # Could not extract employee count from company LinkedIn (both Stage 4 and GSE) - FAIL
+            print(f"   ❌ EMPLOYEE COUNT: Could not extract from company LinkedIn - verification failed")
+            return False, {
+                "stage": "Stage 5: Employee Count Verification",
+                "check_name": "check_stage5_unified",
+                "message": f"Employee Count verification failed: Could not extract employee count from company LinkedIn page",
+                "failed_fields": ["employee_count", "company_linkedin"],
+                "early_exit": "employee_count_not_found",
+                "claimed_employee_count": claimed_employee_count,
+                "extracted_employee_count": None,
+                "match_reason": "Company LinkedIn page did not contain employee count data (tried Stage 4 and GSE search)",
+                "data_source": None
+            }
+    else:
+        # No employee count claimed - this is required, should fail
+        print(f"   ❌ EMPLOYEE COUNT: No claim provided - this field is required")
+        return False, {
+            "stage": "Stage 5: Employee Count Verification",
+            "check_name": "check_stage5_unified",
+            "message": "Employee Count verification failed: Miner did not provide employee_count",
+            "failed_fields": ["employee_count"],
+            "early_exit": "employee_count_missing",
+            "claimed_employee_count": None,
+            "extracted_employee_count": None,
+            "match_reason": "No employee count provided by miner",
+            "data_source": None
+        }
+    
+    # Store employee count results on lead
+    lead["stage5_employee_count_match"] = employee_count_match
+    lead["stage5_claimed_employee_count"] = claimed_employee_count
+    lead["stage5_extracted_employee_count"] = extracted_employee_count
     
     # Check if all fields were fuzzy-matched
     if not fuzzy_result["needs_llm"]:
@@ -5637,6 +7697,10 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         lead["stage5_industry_match"] = True
         lead["stage5_extracted_role"] = fuzzy_result["role_extracted"]
         lead["stage5_extracted_region"] = fuzzy_result["region_extracted"]
+        # Use miner's original country/state/city fields (submitted via gateway)
+        lead["region_country"] = lead.get("country", "")
+        lead["region_state"] = lead.get("state", "")
+        lead["region_city"] = lead.get("city", "")
         return True, None
     
     # STEP 5: LLM VERIFICATION for remaining fields
@@ -5670,18 +7734,33 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         region_context = "\nREGION/HEADQUARTERS SEARCH RESULTS:\n"
         for i, result in enumerate(region_results[:4], 1):
             title = result.get("title", "")
-            snippet = result.get("snippet", "")
+            snippet = result.get("snippet", result.get("body", ""))
             region_context += f"{i}. {title}\n   {snippet[:150]}\n"
+    
+    # COMPANY LINKEDIN DATA (if available)
+    company_linkedin_context = ""
+    if use_company_linkedin_for_verification and company_linkedin_data:
+        company_linkedin_context = "\nCOMPANY LINKEDIN DATA (from miner's provided company_linkedin URL):\n"
+        if company_linkedin_data.get("company_name_from_linkedin"):
+            company_linkedin_context += f"- Company Name: {company_linkedin_data['company_name_from_linkedin']}\n"
+        if company_linkedin_data.get("industry"):
+            company_linkedin_context += f"- Industry: {company_linkedin_data['industry']}\n"
+        if company_linkedin_data.get("description"):
+            company_linkedin_context += f"- Description: {company_linkedin_data['description'][:300]}\n"
+        if company_linkedin_data.get("employee_count"):
+            company_linkedin_context += f"- Employee Count: {company_linkedin_data['employee_count']}\n"
+        if company_linkedin_data.get("location"):
+            company_linkedin_context += f"- Location: {company_linkedin_data['location']}\n"
     
     industry_context = ""
     if "industry" in needs_llm and industry_results:
         industry_context = "\nINDUSTRY SEARCH RESULTS:\n"
         for i, result in enumerate(industry_results[:4], 1):
             title = result.get("title", "")
-            snippet = result.get("snippet", "")
+            snippet = result.get("snippet", result.get("body", ""))
             industry_context += f"{i}. {title}\n   {snippet[:150]}\n"
     
-    all_search_context = role_context + region_context + industry_context
+    all_search_context = role_context + region_context + company_linkedin_context + industry_context
     
     # AUTO-FAIL if role needs LLM but no context
     if "role" in needs_llm and not role_context.strip():
@@ -5738,25 +7817,53 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     else:
         claims_to_verify.append(f'2. REGION: "{claimed_region}" ✅ (Already verified by fuzzy match)')
     
-    if "industry" in needs_llm:
-        claims_to_verify.append(f'3. INDUSTRY: "{claimed_industry}"')
-        verification_rules.append("""
-3. INDUSTRY VERIFICATION:
-   - Look for what the company does in search results
-   - BE VERY LENIENT: Industries often overlap and can be categorized differently
-   - "Technology" covers software, SaaS, IT, tech startups ✓
-   - "Fintech" → "Financial Services" ✓
-   - "Venture Capital" → "Financial Services" ✓
-   - "Food & Beverages" → bars, restaurants, cocktails, hospitality ✓
-   - "Hospitality" → restaurants, bars, hotels, food service ✓
-   - "Retail" → stores, e-commerce, consumer products ✓
-   - "Healthcare" → medical devices, biotech, pharma, health services ✓
-   - ONLY FAIL if industries are COMPLETELY unrelated (e.g., "Aerospace" for a restaurant)
-   - PASS if claimed industry is even loosely related to what the company does
-   - If unknown company → industry_match=true, extracted_industry="UNKNOWN"
+    # Always verify industry + sub_industry + description together (exact matches already validated)
+    claims_to_verify.append(f'3. INDUSTRY: "{claimed_industry}" (taxonomy-validated)')
+    claims_to_verify.append(f'4. SUB-INDUSTRY: "{claimed_sub_industry}" (taxonomy-validated)')
+    claims_to_verify.append(f'   Definition: "{sub_industry_definition[:200]}..."' if len(sub_industry_definition) > 200 else f'   Definition: "{sub_industry_definition}"')
+    if claimed_description:
+        claims_to_verify.append(f'5. DESCRIPTION: "{claimed_description[:200]}..."' if len(claimed_description) > 200 else f'5. DESCRIPTION: "{claimed_description}"')
+    
+    # Add company LinkedIn context note if available
+    linkedin_note = ""
+    if use_company_linkedin_for_verification:
+        linkedin_note = """
+   - PRIORITY: Use COMPANY LINKEDIN DATA section above (from miner's provided company_linkedin URL) as primary source
+   - Company LinkedIn data is authoritative - if it shows industry/description, weight it highly"""
+    
+    verification_rules.append(f"""
+3. INDUSTRY & SUB-INDUSTRY VERIFICATION:
+   - The industry "{claimed_industry}" and sub-industry "{claimed_sub_industry}" have been validated as exact taxonomy matches
+   - Your job is to verify the COMPANY actually operates in this industry/sub-industry{linkedin_note}
+   - Look at the search results and COMPANY LINKEDIN DATA to determine if the company's business matches:
+     * Industry: "{claimed_industry}"
+     * Sub-industry: "{claimed_sub_industry}"
+     * Definition: "{sub_industry_definition}"
+   - IMPORTANT: The definition may include examples, but examples are NOT exhaustive - other similar products/services also qualify
+   - Verify the company fits the industry "{claimed_industry}" AND sub-industry "{claimed_sub_industry}"
+   - PASS if the company operates in a space that reasonably fits the industry AND sub-industry category
+   - FAIL only if the company operates in a completely unrelated field
 """)
-    else:
-        claims_to_verify.append(f'3. INDUSTRY: "{claimed_industry}" ✅ (Already verified by fuzzy match)')
+    
+    if claimed_description:
+        desc_linkedin_note = ""
+        if use_company_linkedin_for_verification and company_linkedin_data and company_linkedin_data.get("description"):
+            desc_linkedin_note = f"\n   - PRIORITY: Compare with COMPANY LINKEDIN DATA description: \"{company_linkedin_data['description'][:200]}...\""
+        
+        verification_rules.append(f"""
+4. DESCRIPTION VERIFICATION:
+   - Compare the miner's description to what you find in COMPANY LINKEDIN DATA about the company{desc_linkedin_note}
+   - KEY QUESTION: Do both descriptions describe a company in the SAME INDUSTRY doing the SAME type of work?
+   - FOCUS ON: Does the company's CORE BUSINESS match? (not exact wording)
+   - description_match = true if:
+     * Both describe the same industry sector (e.g., both describe a financial services company)
+     * Both describe the same type of product/service (e.g., both describe B2B software)
+     * Wording differs but the fundamental business is the same
+   - description_match = false ONLY if:
+     * Completely DIFFERENT industry (e.g., "software company" vs "construction firm")
+     * Fundamentally different product type (e.g., "SaaS platform" vs "consulting services")
+   - IMPORTANT: The industry "{matched_industry}" has already been verified - use this as a guide
+""")
     
     claims_section = "\n".join(claims_to_verify)
     rules_section = "\n".join(verification_rules)
@@ -5766,8 +7873,11 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         response_fields.append('"role_match": true/false,\n    "extracted_role": "role found in search results"')
     if "region" in needs_llm:
         response_fields.append('"region_match": true/false,\n    "extracted_region": "company HQ from search"')
-    if "industry" in needs_llm:
-        response_fields.append('"industry_match": true/false,\n    "extracted_industry": "industry from search"')
+    # Always include industry + sub_industry verification (exact matches already validated)
+    response_fields.append('"industry_match": true/false,\n    "extracted_industry": "industry from search"')
+    response_fields.append('"sub_industry_match": true/false,\n    "sub_industry_reasoning": "does company match the sub-industry definition?"')
+    if claimed_description:
+        response_fields.append('"description_match": true/false,\n    "description_reasoning": "is description accurate?"')
     response_fields.append('"confidence": 0.0-1.0,\n    "reasoning": "Brief explanation"')
     
     response_format = ",\n    ".join(response_fields)
@@ -5792,6 +7902,13 @@ RESPOND WITH JSON ONLY:
 {{
     {response_format}
 }}"""
+    # REMOVE THE FOLLOWING 5 PRINTS
+    # DEBUG: Log full LLM prompt for diagnosis
+    print(f"\n{'='*80}")
+    print(f"🤖 LLM PROMPT FOR {company}:")
+    print(f"{'='*80}")
+    print(prompt)
+    print(f"{'='*80}\n")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -5887,15 +8004,90 @@ RESPOND WITH JSON ONLY:
                         print(f"   🌍 GeoPy override: {geopy_reason}")
                         region_match = True
                 
-                # Industry
-                if fuzzy_result["industry_verified"]:
-                    industry_match = True
-                    extracted_industry = fuzzy_result["industry_extracted"] or claimed_industry
-                else:
-                    industry_match = result.get("industry_match", False)
-                    extracted_industry = result.get("extracted_industry", "")
+                # Industry - always verified by LLM now (exact match already validated)
+                industry_match = result.get("industry_match", False)
+                extracted_industry = result.get("extracted_industry", "")
                 
-                all_match = role_match and region_match and industry_match
+                if not industry_match:
+                    print(f"   ❌ INDUSTRY LLM FAILED: Company does not match industry '{claimed_industry}'")
+                    return False, {
+                        "stage": "Stage 5: Industry Verification",
+                        "check_name": "check_stage5_unified",
+                        "message": f"Industry verification failed: Company does not appear to operate in '{claimed_industry}'",
+                        "failed_fields": ["industry"],
+                        "extracted_industry": extracted_industry
+                    }
+                
+                # Sub-industry - verified by LLM (exact match already validated)
+                sub_industry_match = result.get("sub_industry_match", False)
+                sub_industry_reasoning = result.get("sub_industry_reasoning", "")
+                
+                if not sub_industry_match:
+                    print(f"   ❌ SUB-INDUSTRY LLM FAILED: Company does not match sub-industry '{claimed_sub_industry}'")
+                    return False, {
+                        "stage": "Stage 5: Sub-Industry Verification",
+                        "check_name": "check_stage5_unified",
+                        "message": f"Sub-industry verification failed: Company does not match '{claimed_sub_industry}' definition",
+                        "failed_fields": ["sub_industry"],
+                        "sub_industry_reasoning": sub_industry_reasoning,
+                        "sub_industry_definition": sub_industry_definition
+                    }
+                
+                # Description verification (if description was provided)
+                description_match = True
+                description_reasoning = "No description provided"
+                if claimed_description:
+                    description_match = result.get("description_match", True)
+                    description_reasoning = result.get("description_reasoning", "")
+                    
+                    if not description_match:
+                        # TARGETED OVERRIDE: If verified sub-industry keywords appear in description,
+                        # the description is consistent with the verified business type.
+                        # This is SAFE because sub-industry was already verified by LLM above.
+                        # Example: sub_industry="Lending", description="fix and flip lending company"
+                        #          → "lending" found in description → consistent with verified business
+                        desc_lower = claimed_description.lower()
+                        sub_lower = claimed_sub_industry.lower() if claimed_sub_industry else ""
+                        industry_lower = claimed_industry.lower() if claimed_industry else ""
+                        
+                        # Get significant words from verified sub-industry and industry (skip short words)
+                        sub_words = [w for w in sub_lower.split() if len(w) > 3]
+                        industry_words = [w for w in industry_lower.split() if len(w) > 3]
+                        
+                        # Check if any sub-industry keywords appear in description
+                        matching_sub = [w for w in sub_words if w in desc_lower]
+                        matching_industry = [w for w in industry_words if w in desc_lower]
+                        
+                        if matching_sub:
+                            # Sub-industry keyword found in description - override LLM
+                            description_match = True
+                            description_reasoning = f"Override: Verified sub-industry '{claimed_sub_industry}' keywords {matching_sub} found in description"
+                            print(f"   🔄 DESCRIPTION OVERRIDE: Sub-industry keywords {matching_sub} found in description")
+                        elif matching_industry:
+                            # Industry keyword found in description - override LLM
+                            description_match = True
+                            description_reasoning = f"Override: Verified industry '{claimed_industry}' keywords {matching_industry} found in description"
+                            print(f"   🔄 DESCRIPTION OVERRIDE: Industry keywords {matching_industry} found in description")
+                        else:
+                            # No keyword match - LLM decision stands
+                            print(f"   ❌ DESCRIPTION FAILED: Description does not match company")
+                            return False, {
+                                "stage": "Stage 5: Description Verification",
+                                "check_name": "check_stage5_unified",
+                                "message": f"Description verification failed: Description does not accurately describe the company",
+                                "failed_fields": ["description"],
+                                "description_reasoning": description_reasoning
+                            }
+                
+                # Store sub_industry results on lead
+                lead["stage5_sub_industry_match"] = sub_industry_match
+                lead["stage5_claimed_sub_industry"] = claimed_sub_industry
+                lead["stage5_matched_sub_industry"] = matched_sub_industry
+                lead["stage5_sub_industry_reason"] = sub_industry_reasoning
+                lead["stage5_description_match"] = description_match
+                lead["stage5_description_reasoning"] = description_reasoning
+                
+                all_match = role_match and region_match and industry_match and sub_industry_match and description_match
                 
                 # Store results on lead
                 lead["stage5_role_match"] = role_match
@@ -5904,6 +8096,13 @@ RESPOND WITH JSON ONLY:
                 lead["stage5_extracted_role"] = extracted_role
                 lead["stage5_extracted_region"] = extracted_region
                 lead["stage5_extracted_industry"] = extracted_industry
+                
+                # Use miner's original country/state/city fields (submitted via gateway)
+                # These are 100% accurate since miner explicitly provided them
+                if region_match:
+                    lead["region_country"] = lead.get("country", "")
+                    lead["region_state"] = lead.get("state", "")
+                    lead["region_city"] = lead.get("city", "")
                 
                 if all_match:
                     return True, None
@@ -5915,15 +8114,19 @@ RESPOND WITH JSON ONLY:
                         failed_fields.append("region")
                     if not industry_match:
                         failed_fields.append("industry")
+                    if not sub_industry_match:
+                        failed_fields.append("sub_industry")
                     
                     return False, {
-                        "stage": "Stage 5: Role/Region/Industry",
+                        "stage": "Stage 5: Role/Region/Industry/Sub-Industry",
                         "check_name": "check_stage5_unified",
                         "message": f"Stage 5 verification failed for: {', '.join(failed_fields)}",
                         "failed_fields": failed_fields,
                         "role_match": role_match,
                         "region_match": region_match,
-                        "industry_match": industry_match
+                        "industry_match": industry_match,
+                        "sub_industry_match": sub_industry_match,
+                        "sub_industry_reason": sub_industry_reason
                     }
                 
     except Exception as e:
@@ -5951,7 +8154,8 @@ def determine_icp_multiplier(lead: dict) -> float:
     - Region (optional - e.g., "Africa" for streaming/broadcast ICP)
     
     Returns:
-        1.5 if lead matches ICP criteria
+        Custom multiplier if defined in ICP (e.g., 5.0 for Africa)
+        1.5 if lead matches ICP criteria (default)
         1.0 if lead is standard (non-ICP)
     """
     # Extract lead fields (case-insensitive)
@@ -5980,7 +8184,8 @@ def determine_icp_multiplier(lead: dict) -> float:
         # Step 3: Check if role contains role_details (specific titles)
         # Role details are the most specific check (e.g., "CEO", "CTO", "VP of Operations")
         if matches_any(role, icp["role_details"]):
-            return 1.5  # ICP match found!
+            # Return custom multiplier if defined, otherwise default 1.5x
+            return icp.get("multiplier", 1.5)
     
     # No ICP match found
     return 1.0

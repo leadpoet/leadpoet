@@ -337,8 +337,14 @@ class Miner(BaseMinerNeuron):
                             "website": lead.get("website", ""),
                             "industry": lead.get("industry", ""),
                             "sub_industry": lead.get("sub_industry", ""),
+                            "country": lead.get("country", ""),
+                            "state": lead.get("state", ""),
+                            "city": lead.get("city", ""),
                             "region": lead.get("region", ""),
                             "role": lead.get("role", ""),
+                            "description": lead.get("description", ""),
+                            "company_linkedin": lead.get("company_linkedin", ""),
+                            "employee_count": lead.get("employee_count", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
                             "curated_at":
@@ -515,8 +521,14 @@ class Miner(BaseMinerNeuron):
                             "website": lead.get("website", ""),
                             "industry": lead.get("industry", ""),
                             "sub_industry": lead.get("sub_industry", ""),
+                            "country": lead.get("country", ""),
+                            "state": lead.get("state", ""),
+                            "city": lead.get("city", ""),
                             "region": lead.get("region", ""),
                             "role": lead.get("role", ""),
+                            "description": lead.get("description", ""),
+                            "company_linkedin": lead.get("company_linkedin", ""),
+                            "employee_count": lead.get("employee_count", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
                             "curated_at":
@@ -660,8 +672,14 @@ class Miner(BaseMinerNeuron):
                             "website": lead.get("website", ""),
                             "industry": lead.get("industry", ""),
                             "sub_industry": lead.get("sub_industry", ""),
+                            "country": lead.get("country", ""),
+                            "state": lead.get("state", ""),
+                            "city": lead.get("city", ""),
                             "region": lead.get("region", ""),
                             "role": lead.get("role", ""),
+                            "description": lead.get("description", ""),
+                            "company_linkedin": lead.get("company_linkedin", ""),
+                            "employee_count": lead.get("employee_count", ""),
                             "source": lead.get("source", ""),
                             "curated_by": self.wallet.hotkey.ss58_address,
                             "curated_at": datetime.now(timezone.utc).isoformat(),
@@ -792,7 +810,13 @@ class Miner(BaseMinerNeuron):
                     "industry": lead.get("industry", ""),
                     "sub_industry": lead.get("sub_industry", ""),
                     "role": lead.get("role", ""),
+                    "country": lead.get("country", ""),
+                    "state": lead.get("state", ""),
+                    "city": lead.get("city", ""),
                     "region": lead.get("region", ""),
+                    "description": lead.get("description", ""),
+                    "company_linkedin": lead.get("company_linkedin", ""),
+                    "employee_count": lead.get("employee_count", ""),
                     "source": lead.get("source", ""),
                     "curated_by": self.wallet.hotkey.ss58_address,
                 }
@@ -1050,10 +1074,18 @@ def sanitize_prospect(prospect, miner_hotkey=None):
         "sub_industry":
         strip_html(
             prospect.get("sub_industry", prospect.get("Sub Industry", ""))),
+        "country":
+        strip_html(prospect.get("country", prospect.get("Country", ""))),
+        "state":
+        strip_html(prospect.get("state", prospect.get("State", ""))),
+        "city":
+        strip_html(prospect.get("city", prospect.get("City", ""))),
         "region":
         strip_html(prospect.get("region", prospect.get("Region", ""))),
         "description":
         strip_html(prospect.get("description", "")),
+        "company_linkedin":
+        strip_html(prospect.get("company_linkedin", prospect.get("Company LinkedIn", ""))),
         "phone_numbers":
         prospect.get("phone_numbers", []),
         "founded_year":
@@ -1064,6 +1096,8 @@ def sanitize_prospect(prospect, miner_hotkey=None):
         strip_html(prospect.get("company_type", prospect.get("Company Type", ""))),
         "number_of_locations":
         prospect.get("number_of_locations", prospect.get("Number of Locations", "")),
+        "employee_count":
+        strip_html(prospect.get("employee_count", prospect.get("Employee Count", ""))),
         "socials":
         prospect.get("socials", {}),
         "source":

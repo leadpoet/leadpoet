@@ -156,7 +156,7 @@ async def log_anchor_event(
         payload["seq_end"] = seq_end
     
     # Compute payload hash for integrity
-    payload_json = json.dumps(payload, sort_keys=True)
+    payload_json = json.dumps(payload, sort_keys=True, default=str)  # Handle datetime objects
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
     
     log_entry = {

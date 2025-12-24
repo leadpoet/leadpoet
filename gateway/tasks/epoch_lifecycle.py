@@ -360,7 +360,7 @@ async def log_epoch_event(event_type: str, epoch_id: int, payload: dict):
     try:
         from gateway.utils.logger import log_event
         
-        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
         payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
         
         log_entry = {
@@ -1035,7 +1035,7 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
             "consensus_weight": outcome["consensus_weight"]
         }
         
-        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
         payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
         
         log_entry = {

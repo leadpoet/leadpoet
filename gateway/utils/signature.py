@@ -81,7 +81,7 @@ def compute_payload_hash(payload: Dict[str, Any]) -> str:
         'a3b2c1d4e5f6...'
     """
     # Canonicalize JSON (sort keys for determinism)
-    payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
     
     # Compute SHA256 hash
     payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()

@@ -2140,9 +2140,13 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
             }
             
             # Submit validation (single request for all leads)
+            # CRITICAL: Must serialize with default=str to handle datetime objects in evidence_blob
+            # requests.post(json=...) doesn't support custom serializers, so we serialize manually
+            event_json = json.dumps(event, default=str)
             response = requests.post(
                 f"{GATEWAY_URL}/validate",
-                json=event,
+                data=event_json,
+                headers={"Content-Type": "application/json"},
                 timeout=600  # 10 minutes timeout (gateway needs time for validation evidence storage + consensus + database operations)
             )
             response.raise_for_status()
@@ -2251,15 +2255,19 @@ def _submit_reveal_batch(wallet: bt.wallet, epoch_id: int, reveal_batch: List[Di
                 bt.logging.warning(f"🔄 Retry {attempt}/3 for batch {batch_num}/{total_batches}...")
             
             # Submit reveal batch
+            # CRITICAL: Must serialize with default=str to handle datetime objects in rejection_reason
+            reveal_payload = {
+                "validator_hotkey": wallet.hotkey.ss58_address,
+                "epoch_id": epoch_id,
+                "signature": signature,
+                "nonce": nonce,
+                "reveals": reveal_batch
+            }
+            reveal_json = json.dumps(reveal_payload, default=str)
             response = requests.post(
                 f"{GATEWAY_URL}/reveal/batch",
-                json={
-                    "validator_hotkey": wallet.hotkey.ss58_address,
-                    "epoch_id": epoch_id,
-                    "signature": signature,
-                    "nonce": nonce,
-                    "reveals": reveal_batch
-                },
+                data=reveal_json,
+                headers={"Content-Type": "application/json"},
                 timeout=300  # 5 minutes timeout per batch
             )
             response.raise_for_status()

@@ -104,7 +104,7 @@ def compute_payload_hash(payload: dict) -> str:
         Hex-encoded SHA256 hash (64 characters)
     """
     # Canonical JSON serialization (sorted keys, no whitespace)
-    payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
     payload_bytes = payload_json.encode('utf-8')
     return hashlib.sha256(payload_bytes).hexdigest()
 

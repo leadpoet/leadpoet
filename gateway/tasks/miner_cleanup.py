@@ -260,7 +260,7 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
                 "ts": current_timestamp,  # Use 'ts' not 'timestamp'
                 "payload": cleanup_report,
                 "payload_hash": hashlib.sha256(
-                    json.dumps(cleanup_report, sort_keys=True).encode()
+                    json.dumps(cleanup_report, sort_keys=True, default=str).encode()  # Handle datetime objects
                 ).hexdigest(),
                 "build_id": "gateway",  # Required field
                 "signature": "gateway_internal_cleanup",  # Required field (gateway-generated event, no cryptographic signature)
@@ -288,7 +288,7 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
             from gateway.utils.logger import log_event
             
             # Create payload for TEE
-            payload_json = json.dumps(cleanup_report, sort_keys=True, separators=(',', ':'))
+            payload_json = json.dumps(cleanup_report, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
             payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
             
             tee_event = {

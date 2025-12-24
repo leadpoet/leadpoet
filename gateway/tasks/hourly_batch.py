@@ -167,7 +167,7 @@ async def hourly_batch_task():
             
             # Step 3: Compress events
             print(f"\n📦 Compressing events...")
-            events_json = json.dumps(events)
+            events_json = json.dumps(events, default=str)  # Handle datetime objects
             events_bytes = events_json.encode('utf-8')
             compressed_events = gzip.compress(events_bytes, compresslevel=9)
             

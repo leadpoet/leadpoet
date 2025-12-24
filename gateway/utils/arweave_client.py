@@ -116,7 +116,7 @@ async def write_event(event: Dict, tags: Optional[Dict[str, str]] = None) -> str
         raise RuntimeError("Arweave wallet not initialized")
     
     # Serialize event to JSON
-    event_json = json.dumps(event, sort_keys=True, indent=2)
+    event_json = json.dumps(event, sort_keys=True, indent=2, default=str)  # Handle datetime objects
     event_bytes = event_json.encode('utf-8')
     
     # Calculate cost
@@ -357,7 +357,7 @@ async def upload_checkpoint(
             "tree_levels": tree_levels
         }
         
-        payload_json = json.dumps(checkpoint_payload)
+        payload_json = json.dumps(checkpoint_payload, default=str)  # Handle datetime objects
         payload_bytes = payload_json.encode('utf-8')
         
         print(f"   Total payload size: {len(payload_bytes)} bytes ({len(payload_bytes)/1024:.2f} KB)")

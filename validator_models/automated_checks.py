@@ -738,7 +738,7 @@ def compute_validation_hashes(decision: str, rep_score: float, evidence: dict, s
     import hashlib
     
     # Canonicalize evidence (sort keys for determinism)
-    evidence_json = json.dumps(evidence, sort_keys=True)
+    evidence_json = json.dumps(evidence, sort_keys=True, default=str)  # Handle datetime objects
     
     # Compute hashes
     decision_hash = hashlib.sha256(salt + decision.encode()).hexdigest()
@@ -943,7 +943,7 @@ async def log_validation_metrics(lead_data: dict, validation_result: dict, stage
 
         log_file = os.path.join(VALIDATION_ARTIFACTS_DIR, "validation_log.jsonl")
         with open(log_file, "a") as f:
-            f.write(json.dumps(log_entry) + "\n")
+            f.write(json.dumps(log_entry, default=str) + "\n")  # Handle datetime objects
 
     except Exception as e:
         print(f"⚠️ Failed to log validation metrics: {e}")

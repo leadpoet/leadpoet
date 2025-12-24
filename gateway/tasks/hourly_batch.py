@@ -256,7 +256,7 @@ async def hourly_batch_task():
                 
                 # json and hashlib already imported at top of file
                 import hashlib
-                payload_json = json.dumps(payload_data, sort_keys=True)
+                payload_json = json.dumps(payload_data, sort_keys=True, default=str)  # Handle datetime objects
                 payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
                 
                 checkpoint_log = {

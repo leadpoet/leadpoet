@@ -1156,7 +1156,7 @@ def fetch_curation_result(request_id: str) -> dict:
     return r.json()
 
 def _signed_body(wallet: bt.wallet, extra: dict) -> dict:
-    payload  = generate_timestamp(json.dumps(extra, sort_keys=True))
+    payload  = generate_timestamp(json.dumps(extra, sort_keys=True, default=str))  # Handle datetime objects
     sig_b64  = base64.b64encode(wallet.hotkey.sign(payload)).decode()
     return {"wallet": wallet.hotkey.ss58_address,
             "signature": sig_b64, **extra}

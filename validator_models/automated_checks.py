@@ -3083,6 +3083,52 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
                 print(f"   📝 Stage 4: Extracted role from profile: '{stage4_extracted_role}'")
         
         # ========================================================================
+        # EXTRACT PERSON LOCATION FROM LINKEDIN SEARCH RESULTS (NEW)
+        # ========================================================================
+        # The person's profile header location often appears in Google snippets.
+        # This is the PERSON's location, not the company headquarters.
+        # Format in snippets: "...School of Business. New York, New York, United States."
+        # 
+        # IMPORTANT: Only extract location from results that match the miner's
+        # provided LinkedIn URL. This prevents extracting location from a different
+        # person with the same name.
+        # ========================================================================
+        stage4_extracted_location = None
+        if search_results and len(search_results) > 0:
+            # Extract profile slug from miner's provided LinkedIn URL
+            profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0].lower() if linkedin_url and "/in/" in linkedin_url else None
+            
+            # Try extracting location from search result snippets
+            # ONLY from results that match the miner's LinkedIn profile URL
+            for result in search_results[:5]:  # Check first 5 results
+                result_url = result.get("link", result.get("url", "")).lower()
+                result_snippet = result.get("snippet", result.get("body", ""))
+                
+                # ENFORCE: Only extract from results that match the profile slug
+                if profile_slug and "linkedin.com/in/" in result_url:
+                    # Extract slug from result URL
+                    result_slug = result_url.split("/in/")[-1].strip("/").split("?")[0]
+                    
+                    # Normalize for comparison (handle hyphens, underscores)
+                    profile_slug_norm = profile_slug.replace("-", "").replace("_", "")
+                    result_slug_norm = result_slug.replace("-", "").replace("_", "")
+                    
+                    if profile_slug_norm != result_slug_norm:
+                        # URL doesn't match miner's profile - skip this result
+                        continue
+                
+                if result_snippet:
+                    location = extract_person_location_from_linkedin_snippet(result_snippet)
+                    if location:
+                        stage4_extracted_location = location
+                        print(f"   📍 Stage 4: Extracted person location from VERIFIED profile URL")
+                        break
+            
+            if stage4_extracted_location:
+                lead["stage4_extracted_location"] = stage4_extracted_location
+                print(f"   📍 Stage 4: Extracted person location from profile: '{stage4_extracted_location}'")
+        
+        # ========================================================================
         # STAGE 4: COMPANY LINKEDIN VALIDATION (NEW)
         # ========================================================================
         # Validates company_linkedin URL, verifies company name matches, and caches
@@ -4383,14 +4429,20 @@ def locations_match_geopy(claimed: str, extracted: str, max_distance_km: float =
     
     claimed_lower = claimed.lower()
     
-    # Count distinct US states mentioned
+    # Count distinct US states mentioned (use word boundaries to avoid "kansas" matching "arkansas")
     states_found = set()
     for state in US_STATES_SET:
-        if state in claimed_lower:
+        # e.g., "Arkansas" should not match "kansas"
+        pattern = r'\b' + re.escape(state) + r'\b'
+        if re.search(pattern, claimed_lower):
             states_found.add(state)
     for abbrev in US_STATE_ABBREVS:
         if re.search(rf'\b{abbrev}\b', claimed_lower):
             states_found.add(abbrev)
+    
+    # Special case: "west virginia" should not also count "virginia"
+    if 'west virginia' in states_found and 'virginia' in states_found:
+        states_found.discard('virginia')
     
     if len(states_found) > 2:
         return False, f"ANTI-GAMING: Multiple states detected in claimed region: {states_found}"
@@ -5683,6 +5735,104 @@ def _is_valid_location(location: str) -> bool:
     return has_comma or has_known_state or has_known_city
 
 
+def extract_person_location_from_linkedin_snippet(snippet: str) -> Optional[str]:
+    """
+    Extract person's location from LinkedIn search result snippet.
+    
+    LinkedIn snippets typically show the profile header location in formats like:
+    - End of snippet: "...School of Business. New York, New York, United States."
+    - Middle of snippet: "...10 months. Manhattan, New York, United States..."
+    - Directory format: "New York, NY. Nasdaq, +3 more."
+    - Location prefix: "Location: New York"
+    
+    This extracts the PERSON's location (from their profile header),
+    NOT the company headquarters.
+    
+    Returns:
+        Location string if found, None otherwise
+    """
+    if not snippet:
+        return None
+    
+    # Known countries for validation
+    COUNTRIES = {
+        'united states', 'united kingdom', 'canada', 'australia', 'germany', 
+        'france', 'spain', 'italy', 'netherlands', 'india', 'singapore',
+        'japan', 'china', 'brazil', 'mexico', 'ireland', 'switzerland',
+        'sweden', 'norway', 'denmark', 'finland', 'belgium', 'austria',
+        'new zealand', 'south africa', 'israel', 'uae', 'united arab emirates',
+        'hong kong', 'taiwan', 'south korea', 'poland', 'czech republic',
+        'portugal', 'greece', 'argentina', 'chile', 'colombia', 'peru',
+        'russia', 'turkey', 'egypt', 'nigeria', 'kenya', 'indonesia',
+        'malaysia', 'thailand', 'vietnam', 'philippines'
+    }
+    
+    # US state abbreviations for "City, ST" format
+    US_ABBREVS = {
+        'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID',
+        'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS',
+        'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK',
+        'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV',
+        'WI', 'WY', 'DC'
+    }
+    
+    # Pattern 1: Full location at END of snippet with country
+    # Matches: "...School of Business. New York, New York, United States."
+    pattern_full_end = r'([A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+)\.?\s*$'
+    match = re.search(pattern_full_end, snippet)
+    if match:
+        location = match.group(1).strip().rstrip('.')
+        parts = [p.strip() for p in location.split(',')]
+        if len(parts) >= 2 and parts[-1].lower() in COUNTRIES:
+            return location
+    
+    # Pattern 2: Full location in MIDDLE of snippet with country
+    # Matches: "...10 months. Manhattan, New York, United States..."
+    pattern_full_middle = r'([A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+)(?:\s*[·\.\|]|\s+\d)'
+    match = re.search(pattern_full_middle, snippet)
+    if match:
+        location = match.group(1).strip()
+        parts = [p.strip() for p in location.split(',')]
+        if len(parts) >= 2 and parts[-1].lower() in COUNTRIES:
+            return location
+    
+    # Pattern 3: Abbreviated US location (City, ST) anywhere in snippet
+    # Matches: "New York, NY" or "San Francisco, CA"
+    pattern_abbrev = r'([A-Z][a-zA-Z\s]+,\s*(' + '|'.join(US_ABBREVS) + r'))\b'
+    match = re.search(pattern_abbrev, snippet)
+    if match:
+        return match.group(1).strip()
+    
+    # Pattern 4: Location with "Location:" prefix (from LinkedIn directory pages)
+    # Matches: "Location: New York" or "Location: 600039"
+    pattern_prefix = r'Location:\s*([A-Z][a-zA-Z\s,]+?)(?:\s*[·\|]|\s+\d|\s*$)'
+    match = re.search(pattern_prefix, snippet)
+    if match:
+        location = match.group(1).strip()
+        # Skip numeric-only locations (postal codes)
+        if not location.isdigit():
+            return location
+    
+    # Pattern 5: Metro areas
+    # Matches: "San Francisco Bay Area", "Greater New York City Area"
+    pattern_metro = r'((?:Greater\s+)?[A-Z][a-zA-Z\s]+(?:Bay\s+Area|Metro(?:politan)?\s+Area|City\s+Area))'
+    match = re.search(pattern_metro, snippet)
+    if match:
+        return match.group(1).strip()
+    
+    # Pattern 6: Two-part location at end (City, Country) - no state
+    # Matches: "...profile. London, United Kingdom."
+    pattern_two_part = r'([A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+)\.?\s*$'
+    match = re.search(pattern_two_part, snippet)
+    if match:
+        location = match.group(1).strip().rstrip('.')
+        parts = [p.strip() for p in location.split(',')]
+        if len(parts) == 2 and parts[-1].lower() in COUNTRIES:
+            return location
+    
+    return None
+
+
 def extract_location_from_text(text: str) -> Optional[str]:
     """Extract location from text using regex patterns."""
     if not text:
@@ -6082,8 +6232,14 @@ def fuzzy_pre_verification_stage5(
         claimed_lower = claimed_region.lower()
         states_found = set()
         for state in US_STATES_SET:
-            if state in claimed_lower:
+            # e.g., "Arkansas" should not match "kansas" (use word boundaries)
+            pattern = r'\b' + re.escape(state) + r'\b'
+            if re.search(pattern, claimed_lower):
                 states_found.add(state)
+        
+        # Special case: "west virginia" should not also count "virginia"
+        if 'west virginia' in states_found and 'virginia' in states_found:
+            states_found.discard('virginia')
         
         if len(states_found) >= 2:
             result["region_verified"] = False
@@ -6671,14 +6827,30 @@ def _gse_search_stage5_sync(
             fallback_queries.append(f'"{full_name}" {role_simplified} linkedin')
         if linkedin_url_query:
             fallback_queries.append(linkedin_url_query)
-    elif search_type == "region":
-        region_hint = kwargs.get("region_hint", "")
-        if region_hint:
-            queries = [f'{company} {region_hint} headquarters location', f'{company} headquarters {region_hint}']
-        else:
-            queries = [f'{company} headquarters location']
+    elif search_type == "person_location":
+        # Search for PERSON's location using their LinkedIn URL
+        # This is called ONLY when Stage 4 didn't extract location from its search results.
+        # Stage 4 already searches for the profile - we just need targeted location queries.
+        #
+        # Query 1: "{linkedin_url}" location
+        # Example result: "Location: New York City Metropolitan Area · 500+ connections"
+        #
+        # Query 2: "{linkedin_url}" {claimed_region}
+        # Example: "{linkedin_url}" United States, New York, Manhattan
+        linkedin_url = kwargs.get("linkedin_url", "")
+        region_hint = kwargs.get("region_hint", "")  # country, state, city combined
+        
+        queries = []
         fallback_queries = []
-    else:  # industry
+        
+        if linkedin_url and "linkedin.com/in/" in linkedin_url:
+            # Primary: LinkedIn URL + "location"
+            queries.append(f'"{linkedin_url}" location')
+            
+            # Secondary: LinkedIn URL + miner's claimed region (country, state, city)
+            if region_hint:
+                queries.append(f'"{linkedin_url}" {region_hint}')
+    elif search_type == "industry":
         region_hint = kwargs.get("region_hint", "")
         if region_hint:
             queries = [f'{company} {region_hint} company industry', f'{company} company industry {region_hint}']
@@ -6709,8 +6881,8 @@ def _gse_search_stage5_sync(
                         "body": item.get("snippet", "")
                     })
                 
-                # For region/industry: verify company mentioned
-                if company_name and search_type in ["region", "industry"]:
+                # For industry: verify company mentioned
+                if company_name and search_type == "industry":
                     company_normalized = re.sub(r'\s*-\s*', '-', company_name.lower())
                     company_words = [w for w in company_normalized.split() if len(w) > 3][:2]
                     
@@ -7580,9 +7752,29 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         if match:
             company_linkedin_slug = match.group(1)
     
-    # REGION search always runs (independent of company LinkedIn)
+    # ========================================================================
+    # REGION: Use PERSON location (NOT company HQ)
+    # ========================================================================
+    # Priority:
+    # 1. Stage 4 extracted location from LinkedIn snippets → use it
+    # 2. Stage 5 searches for person location using LinkedIn URL
+    # 3. NEVER fall back to company HQ (that's not accurate for the person)
+    # ========================================================================
+    stage4_location = lead.get("stage4_extracted_location")
+    use_stage4_location = bool(stage4_location)
+    need_person_location_search = not use_stage4_location  # Need to search for person location
+    
+    # Get LinkedIn URL for person location search
+    linkedin_url = lead.get("linkedin", "")
+    
     print(f"   🔍 GSE: Starting conditional searches...")
-    print(f"      Region search: ALWAYS (independent)")
+    if use_stage4_location:
+        print(f"      Person location: SKIP (using Stage 4: '{stage4_location}')")
+    elif linkedin_url:
+        print(f"      Person location: RUN (searching via LinkedIn URL)")
+    else:
+        print(f"      Person location: SKIP (no LinkedIn URL for search)")
+        need_person_location_search = False
     print(f"      Industry/description search: {'SKIP (have from company LinkedIn)' if has_industry_description else 'RUN (need fallback)'}")
     print(f"      Employee count search: {'SKIP (have from company LinkedIn)' if has_employee_count else f'RUN (targeting {company_linkedin_slug})'}")
     
@@ -7590,10 +7782,18 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     tasks = []
     task_names = []
     
-    # Region search always runs
-    region_task = _gse_search_stage5("region", company=company, region_hint=claimed_region)
-    tasks.append(region_task)
-    task_names.append("region")
+    # Person location search: only if Stage 4 didn't find it
+    if need_person_location_search and linkedin_url:
+        # Use new "person_location" search type that searches the LinkedIn URL
+        person_location_task = _gse_search_stage5(
+            "person_location",
+            full_name=full_name,
+            company=company,
+            linkedin_url=linkedin_url,
+            region_hint=claimed_region
+        )
+        tasks.append(person_location_task)
+        task_names.append("person_location")
     
     # Industry search only if we don't have data from company LinkedIn
     if need_industry_gse:
@@ -7608,25 +7808,84 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         task_names.append("employee_count")
     
     # Run all needed searches in parallel
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks) if tasks else []
     
     # Parse results based on task order
-    region_results = results[0]  # Region is always first
-    result_idx = 1
+    result_idx = 0
+    person_location_results = []
+    region_results = []  # Keep for backward compatibility in fuzzy_pre_verification
+    
+    if need_person_location_search and linkedin_url:
+        # Person location search was run
+        if result_idx < len(results):
+            person_location_results = results[result_idx]
+            result_idx += 1
     
     if need_industry_gse:
-        industry_results = results[result_idx]
-        result_idx += 1
+        if result_idx < len(results):
+            industry_results = results[result_idx]
+            result_idx += 1
     
     if need_employee_count_gse and company_linkedin_slug:
-        employee_count_results = results[result_idx]
-        result_idx += 1
+        if result_idx < len(results):
+            employee_count_results = results[result_idx]
+            result_idx += 1
+    
+    # Store all search results in lead for test access
+    lead["_stage5_search_results"] = {
+        "person_location_results": person_location_results,
+        "role_results": role_results,
+        "industry_results": industry_results,
+        "employee_count_results": employee_count_results,
+        "stage4_location": stage4_location,
+        "use_stage4_location": use_stage4_location
+    }
+    
+    # Extract person location from search results if Stage 4 didn't find it
+    # IMPORTANT: Only extract from results that match the miner's LinkedIn URL
+    stage5_extracted_location = None
+    if not use_stage4_location and person_location_results:
+        print(f"   🔍 Extracting person location from {len(person_location_results)} results...")
+        
+        # Extract profile slug from miner's provided LinkedIn URL for matching
+        profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0].lower() if linkedin_url and "/in/" in linkedin_url else None
+        
+        for r in person_location_results[:5]:
+            result_url = r.get("link", r.get("href", r.get("url", ""))).lower()
+            snippet = r.get("body", r.get("snippet", ""))
+            
+            # ENFORCE: Only extract from results that match the profile slug
+            if profile_slug and "linkedin.com/in/" in result_url:
+                # Extract slug from result URL
+                result_slug = result_url.split("/in/")[-1].strip("/").split("?")[0]
+                
+                # Normalize for comparison (handle hyphens, underscores)
+                profile_slug_norm = profile_slug.replace("-", "").replace("_", "")
+                result_slug_norm = result_slug.replace("-", "").replace("_", "")
+                
+                if profile_slug_norm != result_slug_norm:
+                    # URL doesn't match miner's profile - skip this result
+                    continue
+            
+            if snippet:
+                location = extract_person_location_from_linkedin_snippet(snippet)
+                if location:
+                    stage5_extracted_location = location
+                    print(f"   📍 Stage 5: Extracted person location from VERIFIED profile URL: '{location}'")
+                    break
+        
+        if not stage5_extracted_location:
+            print(f"   ⚠️ Could not extract person location from search results (no matching profile URLs)")
     
     # Log results
-    if region_results:
-        print(f"   ✅ Found {len(region_results)} region search results")
+    if use_stage4_location:
+        print(f"   📍 Using Stage 4 person location: '{stage4_location}'")
+    elif stage5_extracted_location:
+        print(f"   📍 Using Stage 5 person location: '{stage5_extracted_location}'")
+    elif person_location_results:
+        print(f"   ⚠️ Found {len(person_location_results)} person location results but no location extracted")
     else:
-        print(f"   ⚠️ No region results found")
+        print(f"   ⚠️ No person location found (will rely on LLM)")
     
     if need_industry_gse:
         if industry_results:
@@ -7652,7 +7911,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         claimed_region=claimed_region,
         claimed_industry=claimed_industry,
         role_search_results=role_results if not role_verified_by_stage4 else [],  # Empty if Stage 4 verified
-        region_search_results=region_results,
+        region_search_results=region_results,  # Empty if using Stage 4 location
         industry_search_results=industry_results,
         full_name=full_name,
         company=company
@@ -7666,6 +7925,47 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         # Remove "role" from needs_llm if Stage 4 already verified it
         if "role" in fuzzy_result.get("needs_llm", []):
             fuzzy_result["needs_llm"].remove("role")
+    
+    # ========================================================================
+    # REGION: Use extracted person location for verification
+    # ========================================================================
+    # Priority: Stage 4 location > Stage 5 location > LLM fallback
+    # This verifies the PERSON's location, not company HQ.
+    # ========================================================================
+    extracted_person_location = stage4_location or stage5_extracted_location
+    location_source = "Stage 4" if stage4_location else ("Stage 5" if stage5_extracted_location else None)
+    
+    if extracted_person_location and claimed_region:
+        print(f"   🔍 REGION: Comparing person location vs claimed region...")
+        print(f"      {location_source} extracted: '{extracted_person_location}'")
+        print(f"      Miner claimed: '{claimed_region}'")
+        
+        # Use GeoPy to compare locations
+        geo_match, geo_reason = locations_match_geopy(claimed_region, extracted_person_location)
+        
+        fuzzy_result["region_extracted"] = extracted_person_location
+        fuzzy_result["region_confidence"] = 0.95 if geo_match else 0.3
+        fuzzy_result["region_reason"] = f"[{location_source} person location] {geo_reason}"
+        
+        if geo_match:
+            fuzzy_result["region_verified"] = True
+            print(f"   ✅ REGION MATCH: '{claimed_region}' ≈ '{extracted_person_location}'")
+            print(f"      Reason: {geo_reason}")
+            # Remove region from LLM verification if fuzzy matched
+            if "region" in fuzzy_result.get("needs_llm", []):
+                fuzzy_result["needs_llm"].remove("region")
+        else:
+            # GeoPy says no match - still send to LLM for final verification
+            if not fuzzy_result.get("region_hard_fail"):
+                if "region" not in fuzzy_result.get("needs_llm", []):
+                    fuzzy_result["needs_llm"].append("region")
+                print(f"   ⚠️ REGION: GeoPy says no match, sending to LLM for verification")
+                print(f"      Claimed: {claimed_region} | Extracted: {extracted_person_location}")
+    elif not extracted_person_location and claimed_region:
+        # No person location found - send to LLM with whatever region results we have
+        print(f"   ⚠️ REGION: No person location extracted, sending to LLM for verification")
+        if "region" not in fuzzy_result.get("needs_llm", []):
+            fuzzy_result["needs_llm"].append("region")
     
     # Note: role_definitive_fail already checked above (before region/industry GSE)
     # so we only check region anti-gaming here

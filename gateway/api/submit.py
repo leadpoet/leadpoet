@@ -54,6 +54,12 @@ router = APIRouter(prefix="/submit", tags=["Submission"])
 
 
 # ============================================================
+# LinkedIn URL Normalization (for duplicate detection)
+# ============================================================
+from gateway.utils.linkedin import normalize_linkedin_url, compute_linkedin_combo_hash
+
+
+# ============================================================
 # Field Normalization Helper
 # ============================================================
 
@@ -434,51 +440,54 @@ async def submit_lead(event: SubmitLeadEvent):
         )
     
     # ========================================
-    # Step 6.5: Check for duplicate email (CRITICAL)
+    # Step 6.5: Check for duplicate email (PUBLIC - transparency_log)
     # ========================================
-    # Prevents malicious miners from submitting the same email
-    # Checks leads_private directly (source of truth, no race condition)
-    print(f"🔍 Step 6.5: Checking for duplicate email...")
+    # Uses transparency_log for VERIFIABLE fairness - miners can query same data
+    # 
+    # Logic:
+    # 1. Check for CONSENSUS_RESULT events with this email_hash
+    # 2. If most recent consensus is 'deny' → ALLOW resubmission (rejected leads can retry)
+    # 3. If most recent consensus is 'approve' → BLOCK (already approved)
+    # 4. If NO consensus yet but SUBMISSION_REQUEST exists → BLOCK (still processing)
+    # 5. If no records at all → ALLOW (new email)
+    #
+    # This is 100% verifiable: miners can run the EXACT same query to check fairness
+    print(f"🔍 Step 6.5: Checking for duplicate email (using transparency_log)...")
     try:
-        # First, we need to get the actual email from the committed lead blob
-        # Fetch it from S3 using the lead_blob_hash (S3 key is the hash, not lead_id)
-        from gateway.utils.storage import s3_client as storage_s3_client, AWS_S3_BUCKET
+        # Step 1: Check for CONSENSUS_RESULT with this email_hash
+        # This tells us the final outcome of any previous submission with this email
+        consensus_check = supabase.table("transparency_log") \
+            .select("payload, created_at") \
+            .eq("email_hash", committed_email_hash) \
+            .eq("event_type", "CONSENSUS_RESULT") \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
         
-        # S3 key is the lead_blob_hash from SUBMISSION_REQUEST, not the lead_id
-        s3_key = f"leads/{committed_lead_blob_hash}.json"
-        
-        try:
-            response = storage_s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=s3_key)
-            lead_blob_data = json.loads(response['Body'].read().decode('utf-8'))
-            submitted_email = lead_blob_data.get("email", "").strip().lower()
-        except Exception as e:
-            print(f"   ⚠️ Could not fetch lead blob for duplicate check: {e}")
-            submitted_email = None
-        
-        # Check leads_private directly for duplicate email
-        # OPTIMIZED: Uses unique index leads_private_email_unique instead of full table scan
-        if submitted_email:
-            # Query using the indexed email field (JSONB ->> operator)
-            # This uses idx: leads_private_email_unique - O(log n) instead of O(n)
-            duplicate_check = supabase.table("leads_private") \
-                .select("lead_id, miner_hotkey, created_ts") \
-                .eq("lead_blob->>email", submitted_email) \
-                .limit(1) \
-                .execute()
+        if consensus_check.data:
+            # There's a consensus result for this email
+            consensus = consensus_check.data[0]
+            consensus_payload = consensus.get("payload", {})
+            if isinstance(consensus_payload, str):
+                consensus_payload = json.loads(consensus_payload)
             
-            # Check if duplicate found (should be 0 or 1 result now)
-            if duplicate_check.data:
-                existing_lead = duplicate_check.data[0]
-                print(f"❌ Duplicate email detected!")
-                print(f"   Email: {submitted_email}")
-                print(f"   Original lead: {existing_lead.get('lead_id')[:10]}..., miner={existing_lead.get('miner_hotkey', 'unknown')[:10]}..., ts={existing_lead.get('created_ts')}")
+            final_decision = consensus_payload.get("final_decision")
+            consensus_lead_id = consensus_payload.get("lead_id", "unknown")
+            consensus_time = consensus.get("created_at")
+            
+            print(f"   Found CONSENSUS_RESULT: lead={consensus_lead_id[:10]}..., decision={final_decision}, time={consensus_time}")
+            
+            if final_decision == "approve":
+                # Already approved - BLOCK duplicate
+                print(f"❌ Duplicate email detected - already APPROVED!")
+                print(f"   Email hash: {committed_email_hash[:32]}...")
+                print(f"   Original lead: {consensus_lead_id[:10]}...")
                 
-                # Mark submission as failed (FAILURE - duplicate)
-                # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
+                # Mark submission as failed
                 updated_stats = mark_submission_failed(event.actor_hotkey)
                 print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
                 
-                # Log VALIDATION_FAILED event to TEE (consistent with required fields check)
+                # Log VALIDATION_FAILED event
                 try:
                     from gateway.utils.logger import log_event
                     
@@ -489,34 +498,36 @@ async def submit_lead(event: SubmitLeadEvent):
                         "ts": datetime.now(tz.utc).isoformat(),
                         "payload_hash": hashlib.sha256(json.dumps({
                             "lead_id": event.payload.lead_id,
-                            "reason": "duplicate_email",
+                            "reason": "duplicate_email_approved",
                             "email_hash": committed_email_hash
                         }, sort_keys=True).encode()).hexdigest(),
                         "build_id": "gateway",
-                        "signature": "duplicate_check",  # Gateway-generated
+                        "signature": "duplicate_check",
                         "payload": {
                             "lead_id": event.payload.lead_id,
-                            "reason": "duplicate_email",
+                            "reason": "duplicate_email_approved",
                             "email_hash": committed_email_hash,
-                            "original_lead_id": existing_lead.get("lead_id"),
+                            "original_lead_id": consensus_lead_id,
+                            "original_decision": "approve",
                             "miner_hotkey": event.actor_hotkey
                         }
                     }
                     
                     await log_event(validation_failed_event)
-                    print(f"   ✅ Logged VALIDATION_FAILED (duplicate) to TEE buffer")
+                    print(f"   ✅ Logged VALIDATION_FAILED (duplicate_approved) to TEE buffer")
                 except Exception as e:
                     print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
                 
                 raise HTTPException(
-                    status_code=409,  # 409 Conflict
+                    status_code=409,
                     detail={
                         "error": "duplicate_email",
-                        "message": "This email has already been submitted to the network",
+                        "message": "This email has already been approved by the network",
                         "email_hash": committed_email_hash,
                         "original_submission": {
-                            "lead_id": existing_lead.get("lead_id"),
-                            "submitted_at": existing_lead.get("created_ts")
+                            "lead_id": consensus_lead_id,
+                            "final_decision": "approve",
+                            "consensus_at": consensus_time
                         },
                         "rate_limit_stats": {
                             "submissions": updated_stats["submissions"],
@@ -527,8 +538,112 @@ async def submit_lead(event: SubmitLeadEvent):
                         }
                     }
                 )
+            
+            elif final_decision == "deny":
+                # Was rejected - ALLOW resubmission!
+                print(f"✅ Email was previously REJECTED - allowing resubmission")
+                print(f"   Previous lead: {consensus_lead_id[:10]}... was denied")
+                print(f"   Miner can now submit corrected lead data")
+                # Continue to next step (no raise, no block)
+            
+            else:
+                # Unknown decision - treat as block to be safe
+                print(f"⚠️  Unknown consensus decision '{final_decision}' - blocking for safety")
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "duplicate_email",
+                        "message": f"This email has an unknown consensus state: {final_decision}",
+                        "email_hash": committed_email_hash
+                    }
+                )
         
-        print(f"✅ No duplicate found - lead is unique")
+        else:
+            # No CONSENSUS_RESULT found - check if there's a pending submission
+            print(f"   No CONSENSUS_RESULT found for this email")
+            
+            # Check for any SUBMISSION_REQUEST with this email (still processing)
+            submission_check = supabase.table("transparency_log") \
+                .select("payload, created_at, actor_hotkey") \
+                .eq("email_hash", committed_email_hash) \
+                .eq("event_type", "SUBMISSION_REQUEST") \
+                .order("created_at", desc=True) \
+                .limit(1) \
+                .execute()
+            
+            if submission_check.data:
+                # There's a submission but no consensus yet - BLOCK (still processing)
+                existing_submission = submission_check.data[0]
+                existing_payload = existing_submission.get("payload", {})
+                if isinstance(existing_payload, str):
+                    existing_payload = json.loads(existing_payload)
+                
+                existing_lead_id = existing_payload.get("lead_id", "unknown")
+                existing_time = existing_submission.get("created_at")
+                existing_miner = existing_submission.get("actor_hotkey", "unknown")
+                
+                print(f"❌ Duplicate email detected - still PROCESSING!")
+                print(f"   Email hash: {committed_email_hash[:32]}...")
+                print(f"   Pending lead: {existing_lead_id[:10]}..., miner={existing_miner[:10]}..., ts={existing_time}")
+                
+                # Mark submission as failed
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+                
+                # Log VALIDATION_FAILED event
+                try:
+                    from gateway.utils.logger import log_event
+                    
+                    validation_failed_event = {
+                        "event_type": "VALIDATION_FAILED",
+                        "actor_hotkey": event.actor_hotkey,
+                        "nonce": str(uuid.uuid4()),
+                        "ts": datetime.now(tz.utc).isoformat(),
+                        "payload_hash": hashlib.sha256(json.dumps({
+                            "lead_id": event.payload.lead_id,
+                            "reason": "duplicate_email_processing",
+                            "email_hash": committed_email_hash
+                        }, sort_keys=True).encode()).hexdigest(),
+                        "build_id": "gateway",
+                        "signature": "duplicate_check",
+                        "payload": {
+                            "lead_id": event.payload.lead_id,
+                            "reason": "duplicate_email_processing",
+                            "email_hash": committed_email_hash,
+                            "original_lead_id": existing_lead_id,
+                            "original_miner": existing_miner,
+                            "miner_hotkey": event.actor_hotkey
+                        }
+                    }
+                    
+                    await log_event(validation_failed_event)
+                    print(f"   ✅ Logged VALIDATION_FAILED (duplicate_processing) to TEE buffer")
+                except Exception as e:
+                    print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+                
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "duplicate_email_processing",
+                        "message": "This email is currently being processed by the network. Please wait for consensus.",
+                        "email_hash": committed_email_hash,
+                        "original_submission": {
+                            "lead_id": existing_lead_id,
+                            "submitted_at": existing_time,
+                            "status": "pending_consensus"
+                        },
+                        "rate_limit_stats": {
+                            "submissions": updated_stats["submissions"],
+                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                            "rejections": updated_stats["rejections"],
+                            "max_rejections": MAX_REJECTIONS_PER_DAY,
+                            "reset_at": updated_stats["reset_at"]
+                        }
+                    }
+                )
+            
+            # No SUBMISSION_REQUEST either - new email!
+            print(f"✅ No prior submission found - email is unique")
         
     except HTTPException:
         raise
@@ -623,6 +738,235 @@ async def submit_lead(event: SubmitLeadEvent):
                 status_code=500,
                 detail=f"Failed to fetch lead blob: {str(e)}"
             )
+        
+        # ========================================
+        # CRITICAL: Verify email hash matches committed value
+        # ========================================
+        # This prevents email substitution attacks where miner commits email_hash_A
+        # but uploads lead_blob with different email_B to bypass duplicate detection.
+        # 
+        # Flow:
+        # 1. Miner commits email_hash in SUBMISSION_REQUEST (for duplicate check)
+        # 2. Miner uploads lead_blob with actual email
+        # 3. Gateway verifies: SHA256(actual_email) == committed_email_hash
+        # 4. MISMATCH → REJECT (prevents gaming duplicate detection)
+        #
+        # Performance: ~1 microsecond (SHA256 of ~50 byte email string)
+        print(f"   🔍 Verifying email hash integrity...")
+        actual_email = lead_blob.get("email", "").strip().lower()
+        actual_email_hash = hashlib.sha256(actual_email.encode()).hexdigest()
+        
+        if actual_email_hash != committed_email_hash:
+            print(f"❌ EMAIL HASH MISMATCH DETECTED!")
+            print(f"   Committed email_hash: {committed_email_hash[:32]}...")
+            print(f"   Actual email_hash:    {actual_email_hash[:32]}...")
+            print(f"   This indicates miner tried to substitute email to bypass duplicate detection!")
+            
+            # Mark submission as failed
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            print(f"   📊 Rate limit updated: rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+            
+            # Log VALIDATION_FAILED event
+            try:
+                validation_failed_event = {
+                    "event_type": "VALIDATION_FAILED",
+                    "actor_hotkey": event.actor_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.now(tz.utc).isoformat(),
+                    "payload_hash": hashlib.sha256(json.dumps({
+                        "lead_id": event.payload.lead_id,
+                        "reason": "email_hash_mismatch",
+                        "committed_email_hash": committed_email_hash,
+                        "actual_email_hash": actual_email_hash
+                    }, sort_keys=True).encode()).hexdigest(),
+                    "build_id": "gateway",
+                    "signature": "email_hash_verification",
+                    "payload": {
+                        "lead_id": event.payload.lead_id,
+                        "reason": "email_hash_mismatch",
+                        "committed_email_hash": committed_email_hash,
+                        "actual_email_hash": actual_email_hash,
+                        "miner_hotkey": event.actor_hotkey
+                    }
+                }
+                
+                await log_event(validation_failed_event)
+                print(f"   ✅ Logged VALIDATION_FAILED (email_hash_mismatch) to TEE buffer")
+            except Exception as e:
+                print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+            
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "email_hash_mismatch",
+                    "message": "Email in uploaded lead does not match committed email hash. This is not allowed.",
+                    "committed_email_hash": committed_email_hash[:16] + "...",
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": updated_stats["reset_at"]
+                    }
+                }
+            )
+        
+        print(f"   ✅ Email hash verified: {actual_email_hash[:16]}... matches committed value")
+        
+        # ========================================
+        # Compute LinkedIn combo hash for duplicate detection
+        # ========================================
+        # This creates a unique identifier for "person X at company Y"
+        # to prevent duplicate submissions of the same person at the same company
+        print(f"   🔍 Computing LinkedIn combo hash...")
+        linkedin_url = lead_blob.get("linkedin", "")
+        company_linkedin_url = lead_blob.get("company_linkedin", "")
+        
+        actual_linkedin_combo_hash = compute_linkedin_combo_hash(linkedin_url, company_linkedin_url)
+        
+        if actual_linkedin_combo_hash:
+            print(f"   ✅ LinkedIn combo hash computed: {actual_linkedin_combo_hash[:16]}...")
+            print(f"      Profile: {normalize_linkedin_url(linkedin_url, 'profile')}")
+            print(f"      Company: {normalize_linkedin_url(company_linkedin_url, 'company')}")
+        else:
+            print(f"   ⚠️  Could not compute LinkedIn combo hash (invalid URLs)")
+            print(f"      Profile URL: {linkedin_url[:50] if linkedin_url else 'MISSING'}...")
+            print(f"      Company URL: {company_linkedin_url[:50] if company_linkedin_url else 'MISSING'}...")
+            # Don't fail here - the required fields check below will catch missing fields
+        
+        # ========================================
+        # Check for duplicate LinkedIn combo (person + company)
+        # ========================================
+        # Similar to email duplicate check, but for person+company combination
+        # This prevents miners from resubmitting the same person at the same company
+        # with a different email address.
+        if actual_linkedin_combo_hash:
+            print(f"   🔍 Checking for duplicate LinkedIn combo...")
+            try:
+                # Check for CONSENSUS_RESULT with this linkedin_combo_hash
+                linkedin_consensus_check = supabase.table("transparency_log") \
+                    .select("payload, created_at") \
+                    .eq("linkedin_combo_hash", actual_linkedin_combo_hash) \
+                    .eq("event_type", "CONSENSUS_RESULT") \
+                    .order("created_at", desc=True) \
+                    .limit(1) \
+                    .execute()
+                
+                if linkedin_consensus_check.data:
+                    # There's a consensus result for this person+company combo
+                    linkedin_consensus = linkedin_consensus_check.data[0]
+                    linkedin_consensus_payload = linkedin_consensus.get("payload", {})
+                    if isinstance(linkedin_consensus_payload, str):
+                        linkedin_consensus_payload = json.loads(linkedin_consensus_payload)
+                    
+                    linkedin_final_decision = linkedin_consensus_payload.get("final_decision")
+                    linkedin_consensus_lead_id = linkedin_consensus_payload.get("lead_id", "unknown")
+                    linkedin_consensus_time = linkedin_consensus.get("created_at")
+                    
+                    print(f"      Found CONSENSUS_RESULT: lead={linkedin_consensus_lead_id[:10]}..., decision={linkedin_final_decision}")
+                    
+                    if linkedin_final_decision == "approve":
+                        # Already approved - BLOCK duplicate person+company
+                        print(f"   ❌ Duplicate person+company detected - already APPROVED!")
+                        
+                        updated_stats = mark_submission_failed(event.actor_hotkey)
+                        
+                        try:
+                            validation_failed_event = {
+                                "event_type": "VALIDATION_FAILED",
+                                "actor_hotkey": event.actor_hotkey,
+                                "nonce": str(uuid.uuid4()),
+                                "ts": datetime.now(tz.utc).isoformat(),
+                                "payload_hash": hashlib.sha256(json.dumps({
+                                    "lead_id": event.payload.lead_id,
+                                    "reason": "duplicate_linkedin_combo_approved",
+                                    "linkedin_combo_hash": actual_linkedin_combo_hash
+                                }, sort_keys=True).encode()).hexdigest(),
+                                "build_id": "gateway",
+                                "signature": "linkedin_combo_duplicate_check",
+                                "payload": {
+                                    "lead_id": event.payload.lead_id,
+                                    "reason": "duplicate_linkedin_combo_approved",
+                                    "linkedin_combo_hash": actual_linkedin_combo_hash,
+                                    "original_lead_id": linkedin_consensus_lead_id,
+                                    "miner_hotkey": event.actor_hotkey
+                                }
+                            }
+                            await log_event(validation_failed_event)
+                        except Exception as e:
+                            print(f"      ⚠️  Failed to log VALIDATION_FAILED: {e}")
+                        
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "error": "duplicate_linkedin_combo",
+                                "message": "This person+company combination has already been approved. Same person at same company cannot be submitted with different email.",
+                                "linkedin_combo_hash": actual_linkedin_combo_hash[:16] + "...",
+                                "original_lead_id": linkedin_consensus_lead_id,
+                                "rate_limit_stats": {
+                                    "submissions": updated_stats["submissions"],
+                                    "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                                    "rejections": updated_stats["rejections"],
+                                    "max_rejections": MAX_REJECTIONS_PER_DAY,
+                                    "reset_at": updated_stats["reset_at"]
+                                }
+                            }
+                        )
+                    
+                    elif linkedin_final_decision == "deny":
+                        # Was rejected - allow resubmission
+                        print(f"   ✅ LinkedIn combo was previously REJECTED - allowing resubmission")
+                
+                else:
+                    # No CONSENSUS_RESULT - check for pending SUBMISSION_REQUEST
+                    linkedin_submission_check = supabase.table("transparency_log") \
+                        .select("payload, created_at, actor_hotkey") \
+                        .eq("linkedin_combo_hash", actual_linkedin_combo_hash) \
+                        .eq("event_type", "SUBMISSION_REQUEST") \
+                        .order("created_at", desc=True) \
+                        .limit(1) \
+                        .execute()
+                    
+                    if linkedin_submission_check.data:
+                        # There's a submission but no consensus yet - BLOCK (still processing)
+                        existing_linkedin = linkedin_submission_check.data[0]
+                        existing_linkedin_payload = existing_linkedin.get("payload", {})
+                        if isinstance(existing_linkedin_payload, str):
+                            existing_linkedin_payload = json.loads(existing_linkedin_payload)
+                        
+                        existing_linkedin_lead_id = existing_linkedin_payload.get("lead_id", "unknown")
+                        existing_linkedin_time = existing_linkedin.get("created_at")
+                        
+                        print(f"   ❌ Duplicate person+company detected - still PROCESSING!")
+                        print(f"      Pending lead: {existing_linkedin_lead_id[:10]}..., ts={existing_linkedin_time}")
+                        
+                        updated_stats = mark_submission_failed(event.actor_hotkey)
+                        
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "error": "duplicate_linkedin_combo_processing",
+                                "message": "This person+company combination is currently being processed. Please wait for consensus.",
+                                "linkedin_combo_hash": actual_linkedin_combo_hash[:16] + "...",
+                                "original_lead_id": existing_linkedin_lead_id,
+                                "rate_limit_stats": {
+                                    "submissions": updated_stats["submissions"],
+                                    "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                                    "rejections": updated_stats["rejections"],
+                                    "max_rejections": MAX_REJECTIONS_PER_DAY,
+                                    "reset_at": updated_stats["reset_at"]
+                                }
+                            }
+                        )
+                    
+                    # No prior submission - new person+company combo!
+                    print(f"   ✅ No prior LinkedIn combo found - unique person+company")
+            
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"   ⚠️  LinkedIn combo duplicate check error: {e}")
+                # Continue anyway - don't block on check failure
         
         # ========================================
         # CRITICAL: Validate Required Fields (README.md lines 239-258)
@@ -1231,6 +1575,39 @@ async def submit_lead(event: SubmitLeadEvent):
             # Note: salt is NOT stored here - validators generate their own salt
             # for the commit-reveal scheme and store it in validation_evidence_private
             
+            # ========================================
+            # Handle resubmission of denied leads
+            # ========================================
+            # If Step 6.5 allowed resubmission (because prior lead was denied),
+            # we need to delete the old denied record before inserting new one.
+            # The CONSENSUS_RESULT for the denied lead is already in transparency_log (immutable).
+            submitted_email = lead_blob.get("email", "").strip().lower()
+            if submitted_email:
+                try:
+                    # Check if there's a denied lead with same email
+                    denied_check = supabase.table("leads_private") \
+                        .select("lead_id") \
+                        .eq("lead_blob->>email", submitted_email) \
+                        .eq("status", "denied") \
+                        .limit(1) \
+                        .execute()
+                    
+                    if denied_check.data:
+                        old_lead_id = denied_check.data[0].get("lead_id")
+                        print(f"   🔄 Found denied lead with same email: {old_lead_id[:10]}...")
+                        print(f"      Deleting old record to allow resubmission (CONSENSUS_RESULT preserved in transparency_log)")
+                        
+                        # Delete the old denied record
+                        supabase.table("leads_private") \
+                            .delete() \
+                            .eq("lead_id", old_lead_id) \
+                            .execute()
+                        
+                        print(f"   ✅ Old denied lead deleted - resubmission can proceed")
+                except Exception as cleanup_error:
+                    print(f"   ⚠️  Error during denied lead cleanup: {cleanup_error}")
+                    # Continue anyway - insert might still succeed if no constraint conflict
+            
             lead_private_entry = {
                 "lead_id": event.payload.lead_id,
                 "lead_blob_hash": committed_lead_blob_hash,
@@ -1250,6 +1627,7 @@ async def submit_lead(event: SubmitLeadEvent):
             if "duplicate" in error_str or "unique" in error_str or "23505" in error_str:
                 print(f"❌ Duplicate email detected at database level (race condition caught)!")
                 print(f"   Email from lead_blob: {lead_blob.get('email', 'unknown')}")
+                print(f"   This could be a lead that's still processing (not yet denied)")
                 
                 # Mark submission as failed (FAILURE - duplicate at DB level)
                 # NOTE: Submission slot was already reserved in Step 2.5, just increment rejections
@@ -1260,7 +1638,7 @@ async def submit_lead(event: SubmitLeadEvent):
                     status_code=409,  # 409 Conflict
                     detail={
                         "error": "duplicate_email",
-                        "message": "This email has already been submitted to the network (race condition)",
+                        "message": "This email is still being processed or has been approved (race condition)",
                         "email_hash": committed_email_hash,
                         "rate_limit_stats": {
                             "submissions": updated_stats["submissions"],
@@ -1287,6 +1665,7 @@ async def submit_lead(event: SubmitLeadEvent):
                 "lead_id": event.payload.lead_id,
                 "lead_blob_hash": committed_lead_blob_hash,
                 "email_hash": committed_email_hash,
+                "linkedin_combo_hash": actual_linkedin_combo_hash if actual_linkedin_combo_hash else None,
                 "miner_hotkey": event.actor_hotkey,
                 "submission_timestamp": datetime.now(tz.utc).isoformat(),
                 "s3_proof_tee_seq": storage_proof_tee_seqs.get("s3")

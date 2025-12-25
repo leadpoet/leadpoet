@@ -28,6 +28,7 @@ from gateway.utils.epoch import (
     get_block_within_epoch
 )
 from gateway.utils.merkle import compute_merkle_root
+from gateway.utils.linkedin import normalize_linkedin_url, compute_linkedin_combo_hash
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BUILD_ID, MAX_LEADS_PER_EPOCH
 from supabase import create_client
 
@@ -1010,6 +1011,7 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
         )
         
         email_hash = None
+        linkedin_combo_hash = None
         is_icp_multiplier = 1.0  # Default for old leads
         if lead_result.data and len(lead_result.data) > 0:
             lead_blob = lead_result.data[0].get("lead_blob", {})
@@ -1020,6 +1022,11 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
             email = lead_blob.get("email", "").strip().lower()
             if email:
                 email_hash = hashlib.sha256(email.encode()).hexdigest()
+            
+            # Compute linkedin_combo_hash for person+company duplicate detection
+            linkedin_url = lead_blob.get("linkedin", "")
+            company_linkedin_url = lead_blob.get("company_linkedin", "")
+            linkedin_combo_hash = compute_linkedin_combo_hash(linkedin_url, company_linkedin_url)
             
             # Get ICP multiplier (from DB column, falls back to 1.0 if missing)
             is_icp_multiplier = lead_result.data[0].get("is_icp_multiplier", 1.0)
@@ -1047,7 +1054,8 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
             "build_id": BUILD_ID,
             "signature": "system",  # No signature for system events
             "payload": payload,
-            "email_hash": email_hash  # Add email_hash for transparency_log table
+            "email_hash": email_hash,  # Add email_hash for transparency_log table
+            "linkedin_combo_hash": linkedin_combo_hash  # Add for person+company duplicate detection
         }
         
         # Write to TEE buffer (authoritative, hardware-protected)
@@ -1056,7 +1064,8 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
         result = await log_event(log_entry)
         
         tee_sequence = result.get("sequence")
-        print(f"         📊 Logged CONSENSUS_RESULT for lead {lead_id[:8]}... (TEE seq={tee_sequence}, email_hash={email_hash[:16] if email_hash else 'NULL'}...)")
+        linkedin_hash_display = linkedin_combo_hash[:16] if linkedin_combo_hash else 'NULL'
+        print(f"         📊 Logged CONSENSUS_RESULT for lead {lead_id[:8]}... (TEE seq={tee_sequence}, email={email_hash[:16] if email_hash else 'NULL'}..., linkedin_combo={linkedin_hash_display}...)")
     
     except Exception as e:
         print(f"         ❌ Failed to log CONSENSUS_RESULT for lead {lead_id[:8]}...: {e}")

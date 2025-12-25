@@ -6837,8 +6837,12 @@ def _gse_search_stage5_sync(
         #
         # Query 2: "{linkedin_url}" {claimed_region}
         # Example: "{linkedin_url}" United States, New York, Manhattan
+        #
+        # Query 3: "{linkedin_url}" "{role}" (forces experience section with location)
+        # Example: "{linkedin_url}" "Technical Director" → returns work history with location
         linkedin_url = kwargs.get("linkedin_url", "")
         region_hint = kwargs.get("region_hint", "")  # country, state, city combined
+        role = kwargs.get("role", "")
         
         queries = []
         fallback_queries = []
@@ -6850,6 +6854,10 @@ def _gse_search_stage5_sync(
             # Secondary: LinkedIn URL + miner's claimed region (country, state, city)
             if region_hint:
                 queries.append(f'"{linkedin_url}" {region_hint}')
+            
+            # Tertiary: LinkedIn URL + role (forces Google to return experience section with location)
+            if role:
+                queries.append(f'"{linkedin_url}" "{role}"')
     elif search_type == "industry":
         region_hint = kwargs.get("region_hint", "")
         if region_hint:
@@ -7790,7 +7798,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             full_name=full_name,
             company=company,
             linkedin_url=linkedin_url,
-            region_hint=claimed_region
+            region_hint=claimed_region,
+            role=claimed_role
         )
         tasks.append(person_location_task)
         task_names.append("person_location")

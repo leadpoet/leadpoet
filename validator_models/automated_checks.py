@@ -6926,6 +6926,23 @@ def _gse_search_stage5_sync(
                         break
                 if role_found:
                     return all_results
+            elif search_type == "person_location":
+                # For person_location: only return if we actually extracted a location
+                # Otherwise continue to next query (e.g., Query 2 or 3)
+                location_found = False
+                for r in results:
+                    snippet = r.get("body", r.get("snippet", ""))
+                    title = r.get("title", "")
+                    combined = title + " " + snippet
+                    extracted_loc = extract_person_location_from_linkedin_snippet(combined)
+                    if extracted_loc:
+                        location_found = True
+                        print(f"   ✅ Found location in query: '{extracted_loc}'")
+                        break
+                if location_found:
+                    return results
+                else:
+                    print(f"   ⚠️ Query returned results but no location extracted - trying next query...")
             else:
                 return results
     

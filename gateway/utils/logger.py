@@ -216,6 +216,16 @@ async def log_event(event: dict) -> Dict:
             if not email_hash:
                 email_hash = event.get("email_hash")
             
+            # Extract linkedin_combo_hash from payload or top-level event
+            # This is for person+company duplicate detection
+            linkedin_combo_hash = None
+            if payload and isinstance(payload, dict):
+                linkedin_combo_hash = payload.get("linkedin_combo_hash")
+            
+            # Fallback: check top-level event
+            if not linkedin_combo_hash:
+                linkedin_combo_hash = event.get("linkedin_combo_hash")
+            
             # Create Supabase entry with correct column names
             supabase_entry = {
                 "event_type": event.get("event_type"),
@@ -231,7 +241,9 @@ async def log_event(event: dict) -> Dict:
                 "tee_buffered_at": datetime.utcnow().isoformat(),
                 "tee_buffer_size": buffer_size,
                 # Email hash for duplicate detection (extracted from payload)
-                "email_hash": email_hash
+                "email_hash": email_hash,
+                # LinkedIn combo hash for person+company duplicate detection
+                "linkedin_combo_hash": linkedin_combo_hash
             }
             
             # Remove None values (optional fields)

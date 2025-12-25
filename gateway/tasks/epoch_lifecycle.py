@@ -608,12 +608,12 @@ async def compute_epoch_consensus(epoch_id: int):
             while True:
                 evidence_batch = await asyncio.to_thread(
                     lambda o=offset: supabase.table("validation_evidence_private")
-                        .select("evidence_id, validator_hotkey")
-                        .eq("epoch_id", epoch_id)
-                        .not_.is_("decision", "null")
+                    .select("evidence_id, validator_hotkey")
+                    .eq("epoch_id", epoch_id)
+                    .not_.is_("decision", "null")
                         .range(o, o + batch_size - 1)
-                        .execute()
-                )
+                    .execute()
+            )
                 
                 if not evidence_batch.data:
                     break
@@ -689,10 +689,10 @@ async def compute_epoch_consensus(epoch_id: int):
         while True:
             result = await asyncio.to_thread(
                 lambda o=offset: supabase.table("validation_evidence_private")
-                    .select("lead_id")
-                    .eq("epoch_id", epoch_id)
-                    .range(o, o + batch_size - 1)
-                    .execute()
+                .select("lead_id")
+                .eq("epoch_id", epoch_id)
+                .range(o, o + batch_size - 1)
+                .execute()
             )
             
             if not result.data:

@@ -1638,17 +1638,23 @@ def sync_metagraph_to_supabase(metagraph, netuid: int) -> bool:
 
 def check_email_duplicate(email: str) -> bool:
     """
-    Check if an email has already been submitted by querying the public transparency_log.
+    Check if a lead is a duplicate by querying the public transparency_log.
     
     This allows miners to detect duplicates BEFORE wasting time on presign/upload.
     The transparency_log is PUBLIC (read-only via SUPABASE_ANON_KEY).
+    
+    IMPORTANT: A lead is only a duplicate if:
+    - It was APPROVED (final_decision="approve" in CONSENSUS_RESULT)
+    - It is still PROCESSING (SUBMISSION exists but no CONSENSUS_RESULT yet)
+    
+    If a lead was REJECTED (final_decision="deny"), it is NOT a duplicate and can be resubmitted.
     
     Args:
         email: Email address to check (will be normalized: lowercase, trimmed)
         
     Returns:
-        True if email is a duplicate (already in transparency_log)
-        False if email is unique (safe to submit)
+        True if email is a duplicate (approved or processing)
+        False if email is unique OR was previously rejected (safe to submit)
     """
     try:
         import hashlib
@@ -1663,31 +1669,236 @@ def check_email_duplicate(email: str) -> bool:
         # Use ANON key for public read-only access to transparency_log
         supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
         
-        # Query transparency_log for this email_hash
-        # CRITICAL: Only check SUBMISSION events (successful submissions)
-        # NOT SUBMISSION_REQUEST events (which exist even if validation failed)
-        result = supabase.table("transparency_log") \
-            .select("id, actor_hotkey, ts, event_type") \
+        # Step 1: Check for CONSENSUS_RESULT (final decision)
+        # This tells us if the lead was approved or rejected
+        consensus_check = supabase.table("transparency_log") \
+            .select("payload, created_at") \
             .eq("email_hash", email_hash) \
-            .eq("event_type", "SUBMISSION") \
+            .eq("event_type", "CONSENSUS_RESULT") \
+            .order("created_at", desc=True) \
             .limit(1) \
             .execute()
         
-        if result.data and len(result.data) > 0:
-            # Duplicate found!
-            existing = result.data[0]
-            bt.logging.warning(f"⚠️  DUPLICATE DETECTED: Email already submitted")
-            bt.logging.warning(f"   Original submission: {existing.get('ts', 'unknown time')}")
+        if consensus_check.data and len(consensus_check.data) > 0:
+            consensus = consensus_check.data[0]
+            payload = consensus.get("payload", {})
+            if isinstance(payload, str):
+                import json
+                payload = json.loads(payload)
+            
+            final_decision = payload.get("final_decision")
+            consensus_time = consensus.get("created_at")
+            
+            if final_decision == "approve":
+                # Already approved - this IS a duplicate
+                bt.logging.warning(f"⚠️  DUPLICATE DETECTED: Email already APPROVED")
+                bt.logging.warning(f"   Consensus time: {consensus_time}")
+                return True
+            elif final_decision == "deny":
+                # Was rejected - NOT a duplicate, can resubmit
+                print(f"✅ Previous submission was REJECTED - resubmission allowed")
+                return False
+            else:
+                # Unknown decision - treat as duplicate to be safe
+                bt.logging.warning(f"⚠️  Unknown consensus decision '{final_decision}' - treating as duplicate")
+                return True
+        
+        # Step 2: No CONSENSUS_RESULT - check if there's a pending SUBMISSION
+        submission_check = supabase.table("transparency_log") \
+            .select("id, actor_hotkey, created_at") \
+            .eq("email_hash", email_hash) \
+            .eq("event_type", "SUBMISSION") \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+        
+        if submission_check.data and len(submission_check.data) > 0:
+            # There's a submission but no consensus yet - still processing
+            existing = submission_check.data[0]
+            bt.logging.warning(f"⚠️  DUPLICATE DETECTED: Email still PROCESSING")
+            bt.logging.warning(f"   Submission time: {existing.get('created_at', 'unknown')}")
             bt.logging.warning(f"   Original miner: {existing.get('actor_hotkey', 'unknown')[:20]}...")
             return True
         
-        # No duplicate found
-        print(f"✅ No duplicate found - lead is unique")
+        # No prior submission at all - unique email
+        print(f"✅ No duplicate found - email is unique")
         return False
         
     except Exception as e:
         bt.logging.warning(f"Failed to check duplicate (assuming not duplicate): {e}")
         # If check fails, assume not duplicate (don't block submission)
+        return False
+
+
+def normalize_linkedin_url(url: str, url_type: str = "profile") -> str:
+    """
+    Normalize LinkedIn URL to canonical form for duplicate detection.
+    Must match gateway/utils/linkedin.py EXACTLY.
+    
+    Args:
+        url: Raw LinkedIn URL
+        url_type: "profile" for personal (/in/), "company" for company pages (/company/)
+    
+    Returns:
+        Canonical form: "linkedin.com/in/{slug}" or "linkedin.com/company/{slug}"
+        Empty string if URL is invalid/not LinkedIn
+    """
+    import re
+    from urllib.parse import unquote
+    
+    if not url or not isinstance(url, str):
+        return ""
+    
+    # URL decode first
+    try:
+        url = unquote(url)
+    except:
+        pass
+    
+    # Strip whitespace and convert to lowercase
+    url = url.strip().lower()
+    
+    # Remove protocol (http://, https://)
+    url = re.sub(r'^https?://', '', url)
+    
+    # Remove www. prefix
+    url = re.sub(r'^www\.', '', url)
+    
+    # Must start with linkedin.com
+    if not url.startswith('linkedin.com'):
+        return ""
+    
+    # Remove query params and fragments
+    url = url.split('?')[0].split('#')[0]
+    
+    # Clean up multiple slashes and remove trailing slash
+    url = re.sub(r'/+', '/', url)
+    url = url.rstrip('/')
+    
+    # Extract slug based on type
+    if url_type == "profile":
+        match = re.search(r'linkedin\.com/in/([^/]+)', url)
+        if match:
+            slug = match.group(1)
+            return f"linkedin.com/in/{slug}"
+    elif url_type == "company":
+        match = re.search(r'linkedin\.com/company/([^/]+)', url)
+        if match:
+            slug = match.group(1)
+            return f"linkedin.com/company/{slug}"
+    
+    return ""
+
+
+def compute_linkedin_combo_hash(linkedin_url: str, company_linkedin_url: str) -> str:
+    """
+    Compute SHA256 hash of normalized linkedin + company_linkedin combination.
+    Must match gateway/utils/linkedin.py EXACTLY.
+    
+    Args:
+        linkedin_url: Personal LinkedIn profile URL
+        company_linkedin_url: Company LinkedIn page URL
+    
+    Returns:
+        SHA256 hex digest, or empty string if either URL is invalid
+    """
+    import hashlib
+    
+    normalized_profile = normalize_linkedin_url(linkedin_url, "profile")
+    normalized_company = normalize_linkedin_url(company_linkedin_url, "company")
+    
+    # Both must be valid for a meaningful hash
+    if not normalized_profile or not normalized_company:
+        return ""
+    
+    # Combine with || separator (must match gateway)
+    combined = f"{normalized_profile}||{normalized_company}"
+    
+    return hashlib.sha256(combined.encode()).hexdigest()
+
+
+def check_linkedin_combo_duplicate(linkedin_url: str, company_linkedin_url: str) -> bool:
+    """
+    Check if a person+company LinkedIn combo is a duplicate.
+    
+    Same logic as email duplicate check:
+    - APPROVED → duplicate (block)
+    - PROCESSING → duplicate (block)
+    - REJECTED → not duplicate (allow resubmission)
+    - NOT FOUND → not duplicate (unique)
+    
+    Args:
+        linkedin_url: Personal LinkedIn profile URL
+        company_linkedin_url: Company LinkedIn page URL
+        
+    Returns:
+        True if duplicate (approved or processing)
+        False if unique or was rejected (safe to submit)
+    """
+    try:
+        from supabase import create_client
+        
+        # Compute linkedin combo hash (same as gateway)
+        linkedin_combo_hash = compute_linkedin_combo_hash(linkedin_url, company_linkedin_url)
+        
+        if not linkedin_combo_hash:
+            # Invalid URLs - can't compute hash, skip this check
+            print(f"⚠️  Could not compute LinkedIn combo hash (invalid URLs)")
+            return False
+        
+        # Use ANON key for public read-only access
+        supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        
+        # Step 1: Check for CONSENSUS_RESULT
+        consensus_check = supabase.table("transparency_log") \
+            .select("payload, created_at") \
+            .eq("linkedin_combo_hash", linkedin_combo_hash) \
+            .eq("event_type", "CONSENSUS_RESULT") \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+        
+        if consensus_check.data and len(consensus_check.data) > 0:
+            consensus = consensus_check.data[0]
+            payload = consensus.get("payload", {})
+            if isinstance(payload, str):
+                import json
+                payload = json.loads(payload)
+            
+            final_decision = payload.get("final_decision")
+            
+            if final_decision == "approve":
+                bt.logging.warning(f"⚠️  DUPLICATE DETECTED: Person+Company already APPROVED")
+                bt.logging.warning(f"   LinkedIn combo hash: {linkedin_combo_hash[:16]}...")
+                return True
+            elif final_decision == "deny":
+                print(f"✅ Previous person+company submission was REJECTED - resubmission allowed")
+                return False
+            else:
+                bt.logging.warning(f"⚠️  Unknown consensus decision '{final_decision}' - treating as duplicate")
+                return True
+        
+        # Step 2: Check for pending SUBMISSION
+        submission_check = supabase.table("transparency_log") \
+            .select("id, created_at") \
+            .eq("linkedin_combo_hash", linkedin_combo_hash) \
+            .eq("event_type", "SUBMISSION") \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+        
+        if submission_check.data and len(submission_check.data) > 0:
+            existing = submission_check.data[0]
+            bt.logging.warning(f"⚠️  DUPLICATE DETECTED: Person+Company still PROCESSING")
+            bt.logging.warning(f"   Submission time: {existing.get('created_at', 'unknown')}")
+            return True
+        
+        # No prior submission
+        print(f"✅ No duplicate found - person+company combo is unique")
+        return False
+        
+    except Exception as e:
+        bt.logging.warning(f"Failed to check LinkedIn combo duplicate (assuming not duplicate): {e}")
         return False
 
 
@@ -2257,10 +2468,10 @@ def _submit_reveal_batch(wallet: bt.wallet, epoch_id: int, reveal_batch: List[Di
             # Submit reveal batch
             # CRITICAL: Must serialize with default=str to handle datetime objects in rejection_reason
             reveal_payload = {
-                "validator_hotkey": wallet.hotkey.ss58_address,
-                "epoch_id": epoch_id,
-                "signature": signature,
-                "nonce": nonce,
+                    "validator_hotkey": wallet.hotkey.ss58_address,
+                    "epoch_id": epoch_id,
+                    "signature": signature,
+                    "nonce": nonce,
                 "reveals": reveal_batch
             }
             reveal_json = json.dumps(reveal_payload, default=str)

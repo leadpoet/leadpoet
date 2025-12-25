@@ -28,6 +28,7 @@ from Leadpoet.utils.cloud_db import (
     push_prospects_to_cloud,
     fetch_miner_curation_request,
     push_miner_curation_result,
+    check_linkedin_combo_duplicate,
 )
 import logging
 import random
@@ -214,12 +215,26 @@ class Miner(BaseMinerNeuron):
                     for lead in sanitized:
                         business_name = lead.get('business', 'Unknown')
                         email = lead.get('email', '')
+                        linkedin_url = lead.get('linkedin', '')
+                        company_linkedin_url = lead.get('company_linkedin', '')
                         
-                        # Step 0: Check for duplicate BEFORE calling presign (saves time & rate limit)
+                        # Step 0: Check for duplicates BEFORE calling presign (saves time & rate limit)
+                        # Check both email AND linkedin combo (person+company)
+                        
+                        # Check email duplicate (approved or processing = skip, rejected = allow)
                         if check_email_duplicate(email):
-                            print(f"⏭️  Skipping duplicate: {business_name} ({email})")
+                            print(f"⏭️  Skipping duplicate email: {business_name} ({email})")
                             duplicate_count += 1
                             continue
+                        
+                        # Check linkedin combo duplicate (same logic: approved/processing = skip, rejected = allow)
+                        if linkedin_url and company_linkedin_url:
+                            if check_linkedin_combo_duplicate(linkedin_url, company_linkedin_url):
+                                print(f"⏭️  Skipping duplicate person+company: {business_name}")
+                                print(f"      LinkedIn: {linkedin_url[:50]}...")
+                                print(f"      Company: {company_linkedin_url[:50]}...")
+                                duplicate_count += 1
+                                continue
                         
                         # Step 1: Get presigned URLs (gateway logs SUBMISSION_REQUEST with committed hash)
                         presign_result = gateway_get_presigned_url(self.wallet, lead)

@@ -170,6 +170,18 @@ async def get_metagraph_async() -> bt.metagraph:
                         timeout=timeout_per_attempt
                     )
                     print(f"✅ Sync fallback succeeded!")
+                    print(f"   Network: {BITTENSOR_NETWORK}, NetUID: {BITTENSOR_NETUID}")
+                    print(f"   Timeout: {timeout_per_attempt}s")
+                    
+                    # Update cache and return (don't fall through to async path)
+                    with _cache_lock:
+                        _metagraph_cache = metagraph
+                        _cache_epoch = current_epoch
+                        _cache_epoch_timestamp = time.time()
+                        _fetch_in_progress = False
+                    
+                    print(f"✅ Metagraph cached for epoch {current_epoch}: {len(metagraph.hotkeys)} neurons registered (via sync fallback)")
+                    return metagraph
                 else:
                     # ════════════════════════════════════════════════════════════
                     # ASYNC PATH: Use shared AsyncSubtensor (fast when healthy)

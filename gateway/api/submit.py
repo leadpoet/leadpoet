@@ -448,7 +448,7 @@ async def submit_lead(event: SubmitLeadEvent):
     # 1. Check for CONSENSUS_RESULT events with this email_hash
     # 2. If most recent consensus is 'deny' → ALLOW resubmission (rejected leads can retry)
     # 3. If most recent consensus is 'approve' → BLOCK (already approved)
-    # 4. If NO consensus yet but SUBMISSION_REQUEST exists → BLOCK (still processing)
+    # 4. If NO consensus yet but SUBMISSION exists → BLOCK (still processing)
     # 5. If no records at all → ALLOW (new email)
     #
     # This is 100% verifiable: miners can run the EXACT same query to check fairness
@@ -562,11 +562,13 @@ async def submit_lead(event: SubmitLeadEvent):
             # No CONSENSUS_RESULT found - check if there's a pending submission
             print(f"   No CONSENSUS_RESULT found for this email")
             
-            # Check for any SUBMISSION_REQUEST with this email (still processing)
+            # Check for any SUBMISSION with this email (still processing)
+            # NOTE: SUBMISSION (not SUBMISSION_REQUEST) means lead was actually accepted into queue
+            # SUBMISSION_REQUEST is just the presign intent - doesn't mean lead was accepted
             submission_check = supabase.table("transparency_log") \
                 .select("payload, created_at, actor_hotkey") \
                 .eq("email_hash", committed_email_hash) \
-                .eq("event_type", "SUBMISSION_REQUEST") \
+                .eq("event_type", "SUBMISSION") \
                 .order("created_at", desc=True) \
                 .limit(1) \
                 .execute()
@@ -642,7 +644,7 @@ async def submit_lead(event: SubmitLeadEvent):
                     }
                 )
             
-            # No SUBMISSION_REQUEST either - new email!
+            # No SUBMISSION either - new email!
             print(f"✅ No prior submission found - email is unique")
         
     except HTTPException:
@@ -918,11 +920,12 @@ async def submit_lead(event: SubmitLeadEvent):
                         print(f"   ✅ LinkedIn combo was previously REJECTED - allowing resubmission")
                 
                 else:
-                    # No CONSENSUS_RESULT - check for pending SUBMISSION_REQUEST
+                    # No CONSENSUS_RESULT - check for pending SUBMISSION
+                    # NOTE: SUBMISSION (not SUBMISSION_REQUEST) means lead was actually accepted into queue
                     linkedin_submission_check = supabase.table("transparency_log") \
                         .select("payload, created_at, actor_hotkey") \
                         .eq("linkedin_combo_hash", actual_linkedin_combo_hash) \
-                        .eq("event_type", "SUBMISSION_REQUEST") \
+                        .eq("event_type", "SUBMISSION") \
                         .order("created_at", desc=True) \
                         .limit(1) \
                         .execute()

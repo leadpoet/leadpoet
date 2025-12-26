@@ -2041,6 +2041,28 @@ class Validator(BaseValidatorNeuron):
             
             # Run batch validation (handles TrueList batch + sequential stages with 1s delays)
             # Coordinator is container_id=0, submits TrueList batch immediately (no stagger delay)
+            # 
+            # CRITICAL: Batch validation takes 10+ minutes. During this time, we MUST keep
+            # updating the block file so workers don't see stale data and get stuck.
+            # Solution: Run a background task that updates block file every 10 seconds.
+            
+            async def block_file_updater():
+                """Background task to keep block file fresh during batch validation."""
+                while True:
+                    try:
+                        await asyncio.sleep(10)  # Update every 10 seconds
+                        current_block_bg = await self.get_current_block_async()
+                        current_epoch_bg = current_block_bg // 360
+                        blocks_into_epoch_bg = current_block_bg % 360
+                        self._write_shared_block_file(current_block_bg, current_epoch_bg, blocks_into_epoch_bg)
+                    except asyncio.CancelledError:
+                        break  # Stop when batch validation completes
+                    except Exception as e:
+                        print(f"   ⚠️ Block file update error: {e}")
+            
+            # Start block file updater in background
+            block_updater_task = asyncio.create_task(block_file_updater())
+            
             try:
                 batch_results = await run_batch_automated_checks(lead_blobs, container_id=0)
             except Exception as e:
@@ -2059,6 +2081,13 @@ class Validator(BaseValidatorNeuron):
                     })
                     for _ in leads
                 ]
+            finally:
+                # Stop the block file updater
+                block_updater_task.cancel()
+                try:
+                    await block_updater_task
+                except asyncio.CancelledError:
+                    pass
             
             print(f"\n📦 Batch validation complete. Processing {len(batch_results)} results...")
             

@@ -687,13 +687,13 @@ async def compute_epoch_consensus(epoch_id: int):
         batch_size = 1000
         
         while True:
-        result = await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 lambda o=offset: supabase.table("validation_evidence_private")
-                .select("lead_id")
-                .eq("epoch_id", epoch_id)
+                    .select("lead_id")
+                    .eq("epoch_id", epoch_id)
                     .range(o, o + batch_size - 1)
-                .execute()
-        )
+                    .execute()
+            )
             
             if not result.data:
                 break

@@ -2587,26 +2587,36 @@ async def submit_and_poll_truelist(emails: List[str]) -> Tuple[str, Dict[str, di
     return batch_id, results
 
 
-async def retry_truelist_batch(emails: List[str]) -> Dict[str, dict]:
+async def retry_truelist_batch(emails: List[str], prev_batch_id: str = None) -> Tuple[str, Dict[str, dict]]:
     """
     Submit a retry batch and poll for results.
+    
+    IMPORTANT: If prev_batch_id is provided, deletes it first to clear
+    TrueList's duplicate detection before submitting the retry.
     
     On exception, marks all emails as needs_retry=True so the orchestrator
     can decide whether to retry again or skip.
     
     Args:
         emails: List of email addresses to retry validation
+        prev_batch_id: Optional batch_id from previous retry to delete first
     
     Returns:
-        Dict mapping email -> result dict
+        Tuple of (batch_id, results_dict)
+        On error, returns (None, {email: needs_retry=True})
     """
     try:
+        # Delete previous retry batch if provided (clears duplicate detection)
+        if prev_batch_id:
+            await delete_truelist_batch(prev_batch_id)
+        
         batch_id = await submit_truelist_batch(emails)
-        return await poll_truelist_batch(batch_id)
+        results = await poll_truelist_batch(batch_id)
+        return batch_id, results
     except Exception as e:
         print(f"   ⚠️  Retry batch failed: {str(e)[:100]}")
         # On error, mark all as needing retry (orchestrator will decide next step)
-        return {email: {"needs_retry": True, "error": str(e)} for email in emails}
+        return None, {email: {"needs_retry": True, "error": str(e)} for email in emails}
 
 
 # ============================================================================
@@ -3212,24 +3222,33 @@ async def delete_truelist_batch(batch_id: str) -> bool:
         return False
 
 
-async def retry_truelist_batch(emails: List[str]) -> Dict[str, dict]:
+async def retry_truelist_batch(emails: List[str], prev_batch_id: str = None) -> Tuple[str, Dict[str, dict]]:
     """
     Submit a retry batch and poll for results.
     
+    IMPORTANT: If prev_batch_id is provided, deletes it first to clear
+    TrueList's duplicate detection before submitting the retry.
+    
     Args:
         emails: List of email addresses to retry
+        prev_batch_id: Optional batch_id from previous retry to delete first
     
     Returns:
-        Dict mapping email -> result dict
-        On error, all emails marked as needs_retry=True
+        Tuple of (batch_id, results_dict)
+        On error, returns (None, {email: needs_retry=True})
     """
     try:
+        # Delete previous retry batch if provided (clears duplicate detection)
+        if prev_batch_id:
+            await delete_truelist_batch(prev_batch_id)
+        
         batch_id = await submit_truelist_batch(emails)
-        return await poll_truelist_batch(batch_id)
+        results = await poll_truelist_batch(batch_id)
+        return batch_id, results
     except Exception as e:
         print(f"   ⚠️ Retry batch error: {e}")
         # On error, mark all as needing retry
-        return {email: {"needs_retry": True, "error": str(e)} for email in emails}
+        return None, {email: {"needs_retry": True, "error": str(e)} for email in emails}
 
 
 async def run_batch_automated_checks(
@@ -3498,6 +3517,8 @@ async def run_batch_automated_checks(
     # Start retry batch if needed (runs in background)
     retry_task = None
     retry_attempt = 0
+    last_retry_batch_id = None  # Track retry batch_id for deletion before next retry
+    
     if needs_retry:
         # CRITICAL: Delete the original batch BEFORE retrying
         # TrueList detects duplicate email content and rejects re-submissions.
@@ -3506,7 +3527,7 @@ async def run_batch_automated_checks(
             await delete_truelist_batch(original_batch_id)
         
         print(f"   🔄 Starting retry batch #1 for {len(needs_retry)} emails...")
-        retry_task = asyncio.create_task(retry_truelist_batch(needs_retry))
+        retry_task = asyncio.create_task(retry_truelist_batch(needs_retry, None))
     
     # Process Stage 4-5 queue SEQUENTIALLY
     queue_idx = 0
@@ -3543,9 +3564,10 @@ async def run_batch_automated_checks(
         # Check if retry batch completed (non-blocking check)
         if retry_task is not None and retry_task.done():
             try:
-                retry_results = retry_task.result()
+                last_retry_batch_id, retry_results = retry_task.result()
             except Exception as e:
                 print(f"   ⚠️ Retry batch failed: {e}")
+                last_retry_batch_id = None
                 retry_results = {email: {"needs_retry": True, "error": str(e)} for email in needs_retry}
             
             retry_task = None
@@ -3580,7 +3602,8 @@ async def run_batch_automated_checks(
             # Start next retry if needed and haven't exceeded max
             if needs_retry and retry_attempt < TRUELIST_BATCH_MAX_RETRIES:
                 print(f"   🔄 Starting retry batch #{retry_attempt+1} for {len(needs_retry)} emails...")
-                retry_task = asyncio.create_task(retry_truelist_batch(needs_retry))
+                # Pass the previous retry batch_id so it gets deleted before new submission
+                retry_task = asyncio.create_task(retry_truelist_batch(needs_retry, last_retry_batch_id))
             
             print(f"   📊 After retry #{retry_attempt}: {len(still_needs_retry)} still pending, {len(stage4_5_queue) - queue_idx} added to queue")
         

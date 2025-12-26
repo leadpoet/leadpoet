@@ -2055,36 +2055,26 @@ async def submit_truelist_batch(emails: List[str]) -> str:
                 print(f"   ❌ No valid emails to submit (all filtered)")
                 return None  # Return None to indicate no batch was created
             
-            # IMPORTANT: TrueList batch API works better with file upload than data parameter
-            # The data parameter creates batches but emails don't appear in CSV results
-            # File upload method: Create CSV content and upload as file
+            # IMPORTANT: TrueList file upload is currently broken (returns 500)
+            # Using JSON data format instead which works correctly
+            # JSON format: {"data": [["email1"], ["email2"]], "validation_strategy": "accurate"}
             
-            # Create CSV content with email column header
-            csv_lines = ["email"]  # Header row
-            csv_lines.extend(valid_emails)  # One email per line
-            csv_content = "\n".join(csv_lines)
+            # Convert emails to JSON array format: [["email1"], ["email2"], ...]
+            email_data = [[email] for email in valid_emails]
             
-            # Build multipart form data with file upload
-            form_data = aiohttp.FormData()
+            json_payload = {
+                "data": email_data,
+                "validation_strategy": TRUELIST_BATCH_STRATEGY  # "accurate" or "fast"
+            }
             
-            # Add unique name to avoid "Duplicate file upload" error
-            unique_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-            
-            # Upload as CSV file - this is the format that works correctly
-            form_data.add_field('file', csv_content.encode('utf-8'), 
-                               filename=f'{unique_name}.csv',
-                               content_type='text/csv')
-            form_data.add_field('validation_strategy', TRUELIST_BATCH_STRATEGY)  # "accurate" or "fast"
-            
-            print(f"   📤 POST {url} (file upload)")
+            print(f"   📤 POST {url} (JSON format)")
             print(f"   📋 Strategy: {TRUELIST_BATCH_STRATEGY}")
-            print(f"   📋 File: {unique_name}.csv")
             print(f"   📊 Email count: {len(valid_emails)}")
             
             async with session.post(
                 url, 
                 headers=headers, 
-                data=form_data,  # Use form data, NOT json
+                json=json_payload,  # Use JSON format (file upload returns 500)
                 timeout=60,  # 60s timeout for batch submission
                 proxy=HTTP_PROXY_URL
             ) as response:

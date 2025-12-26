@@ -3243,13 +3243,14 @@ async def run_batch_automated_checks(
     # Step 1: Extract emails and build lookup maps
     # ========================================================================
     emails = []
-    email_to_idx = {}  # email -> index in leads list
+    email_to_idx = {}  # email (lowercase) -> index in leads list
     
     for i, lead in enumerate(leads):
         email = get_email(lead)
         if email:
-            emails.append(email)
-            email_to_idx[email] = i
+            email_lower = email.lower()  # Normalize to lowercase for matching with CSV results
+            emails.append(email_lower)
+            email_to_idx[email_lower] = i
         else:
             # No email - immediate rejection
             results[i] = (False, {
@@ -3406,15 +3407,16 @@ async def run_batch_automated_checks(
         if not email:
             continue
         
+        email_lower = email.lower()  # Use lowercase for lookup (CSV results are lowercase)
         stage0_2_passed, stage0_2_data = stage0_2_results[i]
-        email_result = email_results.get(email, {})
+        email_result = email_results.get(email_lower, {})
         
         if not stage0_2_passed:
             # Failed Stage 0-2 → immediate reject
             results[i] = (False, stage0_2_data)
         elif email_result.get("needs_retry"):
             # Email errored → queue for retry
-            needs_retry.append(email)
+            needs_retry.append(email_lower)
         elif email_result.get("passed"):
             # Both passed → queue for Stage 4-5
             stage4_5_queue.append((i, lead, email_result, stage0_2_data))

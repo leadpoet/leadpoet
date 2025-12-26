@@ -2358,16 +2358,51 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         print(f"   ✅ Batch completed!")
                         print(f"   📧 Total: {email_count}, OK: {ok_count}, Unknown: {unknown_count}")
                         
-                        # Get the annotated CSV URL
-                        annotated_csv_url = data.get("annotated_csv_url")
+                        # Debug: Log all keys in the response
+                        print(f"   🔍 API response keys: {list(data.keys())}")
+                        
+                        # Get the annotated CSV URL - try multiple possible fields
+                        annotated_csv_url = (
+                            data.get("annotated_csv_url") or 
+                            data.get("results_url") or 
+                            data.get("download_url") or
+                            data.get("csv_url")
+                        )
                         
                         if not annotated_csv_url:
-                            # Fallback: construct URL or use batch data directly
-                            print(f"   ⚠️  No annotated_csv_url in response, constructing from batch data...")
+                            # Try constructing the URL based on TrueList's known patterns
+                            # Pattern 1: /api/v1/batches/{id}/download
+                            constructed_url = f"https://api.truelist.io/api/v1/batches/{batch_id}/download"
+                            print(f"   ⚠️  No CSV URL in response, trying constructed URL: {constructed_url}")
+                            
+                            try:
+                                results = await _download_and_parse_batch_csv(constructed_url, headers)
+                                if results:
+                                    print(f"   ✅ Constructed URL worked! Parsed {len(results)} email results")
+                                    return results
+                            except Exception as download_err:
+                                print(f"   ⚠️  Constructed URL failed: {str(download_err)[:100]}")
+                            
+                            # Try constructing alternative URL pattern
+                            # Pattern 2: Direct download with batch ID
+                            alt_url = f"https://api.truelist.io/downloads/{batch_id}/annotated.csv"
+                            print(f"   ⚠️  Trying alternative URL: {alt_url}")
+                            
+                            try:
+                                results = await _download_and_parse_batch_csv(alt_url, headers)
+                                if results:
+                                    print(f"   ✅ Alternative URL worked! Parsed {len(results)} email results")
+                                    return results
+                            except Exception as alt_err:
+                                print(f"   ⚠️  Alternative URL failed: {str(alt_err)[:100]}")
+                            
+                            # Final fallback: Use batch stats (won't work for individual emails)
+                            print(f"   ❌ Could not download CSV results. Full response:")
+                            print(f"   {json.dumps(data, default=str)[:500]}")
                             return _parse_batch_status_from_response(data, batch_id)
                         
                         # Download and parse the CSV
-                        print(f"   📥 Downloading results from: {annotated_csv_url[:60]}...")
+                        print(f"   📥 Downloading results from: {annotated_csv_url[:80]}...")
                         results = await _download_and_parse_batch_csv(annotated_csv_url, headers)
                         
                         print(f"   ✅ Parsed {len(results)} email results")

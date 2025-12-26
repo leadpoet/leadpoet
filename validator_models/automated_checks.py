@@ -2229,9 +2229,18 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         print(f"   📊 Poll #{poll_count} ({elapsed:.0f}s): {batch_state} - {processed_count}/{email_count} ({progress_pct:.0f}%)")
                     
                     # Check if batch is complete
-                    if batch_state == "completed":
-                        print(f"   ✅ Batch completed!")
+                    # CRITICAL: TrueList may say "completed" before all emails are processed!
+                    # We must check BOTH state AND processed_count
+                    if batch_state == "completed" and processed_count >= email_count:
+                        print(f"   ✅ Batch fully completed!")
                         print(f"   📧 Total: {email_count}, OK: {ok_count}, Unknown: {unknown_count}")
+                    elif batch_state == "completed" and processed_count < email_count:
+                        # TrueList says completed but not all processed - keep polling!
+                        print(f"   ⚠️ Batch says 'completed' but only {processed_count}/{email_count} processed - continuing to poll...")
+                        await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
+                        continue
+                    
+                    if batch_state == "completed":
                         
                         # CRITICAL: Wait for CSV generation to finish
                         # TrueList's "completed" state doesn't mean CSV is ready

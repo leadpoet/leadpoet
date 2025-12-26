@@ -3924,9 +3924,8 @@ async def run_batch_automated_checks(
             
             queue_idx += 1
             
-            # 1-second delay between Stage 4-5 leads (rate limiting)
-            if queue_idx < len(stage4_5_queue):
-                await asyncio.sleep(1)
+            # No delay between Stage 4-5 leads - ScrapingDog/OpenRouter can handle it
+            # (Stage 0-2 still has 1s delay for DNS/HEAD request rate limiting)
         
         # Check if retry batch completed (non-blocking check)
         if retry_task is not None and retry_task.done():

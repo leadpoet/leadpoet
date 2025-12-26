@@ -701,7 +701,7 @@ TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 TRUELIST_BATCH_POLL_INTERVAL = 10  # seconds between status polls
 TRUELIST_BATCH_TIMEOUT = 40 * 60   # 40 minutes in seconds
 TRUELIST_BATCH_MAX_RETRIES = 2     # Max retry attempts for errored emails
-TRUELIST_BATCH_STRATEGY = "accurate"  # "accurate" (default) or "fast"
+TRUELIST_BATCH_STRATEGY = "fast"  # "fast" returns more complete results than "accurate"
 
 # Stage 4 & 5: ScrapingDog GSE API + OpenRouter LLM
 SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY", "")

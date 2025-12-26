@@ -2793,7 +2793,7 @@ async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
     
     # TrueList inline API accepts up to 3 emails per request (space-separated)
     BATCH_SIZE = 3
-    PASS_STATUSES = {"email_ok", "accept_all"}  # Both are valid for delivery
+    PASS_STATUSES = {"email_ok"}  # Only email_ok passes - accept_all is rejected
     RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error", "failed_greylisted"}
     
     print(f"   🔍 Inline verification for {len(emails)} emails (TrueList batch fallback)...")

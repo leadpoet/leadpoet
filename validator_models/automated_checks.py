@@ -2797,6 +2797,8 @@ async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
     RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error", "failed_greylisted"}
     
     print(f"   🔍 Inline verification for {len(emails)} emails (TrueList batch fallback)...")
+    import time as _time
+    _start = _time.time()
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -2823,6 +2825,10 @@ async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
                         data = await response.json()
                         email_results = data.get("emails", [])
                         
+                        # DEBUG: Log first response to see actual structure
+                        if i == 0 and email_results:
+                            print(f"   📋 Inline API first response: {email_results[0]}")
+                        
                         for email_data in email_results:
                             # TrueList inline uses "address" not "email_address"
                             email = email_data.get("address", email_data.get("email_address", email_data.get("email", ""))).lower()
@@ -2831,6 +2837,10 @@ async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
                             
                             email_state = email_data.get("email_state", "unknown")
                             email_sub_state = email_data.get("email_sub_state", email_state)
+                            
+                            # DEBUG: Log non-email_ok statuses
+                            if email_sub_state != "email_ok":
+                                print(f"   📋 Inline status: {email} -> {email_state}/{email_sub_state}")
                             
                             if email_sub_state in PASS_STATUSES:
                                 results[email] = {
@@ -2872,7 +2882,8 @@ async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
                 await asyncio.sleep(0.15)
         
         passed = sum(1 for r in results.values() if r.get("passed"))
-        print(f"   ✅ Inline verification: {passed}/{len(emails)} passed")
+        elapsed = _time.time() - _start
+        print(f"   ✅ Inline verification: {passed}/{len(emails)} passed ({elapsed:.1f}s)")
         return results
         
     except Exception as e:

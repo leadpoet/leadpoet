@@ -2370,36 +2370,55 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         )
                         
                         if not annotated_csv_url:
-                            # Try constructing the URL based on TrueList's known patterns
-                            # Pattern 1: /api/v1/batches/{id}/download
-                            constructed_url = f"https://api.truelist.io/api/v1/batches/{batch_id}/download"
-                            print(f"   ⚠️  No CSV URL in response, trying constructed URL: {constructed_url}")
+                            # CSV URL is null - TrueList may still be generating it
+                            # Wait and retry polling a few times before falling back
+                            CSV_URL_RETRY_DELAY = 5  # seconds
+                            CSV_URL_MAX_RETRIES = 3
                             
-                            try:
-                                results = await _download_and_parse_batch_csv(constructed_url, headers)
-                                if results:
-                                    print(f"   ✅ Constructed URL worked! Parsed {len(results)} email results")
-                                    return results
-                            except Exception as download_err:
-                                print(f"   ⚠️  Constructed URL failed: {str(download_err)[:100]}")
+                            for csv_retry in range(CSV_URL_MAX_RETRIES):
+                                print(f"   ⚠️  No CSV URL in response, waiting {CSV_URL_RETRY_DELAY}s and retrying ({csv_retry + 1}/{CSV_URL_MAX_RETRIES})...")
+                                await asyncio.sleep(CSV_URL_RETRY_DELAY)
+                                
+                                # Re-poll the batch
+                                async with session.get(url, headers=headers, timeout=30, proxy=HTTP_PROXY_URL) as retry_response:
+                                    if retry_response.status == 200:
+                                        retry_data = await retry_response.json()
+                                        annotated_csv_url = retry_data.get("annotated_csv_url")
+                                        if annotated_csv_url:
+                                            print(f"   ✅ CSV URL now available after retry!")
+                                            data = retry_data  # Update data for later use
+                                            break
                             
-                            # Try constructing alternative URL pattern
-                            # Pattern 2: Direct download with batch ID
-                            alt_url = f"https://api.truelist.io/downloads/{batch_id}/annotated.csv"
-                            print(f"   ⚠️  Trying alternative URL: {alt_url}")
-                            
-                            try:
-                                results = await _download_and_parse_batch_csv(alt_url, headers)
-                                if results:
-                                    print(f"   ✅ Alternative URL worked! Parsed {len(results)} email results")
-                                    return results
-                            except Exception as alt_err:
-                                print(f"   ⚠️  Alternative URL failed: {str(alt_err)[:100]}")
-                            
-                            # Final fallback: Use batch stats (won't work for individual emails)
-                            print(f"   ❌ Could not download CSV results. Full response:")
-                            print(f"   {json.dumps(data, default=str)[:500]}")
-                            return _parse_batch_status_from_response(data, batch_id)
+                            if not annotated_csv_url:
+                                # Still no CSV URL - try constructed URLs
+                                # Pattern 1: /api/v1/batches/{id}/download
+                                constructed_url = f"https://api.truelist.io/api/v1/batches/{batch_id}/download"
+                                print(f"   ⚠️  Still no CSV URL, trying constructed URL: {constructed_url}")
+                                
+                                try:
+                                    results = await _download_and_parse_batch_csv(constructed_url, headers)
+                                    if results:
+                                        print(f"   ✅ Constructed URL worked! Parsed {len(results)} email results")
+                                        return results
+                                except Exception as download_err:
+                                    print(f"   ⚠️  Constructed URL failed: {str(download_err)[:100]}")
+                                
+                                # Pattern 2: Direct download with batch ID
+                                alt_url = f"https://api.truelist.io/downloads/{batch_id}/annotated.csv"
+                                print(f"   ⚠️  Trying alternative URL: {alt_url}")
+                                
+                                try:
+                                    results = await _download_and_parse_batch_csv(alt_url, headers)
+                                    if results:
+                                        print(f"   ✅ Alternative URL worked! Parsed {len(results)} email results")
+                                        return results
+                                except Exception as alt_err:
+                                    print(f"   ⚠️  Alternative URL failed: {str(alt_err)[:100]}")
+                                
+                                # Final fallback: Use batch stats (won't work for individual emails)
+                                print(f"   ❌ Could not download CSV results after retries. Full response:")
+                                print(f"   {json.dumps(data, default=str)[:500]}")
+                                return _parse_batch_status_from_response(data, batch_id)
                         
                         # Download and parse the CSV
                         print(f"   📥 Downloading results from: {annotated_csv_url[:80]}...")
@@ -3251,7 +3270,8 @@ async def retry_truelist_batch(emails: List[str]) -> Dict[str, dict]:
 
 
 async def run_batch_automated_checks(
-    leads: List[dict]
+    leads: List[dict],
+    container_id: int = 0
 ) -> List[Tuple[bool, dict]]:
     """
     Batch validation with SEQUENTIAL Stage 0-2 and Stage 4-5.
@@ -3261,16 +3281,21 @@ async def run_batch_automated_checks(
     Orchestrates the full batch flow without modifying any actual validation checks.
     
     Flow:
-    1. Submit TrueList batch (background task)
-    2. Run Stage 0-2 SEQUENTIALLY for all leads (while TrueList processes)
-    3. Wait for TrueList batch to complete
-    4. Categorize leads: passed_both → Stage 4-5 queue, failed → reject, error → retry
-    5. Run Stage 4-5 SEQUENTIALLY with dynamic queue
-    6. Handle retries in parallel with Stage 4-5 (retry-passed leads join queue)
-    7. After max retries, still-erroring leads → skip
+    1. STAGGERED DELAY: Wait (container_id * 5) seconds before TrueList submission
+    2. Submit TrueList batch (background task)
+    3. Run Stage 0-2 SEQUENTIALLY for all leads (while TrueList processes)
+    4. Wait for TrueList batch to complete
+    5. Categorize leads: passed_both → Stage 4-5 queue, failed → reject, error → retry
+    6. Run Stage 4-5 SEQUENTIALLY with dynamic queue
+    7. Handle retries in parallel with Stage 4-5 (retry-passed leads join queue)
+    8. After max retries, still-erroring leads → skip
     
     Args:
         leads: List of lead dicts (e.g., 110 leads per container)
+        container_id: Container ID (0-8) for staggered TrueList batch submission.
+                      Container 0 submits immediately, container 1 waits 5s, etc.
+                      This prevents TrueList rate limiting when multiple containers
+                      submit batches simultaneously.
     
     Returns:
         List of (passed, automated_checks_data) tuples in SAME ORDER as input
@@ -3364,6 +3389,17 @@ async def run_batch_automated_checks(
     # ========================================================================
     # Step 2: Submit TrueList batch as background task (non-blocking)
     # ========================================================================
+    # STAGGERED DELAY: To prevent TrueList rate limiting when multiple containers
+    # submit batches simultaneously, we add a container-specific delay.
+    # Container 0 (coordinator) submits immediately, container 1 waits 5s, etc.
+    # This ensures TrueList has time to process each batch's CSV before the next.
+    TRUELIST_STAGGER_DELAY_SECONDS = 10  # 10s between containers to prevent TrueList rate limiting
+    stagger_delay = container_id * TRUELIST_STAGGER_DELAY_SECONDS
+    
+    if stagger_delay > 0:
+        print(f"   ⏳ Container {container_id}: Waiting {stagger_delay}s before TrueList batch (staggered submission)...")
+        await asyncio.sleep(stagger_delay)
+    
     print(f"   🚀 Submitting TrueList batch for {len(emails)} emails...")
     
     try:

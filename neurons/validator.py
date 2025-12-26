@@ -2040,8 +2040,9 @@ class Validator(BaseValidatorNeuron):
             lead_blobs = [lead.get('lead_blob', {}) for lead in leads]
             
             # Run batch validation (handles TrueList batch + sequential stages with 1s delays)
+            # Coordinator is container_id=0, submits TrueList batch immediately (no stagger delay)
             try:
-                batch_results = await run_batch_automated_checks(lead_blobs)
+                batch_results = await run_batch_automated_checks(lead_blobs, container_id=0)
             except Exception as e:
                 print(f"   ❌ Batch validation failed: {e}")
                 import traceback
@@ -4827,14 +4828,16 @@ def run_lightweight_worker(config):
                     # ================================================================
                     # BATCH VALIDATION: Use run_batch_automated_checks for efficiency
                     # TrueList emails are batched, stages run sequentially
+                    # container_id is passed for staggered TrueList batch submission
                     # ================================================================
                     
                     # Extract lead_blobs for batch processing
                     lead_blobs = [lead_data.get('lead_blob', {}) for lead_data in worker_leads]
                     
                     # Run batch validation (handles TrueList batch + sequential stages)
+                    # Workers use container_id for staggered TrueList submission (5s per container)
                     try:
-                        batch_results = await run_batch_automated_checks(lead_blobs)
+                        batch_results = await run_batch_automated_checks(lead_blobs, container_id=container_id)
                     except Exception as e:
                         print(f"   ❌ Batch validation failed: {e}")
                         import traceback

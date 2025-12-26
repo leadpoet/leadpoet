@@ -2251,9 +2251,10 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         
                         if not annotated_csv_url:
                             # CSV URL is null - TrueList may still be generating it
-                            # Wait and retry polling a few times before falling back
-                            CSV_URL_RETRY_DELAY = 5  # seconds
-                            CSV_URL_MAX_RETRIES = 3
+                            # Wait and retry polling - TrueList CSV generation is ASYNC
+                            # and can take 30-60+ seconds after batch shows "completed"
+                            CSV_URL_RETRY_DELAY = 10  # seconds
+                            CSV_URL_MAX_RETRIES = 6   # Total: 60 seconds of waiting
                             
                             for csv_retry in range(CSV_URL_MAX_RETRIES):
                                 print(f"   ⚠️  No CSV URL in response, waiting {CSV_URL_RETRY_DELAY}s and retrying ({csv_retry + 1}/{CSV_URL_MAX_RETRIES})...")

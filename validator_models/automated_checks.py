@@ -2062,12 +2062,17 @@ async def submit_truelist_batch(emails: List[str]) -> str:
             # Convert emails to JSON array format: [["email1"], ["email2"], ...]
             email_data = [[email] for email in valid_emails]
             
+            # Generate unique batch name to avoid "Duplicate file upload" error
+            unique_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.csv"
+            
             json_payload = {
                 "data": email_data,
-                "validation_strategy": TRUELIST_BATCH_STRATEGY  # "accurate" or "fast"
+                "validation_strategy": TRUELIST_BATCH_STRATEGY,  # "accurate" or "fast"
+                "name": unique_name  # Unique name prevents duplicate detection
             }
             
             print(f"   📤 POST {url} (JSON format)")
+            print(f"   📋 Batch name: {unique_name}")
             print(f"   📋 Strategy: {TRUELIST_BATCH_STRATEGY}")
             print(f"   📊 Email count: {len(valid_emails)}")
             

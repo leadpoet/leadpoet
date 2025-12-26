@@ -145,13 +145,15 @@ Miners must submit prospects with the following structure:
   "email": "elon@spacex.com",              # REQUIRED
   "role": "CEO",                           # REQUIRED
   "website": "https://spacex.com",         # REQUIRED
-  "industry": "Aerospace Manufacturing",   # REQUIRED
-  "sub_industry": "Space Transportation",  # REQUIRED
+  "industry": "Science and Engineering",   # REQUIRED - must be from industry_taxonomy.py
+  "sub_industry": "Aerospace",             # REQUIRED - must be from industry_taxonomy.py
   "region": "Hawthorne, CA",               # REQUIRED
   "linkedin": "https://linkedin.com/in/elonmusk", # REQUIRED
+  "company_linkedin": "https://linkedin.com/company/spacex", # REQUIRED
   "source_url": "https://spacex.com/careers", # REQUIRED (URL where lead was found, OR "proprietary_database")
-  "source_type": "company_site",           # Source category
-  "description": "Aerospace manufacturer and space transportation company focused on reducing space transportation costs",
+  "description": "Aerospace manufacturer focused on reducing space transportation costs", # REQUIRED
+  "employee_count": "1,001-5,000",         # REQUIRED - valid ranges: "1-10", "11-50", "51-200", "201-500", "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
+  "source_type": "company_site",
   "phone_numbers": ["+1-310-363-6000"],
   "founded_year": 2002,
   "ownership_type": "Private",
@@ -162,6 +164,8 @@ Miners must submit prospects with the following structure:
 ```
 
 **Source URL:** Provide the actual URL where the lead was found. For proprietary databases, set both `source_url` and `source_type` to `"proprietary_database"`. LinkedIn URLs in `source_url` are blocked.
+
+**Industry & Sub-Industry:** Must be exact values from `validator_models/industry_taxonomy.py`. The `sub_industry` key maps to valid parent `industries`.
 
 ### Lead Requirements
 

@@ -1982,131 +1982,11 @@ async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
         print(f"⚠️ DNSBL check error for {root_domain}: {e}")
         return result
 
-# Stage 3: Email Verification (MyEmailVerifier or TrueList fallback)
-
-async def check_truelist_email(lead: dict) -> Tuple[bool, dict]:
-    """
-    Check email validity using TrueList API (fallback when MEV not configured).
-    
-    TrueList API: https://apidocs.truelist.io/#tag/Single-email-validation
-    Only accepts "email_ok" status (equivalent to MEV "Valid").
-    
-    Retry logic: Up to 2 attempts with 4s wait between retries.
-    """
-    email = get_email(lead)
-    if not email:
-        return False, {
-            "stage": "Stage 3: TrueList",
-            "check_name": "check_truelist_email",
-            "message": "No email provided",
-            "failed_fields": ["email"]
-        }
-
-    cache_key = f"truelist:{email}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["myemailverifier"]):
-        print(f"   💾 Using cached TrueList result for: {email}")
-        return validation_cache[cache_key]
-
-    max_retries = 2
-    retry_delay = 3
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            async with API_SEMAPHORE:
-                async with aiohttp.ClientSession() as session:
-                    # TrueList single email validation endpoint
-                    # API docs: https://apidocs.truelist.io/#tag/Single-email-validation
-                    url = "https://api.truelist.io/api/v1/verify_inline"
-                    headers = {"Authorization": f"Bearer {TRUELIST_API_KEY}"}
-                    payload = {"email": email}
-                    
-                    if attempt == 1:
-                        print(f"   📞 Calling TrueList API for: {email}")
-                    else:
-                        print(f"   🔄 Retry {attempt}/{max_retries} for: {email}")
-                    
-                    async with session.post(url, headers=headers, json=payload, timeout=30, proxy=HTTP_PROXY_URL) as response:
-                        if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:
-                            print(f"   🚨 TrueList API error (HTTP {response.status})")
-                            raise EmailVerificationUnavailableError(f"TrueList API unavailable (HTTP {response.status})")
-                        
-                        data = await response.json()
-                        print(f"   📥 TrueList Response: {data}")
-                        
-                        # TrueList returns: {"emails": [{"email_sub_state": "email_ok", ...}]}
-                        emails = data.get("emails", [])
-                        if not emails:
-                            raise Exception("No email results in TrueList response")
-                        
-                        email_data = emails[0]
-                        status = email_data.get("email_sub_state", "unknown")
-                        email_state = email_data.get("email_state", "unknown")
-                        
-                        # Store metadata in lead
-                        lead["email_verifier_status"] = status
-                        lead["email_verifier_disposable"] = status == "disposable"
-                        lead["email_verifier_catch_all"] = status == "accept_all"
-                        lead["email_verifier_provider"] = "truelist"
-                        
-                        # Only accept "email_ok" (equivalent to MEV "Valid")
-                        if status == "email_ok":
-                            result = (True, {})
-                        elif status == "accept_all":
-                            result = (False, {
-                                "stage": "Stage 3: TrueList",
-                                "check_name": "check_truelist_email",
-                                "message": "Email is catch-all/accept-all (instant rejection)",
-                                "failed_fields": ["email"]
-                            })
-                        elif status == "disposable":
-                            result = (False, {
-                                "stage": "Stage 3: TrueList",
-                                "check_name": "check_truelist_email",
-                                "message": "Email is from a disposable provider",
-                                "failed_fields": ["email"]
-                            })
-                        elif status in ["unknown_error", "unknown", "timeout", "error"]:
-                            # API couldn't determine email status - should retry, not reject
-                            print(f"   ⚠️ TrueList returned '{status}' - inconclusive result")
-                            if attempt < max_retries:
-                                print(f"   🔄 Retrying due to inconclusive status ({attempt}/{max_retries})...")
-                                await asyncio.sleep(retry_delay)
-                                continue  # Retry the verification
-                            else:
-                                # All retries exhausted - raise exception to SKIP lead, not reject
-                                raise EmailVerificationUnavailableError(f"TrueList returned inconclusive status '{status}' after {max_retries} retries")
-                        else:
-                            # Reject definitively invalid statuses (failed_no_mailbox, invalid_syntax, etc.)
-                            result = (False, {
-                                "stage": "Stage 3: TrueList",
-                                "check_name": "check_truelist_email",
-                                "message": f"Email status '{status}' (only 'email_ok' accepted)",
-                                "failed_fields": ["email"]
-                            })
-                        
-                        validation_cache[cache_key] = result
-                        return result
-        
-        except EmailVerificationUnavailableError:
-            raise
-        except asyncio.TimeoutError:
-            if attempt < max_retries:
-                print(f"   ⏳ TrueList timed out. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
-                await asyncio.sleep(retry_delay)
-            else:
-                raise EmailVerificationUnavailableError("TrueList API timeout (all retries exhausted)")
-        except aiohttp.ClientError as e:
-            if attempt < max_retries:
-                print(f"   ⏳ Network error. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
-                await asyncio.sleep(retry_delay)
-            else:
-                raise EmailVerificationUnavailableError(f"TrueList API network error: {str(e)}")
-        except Exception as e:
-            if attempt < max_retries:
-                print(f"   ⏳ Unexpected error. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
-                await asyncio.sleep(retry_delay)
-            else:
-                raise EmailVerificationUnavailableError(f"TrueList API error: {str(e)}")
+# Stage 3: Email Verification
+# NOTE: Single-email validation functions (check_truelist_email, check_myemailverifier_email)
+# have been REMOVED as of Dec 2024. All email validation now uses TrueList BATCH API
+# via run_batch_automated_checks() for efficiency.
+# See: submit_truelist_batch(), poll_truelist_batch(), parse_truelist_batch_csv()
 
 
 # ============================================================================
@@ -3690,203 +3570,8 @@ async def run_batch_automated_checks(
     return results
 
 
-async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:
-    """
-    Check email validity using MyEmailVerifier API (with retry logic)
-    
-    FALLBACK: If MYEMAILVERIFIER_API_KEY is not set, uses TrueList API instead.
-    
-    MyEmailVerifier provides real-time email verification with:
-    - Syntax validation
-    - Domain/MX record checks
-    - Catch-all detection
-    - Disposable email detection
-    - Spam trap detection
-    - Role account detection
-    
-    Retry logic: Up to 3 attempts with 10s wait between retries.
-    If all retries fail, lead is SKIPPED (not approved/denied).
-    
-    API Documentation: https://myemailverifier.com/real-time-email-verification
-    """
-    # FALLBACK: Use TrueList if MEV API key not configured
-    if not MYEMAILVERIFIER_API_KEY:
-        if TRUELIST_API_KEY:
-            print(f"   ℹ️  MEV API key not set, using TrueList fallback")
-            return await check_truelist_email(lead)
-        else:
-            raise EmailVerificationUnavailableError("No email verification API key configured (MEV or TrueList)")
-    
-    email = get_email(lead)
-    if not email:
-        return False, {
-            "stage": "Stage 3: MyEmailVerifier",
-            "check_name": "check_myemailverifier_email",
-            "message": "No email provided",
-            "failed_fields": ["email"]
-        }
-
-    cache_key = f"myemailverifier:{email}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["myemailverifier"]):
-        print(f"   💾 Using cached MyEmailVerifier result for: {email}")
-        return validation_cache[cache_key]
-
-    # Retry logic: Up to 3 attempts
-    max_retries = 3
-    retry_delay = 10  # seconds
-    
-    for attempt in range(1, max_retries + 1):
-        try:
-            async with API_SEMAPHORE:
-                async with aiohttp.ClientSession() as session:
-                    # MyEmailVerifier API endpoint
-                    # Correct endpoint format: https://client.myemailverifier.com/verifier/validate_single/{email}/{API_KEY}
-                    url = f"https://client.myemailverifier.com/verifier/validate_single/{email}/{MYEMAILVERIFIER_API_KEY}"
-                    
-                    if attempt == 1:
-                        print(f"   📞 Calling MyEmailVerifier API for: {email}")
-                    else:
-                        print(f"   🔄 Retry {attempt}/{max_retries} for: {email}")
-                    
-                    async with session.get(url, timeout=30, proxy=HTTP_PROXY_URL) as response:
-                        # Check for API error responses (no credits, invalid key, etc.)
-                        # These should SKIP the lead entirely (not submit to Supabase)
-                        if response.status in [401, 402, 403, 429, 500, 502, 503, 504]:
-                            if response.status == 402:
-                                print(f"   🚨 MyEmailVerifier API: No credits remaining")
-                            elif response.status == 401:
-                                print(f"   🚨 MyEmailVerifier API: Invalid API key")
-                            elif response.status == 429:
-                                print(f"   🚨 MyEmailVerifier API: Rate limit exceeded")
-                            else:
-                                print(f"   🚨 MyEmailVerifier API: Server error (HTTP {response.status})")
-                            # Raise exception to tell validator to SKIP this lead
-                            raise EmailVerificationUnavailableError(f"MyEmailVerifier API unavailable (HTTP {response.status})")
-                        
-                        data = await response.json()
-                        
-                        # Log the actual API response to prove it's not mock mode
-                        print(f"   📥 MyEmailVerifier Response: {data}")
-                        
-                        # Parse MyEmailVerifier response
-                        # API response fields (as per official docs):
-                        # - Address: the email address
-                        # - Status: "Valid", "Invalid", "Unknown", "Catch All", "Grey-listed"
-                        # - Disposable_Domain: "true" or "false" (string)
-                        # - catch_all: "true" or "false" (string)
-                        # - Role_Based: "true" or "false" (string)
-                        # - Free_Domain: "true" or "false" (string)
-                        # - Greylisted: "true" or "false" (string)
-                        # - Diagnosis: description (e.g., "Mailbox Exists and Active")
-                        
-                        status = data.get("Status", "Unknown")
-                        
-                        # Store email verification metadata in lead (for tasks2.md Phase 1)
-                        lead["email_verifier_status"] = status
-                        lead["email_verifier_disposable"] = data.get("Disposable_Domain", "false") == "true"
-                        lead["email_verifier_catch_all"] = data.get("catch_all", "false") == "true"
-                        lead["email_verifier_role_based"] = data.get("Role_Based", "false") == "true"
-                        lead["email_verifier_free"] = data.get("Free_Domain", "false") == "true"
-                        lead["email_verifier_diagnosis"] = data.get("Diagnosis", "")
-                        
-                        # Check for disposable domains
-                        is_disposable = lead["email_verifier_disposable"]
-                        if is_disposable:
-                            result = (False, {
-                                "stage": "Stage 3: MyEmailVerifier",
-                                "check_name": "check_myemailverifier_email",
-                                "message": "Email is from a disposable/temporary email provider",
-                                "failed_fields": ["email"]
-                            })
-                            validation_cache[cache_key] = result
-                            return result
-
-                        # Handle validation results based on Status field
-                        # API Documentation: https://myemailverifier.com/real-time-email-verification
-                        # Valid statuses: "Valid", "Invalid", "Unknown", "Catch All", "Grey-listed"
-                        if status == "Valid":
-                            result = (True, {})
-                        elif status in ["Catch All", "Catch-All", "Catch-all"]:
-                            # BRD: Reject ALL catch-all emails (no exceptions)
-                            # Check all variants: "Catch All", "Catch-All", "Catch-all" (API returns different formats)
-                            result = (False, {
-                                "stage": "Stage 3: MyEmailVerifier",
-                                "check_name": "check_myemailverifier_email",
-                                "message": "Email is catch-all (instant rejection)",
-                                "failed_fields": ["email"]
-                            })
-                        elif status == "Invalid":
-                            result = (False, {
-                                "stage": "Stage 3: MyEmailVerifier",
-                                "check_name": "check_myemailverifier_email",
-                                "message": "Email marked invalid",
-                                "failed_fields": ["email"]
-                            })
-                        elif status == "Grey-listed":
-                            # IMPORTANT: Treat grey-listed as invalid (as per tasks2.md Phase 1 requirement)
-                            result = (False, {
-                                "stage": "Stage 3: MyEmailVerifier",
-                                "check_name": "check_myemailverifier_email",
-                                "message": "Email is grey-listed (treated as invalid)",
-                                "failed_fields": ["email"]
-                            })
-                        elif status == "Unknown":
-                            # IMPORTANT: Treat unknown as invalid (as per tasks2.md Phase 1 requirement)
-                            result = (False, {
-                                "stage": "Stage 3: MyEmailVerifier",
-                                "check_name": "check_myemailverifier_email",
-                                "message": "Email status unknown (treated as invalid)",
-                                "failed_fields": ["email"]
-                            })
-                        else:
-                            # SECURITY: Reject any unrecognized status (prevents API changes from bypassing validation)
-                            print(f"   ⚠️  UNKNOWN MyEmailVerifier status: {status}")
-                            result = (False, {
-                                "stage": "Stage 3: MyEmailVerifier",
-                                "check_name": "check_myemailverifier_email",
-                                "message": f"Unrecognized email status '{status}' (rejected for safety)",
-                                "failed_fields": ["email"]
-                            })
-
-                        validation_cache[cache_key] = result
-                        return result
-        
-        except EmailVerificationUnavailableError:
-            # API infrastructure error (402, 429, etc.) - re-raise immediately, no retry
-            raise
-        
-        except asyncio.TimeoutError:
-            # Timeout - retry if attempts remaining
-            if attempt < max_retries:
-                print(f"   ⏳ API timed out. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
-                await asyncio.sleep(retry_delay)
-                continue  # Retry
-            else:
-                # All retries exhausted - SKIP the lead
-                print(f"   ❌ API timed out after {max_retries} attempts. Lead will be SKIPPED.")
-                raise EmailVerificationUnavailableError("MyEmailVerifier API timeout (all retries exhausted)")
-        
-        except aiohttp.ClientError as e:
-            # Network error - retry if attempts remaining
-            if attempt < max_retries:
-                print(f"   ⏳ Network error. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
-                await asyncio.sleep(retry_delay)
-                continue  # Retry
-            else:
-                # All retries exhausted - SKIP the lead
-                print(f"   ❌ Network error after {max_retries} attempts. Lead will be SKIPPED.")
-                raise EmailVerificationUnavailableError(f"MyEmailVerifier API network error: {str(e)}")
-        
-        except Exception as e:
-            # Unexpected error - retry if attempts remaining
-            if attempt < max_retries:
-                print(f"   ⏳ Unexpected error. Retrying in {retry_delay}s... ({attempt}/{max_retries})")
-                await asyncio.sleep(retry_delay)
-                continue  # Retry
-            else:
-                # All retries exhausted - SKIP the lead
-                print(f"   ❌ Unexpected error after {max_retries} attempts. Lead will be SKIPPED.")
-                raise EmailVerificationUnavailableError(f"MyEmailVerifier API error: {str(e)}")
+# NOTE: check_myemailverifier_email() has been REMOVED as of Dec 2024.
+# All email validation now uses TrueList BATCH API via run_batch_automated_checks().
 
 # Stage 4: LinkedIn/GSE Validation
 
@@ -10466,39 +10151,22 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     print("   ✅ Stage 2 passed")
 
     # ========================================================================
-    # Stage 3: MyEmailVerifier Check (HARD)
-    # - Email verification: Pass IF valid, IF catch-all accept only IF SPF
+    # Stage 3: Email Verification (DEPRECATED - use run_batch_automated_checks instead)
     # ========================================================================
-    print(f"🔍 Stage 3: MyEmailVerifier email validation for {email} @ {company}")
-    passed, rejection_reason = await check_myemailverifier_email(lead)
+    # NOTE: Single-email validation has been removed. Email validation is now
+    # handled by TrueList BATCH API in run_batch_automated_checks().
+    # This function is kept for backwards compatibility but should not be used.
+    print(f"⚠️  Stage 3: DEPRECATED - use run_batch_automated_checks() for email validation")
+    print(f"   Skipping single-email validation for {email}")
     
-    # Collect Stage 3 email data
-    # Map MyEmailVerifier status to standard format: "valid", "catch-all", "invalid", "unknown"
-    raw_status = lead.get("email_verifier_status", "Unknown")
-    if raw_status == "Valid":
-        email_status = "valid"
-    elif raw_status in ["Catch All", "Catch-All", "Catch-all"]:
-        email_status = "catch-all"
-    elif raw_status in ["Invalid", "Grey-listed", "Unknown"]:
-        # Grey-listed and Unknown are treated as invalid (tasks2.md Phase 1 requirement)
-        email_status = "invalid"
-    else:
-        email_status = "unknown"
+    # Mark Stage 3 as skipped (not verified)
+    automated_checks_data["stage_3_email"]["email_status"] = "skipped"
+    automated_checks_data["stage_3_email"]["email_score"] = 0
+    automated_checks_data["stage_3_email"]["is_disposable"] = False
+    automated_checks_data["stage_3_email"]["is_role_based"] = False
+    automated_checks_data["stage_3_email"]["is_free"] = False
     
-    automated_checks_data["stage_3_email"]["email_status"] = email_status
-    automated_checks_data["stage_3_email"]["email_score"] = 10 if passed else 0
-    automated_checks_data["stage_3_email"]["is_disposable"] = lead.get("email_verifier_disposable", False)
-    automated_checks_data["stage_3_email"]["is_role_based"] = lead.get("email_verifier_role_based", False)
-    automated_checks_data["stage_3_email"]["is_free"] = lead.get("email_verifier_free", False)
-    
-    if not passed:
-        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
-        print(f"   ❌ Stage 3 failed: {msg}")
-        automated_checks_data["passed"] = False
-        automated_checks_data["rejection_reason"] = rejection_reason
-        return False, automated_checks_data
-
-    print("   ✅ Stage 3 passed")
+    print("   ⏭️  Stage 3 skipped (use batch validation)")
 
     # ========================================================================
     # Stage 4: LinkedIn/GSE Validation (HARD)

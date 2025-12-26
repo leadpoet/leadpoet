@@ -3541,19 +3541,24 @@ async def run_batch_automated_checks(
         
         email_lower = email.lower()  # Use lowercase for lookup (CSV results are lowercase)
         stage0_2_passed, stage0_2_data = stage0_2_results[i]
-        email_result = email_results.get(email_lower, {})
+        email_result = email_results.get(email_lower, None)  # None if not in results
         
         if not stage0_2_passed:
             # Failed Stage 0-2 → immediate reject
             results[i] = (False, stage0_2_data)
+        elif email_result is None:
+            # Email NOT IN TrueList results at all → queue for retry
+            # This happens when TrueList's CSV doesn't include all emails
+            # CRITICAL: Do NOT reject - treat as transient error and retry
+            needs_retry.append(email_lower)
         elif email_result.get("needs_retry"):
-            # Email errored → queue for retry
+            # Email explicitly errored → queue for retry
             needs_retry.append(email_lower)
         elif email_result.get("passed"):
             # Both passed → queue for Stage 4-5
             stage4_5_queue.append((i, lead, email_result, stage0_2_data))
         else:
-            # Email failed → reject
+            # Email explicitly failed (has status) → reject
             rejection_data = stage0_2_data.copy()
             rejection_data["passed"] = False
             rejection_data["rejection_reason"] = email_result.get("rejection_reason") or {

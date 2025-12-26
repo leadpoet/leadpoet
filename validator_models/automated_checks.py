@@ -2175,24 +2175,30 @@ async def submit_truelist_batch(emails: List[str]) -> str:
                 print(f"   ❌ No valid emails to submit (all filtered)")
                 return None  # Return None to indicate no batch was created
             
-            # Format emails as required by TrueList batch API
-            # Format: [["email1@domain.com"], ["email2@domain.com"], ...]
-            # Each email is wrapped in its own array for the data parameter
-            data_param = [[email] for email in valid_emails]
+            # IMPORTANT: TrueList batch API works better with file upload than data parameter
+            # The data parameter creates batches but emails don't appear in CSV results
+            # File upload method: Create CSV content and upload as file
             
-            # Build multipart form data
+            # Create CSV content with email column header
+            csv_lines = ["email"]  # Header row
+            csv_lines.extend(valid_emails)  # One email per line
+            csv_content = "\n".join(csv_lines)
+            
+            # Build multipart form data with file upload
             form_data = aiohttp.FormData()
-            form_data.add_field('data', json.dumps(data_param))  # JSON array as string in form field
-            form_data.add_field('validation_strategy', TRUELIST_BATCH_STRATEGY)  # "accurate" or "fast"
             
             # Add unique name to avoid "Duplicate file upload" error
-            # TrueList detects duplicate content - unique name bypasses this
             unique_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-            form_data.add_field('name', unique_name)
             
-            print(f"   📤 POST {url}")
+            # Upload as CSV file - this is the format that works correctly
+            form_data.add_field('file', csv_content.encode('utf-8'), 
+                               filename=f'{unique_name}.csv',
+                               content_type='text/csv')
+            form_data.add_field('validation_strategy', TRUELIST_BATCH_STRATEGY)  # "accurate" or "fast"
+            
+            print(f"   📤 POST {url} (file upload)")
             print(f"   📋 Strategy: {TRUELIST_BATCH_STRATEGY}")
-            print(f"   📋 Batch name: {unique_name}")
+            print(f"   📋 File: {unique_name}.csv")
             print(f"   📊 Email count: {len(valid_emails)}")
             
             async with session.post(

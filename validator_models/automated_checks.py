@@ -2233,20 +2233,22 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         print(f"   ✅ Batch completed!")
                         print(f"   📧 Total: {email_count}, OK: {ok_count}, Unknown: {unknown_count}")
                         
-                        # ============================================================
-                        # PRIMARY METHOD: Use /emails endpoint with pagination
-                        # This is the CORRECT way per TrueList API docs
-                        # ============================================================
-                        results = await _fetch_batch_email_results(batch_id, headers, email_count)
+                        # CRITICAL: Wait for CSV generation to finish
+                        # TrueList's "completed" state doesn't mean CSV is ready
+                        # CSV generation happens asynchronously after processing
+                        CSV_GENERATION_DELAY = 15  # seconds
+                        print(f"   ⏳ Waiting {CSV_GENERATION_DELAY}s for CSV generation...")
+                        await asyncio.sleep(CSV_GENERATION_DELAY)
                         
-                        if len(results) >= email_count * 0.9:  # Got at least 90% of expected results
-                            print(f"   ✅ Got {len(results)}/{email_count} results via /emails endpoint")
-                            return results
+                        # Re-fetch batch data to get fresh CSV URLs
+                        print(f"   🔄 Re-fetching batch data for fresh CSV URLs...")
+                        async with session.get(url, headers=headers, timeout=30, proxy=HTTP_PROXY_URL) as refresh_response:
+                            if refresh_response.status == 200:
+                                data = await refresh_response.json()
                         
                         # ============================================================
-                        # FALLBACK: Try CSV downloads if /emails endpoint incomplete
+                        # FALLBACK: CSV downloads (the /emails endpoint returns 404)
                         # ============================================================
-                        print(f"   ⚠️ /emails endpoint only returned {len(results)}/{email_count}, trying CSV fallback...")
                         
                         # Get the annotated CSV URL - try multiple possible fields
                         annotated_csv_url = (

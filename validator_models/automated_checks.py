@@ -2456,17 +2456,28 @@ def parse_truelist_batch_csv(csv_content: str) -> Dict[str, dict]:
     try:
         reader = csv.DictReader(StringIO(csv_content))
         
-        for row in reader:
-            # TrueList CSV has columns: "Email Address", "Email State", "Email Sub-State"
-            # Note: Column names have spaces and capital letters
-            email = row.get("Email Address", row.get("email", "")).strip().lower()
+        # Debug: Print first few lines and column names
+        rows = list(reader)
+        if rows:
+            print(f"   📋 CSV columns: {list(rows[0].keys())}")
+            print(f"   📋 First row: {dict(list(rows[0].items())[:5])}")  # First 5 fields
+        else:
+            print(f"   ⚠️ CSV is empty! Content preview: {csv_content[:200]}")
+        
+        for row in rows:
+            # TrueList CSV has columns: Try multiple column name formats
+            # API may use different column names: "Email Address", "email", "Email", etc.
+            email = (row.get("Email Address") or row.get("email") or 
+                     row.get("Email") or row.get("email_address") or "").strip().lower()
             
             if not email:
                 continue
             
-            # Get the detailed status (Email Sub-State is more specific than Email State)
-            status = row.get("Email Sub-State", row.get("email_sub_state", 
-                     row.get("Email State", row.get("email_state", "unknown"))))
+            # Get the detailed status - try multiple column name formats
+            # TrueList uses "Email Sub-State" or "Email State"
+            status = (row.get("Email Sub-State") or row.get("email_sub_state") or
+                      row.get("Email State") or row.get("email_state") or 
+                      row.get("sub_state") or row.get("state") or "unknown")
             status = status.lower() if status else "unknown"
             
             # Determine pass/fail/retry

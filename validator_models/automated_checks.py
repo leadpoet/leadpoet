@@ -3274,6 +3274,61 @@ async def delete_truelist_batch(batch_id: str) -> bool:
         return False
 
 
+async def delete_all_truelist_batches() -> int:
+    """
+    Delete ALL TrueList batches to clear duplicate detection.
+    
+    CRITICAL: TrueList detects duplicate emails across ALL batches ever submitted.
+    Even if a batch is "completed", TrueList remembers the emails and may return
+    incomplete CSV results for subsequent batches containing the same emails.
+    
+    This function queries all batches and deletes them one by one.
+    Should be called before submitting a new batch in each epoch.
+    
+    Returns:
+        Number of batches deleted
+    """
+    url = "https://api.truelist.io/api/v1/batches"
+    headers = {"Authorization": f"Bearer {TRUELIST_API_KEY}"}
+    deleted_count = 0
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Get list of all batches
+            async with session.get(url, headers=headers, timeout=30, proxy=HTTP_PROXY_URL) as response:
+                if response.status != 200:
+                    print(f"   ⚠️ Failed to list batches (status {response.status})")
+                    return 0
+                
+                data = await response.json()
+                batches = data.get("batches", [])
+                
+                if not batches:
+                    print(f"   ✅ No old batches to delete")
+                    return 0
+                
+                print(f"   🗑️ Deleting {len(batches)} old TrueList batches to clear duplicate detection...")
+                
+                # Delete each batch
+                for batch in batches:
+                    batch_id = batch.get("id")
+                    if batch_id:
+                        delete_url = f"{url}/{batch_id}"
+                        try:
+                            async with session.delete(delete_url, headers=headers, timeout=10, proxy=HTTP_PROXY_URL) as del_response:
+                                if del_response.status == 204:
+                                    deleted_count += 1
+                        except Exception:
+                            pass  # Silently skip failed deletes
+                
+                print(f"   ✅ Deleted {deleted_count}/{len(batches)} batches")
+                return deleted_count
+                
+    except Exception as e:
+        print(f"   ⚠️ Error deleting batches: {str(e)[:50]}")
+        return deleted_count
+
+
 async def retry_truelist_batch(emails: List[str], prev_batch_id: str = None) -> Tuple[str, Dict[str, dict]]:
     """
     Submit a retry batch and poll for results.
@@ -3423,6 +3478,13 @@ async def run_batch_automated_checks(
     # ========================================================================
     # Step 2: Submit TrueList batch as background task (non-blocking)
     # ========================================================================
+    # CRITICAL: Delete all old TrueList batches before submitting new ones.
+    # TrueList remembers emails across ALL batches and returns incomplete CSVs
+    # when it detects "duplicates". Only container 0 does cleanup to avoid race.
+    if container_id == 0:
+        print(f"   🧹 Container 0: Cleaning up old TrueList batches...")
+        await delete_all_truelist_batches()
+    
     # STAGGERED DELAY: To prevent TrueList rate limiting when multiple containers
     # submit batches simultaneously, we add a container-specific delay.
     # Container 0 (coordinator) submits immediately, container 1 waits 5s, etc.

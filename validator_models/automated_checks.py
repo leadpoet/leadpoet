@@ -2345,6 +2345,58 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         results = await _download_and_parse_batch_csv(annotated_csv_url, headers)
                         
                         print(f"   ✅ Parsed {len(results)} email results")
+                        
+                        # CRITICAL FIX: If CSV was empty but batch has emails, use fallback CSVs
+                        if len(results) == 0 and email_count > 0:
+                            print(f"   ⚠️  CSV was empty but batch has {email_count} emails - using fallback CSVs...")
+                            
+                            combined_results = {}
+                            
+                            # Try highest_reach_csv_url (contains ok + accept_all)
+                            highest_reach_url = data.get("highest_reach_csv_url")
+                            if highest_reach_url:
+                                print(f"   📥 Fallback: Downloading highest_reach CSV...")
+                                try:
+                                    reach_results = await _download_and_parse_batch_csv(highest_reach_url, headers)
+                                    if reach_results:
+                                        print(f"   ✅ Got {len(reach_results)} emails from highest_reach CSV")
+                                        combined_results.update(reach_results)
+                                except Exception as e:
+                                    print(f"   ⚠️  highest_reach CSV failed: {str(e)[:50]}")
+                            
+                            # Try only_invalid_csv_url (contains failed emails)
+                            invalid_url = data.get("only_invalid_csv_url")
+                            if invalid_url:
+                                print(f"   📥 Fallback: Downloading only_invalid CSV...")
+                                try:
+                                    invalid_results = await _download_and_parse_batch_csv(invalid_url, headers)
+                                    if invalid_results:
+                                        print(f"   ✅ Got {len(invalid_results)} emails from only_invalid CSV")
+                                        combined_results.update(invalid_results)
+                                except Exception as e:
+                                    print(f"   ⚠️  only_invalid CSV failed: {str(e)[:50]}")
+                            
+                            # Try safest_bet_csv_url as additional source
+                            safest_url = data.get("safest_bet_csv_url")
+                            if safest_url and len(combined_results) < email_count:
+                                print(f"   📥 Fallback: Downloading safest_bet CSV...")
+                                try:
+                                    safest_results = await _download_and_parse_batch_csv(safest_url, headers)
+                                    if safest_results:
+                                        print(f"   ✅ Got {len(safest_results)} emails from safest_bet CSV")
+                                        for email, result in safest_results.items():
+                                            if email not in combined_results:
+                                                combined_results[email] = result
+                                except Exception as e:
+                                    print(f"   ⚠️  safest_bet CSV failed: {str(e)[:50]}")
+                            
+                            if combined_results:
+                                print(f"   ✅ Combined fallback CSVs: {len(combined_results)} total emails")
+                                return combined_results
+                            else:
+                                print(f"   ❌ All fallback CSVs failed or empty")
+                                # Return empty results - will trigger retry logic
+                        
                         return results
                     
                     elif batch_state == "failed":

@@ -2824,7 +2824,8 @@ async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
                         email_results = data.get("emails", [])
                         
                         for email_data in email_results:
-                            email = email_data.get("email_address", email_data.get("email", "")).lower()
+                            # TrueList inline uses "address" not "email_address"
+                            email = email_data.get("address", email_data.get("email_address", email_data.get("email", ""))).lower()
                             if not email:
                                 continue
                             

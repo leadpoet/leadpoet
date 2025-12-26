@@ -696,6 +696,13 @@ def get_aiohttp_connector():
 MYEMAILVERIFIER_API_KEY = ""  # Hardcoded empty - TrueList is the only email verifier
 TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 
+# TrueList Batch Email Validation Configuration
+# See: https://apidocs.truelist.io/#tag/Batch-email-validation
+TRUELIST_BATCH_POLL_INTERVAL = 10  # seconds between status polls
+TRUELIST_BATCH_TIMEOUT = 40 * 60   # 40 minutes in seconds
+TRUELIST_BATCH_MAX_RETRIES = 2     # Max retry attempts for errored emails
+TRUELIST_BATCH_STRATEGY = "accurate"  # "accurate" (default) or "fast"
+
 # Stage 4 & 5: ScrapingDog GSE API + OpenRouter LLM
 SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY", "")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
@@ -2100,6 +2107,1440 @@ async def check_truelist_email(lead: dict) -> Tuple[bool, dict]:
                 await asyncio.sleep(retry_delay)
             else:
                 raise EmailVerificationUnavailableError(f"TrueList API error: {str(e)}")
+
+
+# ============================================================================
+# TrueList Batch Email Validation Functions
+# ============================================================================
+# These functions support batch email verification for improved throughput.
+# See tasks9.md for the full migration plan.
+# API Reference: https://apidocs.truelist.io/#tag/Batch-email-validation
+# ============================================================================
+
+async def submit_truelist_batch(emails: List[str]) -> str:
+    """
+    Submit a list of emails to TrueList batch API.
+    
+    This function submits emails for batch verification. The batch is processed
+    asynchronously by TrueList and must be polled for completion using
+    poll_truelist_batch().
+    
+    API Reference: https://apidocs.truelist.io/#tag/Batch-email-validation
+    
+    Args:
+        emails: List of email addresses to validate (max 5000 per batch)
+    
+    Returns:
+        batch_id: UUID of the created batch for polling
+    
+    Raises:
+        EmailVerificationUnavailableError: If batch submission fails
+        ValueError: If no emails provided or API key not configured
+    
+    Example:
+        batch_id = await submit_truelist_batch(["user1@example.com", "user2@example.com"])
+        # Then poll with: results = await poll_truelist_batch(batch_id)
+    """
+    if not emails:
+        raise ValueError("No emails provided for batch validation")
+    
+    if not TRUELIST_API_KEY:
+        raise EmailVerificationUnavailableError("TRUELIST_API_KEY not configured")
+    
+    # Log batch submission
+    print(f"\n📧 TrueList Batch: Submitting {len(emails)} emails for validation...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # TrueList batch API endpoint
+            url = "https://api.truelist.io/api/v1/batches"
+            
+            # IMPORTANT: TrueList batch API requires multipart/form-data, NOT JSON body
+            # The 'data' parameter is a JSON string sent as a form field
+            headers = {
+                "Authorization": f"Bearer {TRUELIST_API_KEY}",
+                # Note: Do NOT set Content-Type header - aiohttp sets it automatically for FormData
+            }
+            
+            # CRITICAL: TrueList batch API rejects the ENTIRE batch if ANY email 
+            # doesn't have an @ sign. Pre-filter to avoid this.
+            # Emails without @ will be handled separately with immediate rejection.
+            valid_emails = [email for email in emails if '@' in email]
+            invalid_emails = [email for email in emails if '@' not in email]
+            
+            if invalid_emails:
+                print(f"   ⚠️  Filtered {len(invalid_emails)} invalid emails (no @ sign)")
+            
+            if not valid_emails:
+                print(f"   ❌ No valid emails to submit (all filtered)")
+                return None  # Return None to indicate no batch was created
+            
+            # Format emails as required by TrueList batch API
+            # Format: [["email1@domain.com"], ["email2@domain.com"], ...]
+            # Each email is wrapped in its own array for the data parameter
+            data_param = [[email] for email in valid_emails]
+            
+            # Build multipart form data
+            form_data = aiohttp.FormData()
+            form_data.add_field('data', json.dumps(data_param))  # JSON array as string in form field
+            form_data.add_field('validation_strategy', TRUELIST_BATCH_STRATEGY)  # "accurate" or "fast"
+            
+            # Add unique name to avoid "Duplicate file upload" error
+            # TrueList detects duplicate content - unique name bypasses this
+            unique_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            form_data.add_field('name', unique_name)
+            
+            print(f"   📤 POST {url}")
+            print(f"   📋 Strategy: {TRUELIST_BATCH_STRATEGY}")
+            print(f"   📋 Batch name: {unique_name}")
+            print(f"   📊 Email count: {len(valid_emails)}")
+            
+            async with session.post(
+                url, 
+                headers=headers, 
+                data=form_data,  # Use form data, NOT json
+                timeout=60,  # 60s timeout for batch submission
+                proxy=HTTP_PROXY_URL
+            ) as response:
+                
+                # Handle error responses
+                if response.status == 401:
+                    raise EmailVerificationUnavailableError("TrueList API: Invalid or expired API key")
+                elif response.status == 402:
+                    raise EmailVerificationUnavailableError("TrueList API: Insufficient credits")
+                elif response.status == 429:
+                    raise EmailVerificationUnavailableError("TrueList API: Rate limited")
+                elif response.status >= 500:
+                    raise EmailVerificationUnavailableError(f"TrueList API server error: HTTP {response.status}")
+                elif response.status != 200:
+                    error_text = await response.text()
+                    raise EmailVerificationUnavailableError(f"TrueList API error: HTTP {response.status} - {error_text[:200]}")
+                
+                # Parse successful response
+                data = await response.json()
+                
+                batch_id = data.get("id")
+                batch_state = data.get("batch_state", "unknown")
+                email_count = data.get("email_count", 0)
+                
+                if not batch_id:
+                    raise EmailVerificationUnavailableError("TrueList API: No batch_id in response")
+                
+                print(f"   ✅ Batch created successfully!")
+                print(f"   🆔 Batch ID: {batch_id}")
+                print(f"   📊 State: {batch_state}")
+                print(f"   📧 Emails queued: {email_count}")
+                
+                return batch_id
+    
+    except aiohttp.ClientError as e:
+        raise EmailVerificationUnavailableError(f"TrueList batch submission network error: {str(e)}")
+    except asyncio.TimeoutError:
+        raise EmailVerificationUnavailableError("TrueList batch submission timed out (60s)")
+    except EmailVerificationUnavailableError:
+        raise
+    except Exception as e:
+        raise EmailVerificationUnavailableError(f"TrueList batch submission error: {str(e)}")
+
+
+async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
+    """
+    Poll TrueList batch until completion or timeout.
+    
+    This function polls the batch status every TRUELIST_BATCH_POLL_INTERVAL seconds
+    until the batch is complete or TRUELIST_BATCH_TIMEOUT is reached. When complete,
+    it downloads and parses the annotated CSV to get per-email results.
+    
+    API Reference: https://apidocs.truelist.io/#tag/Batch-email-validation
+    
+    Args:
+        batch_id: UUID of the batch to poll (from submit_truelist_batch)
+    
+    Returns:
+        Dict mapping email -> result dict:
+        {
+            "email@domain.com": {
+                "status": "email_ok",      # TrueList email_sub_state
+                "passed": True,            # True if email_ok
+                "needs_retry": False,      # True if unknown/timeout/error
+                "rejection_reason": None   # Rejection reason if failed
+            },
+            ...
+        }
+    
+    Raises:
+        EmailVerificationUnavailableError: If polling times out or batch fails
+    
+    Example:
+        batch_id = await submit_truelist_batch(emails)
+        results = await poll_truelist_batch(batch_id)
+        for email, result in results.items():
+            if result["passed"]:
+                print(f"{email} is valid")
+    """
+    import time
+    import csv
+    from io import StringIO
+    
+    if not batch_id:
+        raise ValueError("No batch_id provided for polling")
+    
+    if not TRUELIST_API_KEY:
+        raise EmailVerificationUnavailableError("TRUELIST_API_KEY not configured")
+    
+    url = f"https://api.truelist.io/api/v1/batches/{batch_id}"
+    headers = {"Authorization": f"Bearer {TRUELIST_API_KEY}"}
+    
+    start_time = time.time()
+    poll_count = 0
+    
+    print(f"\n⏳ TrueList Batch: Polling for completion...")
+    print(f"   🆔 Batch ID: {batch_id}")
+    print(f"   ⏱️  Poll interval: {TRUELIST_BATCH_POLL_INTERVAL}s")
+    print(f"   ⏰ Timeout: {TRUELIST_BATCH_TIMEOUT // 60} minutes")
+    
+    while True:
+        elapsed = time.time() - start_time
+        
+        # Check timeout
+        if elapsed >= TRUELIST_BATCH_TIMEOUT:
+            raise EmailVerificationUnavailableError(
+                f"TrueList batch polling timed out after {TRUELIST_BATCH_TIMEOUT // 60} minutes"
+            )
+        
+        poll_count += 1
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, 
+                    headers=headers, 
+                    timeout=30,
+                    proxy=HTTP_PROXY_URL
+                ) as response:
+                    
+                    if response.status == 404:
+                        raise EmailVerificationUnavailableError(f"TrueList batch not found: {batch_id}")
+                    elif response.status == 401:
+                        raise EmailVerificationUnavailableError("TrueList API: Invalid or expired API key")
+                    elif response.status >= 500:
+                        # Server error - retry polling
+                        print(f"   ⚠️  Poll #{poll_count}: Server error (HTTP {response.status}), retrying...")
+                        await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
+                        continue
+                    elif response.status != 200:
+                        error_text = await response.text()
+                        raise EmailVerificationUnavailableError(
+                            f"TrueList API error: HTTP {response.status} - {error_text[:200]}"
+                        )
+                    
+                    data = await response.json()
+                    
+                    batch_state = data.get("batch_state", "unknown")
+                    email_count = data.get("email_count", 0)
+                    processed_count = data.get("processed_count", 0)
+                    ok_count = data.get("ok_count", 0)
+                    unknown_count = data.get("unknown_count", 0)
+                    
+                    # Progress update every 5 polls or when state changes
+                    if poll_count % 5 == 1 or batch_state == "completed":
+                        progress_pct = (processed_count / email_count * 100) if email_count > 0 else 0
+                        print(f"   📊 Poll #{poll_count} ({elapsed:.0f}s): {batch_state} - {processed_count}/{email_count} ({progress_pct:.0f}%)")
+                    
+                    # Check if batch is complete
+                    if batch_state == "completed":
+                        print(f"   ✅ Batch completed!")
+                        print(f"   📧 Total: {email_count}, OK: {ok_count}, Unknown: {unknown_count}")
+                        
+                        # Get the annotated CSV URL
+                        annotated_csv_url = data.get("annotated_csv_url")
+                        
+                        if not annotated_csv_url:
+                            # Fallback: construct URL or use batch data directly
+                            print(f"   ⚠️  No annotated_csv_url in response, constructing from batch data...")
+                            return _parse_batch_status_from_response(data, batch_id)
+                        
+                        # Download and parse the CSV
+                        print(f"   📥 Downloading results from: {annotated_csv_url[:60]}...")
+                        results = await _download_and_parse_batch_csv(annotated_csv_url, headers)
+                        
+                        print(f"   ✅ Parsed {len(results)} email results")
+                        return results
+                    
+                    elif batch_state == "failed":
+                        raise EmailVerificationUnavailableError(
+                            f"TrueList batch failed: {data.get('error', 'Unknown error')}"
+                        )
+                    
+                    # Still processing - wait and poll again
+                    await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
+        
+        except EmailVerificationUnavailableError:
+            raise
+        except aiohttp.ClientError as e:
+            # Network error - retry polling
+            print(f"   ⚠️  Poll #{poll_count}: Network error ({str(e)[:50]}), retrying...")
+            await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
+        except asyncio.TimeoutError:
+            # Timeout on single request - retry polling
+            print(f"   ⚠️  Poll #{poll_count}: Request timeout, retrying...")
+            await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
+        except Exception as e:
+            print(f"   ⚠️  Poll #{poll_count}: Unexpected error ({str(e)[:50]}), retrying...")
+            await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
+
+
+async def _download_and_parse_batch_csv(csv_url: str, headers: dict) -> Dict[str, dict]:
+    """
+    Download and parse TrueList annotated CSV results.
+    
+    Args:
+        csv_url: URL to the annotated CSV file
+        headers: Auth headers for the request
+    
+    Returns:
+        Dict mapping email -> result dict
+    """
+    import csv
+    from io import StringIO
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                csv_url, 
+                headers=headers, 
+                timeout=60,
+                proxy=HTTP_PROXY_URL
+            ) as response:
+                
+                if response.status != 200:
+                    raise EmailVerificationUnavailableError(
+                        f"Failed to download batch CSV: HTTP {response.status}"
+                    )
+                
+                csv_content = await response.text()
+                
+                return parse_truelist_batch_csv(csv_content)
+    
+    except aiohttp.ClientError as e:
+        raise EmailVerificationUnavailableError(f"Failed to download batch CSV: {str(e)}")
+    except asyncio.TimeoutError:
+        raise EmailVerificationUnavailableError("Batch CSV download timed out")
+
+
+def parse_truelist_batch_csv(csv_content: str) -> Dict[str, dict]:
+    """
+    Parse TrueList annotated CSV into email -> result mapping.
+    
+    Maps TrueList statuses to our internal format:
+    - email_ok → passed=True
+    - accept_all, disposable, failed_* → passed=False  
+    - unknown, timeout, error → needs_retry=True
+    
+    Args:
+        csv_content: Raw CSV content from TrueList
+    
+    Returns:
+        Dict mapping email -> result dict with status, passed, needs_retry, rejection_reason
+    """
+    import csv
+    from io import StringIO
+    
+    results = {}
+    
+    # Define which statuses pass, fail, or need retry
+    PASS_STATUSES = {"email_ok"}
+    RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error"}
+    # All other statuses are considered failures
+    
+    try:
+        reader = csv.DictReader(StringIO(csv_content))
+        
+        for row in reader:
+            # TrueList CSV has columns: "Email Address", "Email State", "Email Sub-State"
+            # Note: Column names have spaces and capital letters
+            email = row.get("Email Address", row.get("email", "")).strip().lower()
+            
+            if not email:
+                continue
+            
+            # Get the detailed status (Email Sub-State is more specific than Email State)
+            status = row.get("Email Sub-State", row.get("email_sub_state", 
+                     row.get("Email State", row.get("email_state", "unknown"))))
+            status = status.lower() if status else "unknown"
+            
+            # Determine pass/fail/retry
+            if status in PASS_STATUSES:
+                results[email] = {
+                    "status": status,
+                    "passed": True,
+                    "needs_retry": False,
+                    "rejection_reason": None
+                }
+            elif status in RETRY_STATUSES:
+                results[email] = {
+                    "status": status,
+                    "passed": False,
+                    "needs_retry": True,
+                    "rejection_reason": None  # Don't reject - will retry
+                }
+            else:
+                # Failed status - build rejection reason
+                rejection_reason = _build_email_rejection_reason(status)
+                results[email] = {
+                    "status": status,
+                    "passed": False,
+                    "needs_retry": False,
+                    "rejection_reason": rejection_reason
+                }
+        
+        return results
+    
+    except Exception as e:
+        raise EmailVerificationUnavailableError(f"Failed to parse batch CSV: {str(e)}")
+
+
+def _parse_batch_status_from_response(data: dict, batch_id: str) -> Dict[str, dict]:
+    """
+    Fallback: Parse batch results from API response when CSV URL is not available.
+    
+    This is used when annotated_csv_url is missing from the response.
+    Returns aggregate counts but may not have per-email details.
+    
+    Args:
+        data: Batch API response data
+        batch_id: Batch ID for logging
+    
+    Returns:
+        Dict with limited results (may need alternative approach)
+    """
+    print(f"   ⚠️  Using fallback batch parsing (no CSV URL)")
+    
+    # This is a fallback - in practice, TrueList should always provide the CSV URL
+    # Log a warning and return empty results to trigger retry logic
+    email_count = data.get("email_count", 0)
+    ok_count = data.get("ok_count", 0)
+    unknown_count = data.get("unknown_count", 0)
+    
+    print(f"   📊 Batch stats: {email_count} total, {ok_count} ok, {unknown_count} unknown")
+    print(f"   ⚠️  Cannot map to individual emails without CSV - returning empty results")
+    
+    # Return empty dict - the orchestrator should handle this case
+    return {}
+
+
+def _build_email_rejection_reason(status: str) -> dict:
+    """
+    Build a rejection reason dict for a failed email status.
+    
+    Maps TrueList statuses to user-friendly rejection messages.
+    
+    Args:
+        status: TrueList email_sub_state value
+    
+    Returns:
+        Rejection reason dict compatible with our validation format
+    """
+    # Map TrueList statuses to rejection messages
+    # Note: TrueList uses both "disposable" and "is_disposable" for different cases
+    status_messages = {
+        "accept_all": "Email is catch-all/accept-all (instant rejection)",
+        "disposable": "Email is from a disposable provider",
+        "is_disposable": "Email is from a disposable provider",
+        "failed_no_mailbox": "Mailbox does not exist",
+        "failed_syntax_check": "Invalid email syntax",
+        "failed_mx_check": "Domain has no MX records (cannot receive email)",
+        "role": "Email is a role-based address (e.g., info@, support@)",
+        "invalid": "Email is invalid",
+        "spam_trap": "Email is a known spam trap",
+        "complainer": "Email owner is a known complainer",
+        "ok_for_all": "Email domain accepts all emails (catch-all)",
+    }
+    
+    message = status_messages.get(status, f"Email status '{status}' (only 'email_ok' accepted)")
+    
+    return {
+        "stage": "Stage 3: TrueList Batch",
+        "check_name": "truelist_batch_validation",
+        "message": message,
+        "failed_fields": ["email"],
+        "truelist_status": status
+    }
+
+
+# ============================================================================
+# Batch Helper Functions
+# ============================================================================
+
+async def submit_and_poll_truelist(emails: List[str]) -> Dict[str, dict]:
+    """
+    Submit batch and poll for results (combined for background task).
+    
+    This wrapper combines submit_truelist_batch() and poll_truelist_batch()
+    for use with asyncio.create_task() in the batch orchestrator.
+    
+    Args:
+        emails: List of email addresses to validate
+    
+    Returns:
+        Dict mapping email -> result dict with status, passed, needs_retry
+    """
+    batch_id = await submit_truelist_batch(emails)
+    return await poll_truelist_batch(batch_id)
+
+
+async def retry_truelist_batch(emails: List[str]) -> Dict[str, dict]:
+    """
+    Submit a retry batch and poll for results.
+    
+    On exception, marks all emails as needs_retry=True so the orchestrator
+    can decide whether to retry again or skip.
+    
+    Args:
+        emails: List of email addresses to retry validation
+    
+    Returns:
+        Dict mapping email -> result dict
+    """
+    try:
+        batch_id = await submit_truelist_batch(emails)
+        return await poll_truelist_batch(batch_id)
+    except Exception as e:
+        print(f"   ⚠️  Retry batch failed: {str(e)[:100]}")
+        # On error, mark all as needing retry (orchestrator will decide next step)
+        return {email: {"needs_retry": True, "error": str(e)} for email in emails}
+
+
+# ============================================================================
+# Stage 0-2 Extraction for Batch Processing
+# ============================================================================
+# This function extracts Stage 0, 1, and 2 from run_automated_checks() to
+# allow parallel execution with batch email verification.
+# See tasks9.md for the full migration plan.
+# ============================================================================
+
+async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
+    """
+    Run Stage 0, 1, and 2 checks only (no email verification).
+    
+    This function is extracted from run_automated_checks() to support
+    batch email verification. It runs all checks BEFORE Stage 3 (email
+    verification), which is handled separately by the batch process.
+    
+    The actual check functions are IDENTICAL to run_automated_checks() -
+    only the orchestration is different.
+    
+    Stages included:
+    - Pre-checks: Source provenance verification
+    - Stage 0: Required fields, email regex, name-email match, 
+               general purpose email, free email, disposable, HEAD request
+    - Stage 1: Domain age, MX record, SPF/DMARC (parallel)
+    - Stage 2: DNSBL reputation check
+    
+    Args:
+        lead: Lead dict with all fields
+    
+    Returns:
+        Tuple[bool, dict]: (passed, partial_automated_checks_data)
+            - If passed: (True, data with stage_0, stage_1, stage_2 populated)
+            - If failed: (False, data with rejection_reason)
+    
+    Note:
+        This function does NOT run Stage 3 (email verification).
+        Email verification is handled by the batch process (submit_truelist_batch
+        + poll_truelist_batch).
+    """
+    email = get_email(lead)
+    company = get_company(lead)
+    
+    # Initialize structured data collection (same structure as run_automated_checks)
+    automated_checks_data = {
+        "stage_0_hardcoded": {
+            "name_in_email": False,
+            "is_general_purpose_email": False
+        },
+        "stage_1_dns": {
+            "has_mx": False,
+            "has_spf": False,
+            "has_dmarc": False,
+            "dmarc_policy": None
+        },
+        "stage_2_domain": {
+            "dnsbl_checked": False,
+            "dnsbl_blacklisted": False,
+            "dnsbl_list": None,
+            "domain_age_days": None,
+            "domain_registrar": None,
+            "domain_nameservers": None,
+            "whois_updated_days_ago": None
+        },
+        "stage_3_email": {
+            "email_status": "unknown",
+            "email_score": 0,
+            "is_disposable": False,
+            "is_role_based": False,
+            "is_free": False
+        },
+        "stage_4_linkedin": {
+            "linkedin_verified": False,
+            "gse_search_count": 0,
+            "llm_confidence": "none"
+        },
+        "stage_5_verification": {
+            "role_verified": False,
+            "region_verified": False,
+            "industry_verified": False,
+            "extracted_role": None,
+            "extracted_region": None,
+            "extracted_industry": None,
+            "early_exit": None
+        },
+        "rep_score": {
+            "total_score": 0,
+            "max_score": MAX_REP_SCORE,
+            "breakdown": {
+                "wayback_machine": 0,
+                "uspto_trademarks": 0,
+                "sec_edgar": 0,
+                "whois_dnsbl": 0,
+                "gdelt": 0,
+                "companies_house": 0
+            }
+        },
+        "passed": False,
+        "rejection_reason": None
+    }
+
+    # ========================================================================
+    # Pre-Attestation Check: REMOVED
+    # ========================================================================
+    # NOTE: Attestation verification removed from validators.
+    # Gateway verifies attestations during POST /submit.
+    print(f"🔍 Pre-Attestation Check: Skipped (gateway verifies during submission)")
+
+    # ========================================================================
+    # Source Provenance Verification: Source Validation (HARD)
+    # Validates source_url, source_type, denylist, and licensed resale proof
+    # ========================================================================
+    print(f"🔍 Source Provenance Verification: Source validation for {email} @ {company}")
+    
+    checks_stage0_5 = [
+        check_source_provenance,       # Validate source URL, type, denylist
+        check_licensed_resale_proof,   # Validate license hash if applicable
+    ]
+    
+    for check_func in checks_stage0_5:
+        passed, rejection_reason = await check_func(lead)
+        if not passed:
+            msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+            print(f"   ❌ Source Provenance Verification failed: {msg}")
+            automated_checks_data["passed"] = False
+            automated_checks_data["rejection_reason"] = rejection_reason
+            return False, automated_checks_data
+    
+    print("   ✅ Source Provenance Verification passed")
+
+    # ========================================================================
+    # Stage 0: Hardcoded Checks (MIXED)
+    # - Required Fields, Email Regex, Name-Email Match, General Purpose Email, Disposable, HEAD Request
+    # ========================================================================
+    print(f"🔍 Stage 0: Hardcoded checks for {email} @ {company}")
+    
+    # OPTIMIZATION: Run instant checks first, then overlap HEAD request with Stage 1 DNS checks
+    checks_stage0_instant = [
+        check_required_fields,      # Required fields validation (HARD)
+        check_email_regex,          # RFC-5322 regex validation (HARD)
+        check_name_email_match,     # Name in email check (HARD)
+        check_general_purpose_email,# General purpose email filter (HARD)
+        check_free_email_domain,    # Reject free email domains (HARD)
+        check_disposable,           # Filter throwaway email providers (HARD)
+    ]
+
+    for check_func in checks_stage0_instant:
+        passed, rejection_reason = await check_func(lead)
+        if not passed:
+            msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+            print(f"   ❌ Stage 0 failed: {msg}")
+            automated_checks_data["passed"] = False
+            automated_checks_data["rejection_reason"] = rejection_reason
+            return False, automated_checks_data
+
+    # Collect Stage 0 data after successful instant checks
+    automated_checks_data["stage_0_hardcoded"]["name_in_email"] = True
+    automated_checks_data["stage_0_hardcoded"]["is_general_purpose_email"] = False
+
+    print("   ✅ Stage 0 instant checks passed")
+    
+    # OPTIMIZATION: Start HEAD request as background task (will check result after Stage 1)
+    head_request_task = asyncio.create_task(check_head_request(lead))
+
+    # ========================================================================
+    # Stage 1: DNS Layer (MIXED)
+    # - Domain Age, MX Record (HARD)
+    # - SPF/DMARC (SOFT - always passes, appends data)
+    # ========================================================================
+    print(f"🔍 Stage 1: DNS layer checks for {email} @ {company}")
+    
+    # OPTIMIZATION: Run all Stage 1 DNS checks in parallel
+    results = await asyncio.gather(
+        check_domain_age(lead),
+        check_mx_record(lead),
+        check_spf_dmarc(lead),
+        return_exceptions=True
+    )
+    
+    # Check results
+    check_names = ["check_domain_age", "check_mx_record", "check_spf_dmarc"]
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            print(f"   ❌ Stage 1 failed: {str(result)}")
+            automated_checks_data["passed"] = False
+            automated_checks_data["rejection_reason"] = {
+                "stage": "Stage 1: DNS Layer",
+                "check_name": check_names[i],
+                "message": f"Check failed: {str(result)}",
+                "failed_fields": ["domain"]
+            }
+            # Collect partial Stage 1 data even on failure
+            automated_checks_data["stage_1_dns"]["has_mx"] = lead.get("has_mx", False)
+            automated_checks_data["stage_1_dns"]["has_spf"] = lead.get("has_spf", False)
+            automated_checks_data["stage_1_dns"]["has_dmarc"] = lead.get("has_dmarc", False)
+            automated_checks_data["stage_1_dns"]["dmarc_policy"] = "strict" if lead.get("dmarc_policy_strict") else "none"
+            automated_checks_data["stage_2_domain"]["domain_age_days"] = lead.get("domain_age_days")
+            automated_checks_data["stage_2_domain"]["domain_registrar"] = lead.get("domain_registrar")
+            automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
+            automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
+            return False, automated_checks_data
+        
+        passed, rejection_reason = result
+        if not passed:
+            msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+            print(f"   ❌ Stage 1 failed: {msg}")
+            automated_checks_data["passed"] = False
+            automated_checks_data["rejection_reason"] = rejection_reason
+            # Collect partial Stage 1 data even on failure
+            automated_checks_data["stage_1_dns"]["has_mx"] = lead.get("has_mx", False)
+            automated_checks_data["stage_1_dns"]["has_spf"] = lead.get("has_spf", False)
+            automated_checks_data["stage_1_dns"]["has_dmarc"] = lead.get("has_dmarc", False)
+            automated_checks_data["stage_1_dns"]["dmarc_policy"] = "strict" if lead.get("dmarc_policy_strict") else "none"
+            automated_checks_data["stage_2_domain"]["domain_age_days"] = lead.get("domain_age_days")
+            automated_checks_data["stage_2_domain"]["domain_registrar"] = lead.get("domain_registrar")
+            automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
+            automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
+            return False, automated_checks_data
+
+    # Collect Stage 1 DNS data after successful checks
+    automated_checks_data["stage_1_dns"]["has_mx"] = lead.get("has_mx", True)
+    automated_checks_data["stage_1_dns"]["has_spf"] = lead.get("has_spf", False)
+    automated_checks_data["stage_1_dns"]["has_dmarc"] = lead.get("has_dmarc", False)
+    automated_checks_data["stage_1_dns"]["dmarc_policy"] = "strict" if lead.get("dmarc_policy_strict") else "none"
+
+    print("   ✅ Stage 1 passed")
+
+    # ========================================================================
+    # Stage 0 (continued): HEAD Request Check
+    # Check result of background HEAD request task
+    # ========================================================================
+    print(f"🔍 Stage 0: Website HEAD request check for {email} @ {company}")
+    passed, rejection_reason = await head_request_task
+    if not passed:
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 0 (HEAD request) failed: {msg}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
+    
+    print("   ✅ Stage 0 (HEAD request) passed")
+
+    # ========================================================================
+    # Stage 2: Lightweight Domain Reputation Checks (HARD)
+    # - DNSBL (Domain Block List) - Spamhaus DBL lookup
+    # ========================================================================
+    print(f"🔍 Stage 2: Domain reputation checks for {email} @ {company}")
+    passed, rejection_reason = await check_dnsbl(lead)
+    
+    # Collect Stage 2 domain data (DNSBL + WHOIS from Stage 1)
+    automated_checks_data["stage_2_domain"]["dnsbl_checked"] = lead.get("dnsbl_checked", False)
+    automated_checks_data["stage_2_domain"]["dnsbl_blacklisted"] = lead.get("dnsbl_blacklisted", False)
+    automated_checks_data["stage_2_domain"]["dnsbl_list"] = lead.get("dnsbl_list")
+    automated_checks_data["stage_2_domain"]["domain_age_days"] = lead.get("domain_age_days")
+    automated_checks_data["stage_2_domain"]["domain_registrar"] = lead.get("domain_registrar")
+    automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
+    automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
+    
+    if not passed:
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 2 failed: {msg}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
+
+    print("   ✅ Stage 2 passed")
+
+    # ========================================================================
+    # STOP HERE - Stage 3 (email verification) is handled by batch process
+    # ========================================================================
+    # Mark as passed up to Stage 2
+    # The batch orchestrator will handle email verification separately
+    automated_checks_data["passed"] = True  # Passed Stage 0-2
+    
+    print(f"   ✅ Stage 0-2 complete for {email} @ {company}")
+    return True, automated_checks_data
+
+
+async def run_stage4_5_repscore(
+    lead: dict,
+    email_result: dict,
+    stage0_2_data: dict
+) -> Tuple[bool, dict]:
+    """
+    Run Stage 4, Stage 5, and Rep Score checks only.
+    
+    This function is extracted from run_automated_checks() to support
+    batch email verification. It runs AFTER the lead has passed both:
+    1. TrueList batch email verification (email_result)
+    2. Stage 0-2 checks (stage0_2_data from run_stage0_2_checks)
+    
+    The actual check functions (check_linkedin_gse, check_stage5_unified,
+    check_wayback_machine, etc.) are called EXACTLY as in run_automated_checks().
+    
+    Args:
+        lead: Lead dict with email, company, linkedin, etc.
+        email_result: Result from TrueList batch for this email
+                     {"status": "email_ok", "passed": True, "rejection_reason": None}
+        stage0_2_data: Partial automated_checks_data from run_stage0_2_checks()
+    
+    Returns:
+        Tuple[bool, dict]: (passed, complete_automated_checks_data)
+    """
+    email = get_email(lead)
+    company = get_company(lead)
+    
+    # ========================================================================
+    # MERGE: Start with stage0_2_data and extend with Stage 3-5 + Rep Score
+    # ========================================================================
+    automated_checks_data = stage0_2_data.copy()
+    
+    # Ensure Stage 3-5 and rep_score sections exist
+    if "stage_3_email" not in automated_checks_data:
+        automated_checks_data["stage_3_email"] = {
+            "email_status": "unknown",
+            "email_score": 0,
+            "is_disposable": False,
+            "is_role_based": False,
+            "is_free": False
+        }
+    if "stage_4_linkedin" not in automated_checks_data:
+        automated_checks_data["stage_4_linkedin"] = {
+            "linkedin_verified": False,
+            "gse_search_count": 0,
+            "llm_confidence": "none"
+        }
+    if "stage_5_verification" not in automated_checks_data:
+        automated_checks_data["stage_5_verification"] = {
+            "role_verified": False,
+            "region_verified": False,
+            "industry_verified": False,
+            "extracted_role": None,
+            "extracted_region": None,
+            "extracted_industry": None,
+            "early_exit": None
+        }
+    if "rep_score" not in automated_checks_data:
+        automated_checks_data["rep_score"] = {
+            "total_score": 0,
+            "max_score": MAX_REP_SCORE,
+            "breakdown": {
+                "wayback_machine": 0,
+                "uspto_trademarks": 0,
+                "sec_edgar": 0,
+                "whois_dnsbl": 0,
+                "gdelt": 0,
+                "companies_house": 0
+            }
+        }
+    
+    # ========================================================================
+    # Stage 3: Populate from Batch Email Result (NO API CALL - already done)
+    # ========================================================================
+    print(f"🔍 Stage 3: Email verification (from batch) for {email} @ {company}")
+    
+    # Map TrueList batch status to internal format for lead["email_verifier_status"]
+    # This matches the mapping in run_automated_checks() Stage 3 data collection
+    batch_status = email_result.get("status", "unknown")
+    
+    if batch_status == "email_ok":
+        lead["email_verifier_status"] = "Valid"
+        email_status = "valid"
+        email_passed = True
+    elif batch_status == "accept_all":
+        lead["email_verifier_status"] = "Catch-All"
+        email_status = "catch-all"
+        # Catch-all passes only if SPF exists (checked in Stage 1)
+        has_spf = automated_checks_data.get("stage_1_dns", {}).get("has_spf", False)
+        email_passed = has_spf
+    elif batch_status in ["disposable"]:
+        lead["email_verifier_status"] = "Disposable"
+        email_status = "invalid"
+        email_passed = False
+    elif batch_status in ["failed_no_mailbox", "failed_syntax_check", "failed_mx_check"]:
+        lead["email_verifier_status"] = "Invalid"
+        email_status = "invalid"
+        email_passed = False
+    else:
+        # unknown, timeout, error - should have been retried, treat as failure
+        lead["email_verifier_status"] = "Unknown"
+        email_status = "unknown"
+        email_passed = False
+    
+    # Populate batch result flags on lead (for downstream compatibility)
+    lead["email_verifier_disposable"] = email_result.get("is_disposable", False)
+    lead["email_verifier_role_based"] = email_result.get("is_role_based", False)
+    lead["email_verifier_free"] = email_result.get("is_free", False)
+    
+    # Collect Stage 3 email data
+    automated_checks_data["stage_3_email"]["email_status"] = email_status
+    automated_checks_data["stage_3_email"]["email_score"] = 10 if email_passed else 0
+    automated_checks_data["stage_3_email"]["is_disposable"] = lead.get("email_verifier_disposable", False)
+    automated_checks_data["stage_3_email"]["is_role_based"] = lead.get("email_verifier_role_based", False)
+    automated_checks_data["stage_3_email"]["is_free"] = lead.get("email_verifier_free", False)
+    
+    if not email_passed:
+        rejection_reason = email_result.get("rejection_reason") or {
+            "stage": "Stage 3: Email Verification (Batch)",
+            "check_name": "truelist_batch",
+            "message": f"Email verification failed: {batch_status}",
+            "failed_fields": ["email"]
+        }
+        print(f"   ❌ Stage 3 failed: {rejection_reason.get('message', 'Email verification failed')}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
+    
+    print("   ✅ Stage 3 passed (batch verified)")
+    
+    # ========================================================================
+    # Stage 4: LinkedIn/GSE Validation (HARD)
+    # EXTRACTED VERBATIM from run_automated_checks()
+    # ========================================================================
+    print(f"🔍 Stage 4: LinkedIn/GSE validation for {email} @ {company}")
+    
+    passed, rejection_reason = await check_linkedin_gse(lead)
+    
+    # Collect Stage 4 data even on failure
+    automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
+    automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
+    
+    if not passed:
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 4 failed: {msg}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
+
+    print("   ✅ Stage 4 passed")
+    
+    # Collect Stage 4 data after successful check
+    automated_checks_data["stage_4_linkedin"]["linkedin_verified"] = True
+    automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
+    automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
+
+    # ========================================================================
+    # Stage 5: Role/Region/Industry Verification (HARD)
+    # EXTRACTED VERBATIM from run_automated_checks()
+    # - Uses ScrapingDog search + fuzzy matching + LLM to verify role, region, industry
+    # - Early exit: if role fails → skip region/industry
+    # - Early exit: if region fails → skip industry
+    # - Anti-gaming: rejects if miner puts multiple states in region
+    # ========================================================================
+    print(f"🔍 Stage 5: Role/Region/Industry verification for {email} @ {company}")
+    
+    passed, rejection_reason = await check_stage5_unified(lead)
+    
+    # Collect Stage 5 data
+    automated_checks_data["stage_5_verification"]["role_verified"] = lead.get("stage5_role_match", False)
+    automated_checks_data["stage_5_verification"]["region_verified"] = lead.get("stage5_region_match", False)
+    automated_checks_data["stage_5_verification"]["industry_verified"] = lead.get("stage5_industry_match", False)
+    automated_checks_data["stage_5_verification"]["extracted_role"] = lead.get("stage5_extracted_role")
+    automated_checks_data["stage_5_verification"]["extracted_region"] = lead.get("stage5_extracted_region")
+    automated_checks_data["stage_5_verification"]["extracted_industry"] = lead.get("stage5_extracted_industry")
+    
+    if not passed:
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 5 failed: {msg}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        automated_checks_data["stage_5_verification"]["early_exit"] = rejection_reason.get("early_exit") if rejection_reason else None
+        return False, automated_checks_data
+
+    print("   ✅ Stage 5 passed")
+
+    # ========================================================================
+    # Rep Score: Soft Reputation Checks (SOFT)
+    # EXTRACTED VERBATIM from run_automated_checks()
+    # - Wayback Machine (max 6 points), SEC (max 12 points), 
+    #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
+    #   Companies House (max 10 points)
+    # - Always passes, appends scores to lead
+    # - Total: 0-48 points
+    # ========================================================================
+    print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
+    
+    # OPTIMIZATION: Run all rep score checks in parallel to save time
+    # Old: Sequential execution = 6-12s total
+    # New: Parallel execution = 3-4s total (time of slowest API)
+    results = await asyncio.gather(
+        check_wayback_machine(lead),
+        check_sec_edgar(lead),
+        check_whois_dnsbl_reputation(lead),
+        check_gdelt_mentions(lead),
+        check_companies_house(lead),
+        return_exceptions=True  # Don't fail entire batch if one check fails
+    )
+    
+    # Unpack results (handle exceptions gracefully)
+    wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
+    sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
+    whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
+    gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
+    companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
+    
+    total_rep_score = (
+        wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
+        companies_house_score
+    )
+    
+    # Append to lead data
+    lead["rep_score"] = total_rep_score
+    lead["rep_score_details"] = {
+        "wayback": wayback_data,
+        "sec": sec_data,
+        "whois_dnsbl": whois_dnsbl_data,
+        "gdelt": gdelt_data,
+        "companies_house": companies_house_data
+    }
+    
+    # Append to automated_checks_data
+    automated_checks_data["rep_score"] = {
+        "total_score": total_rep_score,
+        "max_score": MAX_REP_SCORE,
+        "breakdown": {
+            "wayback_machine": wayback_score,       # 0-6 points
+            "sec_edgar": sec_score,                 # 0-12 points
+            "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
+            "gdelt": gdelt_score,                   # 0-10 points
+            "companies_house": companies_house_score      # 0-10 points
+        }
+    }
+    
+    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
+    
+    # ========================================================================
+    # ICP Multiplier Determination
+    # EXTRACTED VERBATIM from run_automated_checks()
+    # ========================================================================
+    is_icp_multiplier = determine_icp_multiplier(lead)
+    lead["is_icp_multiplier"] = is_icp_multiplier
+    automated_checks_data["is_icp_multiplier"] = is_icp_multiplier
+    
+    if is_icp_multiplier > 1.0:
+        print(f"   🎯 ICP MATCH: Multiplier {is_icp_multiplier}x applied!")
+    else:
+        print(f"   📋 Standard lead: Multiplier {is_icp_multiplier}x")
+    
+    print(f"🎉 All stages passed for {email} @ {company}")
+
+    # All checks passed - return structured success data
+    automated_checks_data["passed"] = True
+    automated_checks_data["rejection_reason"] = None
+    
+    # IMPORTANT: Also set rep_score on lead object for validator.py to pick up
+    # validator.py looks for lead_blob.get("rep_score", 50)
+    lead["rep_score"] = total_rep_score
+    
+    return True, automated_checks_data
+
+
+async def submit_and_poll_truelist(emails: List[str]) -> Dict[str, dict]:
+    """
+    Submit batch and poll for results (combined for background task).
+    
+    This is a helper function that combines submit_truelist_batch() and
+    poll_truelist_batch() for use with asyncio.create_task().
+    
+    Args:
+        emails: List of email addresses to validate
+    
+    Returns:
+        Dict mapping email -> result dict
+    """
+    batch_id = await submit_truelist_batch(emails)
+    return await poll_truelist_batch(batch_id)
+
+
+async def retry_truelist_batch(emails: List[str]) -> Dict[str, dict]:
+    """
+    Submit a retry batch and poll for results.
+    
+    Args:
+        emails: List of email addresses to retry
+    
+    Returns:
+        Dict mapping email -> result dict
+        On error, all emails marked as needs_retry=True
+    """
+    try:
+        batch_id = await submit_truelist_batch(emails)
+        return await poll_truelist_batch(batch_id)
+    except Exception as e:
+        print(f"   ⚠️ Retry batch error: {e}")
+        # On error, mark all as needing retry
+        return {email: {"needs_retry": True, "error": str(e)} for email in emails}
+
+
+async def run_batch_automated_checks(
+    leads: List[dict]
+) -> List[Tuple[bool, dict]]:
+    """
+    Batch validation with SEQUENTIAL Stage 0-2 and Stage 4-5.
+    TrueList batch runs in PARALLEL with Stage 0-2.
+    
+    This REPLACES calling run_automated_checks() individually for each lead.
+    Orchestrates the full batch flow without modifying any actual validation checks.
+    
+    Flow:
+    1. Submit TrueList batch (background task)
+    2. Run Stage 0-2 SEQUENTIALLY for all leads (while TrueList processes)
+    3. Wait for TrueList batch to complete
+    4. Categorize leads: passed_both → Stage 4-5 queue, failed → reject, error → retry
+    5. Run Stage 4-5 SEQUENTIALLY with dynamic queue
+    6. Handle retries in parallel with Stage 4-5 (retry-passed leads join queue)
+    7. After max retries, still-erroring leads → skip
+    
+    Args:
+        leads: List of lead dicts (e.g., 110 leads per container)
+    
+    Returns:
+        List of (passed, automated_checks_data) tuples in SAME ORDER as input
+        - passed: True (approved), False (rejected), or None (skipped)
+    
+    CRITICAL: Results are returned in the SAME ORDER as input leads.
+    """
+    print(f"📦 Starting batch validation for {len(leads)} leads")
+    start_time = time.time()
+    
+    n = len(leads)
+    
+    # Handle empty batch
+    if n == 0:
+        print("   ⚠️ Empty batch - nothing to validate")
+        return []
+    
+    # Initialize results array with None (will be filled in order)
+    results = [None] * n  # Index-based for order preservation
+    
+    # ========================================================================
+    # Step 1: Extract emails and build lookup maps
+    # ========================================================================
+    emails = []
+    email_to_idx = {}  # email -> index in leads list
+    
+    for i, lead in enumerate(leads):
+        email = get_email(lead)
+        if email:
+            emails.append(email)
+            email_to_idx[email] = i
+        else:
+            # No email - immediate rejection
+            results[i] = (False, {
+                "passed": False,
+                "rejection_reason": {
+                    "stage": "Pre-Batch",
+                    "check_name": "email_extraction",
+                    "message": "No email found in lead",
+                    "failed_fields": ["email"]
+                }
+            })
+    
+    print(f"   📧 Extracted {len(emails)} emails from {n} leads")
+    
+    # Check if all leads rejected (no valid emails)
+    if not emails:
+        print("   ⚠️ No valid emails found - all leads rejected")
+        return results
+    
+    # ========================================================================
+    # Step 1.5: FAST PRE-FILTER - Reject emails without @ sign
+    # ========================================================================
+    # This is a super low-latency check that:
+    # 1. Prevents TrueList batch from failing (it rejects entire batch if ANY email lacks @)
+    # 2. Saves Stage 0-2 processing time for obviously invalid emails
+    
+    valid_emails = []
+    invalid_syntax_count = 0
+    
+    for email in emails:
+        if '@' not in email:
+            # Instant rejection - no @ sign
+            idx = email_to_idx[email]
+            results[idx] = (False, {
+                "passed": False,
+                "rejection_reason": {
+                    "stage": "Pre-Batch",
+                    "check_name": "email_syntax_prefilter",
+                    "message": "Email missing @ symbol (instant rejection)",
+                    "failed_fields": ["email"]
+                }
+            })
+            invalid_syntax_count += 1
+        else:
+            valid_emails.append(email)
+    
+    if invalid_syntax_count > 0:
+        print(f"   ⚡ Pre-filter: Rejected {invalid_syntax_count} emails (missing @ sign)")
+    
+    print(f"   ✅ {len(valid_emails)} valid emails ready for batch processing")
+    
+    # Update email list and check if any remain
+    emails = valid_emails
+    
+    if not emails:
+        print("   ⚠️ No valid emails after pre-filter - all leads rejected")
+        return results
+    
+    # ========================================================================
+    # Step 2: Submit TrueList batch as background task (non-blocking)
+    # ========================================================================
+    print(f"   🚀 Submitting TrueList batch for {len(emails)} emails...")
+    
+    try:
+        batch_task = asyncio.create_task(submit_and_poll_truelist(emails))
+    except Exception as e:
+        print(f"   ❌ Failed to create TrueList batch task: {e}")
+        # Mark all leads with emails as skipped
+        for email in emails:
+            idx = email_to_idx[email]
+            results[idx] = (None, {
+                "skipped": True,
+                "reason": "EmailVerificationUnavailable",
+                "error": str(e)
+            })
+        return results
+    
+    # ========================================================================
+    # Step 3: Run Stage 0-2 SEQUENTIALLY (while TrueList batch processes)
+    # ========================================================================
+    print(f"   🔍 Running Stage 0-2 checks SEQUENTIALLY for {n} leads...")
+    
+    stage0_2_results = []  # List of (passed, data) in order, indexed by lead position
+    
+    for i, lead in enumerate(leads):
+        email = get_email(lead)
+        
+        # Skip leads without email (already rejected in Step 1)
+        if not email:
+            stage0_2_results.append((False, results[i][1] if results[i] else {}))
+            continue
+        
+        print(f"   Stage 0-2: Lead {i+1}/{n} ({email})")
+        
+        try:
+            passed, data = await run_stage0_2_checks(lead)
+            stage0_2_results.append((passed, data))
+        except Exception as e:
+            print(f"      ❌ Stage 0-2 error: {e}")
+            stage0_2_results.append((False, {
+                "passed": False,
+                "rejection_reason": {
+                    "stage": "Stage 0-2",
+                    "check_name": "run_stage0_2_checks",
+                    "message": f"Stage 0-2 error: {str(e)}",
+                    "error": str(e)
+                }
+            }))
+    
+    stage0_2_passed_count = sum(1 for passed, _ in stage0_2_results if passed)
+    print(f"   ✅ Stage 0-2 complete: {stage0_2_passed_count}/{n} passed")
+    
+    # ========================================================================
+    # Step 4: Wait for TrueList batch to complete
+    # ========================================================================
+    print(f"   ⏳ Waiting for TrueList batch completion...")
+    
+    try:
+        email_results = await batch_task
+        print(f"   ✅ TrueList batch complete: {len(email_results)} results")
+    except Exception as e:
+        print(f"   ❌ TrueList batch failed: {e}")
+        # Fallback: Use Stage 0-2 results, mark passed ones as skipped
+        for i, lead in enumerate(leads):
+            email = get_email(lead)
+            if not email:
+                continue  # Already rejected
+            
+            stage0_2_passed, stage0_2_data = stage0_2_results[i]
+            if stage0_2_passed:
+                results[i] = (None, {
+                    "skipped": True,
+                    "reason": "EmailVerificationUnavailable",
+                    "error": str(e)
+                })
+            else:
+                results[i] = (False, stage0_2_data)
+        return results
+    
+    # ========================================================================
+    # Step 5: Categorize leads
+    # ========================================================================
+    stage4_5_queue = []  # List of (index, lead, email_result, stage0_2_data)
+    needs_retry = []     # List of emails that errored
+    
+    for i, lead in enumerate(leads):
+        email = get_email(lead)
+        
+        # Skip leads without email (already rejected)
+        if not email:
+            continue
+        
+        stage0_2_passed, stage0_2_data = stage0_2_results[i]
+        email_result = email_results.get(email, {})
+        
+        if not stage0_2_passed:
+            # Failed Stage 0-2 → immediate reject
+            results[i] = (False, stage0_2_data)
+        elif email_result.get("needs_retry"):
+            # Email errored → queue for retry
+            needs_retry.append(email)
+        elif email_result.get("passed"):
+            # Both passed → queue for Stage 4-5
+            stage4_5_queue.append((i, lead, email_result, stage0_2_data))
+        else:
+            # Email failed → reject
+            rejection_data = stage0_2_data.copy()
+            rejection_data["passed"] = False
+            rejection_data["rejection_reason"] = email_result.get("rejection_reason") or {
+                "stage": "Stage 3: Email Verification (Batch)",
+                "check_name": "truelist_batch",
+                "message": f"Email verification failed: {email_result.get('status', 'unknown')}",
+                "failed_fields": ["email"]
+            }
+            results[i] = (False, rejection_data)
+    
+    print(f"   📊 Categorization: {len(stage4_5_queue)} ready for Stage 4-5, {sum(1 for r in results if r and r[0] == False)} rejected, {len(needs_retry)} need retry")
+    
+    # ========================================================================
+    # Step 6: Start Stage 4-5 SEQUENTIALLY + Handle retries in parallel
+    # ========================================================================
+    
+    # Start retry batch if needed (runs in background)
+    retry_task = None
+    retry_attempt = 0
+    if needs_retry:
+        print(f"   🔄 Starting retry batch #1 for {len(needs_retry)} emails...")
+        retry_task = asyncio.create_task(retry_truelist_batch(needs_retry))
+    
+    # Process Stage 4-5 queue SEQUENTIALLY
+    queue_idx = 0
+    total_stage4_5 = len(stage4_5_queue)
+    
+    while queue_idx < len(stage4_5_queue) or retry_task is not None:
+        # Process next lead in Stage 4-5 queue (if available)
+        if queue_idx < len(stage4_5_queue):
+            idx, lead, email_result, stage0_2_data = stage4_5_queue[queue_idx]
+            email = get_email(lead)
+            print(f"   Stage 4-5: Lead {queue_idx+1}/{len(stage4_5_queue)} ({email})")
+            
+            try:
+                passed, data = await run_stage4_5_repscore(lead, email_result, stage0_2_data)
+                results[idx] = (passed, data)
+            except Exception as e:
+                print(f"      ❌ Stage 4-5 error: {e}")
+                results[idx] = (False, {
+                    "passed": False,
+                    "rejection_reason": {
+                        "stage": "Stage 4-5",
+                        "check_name": "run_stage4_5_repscore",
+                        "message": f"Stage 4-5 error: {str(e)}",
+                        "error": str(e)
+                    }
+                })
+            
+            queue_idx += 1
+        
+        # Check if retry batch completed (non-blocking check)
+        if retry_task is not None and retry_task.done():
+            try:
+                retry_results = retry_task.result()
+            except Exception as e:
+                print(f"   ⚠️ Retry batch failed: {e}")
+                retry_results = {email: {"needs_retry": True, "error": str(e)} for email in needs_retry}
+            
+            retry_task = None
+            still_needs_retry = []
+            
+            for email in needs_retry:
+                result = retry_results.get(email, {"needs_retry": True})
+                idx = email_to_idx[email]
+                stage0_2_passed, stage0_2_data = stage0_2_results[idx]
+                
+                if result.get("needs_retry"):
+                    still_needs_retry.append(email)
+                elif result.get("passed"):
+                    # Retry succeeded → add to Stage 4-5 queue
+                    print(f"   ✅ Retry succeeded for: {email}")
+                    stage4_5_queue.append((idx, leads[idx], result, stage0_2_data))
+                else:
+                    # Retry failed → reject
+                    rejection_data = stage0_2_data.copy()
+                    rejection_data["passed"] = False
+                    rejection_data["rejection_reason"] = result.get("rejection_reason") or {
+                        "stage": "Stage 3: Email Verification (Batch Retry)",
+                        "check_name": "truelist_batch",
+                        "message": f"Email verification failed after retry: {result.get('status', 'unknown')}",
+                        "failed_fields": ["email"]
+                    }
+                    results[idx] = (False, rejection_data)
+            
+            needs_retry = still_needs_retry
+            retry_attempt += 1
+            
+            # Start next retry if needed and haven't exceeded max
+            if needs_retry and retry_attempt < TRUELIST_BATCH_MAX_RETRIES:
+                print(f"   🔄 Starting retry batch #{retry_attempt+1} for {len(needs_retry)} emails...")
+                retry_task = asyncio.create_task(retry_truelist_batch(needs_retry))
+            
+            print(f"   📊 After retry #{retry_attempt}: {len(still_needs_retry)} still pending, {len(stage4_5_queue) - queue_idx} added to queue")
+        
+        # If queue is empty but retry pending, wait briefly before checking again
+        if queue_idx >= len(stage4_5_queue) and retry_task is not None:
+            await asyncio.sleep(1)
+    
+    # ========================================================================
+    # Step 7: Handle leads that still errored after max retries
+    # ========================================================================
+    for email in needs_retry:
+        idx = email_to_idx[email]
+        print(f"   ⏭️ Skipping email after {TRUELIST_BATCH_MAX_RETRIES} retries: {email}")
+        results[idx] = (None, {
+            "skipped": True,
+            "reason": "EmailVerificationUnavailable",
+            "message": f"Email verification failed after {TRUELIST_BATCH_MAX_RETRIES} retries"
+        })
+    
+    # ========================================================================
+    # Summary
+    # ========================================================================
+    elapsed = time.time() - start_time
+    passed_count = sum(1 for r in results if r and r[0] is True)
+    failed_count = sum(1 for r in results if r and r[0] is False)
+    skipped_count = sum(1 for r in results if r and r[0] is None)
+    
+    print(f"📦 Batch validation complete in {elapsed:.1f}s")
+    print(f"   ✅ Passed: {passed_count}")
+    print(f"   ❌ Failed: {failed_count}")
+    print(f"   ⏭️ Skipped: {skipped_count}")
+    
+    return results
 
 
 async def check_myemailverifier_email(lead: dict) -> Tuple[bool, dict]:

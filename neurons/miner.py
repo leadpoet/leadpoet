@@ -233,8 +233,8 @@ class Miner(BaseMinerNeuron):
                                 print(f"⏭️  Skipping duplicate person+company: {business_name}")
                                 print(f"      LinkedIn: {linkedin_url[:50]}...")
                                 print(f"      Company: {company_linkedin_url[:50]}...")
-                                duplicate_count += 1
-                                continue
+                            duplicate_count += 1
+                            continue
                         
                         # Step 1: Get presigned URLs (gateway logs SUBMISSION_REQUEST with committed hash)
                         presign_result = gateway_get_presigned_url(self.wallet, lead)

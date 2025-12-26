@@ -4673,7 +4673,7 @@ def run_lightweight_worker(config):
             but without any Bittensor dependencies.
             """
             import time
-            from validator_models.automated_checks import run_automated_checks
+            from validator_models.automated_checks import run_automated_checks, run_batch_automated_checks
             
             print("🔄 Worker validation loop started")
             
@@ -4790,25 +4790,56 @@ def run_lightweight_worker(config):
                     
                     print(f"   Worker {container_id}: Processing leads {start}-{end} ({len(worker_leads)}/{original_count} leads)")
                     
-                    # Validate leads
+                    # ================================================================
+                    # BATCH VALIDATION: Use run_batch_automated_checks for efficiency
+                    # TrueList emails are batched, stages run sequentially
+                    # ================================================================
+                    
+                    # Extract lead_blobs for batch processing
+                    lead_blobs = [lead_data.get('lead_blob', {}) for lead_data in worker_leads]
+                    
+                    # Run batch validation (handles TrueList batch + sequential stages)
+                    try:
+                        batch_results = await run_batch_automated_checks(lead_blobs)
+                    except Exception as e:
+                        print(f"   ❌ Batch validation failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Fallback: Mark all leads as validation errors
+                        batch_results = [
+                            (False, {
+                                "passed": False,
+                                "rejection_reason": {
+                                    "stage": "Batch Validation",
+                                    "check_name": "run_batch_automated_checks",
+                                    "message": f"Batch validation error: {str(e)}"
+                                }
+                            })
+                            for _ in lead_blobs
+                        ]
+                    
+                    # Map results back to validated_leads format (SAME ORDER guaranteed)
                     validated_leads = []
-                    for idx, lead_data in enumerate(worker_leads, 1):
+                    for i, (passed, automated_checks_data) in enumerate(batch_results):
+                        lead_data = worker_leads[i]
                         lead_id = lead_data.get('lead_id', 'unknown')
                         lead_blob = lead_data.get('lead_blob', {})
                         miner_hotkey = lead_data.get('miner_hotkey', lead_blob.get('wallet_ss58', 'unknown'))
                         
-                        email = lead_blob.get('email', 'unknown')
-                        company = lead_blob.get('company', 'unknown')
-                        
-                        print(f"   Lead {idx}/{len(worker_leads)}: {email} @ {company}")
-                        
-                        try:
-                            # Use run_automated_checks (returns tuple: passed, automated_checks_data)
-                            passed, automated_checks_data = await run_automated_checks(lead_blob)
-                            
-                            # Extract rejection reason if failed
+                        # Handle skipped leads (passed=None means email verification unavailable)
+                        if passed is None:
+                            validated_leads.append({
+                                'lead_id': lead_id,
+                                'is_valid': False,  # Treat skipped as invalid for this epoch
+                                'rejection_reason': {'message': 'EmailVerificationUnavailable'},
+                                'automated_checks_data': automated_checks_data,
+                                'lead_blob': lead_blob,
+                                'miner_hotkey': miner_hotkey,
+                                'skipped': True
+                            })
+                        else:
+                            # Normal pass/fail
                             rejection_reason = automated_checks_data.get("rejection_reason") if not passed else None
-                            
                             validated_leads.append({
                                 'lead_id': lead_id,
                                 'is_valid': passed,
@@ -4817,19 +4848,6 @@ def run_lightweight_worker(config):
                                 'lead_blob': lead_blob,
                                 'miner_hotkey': miner_hotkey
                             })
-                            
-                        except Exception as e:
-                            print(f"      ❌ Validation error: {e}")
-                            validated_leads.append({
-                                'lead_id': lead_id,
-                                'is_valid': False,
-                                'validation_reasons': [f'validation_error: {str(e)}'],
-                                'validation_details': {},
-                                'lead_blob': lead_blob
-                            })
-                        
-                        # Sleep between leads
-                        await asyncio.sleep(2)
                     
                     # Write results to file for coordinator
                     # CRITICAL: Hash results using shared salt (EXACT same format as coordinator)

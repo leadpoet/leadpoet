@@ -2233,8 +2233,20 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         print(f"   ✅ Batch completed!")
                         print(f"   📧 Total: {email_count}, OK: {ok_count}, Unknown: {unknown_count}")
                         
-                        # Debug: Log all keys in the response
-                        print(f"   🔍 API response keys: {list(data.keys())}")
+                        # ============================================================
+                        # PRIMARY METHOD: Use /emails endpoint with pagination
+                        # This is the CORRECT way per TrueList API docs
+                        # ============================================================
+                        results = await _fetch_batch_email_results(batch_id, headers, email_count)
+                        
+                        if len(results) >= email_count * 0.9:  # Got at least 90% of expected results
+                            print(f"   ✅ Got {len(results)}/{email_count} results via /emails endpoint")
+                            return results
+                        
+                        # ============================================================
+                        # FALLBACK: Try CSV downloads if /emails endpoint incomplete
+                        # ============================================================
+                        print(f"   ⚠️ /emails endpoint only returned {len(results)}/{email_count}, trying CSV fallback...")
                         
                         # Get the annotated CSV URL - try multiple possible fields
                         annotated_csv_url = (
@@ -2463,6 +2475,111 @@ async def _download_and_parse_batch_csv(csv_url: str, headers: dict) -> Dict[str
         raise EmailVerificationUnavailableError(f"Failed to download batch CSV: {str(e)}")
     except asyncio.TimeoutError:
         raise EmailVerificationUnavailableError("Batch CSV download timed out")
+
+
+async def _fetch_batch_email_results(batch_id: str, headers: dict, email_count: int) -> Dict[str, dict]:
+    """
+    Fetch email results using TrueList's /emails endpoint with pagination.
+    
+    This is the CORRECT way to retrieve individual email results per the API docs:
+    GET /api/v1/batches/{batch_uuid}/emails
+    
+    Args:
+        batch_id: UUID of the completed batch
+        headers: Auth headers with Bearer token
+        email_count: Expected number of emails (for progress reporting)
+    
+    Returns:
+        Dict mapping email -> result dict with status, passed, needs_retry
+    """
+    # Define which statuses pass, fail, or need retry
+    PASS_STATUSES = {"email_ok"}
+    RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error"}
+    
+    results = {}
+    page = 1
+    per_page = 100  # Maximum allowed per the docs
+    
+    print(f"   📥 Fetching email results via /emails endpoint (paginated)...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            while True:
+                url = f"https://api.truelist.io/api/v1/batches/{batch_id}/emails?page={page}&per_page={per_page}"
+                
+                async with session.get(url, headers=headers, timeout=30, proxy=HTTP_PROXY_URL) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        print(f"   ⚠️ /emails endpoint returned HTTP {response.status}: {error_text[:100]}")
+                        break
+                    
+                    data = await response.json()
+                    email_addresses = data.get("email_addresses", [])
+                    
+                    if not email_addresses:
+                        # No more results
+                        break
+                    
+                    # Process each email result
+                    for email_data in email_addresses:
+                        # The email object structure from the API
+                        email = email_data.get("email_address", email_data.get("email", "")).lower()
+                        if not email:
+                            continue
+                        
+                        email_state = email_data.get("email_state", "unknown")
+                        email_sub_state = email_data.get("email_sub_state", email_state)
+                        
+                        # Determine pass/fail/retry
+                        if email_sub_state in PASS_STATUSES:
+                            results[email] = {
+                                "status": email_sub_state,
+                                "passed": True,
+                                "needs_retry": False,
+                                "rejection_reason": None
+                            }
+                        elif email_sub_state in RETRY_STATUSES:
+                            results[email] = {
+                                "status": email_sub_state,
+                                "passed": False,
+                                "needs_retry": True,
+                                "rejection_reason": None
+                            }
+                        else:
+                            # Failed status
+                            results[email] = {
+                                "status": email_sub_state,
+                                "passed": False,
+                                "needs_retry": False,
+                                "rejection_reason": {
+                                    "stage": "Stage 3",
+                                    "check_name": "truelist_email_verification",
+                                    "message": f"Email verification failed: {email_sub_state}",
+                                    "truelist_status": email_sub_state
+                                }
+                            }
+                    
+                    print(f"   📄 Page {page}: Got {len(email_addresses)} emails (total so far: {len(results)})")
+                    
+                    # Check if we got all expected emails
+                    if len(results) >= email_count:
+                        break
+                    
+                    # Check if this was the last page (fewer than per_page results)
+                    if len(email_addresses) < per_page:
+                        break
+                    
+                    page += 1
+                    
+                    # Small delay between pages to avoid rate limiting
+                    await asyncio.sleep(0.5)
+        
+        print(f"   ✅ Fetched {len(results)}/{email_count} email results via API")
+        return results
+        
+    except Exception as e:
+        print(f"   ⚠️ Error fetching email results: {str(e)[:100]}")
+        return results
 
 
 def parse_truelist_batch_csv(csv_content: str) -> Dict[str, dict]:

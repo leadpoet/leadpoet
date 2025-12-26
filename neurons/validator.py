@@ -2018,16 +2018,10 @@ class Validator(BaseValidatorNeuron):
                 # No containerization - process all leads
                 lead_range_str = None
             
-            # ================================================================
-            # BATCH VALIDATION: Use run_batch_automated_checks for efficiency
-            # TrueList emails are batched, stages run sequentially
-            # This is the SAME approach workers use
-            # ================================================================
-            print(f"🔍 Running BATCH automated checks on {len(leads)} leads...")
+            print(f"🔍 Running automated checks on each lead...")
             print("")
             
-            from validator_models.automated_checks import run_batch_automated_checks
-            
+            # Validate each lead using automated_checks
             # (os and hashlib already imported at line 1845)
             validation_results = []
             local_validation_data = []  # Store for weight calculation
@@ -2036,97 +2030,65 @@ class Validator(BaseValidatorNeuron):
             # Convert back from hex for coordinator's own validation
             salt = bytes.fromhex(salt_hex)
             
-            # Extract lead_blobs for batch processing
-            lead_blobs = [lead.get('lead_blob', {}) for lead in leads]
-            
-            # Run batch validation (handles TrueList batch + sequential stages)
-            try:
-                batch_results = await run_batch_automated_checks(lead_blobs)
-            except Exception as e:
-                print(f"   ❌ Batch validation failed: {e}")
-                import traceback
-                traceback.print_exc()
-                # Fallback: Mark all leads as validation errors
-                batch_results = [
-                    (False, {
-                        "passed": False,
-                        "rejection_reason": {
-                            "stage": "Batch Validation",
-                            "check_name": "run_batch_automated_checks",
-                            "message": f"Batch validation error: {str(e)}"
-                        }
-                    })
-                    for _ in leads
-                ]
-            
-            # Process batch results (same format as workers use)
-            for idx, (lead, (passed, automated_checks_data)) in enumerate(zip(leads, batch_results), 1):
+            for idx, lead in enumerate(leads, 1):
                 try:
+                    # Extract lead data from lead_blob (gateway returns nested structure)
                     lead_blob = lead.get("lead_blob", {})
                     email = lead_blob.get("email", "unknown@example.com")
+                    # Try both "Company" and "business" fields (miners may use different field names)
                     company = lead_blob.get("Company") or lead_blob.get("business", "Unknown")
                     
                     print(f"{'─'*80}")
                     print(f"📋 Lead {idx}/{len(leads)}: {email} @ {company}")
+                    print(f"[DEBUG] Lead data keys: {list(lead.keys())}")
+                    print(f"[DEBUG] Lead blob keys: {list(lead_blob.keys()) if lead_blob else 'None'}")
                     
-                    # Handle skipped leads (passed=None means TrueList errors after retries)
-                    if passed is None:
-                        is_valid = False
-                        decision = "deny"
-                        rep_score = 0
-                        rejection_reason = {
-                            "stage": "Batch Validation",
-                            "check_name": "truelist_batch_skipped",
-                            "message": "Lead skipped due to persistent TrueList errors"
-                        }
-                        result = {"is_legitimate": False, "reason": rejection_reason, "skipped": True}
-                    else:
-                        is_valid = passed
-                        decision = "approve" if is_valid else "deny"
-                        # CRITICAL: Use validator-calculated rep_score, NOT miner's submitted value
-                        # Denied leads get 0, approved leads get score from automated checks
-                        rep_score = int(automated_checks_data.get('rep_score', 0)) if is_valid else 0
-                        rejection_reason = automated_checks_data.get("rejection_reason") or {} if not is_valid else {"message": "pass"}
-                        
-                        # Build result structure matching old validate_lead() output
-                        result = {
-                            "is_legitimate": is_valid,
-                            "enhanced_lead": automated_checks_data if is_valid else {},
-                            "reason": rejection_reason if not is_valid else None
-                        }
-                        if is_valid:
-                            result["enhanced_lead"]["rep_score"] = rep_score
+                    # Pass lead_blob to validate_lead (not the wrapper object)
+                    print(f"[DEBUG] Calling validate_lead() for {email}...")
+                    result = await self.validate_lead(lead_blob)
+                    print(f"[DEBUG] validate_lead() returned for {email}")
+                    
+                    # Extract results
+                    is_valid = result.get("is_legitimate", False)
+                    decision = "approve" if is_valid else "deny"
+                    # CRITICAL: Use validator-calculated rep_score, NOT miner's submitted value
+                    # Denied leads get 0, approved leads get score from automated checks
+                    rep_score = int(result.get('enhanced_lead', {}).get('rep_score', 0)) if is_valid else 0
+                    rejection_reason = result.get("reason") or {} if not is_valid else {"message": "pass"}
                     
                     # Strip internal cache fields from evidence (they contain datetime objects and aren't needed)
+                    # These are Stage 4 optimization artifacts, not part of the validation evidence
                     clean_result = result.copy()
                     if "enhanced_lead" in clean_result and isinstance(clean_result["enhanced_lead"], dict):
                         clean_enhanced = clean_result["enhanced_lead"].copy()
+                        # Remove internal cache fields that shouldn't be in evidence
                         for internal_field in ["company_linkedin_data", "company_linkedin_slug", "company_linkedin_from_cache"]:
                             clean_enhanced.pop(internal_field, None)
                         clean_result["enhanced_lead"] = clean_enhanced
                     
-                    evidence_blob = json.dumps(clean_result, default=str)
+                    evidence_blob = json.dumps(clean_result, default=str)  # Handle any remaining datetime objects
                     
                     # Compute hashes (SHA256 with salt)
                     decision_hash = hashlib.sha256((decision + salt.hex()).encode()).hexdigest()
                     rep_score_hash = hashlib.sha256((str(rep_score) + salt.hex()).encode()).hexdigest()
-                    rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason, default=str) + salt.hex()).encode()).hexdigest()
+                    rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason, default=str) + salt.hex()).encode()).hexdigest()  # Handle datetime
                     evidence_hash = hashlib.sha256(evidence_blob.encode()).hexdigest()
                     
                     # Store hashed result for gateway submission
+                    # lead_id and miner_hotkey are at top level (not in lead_blob)
                     validation_results.append({
-                        "lead_id": lead.get("lead_id"),
+                        "lead_id": lead.get("lead_id"),  # Top level
                         "decision_hash": decision_hash,
                         "rep_score_hash": rep_score_hash,
                         "rejection_reason_hash": rejection_reason_hash,
                         "evidence_hash": evidence_hash,
-                        "evidence_blob": result
+                        "evidence_blob": result  # Include full evidence for gateway storage
                     })
                     
                     # Store local data for weight calculation
                     local_validation_data.append({
-                        "lead_id": lead.get("lead_id"),
-                        "miner_hotkey": lead.get("miner_hotkey"),
+                        "lead_id": lead.get("lead_id"),  # Top level
+                        "miner_hotkey": lead.get("miner_hotkey"),  # Top level
                         "decision": decision,
                         "rep_score": rep_score,
                         "rejection_reason": rejection_reason,
@@ -2134,6 +2096,9 @@ class Validator(BaseValidatorNeuron):
                     })
                     
                     # Store weight data for later accumulation
+                    # Workers: Save in JSON for coordinator to aggregate
+                    # Coordinator/Default: Accumulate immediately (single validator)
+                    # Coordinator in containerized mode: Will re-accumulate all after aggregation
                     container_mode = getattr(self.config.neuron, 'mode', None)
                     
                     # Store weight info in local_validation_data for aggregation
@@ -2141,7 +2106,9 @@ class Validator(BaseValidatorNeuron):
                         local_validation_data[-1]["is_icp_multiplier"] = lead.get("is_icp_multiplier", 1.0)
                     
                     # Only accumulate now if NOT in container mode (backward compatibility)
+                    # In container mode, coordinator will accumulate ALL leads after aggregation
                     if container_mode is None:
+                        # Traditional single-validator mode
                         is_icp_multiplier = lead.get("is_icp_multiplier", 1.0)
                         await self.accumulate_miner_weights(
                             miner_hotkey=lead.get("miner_hotkey"),
@@ -2156,6 +2123,7 @@ class Validator(BaseValidatorNeuron):
                     print(f"   {status_icon} Decision: {decision_text}")
                     print(f"   📊 Rep Score: {rep_score}/{MAX_REP_SCORE}")
                     if not is_valid:
+                        # Print full rejection details
                         print(f"   ❌ REJECTION DETAILS:")
                         print(f"      Stage: {rejection_reason.get('stage', 'Unknown')}")
                         print(f"      Check: {rejection_reason.get('check_name', 'Unknown')}")
@@ -2165,29 +2133,115 @@ class Validator(BaseValidatorNeuron):
                             print(f"      Failed Fields: {', '.join(failed_fields)}")
                     print("")
                     
+                    # Add 2-second delay between leads (except for the last one)
+                    # Prevents rate limiting while keeping validation fast
+                    if idx < len(leads):
+                        print(f"⏳ Waiting 2 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(2)
+                        # Check if we should submit weights mid-processing (block 345+)
+                        await self.submit_weights_at_epoch_end()
+                        
+                        # Check if epoch changed - if so, stop processing old epoch's leads
+                        new_block = await self.get_current_block_async()
+                        new_epoch = new_block // 360
+                        blocks_into_epoch = new_block % 360
+                        
+                        # Update block file for workers every ~12 seconds during validation
+                        container_mode_check = getattr(self.config.neuron, 'mode', None)
+                        if container_mode_check != "worker":
+                            if not hasattr(self, '_block_file_write_counter_validation'):
+                                self._block_file_write_counter_validation = 0
+                            
+                            self._block_file_write_counter_validation += 1
+                            if self._block_file_write_counter_validation >= 1:  # Every lead (prevents 3+ min staleness)
+                                self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
+                                self._block_file_write_counter_validation = 0
+                        
+                        if new_epoch > current_epoch:
+                            print(f"\n{'='*80}")
+                            print(f"⚠️  EPOCH CHANGED: {current_epoch} → {new_epoch}")
+                            print(f"   Stopping validation of epoch {current_epoch} leads ({idx}/{len(leads)} complete)")
+                            print(f"   Remaining {len(leads) - idx} leads cannot be submitted (epoch closed)")
+                            print(f"{'='*80}\n")
+                            break  # Exit the lead processing loop
+                        
+                        # FORCE STOP at block 345 for WORKERS (weight submission time)
+                        # Coordinator needs to submit weights, workers must finish before that
+                        container_mode = getattr(self.config.neuron, 'mode', None)
+                        if container_mode == "worker" and blocks_into_epoch >= 345:
+                            print(f"\n{'='*80}")
+                            print(f"⏰ WORKER FORCE STOP: Block 345+ reached (block {blocks_into_epoch}/360)")
+                            print(f"   Workers must complete before coordinator submits weights")
+                            print(f"   Completed: {idx}/{len(leads)} leads")
+                            print(f"   📦 Saving partial results for coordinator to aggregate")
+                            print(f"{'='*80}\n")
+                            break  # Exit the lead processing loop and proceed to worker JSON write
+                    
                 except Exception as e:
-                    # Error processing individual result from batch
+                    from validator_models.automated_checks import EmailVerificationUnavailableError
+                    
                     lead_id = lead.get('lead_id', 'unknown')
                     email = lead.get('lead_blob', {}).get('email', 'unknown')
                     
-                    print(f"❌ Error processing batch result for lead {lead_id[:8]}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    print("")
-                    # Continue processing remaining results
-            
-            # After batch processing, update block file for workers
-            container_mode_check = getattr(self.config.neuron, 'mode', None)
-            if container_mode_check != "worker":
-                try:
-                    new_block = await self.get_current_block_async()
-                    new_epoch = new_block // 360
-                    blocks_into_epoch = new_block % 360
-                    self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
-                except Exception as e:
-                    print(f"   ⚠️ Could not update block file: {e}")
-            
-            print(f"\n📦 Batch validation complete: {len(validation_results)} leads processed")
+                    # Handle API timeout gracefully (no traceback)
+                    if isinstance(e, EmailVerificationUnavailableError):
+                        print(f"⏭️  Skipping lead {email} due to API timeout (after 3 retries)")
+                        print(f"   Lead ID: {lead_id[:8]}...")
+                        print("")
+                    else:
+                        # Print full traceback for unexpected errors
+                        print(f"❌ Error validating lead {lead_id}: {e}")
+                        import traceback
+                        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+                        print(f"[DEBUG] Lead structure: {lead}")
+                        print("")
+                    
+                    # Add 2-second delay between leads (except for the last one)
+                    # Prevents rate limiting while keeping validation fast
+                    if idx < len(leads):
+                        print(f"⏳ Waiting 2 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(2)
+                        # Check if we should submit weights mid-processing (block 345+)
+                        await self.submit_weights_at_epoch_end()
+                        
+                        # Check if epoch changed - if so, stop processing old epoch's leads
+                        new_block = await self.get_current_block_async()
+                        new_epoch = new_block // 360
+                        blocks_into_epoch = new_block % 360
+                        
+                        # Update block file for workers every ~12 seconds during validation
+                        container_mode_check = getattr(self.config.neuron, 'mode', None)
+                        if container_mode_check != "worker":
+                            if not hasattr(self, '_block_file_write_counter_validation'):
+                                self._block_file_write_counter_validation = 0
+                            
+                            self._block_file_write_counter_validation += 1
+                            if self._block_file_write_counter_validation >= 1:  # Every lead (prevents 3+ min staleness)
+                                self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
+                                self._block_file_write_counter_validation = 0
+                        
+                        if new_epoch > current_epoch:
+                            print(f"\n{'='*80}")
+                            print(f"⚠️  EPOCH CHANGED: {current_epoch} → {new_epoch}")
+                            print(f"   Stopping validation of epoch {current_epoch} leads ({idx}/{len(leads)} complete)")
+                            print(f"   Remaining {len(leads) - idx} leads cannot be submitted (epoch closed)")
+                            print(f"{'='*80}\n")
+                            break  # Exit the lead processing loop
+                        
+                        # FORCE STOP at block 345 for WORKERS (weight submission time)
+                        # Coordinator needs to submit weights, workers must finish before that
+                        container_mode_check = getattr(self.config.neuron, 'mode', None)
+                        if container_mode_check == "worker" and blocks_into_epoch >= 345:
+                            print(f"\n{'='*80}")
+                            print(f"⏰ WORKER FORCE STOP: Block 345+ reached (block {blocks_into_epoch}/360)")
+                            print(f"   Workers must complete before coordinator submits weights")
+                            print(f"   Completed: {idx}/{len(leads)} leads")
+                            print(f"   📦 Saving partial results for coordinator to aggregate")
+                            print(f"{'='*80}\n")
+                            break  # Exit the lead processing loop and proceed to worker JSON write
+                    
+                    # Continue to next lead after error
+                    continue
             
             # ═══════════════════════════════════════════════════════════════════
             # CONTAINER MODE HANDLING: Worker vs Coordinator

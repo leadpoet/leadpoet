@@ -2767,6 +2767,118 @@ async def submit_and_poll_truelist(emails: List[str]) -> Tuple[str, Dict[str, di
     return batch_id, results
 
 
+async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
+    """
+    Verify emails using TrueList's INLINE verification API (not batch).
+    
+    This is a FALLBACK for emails that TrueList's batch API silently drops.
+    Some enterprise domains (spglobal.com, jacobs.com, etc.) work with inline
+    verification but not batch verification.
+    
+    Rate limit: 10 requests/second per TrueList docs.
+    Each request can verify up to 3 emails.
+    
+    Args:
+        emails: List of email addresses to verify
+    
+    Returns:
+        Dict mapping email -> result dict with status, passed, needs_retry
+    """
+    if not TRUELIST_API_KEY:
+        print("   ⚠️ TRUELIST_API_KEY not configured for inline verification")
+        return {email: {"needs_retry": True, "error": "No API key"} for email in emails}
+    
+    results = {}
+    headers = {"Authorization": f"Bearer {TRUELIST_API_KEY}"}
+    
+    # TrueList inline API accepts up to 3 emails per request (space-separated)
+    BATCH_SIZE = 3
+    PASS_STATUSES = {"email_ok", "accept_all"}  # Both are valid for delivery
+    RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error", "failed_greylisted"}
+    
+    print(f"   🔍 Inline verification for {len(emails)} emails (TrueList batch fallback)...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            for i in range(0, len(emails), BATCH_SIZE):
+                batch = emails[i:i+BATCH_SIZE]
+                email_param = " ".join(batch)
+                
+                url = f"https://api.truelist.io/api/v1/verify_inline?email={email_param}"
+                
+                try:
+                    async with session.post(url, headers=headers, timeout=35, proxy=HTTP_PROXY_URL) as response:
+                        if response.status == 429:
+                            print(f"   ⚠️ Rate limited, waiting 2s...")
+                            await asyncio.sleep(2)
+                            continue
+                        
+                        if response.status != 200:
+                            error_text = await response.text()
+                            print(f"   ⚠️ Inline verify failed ({response.status}): {error_text[:50]}")
+                            for email in batch:
+                                results[email.lower()] = {"needs_retry": True, "error": f"HTTP {response.status}"}
+                            continue
+                        
+                        data = await response.json()
+                        email_results = data.get("emails", [])
+                        
+                        for email_data in email_results:
+                            email = email_data.get("email_address", email_data.get("email", "")).lower()
+                            if not email:
+                                continue
+                            
+                            email_state = email_data.get("email_state", "unknown")
+                            email_sub_state = email_data.get("email_sub_state", email_state)
+                            
+                            if email_sub_state in PASS_STATUSES:
+                                results[email] = {
+                                    "status": email_sub_state,
+                                    "passed": True,
+                                    "needs_retry": False,
+                                    "rejection_reason": None
+                                }
+                            elif email_sub_state in RETRY_STATUSES:
+                                results[email] = {
+                                    "status": email_sub_state,
+                                    "passed": False,
+                                    "needs_retry": True,
+                                    "rejection_reason": None
+                                }
+                            else:
+                                results[email] = {
+                                    "status": email_sub_state,
+                                    "passed": False,
+                                    "needs_retry": False,
+                                    "rejection_reason": {
+                                        "stage": "Stage 3",
+                                        "check_name": "truelist_inline_verification",
+                                        "message": f"Email verification failed: {email_sub_state}",
+                                        "truelist_status": email_sub_state
+                                    }
+                                }
+                                
+                except asyncio.TimeoutError:
+                    print(f"   ⚠️ Inline verify timeout for: {batch}")
+                    for email in batch:
+                        results[email.lower()] = {"needs_retry": True, "error": "timeout"}
+                except Exception as e:
+                    print(f"   ⚠️ Inline verify error: {e}")
+                    for email in batch:
+                        results[email.lower()] = {"needs_retry": True, "error": str(e)}
+                
+                # Rate limit: 10 req/sec = 100ms between requests
+                await asyncio.sleep(0.15)
+        
+        passed = sum(1 for r in results.values() if r.get("passed"))
+        print(f"   ✅ Inline verification: {passed}/{len(emails)} passed")
+        return results
+        
+    except Exception as e:
+        print(f"   ⚠️ Inline verification error: {e}")
+        return {email.lower(): {"needs_retry": True, "error": str(e)} for email in emails}
+
+
 async def retry_truelist_batch(emails: List[str], prev_batch_id: str = None) -> Tuple[str, Dict[str, dict]]:
     """
     Submit a retry batch and poll for results.
@@ -3854,16 +3966,54 @@ async def run_batch_automated_checks(
             await asyncio.sleep(1)
     
     # ========================================================================
-    # Step 7: Handle leads that still errored after max retries
+    # Step 7: Use INLINE verification for emails still missing after batch retries
+    # TrueList's batch API silently drops some enterprise domains (spglobal.com, etc.)
+    # but inline verification works fine for them.
     # ========================================================================
-    for email in needs_retry:
-        idx = email_to_idx[email]
-        print(f"   ⏭️ Skipping email after {TRUELIST_BATCH_MAX_RETRIES} retries: {email}")
-        results[idx] = (None, {
-            "skipped": True,
-            "reason": "EmailVerificationUnavailable",
-            "message": f"Email verification failed after {TRUELIST_BATCH_MAX_RETRIES} retries"
-        })
+    if needs_retry:
+        print(f"   🔍 Using inline verification for {len(needs_retry)} emails missing from batch...")
+        inline_results = await verify_emails_inline(needs_retry)
+        
+        for email in needs_retry:
+            idx = email_to_idx[email]
+            stage0_2_passed, stage0_2_data = stage0_2_results[idx]
+            result = inline_results.get(email.lower(), {"needs_retry": True})
+            
+            if result.get("passed"):
+                # Inline verification passed → run Stage 4-5
+                print(f"   ✅ Inline verified: {email}")
+                try:
+                    passed, data = await run_stage4_5_repscore(leads[idx], result, stage0_2_data)
+                    results[idx] = (passed, data)
+                except Exception as e:
+                    print(f"      ❌ Stage 4-5 error: {e}")
+                    results[idx] = (False, {
+                        "passed": False,
+                        "rejection_reason": {
+                            "stage": "Stage 4-5",
+                            "check_name": "run_stage4_5_repscore",
+                            "message": f"Stage 4-5 error after inline verify: {str(e)}"
+                        }
+                    })
+            elif result.get("needs_retry"):
+                # Still can't verify → skip (truly unverifiable)
+                print(f"   ⏭️ Cannot verify email (batch + inline failed): {email}")
+                results[idx] = (None, {
+                    "skipped": True,
+                    "reason": "EmailVerificationUnavailable",
+                    "message": f"Email verification unavailable after batch + inline attempts"
+                })
+            else:
+                # Inline verification explicitly failed → reject
+                rejection_data = stage0_2_data.copy()
+                rejection_data["passed"] = False
+                rejection_data["rejection_reason"] = result.get("rejection_reason") or {
+                    "stage": "Stage 3: Email Verification (Inline Fallback)",
+                    "check_name": "truelist_inline",
+                    "message": f"Email verification failed: {result.get('status', 'unknown')}",
+                    "failed_fields": ["email"]
+                }
+                results[idx] = (False, rejection_data)
     
     # ========================================================================
     # Summary

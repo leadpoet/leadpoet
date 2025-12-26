@@ -2018,10 +2018,16 @@ class Validator(BaseValidatorNeuron):
                 # No containerization - process all leads
                 lead_range_str = None
             
-            print(f"🔍 Running automated checks on each lead...")
+            # ================================================================
+            # BATCH VALIDATION: Same process as workers
+            # TrueList batch runs in parallel with Stage 0-2, then Stage 4-5
+            # 1-second delays between leads are INSIDE run_batch_automated_checks()
+            # ================================================================
+            print(f"🔍 Running BATCH automated checks on {len(leads)} leads...")
             print("")
             
-            # Validate each lead using automated_checks
+            from validator_models.automated_checks import run_batch_automated_checks
+            
             # (os and hashlib already imported at line 1845)
             validation_results = []
             local_validation_data = []  # Store for weight calculation
@@ -2030,31 +2036,68 @@ class Validator(BaseValidatorNeuron):
             # Convert back from hex for coordinator's own validation
             salt = bytes.fromhex(salt_hex)
             
-            for idx, lead in enumerate(leads, 1):
+            # Extract lead_blobs for batch processing
+            lead_blobs = [lead.get('lead_blob', {}) for lead in leads]
+            
+            # Run batch validation (handles TrueList batch + sequential stages with 1s delays)
+            try:
+                batch_results = await run_batch_automated_checks(lead_blobs)
+            except Exception as e:
+                print(f"   ❌ Batch validation failed: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback: Mark all leads as validation errors
+                batch_results = [
+                    (False, {
+                        "passed": False,
+                        "rejection_reason": {
+                            "stage": "Batch Validation",
+                            "check_name": "run_batch_automated_checks",
+                            "message": f"Batch validation error: {str(e)}"
+                        }
+                    })
+                    for _ in leads
+                ]
+            
+            print(f"\n📦 Batch validation complete. Processing {len(batch_results)} results...")
+            
+            # Process batch results - this loop PRESERVES block file updates and epoch detection
+            for idx, (lead, (passed, automated_checks_data)) in enumerate(zip(leads, batch_results), 1):
                 try:
-                    # Extract lead data from lead_blob (gateway returns nested structure)
                     lead_blob = lead.get("lead_blob", {})
                     email = lead_blob.get("email", "unknown@example.com")
-                    # Try both "Company" and "business" fields (miners may use different field names)
                     company = lead_blob.get("Company") or lead_blob.get("business", "Unknown")
                     
                     print(f"{'─'*80}")
-                    print(f"📋 Lead {idx}/{len(leads)}: {email} @ {company}")
-                    print(f"[DEBUG] Lead data keys: {list(lead.keys())}")
-                    print(f"[DEBUG] Lead blob keys: {list(lead_blob.keys()) if lead_blob else 'None'}")
+                    print(f"📋 Processing result {idx}/{len(leads)}: {email} @ {company}")
                     
-                    # Pass lead_blob to validate_lead (not the wrapper object)
-                    print(f"[DEBUG] Calling validate_lead() for {email}...")
-                    result = await self.validate_lead(lead_blob)
-                    print(f"[DEBUG] validate_lead() returned for {email}")
-                    
-                    # Extract results
-                    is_valid = result.get("is_legitimate", False)
-                    decision = "approve" if is_valid else "deny"
-                    # CRITICAL: Use validator-calculated rep_score, NOT miner's submitted value
-                    # Denied leads get 0, approved leads get score from automated checks
-                    rep_score = int(result.get('enhanced_lead', {}).get('rep_score', 0)) if is_valid else 0
-                    rejection_reason = result.get("reason") or {} if not is_valid else {"message": "pass"}
+                    # Handle skipped leads (passed=None means TrueList errors after retries)
+                    if passed is None:
+                        is_valid = False
+                        decision = "deny"
+                        rep_score = 0
+                        rejection_reason = {
+                            "stage": "Batch Validation",
+                            "check_name": "truelist_batch_skipped",
+                            "message": "Lead skipped due to persistent TrueList errors"
+                        }
+                        result = {"is_legitimate": False, "reason": rejection_reason, "skipped": True}
+                    else:
+                        is_valid = passed
+                        decision = "approve" if is_valid else "deny"
+                        # CRITICAL: Use validator-calculated rep_score, NOT miner's submitted value
+                        # Denied leads get 0, approved leads get score from automated checks
+                        rep_score = int(automated_checks_data.get('rep_score', 0)) if is_valid else 0
+                        rejection_reason = automated_checks_data.get("rejection_reason") or {} if not is_valid else {"message": "pass"}
+                        
+                        # Build result structure matching old validate_lead() output
+                        result = {
+                            "is_legitimate": is_valid,
+                            "enhanced_lead": automated_checks_data if is_valid else {},
+                            "reason": rejection_reason if not is_valid else None
+                        }
+                        if is_valid:
+                            result["enhanced_lead"]["rep_score"] = rep_score
                     
                     # Strip internal cache fields from evidence (they contain datetime objects and aren't needed)
                     # These are Stage 4 optimization artifacts, not part of the validation evidence
@@ -2178,23 +2221,14 @@ class Validator(BaseValidatorNeuron):
                             break  # Exit the lead processing loop and proceed to worker JSON write
                     
                 except Exception as e:
-                    from validator_models.automated_checks import EmailVerificationUnavailableError
-                    
+                    # Error processing batch result (rare - validation already complete)
                     lead_id = lead.get('lead_id', 'unknown')
                     email = lead.get('lead_blob', {}).get('email', 'unknown')
                     
-                    # Handle API timeout gracefully (no traceback)
-                    if isinstance(e, EmailVerificationUnavailableError):
-                        print(f"⏭️  Skipping lead {email} due to API timeout (after 3 retries)")
-                        print(f"   Lead ID: {lead_id[:8]}...")
-                        print("")
-                    else:
-                        # Print full traceback for unexpected errors
-                        print(f"❌ Error validating lead {lead_id}: {e}")
-                        import traceback
-                        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
-                        print(f"[DEBUG] Lead structure: {lead}")
-                        print("")
+                    print(f"❌ Error processing result for lead {lead_id[:8]}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    print("")
                     
                     # Add 2-second delay between leads (except for the last one)
                     # Prevents rate limiting while keeping validation fast

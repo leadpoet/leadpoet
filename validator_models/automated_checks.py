@@ -3358,6 +3358,10 @@ async def run_batch_automated_checks(
                     "error": str(e)
                 }
             }))
+        
+        # 1-second delay between Stage 0-2 leads (rate limiting)
+        if i < len(leads) - 1:
+            await asyncio.sleep(1)
     
     stage0_2_passed_count = sum(1 for passed, _ in stage0_2_results if passed)
     print(f"   ✅ Stage 0-2 complete: {stage0_2_passed_count}/{n} passed")
@@ -3466,6 +3470,10 @@ async def run_batch_automated_checks(
                 })
             
             queue_idx += 1
+            
+            # 1-second delay between Stage 4-5 leads (rate limiting)
+            if queue_idx < len(stage4_5_queue):
+                await asyncio.sleep(1)
         
         # Check if retry batch completed (non-blocking check)
         if retry_task is not None and retry_task.done():

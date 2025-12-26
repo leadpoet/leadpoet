@@ -515,7 +515,7 @@ async def submit_lead(event: SubmitLeadEvent):
                     
                     await log_event(validation_failed_event)
                     print(f"   ✅ Logged VALIDATION_FAILED (duplicate_approved) to TEE buffer")
-        except Exception as e:
+                except Exception as e:
                     print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
                 
                 raise HTTPException(
@@ -587,62 +587,62 @@ async def submit_lead(event: SubmitLeadEvent):
                 print(f"❌ Duplicate email detected - still PROCESSING!")
                 print(f"   Email hash: {committed_email_hash[:32]}...")
                 print(f"   Pending lead: {existing_lead_id[:10]}..., miner={existing_miner[:10]}..., ts={existing_time}")
-                    
+                
                 # Mark submission as failed
-                    updated_stats = mark_submission_failed(event.actor_hotkey)
-                    print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
-                    
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+                
                 # Log VALIDATION_FAILED event
-                    try:
-                        from gateway.utils.logger import log_event
-                        
-                        validation_failed_event = {
-                            "event_type": "VALIDATION_FAILED",
-                            "actor_hotkey": event.actor_hotkey,
-                            "nonce": str(uuid.uuid4()),
-                            "ts": datetime.now(tz.utc).isoformat(),
-                            "payload_hash": hashlib.sha256(json.dumps({
-                                "lead_id": event.payload.lead_id,
+                try:
+                    from gateway.utils.logger import log_event
+                    
+                    validation_failed_event = {
+                        "event_type": "VALIDATION_FAILED",
+                        "actor_hotkey": event.actor_hotkey,
+                        "nonce": str(uuid.uuid4()),
+                        "ts": datetime.now(tz.utc).isoformat(),
+                        "payload_hash": hashlib.sha256(json.dumps({
+                            "lead_id": event.payload.lead_id,
                             "reason": "duplicate_email_processing",
-                                "email_hash": committed_email_hash
-                            }, sort_keys=True).encode()).hexdigest(),
-                            "build_id": "gateway",
+                            "email_hash": committed_email_hash
+                        }, sort_keys=True).encode()).hexdigest(),
+                        "build_id": "gateway",
                         "signature": "duplicate_check",
-                            "payload": {
-                                "lead_id": event.payload.lead_id,
+                        "payload": {
+                            "lead_id": event.payload.lead_id,
                             "reason": "duplicate_email_processing",
-                                "email_hash": committed_email_hash,
+                            "email_hash": committed_email_hash,
                             "original_lead_id": existing_lead_id,
                             "original_miner": existing_miner,
-                                "miner_hotkey": event.actor_hotkey
-                            }
+                            "miner_hotkey": event.actor_hotkey
                         }
-                        
-                        await log_event(validation_failed_event)
-                    print(f"   ✅ Logged VALIDATION_FAILED (duplicate_processing) to TEE buffer")
-                    except Exception as e:
-                        print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+                    }
                     
-                    raise HTTPException(
+                    await log_event(validation_failed_event)
+                    print(f"   ✅ Logged VALIDATION_FAILED (duplicate_processing) to TEE buffer")
+                except Exception as e:
+                    print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+                
+                raise HTTPException(
                     status_code=409,
-                        detail={
+                    detail={
                         "error": "duplicate_email_processing",
                         "message": "This email is currently being processed by the network. Please wait for consensus.",
-                            "email_hash": committed_email_hash,
-                            "original_submission": {
+                        "email_hash": committed_email_hash,
+                        "original_submission": {
                             "lead_id": existing_lead_id,
                             "submitted_at": existing_time,
                             "status": "pending_consensus"
-                            },
-                            "rate_limit_stats": {
-                                "submissions": updated_stats["submissions"],
-                                "max_submissions": MAX_SUBMISSIONS_PER_DAY,
-                                "rejections": updated_stats["rejections"],
-                                "max_rejections": MAX_REJECTIONS_PER_DAY,
-                                "reset_at": updated_stats["reset_at"]
-                            }
+                        },
+                        "rate_limit_stats": {
+                            "submissions": updated_stats["submissions"],
+                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                            "rejections": updated_stats["rejections"],
+                            "max_rejections": MAX_REJECTIONS_PER_DAY,
+                            "reset_at": updated_stats["reset_at"]
                         }
-                    )
+                    }
+                )
         
             # No SUBMISSION either - new email!
             print(f"✅ No prior submission found - email is unique")

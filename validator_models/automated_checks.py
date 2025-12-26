@@ -2390,10 +2390,66 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                                             break
                             
                             if not annotated_csv_url:
-                                # Still no CSV URL - try constructed URLs
-                                # Pattern 1: /api/v1/batches/{id}/download
+                                # ================================================================
+                                # FALLBACK: Combine multiple CSV files when annotated_csv_url is null
+                                # TrueList provides separate CSVs for different email categories:
+                                # - highest_reach_csv_url: email_ok + accept_all emails
+                                # - only_invalid_csv_url: failed emails (failed_mx, failed_no_mailbox, etc)
+                                # By combining these, we can reconstruct all email results!
+                                # ================================================================
+                                print(f"   ⚠️  annotated_csv_url is null - trying to combine alternative CSVs...")
+                                
+                                combined_results = {}
+                                
+                                # Try highest_reach_csv_url (contains ok + accept_all)
+                                highest_reach_url = data.get("highest_reach_csv_url")
+                                if highest_reach_url:
+                                    print(f"   📥 Downloading highest_reach CSV...")
+                                    try:
+                                        reach_results = await _download_and_parse_batch_csv(highest_reach_url, headers)
+                                        if reach_results:
+                                            print(f"   ✅ Got {len(reach_results)} emails from highest_reach CSV")
+                                            combined_results.update(reach_results)
+                                    except Exception as e:
+                                        print(f"   ⚠️  highest_reach CSV failed: {str(e)[:50]}")
+                                
+                                # Try only_invalid_csv_url (contains failed emails)
+                                invalid_url = data.get("only_invalid_csv_url")
+                                if invalid_url:
+                                    print(f"   📥 Downloading only_invalid CSV...")
+                                    try:
+                                        invalid_results = await _download_and_parse_batch_csv(invalid_url, headers)
+                                        if invalid_results:
+                                            print(f"   ✅ Got {len(invalid_results)} emails from only_invalid CSV")
+                                            combined_results.update(invalid_results)
+                                    except Exception as e:
+                                        print(f"   ⚠️  only_invalid CSV failed: {str(e)[:50]}")
+                                
+                                # Try safest_bet_csv_url as additional source (email_ok only)
+                                safest_url = data.get("safest_bet_csv_url")
+                                if safest_url and len(combined_results) < email_count:
+                                    print(f"   📥 Downloading safest_bet CSV...")
+                                    try:
+                                        safest_results = await _download_and_parse_batch_csv(safest_url, headers)
+                                        if safest_results:
+                                            # Only add emails we don't already have
+                                            new_count = 0
+                                            for email, result in safest_results.items():
+                                                if email not in combined_results:
+                                                    combined_results[email] = result
+                                                    new_count += 1
+                                            if new_count > 0:
+                                                print(f"   ✅ Got {new_count} additional emails from safest_bet CSV")
+                                    except Exception as e:
+                                        print(f"   ⚠️  safest_bet CSV failed: {str(e)[:50]}")
+                                
+                                if combined_results:
+                                    print(f"   🎉 Combined {len(combined_results)} total email results from alternative CSVs!")
+                                    return combined_results
+                                
+                                # If alternative CSVs also failed, try constructed URLs
                                 constructed_url = f"https://api.truelist.io/api/v1/batches/{batch_id}/download"
-                                print(f"   ⚠️  Still no CSV URL, trying constructed URL: {constructed_url}")
+                                print(f"   ⚠️  Alternative CSVs failed, trying constructed URL: {constructed_url}")
                                 
                                 try:
                                     results = await _download_and_parse_batch_csv(constructed_url, headers)
@@ -2403,20 +2459,8 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                                 except Exception as download_err:
                                     print(f"   ⚠️  Constructed URL failed: {str(download_err)[:100]}")
                                 
-                                # Pattern 2: Direct download with batch ID
-                                alt_url = f"https://api.truelist.io/downloads/{batch_id}/annotated.csv"
-                                print(f"   ⚠️  Trying alternative URL: {alt_url}")
-                                
-                                try:
-                                    results = await _download_and_parse_batch_csv(alt_url, headers)
-                                    if results:
-                                        print(f"   ✅ Alternative URL worked! Parsed {len(results)} email results")
-                                        return results
-                                except Exception as alt_err:
-                                    print(f"   ⚠️  Alternative URL failed: {str(alt_err)[:100]}")
-                                
                                 # Final fallback: Use batch stats (won't work for individual emails)
-                                print(f"   ❌ Could not download CSV results after retries. Full response:")
+                                print(f"   ❌ Could not download CSV results after all fallbacks. Full response:")
                                 print(f"   {json.dumps(data, default=str)[:500]}")
                                 return _parse_batch_status_from_response(data, batch_id)
                         

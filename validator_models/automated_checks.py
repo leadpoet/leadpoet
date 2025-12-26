@@ -3882,6 +3882,7 @@ async def run_batch_automated_checks(
     
     # Start retry batch if needed (runs in background)
     retry_task = None
+    inline_task = None  # Inline verification task (runs in background after retries exhaust)
     retry_attempt = 0
     last_retry_batch_id = None  # Track retry batch_id for deletion before next retry
     
@@ -3899,7 +3900,7 @@ async def run_batch_automated_checks(
     queue_idx = 0
     total_stage4_5 = len(stage4_5_queue)
     
-    while queue_idx < len(stage4_5_queue) or retry_task is not None:
+    while queue_idx < len(stage4_5_queue) or retry_task is not None or inline_task is not None:
         # Process next lead in Stage 4-5 queue (if available)
         if queue_idx < len(stage4_5_queue):
             idx, lead, email_result, stage0_2_data = stage4_5_queue[queue_idx]
@@ -3974,46 +3975,57 @@ async def run_batch_automated_checks(
                 retry_task = asyncio.create_task(retry_truelist_batch(needs_retry, last_retry_batch_id))
             elif needs_retry and retry_attempt >= TRUELIST_BATCH_MAX_RETRIES:
                 # ================================================================
-                # INLINE FALLBACK: Retries exhausted, use inline verification NOW
-                # Don't wait until Stage 4-5 completes - add to queue immediately
+                # INLINE FALLBACK: Retries exhausted, start inline in BACKGROUND
+                # Stage 4-5 continues processing while inline runs
                 # ================================================================
-                print(f"   🔍 Using inline verification for {len(needs_retry)} emails (retries exhausted)...")
-                inline_results = await verify_emails_inline(needs_retry)
-                
-                for email in needs_retry:
-                    idx = email_to_idx[email]
-                    stage0_2_passed, stage0_2_data = stage0_2_results[idx]
-                    result = inline_results.get(email.lower(), {"needs_retry": True})
-                    
-                    if result.get("passed"):
-                        # Inline passed → add to Stage 4-5 queue
-                        print(f"   ✅ Inline verified: {email}")
-                        stage4_5_queue.append((idx, leads[idx], result, stage0_2_data))
-                    elif result.get("needs_retry"):
-                        # Still can't verify → skip
-                        print(f"   ⏭️ Cannot verify (batch + inline failed): {email}")
-                        results[idx] = (None, {
-                            "skipped": True,
-                            "reason": "EmailVerificationUnavailable",
-                            "message": f"Email verification unavailable after batch + inline"
-                        })
-                    else:
-                        # Inline explicitly failed → reject
-                        rejection_data = stage0_2_data.copy()
-                        rejection_data["passed"] = False
-                        rejection_data["rejection_reason"] = result.get("rejection_reason") or {
-                            "stage": "Stage 3: Email Verification (Inline)",
-                            "check_name": "truelist_inline",
-                            "message": f"Email failed inline verification: {result.get('status', 'unknown')}",
-                            "failed_fields": ["email"]
-                        }
-                        results[idx] = (False, rejection_data)
-                
-                # Clear needs_retry since we've handled them
-                needs_retry = []
+                print(f"   🔍 Starting inline verification for {len(needs_retry)} emails (retries exhausted)...")
+                inline_task = asyncio.create_task(verify_emails_inline(needs_retry))
         
-        # If queue is empty but retry pending, wait briefly before checking again
-        if queue_idx >= len(stage4_5_queue) and retry_task is not None:
+        # Check if inline verification completed (non-blocking check)
+        if inline_task is not None and inline_task.done():
+            try:
+                inline_results = inline_task.result()
+            except Exception as e:
+                print(f"   ⚠️ Inline verification failed: {e}")
+                inline_results = {email: {"needs_retry": True, "error": str(e)} for email in needs_retry}
+            
+            inline_task = None
+            
+            for email in needs_retry:
+                idx = email_to_idx[email]
+                stage0_2_passed, stage0_2_data = stage0_2_results[idx]
+                result = inline_results.get(email.lower(), {"needs_retry": True})
+                
+                if result.get("passed"):
+                    # Inline passed → add to Stage 4-5 queue
+                    print(f"   ✅ Inline verified: {email}")
+                    stage4_5_queue.append((idx, leads[idx], result, stage0_2_data))
+                elif result.get("needs_retry"):
+                    # Still can't verify → skip
+                    print(f"   ⏭️ Cannot verify (batch + inline failed): {email}")
+                    results[idx] = (None, {
+                        "skipped": True,
+                        "reason": "EmailVerificationUnavailable",
+                        "message": f"Email verification unavailable after batch + inline"
+                    })
+                else:
+                    # Inline explicitly failed → reject
+                    rejection_data = stage0_2_data.copy()
+                    rejection_data["passed"] = False
+                    rejection_data["rejection_reason"] = result.get("rejection_reason") or {
+                        "stage": "Stage 3: Email Verification (Inline)",
+                        "check_name": "truelist_inline",
+                        "message": f"Email failed inline verification: {result.get('status', 'unknown')}",
+                        "failed_fields": ["email"]
+                    }
+                    results[idx] = (False, rejection_data)
+            
+            # Clear needs_retry since we've handled them
+            needs_retry = []
+            print(f"   📊 After inline: {len(stage4_5_queue) - queue_idx} leads added to Stage 4-5 queue")
+        
+        # If queue is empty but tasks pending, wait briefly before checking again
+        if queue_idx >= len(stage4_5_queue) and (retry_task is not None or inline_task is not None):
             await asyncio.sleep(1)
     
     # ========================================================================

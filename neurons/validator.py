@@ -2088,7 +2088,13 @@ class Validator(BaseValidatorNeuron):
                         decision = "approve" if is_valid else "deny"
                         # CRITICAL: Use validator-calculated rep_score, NOT miner's submitted value
                         # Denied leads get 0, approved leads get score from automated checks
-                        rep_score = int(automated_checks_data.get('rep_score', 0)) if is_valid else 0
+                        # rep_score is a dict with 'total_score' key, not a simple integer
+                        rep_score_data = automated_checks_data.get('rep_score', {})
+                        if isinstance(rep_score_data, dict):
+                            rep_score = int(rep_score_data.get('total_score', 0)) if is_valid else 0
+                        else:
+                            # Fallback for legacy format where rep_score was an integer
+                            rep_score = int(rep_score_data) if is_valid else 0
                         rejection_reason = automated_checks_data.get("rejection_reason") or {} if not is_valid else {"message": "pass"}
                         
                         # Build result structure matching old validate_lead() output

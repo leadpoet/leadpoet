@@ -2346,9 +2346,9 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         
                         print(f"   ✅ Parsed {len(results)} email results")
                         
-                        # CRITICAL FIX: If CSV was empty but batch has emails, use fallback CSVs
-                        if len(results) == 0 and email_count > 0:
-                            print(f"   ⚠️  CSV was empty but batch has {email_count} emails - using fallback CSVs...")
+                        # CRITICAL FIX: If CSV has fewer results than expected, use fallback CSVs
+                        if len(results) < email_count:
+                            print(f"   ⚠️  CSV only had {len(results)}/{email_count} emails - using fallback CSVs...")
                             
                             combined_results = {}
                             

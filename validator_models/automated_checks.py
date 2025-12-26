@@ -2378,6 +2378,10 @@ async def _download_and_parse_batch_csv(csv_url: str, headers: dict) -> Dict[str
     """
     Download and parse TrueList annotated CSV results.
     
+    IMPORTANT: CSV downloads are done WITHOUT proxy because TrueList's
+    S3 signed URLs may not work correctly through proxy servers.
+    The API calls (submit, poll) still use proxy for rate limit protection.
+    
     Args:
         csv_url: URL to the annotated CSV file
         headers: Auth headers for the request
@@ -2390,11 +2394,12 @@ async def _download_and_parse_batch_csv(csv_url: str, headers: dict) -> Dict[str
     
     try:
         async with aiohttp.ClientSession() as session:
+            # NOTE: NO PROXY for CSV downloads - S3 signed URLs don't work through proxies
             async with session.get(
                 csv_url, 
                 headers=headers, 
-                timeout=60,
-                proxy=HTTP_PROXY_URL
+                timeout=60
+                # proxy removed - CSVs must be downloaded directly
             ) as response:
                 
                 if response.status != 200:

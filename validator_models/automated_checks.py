@@ -3796,9 +3796,9 @@ async def run_batch_automated_checks(
                 }
             }))
         
-        # 1-second delay between Stage 0-2 leads (rate limiting)
+        # 0.5-second delay between Stage 0-2 leads (rate limiting)
         if i < len(leads) - 1:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
     
     stage0_2_passed_count = sum(1 for passed, _ in stage0_2_results if passed)
     print(f"   ✅ Stage 0-2 complete: {stage0_2_passed_count}/{n} passed")

@@ -2220,11 +2220,8 @@ class Validator(BaseValidatorNeuron):
                             print(f"      Failed Fields: {', '.join(failed_fields)}")
                     print("")
                     
-                    # Add 2-second delay between leads (except for the last one)
-                    # Prevents rate limiting while keeping validation fast
-                    if idx < len(leads):
-                        print(f"⏳ Waiting 2 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(2)
+                    # Check block/epoch status every 20 leads (no delay - this is just hash preparation)
+                    if idx < len(leads) and idx % 20 == 0:
                         # Check if we should submit weights mid-processing (block 345+)
                         await self.submit_weights_at_epoch_end()
                         
@@ -2233,16 +2230,10 @@ class Validator(BaseValidatorNeuron):
                         new_epoch = new_block // 360
                         blocks_into_epoch = new_block % 360
                         
-                        # Update block file for workers every ~12 seconds during validation
+                        # Update block file for workers
                         container_mode_check = getattr(self.config.neuron, 'mode', None)
                         if container_mode_check != "worker":
-                            if not hasattr(self, '_block_file_write_counter_validation'):
-                                self._block_file_write_counter_validation = 0
-                            
-                            self._block_file_write_counter_validation += 1
-                            if self._block_file_write_counter_validation >= 1:  # Every lead (prevents 3+ min staleness)
-                                self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
-                                self._block_file_write_counter_validation = 0
+                            self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
                         
                         if new_epoch > current_epoch:
                             print(f"\n{'='*80}")
@@ -2273,52 +2264,7 @@ class Validator(BaseValidatorNeuron):
                     import traceback
                     traceback.print_exc()
                     print("")
-                    
-                    # Add 2-second delay between leads (except for the last one)
-                    # Prevents rate limiting while keeping validation fast
-                    if idx < len(leads):
-                        print(f"⏳ Waiting 2 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(2)
-                        # Check if we should submit weights mid-processing (block 345+)
-                        await self.submit_weights_at_epoch_end()
-                        
-                        # Check if epoch changed - if so, stop processing old epoch's leads
-                        new_block = await self.get_current_block_async()
-                        new_epoch = new_block // 360
-                        blocks_into_epoch = new_block % 360
-                        
-                        # Update block file for workers every ~12 seconds during validation
-                        container_mode_check = getattr(self.config.neuron, 'mode', None)
-                        if container_mode_check != "worker":
-                            if not hasattr(self, '_block_file_write_counter_validation'):
-                                self._block_file_write_counter_validation = 0
-                            
-                            self._block_file_write_counter_validation += 1
-                            if self._block_file_write_counter_validation >= 1:  # Every lead (prevents 3+ min staleness)
-                                self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
-                                self._block_file_write_counter_validation = 0
-                        
-                        if new_epoch > current_epoch:
-                            print(f"\n{'='*80}")
-                            print(f"⚠️  EPOCH CHANGED: {current_epoch} → {new_epoch}")
-                            print(f"   Stopping validation of epoch {current_epoch} leads ({idx}/{len(leads)} complete)")
-                            print(f"   Remaining {len(leads) - idx} leads cannot be submitted (epoch closed)")
-                            print(f"{'='*80}\n")
-                            break  # Exit the lead processing loop
-                        
-                        # FORCE STOP at block 345 for WORKERS (weight submission time)
-                        # Coordinator needs to submit weights, workers must finish before that
-                        container_mode_check = getattr(self.config.neuron, 'mode', None)
-                        if container_mode_check == "worker" and blocks_into_epoch >= 345:
-                            print(f"\n{'='*80}")
-                            print(f"⏰ WORKER FORCE STOP: Block 345+ reached (block {blocks_into_epoch}/360)")
-                            print(f"   Workers must complete before coordinator submits weights")
-                            print(f"   Completed: {idx}/{len(leads)} leads")
-                            print(f"   📦 Saving partial results for coordinator to aggregate")
-                            print(f"{'='*80}\n")
-                            break  # Exit the lead processing loop and proceed to worker JSON write
-                    
-                    # Continue to next lead after error
+                    # Continue to next lead after error (no delay needed for hash preparation)
                     continue
             
             # ═══════════════════════════════════════════════════════════════════

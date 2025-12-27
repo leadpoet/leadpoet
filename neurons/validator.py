@@ -2047,7 +2047,7 @@ class Validator(BaseValidatorNeuron):
             # Solution: Run a background task that updates block file every 10 seconds.
             
             async def block_file_updater():
-                """Background task to keep block file fresh during batch validation."""
+                """Background task to keep block file fresh AND check for weight submission during batch validation."""
                 while True:
                     try:
                         await asyncio.sleep(10)  # Update every 10 seconds
@@ -2055,6 +2055,14 @@ class Validator(BaseValidatorNeuron):
                         current_epoch_bg = current_block_bg // 360
                         blocks_into_epoch_bg = current_block_bg % 360
                         self._write_shared_block_file(current_block_bg, current_epoch_bg, blocks_into_epoch_bg)
+                        
+                        # CRITICAL: Check for weight submission at block 345+
+                        # This ensures weights are submitted even if Stage 4-5 is still running
+                        if blocks_into_epoch_bg >= 345:
+                            try:
+                                await self.submit_weights_at_epoch_end()
+                            except Exception as weight_err:
+                                print(f"   ⚠️ Weight submission check error: {weight_err}")
                     except asyncio.CancelledError:
                         break  # Stop when batch validation completes
                     except Exception as e:

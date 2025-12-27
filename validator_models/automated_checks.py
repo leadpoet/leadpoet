@@ -887,8 +887,17 @@ def set_company_linkedin_cache(company_slug: str, data: Dict):
         oldest_slug = None
         oldest_time = datetime.now()
         for slug, cached_data in COMPANY_LINKEDIN_CACHE.items():
-            if cached_data.get("timestamp", datetime.now()) < oldest_time:
-                oldest_time = cached_data["timestamp"]
+            # Parse ISO string timestamp back to datetime for comparison
+            timestamp_str = cached_data.get("timestamp")
+            if timestamp_str:
+                try:
+                    cached_time = datetime.fromisoformat(timestamp_str)
+                except (ValueError, TypeError):
+                    cached_time = datetime.now()
+            else:
+                cached_time = datetime.now()
+            if cached_time < oldest_time:
+                oldest_time = cached_time
                 oldest_slug = slug
         if oldest_slug:
             del COMPANY_LINKEDIN_CACHE[oldest_slug]

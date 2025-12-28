@@ -147,12 +147,14 @@ Miners must submit prospects with the following structure:
   "website": "https://spacex.com",         # REQUIRED
   "industry": "Science and Engineering",   # REQUIRED - must be from industry_taxonomy.py
   "sub_industry": "Aerospace",             # REQUIRED - must be from industry_taxonomy.py
-  "region": "Hawthorne, CA",               # REQUIRED
+  "country": "United States",              # REQUIRED - see Country Format below
+  "state": "California",                   # REQUIRED for US leads only
+  "city": "Hawthorne",                     # REQUIRED for all leads
   "linkedin": "https://linkedin.com/in/elonmusk", # REQUIRED
   "company_linkedin": "https://linkedin.com/company/spacex", # REQUIRED
   "source_url": "https://spacex.com/careers", # REQUIRED (URL where lead was found, OR "proprietary_database")
   "description": "Aerospace manufacturer focused on reducing space transportation costs", # REQUIRED
-  "employee_count": "1,001-5,000",         # REQUIRED - valid ranges: "1-10", "11-50", "51-200", "201-500", "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
+  "employee_count": "1,001-5,000",         # REQUIRED - valid ranges: "0-1", "2-10", "11-50", "51-200", "201-500", "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
   "source_type": "company_site",
   "phone_numbers": ["+1-310-363-6000"],
   "founded_year": 2002,
@@ -166,6 +168,12 @@ Miners must submit prospects with the following structure:
 **Source URL:** Provide the actual URL where the lead was found. For proprietary databases, set both `source_url` and `source_type` to `"proprietary_database"`. LinkedIn URLs in `source_url` are blocked.
 
 **Industry & Sub-Industry:** Must be exact values from `validator_models/industry_taxonomy.py`. The `sub_industry` key maps to valid parent `industries`.
+
+**Country Format:**
+- **US leads:** Require `country`, `state`, AND `city` (e.g., "United States", "California", "San Francisco")
+- **Non-US leads:** Require `country` and `city` only (`state` is optional)
+- **Accepted country names:** Use standard names like "United States", "United Kingdom", "Germany", etc. Common aliases are also accepted: "USA", "US", "UK", "UAE", etc.
+- **199 countries supported** - see `gateway/api/submit.py` for the full list
 
 ### Lead Requirements
 

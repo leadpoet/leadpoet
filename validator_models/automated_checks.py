@@ -10827,30 +10827,63 @@ async def check_domain_existence(domain: str) -> Tuple[bool, str]:
         return False, f"Domain check failed: {str(e)}"
 
 async def verify_company(company_domain: str) -> Tuple[bool, str]:
+    """
+    Verify company website is accessible.
+    
+    Strategy: Try HEAD first (lightweight), fall back to GET if HEAD fails.
+    Many enterprise sites (Intuit, 3M, etc.) block HEAD requests but work with GET.
+    Uses browser User-Agent to avoid anti-bot blocking.
+    """
     if not company_domain:
         return False, "No domain provided"
     if not company_domain.startswith(("http://", "https://")):
         company_domain = f"https://{company_domain}"
+    
+    # Status codes that indicate website exists (pass immediately)
+    PASS_STATUS_CODES = {200, 301, 302, 307, 308, 401, 403, 405, 500, 502, 503}
+    
+    # Browser User-Agent to avoid anti-bot blocking (3M, etc.)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.head(company_domain, timeout=10, allow_redirects=True) as response:
-                if response.status == 200:
-                    return True, "Website accessible"
-                elif response.status in [301, 302, 307, 308]:
-                    return True, f"Website accessible (redirect: {response.status})"
-                elif response.status in [401, 403]:
-                    return True, f"Website accessible (requires auth: {response.status})"
-                elif response.status in [405, 503]:
-                    return True, f"Website accessible (service available: {response.status})"
-                else:
-                    return False, f"Website not accessible (status: {response.status})"
-    except aiohttp.ClientError as e:
-        error_msg = str(e)
-        # Handle large enterprise websites with massive headers (>8KB)
-        # This is common for major companies (e.g., Siemens, Microsoft, etc.)
-        if "Header value is too long" in error_msg or "Got more than" in error_msg:
-            return True, "Website accessible (large enterprise headers detected)"
-        return False, f"Website inaccessible: {error_msg}"
+        async with aiohttp.ClientSession(headers=headers) as session:
+            # Try HEAD request first (lightweight)
+            head_status = None
+            head_error = None
+            try:
+                async with session.head(company_domain, timeout=10, allow_redirects=True) as response:
+                    head_status = response.status
+                    if head_status in PASS_STATUS_CODES:
+                        return True, f"Website accessible (HEAD: {head_status})"
+            except aiohttp.ClientError as e:
+                head_error = str(e)
+                # Handle large enterprise headers - pass immediately
+                if "Header value is too long" in head_error or "Got more than" in head_error:
+                    return True, "Website accessible (large enterprise headers detected)"
+            except Exception as e:
+                head_error = str(e)
+            
+            # HEAD failed or returned non-pass status - try GET as fallback
+            # Many enterprise sites (Intuit, 3M) block HEAD but allow GET
+            try:
+                async with session.get(company_domain, timeout=10, allow_redirects=True) as response:
+                    get_status = response.status
+                    if get_status in PASS_STATUS_CODES:
+                        return True, f"Website accessible (GET fallback: {get_status})"
+                    else:
+                        # Both HEAD and GET returned non-pass status
+                        return False, f"Website not accessible (HEAD: {head_status}, GET: {get_status})"
+            except aiohttp.ClientError as e:
+                get_error = str(e)
+                # Handle large enterprise headers on GET too
+                if "Header value is too long" in get_error or "Got more than" in get_error:
+                    return True, "Website accessible (large enterprise headers detected)"
+                # Both HEAD and GET failed
+                return False, f"Website inaccessible (HEAD: {head_error or head_status}, GET: {get_error})"
+            except Exception as e:
+                return False, f"Website inaccessible (HEAD: {head_error or head_status}, GET: {str(e)})"
     except Exception as e:
         return False, f"Website inaccessible: {str(e)}"
 

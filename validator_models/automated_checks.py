@@ -3823,22 +3823,12 @@ async def run_batch_automated_checks(
         print(f"   ✅ TrueList batch complete: {len(email_results)} results")
     except Exception as e:
         print(f"   ❌ TrueList batch failed: {e}")
-        # Fallback: Use Stage 0-2 results, mark passed ones as skipped
-        for i, lead in enumerate(leads):
-            email = get_email(lead)
-            if not email:
-                continue  # Already rejected
-            
-            stage0_2_passed, stage0_2_data = stage0_2_results[i]
-            if stage0_2_passed:
-                results[i] = (None, {
-                    "skipped": True,
-                    "reason": "EmailVerificationUnavailable",
-                    "error": str(e)
-                })
-            else:
-                results[i] = (False, stage0_2_data)
-        return results
+        # Batch submission failed (e.g., "Need at least 2 rows" for single email)
+        # Instead of returning early, set empty results so the retry/inline logic below runs
+        email_results = {}
+        
+        # Put all emails that passed Stage 0-2 into needs_retry so inline fallback handles them
+        print(f"   🔄 Batch failed - will use inline verification fallback...")
     
     # ========================================================================
     # Step 5: Categorize leads

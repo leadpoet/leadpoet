@@ -3957,7 +3957,7 @@ async def run_batch_automated_checks(
                     # Retry succeeded → add to Stage 4-5 queue
                     print(f"   ✅ Retry succeeded for: {email}")
                     stage4_5_queue.append((idx, leads[idx], result, stage0_2_data))
-            else:
+                else:
                     # Retry failed → reject
                     rejection_data = stage0_2_data.copy()
                     rejection_data["passed"] = False
@@ -4014,7 +4014,7 @@ async def run_batch_automated_checks(
                         "reason": "EmailVerificationUnavailable",
                         "message": f"Email verification unavailable after batch + inline"
                     })
-            else:
+                else:
                     # Inline explicitly failed → reject
                     rejection_data = stage0_2_data.copy()
                     rejection_data["passed"] = False

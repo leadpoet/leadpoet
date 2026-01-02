@@ -58,6 +58,11 @@ router = APIRouter(prefix="/submit", tags=["Submission"])
 # ============================================================
 from gateway.utils.linkedin import normalize_linkedin_url, compute_linkedin_combo_hash
 
+# ============================================================
+# Geographic Normalization (standardizes city/state/country)
+# ============================================================
+from gateway.utils.geo_normalize import normalize_location
+
 
 # ============================================================
 # Field Normalization Helper
@@ -67,17 +72,44 @@ def normalize_lead_fields(lead_blob: dict) -> dict:
     """
     Normalize lead fields for standardized storage in the database.
     
-    This function title-cases specific fields while preserving:
-    - URLs (linkedin, website, source_url, company_linkedin)
-    - Email (kept lowercase)
-    - Technical fields (hashes, IDs, etc.)
+    This function:
+    1. Normalizes geographic fields (city/state/country) using geo_normalize
+       - Standardizes variations: "SF" -> "San Francisco", "CA" -> "California"
+       - Infers country from state if missing: ("NYC", "NY", "") -> "United States"
+       - Handles alternate names: "Bombay" -> "Mumbai"
+    2. Title-cases other text fields
+    3. Preserves URLs and technical fields
     
     Called BEFORE storing lead in leads_private to ensure consistent formatting.
     
     NOTE: This does NOT affect validation - automated_checks.py uses .lower()
     for all comparisons, so capitalization doesn't impact verification.
     """
-    # Fields to title-case (capitalize first letter of each word)
+    # ================================================================
+    # Step 1: Geographic normalization (city, state, country)
+    # ================================================================
+    # This handles:
+    # - "SF", "CA", "USA" -> "San Francisco", "California", "United States"
+    # - "nyc", "ny", "" -> "New York City", "New York", "United States" (country inferred!)
+    # - "Bombay" -> "Mumbai", "Peking" -> "Beijing" (alternate names)
+    city = lead_blob.get("city", "")
+    state = lead_blob.get("state", "")
+    country = lead_blob.get("country", "")
+    
+    norm_city, norm_state, norm_country = normalize_location(city, state, country)
+    
+    # Update with normalized values
+    if norm_city:
+        lead_blob["city"] = norm_city
+    if norm_state:
+        lead_blob["state"] = norm_state
+    if norm_country:
+        lead_blob["country"] = norm_country
+    
+    # ================================================================
+    # Step 2: Title-case other text fields
+    # ================================================================
+    # Note: city/state already handled above, so removed from this list
     TITLE_CASE_FIELDS = [
         "industry",         # e.g., "financial services" → "Financial Services"
         "sub_industry",     # e.g., "investment banking" → "Investment Banking"
@@ -85,8 +117,6 @@ def normalize_lead_fields(lead_blob: dict) -> dict:
         "full_name",        # e.g., "john smith" → "John Smith"
         "first",            # e.g., "john" → "John"
         "last",             # e.g., "smith" → "Smith"
-        "city",             # e.g., "san francisco" → "San Francisco"
-        "state",            # e.g., "california" → "California"
         "business",         # e.g., "acme corporation" → "Acme Corporation"
     ]
     

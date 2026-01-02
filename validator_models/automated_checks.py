@@ -2426,7 +2426,7 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                             if combined_results:
                                 print(f"   ✅ Combined fallback CSVs: {len(combined_results)} total emails")
                                 return combined_results
-                        else:
+                            else:
                                 print(f"   ❌ All fallback CSVs failed or empty")
                                 # Return empty results - will trigger retry logic
                         

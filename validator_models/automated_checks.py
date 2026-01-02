@@ -2223,8 +2223,9 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         raise EmailVerificationUnavailableError(
                             f"TrueList API error: HTTP {response.status} - {error_text[:200]}"
                         )
-                        
-                        data = await response.json()
+                    
+                    # Success (HTTP 200) - parse JSON response
+                    data = await response.json()
                     
                     batch_state = data.get("batch_state", "unknown")
                     email_count = data.get("email_count", 0)
@@ -10038,7 +10039,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     if "region" in needs_llm:
         response_fields.append('"region_match": true/false,\n    "extracted_region": "company HQ from search"')
     # Always include industry + sub_industry verification (exact matches already validated)
-        response_fields.append('"industry_match": true/false,\n    "extracted_industry": "industry from search"')
+    response_fields.append('"industry_match": true/false,\n    "extracted_industry": "industry from search"')
     response_fields.append('"sub_industry_match": true/false,\n    "sub_industry_reasoning": "does company match the sub-industry definition?"')
     if claimed_description:
         response_fields.append('"description_match": true/false,\n    "description_reasoning": "is description accurate?"')
@@ -10169,8 +10170,8 @@ RESPOND WITH JSON ONLY:
                         region_match = True
                 
                 # Industry - always verified by LLM now (exact match already validated)
-                    industry_match = result.get("industry_match", False)
-                    extracted_industry = result.get("extracted_industry", "")
+                industry_match = result.get("industry_match", False)
+                extracted_industry = result.get("extracted_industry", "")
                 
                 if not industry_match:
                     print(f"   ❌ INDUSTRY LLM FAILED: Company does not match industry '{claimed_industry}'")

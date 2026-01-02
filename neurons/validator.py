@@ -53,6 +53,29 @@ import socket
 from math import isclose
 from pathlib import Path
 import warnings
+import subprocess
+import aiohttp
+
+# ════════════════════════════════════════════════════════════════════════════
+# TEE SIGNING IMPORTS (Phase 2.3 - Validator TEE Weight Submission)
+# ════════════════════════════════════════════════════════════════════════════
+# These imports are optional at startup - only used if TEE is enabled
+try:
+    from validator_tee.enclave_signer import (
+        initialize_enclave_keypair,
+        sign_weights,
+        sign_digest,
+        get_enclave_pubkey,
+        get_attestation_document_b64 as get_attestation,
+        get_code_hash,
+        is_keypair_initialized,
+    )
+    from leadpoet_canonical.weights import normalize_to_u16, bundle_weights_hash
+    from leadpoet_canonical.binding import create_binding_message
+    TEE_AVAILABLE = True
+except ImportError as e:
+    TEE_AVAILABLE = False
+    # Will log warning at runtime if TEE submission is attempted
 
 # Additional warning suppression
 warnings.filterwarnings("ignore", message=".*leaked semaphore objects.*")
@@ -2517,19 +2540,21 @@ class Validator(BaseValidatorNeuron):
         the latest weights are already saved in history.
         
         Tracks both:
-        - miner_scores: Sum of (rep_score * is_icp_multiplier) per miner (for weight distribution)
+        - miner_scores: Sum of effective_rep_score per miner (for weight distribution)
         - approved_lead_count: Number of approved leads (for linear emissions scaling)
         
-        ICP Multiplier:
-        - Base rep_score is always stored in DB (never inflated)
-        - Multiplier is applied ONLY during emissions calculation
-        - effective_rep_score = base_rep_score * is_icp_multiplier
-        - ICP leads get 1.5x weight, standard leads get 1.0x weight
+        ICP ADJUSTMENT SYSTEM (NEW):
+        - is_icp_multiplier now stores ADJUSTMENT value (-15 to +20)
+        - effective_rep_score = base_rep_score + icp_adjustment (floor at 0)
+        
+        BACKWARDS COMPATIBILITY:
+        - OLD format: is_icp_multiplier in {1.0, 1.5, 5.0} → use multiplication
+        - NEW format: all other values → use addition
         
         Args:
             miner_hotkey: Miner's hotkey who submitted the lead
             rep_score: Base reputation score (0-48) from automated checks (NOT inflated)
-            is_icp_multiplier: ICP multiplier (1.0 for standard, 1.5 for ICP)
+            is_icp_multiplier: OLD: multiplier (1.0, 1.5, 5.0) / NEW: adjustment (-15 to +20)
             decision: "approve" or "deny"
         """
         try:
@@ -2570,9 +2595,22 @@ class Validator(BaseValidatorNeuron):
             if decision != "approve":
                 return
             
-            # Apply ICP multiplier to rep_score for emissions weight
-            # effective_rep_score = base_rep_score * is_icp_multiplier
-            effective_rep_score = rep_score * is_icp_multiplier
+            # ═══════════════════════════════════════════════════════════
+            # ICP VALUE INTERPRETATION (BACKWARDS COMPATIBLE)
+            # ═══════════════════════════════════════════════════════════
+            # OLD FORMAT: is_icp_multiplier in {1.0, 1.5, 5.0} → multiply
+            # NEW FORMAT: any other value (integers -15 to +20) → add
+            OLD_MULTIPLIER_VALUES = {1.0, 1.5, 5.0}
+            
+            if is_icp_multiplier in OLD_MULTIPLIER_VALUES:
+                # OLD FORMAT: Use multiplication (legacy leads)
+                effective_rep_score = rep_score * is_icp_multiplier
+                print(f"      📊 Legacy ICP multiplier: {rep_score} × {is_icp_multiplier} = {effective_rep_score}")
+            else:
+                # NEW FORMAT: Use addition with floor at 0
+                icp_adjustment = int(is_icp_multiplier)
+                effective_rep_score = max(0, rep_score + icp_adjustment)
+                print(f"      📊 ICP adjustment: {rep_score} + ({icp_adjustment:+d}) = {effective_rep_score}")
             
             # Add effective score to miner's total (only for approved leads)
             epoch_data = weights_data[str(current_epoch)]
@@ -2684,9 +2722,9 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
             EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
-            BASE_BURN_SHARE = 0.20         # 20% base burn to UID 0
+            BASE_BURN_SHARE = 0.05         # 5% base burn to UID 0
             MAX_CURRENT_EPOCH_SHARE = 0.0  # 0% max to miners (current epoch)
-            MAX_ROLLING_EPOCH_SHARE = 0.80 # 80% max to miners (rolling 30 epochs)
+            MAX_ROLLING_EPOCH_SHARE = 0.95 # 95% max to miners (rolling 30 epochs)
             # Dynamic MAX_LEADS_PER_EPOCH from gateway (fetched during process_gateway_validation_workflow)
             # If not in memory (e.g., after restart), try to recover from history file
             MAX_LEADS_PER_EPOCH = getattr(self, '_max_leads_per_epoch', None)
@@ -2989,6 +3027,28 @@ class Validator(BaseValidatorNeuron):
             uids = final_uids
             normalized_weights = final_weights
             
+            # ═══════════════════════════════════════════════════════════════════
+            # TEE GATEWAY SUBMISSION (Phase 2.3)
+            # Submit to gateway BEFORE chain for auditor validators
+            # ═══════════════════════════════════════════════════════════════════
+            tee_event_hash = None
+            if TEE_AVAILABLE and os.environ.get("ENABLE_TEE_SUBMISSION", "").lower() == "true":
+                print(f"\n🔐 TEE weight submission enabled - submitting to gateway first...")
+                tee_event_hash = await self._submit_weights_to_gateway(
+                    epoch_id=current_epoch,
+                    block=current_block,
+                    uids=uids,
+                    weights=normalized_weights,
+                )
+                if tee_event_hash:
+                    print(f"   ✅ Gateway accepted weights (hash: {tee_event_hash[:16]}...)")
+                else:
+                    # Gateway submission failed - but we still proceed to chain
+                    # This ensures chain submission is not blocked by gateway issues
+                    print(f"   ⚠️ Gateway submission failed - proceeding to chain anyway")
+            elif TEE_AVAILABLE:
+                print(f"\nℹ️ TEE available but submission disabled (set ENABLE_TEE_SUBMISSION=true to enable)")
+            
             # Submit to Bittensor chain
             print(f"\n📡 Submitting weights to Bittensor chain...")
             result = self.subtensor.set_weights(
@@ -3030,6 +3090,177 @@ class Validator(BaseValidatorNeuron):
             import traceback
             bt.logging.error(traceback.format_exc())
             return False
+    
+    async def _submit_weights_to_gateway(
+        self,
+        epoch_id: int,
+        block: int,
+        uids: List[int],
+        weights: List[float],
+    ) -> Optional[str]:
+        """
+        Submit weights to TEE gateway for auditor validators (Phase 2.3).
+        
+        Uses CANONICAL format: UIDs + u16 weights, not floats/hotkeys.
+        See business_files/tasks8.md for exact format specification.
+        
+        SECURITY:
+        - Signs weights inside enclave (private key never leaves)
+        - Attestation includes epoch_id for replay protection
+        - Binding message proves hotkey authorized enclave
+        
+        Args:
+            epoch_id: Current epoch
+            block: Block number when weights were computed
+            uids: List of UIDs (sorted ascending)
+            weights: Corresponding float weights (will be converted to u16)
+            
+        Returns:
+            weight_submission_event_hash if accepted, None if failed/rejected
+        """
+        # Check if TEE is available
+        if not TEE_AVAILABLE:
+            bt.logging.warning("⚠️ TEE modules not available - skipping gateway submission")
+            bt.logging.warning("   Install validator_tee package to enable gateway submission")
+            return None
+        
+        # Check if enclave is initialized
+        if not is_keypair_initialized():
+            bt.logging.warning("⚠️ Validator enclave not initialized - skipping gateway submission")
+            return None
+        
+        # Check if gateway submission is enabled
+        gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+        if os.environ.get("DISABLE_GATEWAY_WEIGHT_SUBMISSION", "").lower() == "true":
+            bt.logging.info("ℹ️ Gateway weight submission disabled via env var")
+            return None
+        
+        try:
+            netuid = self.config.netuid
+            
+            # Get expected chain endpoint for binding message
+            expected_chain = os.environ.get(
+                "EXPECTED_CHAIN", 
+                "wss://entrypoint-finney.opentensor.ai:443"
+            )
+            
+            # Get git commit for version info
+            try:
+                git_commit_short = subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            except Exception:
+                git_commit_short = "unknown"
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # Step 1: Convert floats to u16 using canonical function
+            # ═══════════════════════════════════════════════════════════════════
+            weights_u16 = normalize_to_u16(uids, weights)
+            
+            # Filter to sparse (remove zeros) and ensure sorted
+            sparse_pairs = [(uid, w) for uid, w in zip(uids, weights_u16) if w > 0]
+            sparse_pairs.sort(key=lambda x: x[0])  # Sort by UID
+            
+            if not sparse_pairs:
+                bt.logging.warning("⚠️ No non-zero weights after u16 conversion")
+                return None
+            
+            sparse_uids = [p[0] for p in sparse_pairs]
+            sparse_weights_u16 = [p[1] for p in sparse_pairs]
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # Step 2: Sign weights with enclave key
+            # ═══════════════════════════════════════════════════════════════════
+            weights_hash, signature_hex = sign_weights(
+                netuid=netuid,
+                epoch_id=epoch_id,
+                block=block,
+                uids=sparse_uids,
+                weights_u16=sparse_weights_u16,
+            )
+            
+            enclave_pubkey = get_enclave_pubkey()
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # Step 3: Get attestation (includes epoch_id for replay protection)
+            # ═══════════════════════════════════════════════════════════════════
+            attestation_b64 = get_attestation(epoch_id=epoch_id)
+            code_hash = get_code_hash()
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # Step 4: Build binding message (proves hotkey authorized enclave)
+            # ═══════════════════════════════════════════════════════════════════
+            binding_message = create_binding_message(
+                netuid=netuid,
+                chain=expected_chain,
+                enclave_pubkey=enclave_pubkey,
+                validator_code_hash=code_hash,
+                version=git_commit_short,
+            )
+            
+            # Sign binding message with hotkey (sr25519)
+            hotkey_signature = self.wallet.hotkey.sign(binding_message.encode())
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # Step 5: Build submission payload (matches WeightSubmission model)
+            # ═══════════════════════════════════════════════════════════════════
+            submission = {
+                "netuid": netuid,
+                "epoch_id": epoch_id,
+                "block": block,
+                "uids": sparse_uids,
+                "weights_u16": sparse_weights_u16,
+                "weights_hash": weights_hash,
+                "validator_hotkey": self.wallet.hotkey.ss58_address,
+                "validator_enclave_pubkey": enclave_pubkey,
+                "validator_signature": signature_hex,
+                "validator_attestation_b64": attestation_b64,
+                "validator_code_hash": code_hash,
+                "binding_message": binding_message,
+                "validator_hotkey_signature": hotkey_signature.hex(),
+            }
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # Step 6: Submit to gateway
+            # ═══════════════════════════════════════════════════════════════════
+            print(f"📡 Submitting TEE-signed weights to gateway...")
+            print(f"   Endpoint: {gateway_url}/weights/submit")
+            print(f"   Epoch: {epoch_id}, Block: {block}, UIDs: {len(sparse_uids)}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{gateway_url}/weights/submit",
+                    json=submission,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        event_hash = result.get("weight_submission_event_hash")
+                        print(f"✅ Weights accepted by gateway")
+                        print(f"   Event hash: {event_hash[:16] if event_hash else 'N/A'}...")
+                        return event_hash
+                        
+                    elif response.status == 409:
+                        # Duplicate submission - already submitted for this epoch
+                        print(f"⚠️ Duplicate submission rejected (already submitted for epoch {epoch_id})")
+                        return None
+                        
+                    else:
+                        error = await response.text()
+                        print(f"❌ Gateway rejected submission: {response.status}")
+                        print(f"   Error: {error[:200]}...")
+                        return None
+                        
+        except aiohttp.ClientError as e:
+            bt.logging.error(f"Network error submitting to gateway: {e}")
+            return None
+        except Exception as e:
+            bt.logging.error(f"Error submitting weights to gateway: {e}")
+            import traceback
+            bt.logging.error(traceback.format_exc())
+            return None
     
     def archive_weights_to_history(self, epoch_id: int, epoch_data: Dict):
         """

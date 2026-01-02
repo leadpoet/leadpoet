@@ -172,7 +172,16 @@ async def epoch_lifecycle_task():
                 print(f"   Close: {epoch_close.isoformat()}")
                 
                 # Compute and log single atomic EPOCH_INITIALIZATION event
-                await compute_and_log_epoch_initialization(current_epoch, epoch_start, epoch_end, epoch_close)
+                # If this fails, we DON'T update last_epoch_id so next 30s cycle retries automatically
+                try:
+                    await compute_and_log_epoch_initialization(current_epoch, epoch_start, epoch_end, epoch_close)
+                except Exception as init_error:
+                    print(f"   ❌ EPOCH_INITIALIZATION failed: {init_error}")
+                    print(f"   ⚠️  Will retry on next 30s cycle (NOT updating last_epoch_id)")
+                    # DON'T update last_epoch_id - this ensures we retry next cycle
+                    # DON'T block other operations - just continue the main loop
+                    await asyncio.sleep(30)
+                    continue
                 
                 # Clean up old epoch cache (keep only current and next)
                 cleanup_old_epochs(current_epoch)
@@ -408,18 +417,41 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         
         # ========================================================================
         # 1. Query pending leads from queue (FIFO order) - RUN IN THREAD
-        # IMPORTANT: Add .range(0, 10000) to override Supabase's default 1000 row limit
+        # CRITICAL: Use pagination with small batches to avoid Supabase statement timeout
+        # The old .range(0, 10000) query was timing out under load
         # ========================================================================
-        result = await asyncio.to_thread(
-            lambda: supabase.table("leads_private")
-                .select("lead_id")
-                .eq("status", "pending_validation")
-                .order("created_ts")
-                .range(0, 10000)
-                .execute()
-        )
+        lead_ids = []
+        batch_size = 500  # Small batches to avoid timeout
+        offset = 0
+        max_leads = 10000  # Safety limit
         
-        lead_ids = [row["lead_id"] for row in result.data]
+        print(f"   📊 Fetching pending leads (batch_size={batch_size})...")
+        
+        while offset < max_leads:
+            end = offset + batch_size - 1
+            
+            result = await asyncio.to_thread(
+                lambda s=offset, e=end: supabase.table("leads_private")
+                    .select("lead_id")
+                    .eq("status", "pending_validation")
+                    .order("created_ts")
+                    .range(s, e)
+                    .execute()
+            )
+            
+            if not result.data:
+                break
+            
+            batch_ids = [row["lead_id"] for row in result.data]
+            lead_ids.extend(batch_ids)
+            
+            # If we got less than batch_size, we've reached the end
+            if len(result.data) < batch_size:
+                break
+            
+            offset += batch_size
+        
+        print(f"   📊 Fetched {len(lead_ids)} pending leads total")
         
         if not lead_ids:
             queue_merkle_root = "0" * 64  # Empty queue
@@ -482,6 +514,7 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         print(f"   ❌ Failed to compute EPOCH_INITIALIZATION: {e}")
         import traceback
         traceback.print_exc()
+        raise  # Re-raise so caller can retry
 
 
 async def compute_and_log_epoch_inputs(epoch_id: int):
@@ -835,10 +868,12 @@ async def compute_epoch_consensus(epoch_id: int):
                 # Final rep_score (CRITICAL FIX: 0 for denied, not NULL)
                 final_rep_score = outcome['final_rep_score'] if outcome['final_decision'] == 'approve' else 0
                 
-                # Extract ICP multiplier from validator evidence_blob (CRITICAL FIX)
-                # Validators calculate is_icp_multiplier during automated_checks based on ICP_DEFINITIONS
+                # Extract ICP adjustment/multiplier from validator evidence_blob (CRITICAL FIX)
+                # Validators calculate icp_adjustment during automated_checks based on ICP_DEFINITIONS
+                # NEW FORMAT: values -15 to +20 (adjustment points)
+                # OLD FORMAT: values 1.0, 1.5, 5.0 (multipliers) - backwards compatible
                 # We need to extract it from the consensus-winning validators' evidence
-                is_icp_multiplier = 1.0  # Default for legacy/denied leads
+                is_icp_multiplier = 0.0  # Default for new leads (0 adjustment)
                 try:
                     # Query evidence_blobs from validators who approved this lead
                     # We'll take the average if validators disagree (shouldn't happen)
@@ -872,13 +907,17 @@ async def compute_epoch_consensus(epoch_id: int):
                             from collections import Counter
                             counter = Counter(multipliers)
                             is_icp_multiplier = counter.most_common(1)[0][0]
-                            print(f"         🎯 ICP Multiplier: {is_icp_multiplier}x (from {len(multipliers)} approving validators)")
+                            # Detect format: OLD (1.0, 1.5, 5.0) vs NEW (integers -15 to +20)
+                            if is_icp_multiplier in {1.0, 1.5, 5.0}:
+                                print(f"         🎯 ICP Multiplier (legacy): {is_icp_multiplier}x (from {len(multipliers)} approving validators)")
+                            else:
+                                print(f"         🎯 ICP Adjustment: {int(is_icp_multiplier):+d} points (from {len(multipliers)} approving validators)")
                     else:
-                        print(f"         📋 No approving validators with evidence_blob - using default multiplier 1.0x")
+                        print(f"         📋 No approving validators with evidence_blob - using default adjustment 0")
                         
                 except Exception as e:
-                    print(f"         ⚠️  Could not extract ICP multiplier from evidence: {e}")
-                    print(f"            Using default multiplier 1.0x")
+                    print(f"         ⚠️  Could not extract ICP adjustment from evidence: {e}")
+                    print(f"            Using default adjustment 0")
                 
                 # ========================================================================
                 # Update leads_private with ALL aggregated data
@@ -889,7 +928,11 @@ async def compute_epoch_consensus(epoch_id: int):
                 print(f"            - validator_responses: {len(validator_responses)} responses")
                 print(f"            - consensus_votes: {consensus_votes.get('approve', 0)} approve, {consensus_votes.get('deny', 0)} deny")
                 print(f"            - rep_score: {final_rep_score}")
-                print(f"            - is_icp_multiplier: {is_icp_multiplier}")
+                # Log ICP value with appropriate label based on format
+                if is_icp_multiplier in {1.0, 1.5, 5.0}:
+                    print(f"            - icp_multiplier (legacy): {is_icp_multiplier}x")
+                else:
+                    print(f"            - icp_adjustment: {int(is_icp_multiplier):+d} points")
                 
                 try:
                     update_result = await asyncio.to_thread(
@@ -1028,8 +1071,8 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
             company_linkedin_url = lead_blob.get("company_linkedin", "")
             linkedin_combo_hash = compute_linkedin_combo_hash(linkedin_url, company_linkedin_url)
             
-            # Get ICP multiplier (from DB column, falls back to 1.0 if missing)
-            is_icp_multiplier = lead_result.data[0].get("is_icp_multiplier", 1.0)
+            # Get ICP adjustment/multiplier (from DB column, falls back to 0 for new format if missing)
+            is_icp_multiplier = lead_result.data[0].get("is_icp_multiplier", 0.0)
         
         payload = {
             "lead_id": lead_id,

@@ -2223,8 +2223,8 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                         raise EmailVerificationUnavailableError(
                             f"TrueList API error: HTTP {response.status} - {error_text[:200]}"
                         )
-                    
-                    data = await response.json()
+                        
+                        data = await response.json()
                     
                     batch_state = data.get("batch_state", "unknown")
                     email_count = data.get("email_count", 0)
@@ -2425,7 +2425,7 @@ async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
                             if combined_results:
                                 print(f"   ✅ Combined fallback CSVs: {len(combined_results)} total emails")
                                 return combined_results
-                            else:
+                        else:
                                 print(f"   ❌ All fallback CSVs failed or empty")
                                 # Return empty results - will trigger retry logic
                         
@@ -3457,17 +3457,14 @@ async def run_stage4_5_repscore(
     print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
     # ========================================================================
-    # ICP Multiplier Determination
-    # EXTRACTED VERBATIM from run_automated_checks()
+    # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)
+    # Replaces the old multiplier system with absolute point adjustments
     # ========================================================================
-    is_icp_multiplier = determine_icp_multiplier(lead)
-    lead["is_icp_multiplier"] = is_icp_multiplier
-    automated_checks_data["is_icp_multiplier"] = is_icp_multiplier
-    
-    if is_icp_multiplier > 1.0:
-        print(f"   🎯 ICP MATCH: Multiplier {is_icp_multiplier}x applied!")
-    else:
-        print(f"   📋 Standard lead: Multiplier {is_icp_multiplier}x")
+    icp_adjustment = calculate_icp_adjustment(lead)
+    # Store in is_icp_multiplier field for backwards compatibility
+    # Values: -15 to +20 (new format) vs 1.0/1.5/5.0 (old format)
+    lead["is_icp_multiplier"] = float(icp_adjustment)
+    automated_checks_data["is_icp_multiplier"] = float(icp_adjustment)
     
     print(f"🎉 All stages passed for {email} @ {company}")
 
@@ -3686,7 +3683,7 @@ async def run_batch_automated_checks(
                     "stage": "Pre-Batch",
                     "check_name": "email_extraction",
                     "message": "No email found in lead",
-                    "failed_fields": ["email"]
+                                "failed_fields": ["email"]
                 }
             })
     
@@ -3717,7 +3714,7 @@ async def run_batch_automated_checks(
                     "stage": "Pre-Batch",
                     "check_name": "email_syntax_prefilter",
                     "message": "Email missing @ symbol (instant rejection)",
-                    "failed_fields": ["email"]
+                                "failed_fields": ["email"]
                 }
             })
             invalid_syntax_count += 1
@@ -3823,12 +3820,22 @@ async def run_batch_automated_checks(
         print(f"   ✅ TrueList batch complete: {len(email_results)} results")
     except Exception as e:
         print(f"   ❌ TrueList batch failed: {e}")
-        # Batch submission failed (e.g., "Need at least 2 rows" for single email)
-        # Instead of returning early, set empty results so the retry/inline logic below runs
-        email_results = {}
-        
-        # Put all emails that passed Stage 0-2 into needs_retry so inline fallback handles them
-        print(f"   🔄 Batch failed - will use inline verification fallback...")
+        # Fallback: Use Stage 0-2 results, mark passed ones as skipped
+        for i, lead in enumerate(leads):
+            email = get_email(lead)
+            if not email:
+                continue  # Already rejected
+            
+            stage0_2_passed, stage0_2_data = stage0_2_results[i]
+            if stage0_2_passed:
+                results[i] = (None, {
+                    "skipped": True,
+                    "reason": "EmailVerificationUnavailable",
+                    "error": str(e)
+                })
+            else:
+                results[i] = (False, stage0_2_data)
+        return results
     
     # ========================================================================
     # Step 5: Categorize leads
@@ -3869,7 +3876,7 @@ async def run_batch_automated_checks(
                 "stage": "Stage 3: Email Verification (Batch)",
                 "check_name": "truelist_batch",
                 "message": f"Email verification failed: {email_result.get('status', 'unknown')}",
-                "failed_fields": ["email"]
+                                "failed_fields": ["email"]
             }
             results[i] = (False, rejection_data)
     
@@ -3949,7 +3956,7 @@ async def run_batch_automated_checks(
                     # Retry succeeded → add to Stage 4-5 queue
                     print(f"   ✅ Retry succeeded for: {email}")
                     stage4_5_queue.append((idx, leads[idx], result, stage0_2_data))
-                else:
+            else:
                     # Retry failed → reject
                     rejection_data = stage0_2_data.copy()
                     rejection_data["passed"] = False
@@ -4006,7 +4013,7 @@ async def run_batch_automated_checks(
                         "reason": "EmailVerificationUnavailable",
                         "message": f"Email verification unavailable after batch + inline"
                     })
-                else:
+            else:
                     # Inline explicitly failed → reject
                     rejection_data = stage0_2_data.copy()
                     rejection_data["passed"] = False
@@ -9907,7 +9914,10 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             company_linkedin_context += f"- Location: {company_linkedin_data['location']}\n"
     
     industry_context = ""
-    if "industry" in needs_llm and industry_results:
+    # ALWAYS include industry search results - industry is ALWAYS verified by LLM
+    # BUG FIX: Previously this had "if 'industry' in needs_llm" but 'industry' is NEVER in needs_llm
+    # This caused LLM to verify industry without any search context, leading to false rejections
+    if industry_results:
         industry_context = "\nINDUSTRY SEARCH RESULTS:\n"
         for i, result in enumerate(industry_results[:4], 1):
             title = result.get("title", "")
@@ -10028,7 +10038,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     if "region" in needs_llm:
         response_fields.append('"region_match": true/false,\n    "extracted_region": "company HQ from search"')
     # Always include industry + sub_industry verification (exact matches already validated)
-    response_fields.append('"industry_match": true/false,\n    "extracted_industry": "industry from search"')
+        response_fields.append('"industry_match": true/false,\n    "extracted_industry": "industry from search"')
     response_fields.append('"sub_industry_match": true/false,\n    "sub_industry_reasoning": "does company match the sub-industry definition?"')
     if claimed_description:
         response_fields.append('"description_match": true/false,\n    "description_reasoning": "is description accurate?"')
@@ -10159,8 +10169,8 @@ RESPOND WITH JSON ONLY:
                         region_match = True
                 
                 # Industry - always verified by LLM now (exact match already validated)
-                industry_match = result.get("industry_match", False)
-                extracted_industry = result.get("extracted_industry", "")
+                    industry_match = result.get("industry_match", False)
+                    extracted_industry = result.get("extracted_industry", "")
                 
                 if not industry_match:
                     print(f"   ❌ INDUSTRY LLM FAILED: Company does not match industry '{claimed_industry}'")
@@ -10298,6 +10308,8 @@ RESPOND WITH JSON ONLY:
 
 def determine_icp_multiplier(lead: dict) -> float:
     """
+    LEGACY FUNCTION - Kept for backwards compatibility.
+    
     Determine if a lead matches our ICP (Ideal Customer Profile) criteria.
     
     Uses the ICP_DEFINITIONS table (defined at top of file) to check if a lead matches
@@ -10311,6 +10323,8 @@ def determine_icp_multiplier(lead: dict) -> float:
         Custom multiplier if defined in ICP (e.g., 5.0 for Africa)
         1.5 if lead matches ICP criteria (default)
         1.0 if lead is standard (non-ICP)
+        
+    NOTE: This function is deprecated. Use calculate_icp_adjustment() instead.
     """
     # Extract lead fields (case-insensitive)
     sub_industry = lead.get("sub_industry", "").strip().lower()
@@ -10343,6 +10357,272 @@ def determine_icp_multiplier(lead: dict) -> float:
     
     # No ICP match found
     return 1.0
+
+
+def _matches_icp_definitions(lead: dict) -> bool:
+    """
+    Check if a lead matches any ICP definition (without returning multiplier value).
+    
+    Returns:
+        True if lead matches any ICP definition
+        False otherwise
+    """
+    sub_industry = lead.get("sub_industry", "").strip().lower()
+    role = lead.get("role", "").strip().lower()
+    region = lead.get("region", "").strip().lower()
+    
+    def matches_any(text: str, keywords: list) -> bool:
+        text_lower = text.lower()
+        return any(keyword.lower() in text_lower for keyword in keywords)
+    
+    for icp in ICP_DEFINITIONS:
+        if not matches_any(sub_industry, icp["sub_industries"]):
+            continue
+        if "regions" in icp:
+            if not matches_any(region, icp["regions"]):
+                continue
+        if matches_any(role, icp["role_details"]):
+            return True
+    
+    return False
+
+
+def calculate_icp_adjustment(lead: dict) -> int:
+    """
+    Calculate ICP adjustment points (NEW SYSTEM - replaces multiplier).
+    
+    This function calculates an absolute point adjustment based on:
+    1. ICP Definition Match: +50 points
+    2. Small Company in Major Hub Bonus: +50 points
+       - ≤10 employees AND in major hub (NYC, SF, LA, Austin, Chicago, etc.)
+    3. Small Company Bonus:
+       - ≤50 employees: +20 points
+    4. Large Company Penalty:
+       - >1,000 employees: -10 points
+       - >5,000 or >10,000 employees: -15 points
+    
+    MAX POSITIVE BONUS: +50 (ICP and small company bonuses do NOT stack beyond 50)
+    PENALTIES STACK: Penalties are applied AFTER capping the bonus
+    
+    Args:
+        lead: Lead dictionary with employee_count, city, and ICP-relevant fields
+        
+    Returns:
+        Integer adjustment (bonus capped at +50, then penalties applied)
+        
+    Examples:
+        - ICP match only = +50
+        - ICP + ≤50 employees = +70 → capped to +50
+        - ICP + >1k employees = +50 - 10 = +40
+        - ICP + >5k employees = +50 - 15 = +35
+        - Small hub (≤10 + NYC) = +50
+        - Small hub + >1k employees = +50 - 10 = +40
+        - Non-ICP + ≤50 employees = +20
+        - Non-ICP + >5k employees = -15
+    """
+    bonus = 0
+    penalty = 0
+    breakdown = {"icp_match": 0, "major_hub_bonus": 0, "employee_bonus": 0, "employee_penalty": 0}
+    
+    # ========================================================================
+    # MAJOR HUBS BY COUNTRY (city + country must BOTH match)
+    # ========================================================================
+    # Country names MUST match EXACTLY with gateway/api/submit.py VALID_COUNTRIES
+    # This prevents gaming (e.g., submitting "United States, London" to get bonus)
+    MAJOR_HUBS_BY_COUNTRY = {
+        # ----------------------------------------------------------------
+        # NORTH AMERICA
+        # ----------------------------------------------------------------
+        "united states": [
+            "new york", "nyc", "manhattan", "brooklyn",
+            "san francisco", "sf", "bay area",
+            "los angeles", "la",
+            "austin", "atx",
+            "chicago", "chi",
+            "seattle", "sea",
+            "boston", "bos",
+            "denver", "den",
+            "miami", "mia",
+            "washington", "dc", "d.c.",
+            "atlanta", "atl",
+            "dallas", "dfw",
+            "houston", "htx",
+            "phoenix", "phx",
+            "san diego", "sd",
+            "san jose", "sj",
+            "portland", "pdx",
+        ],
+        "canada": [
+            "toronto", "yyz",
+            "vancouver", "yvr",
+            "montreal", "mtl",
+        ],
+        # ----------------------------------------------------------------
+        # EUROPE
+        # ----------------------------------------------------------------
+        "united kingdom": [
+            "london", "ldn",
+            "manchester",
+            "edinburgh",
+            "cambridge",
+            "oxford",
+        ],
+        "germany": [
+            "berlin",
+            "munich", "münchen",
+            "frankfurt",
+            "hamburg",
+        ],
+        "france": [
+            "paris",
+        ],
+        "netherlands": [
+            "amsterdam",
+            "rotterdam",
+        ],
+        "switzerland": [
+            "zurich", "zürich",
+            "geneva", "geneve", "genève",
+        ],
+        "ireland": [
+            "dublin",
+        ],
+        "sweden": [
+            "stockholm",
+        ],
+        "spain": [
+            "barcelona",
+            "madrid",
+        ],
+        # ----------------------------------------------------------------
+        # ASIA-PACIFIC
+        # ----------------------------------------------------------------
+        "hong kong": [
+            "hong kong", "hk", "central", "kowloon",
+        ],
+        "singapore": [
+            "singapore",
+        ],
+        "japan": [
+            "tokyo",
+            "osaka",
+        ],
+        "south korea": [
+            "seoul",
+        ],
+        "china": [
+            "shanghai",
+            "beijing",
+            "shenzhen",
+        ],
+        "india": [
+            "bangalore", "bengaluru",
+            "mumbai", "bombay",
+            "delhi", "new delhi",
+            "hyderabad",
+            "pune",
+        ],
+        "australia": [
+            "sydney", "syd",
+            "melbourne", "mel",
+        ],
+        "new zealand": [
+            "auckland",
+        ],
+        # ----------------------------------------------------------------
+        # MIDDLE EAST
+        # ----------------------------------------------------------------
+        "israel": [
+            "tel aviv", "tlv",
+        ],
+        "united arab emirates": [
+            "dubai",
+            "abu dhabi",
+        ],
+        # ----------------------------------------------------------------
+        # SOUTH AMERICA
+        # ----------------------------------------------------------------
+        "brazil": [
+            "sao paulo", "são paulo",
+        ],
+    }
+    
+    # Get city and country for major hub check
+    city = lead.get("city", "").strip().lower()
+    country = lead.get("country", "").strip().lower()
+    
+    # Check if BOTH country AND city match a major hub
+    is_major_hub = False
+    matched_hub = None
+    
+    if country in MAJOR_HUBS_BY_COUNTRY:
+        hub_cities = MAJOR_HUBS_BY_COUNTRY[country]
+        for hub in hub_cities:
+            if hub in city:
+                is_major_hub = True
+                matched_hub = f"{city} ({country})"
+                break
+    
+    # ========================================================================
+    # STEP 1: ICP Definition Match (+50 points)
+    # ========================================================================
+    if _matches_icp_definitions(lead):
+        bonus += 50
+        breakdown["icp_match"] = 50
+        print(f"   🎯 ICP MATCH: +50 points")
+    
+    # ========================================================================
+    # STEP 2: Employee Count Bonuses and Penalties
+    # ========================================================================
+    employee_count_str = get_employee_count(lead) or ""
+    
+    if employee_count_str:
+        parsed = parse_employee_count(employee_count_str)
+        
+        if parsed:
+            emp_min, emp_max = parsed
+            
+            # Small company in major hub bonus (+50 points)
+            if emp_max <= 10 and is_major_hub:
+                bonus += 50
+                breakdown["major_hub_bonus"] = 50
+                print(f"   🌆 SMALL COMPANY IN MAJOR HUB (≤10 + {matched_hub}): +50 points")
+            # Small company bonus (+20 points for ≤50 employees)
+            elif emp_max <= 50:
+                bonus += 20
+                breakdown["employee_bonus"] = 20
+                print(f"   🏢 SMALL COMPANY (≤50): +20 points")
+            
+            # Large company penalty (stacks with capped bonus)
+            # Note: Uses emp_min to determine the MINIMUM company size
+            if emp_min > 5000:
+                # 5,001+ employees (includes 10,001+)
+                penalty = 15
+                breakdown["employee_penalty"] = -15
+                print(f"   🏭 LARGE COMPANY (>5k): -15 points")
+            elif emp_min > 1000:
+                # 1,001-5,000 employees
+                penalty = 10
+                breakdown["employee_penalty"] = -10
+                print(f"   🏭 LARGE COMPANY (>1k): -10 points")
+    else:
+        print(f"   📋 No employee count available - no size adjustment")
+    
+    # ========================================================================
+    # STEP 3: Cap bonus at +50, then apply penalties
+    # ========================================================================
+    if bonus > 50:
+        print(f"   ⚠️  Bonus {bonus} exceeds cap, capping at +50")
+        bonus = 50
+    
+    # Penalties stack with capped bonus
+    adjustment = bonus - penalty
+    
+    print(f"   📊 FINAL ICP ADJUSTMENT: {adjustment:+d} points")
+    print(f"      Bonus (capped at 50): {min(bonus, 50):+d} = ICP:{breakdown['icp_match']:+d} + Hub:{breakdown['major_hub_bonus']:+d} + Size:{breakdown['employee_bonus']:+d}")
+    print(f"      Penalty: {-penalty:+d}")
+    
+    return adjustment
 
 
 # Main validation pipeline
@@ -10759,16 +11039,14 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
     # ========================================================================
-    # ICP Multiplier Determination
+    # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)
+    # Replaces the old multiplier system with absolute point adjustments
     # ========================================================================
-    is_icp_multiplier = determine_icp_multiplier(lead)
-    lead["is_icp_multiplier"] = is_icp_multiplier
-    automated_checks_data["is_icp_multiplier"] = is_icp_multiplier
-    
-    if is_icp_multiplier > 1.0:
-        print(f"   🎯 ICP MATCH: Multiplier {is_icp_multiplier}x applied!")
-    else:
-        print(f"   📋 Standard lead: Multiplier {is_icp_multiplier}x")
+    icp_adjustment = calculate_icp_adjustment(lead)
+    # Store in is_icp_multiplier field for backwards compatibility
+    # Values: -15 to +20 (new format) vs 1.0/1.5/5.0 (old format)
+    lead["is_icp_multiplier"] = float(icp_adjustment)
+    automated_checks_data["is_icp_multiplier"] = float(icp_adjustment)
     
     print(f"🎉 All stages passed for {email} @ {company}")
 
@@ -10823,7 +11101,10 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
     Strategy: Try HEAD first (lightweight), fall back to GET if HEAD fails.
     Many enterprise sites (Intuit, 3M, etc.) block HEAD requests but work with GET.
     Uses browser User-Agent to avoid anti-bot blocking.
+    Uses custom SSL context with broader cipher support for enterprise sites (Hartford, etc.)
     """
+    import ssl
+    
     if not company_domain:
         return False, "No domain provided"
     if not company_domain.startswith(("http://", "https://")):
@@ -10837,8 +11118,20 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
+    # Create custom SSL context with broader cipher support
+    # Some enterprise sites (Hartford, etc.) have strict SSL configs that reject default ciphers
+    ssl_context = ssl.create_default_context()
+    # Allow older TLS versions for compatibility with enterprise sites
+    ssl_context.set_ciphers('DEFAULT:@SECLEVEL=1')
+    # Add additional options for maximum compatibility
+    ssl_context.check_hostname = True
+    ssl_context.verify_mode = ssl.CERT_REQUIRED
+    
+    # Create connector with custom SSL context
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
             # Try HEAD request first (lightweight)
             head_status = None
             head_error = None

@@ -6,48 +6,325 @@ Standardizes city, state, and country fields for consistent storage.
 
 Features:
 - Infers country from state if missing (e.g., "CA" -> "United States")
-- Uses `us` library for US states (no hardcoding)
-- Uses `geonamescache` for cities (100k+ cities with alternate names)
-- Validates against VALID_COUNTRIES list
+- Uses geo_lookup_fast.json for all lookups (no external libraries)
+- Validates against VALID_COUNTRIES_SET (199 countries from JSON)
 
-Libraries used (NO rate limits - both are offline):
-- us: Pure Python US state data
-- geonamescache: Offline city database with 786k+ name variations
+All data is loaded from geo_lookup_fast.json at import time (one-time load).
 """
 
 from typing import Tuple
+from pathlib import Path
+import json
 
-import us
-import geonamescache
 
 # ============================================================
-# Initialize geonamescache (one-time load at import)
+# Load geo_lookup_fast.json (one-time load at import)
 # ============================================================
 
-_gc = geonamescache.GeonamesCache(min_city_population=1000)
-_all_cities = _gc.get_cities()
+_geo_path = Path(__file__).parent / "geo_lookup_fast.json"
+with open(_geo_path, 'r', encoding='utf-8') as _f:
+    _geo_data = json.load(_f)
 
-# Build city lookup: alternate names -> canonical name
-# Handles aliases like "Bombay" -> "Mumbai", "Peking" -> "Beijing"
-CITY_LOOKUP = {}
-for _city_id, _city_data in _all_cities.items():
-    _canonical = _city_data['name']
-    # Add canonical name
-    CITY_LOOKUP[_canonical.lower()] = _canonical
-    # Add alternate names if available
-    _alt_names = _city_data.get('alternatenames', [])
-    # Handle both list and string formats (version compatibility)
-    if isinstance(_alt_names, str):
-        _alt_names = _alt_names.split(',')
-    for _alt in _alt_names:
-        _alt_clean = _alt.strip().lower()
-        if _alt_clean and len(_alt_clean) >= 2:
-            # Don't overwrite if canonical exists
-            if _alt_clean not in CITY_LOOKUP:
-                CITY_LOOKUP[_alt_clean] = _canonical
+# Build sets for O(1) validation lookups
+VALID_COUNTRIES_SET = set(_geo_data['countries'])
+US_STATES_SET = set(_geo_data['us_states'].keys())
+US_CITIES_BY_STATE = {state: set(cities) for state, cities in _geo_data['us_states'].items()}
+CITIES_BY_COUNTRY = {country: set(cities) for country, cities in _geo_data['cities'].items()}
+STATE_ABBR_TO_NAME = _geo_data['state_abbr']
 
-# Clean up temporary variables
-del _gc, _all_cities, _city_id, _city_data, _canonical, _alt_names, _alt, _alt_clean
+# Build proper case mapping for US states (lowercase -> Proper Case)
+US_STATE_PROPER = {}
+for _state in US_STATES_SET:
+    if _state == 'district of columbia':
+        US_STATE_PROPER[_state] = 'District of Columbia'
+    else:
+        US_STATE_PROPER[_state] = ' '.join(w.capitalize() for w in _state.split())
+
+# Build abbreviation -> Proper Case mapping
+STATE_ABBR_TO_PROPER = {abbr: US_STATE_PROPER[name] for abbr, name in STATE_ABBR_TO_NAME.items()}
+
+del _geo_path, _f, _geo_data, _state
+
+
+# ============================================================
+# City aliases for validation - SPLIT INTO US AND INTERNATIONAL
+# 
+# US aliases are applied for US validation only.
+# International aliases are applied for non-US validation only.
+# This prevents aliases like 'bogota' -> 'bogotá' from breaking
+# US cities like Bogota, NJ.
+# ============================================================
+
+# US-only city aliases (applied only for United States validation)
+US_CITY_ALIASES = {
+    # Common abbreviations
+    'new york': 'new york city',
+    'nyc': 'new york city',
+    'la': 'los angeles',
+    'sf': 'san francisco',
+    'dc': 'washington',
+    'washington dc': 'washington',
+    'washington d.c.': 'washington',
+    'philly': 'philadelphia',
+    'vegas': 'las vegas',
+
+    # Saint/St variations
+    # NOTE: 'saint louis' NOT aliased - Michigan has 'saint louis', Missouri has 'st. louis'
+    'st louis': 'st. louis',  # For Missouri (St. Louis without period)
+    'saint peters': 'st. peters',
+    'st peters': 'st. peters',
+    'saint petersburg': 'st. petersburg',
+    'st. augustine': 'saint augustine',
+    'st augustine': 'saint augustine',
+    'port st. lucie': 'port saint lucie',
+    'port st lucie': 'port saint lucie',
+    'st. paul': 'saint paul',
+    'st paul': 'saint paul',
+
+    # Fort/Ft variations
+    'ft. lauderdale': 'fort lauderdale',
+    'ft lauderdale': 'fort lauderdale',
+    'ft. worth': 'fort worth',
+    'ft worth': 'fort worth',
+    'ft. myers': 'fort myers',
+    'ft myers': 'fort myers',
+
+    # Hawaii (with okina U+2018)
+    'kihei': 'kīhei',
+    'mililani': 'mililani town',
+    'aiea': '\u2018aiea',
+    'ewa beach': '\u2018ewa beach',
+    'kalaheo': 'kalaheo hillside',
+    'haleiwa': 'hale\u2018iwa',
+
+    # Township variations
+    'lakewood township': 'lakewood',
+    'woodbridge township': 'woodbridge',
+    'springfield township': 'springfield',
+    'freehold township': 'freehold',
+    'marlboro township': 'marlboro',
+    'plymouth township': 'plymouth',
+
+    # Unique cities with suffixes
+    'simsbury': 'simsbury center',
+    'killingly': 'killingly center',
+    'suffield': 'suffield depot',
+    'deep river': 'deep river center',
+    'harpswell': 'harpswell center',
+    'stratham': 'stratham station',
+    'north attleborough': 'north attleborough center',
+    'loxahatchee': 'loxahatchee groves',
+    'plainsboro': 'plainsboro center',
+}
+
+# International city aliases (applied only for non-US validation)
+# These may conflict with US city names, but that's OK because
+# they're only applied when country != United States
+INTERNATIONAL_CITY_ALIASES = {
+    # === Switzerland ===
+    'zurich': 'zürich',
+    'zuerich': 'zürich',
+    'geneve': 'genève',
+    'lucerne': 'luzern',
+    'st. gallen': 'sankt gallen',
+    'st gallen': 'sankt gallen',
+    'saint gallen': 'sankt gallen',
+    'staefa': 'stäfa',
+    'duebendorf': 'dübendorf',
+    'rueschlikon': 'rüschlikon',
+    'neuchatel': 'neuchâtel',
+    'kuettigen': 'küttigen',
+    'fuellinsdorf': 'füllinsdorf',
+    'koeniz': 'köniz',
+    'kuessnacht': 'küssnacht',
+    'wadenswil': 'wädenswil',
+    'waedenswil': 'wädenswil',
+
+    # === Sweden ===
+    'gothenburg': 'göteborg',
+    'goteborg': 'göteborg',
+    'lidingo': 'lidingö',
+    'lidingoe': 'lidingö',
+    'malmo': 'malmö',
+    'malmoe': 'malmö',
+    'soedertaelje': 'södertälje',
+    'sodertälje': 'södertälje',
+    'taeby': 'täby',
+    'jonkoping': 'jönköping',
+    'jonkoeping': 'jönköping',
+    'norrkoping': 'norrköping',
+    'norrkoeping': 'norrköping',
+    'linkoping': 'linköping',
+    'linkoeping': 'linköping',
+    'gaevle': 'gävle',
+    'gavle': 'gävle',
+    'orebro': 'örebro',
+    'oerebro': 'örebro',
+    'vasteras': 'västerås',
+    'vaesteras': 'västerås',
+    'umea': 'umeå',
+    'lulea': 'luleå',
+
+    # === Denmark ===
+    'kobenhavn': 'københavn',
+    'koebenhavn': 'københavn',
+    'copenhagen': 'københavn',
+
+    # === Turkey ===
+    'izmir': 'i\u0307zmir',
+    'atasehir': 'ataşehir',
+    'kadikoy': 'kadıköy',
+    'kadikoey': 'kadıköy',
+    'eskisehir': 'eskişehir',
+    'sisli': 'şişli',
+    'uskudar': 'üsküdar',
+
+    # === India ===
+    'bangalore': 'bengaluru',
+    'bombay': 'mumbai',
+    'gurgaon': 'gurugram',
+    'ernakulam': 'kochi',
+    'calcutta': 'kolkata',  # Old name
+
+    # === Italy (English -> Italian names in JSON) ===
+    'milano': 'milan',
+    'roma': 'rome',
+    'firenze': 'florence',
+    'venezia': 'venice',
+    'napoli': 'naples',
+    'torino': 'turin',
+
+    # === Belgium ===
+    'antwerp': 'antwerpen',
+    'bruges': 'brugge',
+    'brussel': 'brussels',
+    'ghent': 'gent',
+
+    # === Germany ===
+    'munich': 'münchen',
+    'muenchen': 'münchen',
+    'munchen': 'münchen',
+    'nuremberg': 'nürnberg',
+    'nuernberg': 'nürnberg',
+    'dusseldorf': 'düsseldorf',
+    'duesseldorf': 'düsseldorf',
+    'cologne': 'köln',
+    'koeln': 'köln',
+    'frankfurt': 'frankfurt am main',
+    'wurzburg': 'würzburg',
+    'wuerzburg': 'würzburg',
+    'tubingen': 'tübingen',
+    'tuebingen': 'tübingen',
+    'gottingen': 'göttingen',
+    'goettingen': 'göttingen',
+    'lubeck': 'lübeck',
+    'luebeck': 'lübeck',
+    'hanover': 'hannover',
+
+    # === Austria ===
+    'wien': 'vienna',
+
+    # === Netherlands ===
+    'den haag': 'the hague',
+
+    # === Canada ===
+    'montreal': 'montréal',
+
+    # === UK ===
+    'saint helens': 'st helens',
+
+    # === Australia ===
+    'brisbane city': 'brisbane',
+
+    # === Brazil ===
+    'sao paulo': 'são paulo',
+    'brasilia': 'brasília',
+
+    # === Colombia ===
+    'bogota': 'bogotá',
+    'puerto bogota': 'puerto bogotá',
+    'medellin': 'medellín',
+
+    # === Argentina ===
+    'cordoba': 'córdoba',
+
+    # === Spain ===
+    'coruna': 'a coruña',
+    'la coruna': 'a coruña',
+    'malaga': 'málaga',
+    'almeria': 'almería',
+    'leon': 'león',
+    'seville': 'sevilla',
+
+    # === Poland ===
+    'gdansk': 'gdańsk',
+    'wroclaw': 'wrocław',
+    'poznan': 'poznań',
+    'lodz': 'łódź',
+    'krakow': 'kraków',
+    'cracow': 'kraków',
+
+    # === Mexico ===
+    'mexico city': 'ciudad de méxico',
+    'ciudad de mexico': 'ciudad de méxico',
+    'cdmx': 'ciudad de méxico',
+    'cancun': 'cancún',
+    'merida': 'mérida',
+    'queretaro': 'querétaro',
+
+    # === Chile ===
+    'valparaiso': 'valparaíso',
+
+    # === Morocco ===
+    'marrakech': 'marrakesh',
+
+    # === Iceland ===
+    'reykjavik': 'reykjavík',
+
+    # === Portugal ===
+    'evora': 'évora',
+
+    # === Vietnam ===
+    'saigon': 'ho chi minh city',
+
+    # === Philippines ===
+    'cebu': 'cebu city',
+
+    # === China (old names) ===
+    'peking': 'beijing',
+    'canton': 'guangzhou',
+
+    # === Ukraine ===
+    'kiev': 'kyiv',
+
+    # === Romania ===
+    'bucuresti': 'bucharest',
+
+    # === Serbia ===
+    'beograd': 'belgrade',
+
+    # === Russia ===
+    'st petersburg': 'saint petersburg',
+
+    # === Saudi Arabia ===
+    'mecca': 'makkah',
+    'medina': 'madinah',
+
+    # === UAE ===
+    'ajman': 'ajman city',
+
+    # === Cuba ===
+    'la habana': 'havana',
+
+    # === Egypt ===
+    'sharm el sheikh': 'sharm el-sheikh',
+
+    # === Costa Rica ===
+    'san jose': 'san josé',
+
+    # === Panama ===
+    'panama city': 'panamá',
+}
 
 
 # ============================================================
@@ -55,100 +332,48 @@ del _gc, _all_cities, _city_id, _city_data, _canonical, _alt_names, _alt, _alt_c
 # ============================================================
 
 COUNTRY_ALIASES = {
+    # USA
     "usa": "united states", "us": "united states", "u.s.": "united states",
     "u.s.a.": "united states", "america": "united states",
     "united states of america": "united states",
+    # UK
     "uk": "united kingdom", "u.k.": "united kingdom",
     "great britain": "united kingdom", "britain": "united kingdom",
     "england": "united kingdom", "scotland": "united kingdom",
     "wales": "united kingdom", "northern ireland": "united kingdom",
+    # UAE
     "uae": "united arab emirates", "u.a.e.": "united arab emirates",
     "emirates": "united arab emirates",
-    "korea": "south korea", "republic of korea": "south korea",
+    # Korea
+    "korea": "south korea", "republic of korea": "south korea", "rok": "south korea",
+    # Others
     "holland": "netherlands", "the netherlands": "netherlands",
     "deutschland": "germany", "brasil": "brazil",
     "espana": "spain", "españa": "spain", "italia": "italy",
     "nippon": "japan", "nihon": "japan",
-    "prc": "china", "russia": "russia", "russian federation": "russia",
-    "czech": "czech republic", "vatican": "vatican city", "holy see": "vatican city",
+    "prc": "china", "peoples republic of china": "china", "people's republic of china": "china",
+    "roc": "taiwan", "republic of china": "taiwan",
+    "russia": "russia", "russian federation": "russia",
+    "czech": "czech republic", "czechia": "czech republic",
+    "vatican": "vatican city", "holy see": "vatican city",
     "burma": "myanmar", "persia": "iran", "swaziland": "eswatini",
-    "congo": "republic of the congo", "drc": "democratic republic of the congo",
+    "the gambia": "gambia", "eesti": "estonia",
+    "côte d'ivoire": "ivory coast", "cote d'ivoire": "ivory coast",
+    "congo": "republic of the congo",
+    "drc": "democratic republic of the congo",
+    "dr congo": "democratic republic of the congo",
+    "zaire": "democratic republic of the congo",
 }
 
-VALID_COUNTRIES = {
-    "united states", "canada", "mexico",
-    "guatemala", "belize", "honduras", "el salvador", "nicaragua", "costa rica", "panama",
-    "cuba", "jamaica", "haiti", "dominican republic", "bahamas", "barbados", "trinidad and tobago",
-    "saint lucia", "grenada", "saint vincent and the grenadines", "antigua and barbuda",
-    "dominica", "saint kitts and nevis",
-    "brazil", "argentina", "colombia", "peru", "venezuela", "chile", "ecuador", "bolivia",
-    "paraguay", "uruguay", "guyana", "suriname",
-    "united kingdom", "germany", "france", "italy", "spain", "portugal", "netherlands",
-    "belgium", "switzerland", "austria", "ireland", "luxembourg", "monaco", "andorra",
-    "liechtenstein", "san marino", "vatican city",
-    "sweden", "norway", "denmark", "finland", "iceland",
-    "poland", "czech republic", "czechia", "hungary", "romania", "bulgaria", "ukraine",
-    "belarus", "moldova", "slovakia", "slovenia", "croatia", "serbia", "bosnia and herzegovina",
-    "montenegro", "north macedonia", "albania", "kosovo", "lithuania", "latvia", "estonia",
-    "greece", "cyprus", "malta",
-    "russia", "kazakhstan", "uzbekistan", "turkmenistan", "tajikistan", "kyrgyzstan",
-    "georgia", "armenia", "azerbaijan",
-    "turkey", "israel", "palestine", "lebanon", "jordan", "syria", "iraq", "iran",
-    "saudi arabia", "united arab emirates", "qatar", "kuwait", "bahrain", "oman", "yemen",
-    "india", "pakistan", "bangladesh", "sri lanka", "nepal", "bhutan", "maldives", "afghanistan",
-    "indonesia", "malaysia", "singapore", "thailand", "vietnam", "philippines", "myanmar",
-    "cambodia", "laos", "brunei", "timor-leste",
-    "china", "japan", "south korea", "taiwan", "mongolia", "hong kong", "macau",
-    "australia", "new zealand", "fiji", "papua new guinea", "solomon islands", "vanuatu",
-    "samoa", "tonga", "kiribati", "micronesia", "palau", "marshall islands", "nauru", "tuvalu",
-    "egypt", "libya", "tunisia", "algeria", "morocco",
-    "nigeria", "ghana", "senegal", "ivory coast", "mali", "burkina faso", "niger", "guinea",
-    "benin", "togo", "sierra leone", "liberia", "mauritania", "gambia", "guinea-bissau", "cape verde",
-    "democratic republic of the congo", "cameroon", "central african republic", "chad",
-    "republic of the congo", "gabon", "equatorial guinea", "sao tome and principe",
-    "kenya", "ethiopia", "tanzania", "uganda", "rwanda", "burundi", "south sudan", "sudan",
-    "eritrea", "djibouti", "somalia", "comoros", "mauritius", "seychelles", "madagascar",
-    "south africa", "namibia", "botswana", "zimbabwe", "zambia", "malawi", "mozambique",
-    "angola", "lesotho", "eswatini"
+# VALID_COUNTRIES is now VALID_COUNTRIES_SET (loaded from JSON above)
+
+# Country name -> city lookup key mapping
+# Used when cities are stored under a different key than the country name
+COUNTRY_CITY_KEY_MAP = {
+    'czech republic': 'czechia',  # Cities stored under 'czechia' not 'czech republic'
 }
 
-SPECIAL_CAPITALIZATION = {
-    "united states": "United States",
-    "united kingdom": "United Kingdom",
-    "united arab emirates": "United Arab Emirates",
-    "south korea": "South Korea",
-    "south africa": "South Africa",
-    "south sudan": "South Sudan",
-    "new zealand": "New Zealand",
-    "saudi arabia": "Saudi Arabia",
-    "sri lanka": "Sri Lanka",
-    "hong kong": "Hong Kong",
-    "costa rica": "Costa Rica",
-    "el salvador": "El Salvador",
-    "dominican republic": "Dominican Republic",
-    "czech republic": "Czech Republic",
-    "north macedonia": "North Macedonia",
-    "san marino": "San Marino",
-    "vatican city": "Vatican City",
-    "papua new guinea": "Papua New Guinea",
-    "solomon islands": "Solomon Islands",
-    "marshall islands": "Marshall Islands",
-    "burkina faso": "Burkina Faso",
-    "sierra leone": "Sierra Leone",
-    "cape verde": "Cape Verde",
-    "ivory coast": "Ivory Coast",
-    "central african republic": "Central African Republic",
-    "equatorial guinea": "Equatorial Guinea",
-    "trinidad and tobago": "Trinidad And Tobago",
-    "saint lucia": "Saint Lucia",
-    "saint vincent and the grenadines": "Saint Vincent And The Grenadines",
-    "antigua and barbuda": "Antigua And Barbuda",
-    "saint kitts and nevis": "Saint Kitts And Nevis",
-    "bosnia and herzegovina": "Bosnia And Herzegovina",
-    "sao tome and principe": "Sao Tome And Principe",
-    "democratic republic of the congo": "Democratic Republic Of The Congo",
-    "republic of the congo": "Republic Of The Congo",
-}
+# SPECIAL_CAPITALIZATION removed - just use title()
 
 
 # ============================================================
@@ -204,61 +429,7 @@ NON_US_STATE_TO_COUNTRY = {
 }
 
 
-# ============================================================
-# City Aliases (for abbreviations not in geonamescache)
-# ============================================================
-
-CITY_ALIASES = {
-    # Common US abbreviations
-    "sf": "San Francisco", "san fran": "San Francisco",
-    "la": "Los Angeles", "l.a.": "Los Angeles",
-    "nyc": "New York City", "n.y.c.": "New York City", 
-    "new york": "New York City", "new york city": "New York City",  # Override geonamescache "Niu-York"
-    "dc": "Washington", "d.c.": "Washington", "washington dc": "Washington",
-    "philly": "Philadelphia", "vegas": "Las Vegas",
-    "chi": "Chicago", "chi-town": "Chicago",
-    "atl": "Atlanta", "bos": "Boston", "dal": "Dallas",
-    "hou": "Houston", "htx": "Houston", "mia": "Miami",
-    "phx": "Phoenix", "det": "Detroit", "den": "Denver",
-    "sea": "Seattle", "pdx": "Portland", "sj": "San Jose",
-    "sd": "San Diego", "sac": "Sacramento", "stl": "St. Louis",
-    "nola": "New Orleans", "slc": "Salt Lake City",
-    "indy": "Indianapolis", "kc": "Kansas City", "msp": "Minneapolis",
-    # Common international abbreviations
-    "ldn": "London", "lon": "London", "hk": "Hong Kong", "sg": "Singapore",
-    "syd": "Sydney", "mel": "Melbourne", "tor": "Toronto",
-    "van": "Vancouver", "mtl": "Montreal", "tyo": "Tokyo", "osa": "Osaka",
-    "sel": "Seoul", "pek": "Beijing", "sha": "Shanghai",
-    "bkk": "Bangkok", "sin": "Singapore", "kul": "Kuala Lumpur",
-    "del": "Delhi", "bom": "Mumbai", "blr": "Bengaluru",
-    "dxb": "Dubai", "auh": "Abu Dhabi",
-    "par": "Paris", "ber": "Berlin", "muc": "Munich", "ffm": "Frankfurt",
-    "ams": "Amsterdam", "bcn": "Barcelona", "mad": "Madrid",
-    "rom": "Rome", "mil": "Milan", "dub": "Dublin",
-    # Override geonamescache errors (actual city names mapping to wrong cities)
-    "sao paulo": "Sao Paulo", "são paulo": "Sao Paulo",  # Was mapping to "Diamante"
-    "cairo": "Cairo",  # Ensure Cairo maps correctly
-    "geneva": "Geneva", "geneve": "Geneva", "genève": "Geneva",
-    "montreal": "Montreal", "montréal": "Montreal",
-    "zurich": "Zurich", "zürich": "Zurich",
-    "bogota": "Bogota", "bogotá": "Bogota",
-    # Critical: actual city names were mapping to completely wrong cities
-    "cancun": "Cancun", "cancún": "Cancun",  # Was "Changchun"
-    "brasilia": "Brasilia", "brasília": "Brasilia",  # Was "Porecatu"
-    # German cities - standardize to English spellings
-    "cologne": "Cologne", "köln": "Cologne", "koln": "Cologne",
-    "dusseldorf": "Dusseldorf", "düsseldorf": "Dusseldorf",
-    "munich": "Munich", "münchen": "Munich",
-    # Other standardizations (actual city names, not airport codes)
-    "thessaloniki": "Thessaloniki", "thessaloníki": "Thessaloniki",
-    "medellin": "Medellin", "medellín": "Medellin",
-    # BLOCK airport codes from being mapped to wrong cities by geonamescache
-    # These pass through as-is (bad data stays bad, doesn't silently corrupt)
-    "brs": "BRS", "arn": "ARN", "eze": "EZE", "cgn": "CGN",
-    "gva": "GVA", "zrh": "ZRH", "cai": "CAI", "muc": "MUC",
-    "dus": "DUS", "skg": "SKG", "mde": "MDE", "bog": "BOG",
-    "cun": "CUN", "bsb": "BSB",
-}
+# CITY_ALIASES removed - use US_CITY_ALIASES + INTERNATIONAL_CITY_ALIASES + title case for display
 
 
 # ============================================================
@@ -269,22 +440,14 @@ def normalize_country(country: str) -> str:
     """Normalize country name to canonical form."""
     if not country:
         return ""
-    
+
     country_lower = country.strip().lower()
-    
+
     # Check aliases
     if country_lower in COUNTRY_ALIASES:
         country_lower = COUNTRY_ALIASES[country_lower]
-    
-    # Validate against known countries
-    if country_lower not in VALID_COUNTRIES:
-        # Unknown country - just title case it
-        return country.strip().title()
-    
-    # Special capitalization for multi-word countries
-    if country_lower in SPECIAL_CAPITALIZATION:
-        return SPECIAL_CAPITALIZATION[country_lower]
-    
+
+    # Return title case (works for all countries)
     return country_lower.title()
 
 
@@ -292,31 +455,32 @@ def normalize_state(state: str, country: str = "") -> str:
     """Normalize state/province name to canonical form."""
     if not state:
         return ""
-    
+
     cleaned = state.strip().lower().replace(".", "")
     country_lower = country.lower().replace(".", "") if country else ""
-    
+
     # Check US aliases first (e.g., "calif" -> "California")
     if cleaned in US_STATE_ALIASES:
         return US_STATE_ALIASES[cleaned]
-    
+
     # Check if US (or unknown country - assume US for state lookup)
-    # Include common aliases that submit.py also recognizes
     US_COUNTRY_INDICATORS = [
         "united states", "us", "usa", "america", "u s", "u s a"
     ]
     is_us = not country_lower or any(ind in country_lower for ind in US_COUNTRY_INDICATORS)
-    
+
     if is_us:
-        # Use us library for official US states
-        found = us.states.lookup(state.strip())
-        if found:
-            return found.name
-    
+        # Check abbreviation first (e.g., "CA" -> "California")
+        if cleaned in STATE_ABBR_TO_PROPER:
+            return STATE_ABBR_TO_PROPER[cleaned]
+        # Check full state name (e.g., "california" -> "California")
+        if cleaned in US_STATE_PROPER:
+            return US_STATE_PROPER[cleaned]
+
     # Check international states/provinces
     if cleaned in INTERNATIONAL_STATES:
         return INTERNATIONAL_STATES[cleaned]
-    
+
     # Fallback to title case
     return state.strip().title()
 
@@ -324,42 +488,43 @@ def normalize_state(state: str, country: str = "") -> str:
 def normalize_city(city: str) -> str:
     """
     Normalize city name using:
-    1. Fallback aliases (for abbreviations like SF, NYC)
-    2. geonamescache lookup (786k+ variations, handles Bombay->Mumbai, etc.)
+    1. US_CITY_ALIASES for US variations (nyc, sf, etc.)
+    2. INTERNATIONAL_CITY_ALIASES for international variations
     3. Title case fallback
+    
+    Note: This is for display normalization. Validation uses separate
+    alias dictionaries based on country to avoid conflicts.
     """
     if not city:
         return ""
-    
+
     cleaned = city.strip().lower().replace(".", "")
-    
-    # 1. Check fallback aliases first (abbreviations)
-    if cleaned in CITY_ALIASES:
-        return CITY_ALIASES[cleaned]
-    
-    # 2. Check geonamescache lookup (includes alternate names)
-    if cleaned in CITY_LOOKUP:
-        return CITY_LOOKUP[cleaned]
-    
-    # 3. Fallback to title case
+
+    # Check US aliases first, then international
+    if cleaned in US_CITY_ALIASES:
+        return US_CITY_ALIASES[cleaned].title()
+    if cleaned in INTERNATIONAL_CITY_ALIASES:
+        return INTERNATIONAL_CITY_ALIASES[cleaned].title()
+
+    # Fallback to title case
     return city.strip().title()
 
 
 def infer_country_from_state(norm_state: str) -> str:
     """
     Infer country from normalized state name.
-    
+
     Uses:
-    - us library for US states (no hardcoding)
+    - US_STATES_SET for US states
     - NON_US_STATE_TO_COUNTRY for Canada/Australia/UK
     """
     if not norm_state:
         return ""
-    
-    # Check US states using library
-    if us.states.lookup(norm_state):
+
+    # Check if it's a US state
+    if norm_state.lower() in US_STATES_SET:
         return "United States"
-    
+
     # Check non-US states
     return NON_US_STATE_TO_COUNTRY.get(norm_state.lower(), "")
 
@@ -369,7 +534,7 @@ def normalize_location(city: str, state: str, country: str) -> Tuple[str, str, s
     Normalize city and state fields. Country is passed through as-is.
     
     NOTE: Country normalization is NOT done here - submit.py has its own
-    COUNTRY_ALIASES and VALID_COUNTRIES validation. Miners MUST submit
+    COUNTRY_ALIASES and VALID_COUNTRIES_SET validation. Miners MUST submit
     exact country names from the 199-country list (or valid aliases).
     
     Flow:
@@ -398,7 +563,7 @@ def normalize_location(city: str, state: str, country: str) -> Tuple[str, str, s
     # NOTE: We infer the FULL country name here since miner didn't provide one
     if not country.strip() and norm_state:
         inferred = infer_country_from_state(norm_state)
-        if inferred.lower() in VALID_COUNTRIES:
+        if inferred.lower() in VALID_COUNTRIES_SET:
             country = inferred
     
     # Step 3: Normalize city only
@@ -407,4 +572,116 @@ def normalize_location(city: str, state: str, country: str) -> Tuple[str, str, s
     # Step 4: Return country as-is (submit.py handles validation/normalization)
     # Only strip whitespace, don't change the value
     return (norm_city, norm_state, country.strip())
+
+
+# ============================================================
+# Location Validation
+# ============================================================
+
+def _normalize_for_validation(city: str, is_us: bool = False) -> str:
+    """
+    Normalize city for validation lookup.
+    
+    Args:
+        city: City name to normalize
+        is_us: If True, apply US_CITY_ALIASES (for US validation).
+               If False, apply INTERNATIONAL_CITY_ALIASES (for non-US).
+               
+    This split prevents international aliases (e.g., 'bogota' -> 'bogotá')
+    from breaking US city validation (e.g., Bogota, NJ exists in the US).
+    """
+    if not city:
+        return ""
+    city_lower = city.lower().strip()
+    if is_us:
+        return US_CITY_ALIASES.get(city_lower, city_lower)
+    else:
+        return INTERNATIONAL_CITY_ALIASES.get(city_lower, city_lower)
+
+
+def _normalize_state_for_validation(state: str) -> str:
+    """Normalize state for validation lookup."""
+    if not state:
+        return ""
+    state_lower = state.lower().strip().replace('.', '')
+    # Filter out invalid state values
+    if state_lower in ['us', 'usa', 'unknown', 'united states']:
+        return ""
+    # Check abbreviation mapping
+    return STATE_ABBR_TO_NAME.get(state_lower, state_lower)
+
+
+def validate_location(city: str, state: str, country: str) -> Tuple[bool, str]:
+    """
+    Validate that location exists in geo_lookup_fast.json.
+
+    Checks:
+    1. Country is in 199 valid countries
+    2. For US: state is valid AND city exists in that state
+    3. For international: city exists in that country
+
+    Args:
+        city: City name (will be normalized)
+        state: State/province name (will be normalized)
+        country: Country name (will be normalized)
+
+    Returns:
+        Tuple of (is_valid, rejection_reason)
+        - (True, None) if valid
+        - (False, "reason") if invalid
+
+    Examples:
+        ("Los Angeles", "CA", "USA") -> (True, None)
+        ("LA", "California", "United States") -> (True, None)
+        ("FakeCity", "CA", "USA") -> (False, "city_invalid_for_state")
+        ("Berlin", "", "Germany") -> (True, None)
+        ("FakeCity", "", "Germany") -> (False, "city_invalid_for_country")
+        ("NYC", "NY", "Narnia") -> (False, "country_invalid")
+    """
+    # Normalize country
+    if not country:
+        return False, "country_empty"
+
+    country_lower = country.lower().strip()
+    # Apply country aliases
+    country_lower = COUNTRY_ALIASES.get(country_lower, country_lower)
+
+    # Check country is valid
+    if country_lower not in VALID_COUNTRIES_SET:
+        return False, "country_invalid"
+
+    # US validation: check state AND city
+    # Uses US_CITY_ALIASES (nyc -> new york city, sf -> san francisco, etc.)
+    if country_lower == 'united states':
+        city_norm = _normalize_for_validation(city, is_us=True)
+        if not city_norm:
+            return False, "city_empty"
+            
+        state_norm = _normalize_state_for_validation(state)
+
+        if not state_norm:
+            return False, "state_empty_for_usa"
+
+        if state_norm not in US_STATES_SET:
+            return False, "state_invalid"
+
+        # Check city exists in that state
+        state_cities = US_CITIES_BY_STATE.get(state_norm, set())
+        if city_norm not in state_cities:
+            return False, "city_invalid_for_state"
+
+    # International validation: check city exists in country
+    # Uses INTERNATIONAL_CITY_ALIASES (bogota -> bogotá, munich -> münchen, etc.)
+    else:
+        city_norm = _normalize_for_validation(city, is_us=False)
+        if not city_norm:
+            return False, "city_empty"
+            
+        # Handle country name -> city lookup key mapping (e.g., 'czech republic' -> 'czechia')
+        city_lookup_key = COUNTRY_CITY_KEY_MAP.get(country_lower, country_lower)
+        country_cities = CITIES_BY_COUNTRY.get(city_lookup_key, set())
+        if city_norm not in country_cities:
+            return False, "city_invalid_for_country"
+
+    return True, None
 

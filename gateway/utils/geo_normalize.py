@@ -60,6 +60,7 @@ US_CITY_ALIASES = {
     # Common abbreviations
     'new york': 'new york city',
     'nyc': 'new york city',
+    'city of new york': 'new york city',  # Official name variant
     'la': 'los angeles',
     'sf': 'san francisco',
     'dc': 'washington',
@@ -68,9 +69,13 @@ US_CITY_ALIASES = {
     'philly': 'philadelphia',
     'vegas': 'las vegas',
 
+    # McLean, Virginia (space variant)
+    'mc lean': 'mclean',
+
     # Saint/St variations
     # NOTE: 'saint louis' NOT aliased - Michigan has 'saint louis', Missouri has 'st. louis'
-    'st louis': 'st. louis',  # For Missouri (St. Louis without period)
+    # Adding an alias would break one or the other state's validation
+    'st louis': 'st. louis',  # For Missouri (St. Louis without period - missing the dot)
     'saint peters': 'st. peters',
     'st peters': 'st. peters',
     'saint petersburg': 'st. petersburg',
@@ -89,13 +94,14 @@ US_CITY_ALIASES = {
     'ft. myers': 'fort myers',
     'ft myers': 'fort myers',
 
-    # Hawaii (with okina U+2018)
+    # Hawaii (with okina U+2018 or macron)
     'kihei': 'kīhei',
     'mililani': 'mililani town',
     'aiea': '\u2018aiea',
     'ewa beach': '\u2018ewa beach',
     'kalaheo': 'kalaheo hillside',
     'haleiwa': 'hale\u2018iwa',
+    'pāhoa': 'pahoa',  # Macron variant -> JSON has non-macron
 
     # Township variations
     'lakewood township': 'lakewood',
@@ -115,6 +121,10 @@ US_CITY_ALIASES = {
     'north attleborough': 'north attleborough center',
     'loxahatchee': 'loxahatchee groves',
     'plainsboro': 'plainsboro center',
+
+    # City name variations (CITIES only - no towns/villages/townships)
+    'salt lake': 'salt lake city',  # Utah - common abbreviation for the city
+    'st. augustine south': 'saint augustine south',  # FL - St. -> Saint formatting
 }
 
 # International city aliases (applied only for non-US validation)
@@ -337,7 +347,7 @@ COUNTRY_ALIASES = {
     "u.s.a.": "united states", "america": "united states",
     "united states of america": "united states",
     # UK
-    "uk": "united kingdom", "u.k.": "united kingdom",
+    "uk": "united kingdom", "u.k.": "united kingdom", "gb": "united kingdom",
     "great britain": "united kingdom", "britain": "united kingdom",
     "england": "united kingdom", "scotland": "united kingdom",
     "wales": "united kingdom", "northern ireland": "united kingdom",
@@ -347,7 +357,7 @@ COUNTRY_ALIASES = {
     # Korea
     "korea": "south korea", "republic of korea": "south korea", "rok": "south korea",
     # Others
-    "holland": "netherlands", "the netherlands": "netherlands",
+    "holland": "netherlands", "the netherlands": "netherlands", "nederland": "netherlands",
     "deutschland": "germany", "brasil": "brazil",
     "espana": "spain", "españa": "spain", "italia": "italy",
     "nippon": "japan", "nihon": "japan",

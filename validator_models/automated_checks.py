@@ -3662,7 +3662,9 @@ async def run_centralized_truelist_batch(leads: List[dict]) -> Dict[str, dict]:
     email_to_lead_idx = {}  # Track which lead each email came from (for debugging)
     
     for i, lead in enumerate(leads):
-        email = get_email(lead)
+        # Handle both formats: {"lead_blob": {...}} wrapper OR flat lead dict
+        lead_blob = lead.get("lead_blob", lead) if isinstance(lead, dict) else lead
+        email = get_email(lead_blob)
         if email and '@' in email:
             email_lower = email.lower()
             emails.append(email_lower)
@@ -4035,8 +4037,8 @@ async def run_batch_automated_checks(
             results[i] = (False, stage0_2_data)
         elif email_result is None:
             # Email NOT IN results at all
-            if use_precomputed:
-                # WORKER MODE: Coordinator couldn't verify this email → skip
+            if has_precomputed or needs_polling:
+                # Using precomputed/polled results: Coordinator couldn't verify this email → skip
                 # (Coordinator has already done retries, so we trust the absence)
                 results[i] = (None, {
                     "skipped": True,
@@ -4044,12 +4046,12 @@ async def run_batch_automated_checks(
                     "message": "Coordinator could not verify this email"
                 })
             else:
-                # COORDINATOR MODE: Queue for retry
+                # No external results: Queue for retry
                 # This happens when TrueList's CSV doesn't include all emails
                 needs_retry.append(email_lower)
         elif email_result.get("needs_retry"):
             # Email explicitly errored
-            if use_precomputed:
+            if has_precomputed or needs_polling:
                 # WORKER MODE: Coordinator marked as needing retry but couldn't resolve → skip
                 results[i] = (None, {
                     "skipped": True,
@@ -4081,13 +4083,13 @@ async def run_batch_automated_checks(
     # ========================================================================
     
     # Start retry batch if needed (runs in background)
-    # NOTE: Workers (use_precomputed=True) never retry - coordinator has already done retries
+    # NOTE: When polling file, retries are handled by coordinator - workers don't retry
     retry_task = None
     inline_task = None  # Inline verification task (runs in background after retries exhaust)
     retry_attempt = 0
     last_retry_batch_id = None  # Track retry batch_id for deletion before next retry
     
-    if needs_retry and not use_precomputed:
+    if needs_retry and not has_precomputed and not needs_polling:
         # COORDINATOR MODE ONLY: Retry failed emails
         # CRITICAL: Delete the original batch BEFORE retrying
         # TrueList detects duplicate email content and rejects re-submissions.

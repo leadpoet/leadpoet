@@ -46,9 +46,9 @@ _cache_loaded = False  # Track if we've loaded from Supabase yet
 
 # Rate limit constants
 # Production limits to maintain lead quality and prevent spam
-MAX_SUBMISSIONS_PER_DAY = 400
-MAX_REJECTIONS_PER_DAY = 80
-MIN_SECONDS_BETWEEN_SUBMISSIONS = 30  # Cooldown between submissions (anti-spam)
+MAX_SUBMISSIONS_PER_DAY = 500
+MAX_REJECTIONS_PER_DAY = 100
+MIN_SECONDS_BETWEEN_SUBMISSIONS = 45  # Cooldown between submissions (anti-spam)
 
 # EST timezone offset (UTC-5, or UTC-4 during DST)
 # For simplicity, we'll use UTC-5 (EST) year-round

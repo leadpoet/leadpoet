@@ -263,17 +263,44 @@ async def get_epoch_leads(
             print(f"🔍 Step 4b: Querying leads directly from leads_private (fallback)...")
             
             # Query first MAX_LEADS_PER_EPOCH leads from queue that haven't been validated
-            leads_result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    lambda: supabase.table("leads_private")
-                        .select("lead_id, lead_blob, lead_blob_hash")
-                        .eq("status", "pending_validation")  # FIX: Use correct status
-                        .order("created_ts", desc=False)  # FIX: Use consistent column (FIFO)
-                        .limit(MAX_LEADS_PER_EPOCH)
-                        .execute()
-                ),
-                timeout=90.0
-            )
+            # CRITICAL: Supabase has a 1000-row limit per request, must use pagination
+            batch_size = 500
+            offset = 0
+            rows_needed = MAX_LEADS_PER_EPOCH
+            all_leads_data = []
+            
+            while len(all_leads_data) < rows_needed:
+                start = offset
+                end = min(offset + batch_size - 1, rows_needed - 1)
+                
+                batch_result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda s=start, e=end: supabase.table("leads_private")
+                            .select("lead_id, lead_blob, lead_blob_hash")
+                            .eq("status", "pending_validation")
+                            .order("created_ts", desc=False)
+                            .range(s, e)
+                            .execute()
+                    ),
+                    timeout=30.0
+                )
+                
+                if not batch_result.data:
+                    break
+                
+                all_leads_data.extend(batch_result.data)
+                
+                if len(batch_result.data) < (end - start + 1):
+                    break
+                
+                offset += batch_size
+            
+            # Create a result-like object for backward compatibility
+            class FallbackResult:
+                def __init__(self, data):
+                    self.data = data
+            
+            leads_result = FallbackResult(all_leads_data[:MAX_LEADS_PER_EPOCH])
             
             if leads_result.data:
                 assigned_lead_ids = [lead["lead_id"] for lead in leads_result.data]
@@ -422,46 +449,35 @@ async def get_epoch_leads(
             print(f"🔍 Step 5: Fetching {total_leads} leads from leads_private...")
             print(f"   Lead IDs: {assigned_lead_ids[:3]}... (showing first 3)")
             
-            # CRITICAL: Split into 2 equal batches to avoid PostgREST response size limits
-            # PostgREST has ~1-2MB limit, large lead_blob fields can exceed this
-            batch_size = total_leads // 2
-            batch_1_ids = assigned_lead_ids[:batch_size]
-            batch_2_ids = assigned_lead_ids[batch_size:]
+            # CRITICAL: Use small batches (500 leads) to avoid URL length limits in .in_() queries
+            # Each UUID is ~36 chars, 500 UUIDs = ~18KB which should be safe for PostgREST
+            batch_size = 500
+            num_batches = (total_leads + batch_size - 1) // batch_size  # Ceiling division
             
-            print(f"   📦 Splitting into 2 batches: {len(batch_1_ids)} + {len(batch_2_ids)} leads")
+            print(f"   📦 Splitting into {num_batches} batches of ~{batch_size} leads each")
             
-            # Fetch batch 1
-            print(f"   🔍 Fetching batch 1/2 ({len(batch_1_ids)} leads)...")
-            batch_1_result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    lambda: supabase.table("leads_private")
-                        .select("lead_id, lead_blob, lead_blob_hash")
-                        .in_("lead_id", batch_1_ids)
-                        .execute()
-                ),
-                timeout=90.0
-            )
-            print(f"   ✅ Batch 1/2: Fetched {len(batch_1_result.data) if batch_1_result.data else 0} leads")
-            
-            # Fetch batch 2
-            print(f"   🔍 Fetching batch 2/2 ({len(batch_2_ids)} leads)...")
-            batch_2_result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    lambda: supabase.table("leads_private")
-                        .select("lead_id, lead_blob, lead_blob_hash")
-                        .in_("lead_id", batch_2_ids)
-                        .execute()
-                ),
-                timeout=90.0
-            )
-            print(f"   ✅ Batch 2/2: Fetched {len(batch_2_result.data) if batch_2_result.data else 0} leads")
-            
-            # Aggregate batches into single result
             all_leads_data = []
-            if batch_1_result.data:
-                all_leads_data.extend(batch_1_result.data)
-            if batch_2_result.data:
-                all_leads_data.extend(batch_2_result.data)
+            for batch_num in range(num_batches):
+                start_idx = batch_num * batch_size
+                end_idx = min(start_idx + batch_size, total_leads)
+                batch_ids = assigned_lead_ids[start_idx:end_idx]
+                
+                print(f"   🔍 Fetching batch {batch_num + 1}/{num_batches} ({len(batch_ids)} leads)...")
+                
+                # Need to capture batch_ids in closure properly
+                def make_query(ids):
+                    return lambda: supabase.table("leads_private").select("lead_id, lead_blob, lead_blob_hash").in_("lead_id", ids).execute()
+                
+                batch_result = await asyncio.wait_for(
+                    asyncio.to_thread(make_query(batch_ids)),
+                    timeout=90.0
+                )
+                
+                if batch_result.data:
+                    all_leads_data.extend(batch_result.data)
+                    print(f"   ✅ Batch {batch_num + 1}/{num_batches}: Fetched {len(batch_result.data)} leads")
+                else:
+                    print(f"   ⚠️  Batch {batch_num + 1}/{num_batches}: No leads returned")
             
             # Create mock result object with aggregated data
             class MockResult:
@@ -470,7 +486,7 @@ async def get_epoch_leads(
             
             leads_result = MockResult(all_leads_data)
             
-            print(f"✅ Aggregated {len(leads_result.data)} total leads from 2 batches")
+            print(f"✅ Aggregated {len(leads_result.data)} total leads from {num_batches} batches")
             
             if not leads_result.data:
                 print(f"❌ ERROR: No leads found in database for assigned IDs")

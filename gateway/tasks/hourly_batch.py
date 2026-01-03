@@ -31,7 +31,7 @@ from gateway.config import BUILD_ID
 
 # Configuration
 BATCH_INTERVAL = 10800  # 3 hours in seconds
-EMERGENCY_BATCH_THRESHOLD = 10000  # Trigger early batch if buffer hits this size
+EMERGENCY_BATCH_THRESHOLD = 8000  # Trigger early batch if buffer hits this size
 MAX_UPLOAD_RETRIES = 3  # Retry failed uploads
 
 
@@ -80,25 +80,49 @@ async def hourly_batch_task():
     
     next_batch = next_hour
     
-    # Add countdown progress every 30 minutes
+    # Add countdown progress every 5 minutes WITH EMERGENCY CHECK
+    # This is critical - the old code only checked every 30 min and had NO emergency check
     remaining_time = wait_seconds
-    progress_interval = 1800  # 30 minutes in seconds
+    check_interval = 300  # 5 minutes - same as main loop for consistency
+    progress_interval = 1800  # 30 minutes for verbose logging
+    last_progress_print = 0
+    elapsed = 0
     
+    initial_emergency_triggered = False
     while remaining_time > 0:
-        wait_time = min(progress_interval, remaining_time)
+        wait_time = min(check_interval, remaining_time)
         await asyncio.sleep(wait_time)
         remaining_time -= wait_time
+        elapsed += wait_time
         
-        if remaining_time > 0:
-            minutes_left = remaining_time / 60
-            # Get buffer stats to show accumulated events
-            try:
-                stats = await tee_client.get_buffer_stats()
-                buffer_size = stats.get("size", 0)
+        minutes_left = remaining_time / 60
+        
+        # Check buffer stats EVERY 5 minutes for emergency detection
+        try:
+            stats = await tee_client.get_buffer_stats()
+            buffer_size = stats.get("size", 0)
+            
+            # EMERGENCY CHECK - runs every 5 minutes during INITIAL wait too!
+            if buffer_size >= EMERGENCY_BATCH_THRESHOLD:
+                print(f"\n🚨 EMERGENCY BATCH TRIGGERED DURING STARTUP ALIGNMENT!")
+                print(f"   Buffer size: {buffer_size} events (threshold: {EMERGENCY_BATCH_THRESHOLD})")
+                print(f"   Skipping alignment wait, starting batch immediately...")
+                initial_emergency_triggered = True
+                break  # Exit wait loop, start batch immediately
+            
+            # Print countdown progress every 30 minutes (less verbose)
+            if elapsed - last_progress_print >= progress_interval:
+                last_progress_print = elapsed
                 print(f"⏰ Arweave Upload Countdown: {minutes_left:.0f} minutes remaining")
                 print(f"   📊 {buffer_size} event(s) accumulated in TEE buffer")
                 print(f"   Next upload: {next_batch.isoformat()}\n")
-            except Exception:
+                
+        except Exception as e:
+            # TEE connection failed - LOG IT LOUDLY, don't silently skip
+            print(f"⚠️  TEE connection failed during initial wait: {e}")
+            print(f"   Cannot check for emergency batch condition!")
+            if elapsed - last_progress_print >= progress_interval:
+                last_progress_print = elapsed
                 print(f"⏰ Arweave Upload Countdown: {minutes_left:.0f} minutes remaining\n")
     
     batch_count = 0
@@ -340,38 +364,43 @@ async def hourly_batch_task():
         
         last_progress_print = 0
         
+        emergency_triggered = False
         for check_num in range(checks_per_interval):
             await asyncio.sleep(check_interval)
             
-            # Print countdown progress every 15 minutes
             elapsed = (check_num + 1) * check_interval
-            if elapsed - last_progress_print >= progress_interval or check_num == checks_per_interval - 1:
-                last_progress_print = elapsed
-                remaining = wait_seconds - elapsed
-                minutes_left = remaining / 60
+            remaining = wait_seconds - elapsed
+            minutes_left = remaining / 60
+            
+            # Check buffer stats EVERY 5 minutes for emergency detection
+            try:
+                stats = await tee_client.get_buffer_stats()
+                current_size = stats.get("size", 0)
                 
-                # Check buffer stats for countdown display
-                try:
-                    stats = await tee_client.get_buffer_stats()
-                    current_size = stats.get("size", 0)
+                # EMERGENCY CHECK - runs every 5 minutes (not just every 30 min)
+                if current_size >= EMERGENCY_BATCH_THRESHOLD:
+                    print(f"\n🚨 EMERGENCY BATCH TRIGGERED!")
+                    print(f"   Buffer size: {current_size} events (threshold: {EMERGENCY_BATCH_THRESHOLD})")
+                    print(f"   Triggering early batch to prevent overflow...")
+                    emergency_triggered = True
+                    break  # Exit wait loop, start next batch immediately
+                
+                # Print countdown progress every 30 minutes (less verbose)
+                if elapsed - last_progress_print >= progress_interval or check_num == checks_per_interval - 1:
+                    last_progress_print = elapsed
                     
                     if minutes_left > 0:
                         print(f"⏰ Arweave Upload Countdown: {minutes_left:.0f} minutes remaining")
                         print(f"   📊 {current_size} event(s) accumulated in TEE buffer")
                         print(f"   Next upload: {next_batch_time.isoformat()}\n")
                     
-                    # Check if buffer is approaching capacity
-                    if current_size >= EMERGENCY_BATCH_THRESHOLD:
-                        print(f"\n🚨 EMERGENCY BATCH TRIGGERED!")
-                        print(f"   Buffer size: {current_size} events (threshold: {EMERGENCY_BATCH_THRESHOLD})")
-                        print(f"   Triggering early batch to prevent overflow...")
-                        break  # Exit wait loop, start next batch immediately
-                    
-                except Exception as e:
-                    # TEE connection failed, still print countdown (unknown buffer size)
+            except Exception as e:
+                # TEE connection failed - print warning but continue
+                if elapsed - last_progress_print >= progress_interval or check_num == checks_per_interval - 1:
+                    last_progress_print = elapsed
                     if minutes_left > 0:
                         print(f"⏰ Arweave Upload Countdown: {minutes_left:.0f} minutes remaining")
-                        print(f"   📊 ? event(s) accumulated in TEE buffer (TEE unavailable)")
+                        print(f"   📊 ? event(s) accumulated in TEE buffer (TEE unavailable: {e})")
                         print(f"   Next upload: {next_batch_time.isoformat()}\n")
 
 

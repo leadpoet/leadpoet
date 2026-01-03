@@ -83,16 +83,38 @@ def deterministic_lead_assignment(
         return []
     
     # Step 1: Fetch pending leads from Private DB (ordered by created_ts ASCENDING = FIFO)
-    # OPTIMIZATION: Only fetch max_leads_per_epoch + 1 (we only need first N)
+    # CRITICAL: Supabase has a 1000-row limit PER REQUEST (both .limit() and .range())
+    # To fetch more than 1000 rows, we MUST use pagination.
     try:
-        result = supabase.table("leads_private") \
-            .select("lead_id, created_ts") \
-            .eq("status", "pending_validation") \
-            .order("created_ts") \
-            .limit(max_leads_per_epoch + 1) \
-            .execute()
+        pending_leads = []
+        batch_size = 500  # Stay well under 1000 limit for safety
+        offset = 0
+        rows_needed = max_leads_per_epoch + 1  # +1 to detect backlog
         
-        pending_leads = [row["lead_id"] for row in result.data]
+        while len(pending_leads) < rows_needed:
+            # Calculate range for this batch
+            start = offset
+            end = min(offset + batch_size - 1, rows_needed - 1)
+            
+            result = supabase.table("leads_private") \
+                .select("lead_id, created_ts") \
+                .eq("status", "pending_validation") \
+                .order("created_ts") \
+                .range(start, end) \
+                .execute()
+            
+            if not result.data:
+                break  # No more data
+            
+            pending_leads.extend([row["lead_id"] for row in result.data])
+            
+            # If we got fewer rows than requested, we've reached the end
+            if len(result.data) < (end - start + 1):
+                break
+            
+            offset += batch_size
+        
+        print(f"   📊 Fetched {len(pending_leads)} pending leads (requested up to {rows_needed})")
     
     except Exception as e:
         print(f"❌ Failed to fetch pending leads: {e}")

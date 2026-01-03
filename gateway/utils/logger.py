@@ -1,62 +1,60 @@
 """
-TEE-First Event Logging Utility
+TEE-First Event Logging Utility (with Enclave Signing)
+=======================================================
 
-This module provides functions to log events to the TEE buffer (primary source of truth)
-and then mirror them to Supabase (query cache).
+This module provides functions to log events with TEE enclave signing.
+All events are signed with the gateway's enclave private key and hash-chained
+for tamper-evidence.
 
-ARCHITECTURE CHANGE (Phase 2.3):
-- OLD: Gateway → Arweave (instant) → Supabase mirror
-- NEW: Gateway → TEE buffer → Supabase mirror
-           ↓ (hourly)
-        Arweave checkpoint
+ARCHITECTURE:
+Gateway → sign_event() → Supabase (transparency_log) → Arweave (hourly checkpoint)
+
+CANONICAL LOG_ENTRY FORMAT:
+{
+    "signed_event": {
+        "event_type": "...",
+        "timestamp": "2024-01-01T00:00:00Z",  # ONLY timestamp location
+        "boot_id": "uuid",
+        "monotonic_seq": 12345,
+        "prev_event_hash": "abc123...",
+        "payload": { ... }  # NO timestamp here!
+    },
+    "event_hash": "sha256(canonical_json(signed_event)).hex()",
+    "enclave_pubkey": "hex",
+    "enclave_signature": "hex"
+}
 
 Key principles:
-1. ALWAYS write to TEE buffer first (hardware-protected, canonical copy)
-2. TEE buffer write MUST succeed or request fails (prevents censorship)
-3. Mirror to Supabase asynchronously (non-authoritative cache)
-4. TEE batches events to Arweave hourly (cost reduction: $300/mo → $0.30/mo)
+1. sign_event() is the SINGLE SOURCE OF TRUTH for timestamps
+2. Do NOT add timestamps in payload - they go in signed_event.timestamp
+3. log_event() returns the full log_entry dict (not a status dict)
+4. Callers can access event_hash from the returned log_entry
 
 Security guarantees:
-- Events stored in TEE hardware-protected memory (operator cannot modify)
-- Sequence numbers from TEE prove ordering (prevents reordering attacks)
-- If request succeeds, event is guaranteed in TEE buffer
-- TEE attestation proves canonical code is running
+- Events signed with enclave Ed25519 key (proves gateway origin)
+- Hash-chain (prev_event_hash) ensures ordering and completeness
+- (boot_id, monotonic_seq) provides additional ordering within boot
+- Signature can be verified by auditors using attested enclave pubkey
 
 ==============================================================================
-TRUST HIERARCHY FOR EVENT VERIFICATION (Task 2.4)
+TRUST HIERARCHY FOR EVENT VERIFICATION
 ==============================================================================
 
-When verifying events or resolving disputes, follow this precedence:
+1. SIGNED LOG ENTRIES (Authoritative)
+   - Location: transparency_log table in Supabase
+   - Format: Full log_entry with signed_event, event_hash, signature
+   - Verification: Recompute hash, verify Ed25519 signature, check hash-chain
 
-1. TEE BUFFER (Authoritative for events < 1 hour old)
-   - Location: Nitro Enclave in-memory buffer
-   - Access: vsock RPC to enclave
-   - Guarantees: Hardware-protected, tamper-proof, code integrity verified
-   - Limitation: Only stores events from past hour (cleared after Arweave batch)
-
-2. ARWEAVE CHECKPOINTS (Authoritative for events > 1 hour old)
+2. ARWEAVE CHECKPOINTS (Authoritative for archived events)
    - Location: Permanent Arweave blockchain storage
-   - Access: Download checkpoint via Arweave TX ID
-   - Guarantees: Immutable, public, TEE-signed Merkle root
-   - Usage: Canonical source after hourly batch
+   - Contains: Signed checkpoints with last_event_hash for chain verification
+   - Usage: Canonical archive for events after hourly batch
 
-3. SUPABASE (Non-Authoritative - Query Cache Only)
-   - Location: Supabase PostgreSQL database
-   - Access: SQL queries
-   - Purpose: Fast queries for epochs, leads, consensus computation
-   - WARNING: NEVER use Supabase alone for event verification
-   - Note: Supabase is a convenience mirror only, not source of truth
-
-DISPUTE RESOLUTION LOGIC:
-- If event timestamp < 1 hour ago: Query TEE buffer (call get_canonical_event())
-- If event timestamp > 1 hour ago: Query Arweave checkpoint
-- Never trust Supabase alone: Always verify against TEE or Arweave
-
-Example: Miner claims "I submitted lead X but gateway denies it"
-1. Check TEE buffer for SUBMISSION event with lead_id=X
-2. If not in buffer (> 1 hour old), download relevant Arweave checkpoint
-3. Verify event presence using Merkle inclusion proof
-4. Supabase query is ONLY for finding which checkpoint to check
+3. AUDITOR VERIFICATION:
+   - Fetch log entries from transparency_log
+   - Verify each entry's signature using attested enclave pubkey
+   - Verify hash-chain continuity (prev_event_hash links)
+   - Compare with Arweave checkpoints for completeness
 
 ==============================================================================
 """
@@ -66,27 +64,26 @@ import json
 import logging
 import hashlib
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Any, Optional
 from pathlib import Path
 
-from utils.tee_client import tee_client
-from config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BUILD_ID
+# Enclave signing (CRITICAL: This is the signing authority)
+from gateway.tee.enclave_signer import sign_event, is_keypair_initialized
+
+from config import BUILD_ID
 
 # Python logging
 logger = logging.getLogger(__name__)
 
-# Supabase client (optional - for mirroring only)
-supabase = None
-if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+# Supabase client accessor (lazily initialized via gateway.db.client)
+def _get_supabase():
+    """Get Supabase write client for logging events."""
     try:
-        from supabase import create_client
-        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        logger.info("✅ Supabase client initialized for event mirroring")
+        from gateway.db.client import get_write_client
+        return get_write_client()
     except Exception as e:
-        logger.warning(f"⚠️  Supabase client initialization failed: {e}")
-        logger.warning("   Event mirroring to Supabase will be skipped")
-else:
-    logger.warning("⚠️  Supabase credentials not configured - mirroring disabled")
+        logger.warning(f"⚠️  Supabase client unavailable: {e}")
+        return None
 
 # Fallback logging directory (for TEE connection failures)
 FALLBACK_LOG_DIR = Path("gateway/logs/tee_fallback")
@@ -109,163 +106,218 @@ def compute_payload_hash(payload: dict) -> str:
     return hashlib.sha256(payload_bytes).hexdigest()
 
 
-async def log_event(event: dict) -> Dict:
+async def log_event(event_or_type, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Logs event to TEE buffer (authoritative) and Supabase (cache).
+    Log an event to transparency_log.
     
-    This is the PRIMARY logging function for all gateway events.
+    BACKWARD COMPATIBLE: Accepts BOTH old and new formats:
     
-    CRITICAL SECURITY PROPERTIES:
-    - TEE buffer write happens FIRST (hardware-protected canonical copy)
-    - If TEE write fails, request MUST fail (prevents censorship)
-    - Supabase write can fail (it's just a cache for queries)
-    - Events stay in TEE memory for up to 1 hour, then batch to Arweave
-    - Sequence numbers from TEE prove event ordering
+    OLD FORMAT (existing code - NO TEE SIGNING):
+        await log_event({"event_type": "X", "actor_hotkey": "...", ...})
+        
+    NEW FORMAT (TEE signed):
+        await log_event("X", {"actor_hotkey": "...", ...})
     
-    Flow:
-        1. Write to TEE buffer via vsock → canonical copy
-        2. TEE returns sequence number (monotonically increasing)
-        3. Mirror to Supabase → fast queries, non-authoritative
-        4. TEE will batch to Arweave hourly
+    The function auto-detects which format is being used:
+    - If first arg is a dict with "event_type" key → OLD format
+    - If first arg is a string → NEW format (TEE signed)
+    
+    OLD FORMAT BEHAVIOR:
+    - Stores event directly to Supabase (no signing)
+    - New TEE columns (event_hash, boot_id, etc.) will be NULL
+    - Returns dict with "status": "buffered", "sequence": tee_sequence
+    
+    NEW FORMAT BEHAVIOR:
+    - Signs event with enclave Ed25519 key
+    - Stores full signed log_entry to Supabase
+    - Returns full log_entry with event_hash, signature, etc.
+    """
+    
+    # ============================================================
+    # DETECT FORMAT: Old (dict) vs New (event_type, payload)
+    # ============================================================
+    
+    if isinstance(event_or_type, dict):
+        # OLD FORMAT: Single dict argument with event_type inside
+        return await _log_event_legacy_format(event_or_type)
+    elif isinstance(event_or_type, str) and payload is not None:
+        # NEW FORMAT: (event_type: str, payload: dict)
+        return await _log_event_signed_format(event_or_type, payload)
+    else:
+        raise ValueError(
+            f"Invalid log_event arguments. Use either:\n"
+            f"  OLD: log_event({{'event_type': '...', ...}})\n"
+            f"  NEW: log_event('EVENT_TYPE', {{...}})"
+        )
+
+
+async def _log_event_legacy_format(event: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    OLD FORMAT: Log event WITHOUT TEE signing.
+    
+    This maintains backward compatibility with existing code.
+    Events logged this way will have NULL for TEE columns
+    (event_hash, boot_id, monotonic_seq, prev_event_hash, enclave_pubkey).
     
     Args:
-        event: Event dictionary with fields:
-            - event_type: str (SUBMISSION_REQUEST, VALIDATION_RESULT, etc.)
-            - All other event-specific fields
-    
-    Returns:
-        dict: Response from TEE with:
-            - status: "buffered"
-            - sequence: int (TEE sequence number, proves ordering)
-            - buffer_size: int (current buffer size)
-            - overflow_warning: bool (true if buffer approaching capacity)
-    
-    Raises:
-        RuntimeError: If TEE buffer write fails (request MUST fail)
+        event: Full event dict with "event_type" key
         
-    Example:
-        event = {
-            "event_type": "SUBMISSION_REQUEST",
-            "lead_id": "uuid",
-            "miner_hotkey": "ss58_address",
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        result = await log_event(event)
-        # result = {"status": "buffered", "sequence": 42, "buffer_size": 100}
+    Returns:
+        Dict with status info (matches old return format)
     """
-    
     event_type = event.get("event_type", "UNKNOWN")
     
-    # Ensure required fields are present (for Supabase NOT NULL constraints)
-    if "payload_hash" not in event and "payload" in event:
-        event["payload_hash"] = compute_payload_hash(event["payload"])
-    
-    if "build_id" not in event:
-        event["build_id"] = BUILD_ID  # From config (e.g., "dev-local" or GitHub SHA)
-    
     # ============================================================
-    # Step 1: Write to TEE buffer (CRITICAL - must succeed)
+    # Store to Supabase (OLD format - no signing)
     # ============================================================
     
-    try:
-        result = await tee_client.append_event(event)
-        
-        sequence = result.get("sequence")
-        buffer_size = result.get("buffer_size", 0)
-        overflow_warning = result.get("overflow_warning", False)
-        
-        logger.info(
-            f"✅ Event buffered in TEE: {event_type} "
-            f"(seq={sequence}, buffer={buffer_size})"
-        )
-        
-        # Warn if buffer approaching capacity
-        if overflow_warning:
-            logger.warning(
-                f"⚠️ TEE buffer overflow risk! Size: {buffer_size} "
-                f"(threshold: 5000 events). Emergency batch may be needed."
-            )
-    
-    except Exception as e:
-        logger.error(f"❌ TEE buffer write failed: {event_type} - {e}")
-        
-        # Fallback: Log to file for recovery
-        await _fallback_log_to_file(event, error=str(e))
-        
-        # CRITICAL: Request must fail if TEE write fails
-        # This prevents censorship (cannot accept event and then drop it)
-        raise RuntimeError(
-            f"Failed to write event to TEE buffer: {e}. "
-            f"Event type: {event_type}. "
-            f"This is a critical failure - request cannot proceed."
-        )
-    
-    # ============================================================
-    # Step 2: Mirror to Supabase (non-critical, best-effort)
-    # ============================================================
-    
+    supabase = _get_supabase()
     if supabase:
         try:
-            # Extract email_hash from payload or top-level event (for duplicate detection)
-            email_hash = None
+            # Extract fields for Supabase columns (OLD schema)
             payload = event.get("payload")
+            email_hash = None
+            linkedin_combo_hash = None
+            
             if payload and isinstance(payload, dict):
                 email_hash = payload.get("email_hash")
-            
-            # Fallback: check top-level event (used by CONSENSUS_RESULT, etc.)
-            if not email_hash:
-                email_hash = event.get("email_hash")
-            
-            # Extract linkedin_combo_hash from payload or top-level event
-            # This is for person+company duplicate detection
-            linkedin_combo_hash = None
-            if payload and isinstance(payload, dict):
                 linkedin_combo_hash = payload.get("linkedin_combo_hash")
             
             # Fallback: check top-level event
+            if not email_hash:
+                email_hash = event.get("email_hash")
             if not linkedin_combo_hash:
                 linkedin_combo_hash = event.get("linkedin_combo_hash")
             
-            # Create Supabase entry with correct column names
+            # Create Supabase entry (OLD column set)
             supabase_entry = {
                 "event_type": event.get("event_type"),
                 "actor_hotkey": event.get("actor_hotkey"),
                 "nonce": event.get("nonce"),
-                "ts": event.get("ts"),  # Event already uses "ts" key
+                "ts": event.get("ts"),
                 "payload_hash": event.get("payload_hash"),
-                "build_id": event.get("build_id"),
+                "build_id": event.get("build_id") or BUILD_ID,
                 "signature": event.get("signature"),
                 "payload": payload,
-                # TEE metadata
-                "tee_sequence": sequence,
-                "tee_buffered_at": datetime.utcnow().isoformat(),
-                "tee_buffer_size": buffer_size,
-                # Email hash for duplicate detection (extracted from payload)
                 "email_hash": email_hash,
-                # LinkedIn combo hash for person+company duplicate detection
-                "linkedin_combo_hash": linkedin_combo_hash
+                "linkedin_combo_hash": linkedin_combo_hash,
+                # TEE columns will be NULL (not set)
             }
             
-            # Remove None values (optional fields)
+            # Remove None values
             supabase_entry = {k: v for k, v in supabase_entry.items() if v is not None}
             
-            # Insert into Supabase (for fast queries)
+            # Insert into Supabase
             supabase.table("transparency_log").insert(supabase_entry).execute()
             
-            logger.info(f"✅ Event mirrored to Supabase: {event_type}")
+            logger.info(f"✅ Event logged (legacy format): {event_type}")
+            
+            # Return OLD format response
+            return {
+                "status": "buffered",
+                "sequence": 0,  # No TEE sequence in legacy mode
+                "buffer_size": 0,
+                "overflow_warning": False,
+            }
         
         except Exception as e:
-            # Supabase mirroring failure is NOT critical
-            # TEE has canonical copy, Supabase is just a cache
-            logger.warning(
-                f"⚠️ Failed to mirror to Supabase: {event_type} - {e}. "
-                f"Event is safe in TEE buffer (seq={sequence})."
-            )
-            # DO NOT raise - Supabase is non-authoritative
+            logger.error(f"❌ Failed to log event: {event_type} - {e}")
+            await _fallback_log_to_file(event, error=str(e))
+            raise RuntimeError(f"Failed to log event to Supabase: {e}")
     else:
-        logger.debug(f"⏭️  Supabase mirroring skipped (not configured): {event_type}")
+        logger.warning(f"⚠️ Supabase not configured - event not stored: {event_type}")
+        return {"status": "not_stored", "sequence": 0}
+
+
+async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    NEW FORMAT: Log event WITH TEE signing.
     
-    return result
+    Signs the event with the enclave's Ed25519 key and stores
+    the full log_entry (with signature) to Supabase.
+    
+    Args:
+        event_type: Type of event (e.g., "WEIGHT_SUBMISSION")
+        payload: Event-specific data (NO timestamp - sign_event adds it)
+    
+    Returns:
+        Full log_entry with signed_event, event_hash, enclave_signature
+    """
+    
+    # ============================================================
+    # Step 1: Sign event with enclave key
+    # ============================================================
+    
+    try:
+        # sign_event() is the SINGLE source of timestamp truth
+        log_entry = sign_event(event_type, payload)
+        
+        # Extract metadata for logging
+        signed_event = log_entry["signed_event"]
+        event_hash = log_entry["event_hash"]
+        monotonic_seq = signed_event["monotonic_seq"]
+        
+        logger.info(
+            f"✅ Event signed: {event_type} "
+            f"(seq={monotonic_seq}, hash={event_hash[:16]}...)"
+        )
+    
+    except Exception as e:
+        logger.error(f"❌ Event signing failed: {event_type} - {e}")
+        await _fallback_log_to_file({"event_type": event_type, "payload": payload}, error=str(e))
+        raise RuntimeError(
+            f"Failed to sign event: {e}. Event type: {event_type}. "
+            f"This is a critical failure - request cannot proceed."
+        )
+    
+    # ============================================================
+    # Step 2: Store to Supabase (NEW format - with TEE columns)
+    # ============================================================
+    
+    supabase = _get_supabase()
+    if supabase:
+        try:
+            # Extract optional fields for indexing
+            email_hash = payload.get("email_hash") if isinstance(payload, dict) else None
+            linkedin_combo_hash = payload.get("linkedin_combo_hash") if isinstance(payload, dict) else None
+            actor_hotkey = payload.get("actor_hotkey") or payload.get("validator_hotkey") or payload.get("miner_hotkey")
+            
+            # Create Supabase entry (NEW column set with TEE fields)
+            supabase_entry = {
+                "event_type": event_type,
+                "payload": log_entry,  # Full signed log_entry
+                "event_hash": event_hash,
+                "enclave_pubkey": log_entry["enclave_pubkey"],
+                "boot_id": signed_event["boot_id"],
+                "monotonic_seq": monotonic_seq,
+                "prev_event_hash": signed_event["prev_event_hash"],
+                "created_at": signed_event["timestamp"],
+                "actor_hotkey": actor_hotkey,
+                "email_hash": email_hash,
+                "linkedin_combo_hash": linkedin_combo_hash,
+                "build_id": BUILD_ID,
+            }
+            
+            # Remove None values
+            supabase_entry = {k: v for k, v in supabase_entry.items() if v is not None}
+            
+            # Insert into Supabase
+            supabase.table("transparency_log").insert(supabase_entry).execute()
+            
+            logger.info(f"✅ Event stored (signed): {event_type} (hash={event_hash[:16]}...)")
+        
+        except Exception as e:
+            logger.error(f"❌ Failed to store signed event: {event_type} - {e}")
+            await _fallback_log_to_file(log_entry, error=str(e))
+            raise RuntimeError(
+                f"Failed to store signed event to Supabase: {e}. "
+                f"Event type: {event_type}."
+            )
+    else:
+        logger.warning(f"⚠️ Supabase not configured - signed event not stored: {event_type}")
+    
+    # Return the full log_entry
+    return log_entry
 
 
 async def _fallback_log_to_file(event: dict, error: str = ""):
@@ -322,143 +374,120 @@ async def log_event_arweave_first(event: dict) -> Optional[str]:
     """
     [DEPRECATED] Old Arweave-first logging function.
     
-    This function is deprecated in Phase 2.3. Use log_event() instead.
-    
-    Kept temporarily for backward compatibility during migration.
-    Will be removed after all endpoints are updated.
+    This function is deprecated. Use log_event(event_type, payload) instead.
     """
     logger.warning(
         f"⚠️ DEPRECATED: log_event_arweave_first() called. "
-        f"Use log_event() instead (TEE-based)."
+        f"Use log_event(event_type, payload) instead."
     )
     
-    # For now, redirect to new TEE-based logging
     try:
-        result = await log_event(event)
-        # Old function returned arweave_tx_id, but we don't have that yet
-        # Return sequence number as a placeholder
-        return f"tee_seq_{result.get('sequence')}"
+        event_type = event.pop("event_type", "UNKNOWN")
+        log_entry = await log_event(event_type, event)
+        return log_entry.get("event_hash")
     except Exception as e:
         logger.error(f"Failed to log event: {e}")
         return None
 
 
 # ============================================================================
-# TEE BUFFER UTILITIES
+# TRANSPARENCY LOG QUERIES
 # ============================================================================
 
-async def get_canonical_event(
-    event_type: str,
-    event_id: str,
-    timestamp: Optional[str] = None
-) -> Optional[Dict]:
+async def get_log_entry_by_hash(event_hash: str) -> Optional[Dict[str, Any]]:
     """
-    Retrieve canonical (authoritative) copy of an event.
+    Retrieve a signed log entry by its event_hash.
     
-    Implements the trust hierarchy from Task 2.4:
-    1. If event < 1 hour old: Query TEE buffer (authoritative)
-    2. If event > 1 hour old: Should query Arweave (Phase 3 - not yet implemented)
-    3. Never trust Supabase alone (it's just a mirror for queries)
+    This is the primary method for auditors to fetch and verify events.
     
     Args:
-        event_type: Type of event (e.g., "SUBMISSION", "VALIDATION_RESULT")
-        event_id: Unique identifier for the event (e.g., lead_id, epoch_id)
-        timestamp: Optional ISO8601 timestamp to determine age
+        event_hash: The SHA256 hash of the signed_event
     
     Returns:
-        Event dict if found, None if not found
-        
-    Example:
-        # Verify miner's submission claim
-        event = await get_canonical_event("SUBMISSION", lead_id="abc-123")
-        if event:
-            print(f"✅ Submission verified: {event}")
-        else:
-            print(f"❌ No submission found for lead_id=abc-123")
-    
-    Note:
-        - Phase 2.4: Queries TEE buffer only
-        - Phase 3 (TODO): Will also query Arweave checkpoints for older events
-        - Supabase is NEVER queried by this function (not authoritative)
+        The full log_entry dict if found, None otherwise
     """
-    logger.info(f"🔍 Searching for canonical event: {event_type}, id={event_id}")
-    
-    # ============================================================
-    # Step 1: Query TEE buffer (authoritative for recent events)
-    # ============================================================
     try:
-        buffer = await tee_client.get_buffer()
+        from gateway.db.client import get_read_client
+        read_client = get_read_client()
+    except Exception as e:
+        logger.error(f"Supabase not configured - cannot query log entries: {e}")
+        return None
+    
+    try:
+        result = read_client.table("transparency_log") \
+            .select("payload") \
+            .eq("event_hash", event_hash) \
+            .limit(1) \
+            .execute()
         
-        # Search buffer for matching event
-        for event in buffer:
-            if event.get("event_type") == event_type:
-                # Match based on common ID fields
-                if (event.get("lead_id") == event_id or 
-                    event.get("epoch_id") == event_id or
-                    event.get("nonce") == event_id):
-                    logger.info(f"✅ Found event in TEE buffer (seq={event.get('sequence')})")
-                    return event
-        
-        logger.info(f"⚠️  Event not found in TEE buffer")
+        if result.data:
+            return result.data[0]["payload"]
+        return None
         
     except Exception as e:
-        logger.error(f"❌ Failed to query TEE buffer: {e}")
-    
-    # ============================================================
-    # Step 2: Query Arweave checkpoints (Phase 3 - TODO)
-    # ============================================================
-    # TODO Phase 3: If event not in TEE buffer, download relevant Arweave checkpoint
-    # and verify Merkle inclusion
-    logger.info(f"📦 Arweave checkpoint query not yet implemented (Phase 3)")
-    logger.info(f"   Event may be in Arweave if > 1 hour old")
-    
-    # ============================================================
-    # Step 3: NEVER query Supabase alone (not authoritative)
-    # ============================================================
-    # Supabase is a convenience cache only. For verification, we MUST use:
-    # - TEE buffer (if recent)
-    # - Arweave checkpoint (if older)
-    logger.warning(f"⚠️  Event not found in authoritative sources (TEE buffer or Arweave)")
-    logger.warning(f"   Supabase is NOT queried by this function (non-authoritative)")
-    
+        logger.error(f"Failed to fetch log entry: {e}")
     return None
 
 
-async def get_tee_buffer_stats() -> Dict:
+async def get_log_entries_for_epoch(
+    netuid: int, 
+    epoch_id: int, 
+    event_type: Optional[str] = None
+) -> list:
     """
-    Get current TEE buffer statistics.
+    Retrieve all signed log entries for a specific epoch.
     
-    Useful for monitoring buffer health and detecting potential issues.
-    
-    Returns:
-        dict: Buffer statistics with:
-            - size: Current number of events
-            - age_seconds: How long events have been accumulating
-            - overflow_risk: Boolean indicating if buffer is approaching capacity
-            - next_checkpoint_in_seconds: Estimated time until next hourly batch
-    """
-    try:
-        stats = await tee_client.get_buffer_stats()
-        return stats
-    except Exception as e:
-        logger.error(f"Failed to get TEE buffer stats: {e}")
-        return {
-            "error": str(e),
-            "size": None,
-            "overflow_risk": True  # Assume risk if we can't check
-        }
-
-
-async def get_tee_buffer_size() -> int:
-    """
-    Get current TEE buffer size (number of events).
+    Args:
+        netuid: Subnet ID
+        epoch_id: Epoch identifier
+        event_type: Optional filter by event type
     
     Returns:
-        int: Number of events in buffer, or -1 if error
+        List of log_entry dicts
     """
     try:
-        size = await tee_client.get_buffer_size()
-        return size
+        from gateway.db.client import get_read_client
+        read_client = get_read_client()
     except Exception as e:
-        logger.error(f"Failed to get TEE buffer size: {e}")
-        return -1
+        logger.error(f"Supabase not configured - cannot query log entries: {e}")
+        return []
+    
+    try:
+        query = read_client.table("transparency_log") \
+            .select("payload") \
+            .order("monotonic_seq", desc=False)
+        
+        if event_type:
+            query = query.eq("event_type", event_type)
+        
+        # Filter by epoch_id in the payload
+        # Note: This requires the payload to have netuid and epoch_id
+        result = query.execute()
+        
+        # Filter results by netuid and epoch_id in payload
+        entries = []
+        for row in result.data:
+            payload = row.get("payload", {})
+            signed_event = payload.get("signed_event", {})
+            event_payload = signed_event.get("payload", {})
+            
+            if (event_payload.get("netuid") == netuid and 
+                event_payload.get("epoch_id") == epoch_id):
+                entries.append(payload)
+        
+        return entries
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch log entries for epoch: {e}")
+        return []
+
+
+def get_signer_info() -> Dict[str, Any]:
+    """
+    Get information about the current enclave signer state.
+    
+    Returns:
+        Dict with signer state information
+    """
+    from gateway.tee.enclave_signer import get_signer_state
+    return get_signer_state()

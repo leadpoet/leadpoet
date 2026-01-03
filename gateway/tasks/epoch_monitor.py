@@ -58,6 +58,8 @@ class EpochMonitor:
         self.network = network
         self.subtensor = None  # Will be initialized in start()
         self.last_epoch = None
+        self.initialized_epochs = set()  # Epochs that SUCCESSFULLY completed initialization
+        self.initializing_epochs = set()  # Epochs currently being initialized (prevents duplicate tasks)
         self.validation_ended_epochs = set()
         self.closed_epochs = set()  # Epochs that completed consensus successfully
         self.processing_epochs = set()  # Epochs currently being processed (prevents duplicate tasks)
@@ -144,10 +146,20 @@ class EpochMonitor:
                 print(f"🚀 EPOCH TRANSITION DETECTED: {self.last_epoch} → {current_epoch}")
                 print(f"{'='*80}")
                 
-                # Trigger epoch start (non-blocking)
-                asyncio.create_task(self._on_epoch_start(current_epoch))
-                
                 self.last_epoch = current_epoch
+            
+            # ════════════════════════════════════════════════════════════════
+            # Check 1b: Epoch needs initialization (not yet successfully initialized)
+            # This is SEPARATE from transition detection - allows retry on failure
+            # ════════════════════════════════════════════════════════════════
+            if current_epoch not in self.initialized_epochs:
+                if current_epoch not in self.initializing_epochs:
+                    # Mark as initializing BEFORE creating task (prevents duplicate tasks)
+                    self.initializing_epochs.add(current_epoch)
+                    print(f"🔄 Starting initialization for epoch {current_epoch}...")
+                    
+                    # Trigger epoch start (non-blocking)
+                    asyncio.create_task(self._on_epoch_start(current_epoch))
             
             # ════════════════════════════════════════════════════════════════
             # Check 2: Validation phase ended (block 0 of NEXT epoch = block 360 of PREVIOUS)
@@ -243,6 +255,9 @@ class EpochMonitor:
         
         Args:
             epoch_id: The new epoch that just started
+        
+        NOTE: On success, adds epoch to initialized_epochs.
+              On failure, removes from initializing_epochs so it can retry.
         """
         try:
             print(f"🚀 Processing epoch start: {epoch_id}")
@@ -262,6 +277,7 @@ class EpochMonitor:
             print(f"   Close: {epoch_close.isoformat()}")
             
             # Log EPOCH_INITIALIZATION to transparency log
+            # This can raise an exception if Supabase times out
             await compute_and_log_epoch_initialization(epoch_id, epoch_start, epoch_end, epoch_close)
             
             # Clean up old epoch cache (keep only current + next)
@@ -288,13 +304,24 @@ class EpochMonitor:
                 # Don't crash - registry.py already falls back to cached metagraph
                 print(f"⚠️  Metagraph refresh failed: {e} (using cached metagraph)")
             
-            print(f"✅ Epoch {epoch_id} initialized")
+            # SUCCESS: Mark epoch as initialized
+            self.initialized_epochs.add(epoch_id)
+            self.initializing_epochs.discard(epoch_id)
+            print(f"✅ Epoch {epoch_id} initialized successfully")
+            
+            # Clean up old tracking sets to prevent memory growth
+            if len(self.initialized_epochs) > 100:
+                recent = sorted(list(self.initialized_epochs))[-50:]
+                self.initialized_epochs = set(recent)
             
         except Exception as e:
             print(f"❌ Error handling epoch start for {epoch_id}: {e}")
             import traceback
             traceback.print_exc()
-            # Don't crash - log and continue
+            
+            # FAILURE: Remove from initializing so it can retry on next poll cycle
+            self.initializing_epochs.discard(epoch_id)
+            print(f"   🔄 Epoch {epoch_id} initialization FAILED - will retry on next poll cycle (12s)")
     
     async def _on_validation_end(self, epoch_id: int):
         """
@@ -474,6 +501,9 @@ class EpochMonitor:
         """
         return {
             "last_epoch": self.last_epoch,
+            "initialized_count": len(self.initialized_epochs),
+            "initialized_recent": sorted(list(self.initialized_epochs))[-10:] if self.initialized_epochs else [],
+            "initializing_current": sorted(list(self.initializing_epochs)) if self.initializing_epochs else [],
             "validation_ended_count": len(self.validation_ended_epochs),
             "validation_ended_recent": sorted(list(self.validation_ended_epochs))[-10:] if self.validation_ended_epochs else [],
             "processing_count": len(self.processing_epochs),

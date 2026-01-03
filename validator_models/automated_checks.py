@@ -3811,32 +3811,43 @@ async def run_batch_automated_checks(
     print(f"   ✅ Stage 0-2 complete: {stage0_2_passed_count}/{n} passed")
     
     # ========================================================================
-    # Step 4: Wait for TrueList batch to complete
+    # Step 4: Wait for TrueList batch to complete (with retries)
     # ========================================================================
     print(f"   ⏳ Waiting for TrueList batch completion...")
     
     original_batch_id = None  # Track for deletion before retry
-    try:
-        original_batch_id, email_results = await batch_task
-        print(f"   ✅ TrueList batch complete: {len(email_results)} results")
-    except Exception as e:
-        print(f"   ❌ TrueList batch failed: {e}")
-        # Fallback: Use Stage 0-2 results, mark passed ones as skipped
-        for i, lead in enumerate(leads):
-            email = get_email(lead)
-            if not email:
-                continue  # Already rejected
-            
-            stage0_2_passed, stage0_2_data = stage0_2_results[i]
-            if stage0_2_passed:
-                results[i] = (None, {
-                    "skipped": True,
-                    "reason": "EmailVerificationUnavailable",
-                    "error": str(e)
-                })
+    email_results = None
+    batch_error = None
+    
+    # Try batch up to 3 times total (initial + 2 retries)
+    for batch_attempt in range(3):
+        try:
+            if batch_attempt == 0:
+                original_batch_id, email_results = await batch_task
             else:
-                results[i] = (False, stage0_2_data)
-        return results
+                print(f"   🔄 Batch retry #{batch_attempt} for {len(emails)} emails...")
+                await asyncio.sleep(10 * batch_attempt)  # 10s, then 20s delay
+                original_batch_id, email_results = await submit_and_poll_truelist(emails)
+            print(f"   ✅ TrueList batch complete: {len(email_results)} results")
+            batch_error = None
+            break
+        except Exception as e:
+            batch_error = e
+            print(f"   ❌ TrueList batch attempt #{batch_attempt + 1} failed: {e}")
+            if batch_attempt < 2:
+                print(f"   ⏳ Will retry batch in {10 * (batch_attempt + 1)}s...")
+    
+    # If all batch attempts failed, use inline verification as fallback
+    if batch_error is not None:
+        print(f"   🔄 All batch attempts failed, falling back to inline verification...")
+        emails_to_verify = [get_email(leads[i]) for i in range(len(leads)) 
+                           if stage0_2_results[i][0] and get_email(leads[i])]
+        if emails_to_verify:
+            email_results = await verify_emails_inline(emails_to_verify)
+            print(f"   ✅ Inline verification complete: {len(email_results)} results")
+        else:
+            # No emails passed Stage 0-2, nothing to verify
+            email_results = {}
     
     # ========================================================================
     # Step 5: Categorize leads

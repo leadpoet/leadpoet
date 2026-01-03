@@ -1893,13 +1893,19 @@ class Validator(BaseValidatorNeuron):
                 salt_hex = salt.hex()
                 print(f"🔐 Generated new epoch salt: {salt_hex[:16]}... (shared across all containers)")
             
+            # Initialize truelist_results (will be populated by coordinator, read by workers)
+            truelist_results = {}
+            centralized_truelist_results = {}  # For workers reading from shared file
+            
             if container_mode == "coordinator":
                 # COORDINATOR: Fetch from gateway and share via file
                 print(f"📡 Coordinator fetching leads from gateway for epoch {current_epoch}...")
                 leads, max_leads_per_epoch = gateway_get_epoch_leads(self.wallet, current_epoch)
                 
-                # Write to shared volume for workers to read
-                # Include epoch_id AND salt in file for workers
+                # ================================================================
+                # STEP 1: Write INITIAL file so workers can start Stage 0-2 immediately
+                # truelist_results = None indicates "in progress" - workers will poll later
+                # ================================================================
                 leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
                 with open(leads_file, 'w') as f:
                     json.dump({
@@ -1907,9 +1913,23 @@ class Validator(BaseValidatorNeuron):
                         "leads": leads, 
                         "max_leads_per_epoch": max_leads_per_epoch,
                         "created_at_block": current_block,
-                        "salt": salt_hex  # CRITICAL: Workers need this to hash results
+                        "salt": salt_hex,  # CRITICAL: Workers need this to hash results
+                        "truelist_results": None  # None = "in progress", workers will poll after Stage 0-2
                     }, f)
-                print(f"   💾 Saved {len(leads) if leads else 0} leads + salt to {leads_file} for workers")
+                print(f"   💾 Initial file written: {len(leads) if leads else 0} leads + salt (TrueList in progress...)")
+                
+                # ================================================================
+                # STEP 2: Start centralized TrueList as BACKGROUND TASK
+                # Workers can now start Stage 0-2 while TrueList runs
+                # ================================================================
+                truelist_task = None
+                truelist_results = {}
+                all_leads_for_file = leads  # Save original list before any slicing
+                if leads:
+                    from validator_models.automated_checks import run_centralized_truelist_batch
+                    
+                    print(f"\n📧 COORDINATOR: Starting centralized TrueList batch for ALL {len(leads)} leads (BACKGROUND)...")
+                    truelist_task = asyncio.create_task(run_centralized_truelist_batch(leads))
                 
             elif container_mode == "worker":
                 # WORKER: Wait for coordinator to fetch and share
@@ -1958,6 +1978,7 @@ class Validator(BaseValidatorNeuron):
                     file_epoch = data.get("epoch_id")
                     leads = data.get("leads")
                     max_leads_per_epoch = data.get("max_leads_per_epoch")
+                    centralized_truelist_results = data.get("truelist_results", {})  # Precomputed by coordinator
                 
                 # Verify epoch matches (safety check)
                 if file_epoch != current_epoch:
@@ -1969,6 +1990,14 @@ class Validator(BaseValidatorNeuron):
                     return
                 
                 print(f"✅ Worker loaded {len(leads) if leads else 0} leads from coordinator (waited {waited}s)")
+                # Note: truelist_results might be None (in progress) or {} (complete/failed)
+                # Workers will run Stage 0-2 first, then poll for truelist_results
+                if centralized_truelist_results:
+                    print(f"   ✅ TrueList already complete: {len(centralized_truelist_results)} results from coordinator")
+                elif centralized_truelist_results is None:
+                    print(f"   ⏳ TrueList still in progress - will poll after Stage 0-2 completes")
+                else:
+                    print(f"   ⚠️ TrueList returned empty results - leads will fail email verification")
                 
             else:
                 # DEFAULT: Single validator mode (no containers)
@@ -2042,14 +2071,13 @@ class Validator(BaseValidatorNeuron):
                 lead_range_str = None
             
             # ================================================================
-            # BATCH VALIDATION: Same process as workers
-            # TrueList batch runs in parallel with Stage 0-2, then Stage 4-5
-            # 1-second delays between leads are INSIDE run_batch_automated_checks()
+            # BATCH VALIDATION: Stage 0-2 runs in PARALLEL with TrueList
+            # After Stage 0-2, poll file for truelist_results before Stage 4-5
             # ================================================================
             print(f"🔍 Running BATCH automated checks on {len(leads)} leads...")
             print("")
             
-            from validator_models.automated_checks import run_batch_automated_checks
+            from validator_models.automated_checks import run_batch_automated_checks, get_email
             
             # (os and hashlib already imported at line 1845)
             validation_results = []
@@ -2062,9 +2090,53 @@ class Validator(BaseValidatorNeuron):
             # Extract lead_blobs for batch processing
             lead_blobs = [lead.get('lead_blob', {}) for lead in leads]
             
-            # Run batch validation (handles TrueList batch + sequential stages with 1s delays)
-            # Coordinator is container_id=0, submits TrueList batch immediately (no stagger delay)
-            # 
+            # ================================================================
+            # COORDINATOR: Background task to wait for TrueList and update file
+            # This allows Stage 0-2 to run in parallel with TrueList
+            # ================================================================
+            async def truelist_file_updater():
+                """Wait for centralized TrueList to complete, then update file."""
+                nonlocal truelist_results
+                if truelist_task is None:
+                    return  # No TrueList task (no leads)
+                try:
+                    print(f"   🔄 Background: Waiting for centralized TrueList to complete...")
+                    truelist_results = await truelist_task
+                    print(f"   ✅ Background: Centralized TrueList complete ({len(truelist_results)} results)")
+                    
+                    # Update the file with truelist_results
+                    leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
+                    with open(leads_file, 'w') as f:
+                        json.dump({
+                            "epoch_id": current_epoch,
+                            "leads": all_leads_for_file,  # All leads (not just coordinator's slice)
+                            "max_leads_per_epoch": max_leads_per_epoch,
+                            "created_at_block": current_block,
+                            "salt": salt_hex,
+                            "truelist_results": truelist_results  # NOW POPULATED
+                        }, f)
+                    print(f"   💾 Background: Updated file with {len(truelist_results)} TrueList results")
+                except Exception as e:
+                    print(f"   ❌ Background: TrueList failed: {e}")
+                    truelist_results = {}  # Empty = leads fail email verification
+                    # Still update file to unblock workers (with empty results)
+                    leads_file = Path("validator_weights") / f"epoch_{current_epoch}_leads.json"
+                    with open(leads_file, 'w') as f:
+                        json.dump({
+                            "epoch_id": current_epoch,
+                            "leads": all_leads_for_file,
+                            "max_leads_per_epoch": max_leads_per_epoch,
+                            "created_at_block": current_block,
+                            "salt": salt_hex,
+                            "truelist_results": {}  # Empty due to failure
+                        }, f)
+                    print(f"   💾 Background: Updated file with EMPTY TrueList results (failure)")
+            
+            # Start TrueList file updater in background (coordinator only)
+            truelist_updater_task = None
+            if container_mode == "coordinator" and truelist_task is not None:
+                truelist_updater_task = asyncio.create_task(truelist_file_updater())
+            
             # CRITICAL: Batch validation takes 10+ minutes. During this time, we MUST keep
             # updating the block file so workers don't see stale data and get stuck.
             # Solution: Run a background task that updates block file every 10 seconds.
@@ -2094,8 +2166,15 @@ class Validator(BaseValidatorNeuron):
             # Start block file updater in background
             block_updater_task = asyncio.create_task(block_file_updater())
             
+            # Path to leads file for polling TrueList results
+            leads_file_str = str(Path("validator_weights") / f"epoch_{current_epoch}_leads.json")
+            
             try:
-                batch_results = await run_batch_automated_checks(lead_blobs, container_id=0)
+                batch_results = await run_batch_automated_checks(
+                    lead_blobs, 
+                    container_id=0 if container_mode == "coordinator" else int(os.environ.get('CONTAINER_ID', 0)),
+                    leads_file_path=leads_file_str  # Poll file for TrueList results after Stage 0-2
+                )
             except Exception as e:
                 print(f"   ❌ Batch validation failed: {e}")
                 import traceback
@@ -4994,12 +5073,13 @@ def run_lightweight_worker(config):
                     if not leads_file.exists():
                         continue  # Epoch changed or too late
                     
-                    # Read leads from file
+                    # Read leads from file (including centralized TrueList results)
                     with open(leads_file, 'r') as f:
                         data = json.load(f)
                         all_leads = data.get('leads', [])
                         epoch_id = data.get('epoch_id')
                         salt_hex = data.get('salt')  # CRITICAL: Read shared salt
+                        centralized_truelist = data.get('truelist_results')  # None = in progress, {} = failed, {...} = success
                     
                     if epoch_id != current_epoch:
                         print(f"⚠️  Worker: Leads file epoch mismatch ({epoch_id} != {current_epoch})")
@@ -5010,6 +5090,15 @@ def run_lightweight_worker(config):
                         print(f"❌ Worker: No salt in leads file! Cannot hash results.")
                         await asyncio.sleep(10)
                         continue
+                    
+                    # Log TrueList status from file
+                    # None = in progress (coordinator still running), {} = failed, {...} = success
+                    if centralized_truelist is None:
+                        print(f"   ⏳ Worker: TrueList in progress - will poll after Stage 0-2 completes")
+                    elif centralized_truelist:
+                        print(f"   ✅ Worker: TrueList already complete ({len(centralized_truelist)} results)")
+                    else:
+                        print(f"   ⚠️ Worker: TrueList failed (empty results) - leads will fail email verification")
                     
                     # Check if leads were actually fetched by coordinator
                     if all_leads is None or len(all_leads) == 0:
@@ -5046,18 +5135,29 @@ def run_lightweight_worker(config):
                     print(f"   Worker {container_id}: Processing leads {start}-{end} ({len(worker_leads)}/{original_count} leads)")
                     
                     # ================================================================
-                    # BATCH VALIDATION: Use run_batch_automated_checks for efficiency
-                    # TrueList emails are batched, stages run sequentially
-                    # container_id is passed for staggered TrueList batch submission
+                    # BATCH VALIDATION: Stage 0-2 runs in parallel with coordinator's TrueList
+                    # After Stage 0-2, poll file for TrueList results before Stage 4-5
                     # ================================================================
                     
                     # Extract lead_blobs for batch processing
                     lead_blobs = [lead_data.get('lead_blob', {}) for lead_data in worker_leads]
                     
-                    # Run batch validation (handles TrueList batch + sequential stages)
-                    # Workers use container_id for staggered TrueList submission (5s per container)
+                    # Log TrueList status (might be ready or in progress)
+                    if centralized_truelist:
+                        print(f"   ✅ Worker {container_id}: TrueList already complete ({len(centralized_truelist)} results)")
+                    elif centralized_truelist is None:
+                        print(f"   ⏳ Worker {container_id}: TrueList in progress - will poll after Stage 0-2")
+                    else:
+                        print(f"   ⚠️ Worker {container_id}: TrueList returned empty (coordinator may have failed)")
+                    
+                    # Run batch validation - polls file for TrueList results after Stage 0-2
+                    leads_file_str = str(leads_file)
                     try:
-                        batch_results = await run_batch_automated_checks(lead_blobs, container_id=container_id)
+                        batch_results = await run_batch_automated_checks(
+                            lead_blobs, 
+                            container_id=container_id,
+                            leads_file_path=leads_file_str  # Poll file for TrueList results after Stage 0-2
+                        )
                     except Exception as e:
                         print(f"   ❌ Batch validation failed: {e}")
                         import traceback

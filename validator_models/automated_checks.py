@@ -3617,33 +3617,206 @@ async def retry_truelist_batch(emails: List[str], prev_batch_id: str = None) -> 
         return None, {email: {"needs_retry": True, "error": str(e)} for email in emails}
 
 
+async def run_centralized_truelist_batch(leads: List[dict]) -> Dict[str, dict]:
+    """
+    COORDINATOR ONLY: Run TrueList batch on ALL leads at once.
+    
+    This function extracts all emails from leads, submits them to TrueList,
+    handles retries (up to 3 times), and falls back to inline verification.
+    
+    The coordinator calls this BEFORE distributing leads to workers.
+    Workers then receive the precomputed results with their leads.
+    
+    Flow:
+    1. Extract all valid emails from leads
+    2. Delete old TrueList batches (clean slate)
+    3. Submit batch with all emails
+    4. Poll for completion
+    5. Retry any emails with errors (up to 3 times total)
+    6. Fall back to inline verification for remaining errors
+    7. Return complete results dict
+    
+    Args:
+        leads: List of ALL lead dicts from gateway (e.g., 2700 leads)
+    
+    Returns:
+        Dict mapping email (lowercase) -> result dict with:
+        - passed: bool
+        - status: str (email_ok, failed_*, etc.)
+        - needs_retry: bool (if unresolved)
+        - rejection_reason: dict (if failed)
+    
+    NOTE: This function is ONLY called by the coordinator.
+    Workers should use precomputed_email_results parameter of run_batch_automated_checks.
+    """
+    print(f"\n{'='*60}")
+    print(f"📧 COORDINATOR: Centralized TrueList batch for {len(leads)} leads")
+    print(f"{'='*60}")
+    
+    start_time = time.time()
+    
+    # ========================================================================
+    # Step 1: Extract all valid emails
+    # ========================================================================
+    emails = []
+    email_to_lead_idx = {}  # Track which lead each email came from (for debugging)
+    
+    for i, lead in enumerate(leads):
+        email = get_email(lead)
+        if email and '@' in email:
+            email_lower = email.lower()
+            emails.append(email_lower)
+            email_to_lead_idx[email_lower] = i
+    
+    print(f"   📧 Extracted {len(emails)} valid emails from {len(leads)} leads")
+    
+    if not emails:
+        print(f"   ⚠️ No valid emails found - returning empty results")
+        return {}
+    
+    # ========================================================================
+    # Step 2: Clean up old TrueList batches
+    # ========================================================================
+    print(f"   🧹 Cleaning up old TrueList batches...")
+    await delete_all_truelist_batches()
+    
+    # ========================================================================
+    # Step 3: Submit batch and poll (with retries)
+    # ========================================================================
+    email_results = {}
+    batch_id = None
+    
+    # Try batch up to 3 times total
+    for batch_attempt in range(3):
+        try:
+            print(f"   🚀 Submitting TrueList batch (attempt {batch_attempt + 1}/3) for {len(emails)} emails...")
+            
+            batch_id = await submit_truelist_batch(emails)
+            results = await poll_truelist_batch(batch_id)
+            
+            # Merge results
+            email_results.update(results)
+            
+            # Check for emails that need retry
+            needs_retry = []
+            for email in emails:
+                result = email_results.get(email)
+                if result is None or result.get("needs_retry"):
+                    needs_retry.append(email)
+            
+            print(f"   ✅ Batch {batch_attempt + 1} complete: {len(results)} results, {len(needs_retry)} need retry")
+            
+            if not needs_retry:
+                # All emails resolved
+                break
+            
+            if batch_attempt < 2:
+                # More retries available
+                print(f"   🔄 Retrying {len(needs_retry)} emails in 10s...")
+                
+                # Delete batch before retry (clears duplicate detection)
+                if batch_id:
+                    await delete_truelist_batch(batch_id)
+                    batch_id = None
+                
+                await asyncio.sleep(10)
+                emails = needs_retry  # Only retry failed emails
+            
+        except Exception as e:
+            print(f"   ❌ TrueList batch attempt {batch_attempt + 1} failed: {e}")
+            
+            # Delete batch before retry
+            if batch_id:
+                try:
+                    await delete_truelist_batch(batch_id)
+                except:
+                    pass
+                batch_id = None
+            
+            if batch_attempt < 2:
+                await asyncio.sleep(10 * (batch_attempt + 1))
+    
+    # ========================================================================
+    # Step 4: Inline fallback for remaining errors
+    # ========================================================================
+    needs_inline = []
+    for email in emails:
+        result = email_results.get(email)
+        if result is None or result.get("needs_retry"):
+            needs_inline.append(email)
+    
+    if needs_inline:
+        print(f"   🔄 Falling back to inline verification for {len(needs_inline)} emails...")
+        
+        try:
+            inline_results = await verify_emails_inline(needs_inline)
+            email_results.update(inline_results)
+            print(f"   ✅ Inline verification complete: {len(inline_results)} results")
+        except Exception as e:
+            print(f"   ❌ Inline verification failed: {e}")
+            # Mark remaining as unresolved
+            for email in needs_inline:
+                if email not in email_results or email_results[email].get("needs_retry"):
+                    email_results[email] = {
+                        "needs_retry": True,
+                        "error": f"All verification methods failed: {str(e)}"
+                    }
+    
+    # ========================================================================
+    # Step 5: Summary
+    # ========================================================================
+    elapsed = time.time() - start_time
+    elapsed_mins = int(elapsed // 60)
+    elapsed_secs = int(elapsed % 60)
+    
+    passed = sum(1 for r in email_results.values() if r.get("passed"))
+    failed = sum(1 for r in email_results.values() if not r.get("passed") and not r.get("needs_retry"))
+    unresolved = sum(1 for r in email_results.values() if r.get("needs_retry"))
+    
+    print(f"\n{'='*60}")
+    print(f"📊 CENTRALIZED TRUELIST COMPLETE")
+    print(f"{'='*60}")
+    print(f"   📦 Total leads from gateway: {len(leads)}")
+    print(f"   📧 Total emails processed: {len(email_results)}")
+    print(f"   ✅ Passed (email_ok): {passed}")
+    print(f"   ❌ Failed: {failed}")
+    print(f"   ⚠️  Unresolved: {unresolved}")
+    print(f"   ⏱️  TIME: {elapsed_mins}m {elapsed_secs}s ({elapsed:.1f} seconds total)")
+    print(f"{'='*60}\n")
+    
+    return email_results
+
+
 async def run_batch_automated_checks(
     leads: List[dict],
-    container_id: int = 0
+    container_id: int = 0,
+    precomputed_email_results: Dict[str, dict] = None,
+    leads_file_path: str = None
 ) -> List[Tuple[bool, dict]]:
     """
     Batch validation with SEQUENTIAL Stage 0-2 and Stage 4-5.
-    TrueList batch runs in PARALLEL with Stage 0-2.
+    Stage 0-2 runs IN PARALLEL with coordinator's centralized TrueList batch.
     
     This REPLACES calling run_automated_checks() individually for each lead.
     Orchestrates the full batch flow without modifying any actual validation checks.
     
-    Flow:
-    1. STAGGERED DELAY: Wait (container_id * 5) seconds before TrueList submission
-    2. Submit TrueList batch (background task)
-    3. Run Stage 0-2 SEQUENTIALLY for all leads (while TrueList processes)
-    4. Wait for TrueList batch to complete
-    5. Categorize leads: passed_both → Stage 4-5 queue, failed → reject, error → retry
-    6. Run Stage 4-5 SEQUENTIALLY with dynamic queue
-    7. Handle retries in parallel with Stage 4-5 (retry-passed leads join queue)
-    8. After max retries, still-erroring leads → skip
+    Flow (when leads_file_path is provided - worker/coordinator polling mode):
+    1. Run Stage 0-2 SEQUENTIALLY for all leads
+    2. POLL leads_file_path for truelist_results (coordinator updates file when done)
+    3. Use polled results for Stage 4-5
+    
+    Flow (when precomputed_email_results is provided - already has results):
+    1. Run Stage 0-2 SEQUENTIALLY for all leads
+    2. Use precomputed email results directly
+    3. Run Stage 4-5 SEQUENTIALLY
     
     Args:
         leads: List of lead dicts (e.g., 110 leads per container)
-        container_id: Container ID (0-8) for staggered TrueList batch submission.
-                      Container 0 submits immediately, container 1 waits 5s, etc.
-                      This prevents TrueList rate limiting when multiple containers
-                      submit batches simultaneously.
+        container_id: Container ID (0-29) for logging.
+        precomputed_email_results: Dict mapping email (lowercase) -> result dict.
+                                   If provided, skip polling and use these directly.
+        leads_file_path: Path to shared leads file for polling truelist_results.
+                         If provided, poll this file after Stage 0-2 until truelist_results is available.
     
     Returns:
         List of (passed, automated_checks_data) tuples in SAME ORDER as input
@@ -3735,41 +3908,20 @@ async def run_batch_automated_checks(
         return results
     
     # ========================================================================
-    # Step 2: Submit TrueList batch as background task (non-blocking)
+    # Step 2: Determine TrueList results source
     # ========================================================================
-    # CRITICAL: Delete all old TrueList batches before submitting new ones.
-    # TrueList remembers emails across ALL batches and returns incomplete CSVs
-    # when it detects "duplicates". Only container 0 does cleanup to avoid race.
-    if container_id == 0:
-        print(f"   🧹 Container 0: Cleaning up old TrueList batches...")
-        await delete_all_truelist_batches()
+    # Centralized TrueList is handled EXTERNALLY by coordinator's background task.
+    # This function just runs Stage 0-2, then polls file OR uses precomputed results.
     
-    # STAGGERED DELAY: To prevent TrueList rate limiting when multiple containers
-    # submit batches simultaneously, we add a container-specific delay.
-    # Container 0 (coordinator) submits immediately, container 1 waits 5s, etc.
-    # This ensures TrueList has time to process each batch's CSV before the next.
-    TRUELIST_STAGGER_DELAY_SECONDS = 10  # 10s between containers to prevent TrueList rate limiting
-    stagger_delay = container_id * TRUELIST_STAGGER_DELAY_SECONDS
+    has_precomputed = precomputed_email_results is not None and len(precomputed_email_results) > 0
+    needs_polling = leads_file_path is not None and not has_precomputed
     
-    if stagger_delay > 0:
-        print(f"   ⏳ Container {container_id}: Waiting {stagger_delay}s before TrueList batch (staggered submission)...")
-        await asyncio.sleep(stagger_delay)
-    
-    print(f"   🚀 Submitting TrueList batch for {len(emails)} emails...")
-    
-    try:
-        batch_task = asyncio.create_task(submit_and_poll_truelist(emails))
-    except Exception as e:
-        print(f"   ❌ Failed to create TrueList batch task: {e}")
-        # Mark all leads with emails as skipped
-        for email in emails:
-            idx = email_to_idx[email]
-            results[idx] = (None, {
-                "skipped": True,
-                "reason": "EmailVerificationUnavailable",
-                "error": str(e)
-            })
-        return results
+    if has_precomputed:
+        print(f"   📥 Using precomputed TrueList results ({len(precomputed_email_results)} emails)")
+    elif needs_polling:
+        print(f"   ⏳ Will poll {leads_file_path} for TrueList results after Stage 0-2")
+    else:
+        print(f"   ⚠️ No TrueList source - leads will fail email verification")
     
     # ========================================================================
     # Step 3: Run Stage 0-2 SEQUENTIALLY (while TrueList batch processes)
@@ -3811,43 +3963,55 @@ async def run_batch_automated_checks(
     print(f"   ✅ Stage 0-2 complete: {stage0_2_passed_count}/{n} passed")
     
     # ========================================================================
-    # Step 4: Wait for TrueList batch to complete (with retries)
+    # Step 4: Get TrueList results (precomputed OR poll file)
     # ========================================================================
-    print(f"   ⏳ Waiting for TrueList batch completion...")
     
-    original_batch_id = None  # Track for deletion before retry
-    email_results = None
-    batch_error = None
+    email_results = {}
     
-    # Try batch up to 3 times total (initial + 2 retries)
-    for batch_attempt in range(3):
-        try:
-            if batch_attempt == 0:
-                original_batch_id, email_results = await batch_task
-            else:
-                print(f"   🔄 Batch retry #{batch_attempt} for {len(emails)} emails...")
-                await asyncio.sleep(10 * batch_attempt)  # 10s, then 20s delay
-                original_batch_id, email_results = await submit_and_poll_truelist(emails)
-            print(f"   ✅ TrueList batch complete: {len(email_results)} results")
-            batch_error = None
-            break
-        except Exception as e:
-            batch_error = e
-            print(f"   ❌ TrueList batch attempt #{batch_attempt + 1} failed: {e}")
-            if batch_attempt < 2:
-                print(f"   ⏳ Will retry batch in {10 * (batch_attempt + 1)}s...")
-    
-    # If all batch attempts failed, use inline verification as fallback
-    if batch_error is not None:
-        print(f"   🔄 All batch attempts failed, falling back to inline verification...")
-        emails_to_verify = [get_email(leads[i]) for i in range(len(leads)) 
-                           if stage0_2_results[i][0] and get_email(leads[i])]
-        if emails_to_verify:
-            email_results = await verify_emails_inline(emails_to_verify)
-            print(f"   ✅ Inline verification complete: {len(email_results)} results")
-        else:
-            # No emails passed Stage 0-2, nothing to verify
-            email_results = {}
+    if has_precomputed:
+        # Use precomputed results directly
+        email_results = precomputed_email_results
+        print(f"   ✅ Using precomputed email results: {len(email_results)} emails")
+    elif needs_polling:
+        # POLL the leads file until truelist_results is available (not None)
+        print(f"   ⏳ Polling for TrueList results from coordinator...")
+        
+        poll_interval = 5  # seconds
+        max_poll_time = 1200  # 20 minutes max wait
+        poll_start = time.time()
+        poll_waited = 0
+        
+        while True:
+            try:
+                import json
+                with open(leads_file_path, 'r') as f:
+                    file_data = json.load(f)
+                    file_truelist = file_data.get("truelist_results")
+                    
+                    if file_truelist is not None:
+                        # Results available (dict, possibly empty if coordinator failed)
+                        email_results = file_truelist
+                        print(f"   ✅ Received TrueList results from coordinator: {len(email_results)} emails (waited {poll_waited}s)")
+                        break
+                    else:
+                        # Still None = in progress
+                        if poll_waited % 30 == 0 and poll_waited > 0:
+                            print(f"   ⏳ Still waiting for TrueList... ({poll_waited}s elapsed)")
+            except Exception as e:
+                print(f"   ⚠️ Error reading leads file: {e}")
+            
+            await asyncio.sleep(poll_interval)
+            poll_waited += poll_interval
+            
+            if poll_waited >= max_poll_time:
+                print(f"   ❌ Timeout waiting for TrueList results ({max_poll_time}s)")
+                print(f"   ⚠️ Leads will fail email verification")
+                email_results = {}
+                break
+    else:
+        # No source - all leads fail email verification
+        print(f"   ⚠️ No TrueList results available - leads will fail email verification")
+        email_results = {}
     
     # ========================================================================
     # Step 5: Categorize leads
@@ -3870,13 +4034,31 @@ async def run_batch_automated_checks(
             # Failed Stage 0-2 → immediate reject
             results[i] = (False, stage0_2_data)
         elif email_result is None:
-            # Email NOT IN TrueList results at all → queue for retry
-            # This happens when TrueList's CSV doesn't include all emails
-            # CRITICAL: Do NOT reject - treat as transient error and retry
-            needs_retry.append(email_lower)
+            # Email NOT IN results at all
+            if use_precomputed:
+                # WORKER MODE: Coordinator couldn't verify this email → skip
+                # (Coordinator has already done retries, so we trust the absence)
+                results[i] = (None, {
+                    "skipped": True,
+                    "reason": "EmailNotInPrecomputedResults",
+                    "message": "Coordinator could not verify this email"
+                })
+            else:
+                # COORDINATOR MODE: Queue for retry
+                # This happens when TrueList's CSV doesn't include all emails
+                needs_retry.append(email_lower)
         elif email_result.get("needs_retry"):
-            # Email explicitly errored → queue for retry
-            needs_retry.append(email_lower)
+            # Email explicitly errored
+            if use_precomputed:
+                # WORKER MODE: Coordinator marked as needing retry but couldn't resolve → skip
+                results[i] = (None, {
+                    "skipped": True,
+                    "reason": "EmailVerificationIncomplete",
+                    "message": "Coordinator could not complete email verification"
+                })
+            else:
+                # COORDINATOR MODE: Queue for retry
+                needs_retry.append(email_lower)
         elif email_result.get("passed"):
             # Both passed → queue for Stage 4-5
             stage4_5_queue.append((i, lead, email_result, stage0_2_data))
@@ -3899,12 +4081,14 @@ async def run_batch_automated_checks(
     # ========================================================================
     
     # Start retry batch if needed (runs in background)
+    # NOTE: Workers (use_precomputed=True) never retry - coordinator has already done retries
     retry_task = None
     inline_task = None  # Inline verification task (runs in background after retries exhaust)
     retry_attempt = 0
     last_retry_batch_id = None  # Track retry batch_id for deletion before next retry
     
-    if needs_retry:
+    if needs_retry and not use_precomputed:
+        # COORDINATOR MODE ONLY: Retry failed emails
         # CRITICAL: Delete the original batch BEFORE retrying
         # TrueList detects duplicate email content and rejects re-submissions.
         # Deleting the batch clears their duplicate detection for those emails.

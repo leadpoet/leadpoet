@@ -61,7 +61,7 @@ from gateway.utils.linkedin import normalize_linkedin_url, compute_linkedin_comb
 # ============================================================
 # Geographic Normalization (standardizes city/state/country)
 # ============================================================
-from gateway.utils.geo_normalize import normalize_location
+from gateway.utils.geo_normalize import normalize_location, validate_location, normalize_country
 
 
 # ============================================================
@@ -1092,220 +1092,45 @@ async def submit_lead(event: SubmitLeadEvent):
         # ========================================
         # Validate country/state/city logic
         # ========================================
-        # COUNTRY ALIASES: Map common variants to standard names
-        # This allows miners to submit "UK" and have it normalized to "United Kingdom"
-        COUNTRY_ALIASES = {
-            # United States variants
-            "usa": "united states",
-            "us": "united states",
-            "u.s.": "united states",
-            "u.s.a.": "united states",
-            "america": "united states",
-            "united states of america": "united states",
-            # United Kingdom variants
-            "uk": "united kingdom",
-            "u.k.": "united kingdom",
-            "great britain": "united kingdom",
-            "britain": "united kingdom",
-            "england": "united kingdom",
-            "scotland": "united kingdom",
-            "wales": "united kingdom",
-            "northern ireland": "united kingdom",
-            # Other common aliases
-            "uae": "united arab emirates",
-            "u.a.e.": "united arab emirates",
-            "emirates": "united arab emirates",
-            "korea": "south korea",
-            "republic of korea": "south korea",
-            "holland": "netherlands",
-            "the netherlands": "netherlands",
-            "ivory coast": "ivory coast",
-            "côte d'ivoire": "ivory coast",
-            "cote d'ivoire": "ivory coast",
-            "czech": "czech republic",
-            "russia": "russia",
-            "russian federation": "russia",
-            "vatican": "vatican city",
-            "holy see": "vatican city",
-            "eesti": "estonia",
-            "deutschland": "germany",
-            "brasil": "brazil",
-            "espana": "spain",
-            "españa": "spain",
-            "italia": "italy",
-            "nippon": "japan",
-            "nihon": "japan",
-            "prc": "china",
-            "peoples republic of china": "china",
-            "people's republic of china": "china",
-            "roc": "taiwan",
-            "republic of china": "taiwan",
-            "burma": "myanmar",
-            "persia": "iran",
-            "swaziland": "eswatini",
-            "the gambia": "gambia",
-            "congo": "republic of the congo",
-            "drc": "democratic republic of the congo",
-            "dr congo": "democratic republic of the congo",
-            "zaire": "democratic republic of the congo",
-        }
-        
-        # STANDARDIZED COUNTRY LIST (199 countries - excludes North Korea)
-        # Miners MUST submit country exactly as listed (case-insensitive) OR use an alias
-        # This prevents gaming (e.g., submitting random text to bypass US state requirement)
-        VALID_COUNTRIES = {
-            # North America
-            "united states", "canada", "mexico",
-            # Central America & Caribbean
-            "guatemala", "belize", "honduras", "el salvador", "nicaragua", "costa rica", "panama",
-            "cuba", "jamaica", "haiti", "dominican republic", "bahamas", "barbados", "trinidad and tobago",
-            "saint lucia", "grenada", "saint vincent and the grenadines", "antigua and barbuda",
-            "dominica", "saint kitts and nevis",
-            # South America
-            "brazil", "argentina", "colombia", "peru", "venezuela", "chile", "ecuador", "bolivia",
-            "paraguay", "uruguay", "guyana", "suriname",
-            # Western Europe
-            "united kingdom", "germany", "france", "italy", "spain", "portugal", "netherlands",
-            "belgium", "switzerland", "austria", "ireland", "luxembourg", "monaco", "andorra",
-            "liechtenstein", "san marino", "vatican city",
-            # Northern Europe
-            "sweden", "norway", "denmark", "finland", "iceland",
-            # Eastern Europe
-            "poland", "czech republic", "czechia", "hungary", "romania", "bulgaria", "ukraine",
-            "belarus", "moldova", "slovakia", "slovenia", "croatia", "serbia", "bosnia and herzegovina",
-            "montenegro", "north macedonia", "albania", "kosovo", "lithuania", "latvia", "estonia",
-            # Southern Europe
-            "greece", "cyprus", "malta",
-            # Russia & Central Asia
-            "russia", "kazakhstan", "uzbekistan", "turkmenistan", "tajikistan", "kyrgyzstan",
-            "georgia", "armenia", "azerbaijan",
-            # Middle East
-            "turkey", "israel", "palestine", "lebanon", "jordan", "syria", "iraq", "iran",
-            "saudi arabia", "united arab emirates", "qatar", "kuwait", "bahrain", "oman", "yemen",
-            # South Asia
-            "india", "pakistan", "bangladesh", "sri lanka", "nepal", "bhutan", "maldives", "afghanistan",
-            # Southeast Asia
-            "indonesia", "malaysia", "singapore", "thailand", "vietnam", "philippines", "myanmar",
-            "cambodia", "laos", "brunei", "timor-leste",
-            # East Asia
-            "china", "japan", "south korea", "taiwan", "mongolia", "hong kong", "macau",
-            # Oceania
-            "australia", "new zealand", "fiji", "papua new guinea", "solomon islands", "vanuatu",
-            "samoa", "tonga", "kiribati", "micronesia", "palau", "marshall islands", "nauru", "tuvalu",
-            # North Africa
-            "egypt", "libya", "tunisia", "algeria", "morocco",
-            # West Africa
-            "nigeria", "ghana", "senegal", "ivory coast", "mali", "burkina faso", "niger", "guinea",
-            "benin", "togo", "sierra leone", "liberia", "mauritania", "gambia", "guinea-bissau",
-            "cape verde",
-            # Central Africa
-            "democratic republic of the congo", "cameroon", "central african republic", "chad",
-            "republic of the congo", "gabon", "equatorial guinea", "sao tome and principe",
-            # East Africa
-            "kenya", "ethiopia", "tanzania", "uganda", "rwanda", "burundi", "south sudan", "sudan",
-            "eritrea", "djibouti", "somalia", "comoros", "mauritius", "seychelles", "madagascar",
-            # Southern Africa
-            "south africa", "namibia", "botswana", "zimbabwe", "zambia", "malawi", "mozambique",
-            "angola", "lesotho", "eswatini"
-        }
-        
         country_raw = lead_blob.get("country", "").strip()
         state = lead_blob.get("state", "").strip()
         city = lead_blob.get("city", "").strip()
-        
-        # Normalize country using aliases (e.g., "UK" → "United Kingdom")
-        country_lower = country_raw.lower()
-        if country_lower in COUNTRY_ALIASES:
-            country = COUNTRY_ALIASES[country_lower].title()  # Normalize to title case
-            # Special handling for countries with specific capitalization
-            if country.lower() == "united states":
-                country = "United States"
-            elif country.lower() == "united kingdom":
-                country = "United Kingdom"
-            elif country.lower() == "united arab emirates":
-                country = "United Arab Emirates"
-            elif country.lower() == "south korea":
-                country = "South Korea"
-            elif country.lower() == "north macedonia":
-                country = "North Macedonia"
-            elif country.lower() == "south africa":
-                country = "South Africa"
-            elif country.lower() == "south sudan":
-                country = "South Sudan"
-            elif country.lower() == "saudi arabia":
-                country = "Saudi Arabia"
-            elif country.lower() == "sri lanka":
-                country = "Sri Lanka"
-            elif country.lower() == "new zealand":
-                country = "New Zealand"
-            elif country.lower() == "papua new guinea":
-                country = "Papua New Guinea"
-            print(f"   📝 Country alias normalized: '{country_raw}' → '{country}'")
-        else:
-            country = country_raw
-        
-        # Validation 1: Country must be in the approved list
-        if country.lower() not in VALID_COUNTRIES:
-            print(f"❌ Invalid country: '{country}' not in approved list")
-            
-            updated_stats = mark_submission_failed(event.actor_hotkey)
-            
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "invalid_country",
-                    "message": f"Country '{country_raw}' is not recognized. Please use a standard country name.",
-                    "country": country_raw,
-                    "hint": "Use standard names like 'United States', 'United Kingdom', 'Germany', etc. Aliases like 'USA', 'UK', 'UAE' are also accepted.",
-                    "rate_limit_stats": {
-                        "submissions": updated_stats["submissions"],
-                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
-                        "rejections": updated_stats["rejections"],
-                        "max_rejections": MAX_REJECTIONS_PER_DAY
-                    }
-                }
+
+        # Normalize country using geo_normalize (handles aliases + title case)
+        country = normalize_country(country_raw)
+        if country != country_raw:
+            print(f"   📝 Country normalized: '{country_raw}' → '{country}'")
+
+        # Validate location: country (199 valid), state (51 US states), city (exists in state/country)
+        is_valid, rejection_reason = validate_location(city, state, country)
+
+        if not is_valid:
+            # Map rejection reasons to user-friendly error messages
+            ERROR_MESSAGES = {
+                "country_empty": ("invalid_country", "Country field is required."),
+                "country_invalid": ("invalid_country", f"Country '{country_raw}' is not recognized. Use standard names like 'United States', 'Germany', etc."),
+                "state_empty_for_usa": ("invalid_region_format", "United States leads require state field."),
+                "state_invalid": ("invalid_region_format", f"State '{state}' is not a valid US state."),
+                "city_empty": ("invalid_region_format", "City field is required."),
+                "city_invalid_for_state": ("invalid_region_format", f"City '{city}' not found in {state}, {country}."),
+                "city_invalid_for_country": ("invalid_region_format", f"City '{city}' not found in {country}."),
+            }
+
+            error_code, error_message = ERROR_MESSAGES.get(
+                rejection_reason,
+                ("invalid_region_format", f"Invalid location: {rejection_reason}")
             )
-        
-        # Validation 2: US leads require ALL THREE fields (country, state, city)
-        if country.lower() == "united states":
-            if not state or not city:
-                missing = []
-                if not state:
-                    missing.append("state")
-                if not city:
-                    missing.append("city")
-                print(f"❌ US lead missing required fields: {missing}")
-                
-                updated_stats = mark_submission_failed(event.actor_hotkey)
-                
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "invalid_region_format",
-                        "message": f"United States leads require country, state, AND city. Missing: {', '.join(missing)}",
-                        "country": country,
-                        "state": state,
-                        "city": city,
-                        "rate_limit_stats": {
-                            "submissions": updated_stats["submissions"],
-                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
-                            "rejections": updated_stats["rejections"],
-                            "max_rejections": MAX_REJECTIONS_PER_DAY
-                        }
-                    }
-                )
-        
-        # Validation 3: Non-US leads require country + city (state optional)
-        if country.lower() != "united states" and not city:
-            print(f"❌ Non-US lead missing required city field")
-            
+
+            print(f"❌ Location validation failed: {rejection_reason} - {city}/{state}/{country}")
+
             updated_stats = mark_submission_failed(event.actor_hotkey)
-            
+
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "invalid_region_format",
-                    "message": "All leads require country and city. State is optional for non-US leads.",
+                    "error": error_code,
+                    "message": error_message,
+                    "rejection_reason": rejection_reason,
                     "country": country,
                     "state": state,
                     "city": city,

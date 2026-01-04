@@ -124,3 +124,5 @@ docker-compose.gateway.yml
 docker-compose.minio.yml
 .env
 
+# Company name cache (runtime file)
+validator_models/company_name_cache.json

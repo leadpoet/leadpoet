@@ -902,6 +902,70 @@ def set_company_linkedin_cache(company_slug: str, data: Dict):
         if oldest_slug:
             del COMPANY_LINKEDIN_CACHE[oldest_slug]
 
+# ========================================================================
+# COMPANY NAME STANDARDIZATION CACHE (JSON file)
+# ========================================================================
+# Maps company LinkedIn slug to standardized company name.
+# Key: slug (e.g., "23andme")
+# Value: Standardized company name from LinkedIn (e.g., "23andMe")
+# ========================================================================
+COMPANY_NAME_CACHE_FILE = os.path.join(os.path.dirname(__file__), "company_name_cache.json")
+
+def load_company_name_cache() -> Dict[str, str]:
+    """Load the company name cache from local JSON file."""
+    if os.path.exists(COMPANY_NAME_CACHE_FILE):
+        try:
+            with open(COMPANY_NAME_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"⚠️ Error loading company name cache: {e}")
+    return {}
+
+def save_company_name_cache(cache: Dict[str, str]) -> bool:
+    """Save the company name cache to local JSON file."""
+    try:
+        with open(COMPANY_NAME_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"⚠️ Error saving company name cache: {e}")
+        return False
+
+def get_standardized_company_name(company_slug: str) -> Optional[str]:
+    """
+    Get standardized company name from cache.
+
+    Args:
+        company_slug: The company slug from LinkedIn URL (e.g., "23andme")
+
+    Returns:
+        Standardized company name or None if not in cache
+    """
+    cache = load_company_name_cache()
+    # Normalize slug to lowercase
+    slug_normalized = company_slug.lower().strip()
+    return cache.get(slug_normalized)
+
+def set_standardized_company_name(company_slug: str, standardized_name: str) -> bool:
+    """
+    Save standardized company name to cache.
+
+    Args:
+        company_slug: The company slug from LinkedIn URL (e.g., "23andme")
+        standardized_name: The official company name from LinkedIn (e.g., "23andMe")
+
+    Returns:
+        True if saved successfully, False otherwise
+    """
+    cache = load_company_name_cache()
+    # Normalize slug to lowercase
+    slug_normalized = company_slug.lower().strip()
+    cache[slug_normalized] = standardized_name
+    success = save_company_name_cache(cache)
+    if success:
+        print(f"   💾 Cached company name: '{slug_normalized}' → '{standardized_name}'")
+    return success
+
 def get_cache_key(prefix: str, identifier: str) -> str:
     """Generate consistent cache key for validation results"""
     return f"{prefix}_{identifier}"
@@ -3466,17 +3530,54 @@ async def run_stage4_5_repscore(
     # Values: -15 to +20 (new format) vs 1.0/1.5/5.0 (old format)
     lead["is_icp_multiplier"] = float(icp_adjustment)
     automated_checks_data["is_icp_multiplier"] = float(icp_adjustment)
-    
+
+    # ========================================================================
+    # Company Name Standardization (only on approval)
+    # ========================================================================
+    # Use the company LinkedIn slug to get/set the standardized company name.
+    # This ensures all leads with the same company_linkedin URL have the same
+    # standardized company name, regardless of how the miner submitted it.
+    # ========================================================================
+    company_slug = lead.get("company_linkedin_slug")
+    company_linkedin_data = lead.get("company_linkedin_data")
+
+    if company_slug:
+        # Check cache first
+        standardized_name = get_standardized_company_name(company_slug)
+
+        if standardized_name:
+            # Cache hit - use cached standardized name
+            print(f"   📦 Company name from cache: '{company_slug}' → '{standardized_name}'")
+        else:
+            # Cache miss - get from Stage 4 scraped data and save to cache
+            if company_linkedin_data and company_linkedin_data.get("company_name_from_linkedin"):
+                standardized_name = company_linkedin_data["company_name_from_linkedin"]
+                set_standardized_company_name(company_slug, standardized_name)
+            else:
+                # Fallback to miner's submitted company name if no scraped data
+                standardized_name = company
+                print(f"   ⚠️ No scraped company name available, using submitted: '{standardized_name}'")
+
+        # Set on lead and automated_checks_data
+        lead["company_standardized"] = standardized_name
+        automated_checks_data["company_standardized"] = standardized_name
+        print(f"   ✅ Company standardized: '{company}' → '{standardized_name}'")
+    else:
+        # No company_linkedin_slug - use submitted company name
+        lead["company_standardized"] = company
+        automated_checks_data["company_standardized"] = company
+        print(f"   ⚠️ No company LinkedIn slug, using submitted name: '{company}'")
+
     print(f"🎉 All stages passed for {email} @ {company}")
 
     # All checks passed - return structured success data
     automated_checks_data["passed"] = True
     automated_checks_data["rejection_reason"] = None
-    
+
     # IMPORTANT: Also set rep_score on lead object for validator.py to pick up
     # validator.py looks for lead_blob.get("rep_score", 50)
     lead["rep_score"] = total_rep_score
-    
+
     return True, automated_checks_data
 
 
@@ -11245,17 +11346,54 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # Values: -15 to +20 (new format) vs 1.0/1.5/5.0 (old format)
     lead["is_icp_multiplier"] = float(icp_adjustment)
     automated_checks_data["is_icp_multiplier"] = float(icp_adjustment)
-    
+
+    # ========================================================================
+    # Company Name Standardization (only on approval)
+    # ========================================================================
+    # Use the company LinkedIn slug to get/set the standardized company name.
+    # This ensures all leads with the same company_linkedin URL have the same
+    # standardized company name, regardless of how the miner submitted it.
+    # ========================================================================
+    company_slug = lead.get("company_linkedin_slug")
+    company_linkedin_data = lead.get("company_linkedin_data")
+
+    if company_slug:
+        # Check cache first
+        standardized_name = get_standardized_company_name(company_slug)
+
+        if standardized_name:
+            # Cache hit - use cached standardized name
+            print(f"   📦 Company name from cache: '{company_slug}' → '{standardized_name}'")
+        else:
+            # Cache miss - get from Stage 4 scraped data and save to cache
+            if company_linkedin_data and company_linkedin_data.get("company_name_from_linkedin"):
+                standardized_name = company_linkedin_data["company_name_from_linkedin"]
+                set_standardized_company_name(company_slug, standardized_name)
+            else:
+                # Fallback to miner's submitted company name if no scraped data
+                standardized_name = company
+                print(f"   ⚠️ No scraped company name available, using submitted: '{standardized_name}'")
+
+        # Set on lead and automated_checks_data
+        lead["company_standardized"] = standardized_name
+        automated_checks_data["company_standardized"] = standardized_name
+        print(f"   ✅ Company standardized: '{company}' → '{standardized_name}'")
+    else:
+        # No company_linkedin_slug - use submitted company name
+        lead["company_standardized"] = company
+        automated_checks_data["company_standardized"] = company
+        print(f"   ⚠️ No company LinkedIn slug, using submitted name: '{company}'")
+
     print(f"🎉 All stages passed for {email} @ {company}")
 
     # All checks passed - return structured success data
     automated_checks_data["passed"] = True
     automated_checks_data["rejection_reason"] = None
-    
+
     # IMPORTANT: Also set rep_score on lead object for validator.py to pick up
     # validator.py looks for lead_blob.get("rep_score", 50)
     lead["rep_score"] = total_rep_score
-    
+
     return True, automated_checks_data
 
 # Existing functions - DO NOT TOUCH (maintained for backward compatibility)

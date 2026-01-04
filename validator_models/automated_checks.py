@@ -4027,6 +4027,19 @@ async def run_batch_automated_checks(
         print(f"   ⚠️ No TrueList source - leads will fail email verification")
     
     # ========================================================================
+    # Step 2.5: STAGGER DELAY for Stage 0-2 (prevents WHOIS rate limiting)
+    # ========================================================================
+    # With centralized TrueList, all containers start Stage 0-2 simultaneously.
+    # This causes WHOIS servers to rate-limit us (connection resets).
+    # Add container-specific delay so WHOIS requests are staggered across containers.
+    STAGE0_2_STAGGER_DELAY_SECONDS = 8  # 8s between containers
+    stagger_delay = container_id * STAGE0_2_STAGGER_DELAY_SECONDS
+    
+    if stagger_delay > 0:
+        print(f"   ⏳ Container {container_id}: Waiting {stagger_delay}s before Stage 0-2 (staggered WHOIS)...")
+        await asyncio.sleep(stagger_delay)
+    
+    # ========================================================================
     # Step 3: Run Stage 0-2 SEQUENTIALLY (while TrueList batch processes)
     # ========================================================================
     print(f"   🔍 Running Stage 0-2 checks SEQUENTIALLY for {n} leads...")

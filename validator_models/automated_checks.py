@@ -10856,8 +10856,17 @@ def calculate_icp_adjustment(lead: dict) -> int:
     
     if country in MAJOR_HUBS_BY_COUNTRY:
         hub_cities = MAJOR_HUBS_BY_COUNTRY[country]
+        # Split city into words for matching (e.g., "new york city" → ["new", "york", "city"])
+        city_words = set(city.split())
         for hub in hub_cities:
-            if hub in city:
+            # Check for exact match OR hub is a complete word/phrase in city
+            # This prevents "la" matching "eau claire" (substring issue)
+            if city == hub or hub in city_words:
+                is_major_hub = True
+                matched_hub = f"{city} ({country})"
+                break
+            # Also check if multi-word hub matches start of city (e.g., "new york" in "new york city")
+            if len(hub.split()) > 1 and city.startswith(hub):
                 is_major_hub = True
                 matched_hub = f"{city} ({country})"
                 break

@@ -10726,124 +10726,97 @@ def calculate_icp_adjustment(lead: dict) -> int:
     # ========================================================================
     # MAJOR HUBS BY COUNTRY (city + country must BOTH match)
     # ========================================================================
-    # Country names MUST match EXACTLY with gateway/api/submit.py VALID_COUNTRIES
-    # This prevents gaming (e.g., submitting "United States, London" to get bonus)
+    # Uses CANONICAL city names from geo_lookup_fast.json (post-gateway normalization)
+    # Gateway normalizes: "NYC" -> "New York City", "SF" -> "San Francisco", etc.
+    # So we only need the canonical names here - no aliases needed!
+    # 
+    # Country names MUST match gateway/api/submit.py VALID_COUNTRIES (lowercase)
     MAJOR_HUBS_BY_COUNTRY = {
         # ----------------------------------------------------------------
-        # NORTH AMERICA
+        # NORTH AMERICA (canonical names from geo_lookup_fast.json)
         # ----------------------------------------------------------------
-        "united states": [
-            "new york", "nyc", "manhattan", "brooklyn",
-            "san francisco", "sf", "bay area",
-            "los angeles", "la",
-            "austin", "atx",
-            "chicago", "chi",
-            "seattle", "sea",
-            "boston", "bos",
-            "denver", "den",
-            "miami", "mia",
-            "washington", "dc", "d.c.",
-            "atlanta", "atl",
-            "dallas", "dfw",
-            "houston", "htx",
-            "phoenix", "phx",
-            "san diego", "sd",
-            "san jose", "sj",
-            "portland", "pdx",
-        ],
-        "canada": [
-            "toronto", "yyz",
-            "vancouver", "yvr",
-            "montreal", "mtl",
-        ],
+        "united states": {
+            # NYC area (manhattan/brooklyn are separate cities in JSON)
+            "new york city", "manhattan", "brooklyn",
+            # West Coast
+            "san francisco", "los angeles", "san diego", "san jose", "seattle", "portland",
+            # Texas
+            "austin", "dallas", "houston",
+            # Other major hubs
+            "chicago", "boston", "denver", "miami", "washington", "atlanta", "phoenix",
+        },
+        "canada": {
+            "toronto", "vancouver", "montréal",  # Note: "montréal" is canonical (not "montreal")
+        },
         # ----------------------------------------------------------------
-        # EUROPE
+        # EUROPE (canonical names from geo_lookup_fast.json)
         # ----------------------------------------------------------------
-        "united kingdom": [
-            "london", "ldn",
-            "manchester",
-            "edinburgh",
-            "cambridge",
-            "oxford",
-        ],
-        "germany": [
-            "berlin",
-            "munich", "münchen",
-            "frankfurt",
-            "hamburg",
-        ],
-        "france": [
+        "united kingdom": {
+            "london", "manchester", "edinburgh", "cambridge", "oxford",
+        },
+        "germany": {
+            "berlin", "münchen", "frankfurt am main", "hamburg",  # "münchen" is canonical
+        },
+        "france": {
             "paris",
-        ],
-        "netherlands": [
-            "amsterdam",
-            "rotterdam",
-        ],
-        "switzerland": [
-            "zurich", "zürich",
-            "geneva", "geneve", "genève",
-        ],
-        "ireland": [
+        },
+        "netherlands": {
+            "amsterdam", "rotterdam",
+        },
+        "switzerland": {
+            "zürich", "genève",  # Canonical names with accents
+        },
+        "ireland": {
             "dublin",
-        ],
-        "sweden": [
+        },
+        "sweden": {
             "stockholm",
-        ],
-        "spain": [
-            "barcelona",
-            "madrid",
-        ],
+        },
+        "spain": {
+            "barcelona", "madrid",
+        },
         # ----------------------------------------------------------------
-        # ASIA-PACIFIC
+        # ASIA-PACIFIC (canonical names from geo_lookup_fast.json)
         # ----------------------------------------------------------------
-        "hong kong": [
-            "hong kong", "hk", "central", "kowloon",
-        ],
-        "singapore": [
+        "hong kong": {
+            "hong kong",
+        },
+        "singapore": {
             "singapore",
-        ],
-        "japan": [
-            "tokyo",
-            "osaka",
-        ],
-        "south korea": [
+        },
+        "japan": {
+            "tokyo", "osaka",
+        },
+        "south korea": {
             "seoul",
-        ],
-        "china": [
-            "shanghai",
-            "beijing",
-            "shenzhen",
-        ],
-        "india": [
-            "bangalore", "bengaluru",
-            "mumbai", "bombay",
-            "delhi", "new delhi",
-            "hyderabad",
-            "pune",
-        ],
-        "australia": [
-            "sydney", "syd",
-            "melbourne", "mel",
-        ],
-        "new zealand": [
+        },
+        "china": {
+            "shanghai", "beijing", "shenzhen",
+        },
+        "india": {
+            "bengaluru", "mumbai", "new delhi", "hyderabad", "pune",  # "bengaluru" is canonical
+        },
+        "australia": {
+            "sydney", "melbourne",
+        },
+        "new zealand": {
             "auckland",
-        ],
+        },
         # ----------------------------------------------------------------
-        # MIDDLE EAST
+        # MIDDLE EAST (canonical names from geo_lookup_fast.json)
         # ----------------------------------------------------------------
-        "israel": [
-            "tel aviv", "tlv",
-        ],
-        "united arab emirates": [
-            "dubai",
-            "abu dhabi",
-        ],
+        "israel": {
+            "tel aviv",
+        },
+        "united arab emirates": {
+            "dubai", "abu dhabi",
+        },
         # ----------------------------------------------------------------
-        # SOUTH AMERICA
+        # SOUTH AMERICA (canonical names from geo_lookup_fast.json)
         # ----------------------------------------------------------------
-        "brazil": [
-            "sao paulo", "são paulo",
-        ],
+        "brazil": {
+            "são paulo",  # Canonical name with accent
+        },
     }
     
     # Get city and country for major hub check
@@ -10851,25 +10824,15 @@ def calculate_icp_adjustment(lead: dict) -> int:
     country = lead.get("country", "").strip().lower()
     
     # Check if BOTH country AND city match a major hub
+    # Simple exact matching - gateway already normalized cities to canonical form
     is_major_hub = False
     matched_hub = None
     
     if country in MAJOR_HUBS_BY_COUNTRY:
-        hub_cities = MAJOR_HUBS_BY_COUNTRY[country]
-        # Split city into words for matching (e.g., "new york city" → ["new", "york", "city"])
-        city_words = set(city.split())
-        for hub in hub_cities:
-            # Check for exact match OR hub is a complete word/phrase in city
-            # This prevents "la" matching "eau claire" (substring issue)
-            if city == hub or hub in city_words:
-                is_major_hub = True
-                matched_hub = f"{city} ({country})"
-                break
-            # Also check if multi-word hub matches start of city (e.g., "new york" in "new york city")
-            if len(hub.split()) > 1 and city.startswith(hub):
-                is_major_hub = True
-                matched_hub = f"{city} ({country})"
-                break
+        hub_cities = MAJOR_HUBS_BY_COUNTRY[country]  # This is now a set
+        if city in hub_cities:
+            is_major_hub = True
+            matched_hub = f"{city} ({country})"
     
     # ========================================================================
     # STEP 1: ICP Definition Match (+50 points)

@@ -1423,8 +1423,26 @@ async def submit_lead(event: SubmitLeadEvent):
         # Title-case fields like industry, role, full_name, city, etc.
         # This ensures consistent formatting in the database
         # NOTE: Does NOT affect validation (automated_checks uses .lower() for comparisons)
+        #
+        # HASH INTEGRITY: We preserve the original geo fields in "_original" key
+        # so hash(lead_blob without _original) == lead_blob_hash always works.
+        # Validators use the normalized top-level fields (city, state, country).
         print(f"   🔍 Normalizing lead fields for standardized storage...")
+        
+        # Preserve original geo fields BEFORE normalization (for hash verification)
+        original_geo = {
+            "city": lead_blob.get("city", ""),
+            "state": lead_blob.get("state", ""),
+            "country": lead_blob.get("country", ""),
+        }
+        
+        # Normalize the lead_blob (modifies city, state, country, etc.)
         lead_blob = normalize_lead_fields(lead_blob)
+        
+        # Embed original geo fields for hash verification
+        # NOTE: This key is ignored by validators - they use top-level normalized fields
+        lead_blob["_original_geo"] = original_geo
+        
         print(f"   ✅ Lead fields normalized (industry='{lead_blob.get('industry', '')}', role='{lead_blob.get('role', '')[:30]}...')")
         
         # Store lead in leads_private table

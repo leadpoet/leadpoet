@@ -11512,7 +11512,8 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
         company_domain = f"https://{company_domain}"
     
     # Status codes that indicate website exists (pass immediately)
-    PASS_STATUS_CODES = {200, 301, 302, 307, 308, 401, 403, 405, 500, 502, 503}
+    # 429 = Too Many Requests (rate limiting/bot protection) - proves site exists, just blocking automated requests
+    PASS_STATUS_CODES = {200, 301, 302, 307, 308, 401, 403, 405, 429, 500, 502, 503}
     
     # Browser User-Agent to avoid anti-bot blocking (3M, etc.)
     headers = {

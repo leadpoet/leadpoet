@@ -24,6 +24,7 @@ import sys
 import os
 import hashlib
 import json
+import re
 from datetime import datetime
 from typing import Dict, List
 
@@ -1088,7 +1089,137 @@ async def submit_lead(event: SubmitLeadEvent):
             )
         
         print(f"   ✅ All required fields present")
-        
+
+        # ========================================
+        # EARLY EXIT: Role Format Sanity Check
+        # ========================================
+        # Catch obviously garbage roles at gateway BEFORE entering validation queue
+        # Saves validator time and API costs by rejecting spam/garbage early
+        print(f"   🔍 Validating role format (early sanity check)...")
+        role_raw = lead_blob.get("role", "").strip()
+        role_lower = role_raw.lower()
+
+        role_sanity_error = None
+
+        # Check 1: Too short (< 2 chars)
+        if len(role_raw) < 2:
+            role_sanity_error = ("role_too_short", f"Role too short ({len(role_raw)} chars). Minimum 2 characters required.")
+
+        # Check 2: Too long (> 150 chars) - legitimate roles are < 80, but allow buffer
+        elif len(role_raw) > 150:
+            role_sanity_error = ("role_too_long", f"Role too long ({len(role_raw)} chars). Maximum 150 characters allowed.")
+
+        # Check 3: No letters (all symbols/numbers)
+        elif not any(c.isalpha() for c in role_raw):
+            role_sanity_error = ("role_no_letters", "Role must contain at least one letter.")
+
+        # Check 4: Mostly numbers (>50% digits) - "VP123456789" is garbage
+        elif sum(c.isdigit() for c in role_raw) > len(role_raw) * 0.5:
+            role_sanity_error = ("role_mostly_numbers", "Role cannot be mostly numbers.")
+
+        # Check 5: Keyboard spam / placeholder patterns
+        elif role_lower in ["asdfgh", "qwerty", "zxcvbn", "asdf", "qwer", "zxcv",
+                            "aaaaaa", "bbbbbb", "test", "testing", "xxx", "yyy", "zzz",
+                            "null", "undefined", "none", "n/a", "na", "tbd", "tba",
+                            "placeholder", "temp", "todo", "fixme", "abc", "xyz"]:
+            role_sanity_error = ("role_placeholder", "Role appears to be a placeholder or keyboard spam.")
+
+        # Check 6: Repeated character (same char 4+ times in a row)
+        elif re.search(r'(.)\1{3,}', role_raw):
+            role_sanity_error = ("role_repeated_chars", "Role contains repeated characters (spam pattern).")
+
+        # Check 7: Repeated words (same word 3+ times)
+        if not role_sanity_error:
+            role_words = role_lower.split()
+            word_counts = {}
+            for w in role_words:
+                if len(w) > 1:  # Skip single chars
+                    word_counts[w] = word_counts.get(w, 0) + 1
+            if any(count >= 3 for count in word_counts.values()):
+                role_sanity_error = ("role_repeated_words", "Role contains the same word repeated 3+ times.")
+
+        # Check 8: Scam/spam phrases
+        if not role_sanity_error:
+            scam_patterns = [
+                "work from home", "work at home", "make money", "earn money",
+                "passive income", "get rich", "easy money", "be your own boss",
+                "mlm", "multi level marketing", "network marketing",
+                "crypto trader", "forex trader", "bitcoin trader", "day trader",
+                "investment opportunity", "financial freedom", "side hustle",
+                "join my team", "dm me", "click link", "link in bio",
+                "earn $", "make $", "$$", "💰", "🤑", "💵",
+                "work online", "online business", "home based"
+            ]
+            for pattern in scam_patterns:
+                if pattern in role_lower:
+                    role_sanity_error = ("role_scam_pattern", f"Role contains spam/scam pattern: '{pattern}'")
+                    break
+
+        # Check 9: URL in role
+        if not role_sanity_error and re.search(r'https?://|www\.|\.com/|\.org/|\.net/|\.io/', role_lower):
+            role_sanity_error = ("role_contains_url", "Role cannot contain URLs.")
+
+        # Check 10: Email in role
+        if not role_sanity_error and re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', role_raw):
+            role_sanity_error = ("role_contains_email", "Role cannot contain email addresses.")
+
+        # Check 11: Phone number in role
+        if not role_sanity_error and re.search(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b|\b\+\d{10,}', role_raw):
+            role_sanity_error = ("role_contains_phone", "Role cannot contain phone numbers.")
+
+        # Reject if any sanity check failed
+        if role_sanity_error:
+            error_code, error_message = role_sanity_error
+            print(f"❌ Role sanity check failed: {error_code} - '{role_raw[:50]}{'...' if len(role_raw) > 50 else ''}'")
+
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            print(f"   📊 Rate limit updated: rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+            # Log VALIDATION_FAILED event
+            try:
+                from datetime import timezone as tz_module
+                validation_failed_event = {
+                    "event_type": "VALIDATION_FAILED",
+                    "actor_hotkey": event.actor_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.now(tz_module.utc).isoformat(),
+                    "payload_hash": hashlib.sha256(json.dumps({
+                        "lead_id": event.payload.lead_id,
+                        "reason": error_code,
+                        "role": role_raw[:100]
+                    }, sort_keys=True).encode()).hexdigest(),
+                    "build_id": "gateway",
+                    "signature": "role_sanity_check",
+                    "payload": {
+                        "lead_id": event.payload.lead_id,
+                        "reason": error_code,
+                        "role": role_raw[:100],
+                        "miner_hotkey": event.actor_hotkey
+                    }
+                }
+                await log_event(validation_failed_event)
+                print(f"   ✅ Logged VALIDATION_FAILED ({error_code}) to TEE buffer")
+            except Exception as e:
+                print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": error_code,
+                    "message": error_message,
+                    "role": role_raw[:100] + ("..." if len(role_raw) > 100 else ""),
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": updated_stats["reset_at"]
+                    }
+                }
+            )
+
+        print(f"   ✅ Role sanity check passed: '{role_raw[:40]}{'...' if len(role_raw) > 40 else ''}'")
+
         # ========================================
         # Validate country/state/city logic
         # ========================================
@@ -1424,8 +1555,8 @@ async def submit_lead(event: SubmitLeadEvent):
         # This ensures consistent formatting in the database
         # NOTE: Does NOT affect validation (automated_checks uses .lower() for comparisons)
         #
-        # HASH INTEGRITY: We preserve the original geo fields in "_original" key
-        # so hash(lead_blob without _original) == lead_blob_hash always works.
+        # HASH INTEGRITY: We preserve the original geo fields in "_original_geo" key
+        # so hash(lead_blob without _original_geo) == lead_blob_hash always works.
         # Validators use the normalized top-level fields (city, state, country).
         print(f"   🔍 Normalizing lead fields for standardized storage...")
         

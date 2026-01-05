@@ -332,6 +332,72 @@ ICP_DEFINITIONS = [
                     "madagascar", "mauritania", "swaziland", "eswatini"],
         # Custom multiplier for Africa leads (higher value than default 1.5x)
         "multiplier": 5.0
+    },
+    
+    {
+        # Hospitality/Hotels - Business Development, Owners & Operations (US)
+        # Sub-industries from taxonomy: Hospitality, Hotel, Resorts (all under 'Travel and Tourism')
+        "sub_industries": ["Hospitality", "Hotel", "Resorts", "Travel Accommodations", 
+                          "Vacation Rental", "Tourism"],
+        "role_details": [
+            # Business Development
+            "business development", "bd", "biz dev", "business dev", 
+            "vp of business development", "vp business development", "head of business development",
+            "director of business development", "business development manager", "business development director",
+            "vp of bd", "head of bd", "director of bd",
+            # Ownership/Leadership
+            "owner", "co-owner", "business owner", "hotel owner", "property owner",
+            "founder", "co-founder", "ceo", "chief executive officer",
+            "president", "managing director", "general manager", "gm",
+            "principal", "partner", "managing partner",
+            # Operations Management
+            "operations manager", "director of operations", "vp of operations", "vp operations",
+            "head of operations", "operations director", "coo", "chief operating officer",
+            # Hotel/Hospitality Specific
+            "hotel manager", "hotel general manager", "hotel gm", "property manager",
+            "resort manager", "resort general manager", "hospitality manager",
+            "front office manager", "rooms division manager", "director of rooms",
+            "director of hospitality", "vp of hospitality", "head of hospitality"
+        ],
+        # Region filter - US only
+        "regions": ["united states", "usa", "us", "america", "american",
+                    "california", "new york", "texas", "florida", "illinois", "pennsylvania",
+                    "ohio", "georgia", "north carolina", "michigan", "new jersey", "virginia",
+                    "washington", "arizona", "massachusetts", "tennessee", "indiana", "missouri",
+                    "maryland", "wisconsin", "colorado", "minnesota", "south carolina", "alabama",
+                    "louisiana", "kentucky", "oregon", "oklahoma", "connecticut", "utah", "iowa",
+                    "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
+                    "idaho", "west virginia", "hawaii", "maine", "montana", "rhode island",
+                    "delaware", "south dakota", "north dakota", "alaska", "vermont", "wyoming"]
+    },
+    
+    {
+        # Small/Local Businesses - Owners (US)
+        # Note: "Small Business" not in taxonomy, using "Local Business" which is closest match
+        # This ICP targets business owners across various industries in the US
+        "sub_industries": ["Local Business", "Local", "Retail", "Restaurants", "Food and Beverage",
+                          "Professional Services", "Home Services", "Real Estate", "Construction",
+                          "Automotive", "Health Care", "Fitness", "Beauty", "Consulting"],
+        "role_details": [
+            # Ownership
+            "owner", "co-owner", "business owner", "sole proprietor", "sole operator",
+            "franchise owner", "franchisee", "store owner", "shop owner",
+            # Founder/Leadership
+            "founder", "co-founder", "ceo", "chief executive officer",
+            "president", "managing director", "principal", "partner",
+            # Small Business Specific
+            "proprietor", "operator", "entrepreneur"
+        ],
+        # Region filter - US only
+        "regions": ["united states", "usa", "us", "america", "american",
+                    "california", "new york", "texas", "florida", "illinois", "pennsylvania",
+                    "ohio", "georgia", "north carolina", "michigan", "new jersey", "virginia",
+                    "washington", "arizona", "massachusetts", "tennessee", "indiana", "missouri",
+                    "maryland", "wisconsin", "colorado", "minnesota", "south carolina", "alabama",
+                    "louisiana", "kentucky", "oregon", "oklahoma", "connecticut", "utah", "iowa",
+                    "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
+                    "idaho", "west virginia", "hawaii", "maine", "montana", "rhode island",
+                    "delaware", "south dakota", "north dakota", "alaska", "vermont", "wyoming"]
     }
 ]
 

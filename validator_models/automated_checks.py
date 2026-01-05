@@ -8876,26 +8876,53 @@ def _gse_search_stage5_sync(
     if search_type == "role":
         linkedin_url = kwargs.get("linkedin_url", "")
         
-        linkedin_url_query = None
-        if linkedin_url and "linkedin.com/in/" in linkedin_url:
-            profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0]
-            linkedin_url_query = f'linkedin.com/in/{profile_slug}'
+        # MANDATE: Role verification MUST use the miner's LinkedIn URL
+        # This ensures we extract role from the SPECIFIC person's profile.
+        # We search multiple queries for different snippets, but ONLY use results
+        # where the URL matches the miner's LinkedIn profile URL.
+        # NO FALLBACK to name+company searches.
         
         role_simplified = re.split(r'[,&/]', role)[0].strip() if role else ""
         
-        # Multiple primary queries
-        queries = [
-            f'"{full_name}" "{company}" linkedin',
-            f'"{full_name}" {company} linkedin',
-        ]
+        queries = []
+        fallback_queries = []  # Empty - no fallback allowed
         
-        # Verification queries
-        fallback_queries = []
-        if role_simplified:
-            fallback_queries.append(f'"{full_name}" "{role_simplified}" "{company}"')
-            fallback_queries.append(f'"{full_name}" {role_simplified} linkedin')
-        if linkedin_url_query:
-            fallback_queries.append(linkedin_url_query)
+        # Extract profile slug for URL matching
+        profile_slug = None
+        if linkedin_url and "linkedin.com/in/" in linkedin_url:
+            profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0].lower()
+        
+        if linkedin_url and "linkedin.com/in/" in linkedin_url and profile_slug:
+            # All queries search for different aspects, but we ONLY use results
+            # where the URL contains the miner's LinkedIn profile slug
+            
+            # Query 1: LinkedIn URL alone (returns profile with role in title)
+            queries.append(f'"{linkedin_url}"')
+            
+            # Query 2: LinkedIn URL + company (focuses on work history)
+            queries.append(f'"{linkedin_url}" "{company}"')
+            
+            # Query 3: LinkedIn URL + claimed role (verification mode)
+            if role_simplified:
+                queries.append(f'"{linkedin_url}" "{role_simplified}"')
+            
+            # Query 4: Name + role + company (may return profile in results)
+            # We still search this but ONLY use results matching the LinkedIn URL
+            if role_simplified:
+                queries.append(f'"{full_name}" "{role_simplified}" "{company}"')
+            
+            # Query 5: site: operator + claimed role (BEST for extracting role from Experience section)
+            # Uses site: to search INSIDE the profile page content, returns snippet with
+            # full Experience section like: "Paralegal. Brewe Layman. Aug 2005 - Present"
+            if role_simplified:
+                queries.append(f'site:linkedin.com/in/{profile_slug} "{role_simplified}"')
+            
+            # NO FALLBACK - only use results matching the miner's LinkedIn URL
+        else:
+            # NO LinkedIn URL provided - FAIL role verification
+            # Stage 4 requires LinkedIn URL, so this should never happen
+            print(f"   ❌ No valid LinkedIn URL for role search - cannot verify role")
+            return []  # Return empty - role verification will fail
     elif search_type == "person_location":
         # Search for PERSON's location using their LinkedIn URL
         # This is called ONLY when Stage 4 didn't extract location from its search results.
@@ -8980,24 +9007,43 @@ def _gse_search_stage5_sync(
     all_results = []
     role_found = False
     
+    # For role searches: extract profile slug for URL matching
+    role_profile_slug = None
+    if search_type == "role":
+        linkedin_url = kwargs.get("linkedin_url", "")
+        if linkedin_url and "linkedin.com/in/" in linkedin_url:
+            role_profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0].lower()
+    
     for query in queries:
         results = gse_search_with_fallback(query, max_results, company_name=company if search_type != "role" else None)
         if results:
-            all_results.extend(results)
-            # For role searches, check if we actually found a role
-            if search_type == "role":
+            # For role searches: ONLY keep results matching the miner's LinkedIn profile URL
+            if search_type == "role" and role_profile_slug:
+                matching_results = []
                 for r in results:
-                    title = r.get("title", "")
-                    snippet = r.get("body", "")
-                    extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
-                    if extracted and len(extracted) > 3:  # Found valid role
-                        role_found = True
-                        break
-                if role_found:
-                    return all_results
+                    result_url = r.get("href", "").lower()
+                    # Check if the result URL contains the miner's profile slug
+                    if f"/in/{role_profile_slug}" in result_url:
+                        matching_results.append(r)
+                        print(f"   ✅ URL MATCH: {result_url[:60]}...")
+                    else:
+                        # Log non-matching URLs (for debugging)
+                        pass  # Don't spam logs with non-matches
+                
+                if matching_results:
+                    all_results.extend(matching_results)
+                    # Check if we found a role from matching results
+                    for r in matching_results:
+                        title = r.get("title", "")
+                        snippet = r.get("body", "")
+                        extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
+                        if extracted and len(extracted) > 3:
+                            role_found = True
+                            break
             elif search_type == "person_location":
                 # For person_location: only return if we actually extracted a location
                 # Otherwise continue to next query (e.g., Query 2 or 3)
+                all_results.extend(results)
                 location_found = False
                 for r in results:
                     snippet = r.get("body", r.get("snippet", ""))
@@ -9013,62 +9059,30 @@ def _gse_search_stage5_sync(
                 else:
                     print(f"   ⚠️ Query returned results but no location extracted - trying next query...")
             else:
+                # Industry or other search types
+                all_results.extend(results)
                 return results
     
-    # ALWAYS try fallback queries for role verification (even if role was extracted)
-    # Fallback verification provides additional evidence to confirm the claimed role
-    # This is crucial when primary extraction finds a different/old role title
-    if search_type == "role" and fallback_queries:
-        if not role_found:
-            print(f"   ⚠️ No role in primary results, trying fallbacks...")
+    # For role searches: NO FALLBACK - we only use results matching the miner's LinkedIn URL
+    # All matching results are already collected in all_results
+    if search_type == "role":
+        if all_results:
+            print(f"   📊 Role search: Found {len(all_results)} result(s) matching miner's LinkedIn URL")
         else:
-            print(f"   🔍 Running fallback verification to confirm claimed role...")
-        
-        for j, query in enumerate(fallback_queries):
-            query_num = j + 2
-            print(f"   🔍 FALLBACK{query_num-1}: {query[:50]}...")
-            
-            # Check if this fallback query contains the claimed role (verification mode)
-            is_verification_query = role_simplified and role_simplified.lower() in query.lower()
-            
-            results = gse_search_with_fallback(query, max_results)
-            
-            # VERIFICATION MODE: If query contains claimed role and results mention name+company, 
-            # mark role as VERIFIED
-            if is_verification_query and results:
-                name_parts = full_name.lower().split()
-                for r in results:
-                    combined = (r.get("title", "") + " " + r.get("body", "")).lower()
-                    # Check if result mentions the person's name
-                    name_found = any(part in combined for part in name_parts if len(part) > 2)
-                    company_found = company.lower() in combined if company else False
-                    
-                    if name_found and company_found:
-                        print(f"   ✅ Role VERIFIED via fallback: '{role_simplified}' confirmed")
-                        # Add a synthetic result indicating verification
-                        verified_result = {
-                            "title": f"{full_name} - {role_simplified} at {company}",
-                            "href": r.get("href", ""),
-                            "body": f"Role verified: {role_simplified} (from verification search)",
-                            "role_verified": True,
-                            "verified_role": role_simplified
-                        }
-                        return [verified_result] + results
-            
-            # If no verification, just add results for standard extraction
-            if results:
-                all_results.extend(results)
+            print(f"   ⚠️ Role search: No results matching miner's LinkedIn URL found")
+            print(f"   ⚠️ All search results had different URLs - cannot verify role from different profiles")
+        # Return what we have (may be empty if no URL matches)
+        return all_results
     
-    # For non-role searches or if fallbacks didn't verify, return all collected results
+    # For non-role searches: return collected results or try fallback queries
     if all_results:
         return all_results
     
-    # Try remaining fallback queries for non-role searches
-    if search_type != "role":
-        for query in fallback_queries:
-            results = gse_search_with_fallback(query, max_results)
-            if results:
-                return results
+    # Try fallback queries for non-role searches
+    for query in fallback_queries:
+        results = gse_search_with_fallback(query, max_results)
+        if results:
+            return results
     
     return []
 
@@ -11432,8 +11446,7 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
         company_domain = f"https://{company_domain}"
     
     # Status codes that indicate website exists (pass immediately)
-    # 429 = Too Many Requests (rate limiting/bot protection) - proves site exists, just blocking automated requests
-    PASS_STATUS_CODES = {200, 301, 302, 307, 308, 401, 403, 405, 429, 500, 502, 503}
+    PASS_STATUS_CODES = {200, 301, 302, 307, 308, 401, 403, 405, 500, 502, 503}
     
     # Browser User-Agent to avoid anti-bot blocking (3M, etc.)
     headers = {

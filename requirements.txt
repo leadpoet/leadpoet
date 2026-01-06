@@ -117,3 +117,7 @@ websockets>=15.0.1
 # gRPC communication (for miner/validator nodes)
 grpcio>=1.60.0
 # ddgs>=6.0.0  # REMOVED - using ScrapingDog API instead
+
+# Geographic normalization (city/state/country standardization)
+us>=3.0.0  # US state lookup (offline, no rate limits)
+geonamescache>=2.0.0  # 786k+ city name variations (offline, no rate limits)

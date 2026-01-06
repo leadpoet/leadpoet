@@ -68,18 +68,26 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 
 # Enclave signing (CRITICAL: This is the signing authority)
-from gateway.tee.enclave_signer import sign_event, is_keypair_initialized
+# Try both import paths to support local dev and EC2 deployment
+try:
+    from gateway.tee.enclave_signer import sign_event, is_keypair_initialized
+except ImportError:
+    from tee.enclave_signer import sign_event, is_keypair_initialized
 
 from config import BUILD_ID
 
 # Python logging
 logger = logging.getLogger(__name__)
 
-# Supabase client accessor (lazily initialized via gateway.db.client)
+# Supabase client accessor (lazily initialized)
 def _get_supabase():
     """Get Supabase write client for logging events."""
     try:
-        from gateway.db.client import get_write_client
+        # Try both import paths to support local dev and EC2 deployment
+        try:
+            from gateway.db.client import get_write_client
+        except ImportError:
+            from db.client import get_write_client
         return get_write_client()
     except Exception as e:
         logger.warning(f"⚠️  Supabase client unavailable: {e}")
@@ -407,7 +415,11 @@ async def get_log_entry_by_hash(event_hash: str) -> Optional[Dict[str, Any]]:
         The full log_entry dict if found, None otherwise
     """
     try:
-        from gateway.db.client import get_read_client
+        # Try both import paths to support local dev and EC2 deployment
+        try:
+            from gateway.db.client import get_read_client
+        except ImportError:
+            from db.client import get_read_client
         read_client = get_read_client()
     except Exception as e:
         logger.error(f"Supabase not configured - cannot query log entries: {e}")
@@ -446,7 +458,11 @@ async def get_log_entries_for_epoch(
         List of log_entry dicts
     """
     try:
-        from gateway.db.client import get_read_client
+        # Try both import paths to support local dev and EC2 deployment
+        try:
+            from gateway.db.client import get_read_client
+        except ImportError:
+            from db.client import get_read_client
         read_client = get_read_client()
     except Exception as e:
         logger.error(f"Supabase not configured - cannot query log entries: {e}")
@@ -489,5 +505,9 @@ def get_signer_info() -> Dict[str, Any]:
     Returns:
         Dict with signer state information
     """
-    from gateway.tee.enclave_signer import get_signer_state
+    # Try both import paths to support local dev and EC2 deployment
+    try:
+        from gateway.tee.enclave_signer import get_signer_state
+    except ImportError:
+        from tee.enclave_signer import get_signer_state
     return get_signer_state()

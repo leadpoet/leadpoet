@@ -120,7 +120,11 @@ requirements = [
     
     # Monitoring
     "prometheus_client>=0.19.0",
-    "structlog>=23.2.0"
+    "structlog>=23.2.0",
+    
+    # Geographic normalization (city/state/country standardization)
+    "us>=3.0.0",  # US state lookup (offline, no rate limits)
+    "geonamescache>=2.0.0",  # 786k+ city name variations (offline, no rate limits)
 ]
 
 setup(

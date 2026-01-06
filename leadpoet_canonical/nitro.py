@@ -73,8 +73,10 @@ ALLOWED_GATEWAY_PCR0_VALUES: List[str] = [
 
 # Allowed PCR0 values for validator enclave
 # Update this list when deploying new validator builds
-# Currently empty - validator doesn't have TEE yet
-ALLOWED_VALIDATOR_PCR0_VALUES: List[str] = []
+ALLOWED_VALIDATOR_PCR0_VALUES: List[str] = [
+    # Validator enclave deployed 2026-01-06
+    "1697ef7e8c095ff5fc3d7e0e79bb7d00d29d0bdfa487d2c7353812ebafb35667ebd428c42db59ad1efe1c2999d1e5d85",
+]
 
 
 # =============================================================================

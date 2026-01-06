@@ -33,19 +33,19 @@ if [ "$RUNNING" -gt 0 ]; then
 fi
 
 # Start enclave
-# Memory: 512 MB (configured in allocator)
+# Memory: 1024 MB (minimum required for validator EIF)
 # CPU: 2 (configured in allocator)
 echo ""
 echo "📦 Starting enclave..."
 echo "   EIF: $EIF_FILE"
-echo "   Memory: 512 MB"
+echo "   Memory: 1024 MB"
 echo "   CPUs: 2"
 echo ""
 
 nitro-cli run-enclave \
     --eif-path "$EIF_FILE" \
     --cpu-count 2 \
-    --memory 512 \
+    --memory 1024 \
     --debug-mode
 
 echo ""

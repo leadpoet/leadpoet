@@ -50,6 +50,32 @@ from supabase import create_client, Client
 # Create Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+# ============================================================
+# Role Sanity Check Configuration (loaded from JSON)
+# ============================================================
+# Load role validation patterns from JSON config file
+# This allows updating patterns without code changes
+_role_patterns_path = os.path.join(os.path.dirname(__file__), 'role_patterns.json')
+with open(_role_patterns_path, 'r') as f:
+    ROLE_PATTERNS = json.load(f)
+
+# Build typo dictionary for fast lookup
+ROLE_TYPO_DICT = {}
+for correct, typos in ROLE_PATTERNS['typos'].items():
+    for typo in typos:
+        ROLE_TYPO_DICT[typo.lower()] = correct.lower()
+
+# Build URL patterns from TLDs
+ROLE_URL_PATTERNS = [r'https?://', r'\bwww\.']
+for tld in ROLE_PATTERNS['url_tlds']:
+    ROLE_URL_PATTERNS.append(rf'\b\w+\.{tld}\b')
+
+# Compile regex patterns for performance
+ROLE_NON_LATIN_RE = re.compile(ROLE_PATTERNS['non_latin_regex'])
+ROLE_EMOJI_RE = re.compile(ROLE_PATTERNS['emoji_regex'])
+
+print(f"[submit.py] Loaded {len(ROLE_TYPO_DICT)} typo patterns, {len(ROLE_URL_PATTERNS)} URL patterns")
+
 # Create router
 router = APIRouter(prefix="/submit", tags=["Submission"])
 
@@ -63,6 +89,147 @@ from gateway.utils.linkedin import normalize_linkedin_url, compute_linkedin_comb
 # Geographic Normalization (standardizes city/state/country)
 # ============================================================
 from gateway.utils.geo_normalize import normalize_location, validate_location, normalize_country
+
+
+# ============================================================
+# Role Sanity Check Function
+# ============================================================
+
+def check_role_sanity(role_raw: str) -> tuple:
+    """
+    Validate role format - returns (error_code, error_message) or (None, None) if valid.
+
+    Checks loaded from role_patterns.json for easy maintenance.
+    Catches garbage roles at gateway BEFORE entering validation queue.
+    """
+    role_raw = role_raw.strip()
+    role_lower = role_raw.lower()
+    thresholds = ROLE_PATTERNS['thresholds']
+    letters_only = re.sub(r'[^a-zA-Z]', '', role_raw)
+
+    # ==========================================
+    # CURRENT 11 CHECKS
+    # ==========================================
+
+    # Check 1: Too short
+    if len(role_raw) < thresholds['min_length']:
+        return ("role_too_short", f"Role too short ({len(role_raw)} chars). Minimum {thresholds['min_length']} characters required.")
+
+    # Check 2: Too long
+    if len(role_raw) > thresholds['max_length']:
+        return ("role_too_long", f"Role too long ({len(role_raw)} chars). Maximum {thresholds['max_length']} characters allowed.")
+
+    # Check 3: No letters
+    if not any(c.isalpha() for c in role_raw):
+        return ("role_no_letters", "Role must contain at least one letter.")
+
+    # Check 4: Mostly numbers
+    if sum(c.isdigit() for c in role_raw) > len(role_raw) * thresholds['max_digit_ratio']:
+        return ("role_mostly_numbers", "Role cannot be mostly numbers.")
+
+    # Check 5: Placeholder patterns
+    if role_lower in ROLE_PATTERNS['placeholders']:
+        return ("role_placeholder", "Role appears to be a placeholder or keyboard spam.")
+
+    # Check 6: Repeated character 4+ times
+    if re.search(r'(.)\1{3,}', role_raw):
+        return ("role_repeated_chars", "Role contains repeated characters (spam pattern).")
+
+    # Check 7: Repeated words 3+ times
+    role_words = role_lower.split()
+    word_counts = {}
+    for w in role_words:
+        if len(w) > 1:
+            word_counts[w] = word_counts.get(w, 0) + 1
+    if any(count >= 3 for count in word_counts.values()):
+        return ("role_repeated_words", "Role contains the same word repeated 3+ times.")
+
+    # Check 8: Scam/spam phrases
+    for pattern in ROLE_PATTERNS['scam_patterns']:
+        if pattern in role_lower:
+            return ("role_scam_pattern", f"Role contains spam/scam pattern: '{pattern}'")
+
+    # Check 9: URL in role (basic check)
+    if re.search(r'https?://|www\.|\.com/|\.org/|\.net/|\.io/', role_lower):
+        return ("role_contains_url", "Role cannot contain URLs.")
+
+    # Check 10: Email in role
+    if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', role_raw):
+        return ("role_contains_email", "Role cannot contain email addresses.")
+
+    # Check 11: Phone number in role
+    if re.search(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b|\b\+\d{10,}', role_raw):
+        return ("role_contains_phone", "Role cannot contain phone numbers.")
+
+    # ==========================================
+    # NEW CHECKS (loaded from JSON)
+    # ==========================================
+
+    # Check 12: Non-English characters (non-Latin scripts)
+    if ROLE_NON_LATIN_RE.findall(role_raw):
+        return ("role_non_english", "Role contains non-English characters.")
+
+    # Check 13: URLs and websites (comprehensive TLD check)
+    role_for_url = role_lower.replace('.net', '_NET_')  # Preserve .NET framework
+    for pattern in ROLE_URL_PATTERNS:
+        if re.search(pattern, role_for_url):
+            return ("role_contains_website", "Role cannot contain website domains.")
+
+    # Check 14: Typos in common job words
+    role_words_alpha = re.findall(r'[a-zA-Z]+', role_lower)
+    for word in role_words_alpha:
+        if word in ROLE_TYPO_DICT:
+            return ("role_typo", f"Role contains typo: '{word}' should be '{ROLE_TYPO_DICT[word]}'")
+
+    # Check 15: Too few letters
+    if len(letters_only) < thresholds['min_letters']:
+        return ("role_too_few_letters", "Role must contain at least 3 letters.")
+
+    # Check 16: Starts with special character
+    if role_raw and role_raw[0] in ROLE_PATTERNS['special_chars']:
+        return ("role_starts_special_char", "Role cannot start with a special character.")
+
+    # Check 17: Achievement/stat statements
+    for pattern in ROLE_PATTERNS['achievement_patterns']:
+        if re.search(pattern, role_raw, re.IGNORECASE):
+            return ("role_achievement_statement", "Role appears to be an achievement statement, not a job title.")
+
+    # Check 18: Incomplete titles (ending with "of")
+    for pattern in ROLE_PATTERNS['incomplete_patterns']:
+        if re.search(pattern, role_lower.strip()):
+            return ("role_incomplete_title", "Role appears incomplete (ends with 'of').")
+
+    # Check 19: Contains company name
+    for pattern in ROLE_PATTERNS['company_patterns']:
+        if re.search(pattern, role_raw, re.IGNORECASE):
+            return ("role_contains_company", "Role should not contain company name (use separate field).")
+
+    # Check 20: Contains emojis
+    if ROLE_EMOJI_RE.search(role_raw):
+        return ("role_contains_emoji", "Role cannot contain emojis.")
+
+    # Check 21: Hiring markers
+    for pattern in ROLE_PATTERNS['hiring_patterns']:
+        if re.search(pattern, role_lower):
+            return ("role_hiring_marker", "Role contains hiring/recruiting markers.")
+
+    # Check 22: Bio/description phrases
+    for pattern in ROLE_PATTERNS['bio_patterns']:
+        if re.search(pattern, role_lower):
+            return ("role_bio_description", "Role appears to be a bio description, not a job title.")
+
+    # Check 23: Long role without job keywords
+    if len(role_raw) > thresholds['long_role_threshold']:
+        if not any(kw in role_lower for kw in ROLE_PATTERNS['job_keywords']):
+            return ("role_no_job_keywords", "Long role doesn't contain recognizable job title keywords.")
+
+    # Check 24: Gibberish (no vowels)
+    if len(letters_only) > 5:
+        vowels = sum(1 for c in letters_only.lower() if c in 'aeiou')
+        if vowels / len(letters_only) < thresholds['min_vowel_ratio']:
+            return ("role_gibberish", "Role appears to be gibberish (no vowels).")
+
+    return (None, None)  # Passed all checks
 
 
 # ============================================================
@@ -1095,77 +1262,13 @@ async def submit_lead(event: SubmitLeadEvent):
         # ========================================
         # Catch obviously garbage roles at gateway BEFORE entering validation queue
         # Saves validator time and API costs by rejecting spam/garbage early
+        # Checks loaded from role_patterns.json (24 checks total)
         print(f"   🔍 Validating role format (early sanity check)...")
         role_raw = lead_blob.get("role", "").strip()
-        role_lower = role_raw.lower()
 
-        role_sanity_error = None
-
-        # Check 1: Too short (< 2 chars)
-        if len(role_raw) < 2:
-            role_sanity_error = ("role_too_short", f"Role too short ({len(role_raw)} chars). Minimum 2 characters required.")
-
-        # Check 2: Too long (> 150 chars) - legitimate roles are < 80, but allow buffer
-        elif len(role_raw) > 150:
-            role_sanity_error = ("role_too_long", f"Role too long ({len(role_raw)} chars). Maximum 150 characters allowed.")
-
-        # Check 3: No letters (all symbols/numbers)
-        elif not any(c.isalpha() for c in role_raw):
-            role_sanity_error = ("role_no_letters", "Role must contain at least one letter.")
-
-        # Check 4: Mostly numbers (>50% digits) - "VP123456789" is garbage
-        elif sum(c.isdigit() for c in role_raw) > len(role_raw) * 0.5:
-            role_sanity_error = ("role_mostly_numbers", "Role cannot be mostly numbers.")
-
-        # Check 5: Keyboard spam / placeholder patterns
-        elif role_lower in ["asdfgh", "qwerty", "zxcvbn", "asdf", "qwer", "zxcv",
-                            "aaaaaa", "bbbbbb", "test", "testing", "xxx", "yyy", "zzz",
-                            "null", "undefined", "none", "n/a", "na", "tbd", "tba",
-                            "placeholder", "temp", "todo", "fixme", "abc", "xyz"]:
-            role_sanity_error = ("role_placeholder", "Role appears to be a placeholder or keyboard spam.")
-
-        # Check 6: Repeated character (same char 4+ times in a row)
-        elif re.search(r'(.)\1{3,}', role_raw):
-            role_sanity_error = ("role_repeated_chars", "Role contains repeated characters (spam pattern).")
-
-        # Check 7: Repeated words (same word 3+ times)
-        if not role_sanity_error:
-            role_words = role_lower.split()
-            word_counts = {}
-            for w in role_words:
-                if len(w) > 1:  # Skip single chars
-                    word_counts[w] = word_counts.get(w, 0) + 1
-            if any(count >= 3 for count in word_counts.values()):
-                role_sanity_error = ("role_repeated_words", "Role contains the same word repeated 3+ times.")
-
-        # Check 8: Scam/spam phrases
-        if not role_sanity_error:
-            scam_patterns = [
-                "work from home", "work at home", "make money", "earn money",
-                "passive income", "get rich", "easy money", "be your own boss",
-                "mlm", "multi level marketing", "network marketing",
-                "crypto trader", "forex trader", "bitcoin trader", "day trader",
-                "investment opportunity", "financial freedom", "side hustle",
-                "join my team", "dm me", "click link", "link in bio",
-                "earn $", "make $", "$$", "💰", "🤑", "💵",
-                "work online", "online business", "home based"
-            ]
-            for pattern in scam_patterns:
-                if pattern in role_lower:
-                    role_sanity_error = ("role_scam_pattern", f"Role contains spam/scam pattern: '{pattern}'")
-                    break
-
-        # Check 9: URL in role
-        if not role_sanity_error and re.search(r'https?://|www\.|\.com/|\.org/|\.net/|\.io/', role_lower):
-            role_sanity_error = ("role_contains_url", "Role cannot contain URLs.")
-
-        # Check 10: Email in role
-        if not role_sanity_error and re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', role_raw):
-            role_sanity_error = ("role_contains_email", "Role cannot contain email addresses.")
-
-        # Check 11: Phone number in role
-        if not role_sanity_error and re.search(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b|\b\+\d{10,}', role_raw):
-            role_sanity_error = ("role_contains_phone", "Role cannot contain phone numbers.")
+        # Call comprehensive role sanity check function
+        error_code, error_message = check_role_sanity(role_raw)
+        role_sanity_error = (error_code, error_message) if error_code else None
 
         # Reject if any sanity check failed
         if role_sanity_error:

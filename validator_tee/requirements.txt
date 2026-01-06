@@ -1,0 +1,9 @@
+# Validator TEE Enclave Requirements
+# Minimal dependencies for enclave signing operations
+
+# Cryptography for Ed25519 key generation and signing
+cryptography>=41.0.0
+
+# CBOR encoding for attestation documents
+cbor2>=5.4.0
+

@@ -2,14 +2,19 @@
 Validator TEE Enclave Signer
 ============================
 
-This module runs INSIDE the Nitro Enclave and handles:
-- Ed25519 keypair generation (ephemeral per boot)
-- Weight hash signing
-- Attestation document generation
+This module provides the HOST-SIDE interface for validator TEE operations.
+It automatically detects whether a real Nitro Enclave is available:
+
+1. ENCLAVE MODE: When a real Nitro Enclave is running, operations are
+   delegated to the enclave via vsock. The private key exists ONLY in
+   the enclave's protected memory.
+
+2. MOCK MODE: When no enclave is available, uses local Ed25519 keys.
+   This mode is for development/testing only and provides signatures
+   but NOT hardware attestation.
 
 SECURITY MODEL:
-- Keypair is generated once at enclave boot
-- Private key NEVER leaves the enclave
+- In enclave mode: Private key NEVER leaves the enclave
 - Attestation binds public key to enclave code (PCR0)
 - epoch_id in attestation prevents replay attacks
 
@@ -35,7 +40,7 @@ import json
 import hashlib
 import logging
 import threading
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict, Any
 
 # Ed25519 signing
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -48,6 +53,43 @@ from cryptography.hazmat.primitives import serialization
 from leadpoet_canonical.weights import bundle_weights_hash
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# Enclave Detection
+# ============================================================================
+
+_ENCLAVE_CLIENT = None
+_ENCLAVE_AVAILABLE: Optional[bool] = None
+
+
+def _check_enclave_available() -> bool:
+    """Check if a real Nitro Enclave is available."""
+    global _ENCLAVE_AVAILABLE, _ENCLAVE_CLIENT
+    
+    if _ENCLAVE_AVAILABLE is not None:
+        return _ENCLAVE_AVAILABLE
+    
+    try:
+        from validator_tee.vsock_client import ValidatorEnclaveClient, is_enclave_available
+        
+        if is_enclave_available():
+            _ENCLAVE_CLIENT = ValidatorEnclaveClient()
+            # Test connection
+            _ENCLAVE_CLIENT.health_check()
+            _ENCLAVE_AVAILABLE = True
+            logger.info("✅ Connected to real Nitro Enclave via vsock")
+            return True
+    except Exception as e:
+        logger.warning(f"Enclave not available: {e}")
+    
+    _ENCLAVE_AVAILABLE = False
+    logger.warning("⚠️ Running in MOCK mode (no real enclave)")
+    return False
+
+
+def is_using_real_enclave() -> bool:
+    """Check if using a real Nitro Enclave (vs mock mode)."""
+    return _check_enclave_available()
 
 # ============================================================================
 # Module-Level State (Enclave Singleton)
@@ -69,21 +111,29 @@ _SIGN_LOCK = threading.Lock()
 
 def initialize_enclave_keypair() -> str:
     """
-    Generate Ed25519 keypair for this enclave boot session.
+    Initialize or connect to enclave keypair.
     
-    SECURITY: Private key exists only in enclave memory.
-    This function should be called ONCE at enclave boot.
+    If a real Nitro Enclave is running, connects via vsock.
+    Otherwise, generates a local keypair (mock mode).
     
     Returns:
         Public key as hex string
     """
     global _PRIVATE_KEY, _PUBLIC_KEY, _PUBLIC_KEY_HEX
     
-    if _PRIVATE_KEY is not None:
-        logger.warning("Enclave keypair already initialized")
+    # Check for real enclave first
+    if _check_enclave_available():
+        # Use real enclave - get pubkey via vsock
+        _PUBLIC_KEY_HEX = _ENCLAVE_CLIENT.get_public_key()
+        logger.info(f"✅ Connected to enclave: {_PUBLIC_KEY_HEX[:16]}...")
         return _PUBLIC_KEY_HEX
     
-    # Generate new Ed25519 keypair
+    # Fall back to mock mode (local keypair)
+    if _PRIVATE_KEY is not None:
+        logger.warning("Enclave keypair already initialized (mock mode)")
+        return _PUBLIC_KEY_HEX
+    
+    # Generate new Ed25519 keypair locally
     _PRIVATE_KEY = Ed25519PrivateKey.generate()
     _PUBLIC_KEY = _PRIVATE_KEY.public_key()
     
@@ -94,13 +144,15 @@ def initialize_enclave_keypair() -> str:
     )
     _PUBLIC_KEY_HEX = pubkey_bytes.hex()
     
-    logger.info(f"✅ Validator enclave keypair initialized: {_PUBLIC_KEY_HEX[:16]}...")
+    logger.warning(f"⚠️ MOCK MODE: Local keypair initialized: {_PUBLIC_KEY_HEX[:16]}...")
     
     return _PUBLIC_KEY_HEX
 
 
 def is_keypair_initialized() -> bool:
     """Check if enclave keypair has been initialized."""
+    if _check_enclave_available():
+        return True  # Enclave always has its keypair
     return _PRIVATE_KEY is not None
 
 
@@ -114,6 +166,9 @@ def get_enclave_public_key_hex() -> str:
     Raises:
         RuntimeError: If keypair not initialized
     """
+    if _check_enclave_available():
+        return _ENCLAVE_CLIENT.get_public_key()
+    
     if _PUBLIC_KEY_HEX is None:
         raise RuntimeError("Enclave keypair not initialized. Call initialize_enclave_keypair() first.")
     return _PUBLIC_KEY_HEX
@@ -198,6 +253,9 @@ def sign_weights(
     SECURITY: This function computes the canonical hash internally.
     It does NOT accept pre-computed hashes, preventing signing oracle attacks.
     
+    If a real Nitro Enclave is running, signing happens inside the enclave.
+    Otherwise, falls back to local signing (mock mode).
+    
     Args:
         netuid: Subnet ID
         epoch_id: Epoch identifier
@@ -212,10 +270,7 @@ def sign_weights(
         RuntimeError: If keypair not initialized
         ValueError: If inputs are invalid
     """
-    if _PRIVATE_KEY is None:
-        raise RuntimeError("Enclave keypair not initialized")
-    
-    # Validate inputs
+    # Validate inputs first (before sending to enclave)
     if len(uids) != len(weights_u16):
         raise ValueError(f"Length mismatch: {len(uids)} uids vs {len(weights_u16)} weights")
     
@@ -233,6 +288,20 @@ def sign_weights(
     weights_pairs = list(zip(uids, weights_u16))
     weights_hash = bundle_weights_hash(netuid, epoch_id, block, weights_pairs)
     
+    # Use real enclave if available
+    if _check_enclave_available():
+        # Sign via enclave vsock
+        signature_hex = _ENCLAVE_CLIENT.sign_weights(weights_hash)
+        logger.info(
+            f"✅ Signed weights (ENCLAVE): epoch={epoch_id}, {len(uids)} UIDs, "
+            f"hash={weights_hash[:16]}..."
+        )
+        return weights_hash, signature_hex
+    
+    # Fall back to mock mode (local signing)
+    if _PRIVATE_KEY is None:
+        raise RuntimeError("Enclave keypair not initialized")
+    
     # Sign the raw hash bytes (32 bytes), NOT the hex string
     digest_bytes = bytes.fromhex(weights_hash)
     
@@ -241,8 +310,8 @@ def sign_weights(
     
     signature_hex = signature_bytes.hex()
     
-    logger.info(
-        f"✅ Signed weights: epoch={epoch_id}, {len(uids)} UIDs, "
+    logger.warning(
+        f"⚠️ Signed weights (MOCK): epoch={epoch_id}, {len(uids)} UIDs, "
         f"hash={weights_hash[:16]}..."
     )
     
@@ -347,6 +416,7 @@ def get_attestation_document_b64(epoch_id: int) -> str:
     """
     Get base64-encoded attestation document for the given epoch.
     
+    If a real Nitro Enclave is running, gets attestation from enclave.
     Caches attestation per epoch to avoid regenerating.
     
     Args:
@@ -356,6 +426,28 @@ def get_attestation_document_b64(epoch_id: int) -> str:
         Base64-encoded attestation document
     """
     import base64
+    
+    # Use real enclave if available
+    if _check_enclave_available():
+        # Check cache first (even for real enclave)
+        if epoch_id in _ATTESTATION_CACHE:
+            return _ATTESTATION_CACHE[epoch_id]
+        
+        attestation_data = _ENCLAVE_CLIENT.get_attestation(epoch_id)
+        attestation_b64 = attestation_data["attestation_b64"]
+        
+        # Cache it
+        _ATTESTATION_CACHE[epoch_id] = attestation_b64
+        
+        is_mock = attestation_data.get("is_mock", False)
+        if is_mock:
+            logger.warning(f"⚠️ Got MOCK attestation from enclave for epoch {epoch_id}")
+        else:
+            logger.info(f"✅ Got REAL Nitro attestation from enclave for epoch {epoch_id}")
+        
+        return attestation_b64
+    
+    # Fall back to local attestation generation (mock mode)
     
     # Check cache first
     if epoch_id in _ATTESTATION_CACHE:

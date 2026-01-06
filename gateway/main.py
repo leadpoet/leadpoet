@@ -39,7 +39,7 @@ from gateway.utils.storage import generate_presigned_put_urls
 from supabase import create_client, Client
 
 # Import API routers
-from gateway.api import epoch, validate, reveal, manifest, submit, attest, weights
+from gateway.api import epoch, validate, reveal, manifest, submit, attest, weights, attestation
 
 # Import background tasks
 from gateway.tasks.reveal_collector import reveal_collector_task
@@ -338,7 +338,8 @@ app.include_router(validate.router)  # Individual + Batch validation
 app.include_router(reveal.router)
 app.include_router(manifest.router)
 app.include_router(submit.router)
-app.include_router(attest.router)  # TEE attestation endpoint
+app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)
+app.include_router(attestation.router)  # TEE attestation endpoint (/attestation/document, /attestation/pubkey)
 app.include_router(weights.router)  # Weights submission for auditor validators
 
 # ============================================================

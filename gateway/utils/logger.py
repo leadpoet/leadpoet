@@ -291,9 +291,12 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
             actor_hotkey = payload.get("actor_hotkey") or payload.get("validator_hotkey") or payload.get("miner_hotkey")
             
             # Create Supabase entry (NEW column set with TEE fields)
+            # CRITICAL: Keep "payload" as original payload for dashboard compatibility
+            # Store full signed envelope in "signed_log_entry" for auditor verification
             supabase_entry = {
                 "event_type": event_type,
-                "payload": log_entry,  # Full signed log_entry
+                "payload": payload,  # ORIGINAL payload (unchanged for dashboards)
+                "signed_log_entry": log_entry,  # Full signed envelope (for auditors)
                 "event_hash": event_hash,
                 "enclave_pubkey": log_entry["enclave_pubkey"],
                 "boot_id": signed_event["boot_id"],

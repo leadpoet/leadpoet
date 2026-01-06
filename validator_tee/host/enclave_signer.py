@@ -71,7 +71,7 @@ def _ensure_enclave_connected():
         return _ENCLAVE_CLIENT
     
     try:
-        from validator_tee.vsock_client import ValidatorEnclaveClient, is_enclave_available
+        from validator_tee.host.vsock_client import ValidatorEnclaveClient, is_enclave_available
         
         if not is_enclave_available():
             raise RuntimeError(

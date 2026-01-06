@@ -7,7 +7,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EIF_FILE="$SCRIPT_DIR/validator-enclave.eif"
+VALIDATOR_TEE_DIR="$(dirname "$SCRIPT_DIR")"
+EIF_FILE="$VALIDATOR_TEE_DIR/validator-enclave.eif"
 
 echo "=========================================="
 echo "🚀 Starting Validator Nitro Enclave"
@@ -16,7 +17,7 @@ echo "=========================================="
 # Check if EIF exists
 if [ ! -f "$EIF_FILE" ]; then
     echo "❌ Error: $EIF_FILE not found!"
-    echo "   Run: bash build_enclave.sh first"
+    echo "   Run: bash scripts/build_enclave.sh first"
     exit 1
 fi
 
@@ -27,7 +28,7 @@ if [ "$RUNNING" -gt 0 ]; then
     echo ""
     nitro-cli describe-enclaves
     echo ""
-    echo "To stop it: bash stop_enclave.sh"
+    echo "To stop it: bash scripts/stop_enclave.sh"
     exit 1
 fi
 
@@ -57,6 +58,6 @@ echo "To view logs:"
 echo "  nitro-cli console --enclave-id <ENCLAVE_ID>"
 echo ""
 echo "To test connection from host:"
-echo "  python3 -c \"from validator_tee.vsock_client import ValidatorEnclaveClient; c = ValidatorEnclaveClient(); print(c.get_public_key())\""
+echo "  cd ~/leadpoet/leadpoet"
+echo "  python3 -c \"from validator_tee.host.vsock_client import ValidatorEnclaveClient; c = ValidatorEnclaveClient(); print('Public Key:', c.get_public_key())\""
 echo ""
-

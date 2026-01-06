@@ -32,4 +32,3 @@ echo ""
 echo "✅ All enclaves terminated"
 echo ""
 nitro-cli describe-enclaves
-

@@ -7,19 +7,18 @@ RUN yum install -y \
     && yum clean all
 
 # Copy requirements and install dependencies
-COPY validator_tee/requirements.txt /tmp/requirements.txt
+COPY validator_tee/enclave/requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Set working directory
 WORKDIR /app
 
-# Copy validator_tee module
-COPY validator_tee/ /app/validator_tee/
+# Copy enclave-specific files (runs INSIDE the enclave)
+COPY validator_tee/enclave/ /app/validator_tee/enclave/
 
 # Copy leadpoet_canonical module (for canonical weight hashing)
 COPY leadpoet_canonical/ /app/leadpoet_canonical/
 
 # Run the validator TEE service
 # -u flag: unbuffered output (CRITICAL for debugging)
-ENTRYPOINT ["python3", "-u", "/app/validator_tee/tee_service.py"]
-
+ENTRYPOINT ["python3", "-u", "/app/validator_tee/enclave/tee_service.py"]

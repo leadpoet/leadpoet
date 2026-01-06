@@ -3,20 +3,13 @@ Validator TEE Enclave Signer
 ============================
 
 This module provides the HOST-SIDE interface for validator TEE operations.
-It automatically detects whether a real Nitro Enclave is available:
-
-1. ENCLAVE MODE: When a real Nitro Enclave is running, operations are
-   delegated to the enclave via vsock. The private key exists ONLY in
-   the enclave's protected memory.
-
-2. MOCK MODE: When no enclave is available, uses local Ed25519 keys.
-   This mode is for development/testing only and provides signatures
-   but NOT hardware attestation.
+All operations are delegated to the Nitro Enclave via vsock.
 
 SECURITY MODEL:
-- In enclave mode: Private key NEVER leaves the enclave
+- Private key NEVER leaves the enclave (hardware-protected)
 - Attestation binds public key to enclave code (PCR0)
 - epoch_id in attestation prevents replay attacks
+- NO MOCK MODE: Enclave MUST be running, otherwise operations FAIL
 
 CONSTRAINT (CRITICAL):
 This module does NOT expose a generic sign(bytes) API.
@@ -33,6 +26,9 @@ ATTESTATION USER_DATA SCHEMA (Validator - includes epoch_id):
 }
 
 Auditors verify: purpose="validator_weights", epoch_id matches bundle.epoch_id
+
+FAIL-CLOSED: If enclave is not running, all operations raise RuntimeError.
+This ensures the validator cannot accidentally run without TEE protection.
 """
 
 import os
@@ -55,54 +51,64 @@ from leadpoet_canonical.weights import bundle_weights_hash
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# Enclave Detection
+# Enclave Connection (REQUIRED - No Mock Mode)
 # ============================================================================
 
 _ENCLAVE_CLIENT = None
-_ENCLAVE_AVAILABLE: Optional[bool] = None
+_ENCLAVE_CONNECTED: bool = False
 
 
-def _check_enclave_available() -> bool:
-    """Check if a real Nitro Enclave is available."""
-    global _ENCLAVE_AVAILABLE, _ENCLAVE_CLIENT
+def _ensure_enclave_connected():
+    """
+    Ensure connection to Nitro Enclave via vsock.
     
-    if _ENCLAVE_AVAILABLE is not None:
-        return _ENCLAVE_AVAILABLE
+    FAIL-CLOSED: Raises RuntimeError if enclave is not available.
+    There is NO mock mode - the enclave MUST be running.
+    """
+    global _ENCLAVE_CONNECTED, _ENCLAVE_CLIENT
+    
+    if _ENCLAVE_CONNECTED and _ENCLAVE_CLIENT is not None:
+        return _ENCLAVE_CLIENT
     
     try:
         from validator_tee.vsock_client import ValidatorEnclaveClient, is_enclave_available
         
-        if is_enclave_available():
-            _ENCLAVE_CLIENT = ValidatorEnclaveClient()
-            # Test connection
-            _ENCLAVE_CLIENT.health_check()
-            _ENCLAVE_AVAILABLE = True
-            logger.info("✅ Connected to real Nitro Enclave via vsock")
-            return True
+        if not is_enclave_available():
+            raise RuntimeError(
+                "FAIL-CLOSED: Nitro Enclave is NOT running. "
+                "Start the enclave with: bash validator_tee/start_enclave.sh"
+            )
+        
+        _ENCLAVE_CLIENT = ValidatorEnclaveClient()
+        # Test connection
+        _ENCLAVE_CLIENT.health_check()
+        _ENCLAVE_CONNECTED = True
+        logger.info("✅ Connected to Nitro Enclave via vsock")
+        return _ENCLAVE_CLIENT
+        
+    except ImportError as e:
+        raise RuntimeError(f"FAIL-CLOSED: vsock_client not available: {e}")
     except Exception as e:
-        logger.warning(f"Enclave not available: {e}")
-    
-    _ENCLAVE_AVAILABLE = False
-    logger.warning("⚠️ Running in MOCK mode (no real enclave)")
-    return False
+        raise RuntimeError(f"FAIL-CLOSED: Cannot connect to enclave: {e}")
 
 
-def is_using_real_enclave() -> bool:
-    """Check if using a real Nitro Enclave (vs mock mode)."""
-    return _check_enclave_available()
+def is_enclave_running() -> bool:
+    """Check if Nitro Enclave is running and connected."""
+    try:
+        _ensure_enclave_connected()
+        return True
+    except RuntimeError:
+        return False
 
 # ============================================================================
-# Module-Level State (Enclave Singleton)
+# Module-Level State
 # ============================================================================
 
-_PRIVATE_KEY: Optional[Ed25519PrivateKey] = None
-_PUBLIC_KEY: Optional[Ed25519PublicKey] = None
-_PUBLIC_KEY_HEX: Optional[str] = None
-_CODE_HASH: Optional[str] = None
+# Cache for attestations (keyed by epoch_id)
 _ATTESTATION_CACHE: dict = {}  # epoch_id -> attestation_b64
 
-# Thread safety for signing operations
-_SIGN_LOCK = threading.Lock()
+# Cache for public key (avoid repeated vsock calls)
+_PUBLIC_KEY_HEX: Optional[str] = None
 
 
 # ============================================================================
@@ -111,67 +117,37 @@ _SIGN_LOCK = threading.Lock()
 
 def initialize_enclave_keypair() -> str:
     """
-    Initialize or connect to enclave keypair.
+    Connect to enclave and get public key.
     
-    If a real Nitro Enclave is running, connects via vsock.
-    Otherwise, generates a local keypair (mock mode).
+    FAIL-CLOSED: Raises RuntimeError if enclave is not running.
     
     Returns:
         Public key as hex string
     """
-    global _PRIVATE_KEY, _PUBLIC_KEY, _PUBLIC_KEY_HEX
+    global _PUBLIC_KEY_HEX
     
-    # Check for real enclave first
-    if _check_enclave_available():
-        # Use real enclave - get pubkey via vsock
-        _PUBLIC_KEY_HEX = _ENCLAVE_CLIENT.get_public_key()
-        logger.info(f"✅ Connected to enclave: {_PUBLIC_KEY_HEX[:16]}...")
-        return _PUBLIC_KEY_HEX
-    
-    # Fall back to mock mode (local keypair)
-    if _PRIVATE_KEY is not None:
-        logger.warning("Enclave keypair already initialized (mock mode)")
-        return _PUBLIC_KEY_HEX
-    
-    # Generate new Ed25519 keypair locally
-    _PRIVATE_KEY = Ed25519PrivateKey.generate()
-    _PUBLIC_KEY = _PRIVATE_KEY.public_key()
-    
-    # Export public key as hex
-    pubkey_bytes = _PUBLIC_KEY.public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw
-    )
-    _PUBLIC_KEY_HEX = pubkey_bytes.hex()
-    
-    logger.warning(f"⚠️ MOCK MODE: Local keypair initialized: {_PUBLIC_KEY_HEX[:16]}...")
-    
+    client = _ensure_enclave_connected()
+    _PUBLIC_KEY_HEX = client.get_public_key()
+    logger.info(f"✅ Connected to enclave: {_PUBLIC_KEY_HEX[:16]}...")
     return _PUBLIC_KEY_HEX
 
 
 def is_keypair_initialized() -> bool:
-    """Check if enclave keypair has been initialized."""
-    if _check_enclave_available():
-        return True  # Enclave always has its keypair
-    return _PRIVATE_KEY is not None
+    """Check if connected to enclave (enclave always has its keypair)."""
+    return is_enclave_running()
 
 
 def get_enclave_public_key_hex() -> str:
     """
     Get the enclave's public key as hex string.
     
+    FAIL-CLOSED: Raises RuntimeError if enclave is not running.
+    
     Returns:
         Public key hex (64 characters for Ed25519)
-        
-    Raises:
-        RuntimeError: If keypair not initialized
     """
-    if _check_enclave_available():
-        return _ENCLAVE_CLIENT.get_public_key()
-    
-    if _PUBLIC_KEY_HEX is None:
-        raise RuntimeError("Enclave keypair not initialized. Call initialize_enclave_keypair() first.")
-    return _PUBLIC_KEY_HEX
+    client = _ensure_enclave_connected()
+    return client.get_public_key()
 
 
 # Aliases for compatibility with tasks8.md naming
@@ -253,8 +229,7 @@ def sign_weights(
     SECURITY: This function computes the canonical hash internally.
     It does NOT accept pre-computed hashes, preventing signing oracle attacks.
     
-    If a real Nitro Enclave is running, signing happens inside the enclave.
-    Otherwise, falls back to local signing (mock mode).
+    FAIL-CLOSED: Enclave MUST be running, otherwise raises RuntimeError.
     
     Args:
         netuid: Subnet ID
@@ -267,7 +242,7 @@ def sign_weights(
         Tuple of (weights_hash_hex, signature_hex)
         
     Raises:
-        RuntimeError: If keypair not initialized
+        RuntimeError: If enclave not running
         ValueError: If inputs are invalid
     """
     # Validate inputs first (before sending to enclave)
@@ -288,135 +263,34 @@ def sign_weights(
     weights_pairs = list(zip(uids, weights_u16))
     weights_hash = bundle_weights_hash(netuid, epoch_id, block, weights_pairs)
     
-    # Use real enclave if available
-    if _check_enclave_available():
-        # Sign via enclave vsock
-        signature_hex = _ENCLAVE_CLIENT.sign_weights(weights_hash)
-        logger.info(
-            f"✅ Signed weights (ENCLAVE): epoch={epoch_id}, {len(uids)} UIDs, "
-            f"hash={weights_hash[:16]}..."
-        )
-        return weights_hash, signature_hex
+    # Sign via enclave (FAIL-CLOSED - no mock mode)
+    client = _ensure_enclave_connected()
+    signature_hex = client.sign_weights(weights_hash)
     
-    # Fall back to mock mode (local signing)
-    if _PRIVATE_KEY is None:
-        raise RuntimeError("Enclave keypair not initialized")
-    
-    # Sign the raw hash bytes (32 bytes), NOT the hex string
-    digest_bytes = bytes.fromhex(weights_hash)
-    
-    with _SIGN_LOCK:
-        signature_bytes = _PRIVATE_KEY.sign(digest_bytes)
-    
-    signature_hex = signature_bytes.hex()
-    
-    logger.warning(
-        f"⚠️ Signed weights (MOCK): epoch={epoch_id}, {len(uids)} UIDs, "
+    logger.info(
+        f"✅ Signed weights: epoch={epoch_id}, {len(uids)} UIDs, "
         f"hash={weights_hash[:16]}..."
     )
     
     return weights_hash, signature_hex
 
 
-def sign_digest(digest_bytes: bytes) -> str:
-    """
-    Sign raw digest bytes with the enclave's private key.
-    
-    WARNING: This is a lower-level function. Prefer sign_weights() which
-    computes the hash internally to prevent signing oracle attacks.
-    
-    Args:
-        digest_bytes: 32-byte SHA256 digest to sign
-        
-    Returns:
-        Signature as hex string
-        
-    Raises:
-        RuntimeError: If keypair not initialized
-        ValueError: If digest is not 32 bytes
-    """
-    if _PRIVATE_KEY is None:
-        raise RuntimeError("Enclave keypair not initialized")
-    
-    if len(digest_bytes) != 32:
-        raise ValueError(f"Digest must be 32 bytes, got {len(digest_bytes)}")
-    
-    with _SIGN_LOCK:
-        signature_bytes = _PRIVATE_KEY.sign(digest_bytes)
-    
-    return signature_bytes.hex()
+# sign_digest removed - all signing must go through enclave
 
 
 # ============================================================================
-# Attestation Document Generation
+# Attestation Document (via Enclave)
 # ============================================================================
 
-def generate_attestation_document(code_hash: str, epoch_id: int) -> bytes:
-    """
-    Generate AWS Nitro attestation document with epoch binding.
-    
-    CRITICAL: The epoch_id is included in user_data to prevent replay attacks.
-    An attestation from epoch N cannot be reused for epoch N+1.
-    
-    Args:
-        code_hash: SHA256 hash of validator code
-        epoch_id: Current epoch (MUST be included for replay protection)
-        
-    Returns:
-        Raw attestation document bytes (CBOR-encoded COSE_Sign1)
-        
-    Note:
-        In production Nitro Enclave, this calls the NSM API.
-        Outside enclave, returns a placeholder for testing.
-    """
-    import cbor2
-    
-    # Build user_data (CBOR for deterministic encoding)
-    # VALIDATOR schema: includes epoch_id (different from gateway!)
-    user_data = {
-        "purpose": "validator_weights",  # Different from gateway!
-        "epoch_id": epoch_id,  # CRITICAL: binds to specific epoch
-        "enclave_pubkey": get_enclave_public_key_hex(),
-        "code_hash": code_hash,
-    }
-    user_data_cbor = cbor2.dumps(user_data)
-    
-    # Check if we're in a Nitro Enclave
-    try:
-        # Try to import NSM library (only available inside enclave)
-        from gateway.tee.nsm_lib import nsm_get_attestation_doc
-        
-        # Get real attestation from NSM
-        attestation_doc = nsm_get_attestation_doc(
-            public_key=bytes.fromhex(get_enclave_public_key_hex()),
-            user_data=user_data_cbor,
-            nonce=None,
-        )
-        logger.info(f"✅ Generated Nitro attestation for epoch {epoch_id}")
-        return attestation_doc
-        
-    except ImportError:
-        # Not in enclave - generate placeholder for testing
-        logger.warning(
-            f"⚠️ Not in Nitro Enclave - generating placeholder attestation for epoch {epoch_id}"
-        )
-        
-        # Placeholder structure (NOT valid for production)
-        placeholder = {
-            "_placeholder": True,
-            "_warning": "This is NOT a real Nitro attestation",
-            "user_data": user_data,
-            "pcrs": {0: "placeholder_pcr0"},
-        }
-        
-        return cbor2.dumps(placeholder)
+# generate_attestation_document removed - attestation now comes from enclave
+# The enclave's tee_service.py handles attestation generation via NSM
 
 
 def get_attestation_document_b64(epoch_id: int) -> str:
     """
     Get base64-encoded attestation document for the given epoch.
     
-    If a real Nitro Enclave is running, gets attestation from enclave.
+    FAIL-CLOSED: Enclave MUST be running, otherwise raises RuntimeError.
     Caches attestation per epoch to avoid regenerating.
     
     Args:
@@ -425,48 +299,25 @@ def get_attestation_document_b64(epoch_id: int) -> str:
     Returns:
         Base64-encoded attestation document
     """
-    import base64
-    
-    # Use real enclave if available
-    if _check_enclave_available():
-        # Check cache first (even for real enclave)
-        if epoch_id in _ATTESTATION_CACHE:
-            return _ATTESTATION_CACHE[epoch_id]
-        
-        attestation_data = _ENCLAVE_CLIENT.get_attestation(epoch_id)
-        attestation_b64 = attestation_data["attestation_b64"]
-        
-        # Cache it
-        _ATTESTATION_CACHE[epoch_id] = attestation_b64
-        
-        is_mock = attestation_data.get("is_mock", False)
-        if is_mock:
-            logger.warning(f"⚠️ Got MOCK attestation from enclave for epoch {epoch_id}")
-        else:
-            logger.info(f"✅ Got REAL Nitro attestation from enclave for epoch {epoch_id}")
-        
-        return attestation_b64
-    
-    # Fall back to local attestation generation (mock mode)
-    
     # Check cache first
     if epoch_id in _ATTESTATION_CACHE:
         return _ATTESTATION_CACHE[epoch_id]
     
-    # Generate new attestation
-    code_hash = get_code_hash()
-    att_bytes = generate_attestation_document(code_hash, epoch_id)
-    att_b64 = base64.b64encode(att_bytes).decode('ascii')
+    # Get from enclave (FAIL-CLOSED - no mock mode)
+    client = _ensure_enclave_connected()
+    attestation_data = client.get_attestation(epoch_id)
+    attestation_b64 = attestation_data["attestation_b64"]
     
-    # Cache it (limit cache size)
-    if len(_ATTESTATION_CACHE) > 10:
-        # Remove oldest entries
-        oldest_key = min(_ATTESTATION_CACHE.keys())
-        del _ATTESTATION_CACHE[oldest_key]
+    # Cache it
+    _ATTESTATION_CACHE[epoch_id] = attestation_b64
     
-    _ATTESTATION_CACHE[epoch_id] = att_b64
+    is_mock = attestation_data.get("is_mock", False)
+    if is_mock:
+        logger.warning(f"⚠️ Enclave returned MOCK attestation for epoch {epoch_id} (NSM not available)")
+    else:
+        logger.info(f"✅ Got Nitro attestation for epoch {epoch_id}")
     
-    return att_b64
+    return attestation_b64
 
 
 # Alias for compatibility with tasks8.md naming
@@ -484,12 +335,22 @@ def get_signer_state() -> dict:
     Get current state of the enclave signer for debugging.
     
     Returns:
-        Dict with state info (NEVER includes private key)
+        Dict with state info
     """
+    try:
+        client = _ensure_enclave_connected()
+        pubkey = client.get_public_key()
+        code_hash = client.get_code_hash()
+        connected = True
+    except RuntimeError:
+        pubkey = None
+        code_hash = None
+        connected = False
+    
     return {
-        "initialized": _PRIVATE_KEY is not None,
-        "public_key_hex": _PUBLIC_KEY_HEX,
-        "code_hash": _CODE_HASH,
+        "enclave_connected": connected,
+        "public_key_hex": pubkey,
+        "code_hash": code_hash,
         "attestation_cache_size": len(_ATTESTATION_CACHE),
         "cached_epochs": list(_ATTESTATION_CACHE.keys()),
     }

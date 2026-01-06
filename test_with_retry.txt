@@ -1,0 +1,342 @@
+[2025-12-26 00:46:39.941] Loading emails from: /Users/pranav/Downloads/Supabase Snippet APPROVED LEADS CSV (2).csv
+[2025-12-26 00:46:39.944] Loaded 990 unique emails from CSV
+[2025-12-26 00:46:39.944] Using 990 emails for test
+[2025-12-26 00:46:39.944] 
+[2025-12-26 00:46:39.944] ================================================================================
+[2025-12-26 00:46:39.944] STAGGERED TRUELIST BATCH TEST
+[2025-12-26 00:46:39.944] ================================================================================
+[2025-12-26 00:46:39.944] Total emails: 990
+[2025-12-26 00:46:39.944] Containers: 9
+[2025-12-26 00:46:39.944] Stagger delay: 10 seconds per container
+[2025-12-26 00:46:39.944] 
+[2025-12-26 00:46:39.944] Container 0: emails 0-110 (110 emails)
+[2025-12-26 00:46:39.944] Container 1: emails 110-220 (110 emails)
+[2025-12-26 00:46:39.944] Container 2: emails 220-330 (110 emails)
+[2025-12-26 00:46:39.944] Container 3: emails 330-440 (110 emails)
+[2025-12-26 00:46:39.944] Container 4: emails 440-550 (110 emails)
+[2025-12-26 00:46:39.944] Container 5: emails 550-660 (110 emails)
+[2025-12-26 00:46:39.944] Container 6: emails 660-770 (110 emails)
+[2025-12-26 00:46:39.944] Container 7: emails 770-880 (110 emails)
+[2025-12-26 00:46:39.944] Container 8: emails 880-990 (110 emails)
+[2025-12-26 00:46:39.944] 
+[2025-12-26 00:46:39.945] Starting parallel container simulation...
+[2025-12-26 00:46:39.945] (Containers will stagger their TrueList batch submissions)
+[2025-12-26 00:46:39.945] 
+[2025-12-26 00:46:39.945] [Container 0] Starting with 110 emails
+[2025-12-26 00:46:39.945] [Container 0] Submitting TrueList batch...
+
+📧 TrueList Batch: Submitting 110 emails for validation...
+   📤 POST https://api.truelist.io/api/v1/batches (file upload)
+   📋 Strategy: accurate
+   📋 File: batch_20251226_004639_4cefb7b3.csv
+   📊 Email count: 110
+[2025-12-26 00:46:39.945] [Container 1] Starting with 110 emails
+[2025-12-26 00:46:39.945] [Container 1] Waiting 10s (staggered submission)...
+[2025-12-26 00:46:39.946] [Container 2] Starting with 110 emails
+[2025-12-26 00:46:39.946] [Container 2] Waiting 20s (staggered submission)...
+[2025-12-26 00:46:39.946] [Container 3] Starting with 110 emails
+[2025-12-26 00:46:39.946] [Container 3] Waiting 30s (staggered submission)...
+[2025-12-26 00:46:39.946] [Container 4] Starting with 110 emails
+[2025-12-26 00:46:39.946] [Container 4] Waiting 40s (staggered submission)...
+[2025-12-26 00:46:39.946] [Container 5] Starting with 110 emails
+[2025-12-26 00:46:39.946] [Container 5] Waiting 50s (staggered submission)...
+[2025-12-26 00:46:39.946] [Container 6] Starting with 110 emails
+[2025-12-26 00:46:39.946] [Container 6] Waiting 60s (staggered submission)...
+[2025-12-26 00:46:39.946] [Container 7] Starting with 110 emails
+[2025-12-26 00:46:39.946] [Container 7] Waiting 70s (staggered submission)...
+[2025-12-26 00:46:39.946] [Container 8] Starting with 110 emails
+[2025-12-26 00:46:39.946] [Container 8] Waiting 80s (staggered submission)...
+   ✅ Batch created successfully!
+   🆔 Batch ID: bf04336c-0a05-48d6-9fa2-519910f49ab3
+   📊 State: pending
+   📧 Emails queued: 110
+[2025-12-26 00:46:40.624] [Container 0] ✅ Batch created: bf04336c...
+[2025-12-26 00:46:40.624] [Container 0] Polling for results...
+
+⏳ TrueList Batch: Polling for completion...
+   🆔 Batch ID: bf04336c-0a05-48d6-9fa2-519910f49ab3
+   ⏱️  Poll interval: 10s
+   ⏰ Timeout: 40 minutes
+   📊 Poll #1 (0s): pending - 0/110 (0%)
+[2025-12-26 00:46:49.947] [Container 1] Submitting TrueList batch...
+
+📧 TrueList Batch: Submitting 110 emails for validation...
+   📤 POST https://api.truelist.io/api/v1/batches (file upload)
+   📋 Strategy: accurate
+   📋 File: batch_20251226_004649_6c56ae18.csv
+   📊 Email count: 110
+   ✅ Batch created successfully!
+   🆔 Batch ID: 5fb84625-c09e-4666-9c25-8296542f9196
+   📊 State: pending
+   📧 Emails queued: 110
+[2025-12-26 00:46:50.413] [Container 1] ✅ Batch created: 5fb84625...
+[2025-12-26 00:46:50.413] [Container 1] Polling for results...
+
+⏳ TrueList Batch: Polling for completion...
+   🆔 Batch ID: 5fb84625-c09e-4666-9c25-8296542f9196
+   ⏱️  Poll interval: 10s
+   ⏰ Timeout: 40 minutes
+   📊 Poll #1 (0s): pending - 0/110 (0%)
+   📊 Poll #2 (10s): completed - 110/110 (100%)
+   ✅ Batch completed!
+   📧 Total: 110, OK: 81, Unknown: 0
+   🔍 API response keys: ['id', 'batch_state', 'batch_type', 'validation_strategy', 'email_count', 'processed_count', 'disposable_count', 'role_count', 'failed_syntax_check_count', 'failed_mx_check_count', 'failed_no_mailbox_count', 'ok_for_all_count', 'ok_count', 'name', 'duplicateCount', 'safest_bet_csv_url', 'highest_reach_csv_url', 'only_invalid_csv_url', 'annotated_csv_url']
+   📥 Downloading results from: https://api.truelist.io/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVz...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'sean.walsh@1904labs.com', 'Email Address': 'sean.walsh@1904labs.com', 'Did you mean': '', 'Email State': 'invalid', 'Email Sub-State': 'unknown'}
+   ✅ Parsed 110 email results
+[2025-12-26 00:46:51.866] [Container 0] ✅ Batch complete: 110 results (81 OK) in 11.9s
+[2025-12-26 00:46:59.947] [Container 2] Submitting TrueList batch...
+
+📧 TrueList Batch: Submitting 110 emails for validation...
+   📤 POST https://api.truelist.io/api/v1/batches (file upload)
+   📋 Strategy: accurate
+   📋 File: batch_20251226_004659_6af12a1f.csv
+   📊 Email count: 110
+   ✅ Batch created successfully!
+   🆔 Batch ID: 9f0899b7-0074-4ab5-9237-1b1adeddf57b
+   📊 State: pending
+   📧 Emails queued: 110
+[2025-12-26 00:47:00.455] [Container 2] ✅ Batch created: 9f0899b7...
+[2025-12-26 00:47:00.455] [Container 2] Polling for results...
+
+⏳ TrueList Batch: Polling for completion...
+   🆔 Batch ID: 9f0899b7-0074-4ab5-9237-1b1adeddf57b
+   ⏱️  Poll interval: 10s
+   ⏰ Timeout: 40 minutes
+   📊 Poll #1 (0s): pending - 0/110 (0%)
+   📊 Poll #2 (10s): completed - 110/110 (100%)
+   ✅ Batch completed!
+   📧 Total: 110, OK: 81, Unknown: 0
+   🔍 API response keys: ['id', 'batch_state', 'batch_type', 'validation_strategy', 'email_count', 'processed_count', 'disposable_count', 'role_count', 'failed_syntax_check_count', 'failed_mx_check_count', 'failed_no_mailbox_count', 'ok_for_all_count', 'ok_count', 'name', 'duplicateCount', 'safest_bet_csv_url', 'highest_reach_csv_url', 'only_invalid_csv_url', 'annotated_csv_url']
+   📥 Downloading results from: https://api.truelist.io/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVz...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'naail@apexe3.com', 'Email Address': 'naail@apexe3.com', 'Did you mean': '', 'Email State': 'ok', 'Email Sub-State': 'email_ok'}
+   ✅ Parsed 110 email results
+[2025-12-26 00:47:01.594] [Container 1] ✅ Batch complete: 110 results (81 OK) in 11.6s
+[2025-12-26 00:47:09.947] [Container 3] Submitting TrueList batch...
+
+📧 TrueList Batch: Submitting 110 emails for validation...
+   📤 POST https://api.truelist.io/api/v1/batches (file upload)
+   📋 Strategy: accurate
+   📋 File: batch_20251226_004709_36965c5e.csv
+   📊 Email count: 110
+   ✅ Batch created successfully!
+   🆔 Batch ID: c6bafca1-ea9d-4906-a3f0-1ba5d84e1ade
+   📊 State: pending
+   📧 Emails queued: 110
+[2025-12-26 00:47:10.419] [Container 3] ✅ Batch created: c6bafca1...
+[2025-12-26 00:47:10.419] [Container 3] Polling for results...
+
+⏳ TrueList Batch: Polling for completion...
+   🆔 Batch ID: c6bafca1-ea9d-4906-a3f0-1ba5d84e1ade
+   ⏱️  Poll interval: 10s
+   ⏰ Timeout: 40 minutes
+   📊 Poll #1 (0s): pending - 0/110 (0%)
+   📊 Poll #2 (10s): completed - 110/110 (100%)
+   ✅ Batch completed!
+   📧 Total: 110, OK: 89, Unknown: 0
+   🔍 API response keys: ['id', 'batch_state', 'batch_type', 'validation_strategy', 'email_count', 'processed_count', 'disposable_count', 'role_count', 'failed_syntax_check_count', 'failed_mx_check_count', 'failed_no_mailbox_count', 'ok_for_all_count', 'ok_count', 'name', 'duplicateCount', 'safest_bet_csv_url', 'highest_reach_csv_url', 'only_invalid_csv_url', 'annotated_csv_url']
+   ⚠️  No CSV URL in response, waiting 5s and retrying (1/3)...
+   ⚠️  No CSV URL in response, waiting 5s and retrying (2/3)...
+[2025-12-26 00:47:19.947] [Container 4] Submitting TrueList batch...
+
+📧 TrueList Batch: Submitting 110 emails for validation...
+   📤 POST https://api.truelist.io/api/v1/batches (file upload)
+   📋 Strategy: accurate
+   📋 File: batch_20251226_004719_3534c2b4.csv
+   📊 Email count: 110
+   ✅ Batch created successfully!
+   🆔 Batch ID: 51358512-f6a3-4d70-aca3-6d19465fa8bc
+   📊 State: pending
+   📧 Emails queued: 110
+[2025-12-26 00:47:20.447] [Container 4] ✅ Batch created: 51358512...
+[2025-12-26 00:47:20.447] [Container 4] Polling for results...
+
+⏳ TrueList Batch: Polling for completion...
+   🆔 Batch ID: 51358512-f6a3-4d70-aca3-6d19465fa8bc
+   ⏱️  Poll interval: 10s
+   ⏰ Timeout: 40 minutes
+   📊 Poll #1 (0s): pending_processing - 0/110 (0%)
+   📊 Poll #2 (10s): completed - 110/110 (100%)
+   ✅ Batch completed!
+   📧 Total: 110, OK: 85, Unknown: 0
+   🔍 API response keys: ['id', 'batch_state', 'batch_type', 'validation_strategy', 'email_count', 'processed_count', 'disposable_count', 'role_count', 'failed_syntax_check_count', 'failed_mx_check_count', 'failed_no_mailbox_count', 'ok_for_all_count', 'ok_count', 'name', 'duplicateCount', 'safest_bet_csv_url', 'highest_reach_csv_url', 'only_invalid_csv_url', 'annotated_csv_url']
+   ⚠️  No CSV URL in response, waiting 5s and retrying (1/3)...
+   ⚠️  No CSV URL in response, waiting 5s and retrying (3/3)...
+   ⚠️  No CSV URL in response, waiting 5s and retrying (2/3)...
+   ⚠️  annotated_csv_url is null - trying to combine alternative CSVs...
+   📥 Downloading highest_reach CSV...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'masashi.kawaguchi@blockware.co.jp', 'Email Address': 'masashi.kawaguchi@blockware.co.jp', 'Did you mean': '', 'Email State': 'ok', 'Email Sub-State': 'email_ok'}
+   ✅ Got 89 emails from highest_reach CSV
+   📥 Downloading only_invalid CSV...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'cagnello@bcbsm.com', 'Email Address': 'cagnello@bcbsm.com', 'Did you mean': '', 'Email State': 'invalid', 'Email Sub-State': 'failed_no_mailbox'}
+   ✅ Got 1 emails from only_invalid CSV
+   📥 Downloading safest_bet CSV...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'masashi.kawaguchi@blockware.co.jp', 'Email Address': 'masashi.kawaguchi@blockware.co.jp', 'Did you mean': '', 'Email State': 'ok', 'Email Sub-State': 'email_ok'}
+   🎉 Combined 90 total email results from alternative CSVs!
+[2025-12-26 00:47:28.240] [Container 2] ✅ Batch complete: 90 results (89 OK) in 28.3s
+[2025-12-26 00:47:29.947] [Container 5] Submitting TrueList batch...
+
+📧 TrueList Batch: Submitting 110 emails for validation...
+   📤 POST https://api.truelist.io/api/v1/batches (file upload)
+   📋 Strategy: accurate
+   📋 File: batch_20251226_004729_912de934.csv
+   📊 Email count: 110
+   ✅ Batch created successfully!
+   🆔 Batch ID: 47c2a690-262b-4789-9b2a-0c3bc92edcca
+   📊 State: pending
+   📧 Emails queued: 110
+[2025-12-26 00:47:30.450] [Container 5] ✅ Batch created: 47c2a690...
+[2025-12-26 00:47:30.450] [Container 5] Polling for results...
+
+⏳ TrueList Batch: Polling for completion...
+   🆔 Batch ID: 47c2a690-262b-4789-9b2a-0c3bc92edcca
+   ⏱️  Poll interval: 10s
+   ⏰ Timeout: 40 minutes
+   📊 Poll #1 (0s): pending - 0/110 (0%)
+   📊 Poll #2 (10s): completed - 110/110 (100%)
+   ✅ Batch completed!
+   📧 Total: 110, OK: 74, Unknown: 0
+   🔍 API response keys: ['id', 'batch_state', 'batch_type', 'validation_strategy', 'email_count', 'processed_count', 'disposable_count', 'role_count', 'failed_syntax_check_count', 'failed_mx_check_count', 'failed_no_mailbox_count', 'ok_for_all_count', 'ok_count', 'name', 'duplicateCount', 'safest_bet_csv_url', 'highest_reach_csv_url', 'only_invalid_csv_url', 'annotated_csv_url']
+   📥 Downloading results from: https://api.truelist.io/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVz...
+   ⚠️  No CSV URL in response, waiting 5s and retrying (3/3)...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'david@datawrkz.com', 'Email Address': 'david@datawrkz.com', 'Did you mean': '', 'Email State': 'ok', 'Email Sub-State': 'email_ok'}
+   ✅ Parsed 102 email results
+[2025-12-26 00:47:31.597] [Container 4] ✅ Batch complete: 102 results (74 OK) in 11.6s
+   ⚠️  annotated_csv_url is null - trying to combine alternative CSVs...
+   📥 Downloading highest_reach CSV...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'arwid.ischi@ischi.ch', 'Email Address': 'arwid.ischi@ischi.ch', 'Did you mean': '', 'Email State': 'ok', 'Email Sub-State': 'email_ok'}
+   ✅ Got 85 emails from highest_reach CSV
+   📥 Downloading only_invalid CSV...
+   ⚠️ CSV is empty! Content preview: email,Email Address,Did you mean,Email State,Email Sub-State
+
+   📥 Downloading safest_bet CSV...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'arwid.ischi@ischi.ch', 'Email Address': 'arwid.ischi@ischi.ch', 'Did you mean': '', 'Email State': 'ok', 'Email Sub-State': 'email_ok'}
+   🎉 Combined 85 total email results from alternative CSVs!
+[2025-12-26 00:47:37.965] [Container 3] ✅ Batch complete: 85 results (85 OK) in 28.0s
+[2025-12-26 00:47:39.947] [Container 6] Submitting TrueList batch...
+
+📧 TrueList Batch: Submitting 110 emails for validation...
+   📤 POST https://api.truelist.io/api/v1/batches (file upload)
+   📋 Strategy: accurate
+   📋 File: batch_20251226_004739_09d371d3.csv
+   📊 Email count: 110
+   ✅ Batch created successfully!
+   🆔 Batch ID: b2925759-c87a-46bb-ab05-827085402527
+   📊 State: pending
+   📧 Emails queued: 110
+[2025-12-26 00:47:40.540] [Container 6] ✅ Batch created: b2925759...
+[2025-12-26 00:47:40.541] [Container 6] Polling for results...
+
+⏳ TrueList Batch: Polling for completion...
+   🆔 Batch ID: b2925759-c87a-46bb-ab05-827085402527
+   ⏱️  Poll interval: 10s
+   ⏰ Timeout: 40 minutes
+   📊 Poll #1 (0s): pending - 0/110 (0%)
+   📊 Poll #2 (10s): completed - 110/110 (100%)
+   ✅ Batch completed!
+   📧 Total: 110, OK: 76, Unknown: 0
+   🔍 API response keys: ['id', 'batch_state', 'batch_type', 'validation_strategy', 'email_count', 'processed_count', 'disposable_count', 'role_count', 'failed_syntax_check_count', 'failed_mx_check_count', 'failed_no_mailbox_count', 'ok_for_all_count', 'ok_count', 'name', 'duplicateCount', 'safest_bet_csv_url', 'highest_reach_csv_url', 'only_invalid_csv_url', 'annotated_csv_url']
+   📥 Downloading results from: https://api.truelist.io/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVz...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'lucy.daniels@entouragebd.com', 'Email Address': 'lucy.daniels@entouragebd.com', 'Did you mean': '', 'Email State': 'risky', 'Email Sub-State': 'accept_all'}
+   ✅ Parsed 102 email results
+[2025-12-26 00:47:41.622] [Container 5] ✅ Batch complete: 102 results (76 OK) in 11.7s
+[2025-12-26 00:47:49.947] [Container 7] Submitting TrueList batch...
+
+📧 TrueList Batch: Submitting 110 emails for validation...
+   📤 POST https://api.truelist.io/api/v1/batches (file upload)
+   📋 Strategy: accurate
+   📋 File: batch_20251226_004749_e02adbf7.csv
+   📊 Email count: 110
+   ✅ Batch created successfully!
+   🆔 Batch ID: 7db62f93-eb3a-454a-b644-759bed458cef
+   📊 State: pending
+   📧 Emails queued: 110
+[2025-12-26 00:47:50.426] [Container 7] ✅ Batch created: 7db62f93...
+[2025-12-26 00:47:50.427] [Container 7] Polling for results...
+
+⏳ TrueList Batch: Polling for completion...
+   🆔 Batch ID: 7db62f93-eb3a-454a-b644-759bed458cef
+   ⏱️  Poll interval: 10s
+   ⏰ Timeout: 40 minutes
+   📊 Poll #1 (0s): pending - 0/110 (0%)
+   📊 Poll #2 (10s): completed - 110/110 (100%)
+   ✅ Batch completed!
+   📧 Total: 110, OK: 80, Unknown: 0
+   🔍 API response keys: ['id', 'batch_state', 'batch_type', 'validation_strategy', 'email_count', 'processed_count', 'disposable_count', 'role_count', 'failed_syntax_check_count', 'failed_mx_check_count', 'failed_no_mailbox_count', 'ok_for_all_count', 'ok_count', 'name', 'duplicateCount', 'safest_bet_csv_url', 'highest_reach_csv_url', 'only_invalid_csv_url', 'annotated_csv_url']
+   📥 Downloading results from: https://api.truelist.io/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVz...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'aaron@gable.ai', 'Email Address': 'aaron@gable.ai', 'Did you mean': '', 'Email State': 'ok', 'Email Sub-State': 'email_ok'}
+   ✅ Parsed 100 email results
+[2025-12-26 00:47:51.832] [Container 6] ✅ Batch complete: 100 results (80 OK) in 11.9s
+[2025-12-26 00:47:59.947] [Container 8] Submitting TrueList batch...
+
+📧 TrueList Batch: Submitting 110 emails for validation...
+   📤 POST https://api.truelist.io/api/v1/batches (file upload)
+   📋 Strategy: accurate
+   📋 File: batch_20251226_004759_261107a5.csv
+   📊 Email count: 110
+   ✅ Batch created successfully!
+   🆔 Batch ID: d50b3294-0d9d-4bba-9b42-fcd687c6697d
+   📊 State: pending
+   📧 Emails queued: 110
+[2025-12-26 00:48:00.463] [Container 8] ✅ Batch created: d50b3294...
+[2025-12-26 00:48:00.463] [Container 8] Polling for results...
+
+⏳ TrueList Batch: Polling for completion...
+   🆔 Batch ID: d50b3294-0d9d-4bba-9b42-fcd687c6697d
+   ⏱️  Poll interval: 10s
+   ⏰ Timeout: 40 minutes
+   📊 Poll #1 (0s): pending - 0/110 (0%)
+   📊 Poll #2 (10s): completed - 110/110 (100%)
+   ✅ Batch completed!
+   📧 Total: 110, OK: 75, Unknown: 0
+   🔍 API response keys: ['id', 'batch_state', 'batch_type', 'validation_strategy', 'email_count', 'processed_count', 'disposable_count', 'role_count', 'failed_syntax_check_count', 'failed_mx_check_count', 'failed_no_mailbox_count', 'ok_for_all_count', 'ok_count', 'name', 'duplicateCount', 'safest_bet_csv_url', 'highest_reach_csv_url', 'only_invalid_csv_url', 'annotated_csv_url']
+   📥 Downloading results from: https://api.truelist.io/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVz...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'omkar.vedpathak@heliosx.com', 'Email Address': 'omkar.vedpathak@heliosx.com', 'Did you mean': '', 'Email State': 'ok', 'Email Sub-State': 'email_ok'}
+   ✅ Parsed 100 email results
+[2025-12-26 00:48:01.676] [Container 7] ✅ Batch complete: 100 results (75 OK) in 11.7s
+   📊 Poll #2 (10s): completed - 110/110 (100%)
+   ✅ Batch completed!
+   📧 Total: 110, OK: 85, Unknown: 0
+   🔍 API response keys: ['id', 'batch_state', 'batch_type', 'validation_strategy', 'email_count', 'processed_count', 'disposable_count', 'role_count', 'failed_syntax_check_count', 'failed_mx_check_count', 'failed_no_mailbox_count', 'ok_for_all_count', 'ok_count', 'name', 'duplicateCount', 'safest_bet_csv_url', 'highest_reach_csv_url', 'only_invalid_csv_url', 'annotated_csv_url']
+   📥 Downloading results from: https://api.truelist.io/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVz...
+   📋 CSV columns: ['email', 'Email Address', 'Did you mean', 'Email State', 'Email Sub-State']
+   📋 First row: {'email': 'donna.motlow@jacobs.com', 'Email Address': 'donna.motlow@jacobs.com', 'Did you mean': '', 'Email State': 'ok', 'Email Sub-State': 'email_ok'}
+   ✅ Parsed 100 email results
+[2025-12-26 00:48:11.635] [Container 8] ✅ Batch complete: 100 results (85 OK) in 11.7s
+[2025-12-26 00:48:11.635] 
+[2025-12-26 00:48:11.636] ================================================================================
+[2025-12-26 00:48:11.636] TEST SUMMARY
+[2025-12-26 00:48:11.636] ================================================================================
+[2025-12-26 00:48:11.636]   Container 0: ✅ 110/110 results (100%), 81 OK
+[2025-12-26 00:48:11.636]   Container 1: ✅ 110/110 results (100%), 81 OK
+[2025-12-26 00:48:11.636]   Container 2: ⚠️ 90/110 results (82%), 89 OK
+[2025-12-26 00:48:11.636]   Container 3: ⚠️ 85/110 results (77%), 85 OK
+[2025-12-26 00:48:11.637]   Container 4: ✅ 102/110 results (93%), 74 OK
+[2025-12-26 00:48:11.637]   Container 5: ✅ 102/110 results (93%), 76 OK
+[2025-12-26 00:48:11.637]   Container 6: ✅ 100/110 results (91%), 80 OK
+[2025-12-26 00:48:11.637]   Container 7: ✅ 100/110 results (91%), 75 OK
+[2025-12-26 00:48:11.637]   Container 8: ✅ 100/110 results (91%), 85 OK
+[2025-12-26 00:48:11.637] 
+[2025-12-26 00:48:11.637] Total containers: 9
+[2025-12-26 00:48:11.637] Successful: 9/9
+[2025-12-26 00:48:11.637] Total emails submitted: 990
+[2025-12-26 00:48:11.637] Total results received: 899
+[2025-12-26 00:48:11.637] Total OK emails: 726
+[2025-12-26 00:48:11.637] Total time: 91.7s
+[2025-12-26 00:48:11.638] 
+[2025-12-26 00:48:11.638] 🎉 SUCCESS: Staggered batch submission is working!
+[2025-12-26 00:48:11.638]    Coverage: 90.8% (target: >90%)
+[2025-12-26 00:48:11.638] ================================================================================
+[2025-12-26 00:48:11.638] 
+📁 Full log saved to: test_staggered_truelist.log

@@ -259,8 +259,6 @@ EOF
 | Website not accessible | Verify website is online and accessible |
 | Domain blacklisted | Avoid domains flagged for spam/abuse |
 
-**Duplicate Detection:** A lead is blocked if either (1) the email OR (2) the person+company LinkedIn combination already exists in an approved lead. Rejected leads can be resubmitted.
-
 ### Rate Limits & Cooldown
 
 To maintain lead quality and prevent spam, we enforce daily submission limits server-side. Think of it as guardrails to keep the lead pool high-quality.

@@ -56,8 +56,7 @@ PROXIES=()
 PROXY_COUNT=0
 
 # Check for WEBSHARE_PROXY_1, WEBSHARE_PROXY_2, WEBSHARE_PROXY_3, etc.
-# Supports up to 50 proxies (increased from 20 to support 29+ proxies)
-for i in {1..50}; do
+for i in {1..20}; do
     PROXY_VAR="WEBSHARE_PROXY_$i"
     PROXY_VALUE="${!PROXY_VAR}"
     

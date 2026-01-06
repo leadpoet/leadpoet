@@ -8616,6 +8616,17 @@ def is_valid_employee_count_extraction(extracted: str) -> bool:
         if val == 0:
             return False
         
+        # Reject partial matches like "001" or "001+" (from "10,001+")
+        # These are clearly partial extractions when regex doesn't handle commas
+        # Real employee counts with "+" are always >= 10,001 (LinkedIn's largest bucket)
+        if "+" in extracted and val < 1000:
+            return False
+        
+        # Reject numbers with leading zeros (e.g., "001" parsed as 1)
+        # Unless it's a single digit (which is valid like "2" from "2-10")
+        if clean.startswith("0") and len(clean) > 1:
+            return False
+        
         # Reject likely years (1900-2099) UNLESS formatted with comma
         # Employee counts of 1900-2099 are valid only if written as "1,900" or "2,000"
         if 1900 <= val <= 2099:
@@ -11543,12 +11554,14 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
                     if head_status in PASS_STATUS_CODES:
                         return True, f"Website accessible (HEAD: {head_status})"
             except aiohttp.ClientError as e:
-                head_error = str(e)
+                head_error = str(e) or "connection_error"
                 # Handle large enterprise headers - pass immediately
                 if "Header value is too long" in head_error or "Got more than" in head_error:
                     return True, "Website accessible (large enterprise headers detected)"
+            except asyncio.TimeoutError:
+                head_error = "timeout"
             except Exception as e:
-                head_error = str(e)
+                head_error = str(e) or type(e).__name__
             
             # HEAD failed or returned non-pass status - try GET as fallback
             # Many enterprise sites (Intuit, 3M) block HEAD but allow GET
@@ -11561,14 +11574,16 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
                         # Both HEAD and GET returned non-pass status
                         return False, f"Website not accessible (HEAD: {head_status}, GET: {get_status})"
             except aiohttp.ClientError as e:
-                get_error = str(e)
+                get_error = str(e) or "connection_error"
                 # Handle large enterprise headers on GET too
                 if "Header value is too long" in get_error or "Got more than" in get_error:
                     return True, "Website accessible (large enterprise headers detected)"
                 # Both HEAD and GET failed
                 return False, f"Website inaccessible (HEAD: {head_error or head_status}, GET: {get_error})"
+            except asyncio.TimeoutError:
+                return False, f"Website inaccessible (HEAD: {head_error or head_status}, GET: timeout)"
             except Exception as e:
-                return False, f"Website inaccessible (HEAD: {head_error or head_status}, GET: {str(e)})"
+                return False, f"Website inaccessible (HEAD: {head_error or head_status}, GET: {str(e) or type(e).__name__})"
     except Exception as e:
         return False, f"Website inaccessible: {str(e)}"
 

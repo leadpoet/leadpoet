@@ -895,11 +895,9 @@ async def compute_epoch_consensus(epoch_id: int):
                             if isinstance(evidence_blob, str):
                                 evidence_blob = json.loads(evidence_blob)
                         
-                            # Navigate to automated_checks data
-                            # Structure: evidence_blob -> enhanced_lead -> automated_checks -> is_icp_multiplier
-                            enhanced_lead = evidence_blob.get("enhanced_lead", {})
-                            automated_checks = enhanced_lead.get("automated_checks", {})
-                            multiplier = automated_checks.get("is_icp_multiplier", 1.0)
+                            # Extract is_icp_multiplier directly from evidence_blob (top-level key)
+                            # Values: 1.0 (default), 20.0 (+20 ICP bonus), or negative for penalties
+                            multiplier = evidence_blob.get("is_icp_multiplier", 1.0)
                             multipliers.append(multiplier)
                         
                         # Use the most common value (or average if all different)

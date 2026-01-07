@@ -19,6 +19,15 @@ COPY validator_tee/enclave/ /app/validator_tee/enclave/
 # Copy leadpoet_canonical module (for canonical weight hashing)
 COPY leadpoet_canonical/ /app/leadpoet_canonical/
 
+# =============================================================================
+# CRITICAL: Include validation logic for PCR0 verification
+# These files are included in the enclave image so they're part of PCR0.
+# If validator.py or automated_checks.py changes, PCR0 changes.
+# The gateway independently builds this image to verify PCR0.
+# =============================================================================
+COPY neurons/validator.py /app/neurons/validator.py
+COPY validator_models/automated_checks.py /app/validator_models/automated_checks.py
+
 # Run the validator TEE service
 # -u flag: unbuffered output (CRITICAL for debugging)
 ENTRYPOINT ["python3", "-u", "/app/validator_tee/enclave/tee_service.py"]

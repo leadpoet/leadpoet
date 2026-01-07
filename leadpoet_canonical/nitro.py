@@ -392,9 +392,8 @@ def verify_nitro_attestation_full(
         
         # PCR0 verification mode:
         # - If expected_pcr0 is provided: strict match required
-        # - If skip_pcr0_allowlist=True: skip allowlist check (for primary validators)
-        # - Otherwise: check against allowlist
-        skip_pcr0_allowlist = role == "validator"  # Primary validators: store PCR0, auditors verify later
+        # - If role == "validator": use dynamic PCR0 builder (gateway computes from GitHub)
+        # - Otherwise: check against static allowlist
         
         if expected_pcr0:
             # Strict mode: must match specific PCR0
@@ -405,17 +404,51 @@ def verify_nitro_attestation_full(
                     f"  Expected: {expected_pcr0[:32]}..."
                 )
             result["verification_steps"].append("✓ PCR0 matches expected value")
-        elif skip_pcr0_allowlist:
-            # Primary validator mode: PCR0 is STORED for auditor verification
-            # Gateway trusts authorized hotkeys, auditors verify PCR0 matches GitHub code
-            result["verification_steps"].append(
-                f"✓ PCR0 extracted for auditor verification: {pcr0_hex[:32]}..."
-            )
-            result["pcr0_verification_mode"] = "auditor_deferred"
-            logger.info(f"[NITRO] PCR0 stored for auditor verification: {pcr0_hex[:32]}...")
+        elif role == "validator":
+            # Dynamic verification: Gateway computes PCR0 from GitHub code
+            # This is TRUSTLESS - gateway builds enclave itself, no human input
+            try:
+                from gateway.utils.pcr0_builder import verify_pcr0, get_cache_status
+                
+                verification = verify_pcr0(pcr0_hex)
+                
+                if verification["valid"]:
+                    result["verification_steps"].append(
+                        f"✓ PCR0 matches GitHub commit {verification['commit'][:8]}"
+                    )
+                    result["pcr0_verification_mode"] = "dynamic_github"
+                    result["pcr0_commit"] = verification["commit"]
+                    logger.info(f"[NITRO] ✅ PCR0 verified against GitHub: {pcr0_hex[:32]}...")
+                else:
+                    # PCR0 not in cache - could be new commit not yet built
+                    cache_status = get_cache_status()
+                    raise AttestationError(
+                        f"PCR0 not recognized (code not in recent GitHub commits)!\n"
+                        f"  Got:      {pcr0_hex[:48]}...\n"
+                        f"  Cached:   {cache_status['cache_size']} commits\n"
+                        f"  Status:   Build in progress: {cache_status['build_in_progress']}\n"
+                        f"  Hint:     Wait for gateway to build new commit (~5 min after push)"
+                    )
+            except ImportError:
+                # pcr0_builder not available (e.g., running outside gateway)
+                # Fall back to static allowlist
+                logger.warning("[NITRO] pcr0_builder not available, using static allowlist")
+                allowed_pcr0_list = get_allowed_validator_pcr0()
+                
+                if not allowed_pcr0_list:
+                    raise AttestationError("No allowed PCR0 values configured for validators")
+                
+                if pcr0_hex not in allowed_pcr0_list:
+                    raise AttestationError(
+                        f"PCR0 mismatch!\n"
+                        f"  Got:      {pcr0_hex}\n"
+                        f"  Expected: {allowed_pcr0_list[0][:32]}..."
+                    )
+                result["verification_steps"].append("✓ PCR0 matches static allowlist")
+                result["pcr0_verification_mode"] = "static_allowlist"
         else:
-            # Gateway mode: check against allowlist
-            allowed_pcr0_list = get_allowed_gateway_pcr0() if role == "gateway" else get_allowed_validator_pcr0()
+            # Gateway mode: check against static allowlist
+            allowed_pcr0_list = get_allowed_gateway_pcr0()
             
             if not allowed_pcr0_list:
                 raise AttestationError(f"No allowed PCR0 values configured for role '{role}'")

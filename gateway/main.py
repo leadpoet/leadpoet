@@ -217,12 +217,18 @@ async def lifespan(app: FastAPI):
         rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
         print("✅ Rate limiter cleanup task started")
         
+        # Start PCR0 builder for trustless verification
+        from gateway.utils.pcr0_builder import start_pcr0_builder
+        start_pcr0_builder()
+        print("✅ PCR0 builder started (trustless validator verification)")
+        
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
         print("   • Single AsyncSubtensor (no memory leaks)")
         print("   • Polling-based epoch monitor (same as validator)")
         print("   • Bulletproof: No WebSocket = No WebSocket failures")
         print("   • Proven stable: Validator uses polling for months")
+        print("   • PCR0 builder: Computes expected PCR0 from GitHub (trustless)")
         print("="*80 + "\n")
         
         # Yield control back to FastAPI (app runs here)

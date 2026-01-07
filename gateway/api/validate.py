@@ -435,6 +435,7 @@ async def submit_validation(event: ValidationEvent):
         "actor_hotkey": event.actor_hotkey,
         "nonce": event.nonce,
         "ts": event.ts.isoformat(),
+        "payload_hash": event.payload_hash,  # Required for transparency_log
         "payload": log_payload,
         "signature": event.signature,
         "build_id": event.build_id

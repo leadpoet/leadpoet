@@ -349,13 +349,17 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
     
     print(f"   ✅ Epoch freshness OK: epoch={submission.epoch_id}, block={submission.block}")
     
-    # --- Step 4: Attestation verification (PCR0 is ROOT OF TRUST) ---
+    # --- Step 4: Attestation verification (AWS Nitro authenticity) ---
     print(f"   Step 4: Verifying Nitro attestation...")
     
-    # FAIL-CLOSED: Full Nitro verification with PCR0 check
-    # PCR0 is checked against the allowlist from GitHub (cached, auto-refreshed)
-    # The validator CANNOT fake PCR0 - it's inside the AWS-signed attestation document
-    # code_hash in user_data is INFORMATIONAL only
+    # VERIFICATION MODEL:
+    # 1. Gateway verifies AWS certificate chain → proves genuine Nitro enclave
+    # 2. Gateway verifies COSE signature → proves attestation untampered
+    # 3. Gateway extracts PCR0 → STORED for auditor verification
+    # 4. Auditors later verify: PCR0 matches code on GitHub
+    #
+    # This allows automatic workflow: code change → push → validator restarts → submits
+    # Auditors can independently verify the validator ran the published code
     attestation_valid, attestation_data = verify_validator_attestation(
         attestation_b64=submission.validator_attestation_b64,
         expected_pubkey=submission.validator_enclave_pubkey,
@@ -369,9 +373,12 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
             detail=f"Invalid validator attestation: {error_detail}"
         )
     
-    # Extract verified PCR0 for logging
+    # Extract verified PCR0 (stored in bundle for auditor verification)
     verified_pcr0 = attestation_data.get("pcr0", "N/A")
-    print(f"   ✅ Attestation OK (PCR0: {verified_pcr0[:32]}...)")
+    pcr0_mode = attestation_data.get("pcr0_verification_mode", "allowlist")
+    print(f"   ✅ Nitro attestation OK")
+    print(f"      PCR0: {verified_pcr0[:32]}...")
+    print(f"      Mode: {pcr0_mode} (auditors verify against GitHub)")
     
     # --- Step 5: Hotkey binding verification ---
     print(f"   Step 5: Verifying hotkey binding...")
@@ -468,7 +475,7 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
     })
     weight_submission_event_hash = log_entry.get("event_hash")
     
-    # Store bundle
+    # Store bundle (including PCR0 for auditor verification)
     bundle_data = {
         "netuid": submission.netuid,
         "epoch_id": submission.epoch_id,
@@ -481,6 +488,7 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
         "validator_signature": submission.validator_signature,
         "validator_attestation_b64": submission.validator_attestation_b64,
         "validator_code_hash": submission.validator_code_hash,
+        "validator_pcr0": verified_pcr0,  # Extracted from AWS-signed attestation for auditor verification
         "chain_snapshot_block": chain_snapshot_block,
         "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
         "weight_submission_event_hash": weight_submission_event_hash,

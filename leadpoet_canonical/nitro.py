@@ -390,28 +390,44 @@ def verify_nitro_attestation_full(
         result["pcr1"] = pcrs.get(1, b"").hex() if pcrs.get(1) else None
         result["pcr2"] = pcrs.get(2, b"").hex() if pcrs.get(2) else None
         
-        # Determine which PCR0 allowlist to use
+        # PCR0 verification mode:
+        # - If expected_pcr0 is provided: strict match required
+        # - If skip_pcr0_allowlist=True: skip allowlist check (for primary validators)
+        # - Otherwise: check against allowlist
+        skip_pcr0_allowlist = role == "validator"  # Primary validators: store PCR0, auditors verify later
+        
         if expected_pcr0:
-            allowed_pcr0_list = [expected_pcr0]
-        elif role == "gateway":
-            allowed_pcr0_list = get_allowed_gateway_pcr0()
-        elif role == "validator":
-            allowed_pcr0_list = get_allowed_validator_pcr0()
-        else:
-            raise AttestationError(f"Unknown role: {role}")
-        
-        if not allowed_pcr0_list:
-            raise AttestationError(f"No allowed PCR0 values configured for role '{role}'")
-        
-        if pcr0_hex not in allowed_pcr0_list:
-            raise AttestationError(
-                f"PCR0 mismatch (ROOT OF TRUST FAILURE)!\n"
-                f"  Got:      {pcr0_hex}\n"
-                f"  Expected: {allowed_pcr0_list[0][:32]}...\n"
-                f"  This enclave is running UNKNOWN code!"
+            # Strict mode: must match specific PCR0
+            if pcr0_hex != expected_pcr0:
+                raise AttestationError(
+                    f"PCR0 mismatch!\n"
+                    f"  Got:      {pcr0_hex}\n"
+                    f"  Expected: {expected_pcr0[:32]}..."
+                )
+            result["verification_steps"].append("✓ PCR0 matches expected value")
+        elif skip_pcr0_allowlist:
+            # Primary validator mode: PCR0 is STORED for auditor verification
+            # Gateway trusts authorized hotkeys, auditors verify PCR0 matches GitHub code
+            result["verification_steps"].append(
+                f"✓ PCR0 extracted for auditor verification: {pcr0_hex[:32]}..."
             )
-        
-        result["verification_steps"].append("✓ PCR0 matches pinned value (ROOT OF TRUST verified)")
+            result["pcr0_verification_mode"] = "auditor_deferred"
+            logger.info(f"[NITRO] PCR0 stored for auditor verification: {pcr0_hex[:32]}...")
+        else:
+            # Gateway mode: check against allowlist
+            allowed_pcr0_list = get_allowed_gateway_pcr0() if role == "gateway" else get_allowed_validator_pcr0()
+            
+            if not allowed_pcr0_list:
+                raise AttestationError(f"No allowed PCR0 values configured for role '{role}'")
+            
+            if pcr0_hex not in allowed_pcr0_list:
+                raise AttestationError(
+                    f"PCR0 mismatch (ROOT OF TRUST FAILURE)!\n"
+                    f"  Got:      {pcr0_hex}\n"
+                    f"  Expected: {allowed_pcr0_list[0][:32]}...\n"
+                    f"  This enclave is running UNKNOWN code!"
+                )
+            result["verification_steps"].append("✓ PCR0 matches allowlist value")
         
         # =================================================================
         # Step 7: Extract user_data (NOW we can trust it after PCR0 verified)

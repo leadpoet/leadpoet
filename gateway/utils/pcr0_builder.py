@@ -77,12 +77,11 @@ BUILD_DIR = os.environ.get("PCR0_BUILD_DIR", "/tmp/pcr0_builder")
 # Cache
 # =============================================================================
 
-# {commit_hash: {"pcr0": "...", "built_at": timestamp, "files_hash": "..."}}
+# Cache structure (keyed by CONTENT HASH, not commit hash):
+# {content_hash: {"pcr0": "...", "content_hash": "...", "commit_hash": "...", "built_at": timestamp}}
+# This means: same code content = same cache key, regardless of commits
 _pcr0_cache: Dict[str, Dict] = {}
 _cache_lock = asyncio.Lock()
-
-# Last known commit hash (to detect changes)
-_last_commit: Optional[str] = None
 
 # Is a build currently running?
 _build_in_progress = False
@@ -101,9 +100,17 @@ def is_pcr0_valid(pcr0: str) -> bool:
 def get_cache_status() -> Dict:
     """Get current cache status for debugging."""
     return {
-        "cached_commits": list(_pcr0_cache.keys()),
+        "cached_content_hashes": list(_pcr0_cache.keys()),
         "cached_pcr0s": get_cached_pcr0_values(),
-        "last_commit": _last_commit,
+        "cache_entries": [
+            {
+                "content_hash": k,
+                "commit_hash": v.get("commit_hash", "?")[:8],
+                "pcr0": v["pcr0"][:32] + "...",
+                "built_at": v.get("built_at"),
+            }
+            for k, v in _pcr0_cache.items()
+        ],
         "build_in_progress": _build_in_progress,
         "cache_size": len(_pcr0_cache),
     }
@@ -138,36 +145,6 @@ async def get_latest_commits(repo_dir: str, count: int = 3) -> List[Dict]:
             })
     
     return commits
-
-
-async def get_changed_files(repo_dir: str, commit1: str, commit2: str) -> Set[str]:
-    """Get files changed between two commits."""
-    proc = await asyncio.create_subprocess_exec(
-        "git", "diff", "--name-only", commit1, commit2,
-        cwd=repo_dir,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    
-    if proc.returncode != 0:
-        logger.error(f"[PCR0] git diff failed: {stderr.decode()}")
-        return set()
-    
-    return set(stdout.decode().strip().split("\n"))
-
-
-def should_rebuild(changed_files: Set[str]) -> bool:
-    """Check if any changed file affects PCR0."""
-    for f in changed_files:
-        # Check exact file matches
-        if f in MONITORED_FILES:
-            return True
-        # Check directory matches
-        for d in MONITORED_DIRS:
-            if f.startswith(d):
-                return True
-    return False
 
 
 async def clone_or_update_repo(repo_dir: str) -> bool:
@@ -270,23 +247,6 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
     return True
 
 
-async def checkout_commit(repo_dir: str, commit_hash: str) -> bool:
-    """Checkout a specific commit."""
-    proc = await asyncio.create_subprocess_exec(
-        "git", "checkout", commit_hash,
-        cwd=repo_dir,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    
-    if proc.returncode != 0:
-        logger.error(f"[PCR0] git checkout {commit_hash} failed: {stderr.decode()}")
-        return False
-    
-    return True
-
-
 # =============================================================================
 # Enclave Build
 # =============================================================================
@@ -371,12 +331,75 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
 
 
 # =============================================================================
+# Content Hash Tracking (for detecting PCR0-relevant changes)
+# =============================================================================
+
+def compute_files_content_hash(repo_dir: str) -> Optional[str]:
+    """
+    Compute a hash of all PCR0-relevant files' contents.
+    
+    This is used to detect when files actually changed (not just commits).
+    Only rebuilds when the content of monitored files changes.
+    """
+    hasher = hashlib.sha256()
+    
+    files_found = 0
+    for filepath in sorted(MONITORED_FILES):
+        full_path = os.path.join(repo_dir, filepath)
+        if os.path.exists(full_path):
+            try:
+                with open(full_path, 'rb') as f:
+                    hasher.update(f.read())
+                hasher.update(filepath.encode())  # Include path in hash
+                files_found += 1
+            except Exception as e:
+                logger.warning(f"[PCR0] Could not read {filepath}: {e}")
+    
+    # Also hash files in monitored directories
+    for dirpath in sorted(MONITORED_DIRS):
+        full_dir = os.path.join(repo_dir, dirpath)
+        if os.path.isdir(full_dir):
+            for root, dirs, files in os.walk(full_dir):
+                for filename in sorted(files):
+                    if filename.endswith('.py'):  # Only Python files
+                        filepath = os.path.join(root, filename)
+                        rel_path = os.path.relpath(filepath, repo_dir)
+                        try:
+                            with open(filepath, 'rb') as f:
+                                hasher.update(f.read())
+                            hasher.update(rel_path.encode())
+                            files_found += 1
+                        except Exception as e:
+                            logger.warning(f"[PCR0] Could not read {rel_path}: {e}")
+    
+    if files_found == 0:
+        logger.error("[PCR0] No monitored files found!")
+        return None
+    
+    content_hash = hasher.hexdigest()[:16]  # Short hash for logging
+    logger.info(f"[PCR0] Content hash: {content_hash} ({files_found} files)")
+    return content_hash
+
+
+# =============================================================================
 # Background Task
 # =============================================================================
 
+# Track the last content hash we built for
+_last_content_hash: Optional[str] = None
+
 async def check_and_build_pcr0():
-    """Check for new commits and build PCR0 if needed."""
-    global _last_commit, _build_in_progress, _pcr0_cache
+    """
+    Check for file changes and build PCR0 if needed.
+    
+    LOGIC:
+    1. Fetch latest code from GitHub (sparse checkout - only PCR0 files)
+    2. Compute content hash of all monitored files
+    3. If content hash changed from last build → rebuild PCR0
+    4. Cache the PCR0 (keyed by content hash)
+    5. Keep last 3 PCR0 values for validators on different versions
+    """
+    global _last_content_hash, _build_in_progress, _pcr0_cache
     
     if _build_in_progress:
         logger.info("[PCR0] Build already in progress, skipping")
@@ -387,81 +410,67 @@ async def check_and_build_pcr0():
     try:
         repo_dir = BUILD_DIR
         
-        # Clone or update repo
-        logger.info("[PCR0] Updating repo from GitHub...")
+        # Clone or update repo (sparse checkout - only PCR0 files)
+        logger.info("[PCR0] Fetching latest code from GitHub...")
         if not await clone_or_update_repo(repo_dir):
             logger.error("[PCR0] Failed to update repo")
             return
         
-        # Get latest commits
-        commits = await get_latest_commits(repo_dir, PCR0_CACHE_SIZE)
-        if not commits:
-            logger.error("[PCR0] No commits found")
+        # Compute content hash of monitored files
+        content_hash = compute_files_content_hash(repo_dir)
+        if not content_hash:
+            logger.error("[PCR0] Failed to compute content hash")
             return
         
-        latest_commit = commits[0]["hash"]
-        
-        # Check if we need to rebuild
-        need_rebuild = False
-        if _last_commit is None:
-            # First run, build all
-            need_rebuild = True
-            logger.info("[PCR0] First run, building all commits")
-        elif _last_commit != latest_commit:
-            # New commit, check if relevant files changed
-            changed = await get_changed_files(repo_dir, _last_commit, latest_commit)
-            if should_rebuild(changed):
-                need_rebuild = True
-                logger.info(f"[PCR0] Monitored files changed: {changed & (MONITORED_FILES | set(f for f in changed for d in MONITORED_DIRS if f.startswith(d)))}")
-            else:
-                logger.info(f"[PCR0] New commit but no monitored files changed")
-                _last_commit = latest_commit
-        else:
-            logger.info("[PCR0] No new commits")
-        
-        if not need_rebuild:
+        # Check if we already have this content hash cached
+        if content_hash in _pcr0_cache:
+            logger.info(f"[PCR0] Content hash {content_hash} already cached, skipping build")
+            _last_content_hash = content_hash
             return
         
-        # Build PCR0 for each commit we don't have cached
+        # Check if content actually changed
+        if _last_content_hash == content_hash:
+            logger.info(f"[PCR0] No changes to monitored files (hash: {content_hash})")
+            return
+        
+        logger.info(f"[PCR0] Content changed! Old: {_last_content_hash}, New: {content_hash}")
+        logger.info(f"[PCR0] Building PCR0 for content hash {content_hash}...")
+        
+        # Get commit hash for reference (optional, just for logging)
+        commits = await get_latest_commits(repo_dir, 1)
+        commit_hash = commits[0]["hash"] if commits else "unknown"
+        
+        # Build PCR0 for current content
         async with _cache_lock:
-            for commit in commits:
-                commit_hash = commit["hash"]
-                
-                # Skip if already cached
-                if commit_hash in _pcr0_cache:
-                    logger.info(f"[PCR0] Commit {commit_hash[:8]} already cached")
-                    continue
-                
-                # Checkout and build
-                logger.info(f"[PCR0] Building PCR0 for commit {commit_hash[:8]}...")
-                
-                if not await checkout_commit(repo_dir, commit_hash):
-                    continue
-                
-                pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
-                
-                if pcr0:
-                    _pcr0_cache[commit_hash] = {
-                        "pcr0": pcr0,
-                        "built_at": datetime.utcnow().isoformat(),
-                        "commit_message": commit["message"],
-                    }
-                    logger.info(f"[PCR0] ✅ Cached PCR0 for {commit_hash[:8]}: {pcr0[:32]}...")
-                else:
-                    logger.error(f"[PCR0] ❌ Failed to build PCR0 for {commit_hash[:8]}")
+            logger.info(f"[PCR0] Building enclave for content hash {content_hash} (commit {commit_hash[:8]})...")
             
-            # Prune old entries (keep only last N)
-            if len(_pcr0_cache) > PCR0_CACHE_SIZE:
-                # Sort by built_at and keep newest
-                sorted_commits = sorted(
-                    _pcr0_cache.items(),
-                    key=lambda x: x[1]["built_at"],
-                    reverse=True
-                )
-                _pcr0_cache = dict(sorted_commits[:PCR0_CACHE_SIZE])
-                logger.info(f"[PCR0] Pruned cache to {PCR0_CACHE_SIZE} entries")
+            pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
+            
+            if pcr0:
+                # Store keyed by CONTENT HASH (not commit hash)
+                # This means same code = same key, regardless of commit
+                _pcr0_cache[content_hash] = {
+                    "pcr0": pcr0,
+                    "content_hash": content_hash,
+                    "commit_hash": commit_hash,
+                    "built_at": datetime.utcnow().isoformat(),
+                }
+                logger.info(f"[PCR0] ✅ Cached PCR0 for content {content_hash}: {pcr0[:32]}...")
+                
+                # Prune old entries (keep only last N)
+                if len(_pcr0_cache) > PCR0_CACHE_SIZE:
+                    # Sort by built_at and keep newest
+                    sorted_entries = sorted(
+                        _pcr0_cache.items(),
+                        key=lambda x: x[1]["built_at"],
+                        reverse=True
+                    )
+                    _pcr0_cache = dict(sorted_entries[:PCR0_CACHE_SIZE])
+                    logger.info(f"[PCR0] Pruned cache to {PCR0_CACHE_SIZE} entries")
+            else:
+                logger.error(f"[PCR0] ❌ Failed to build PCR0 for content {content_hash}")
         
-        _last_commit = latest_commit
+        _last_content_hash = content_hash
         logger.info(f"[PCR0] ✅ Cache updated. Valid PCR0s: {len(_pcr0_cache)}")
         
     except Exception as e:
@@ -496,28 +505,36 @@ def verify_pcr0(pcr0: str) -> Dict:
     """
     Verify a PCR0 value against our computed cache.
     
+    The cache stores PCR0 values keyed by CONTENT HASH of monitored files.
+    This means:
+    - Same code = same PCR0 (regardless of how many commits)
+    - Only 3 different code versions are cached
+    - Validators on older code versions are still accepted
+    
     Returns:
         {
             "valid": bool,
-            "commit": str or None,
+            "commit_hash": str or None,
+            "content_hash": str or None,
             "message": str,
             "cache_size": int,
         }
     """
-    for commit_hash, entry in _pcr0_cache.items():
+    for content_hash, entry in _pcr0_cache.items():
         if entry["pcr0"] == pcr0:
             return {
                 "valid": True,
-                "commit": commit_hash,
-                "commit_message": entry.get("commit_message", ""),
+                "commit_hash": entry.get("commit_hash", "unknown"),
+                "content_hash": content_hash,
                 "built_at": entry.get("built_at"),
-                "message": f"PCR0 matches commit {commit_hash[:8]}",
+                "message": f"PCR0 matches content {content_hash} (commit {entry.get('commit_hash', 'unknown')[:8]})",
                 "cache_size": len(_pcr0_cache),
             }
     
     return {
         "valid": False,
-        "commit": None,
+        "commit_hash": None,
+        "content_hash": None,
         "message": f"PCR0 not in cache. Valid PCR0s: {len(_pcr0_cache)}",
         "cache_size": len(_pcr0_cache),
         "cached_pcr0s": [e["pcr0"][:32] + "..." for e in _pcr0_cache.values()],

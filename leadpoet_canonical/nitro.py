@@ -413,11 +413,14 @@ def verify_nitro_attestation_full(
                 verification = verify_pcr0(pcr0_hex)
                 
                 if verification["valid"]:
+                    commit_hash = verification.get("commit_hash", "unknown")
+                    content_hash = verification.get("content_hash", "unknown")
                     result["verification_steps"].append(
-                        f"✓ PCR0 matches GitHub commit {verification['commit'][:8]}"
+                        f"✓ PCR0 matches GitHub (content: {content_hash}, commit: {commit_hash[:8]})"
                     )
                     result["pcr0_verification_mode"] = "dynamic_github"
-                    result["pcr0_commit"] = verification["commit"]
+                    result["pcr0_commit"] = commit_hash
+                    result["pcr0_content_hash"] = content_hash
                     logger.info(f"[NITRO] ✅ PCR0 verified against GitHub: {pcr0_hex[:32]}...")
                 else:
                     # PCR0 not in cache - could be new commit not yet built

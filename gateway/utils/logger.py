@@ -176,6 +176,13 @@ async def _log_event_legacy_format(event: Dict[str, Any]) -> Dict[str, Any]:
     event_type = event.get("event_type", "UNKNOWN")
     
     # ============================================================
+    # CRITICAL: Auto-compute payload_hash if not provided
+    # (This was the original behavior - required for NOT NULL constraint)
+    # ============================================================
+    if "payload_hash" not in event and "payload" in event:
+        event["payload_hash"] = compute_payload_hash(event["payload"])
+    
+    # ============================================================
     # Store to Supabase (OLD format - no signing)
     # ============================================================
     

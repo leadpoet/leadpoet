@@ -231,7 +231,7 @@ echo "🛑 Auto-updater stopped"
 if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1":
     # Check if proxies are configured for containerization
     proxies_found = []
-    for i in range(1, 21):  # Check for up to 20 proxies
+    for i in range(1, 50):  # Check for up to 49 proxies (supports scaling)
         proxy_var = f"WEBSHARE_PROXY_{i}"
         proxy_value = os.getenv(proxy_var)
         if proxy_value and proxy_value != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80":

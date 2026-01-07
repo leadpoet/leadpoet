@@ -183,6 +183,8 @@ start_container() {
       -e SCRAPINGDOG_API_KEY="$SCRAPINGDOG_API_KEY" \
       -e OPENROUTER_KEY="$OPENROUTER_KEY" \
       -e COMPANIES_HOUSE_API_KEY="$COMPANIES_HOUSE_API_KEY" \
+      -e ENABLE_TEE_SUBMISSION="${ENABLE_TEE_SUBMISSION:-false}" \
+      -e GATEWAY_URL="${GATEWAY_URL:-http://54.226.209.164:8000}" \
       $PROXY_ARGS \
       leadpoet-validator:latest \
       --netuid 71 \

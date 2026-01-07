@@ -30,9 +30,24 @@ def get_enclave_cid() -> Optional[int]:
     """
     Get the CID of the running validator enclave.
     
+    Priority:
+    1. ENCLAVE_CID environment variable (for Docker containers)
+    2. nitro-cli describe-enclaves (for host)
+    
     Returns:
         Enclave CID or None if not running
     """
+    # Check environment variable first (for Docker containers)
+    env_cid = os.environ.get("ENCLAVE_CID")
+    if env_cid:
+        try:
+            cid = int(env_cid)
+            print(f"[vsock] Using ENCLAVE_CID from environment: {cid}")
+            return cid
+        except ValueError:
+            print(f"[vsock] Invalid ENCLAVE_CID: {env_cid}")
+    
+    # Fall back to nitro-cli (for host)
     try:
         result = subprocess.run(
             ["nitro-cli", "describe-enclaves"],

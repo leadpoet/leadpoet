@@ -66,6 +66,15 @@ for i in {1..49}; do
     fi
 done
 
+# Get enclave CID for TEE signing (if enclave is running)
+ENCLAVE_CID=""
+if command -v nitro-cli &> /dev/null; then
+    ENCLAVE_CID=$(nitro-cli describe-enclaves 2>/dev/null | grep -o '"EnclaveCID": [0-9]*' | head -1 | grep -o '[0-9]*' || true)
+    if [ -n "$ENCLAVE_CID" ]; then
+        echo "🔐 Detected running Nitro Enclave with CID: $ENCLAVE_CID"
+    fi
+fi
+
 # Calculate total containers (main + workers)
 # Main container uses EC2 IP (no proxy)
 # Each proxy gets 1 worker container
@@ -164,8 +173,20 @@ start_container() {
     
     # Determine container mode (ID 0 = coordinator, others = worker)
     local MODE_ARG=""
+    local VSOCK_ARG=""
+    local ENCLAVE_CID_ARG=""
     if [ "$CONTAINER_ID" -eq 0 ]; then
         MODE_ARG="--mode coordinator"
+        # Coordinator needs vsock access for Nitro Enclave TEE signing
+        if [ -e /dev/vsock ]; then
+            VSOCK_ARG="--device /dev/vsock"
+            echo "   🔐 Enabling vsock for TEE signing"
+        fi
+        # Pass enclave CID if available
+        if [ -n "$ENCLAVE_CID" ]; then
+            ENCLAVE_CID_ARG="-e ENCLAVE_CID=$ENCLAVE_CID"
+            echo "   🔐 Passing ENCLAVE_CID=$ENCLAVE_CID"
+        fi
     else
         MODE_ARG="--mode worker"
     fi
@@ -185,6 +206,8 @@ start_container() {
       -e COMPANIES_HOUSE_API_KEY="$COMPANIES_HOUSE_API_KEY" \
       -e ENABLE_TEE_SUBMISSION="${ENABLE_TEE_SUBMISSION:-false}" \
       -e GATEWAY_URL="${GATEWAY_URL:-http://54.226.209.164:8000}" \
+      $ENCLAVE_CID_ARG \
+      $VSOCK_ARG \
       $PROXY_ARGS \
       leadpoet-validator:latest \
       --netuid 71 \

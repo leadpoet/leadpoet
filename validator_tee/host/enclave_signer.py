@@ -110,6 +110,9 @@ _ATTESTATION_CACHE: dict = {}  # epoch_id -> attestation_b64
 # Cache for public key (avoid repeated vsock calls)
 _PUBLIC_KEY_HEX: Optional[str] = None
 
+# Cache for code hash (avoid recomputing)
+_CODE_HASH: Optional[str] = None
+
 
 # ============================================================================
 # Initialization

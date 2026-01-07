@@ -61,14 +61,15 @@ import aiohttp
 # ════════════════════════════════════════════════════════════════════════════
 # These imports are optional at startup - only used if TEE is enabled
 try:
-    from validator_tee.enclave_signer import (
+    from validator_tee import (
         initialize_enclave_keypair,
         sign_weights,
-        sign_digest,
         get_enclave_pubkey,
-        get_attestation_document_b64 as get_attestation,
+        get_attestation_document_b64,
+        get_attestation,
         get_code_hash,
         is_keypair_initialized,
+        is_enclave_running,
     )
     from leadpoet_canonical.weights import normalize_to_u16, bundle_weights_hash
     from leadpoet_canonical.binding import create_binding_message

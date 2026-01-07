@@ -24,7 +24,11 @@ Security:
 
 import os
 import base64
+import hashlib
+import json
 import logging
+import uuid
+from datetime import datetime
 from typing import List, Optional, Set
 
 from fastapi import APIRouter, HTTPException
@@ -47,8 +51,12 @@ router = APIRouter(prefix="/weights", tags=["weights"])
 
 MAX_BLOCK_DRIFT = 30  # Max allowed drift from gateway-observed block
 
-# Config from environment
-EXPECTED_VALIDATOR_CODE_HASH = os.environ.get("EXPECTED_VALIDATOR_CODE_HASH")
+# Build identifier for transparency log
+BUILD_ID = os.environ.get("BUILD_ID", "production-gateway-tee")
+
+# PCR0 is the ROOT OF TRUST - code_hash in user_data is INFORMATIONAL only
+# The verify_nitro_attestation_full function checks PCR0 against the allowlist
+# which is fetched from GitHub automatically
 
 # Filter empty strings - .split(",") on "" produces [""]
 _primary_hotkeys_str = os.environ.get("PRIMARY_VALIDATOR_HOTKEYS", "")
@@ -126,32 +134,51 @@ class WeightSubmissionResponse(BaseModel):
 def verify_validator_attestation(
     attestation_b64: str,
     expected_pubkey: str,
-    expected_code_hash: str,
     expected_epoch_id: int,
 ) -> tuple:
     """
-    Verify the validator's AWS attestation document.
+    Verify the validator's AWS Nitro attestation document.
     
-    FAIL-CLOSED IN PRODUCTION. Dev mode skips with warning.
+    FAIL-CLOSED: NO DEV MODE BYPASS. Attestation verification is ALWAYS required.
+    
+    PCR0 (enclave image hash) is the ROOT OF TRUST:
+    - PCR0 is checked against the allowlist (fetched from GitHub)
+    - code_hash in user_data is INFORMATIONAL only (do NOT trust it alone)
+    - A malicious enclave could claim any code_hash, but cannot fake PCR0
     
     Returns:
         (valid: bool, extracted_data: dict)
     """
     try:
-        attestation_bytes = base64.b64decode(attestation_b64)
+        # FAIL-CLOSED: Full Nitro verification ALWAYS required
+        # NO dev mode bypass - attestation is critical security
+        from leadpoet_canonical.nitro import verify_nitro_attestation_full
         
-        # PRODUCTION: Full verification REQUIRED
-        if os.environ.get("ENVIRONMENT") == "production":
-            from leadpoet_canonical.nitro import verify_nitro_attestation_full
-            return verify_nitro_attestation_full(
-                attestation_bytes, expected_pubkey, expected_code_hash, expected_epoch_id
-            )
+        # PCR0 is verified against the allowlist which is:
+        # 1. Fetched from GitHub automatically (cached 5 minutes)
+        # 2. Contains only PCR0 values for approved enclave builds
+        # 3. The validator CANNOT fake PCR0 - it's inside the AWS-signed attestation
+        valid, data = verify_nitro_attestation_full(
+            attestation_b64=attestation_b64,
+            expected_pubkey=expected_pubkey,
+            expected_purpose="validator_weights",
+            expected_epoch_id=expected_epoch_id,
+            role="validator",  # Uses ALLOWED_VALIDATOR_PCR0_VALUES
+        )
         
-        # DEV MODE: WARNING only
-        logger.warning("[ATTESTATION] ⚠️ DEV MODE: Skipping full Nitro verification")
-        logger.warning("[ATTESTATION]    In production, this would FAIL without full verification")
-        return True, {"dev_mode": True}
+        if valid:
+            logger.info(f"[ATTESTATION] ✅ Full Nitro verification passed")
+            logger.info(f"[ATTESTATION]    PCR0: {data.get('pcr0', 'N/A')[:32]}...")
+            logger.info(f"[ATTESTATION]    Steps: {data.get('verification_steps', [])[-1]}")
+        else:
+            logger.error(f"[ATTESTATION] ❌ Verification failed: {data.get('error', 'Unknown')}")
         
+        return valid, data
+        
+    except ImportError as e:
+        # If nitro module not available, FAIL (don't bypass)
+        logger.error(f"[ATTESTATION] ❌ CRITICAL: Nitro verification module not available: {e}")
+        return False, {"error": f"Nitro verification unavailable: {e}"}
     except Exception as e:
         logger.error(f"[ATTESTATION] ❌ Failed: {e}")
         return False, {"error": str(e)}
@@ -254,14 +281,24 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
         .execute()
     
     if existing.data:
+        dup_payload = {
+            "epoch_id": submission.epoch_id,
+            "netuid": submission.netuid,
+            "validator_hotkey": submission.validator_hotkey,
+        }
+        dup_payload_hash = hashlib.sha256(
+            json.dumps(dup_payload, sort_keys=True).encode()
+        ).hexdigest()
+        
         await log_event({
             "event_type": "WEIGHT_SUBMISSION_REJECTED_DUPLICATE",
             "actor_hotkey": submission.validator_hotkey,
-            "payload": {
-                "epoch_id": submission.epoch_id,
-                "netuid": submission.netuid,
-                "validator_hotkey": submission.validator_hotkey,
-            }
+            "nonce": str(uuid.uuid4()),
+            "ts": datetime.utcnow().isoformat(),
+            "payload_hash": dup_payload_hash,
+            "build_id": BUILD_ID,
+            "signature": "validator",  # Validator-initiated event
+            "payload": dup_payload,
         })
         raise HTTPException(status_code=409, detail="Duplicate submission for this epoch")
     
@@ -312,36 +349,29 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
     
     print(f"   ✅ Epoch freshness OK: epoch={submission.epoch_id}, block={submission.block}")
     
-    # --- Step 4: Attestation verification ---
-    print(f"   Step 4: Verifying attestation...")
+    # --- Step 4: Attestation verification (PCR0 is ROOT OF TRUST) ---
+    print(f"   Step 4: Verifying Nitro attestation...")
     
-    # Enforce pinned code hash in production
-    if EXPECTED_VALIDATOR_CODE_HASH and submission.validator_code_hash != EXPECTED_VALIDATOR_CODE_HASH:
-        raise HTTPException(
-            status_code=403, 
-            detail=f"Validator code hash mismatch: expected {EXPECTED_VALIDATOR_CODE_HASH[:16]}..."
-        )
-    
-    expected_code_hash = EXPECTED_VALIDATOR_CODE_HASH
-    if not expected_code_hash:
-        if os.environ.get("ENVIRONMENT") == "production":
-            raise HTTPException(
-                status_code=500, 
-                detail="EXPECTED_VALIDATOR_CODE_HASH not configured (required in production)"
-            )
-        logger.warning("[DEV MODE] ⚠️ Using client-provided validator_code_hash")
-        expected_code_hash = submission.validator_code_hash
-    
+    # FAIL-CLOSED: Full Nitro verification with PCR0 check
+    # PCR0 is checked against the allowlist from GitHub (cached, auto-refreshed)
+    # The validator CANNOT fake PCR0 - it's inside the AWS-signed attestation document
+    # code_hash in user_data is INFORMATIONAL only
     attestation_valid, attestation_data = verify_validator_attestation(
-        submission.validator_attestation_b64,
-        submission.validator_enclave_pubkey,
-        expected_code_hash,
+        attestation_b64=submission.validator_attestation_b64,
+        expected_pubkey=submission.validator_enclave_pubkey,
         expected_epoch_id=submission.epoch_id,
     )
     if not attestation_valid:
-        raise HTTPException(status_code=403, detail="Invalid validator attestation")
+        error_detail = attestation_data.get("error", "Unknown attestation error")
+        print(f"   ❌ Attestation verification failed: {error_detail}")
+        raise HTTPException(
+            status_code=403, 
+            detail=f"Invalid validator attestation: {error_detail}"
+        )
     
-    print(f"   ✅ Attestation OK")
+    # Extract verified PCR0 for logging
+    verified_pcr0 = attestation_data.get("pcr0", "N/A")
+    print(f"   ✅ Attestation OK (PCR0: {verified_pcr0[:32]}...)")
     
     # --- Step 5: Hotkey binding verification ---
     print(f"   Step 5: Verifying hotkey binding...")
@@ -412,19 +442,29 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
         logger.warning(f"[SNAPSHOT] ⚠️ Could not capture chain snapshot: {e}")
     
     # Log event FIRST to get event_hash
+    submission_payload = {
+        "epoch_id": submission.epoch_id,
+        "netuid": submission.netuid,
+        "block": submission.block,
+        "weights_hash": submission.weights_hash,
+        "validator_hotkey": submission.validator_hotkey,
+        "weights_count": len(submission.uids),
+        "chain_snapshot_block": chain_snapshot_block,
+        "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
+    }
+    submission_payload_hash = hashlib.sha256(
+        json.dumps(submission_payload, sort_keys=True).encode()
+    ).hexdigest()
+    
     log_entry = await log_event({
         "event_type": "WEIGHT_SUBMISSION",
         "actor_hotkey": submission.validator_hotkey,
-        "payload": {
-            "epoch_id": submission.epoch_id,
-            "netuid": submission.netuid,
-            "block": submission.block,
-            "weights_hash": submission.weights_hash,
-            "validator_hotkey": submission.validator_hotkey,
-            "weights_count": len(submission.uids),
-            "chain_snapshot_block": chain_snapshot_block,
-            "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
-        }
+        "nonce": str(uuid.uuid4()),
+        "ts": datetime.utcnow().isoformat(),
+        "payload_hash": submission_payload_hash,
+        "build_id": BUILD_ID,
+        "signature": submission.validator_signature,  # Use the actual validator signature
+        "payload": submission_payload,
     })
     weight_submission_event_hash = log_entry.get("event_hash")
     
@@ -452,15 +492,25 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
     except Exception as e:
         # Handle UNIQUE constraint violation (race condition)
         if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+            race_payload = {
+                "epoch_id": submission.epoch_id,
+                "netuid": submission.netuid,
+                "validator_hotkey": submission.validator_hotkey,
+                "reason": "UNIQUE constraint violation (concurrent submission)",
+            }
+            race_payload_hash = hashlib.sha256(
+                json.dumps(race_payload, sort_keys=True).encode()
+            ).hexdigest()
+            
             await log_event({
                 "event_type": "WEIGHT_SUBMISSION_REJECTED_DUPLICATE",
                 "actor_hotkey": submission.validator_hotkey,
-                "payload": {
-                    "epoch_id": submission.epoch_id,
-                    "netuid": submission.netuid,
-                    "validator_hotkey": submission.validator_hotkey,
-                    "reason": "UNIQUE constraint violation (concurrent submission)",
-                }
+                "nonce": str(uuid.uuid4()),
+                "ts": datetime.utcnow().isoformat(),
+                "payload_hash": race_payload_hash,
+                "build_id": BUILD_ID,
+                "signature": "validator",  # Validator-initiated event
+                "payload": race_payload,
             })
             raise HTTPException(status_code=409, detail="Duplicate submission (concurrent race)")
         raise

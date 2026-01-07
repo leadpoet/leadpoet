@@ -23,10 +23,16 @@ FAIL-CLOSED: This module returns False (or raises) on ANY verification failure.
 import base64
 import hashlib
 import json
+import logging
+import os
+import time
+import threading
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple, List
 
 from leadpoet_canonical.constants import TRUST_LEVEL_FULL_NITRO, TRUST_LEVEL_SIGNATURE_ONLY
+
+logger = logging.getLogger(__name__)
 
 
 class AttestationError(Exception):
@@ -63,20 +69,143 @@ NITRO_ROOT_CERT_DER: bytes = bytes.fromhex(
     "7f9cdaf5d943bc61fc2beb03cb6fee8d2302f3dff6"
 )
 
-# Allowed PCR0 values for gateway enclave
-# Update this list when deploying new gateway builds
-# PCR0 = SHA384 hash of the enclave image (EIF file)
-ALLOWED_GATEWAY_PCR0_VALUES: List[str] = [
-    # Gateway enclave deployed 2026-01-05
+# =============================================================================
+# PCR0 ALLOWLIST - FETCHED FROM GITHUB (AUTO-UPDATED)
+# =============================================================================
+
+# GitHub raw URL for the allowlist file
+# This is the source of truth for allowed PCR0 values
+PCR0_ALLOWLIST_URL = os.environ.get(
+    "PCR0_ALLOWLIST_URL",
+    "https://raw.githubusercontent.com/LeadPoet/Bittensor-subnet/main/pcr0_allowlist.json"
+)
+
+# Cache TTL in seconds (default: 5 minutes)
+PCR0_CACHE_TTL_SECONDS = int(os.environ.get("PCR0_CACHE_TTL_SECONDS", "300"))
+
+# Thread-safe cache for PCR0 allowlist
+_pcr0_cache: Dict[str, Any] = {
+    "gateway_pcr0": [],
+    "validator_pcr0": [],
+    "last_fetch": 0,
+    "fetch_error": None,
+}
+_pcr0_cache_lock = threading.Lock()
+
+# Fallback values (used if GitHub fetch fails on first attempt)
+# These should match the initial values in pcr0_allowlist.json
+FALLBACK_GATEWAY_PCR0_VALUES: List[str] = [
     "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5",
 ]
-
-# Allowed PCR0 values for validator enclave
-# Update this list when deploying new validator builds
-ALLOWED_VALIDATOR_PCR0_VALUES: List[str] = [
-    # Validator enclave deployed 2026-01-06
+FALLBACK_VALIDATOR_PCR0_VALUES: List[str] = [
     "1697ef7e8c095ff5fc3d7e0e79bb7d00d29d0bdfa487d2c7353812ebafb35667ebd428c42db59ad1efe1c2999d1e5d85",
 ]
+
+
+def _fetch_pcr0_allowlist_from_github() -> Dict[str, List[str]]:
+    """
+    Fetch PCR0 allowlist from GitHub.
+    
+    Returns:
+        Dictionary with "gateway_pcr0" and "validator_pcr0" lists
+        
+    Raises:
+        Exception on fetch failure
+    """
+    import urllib.request
+    import urllib.error
+    
+    try:
+        # Fetch with timeout
+        request = urllib.request.Request(
+            PCR0_ALLOWLIST_URL,
+            headers={"User-Agent": "LeadPoet-Gateway/1.0"}
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        
+        # Extract PCR0 values from the structured format
+        gateway_pcr0 = [item["pcr0"] for item in data.get("gateway_pcr0", [])]
+        validator_pcr0 = [item["pcr0"] for item in data.get("validator_pcr0", [])]
+        
+        logger.info(f"[PCR0] Fetched allowlist from GitHub: {len(gateway_pcr0)} gateway, {len(validator_pcr0)} validator PCR0 values")
+        
+        return {
+            "gateway_pcr0": gateway_pcr0,
+            "validator_pcr0": validator_pcr0,
+        }
+        
+    except urllib.error.URLError as e:
+        raise Exception(f"Failed to fetch PCR0 allowlist from GitHub: {e}")
+    except json.JSONDecodeError as e:
+        raise Exception(f"Invalid JSON in PCR0 allowlist: {e}")
+    except KeyError as e:
+        raise Exception(f"Invalid PCR0 allowlist format: missing key {e}")
+
+
+def _refresh_pcr0_cache_if_needed() -> None:
+    """
+    Refresh the PCR0 cache if TTL has expired.
+    Thread-safe implementation.
+    """
+    global _pcr0_cache
+    
+    current_time = time.time()
+    
+    with _pcr0_cache_lock:
+        # Check if cache is still valid
+        if current_time - _pcr0_cache["last_fetch"] < PCR0_CACHE_TTL_SECONDS:
+            return  # Cache is still valid
+        
+        try:
+            # Fetch new allowlist
+            allowlist = _fetch_pcr0_allowlist_from_github()
+            
+            _pcr0_cache["gateway_pcr0"] = allowlist["gateway_pcr0"]
+            _pcr0_cache["validator_pcr0"] = allowlist["validator_pcr0"]
+            _pcr0_cache["last_fetch"] = current_time
+            _pcr0_cache["fetch_error"] = None
+            
+        except Exception as e:
+            logger.warning(f"[PCR0] Failed to refresh allowlist from GitHub: {e}")
+            _pcr0_cache["fetch_error"] = str(e)
+            
+            # If this is the first fetch (cache is empty), use fallback values
+            if not _pcr0_cache["gateway_pcr0"] and not _pcr0_cache["validator_pcr0"]:
+                logger.warning("[PCR0] Using fallback PCR0 values")
+                _pcr0_cache["gateway_pcr0"] = FALLBACK_GATEWAY_PCR0_VALUES.copy()
+                _pcr0_cache["validator_pcr0"] = FALLBACK_VALIDATOR_PCR0_VALUES.copy()
+                _pcr0_cache["last_fetch"] = current_time  # Prevent immediate retry
+
+
+def get_allowed_gateway_pcr0() -> List[str]:
+    """
+    Get the list of allowed gateway PCR0 values.
+    Automatically refreshes from GitHub if cache is stale.
+    
+    Returns:
+        List of allowed PCR0 hex strings
+    """
+    _refresh_pcr0_cache_if_needed()
+    with _pcr0_cache_lock:
+        return _pcr0_cache["gateway_pcr0"].copy()
+
+
+def get_allowed_validator_pcr0() -> List[str]:
+    """
+    Get the list of allowed validator PCR0 values.
+    Automatically refreshes from GitHub if cache is stale.
+    
+    Returns:
+        List of allowed PCR0 hex strings
+    """
+    _refresh_pcr0_cache_if_needed()
+    with _pcr0_cache_lock:
+        return _pcr0_cache["validator_pcr0"].copy()
+
+
+# Legacy aliases for backward compatibility (simple functions, not properties)
+# Note: Code should use get_allowed_gateway_pcr0() and get_allowed_validator_pcr0() directly
 
 
 # =============================================================================
@@ -265,9 +394,9 @@ def verify_nitro_attestation_full(
         if expected_pcr0:
             allowed_pcr0_list = [expected_pcr0]
         elif role == "gateway":
-            allowed_pcr0_list = ALLOWED_GATEWAY_PCR0_VALUES
+            allowed_pcr0_list = get_allowed_gateway_pcr0()
         elif role == "validator":
-            allowed_pcr0_list = ALLOWED_VALIDATOR_PCR0_VALUES
+            allowed_pcr0_list = get_allowed_validator_pcr0()
         else:
             raise AttestationError(f"Unknown role: {role}")
         
@@ -630,14 +759,18 @@ def is_nitro_verification_available() -> bool:
         True if all requirements are met for full verification:
         - NITRO_ROOT_CERT_DER is populated
         - Required libraries are available (cbor2, cryptography)
-        - PCR0 allowlists are populated
+        - PCR0 allowlists are populated (either from GitHub or fallback)
         
     Use this to determine trust level in verification outputs.
     """
     if NITRO_ROOT_CERT_DER is None or len(NITRO_ROOT_CERT_DER) == 0:
         return False
     
-    if not ALLOWED_GATEWAY_PCR0_VALUES and not ALLOWED_VALIDATOR_PCR0_VALUES:
+    # Check if we have any PCR0 values (will trigger fetch if cache is stale)
+    gateway_pcr0 = get_allowed_gateway_pcr0()
+    validator_pcr0 = get_allowed_validator_pcr0()
+    
+    if not gateway_pcr0 and not validator_pcr0:
         return False
     
     try:
@@ -673,35 +806,38 @@ def get_allowed_pcr0_values(role: str = "gateway") -> List[str]:
         List of allowed PCR0 hex strings
     """
     if role == "gateway":
-        return ALLOWED_GATEWAY_PCR0_VALUES.copy()
+        return get_allowed_gateway_pcr0()
     elif role == "validator":
-        return ALLOWED_VALIDATOR_PCR0_VALUES.copy()
+        return get_allowed_validator_pcr0()
     else:
         return []
 
 
 def add_allowed_pcr0(pcr0_hex: str, role: str = "gateway") -> None:
     """
-    Add a PCR0 value to the allowlist (for deployment updates).
+    Add a PCR0 value to the runtime allowlist cache.
     
-    ⚠️ WARNING: In production, allowlists should be hardcoded, not modified at runtime.
-    This function is for testing/development only.
+    ⚠️ WARNING: This only modifies the runtime cache. For permanent changes,
+    update pcr0_allowlist.json in the GitHub repo.
     
     Args:
         pcr0_hex: PCR0 value to add (hex string, 96 characters for SHA-384)
         role: "gateway" or "validator"
     """
+    global _pcr0_cache
+    
     if len(pcr0_hex) != 96:
         raise ValueError(f"PCR0 must be 96 hex characters (SHA-384), got {len(pcr0_hex)}")
     
-    if role == "gateway":
-        if pcr0_hex not in ALLOWED_GATEWAY_PCR0_VALUES:
-            ALLOWED_GATEWAY_PCR0_VALUES.append(pcr0_hex)
-    elif role == "validator":
-        if pcr0_hex not in ALLOWED_VALIDATOR_PCR0_VALUES:
-            ALLOWED_VALIDATOR_PCR0_VALUES.append(pcr0_hex)
-    else:
-        raise ValueError(f"Unknown role: {role}")
+    with _pcr0_cache_lock:
+        if role == "gateway":
+            if pcr0_hex not in _pcr0_cache["gateway_pcr0"]:
+                _pcr0_cache["gateway_pcr0"].append(pcr0_hex)
+        elif role == "validator":
+            if pcr0_hex not in _pcr0_cache["validator_pcr0"]:
+                _pcr0_cache["validator_pcr0"].append(pcr0_hex)
+        else:
+            raise ValueError(f"Unknown role: {role}")
 
 
 # =============================================================================
@@ -737,17 +873,21 @@ def test_pinned_values():
     else:
         print("❌ NITRO_ROOT_CERT_DER: Not populated")
     
-    if ALLOWED_GATEWAY_PCR0_VALUES:
-        print(f"✅ ALLOWED_GATEWAY_PCR0_VALUES: {len(ALLOWED_GATEWAY_PCR0_VALUES)} value(s)")
-        for pcr0 in ALLOWED_GATEWAY_PCR0_VALUES:
+    gateway_pcr0 = get_allowed_gateway_pcr0()
+    if gateway_pcr0:
+        print(f"✅ Gateway PCR0 values: {len(gateway_pcr0)} value(s)")
+        for pcr0 in gateway_pcr0:
             print(f"   - {pcr0[:32]}...{pcr0[-16:]}")
     else:
-        print("❌ ALLOWED_GATEWAY_PCR0_VALUES: Empty")
+        print("❌ Gateway PCR0 values: Empty")
     
-    if ALLOWED_VALIDATOR_PCR0_VALUES:
-        print(f"✅ ALLOWED_VALIDATOR_PCR0_VALUES: {len(ALLOWED_VALIDATOR_PCR0_VALUES)} value(s)")
+    validator_pcr0 = get_allowed_validator_pcr0()
+    if validator_pcr0:
+        print(f"✅ Validator PCR0 values: {len(validator_pcr0)} value(s)")
+        for pcr0 in validator_pcr0:
+            print(f"   - {pcr0[:32]}...{pcr0[-16:]}")
     else:
-        print("⚠️ ALLOWED_VALIDATOR_PCR0_VALUES: Empty (validator TEE not deployed)")
+        print("⚠️ Validator PCR0 values: Empty (validator TEE not deployed)")
 
 
 def test_root_cert_parsing():

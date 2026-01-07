@@ -175,12 +175,15 @@ start_container() {
     local MODE_ARG=""
     local VSOCK_ARG=""
     local ENCLAVE_CID_ARG=""
+    local PRIVILEGED_ARG=""
     if [ "$CONTAINER_ID" -eq 0 ]; then
         MODE_ARG="--mode coordinator"
         # Coordinator needs vsock access for Nitro Enclave TEE signing
+        # Requires --privileged for vsock socket creation permissions
         if [ -e /dev/vsock ]; then
             VSOCK_ARG="--device /dev/vsock"
-            echo "   🔐 Enabling vsock for TEE signing"
+            PRIVILEGED_ARG="--privileged"
+            echo "   🔐 Enabling vsock for TEE signing (privileged mode)"
         fi
         # Pass enclave CID if available
         if [ -n "$ENCLAVE_CID" ]; then
@@ -195,6 +198,7 @@ start_container() {
       --name "$CONTAINER_NAME" \
       --network host \
       --restart unless-stopped \
+      $PRIVILEGED_ARG \
       -v ~/.bittensor/wallets:/root/.bittensor/wallets:ro \
       -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
       -e LEADPOET_CONTAINER_MODE=1 \

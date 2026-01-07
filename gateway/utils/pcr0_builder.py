@@ -38,10 +38,10 @@ logger = logging.getLogger(__name__)
 # Configuration
 # =============================================================================
 
-# GitHub repo URL
+# GitHub repo URL (public repo - no auth needed)
 GITHUB_REPO_URL = os.environ.get(
     "GITHUB_REPO_URL",
-    "https://github.com/LeadPoet/Bittensor-subnet.git"
+    "https://github.com/leadpoet/leadpoet.git"
 )
 
 # Branch to track
@@ -172,11 +172,16 @@ def should_rebuild(changed_files: Set[str]) -> bool:
 
 async def clone_or_update_repo(repo_dir: str) -> bool:
     """Clone or update the repo."""
+    # Environment to prevent git from prompting for credentials
+    git_env = os.environ.copy()
+    git_env["GIT_TERMINAL_PROMPT"] = "0"  # Don't prompt for credentials
+    
     if os.path.exists(os.path.join(repo_dir, ".git")):
         # Update existing repo
         proc = await asyncio.create_subprocess_exec(
             "git", "fetch", "origin", GITHUB_BRANCH,
             cwd=repo_dir,
+            env=git_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -185,6 +190,7 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
         proc = await asyncio.create_subprocess_exec(
             "git", "reset", "--hard", f"origin/{GITHUB_BRANCH}",
             cwd=repo_dir,
+            env=git_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -194,11 +200,16 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
             logger.error(f"[PCR0] git reset failed: {stderr.decode()}")
             return False
     else:
-        # Clone fresh
+        # Clone fresh - remove any partial clone first
+        if os.path.exists(repo_dir):
+            shutil.rmtree(repo_dir)
         os.makedirs(repo_dir, exist_ok=True)
+        
+        logger.info(f"[PCR0] Cloning {GITHUB_REPO_URL}...")
         proc = await asyncio.create_subprocess_exec(
             "git", "clone", "--depth", "10", "-b", GITHUB_BRANCH,
             GITHUB_REPO_URL, repo_dir,
+            env=git_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -207,6 +218,8 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
         if proc.returncode != 0:
             logger.error(f"[PCR0] git clone failed: {stderr.decode()}")
             return False
+        
+        logger.info(f"[PCR0] Clone successful")
     
     return True
 

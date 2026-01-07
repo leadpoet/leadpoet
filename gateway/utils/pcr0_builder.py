@@ -171,21 +171,45 @@ def should_rebuild(changed_files: Set[str]) -> bool:
 
 
 async def clone_or_update_repo(repo_dir: str) -> bool:
-    """Clone or update the repo."""
+    """
+    Clone or update the repo using sparse checkout.
+    
+    OPTIMIZATION: Only fetches the files needed for PCR0 verification:
+    - validator_tee/ (Dockerfile and enclave code)
+    - leadpoet_canonical/ (canonical modules)
+    - neurons/validator.py
+    - validator_models/automated_checks.py
+    
+    This reduces clone size from ~50MB to ~5MB and time from ~10s to ~2s.
+    """
     # Environment to prevent git from prompting for credentials
     git_env = os.environ.copy()
     git_env["GIT_TERMINAL_PROMPT"] = "0"  # Don't prompt for credentials
     
+    # Sparse checkout paths - only what's needed for PCR0
+    sparse_paths = [
+        "validator_tee/",
+        "leadpoet_canonical/",
+        "neurons/validator.py",
+        "validator_models/automated_checks.py",
+    ]
+    
     if os.path.exists(os.path.join(repo_dir, ".git")):
-        # Update existing repo
+        # Update existing repo - just fetch and reset
         proc = await asyncio.create_subprocess_exec(
-            "git", "fetch", "origin", GITHUB_BRANCH,
+            "git", "fetch", "--depth", "1", "origin", GITHUB_BRANCH,
             cwd=repo_dir,
             env=git_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.communicate()
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode != 0:
+            logger.warning(f"[PCR0] git fetch failed: {stderr.decode()}, will retry with fresh clone")
+            # Remove and re-clone
+            shutil.rmtree(repo_dir)
+            return await clone_or_update_repo(repo_dir)
         
         proc = await asyncio.create_subprocess_exec(
             "git", "reset", "--hard", f"origin/{GITHUB_BRANCH}",
@@ -199,15 +223,23 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
         if proc.returncode != 0:
             logger.error(f"[PCR0] git reset failed: {stderr.decode()}")
             return False
+            
+        logger.info("[PCR0] Repo updated via fetch")
     else:
-        # Clone fresh - remove any partial clone first
+        # Fresh clone with sparse checkout (minimal download)
         if os.path.exists(repo_dir):
             shutil.rmtree(repo_dir)
         os.makedirs(repo_dir, exist_ok=True)
         
-        logger.info(f"[PCR0] Cloning {GITHUB_REPO_URL}...")
+        logger.info(f"[PCR0] Sparse cloning {GITHUB_REPO_URL}...")
+        
+        # Step 1: Clone with sparse checkout enabled (downloads only .git metadata)
         proc = await asyncio.create_subprocess_exec(
-            "git", "clone", "--depth", "10", "-b", GITHUB_BRANCH,
+            "git", "clone",
+            "--depth", "1",           # Only latest commit
+            "--filter=blob:none",     # Don't download any files yet
+            "--sparse",               # Enable sparse checkout
+            "-b", GITHUB_BRANCH,
             GITHUB_REPO_URL, repo_dir,
             env=git_env,
             stdout=asyncio.subprocess.PIPE,
@@ -219,7 +251,21 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
             logger.error(f"[PCR0] git clone failed: {stderr.decode()}")
             return False
         
-        logger.info(f"[PCR0] Clone successful")
+        # Step 2: Configure sparse checkout to only get PCR0-relevant files
+        proc = await asyncio.create_subprocess_exec(
+            "git", "sparse-checkout", "set", *sparse_paths,
+            cwd=repo_dir,
+            env=git_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode != 0:
+            logger.error(f"[PCR0] git sparse-checkout failed: {stderr.decode()}")
+            return False
+        
+        logger.info(f"[PCR0] Sparse clone successful (only PCR0 files: {len(sparse_paths)} paths)")
     
     return True
 

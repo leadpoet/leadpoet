@@ -256,7 +256,7 @@ def check_description_sanity(desc_raw: str) -> tuple:
     # ==========================================
     MIN_LENGTH = 70          # Minimum 70 characters
     MAX_LENGTH = 2000        # Maximum 2000 characters
-    MIN_LETTERS = 30         # Must have at least 30 letters
+    MIN_LETTERS = 50         # Must have at least 50 letters
     MIN_VOWEL_RATIO = 0.15   # At least 15% vowels (to catch gibberish)
     
     # ==========================================

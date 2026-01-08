@@ -233,6 +233,150 @@ def check_role_sanity(role_raw: str) -> tuple:
 
 
 # ============================================================
+# Description Sanity Check Function
+# ============================================================
+
+def check_description_sanity(desc_raw: str) -> tuple:
+    """
+    Validate company description format - returns (error_code, error_message) or (None, None) if valid.
+    
+    Catches garbage descriptions at gateway BEFORE entering validation queue.
+    Common issues from miner submissions:
+    - Truncated descriptions ending with "..."
+    - Garbled Unicode (e.g., "ä½LinkedIn é—œæ³¨è€…")
+    - LinkedIn follower count patterns (e.g., "Company | 2457 followers on LinkedIn")
+    - Too short to be meaningful
+    """
+    desc_raw = desc_raw.strip()
+    desc_lower = desc_raw.lower()
+    letters_only = re.sub(r'[^a-zA-Z]', '', desc_raw)
+    
+    # ==========================================
+    # Thresholds
+    # ==========================================
+    MIN_LENGTH = 70          # Minimum 70 characters
+    MAX_LENGTH = 2000        # Maximum 2000 characters
+    MIN_LETTERS = 30         # Must have at least 30 letters
+    MIN_VOWEL_RATIO = 0.15   # At least 15% vowels (to catch gibberish)
+    
+    # ==========================================
+    # Check 1: Too short
+    # ==========================================
+    if len(desc_raw) < MIN_LENGTH:
+        return ("desc_too_short", f"Description too short ({len(desc_raw)} chars). Minimum {MIN_LENGTH} characters required.")
+    
+    # ==========================================
+    # Check 2: Too long
+    # ==========================================
+    if len(desc_raw) > MAX_LENGTH:
+        return ("desc_too_long", f"Description too long ({len(desc_raw)} chars). Maximum {MAX_LENGTH} characters allowed.")
+    
+    # ==========================================
+    # Check 3: No letters
+    # ==========================================
+    if not any(c.isalpha() for c in desc_raw):
+        return ("desc_no_letters", "Description must contain letters.")
+    
+    # ==========================================
+    # Check 4: Too few letters
+    # ==========================================
+    if len(letters_only) < MIN_LETTERS:
+        return ("desc_too_few_letters", f"Description must contain at least {MIN_LETTERS} letters.")
+    
+    # ==========================================
+    # Check 5: Truncated description (ends with "...")
+    # ==========================================
+    # Miners are submitting truncated LinkedIn descriptions
+    if desc_raw.rstrip().endswith('...'):
+        return ("desc_truncated", "Description appears truncated (ends with '...'). Please provide complete description.")
+    
+    # ==========================================
+    # Check 6: LinkedIn follower count pattern
+    # ==========================================
+    # Pattern: "Company | 2457 followers on LinkedIn" - this is scraped junk, not a description
+    if re.search(r'\|\s*\d+\s*followers?\s*(on\s*)?linkedin', desc_lower):
+        return ("desc_linkedin_followers", "Description contains LinkedIn follower count instead of actual company description.")
+    
+    # ==========================================
+    # Check 7: Non-Latin/garbled Unicode characters
+    # ==========================================
+    # Catches: "ä½LinkedIn é—œæ³¨è€…ã€‚" type garbage
+    # Allow: Basic Latin, Extended Latin (accents), common punctuation
+    # Block: CJK characters mixed with English (indicates encoding issues)
+    
+    # Check for CJK characters (Chinese/Japanese/Korean) - these indicate garbled encoding
+    cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff]')
+    if cjk_pattern.search(desc_raw):
+        # If there's CJK mixed with Latin letters, it's likely garbled
+        latin_count = len(re.findall(r'[a-zA-Z]', desc_raw))
+        cjk_count = len(cjk_pattern.findall(desc_raw))
+        
+        # If CJK is mixed with significant Latin text, it's garbled
+        if latin_count > 20 and cjk_count > 0:
+            return ("desc_garbled_unicode", "Description contains garbled Unicode characters. Please provide clean text.")
+    
+    # ==========================================
+    # Check 8: Gibberish (no vowels in long text)
+    # ==========================================
+    if len(letters_only) > 30:
+        vowels = sum(1 for c in letters_only.lower() if c in 'aeiou')
+        if vowels / len(letters_only) < MIN_VOWEL_RATIO:
+            return ("desc_gibberish", "Description appears to be gibberish (insufficient vowels).")
+    
+    # ==========================================
+    # Check 9: Just company name repeated or placeholder
+    # ==========================================
+    placeholders = [
+        "company description",
+        "no description",
+        "n/a",
+        "none",
+        "not available",
+        "lorem ipsum",
+        "test description",
+        "placeholder",
+        "description here",
+        "enter description",
+    ]
+    for placeholder in placeholders:
+        if desc_lower.strip() == placeholder or desc_lower.startswith(placeholder + " "):
+            return ("desc_placeholder", "Description appears to be a placeholder, not actual company information.")
+    
+    # ==========================================
+    # Check 10: Repeated character 5+ times (spam)
+    # ==========================================
+    if re.search(r'(.)\1{4,}', desc_raw):
+        return ("desc_repeated_chars", "Description contains repeated characters (spam pattern).")
+    
+    # ==========================================
+    # Check 11: Just a URL
+    # ==========================================
+    # Description shouldn't be ONLY a URL
+    url_pattern = re.compile(r'^https?://\S+$')
+    if url_pattern.match(desc_raw.strip()):
+        return ("desc_just_url", "Description cannot be just a URL. Please provide actual company description.")
+    
+    # ==========================================
+    # Check 12: Contains email as main content
+    # ==========================================
+    email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+    emails_found = email_pattern.findall(desc_raw)
+    if emails_found:
+        # If email takes up significant portion, reject
+        email_chars = sum(len(e) for e in emails_found)
+        if email_chars > len(desc_raw) * 0.3:
+            return ("desc_mostly_email", "Description appears to contain contact info instead of company description.")
+    
+    # ==========================================
+    # Check 13: Starts with pipe or special formatting junk
+    # ==========================================
+    if desc_raw.startswith('|') or desc_raw.startswith(' |'):
+        return ("desc_formatting_junk", "Description contains formatting artifacts. Please provide clean text.")
+    
+    return (None, None)  # Passed all checks
+
+
+# ============================================================
 # Field Normalization Helper
 # ============================================================
 
@@ -1322,6 +1466,71 @@ async def submit_lead(event: SubmitLeadEvent):
             )
 
         print(f"   ✅ Role sanity check passed: '{role_raw[:40]}{'...' if len(role_raw) > 40 else ''}'")
+
+        # ========================================
+        # EARLY EXIT: Description Format Sanity Check
+        # ========================================
+        # Catch garbage descriptions at gateway BEFORE entering validation queue
+        # Common issues: truncated "...", garbled Unicode, LinkedIn follower counts
+        print(f"   🔍 Validating description format (early sanity check)...")
+        desc_raw = lead_blob.get("description", "").strip()
+
+        # Call comprehensive description sanity check function
+        desc_error_code, desc_error_message = check_description_sanity(desc_raw)
+        desc_sanity_error = (desc_error_code, desc_error_message) if desc_error_code else None
+
+        # Reject if any sanity check failed
+        if desc_sanity_error:
+            desc_error_code, desc_error_message = desc_sanity_error
+            print(f"❌ Description sanity check failed: {desc_error_code} - '{desc_raw[:80]}{'...' if len(desc_raw) > 80 else ''}'")
+
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            print(f"   📊 Rate limit updated: rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+            # Log VALIDATION_FAILED event
+            try:
+                from datetime import timezone as tz_module
+                validation_failed_event = {
+                    "event_type": "VALIDATION_FAILED",
+                    "actor_hotkey": event.actor_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.now(tz_module.utc).isoformat(),
+                    "payload_hash": hashlib.sha256(json.dumps({
+                        "lead_id": event.payload.lead_id,
+                        "reason": desc_error_code,
+                        "description": desc_raw[:200]
+                    }, sort_keys=True).encode()).hexdigest(),
+                    "build_id": "gateway",
+                    "signature": "description_sanity_check",
+                    "payload": {
+                        "lead_id": event.payload.lead_id,
+                        "reason": desc_error_code,
+                        "description": desc_raw[:200],
+                        "miner_hotkey": event.actor_hotkey
+                    }
+                }
+                await log_event(validation_failed_event)
+                print(f"   ✅ Logged VALIDATION_FAILED ({desc_error_code}) to TEE buffer")
+            except Exception as e:
+                print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": desc_error_code,
+                    "message": desc_error_message,
+                    "description": desc_raw[:200] + ("..." if len(desc_raw) > 200 else ""),
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": updated_stats["reset_at"]
+                    }
+                }
+            )
+
+        print(f"   ✅ Description sanity check passed: '{desc_raw[:60]}{'...' if len(desc_raw) > 60 else ''}'")
 
         # ========================================
         # Validate country/state/city logic

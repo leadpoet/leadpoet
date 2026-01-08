@@ -1,0 +1,25 @@
+# Exclude Python cache directories for reproducible PCR0 builds
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Exclude git and IDE files
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Exclude local config and logs
+.env
+*.log
+gateway.log
+
+# Exclude test and temp files
+*.tmp
+test_*
+/data/
+

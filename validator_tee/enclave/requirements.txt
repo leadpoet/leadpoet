@@ -16,6 +16,6 @@
 cryptography==45.0.7
 
 # CBOR encoding for attestation documents
-# Latest as of Jan 2026
-cbor2==5.8.0
+# Latest available for Python 3.7 (amazonlinux:2)
+cbor2==5.4.6
 

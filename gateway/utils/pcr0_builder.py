@@ -242,8 +242,9 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
             return False
         
         # Step 2: Configure sparse checkout to only get PCR0-relevant files
+        # NOTE: --no-cone is required to allow individual file paths (not just directories)
         proc = await asyncio.create_subprocess_exec(
-            "git", "sparse-checkout", "set", *sparse_paths,
+            "git", "sparse-checkout", "set", "--no-cone", *sparse_paths,
             cwd=repo_dir,
             env=git_env,
             stdout=asyncio.subprocess.PIPE,

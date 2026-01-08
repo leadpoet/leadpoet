@@ -10462,8 +10462,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
      * Contains garbled/corrupted Unicode characters (e.g., "ä½" "é—œæ³¨" "ผู้ติดตาม")
      * Contains non-English text mixed with English (e.g., Thai, Chinese characters mixed in)
      * Contains LinkedIn metadata like "X followers on LinkedIn" or "ลิงก์ภายนอกสำหรับ"
-     * Is mostly fragments or incomplete sentences (ends with "..." or has "..." in middle)
      * Contains website navigation text ("About us. Website: ... Follow ... Report this company")
+   - DO NOT reject for: pipes (|), URLs, comma splices, lists, grammar issues, awkward phrasing, hashtags
    - This is about TEXT QUALITY, not accuracy - a coherent description can still be wrong about the company
 """)
     

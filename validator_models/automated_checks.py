@@ -3665,9 +3665,9 @@ async def run_stage4_5_repscore(
     automated_checks_data["passed"] = True
     automated_checks_data["rejection_reason"] = None
 
-    # IMPORTANT: Also set rep_score on lead object for validator.py to pick up
-    # validator.py looks for lead_blob.get("rep_score", 50)
-    lead["rep_score"] = total_rep_score
+    # NOTE: rep_score is already set on lead object:
+    # - Enterprise companies: line 3539 (hardcoded_score)
+    # - Non-enterprise: line 3591 (total_rep_score)
 
     return True, automated_checks_data
 
@@ -11575,9 +11575,9 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     automated_checks_data["passed"] = True
     automated_checks_data["rejection_reason"] = None
 
-    # IMPORTANT: Also set rep_score on lead object for validator.py to pick up
-    # validator.py looks for lead_blob.get("rep_score", 50)
-    lead["rep_score"] = total_rep_score
+    # NOTE: rep_score is already set on lead object:
+    # - Enterprise companies: line 11450 (hardcoded_score)
+    # - Non-enterprise: line 11501 (total_rep_score)
 
     return True, automated_checks_data
 

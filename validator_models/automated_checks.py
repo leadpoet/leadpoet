@@ -339,7 +339,7 @@ ICP_DEFINITIONS = [
         # HIGH VALUE: Targets investment roles at companies that ARE blockchain/crypto
         # NOTE: Only matches companies with blockchain-specific sub_industries, NOT generic VCs
         # A "Partner at Paradigm" only gets +100 if Paradigm's sub_industry is "Blockchain", "Cryptocurrency", or "Web3 Investor"
-        "sub_industries": ["Blockchain", "Cryptocurrency", "Bitcoin", "Ethereum", "Web3 Investor"],
+        "sub_industries": ["Blockchain", "Cryptocurrency", "Bitcoin", "Ethereum", "Web3 Investor", "Web3 Fund"],
         "role_details": [
             # Investment Leadership / Partners
             "partner", "general partner", "gp", "managing partner", "managing director",
@@ -10866,9 +10866,10 @@ def _get_icp_bonus(lead: dict) -> int:
         - Africa Broadcasting: +100
         - Blockchain/Crypto Investors: +100
     """
-    sub_industry = lead.get("sub_industry", "").strip().lower()
-    role = lead.get("role", "").strip().lower()
-    region = lead.get("region", "").strip().lower()
+    # Null-safe extraction - handles None values gracefully
+    sub_industry = (lead.get("sub_industry") or "").strip().lower()
+    role = (lead.get("role") or "").strip().lower()
+    region = (lead.get("region") or "").strip().lower()
     
     def matches_any(text: str, keywords: list) -> bool:
         text_lower = text.lower()

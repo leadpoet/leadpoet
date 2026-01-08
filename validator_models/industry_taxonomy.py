@@ -2807,6 +2807,10 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Financial Services', 'Lending and Investments', 'Blockchain and Cryptocurrency'],
         "definition": "Investment firms, venture capital funds, and hedge funds that focus specifically on blockchain, cryptocurrency, DeFi, NFTs, and other Web3 technologies. Includes crypto VCs, token funds, and Web3-focused angel investors."
     },
+    "Web3 Fund": {
+        "industries": ['Financial Services', 'Lending and Investments', 'Blockchain and Cryptocurrency'],
+        "definition": "Investment funds (venture capital, hedge funds, token funds) that specialize in allocating capital to blockchain, cryptocurrency, DeFi, NFTs, and other Web3 projects and companies."
+    },
     "Web Apps": {
         "industries": ['Apps', 'Software'],
         "definition": "Companies that develop a software app for use in web browsers."

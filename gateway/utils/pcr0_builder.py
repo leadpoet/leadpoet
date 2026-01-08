@@ -418,6 +418,7 @@ async def check_and_build_pcr0():
         repo_dir = BUILD_DIR
         
         # Clone or update repo (sparse checkout - only PCR0 files)
+        print("[PCR0] Fetching latest code from GitHub...")
         logger.info("[PCR0] Fetching latest code from GitHub...")
         if not await clone_or_update_repo(repo_dir):
             logger.error("[PCR0] Failed to update repo")
@@ -455,7 +456,9 @@ async def check_and_build_pcr0():
             logger.info(f"[PCR0] No changes to monitored files (hash: {content_hash})")
             return
         
+        print(f"[PCR0] Content changed! Old: {_last_content_hash}, New: {content_hash}")
         logger.info(f"[PCR0] Content changed! Old: {_last_content_hash}, New: {content_hash}")
+        print(f"[PCR0] Building PCR0 for content hash {content_hash}...")
         logger.info(f"[PCR0] Building PCR0 for content hash {content_hash}...")
         
         # Get commit hash for reference (optional, just for logging)
@@ -477,6 +480,7 @@ async def check_and_build_pcr0():
                     "commit_hash": commit_hash,
                     "built_at": datetime.utcnow().isoformat(),
                 }
+                print(f"[PCR0] ✅ Cached PCR0 for content {content_hash}: {pcr0[:64]}...")
                 logger.info(f"[PCR0] ✅ Cached PCR0 for content {content_hash}: {pcr0[:32]}...")
                 
                 # Prune old entries (keep only last N)

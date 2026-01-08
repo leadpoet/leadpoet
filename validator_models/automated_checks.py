@@ -335,12 +335,11 @@ ICP_DEFINITIONS = [
     },
     
     {
-        # Blockchain/Crypto/Web3 Investors - Investment Roles at Crypto Companies/Funds
-        # HIGH VALUE: Targets people with investment roles at blockchain/crypto companies
-        # This catches: crypto VCs, blockchain fund managers, token investors, web3 funds
-        "sub_industries": ["Blockchain", "Cryptocurrency", "Bitcoin", "Ethereum",
-                          "Venture Capital", "Hedge Funds", "Angel Investment", 
-                          "Impact Investing", "Financial Services"],
+        # Blockchain/Crypto/Web3 Companies - Investment & Leadership Roles
+        # HIGH VALUE: Targets investment roles at companies that ARE blockchain/crypto
+        # NOTE: Only matches companies with blockchain-specific sub_industries, NOT generic VCs
+        # A "Partner at Paradigm" only gets +100 if Paradigm's sub_industry is "Blockchain", "Cryptocurrency", or "Web3 Investor"
+        "sub_industries": ["Blockchain", "Cryptocurrency", "Bitcoin", "Ethereum", "Web3 Investor"],
         "role_details": [
             # Investment Leadership / Partners
             "partner", "general partner", "gp", "managing partner", "managing director",
@@ -349,7 +348,7 @@ ICP_DEFINITIONS = [
             "cio", "chief investment officer", "director of investments", "vp of investments",
             "vp investments", "head of investments", "investment director",
             "portfolio manager", "fund manager", "investment manager", "asset manager",
-            # Founder/Leadership (likely to be investors too)
+            # Founder/Leadership
             "founder", "co-founder", "ceo", "chief executive officer",
             # Investment Team Roles
             "investor", "venture capitalist", "vc", "investment analyst", "research analyst",

@@ -240,7 +240,7 @@ def get_attestation_document(epoch_id: int) -> Dict[str, Any]:
         from nsm_lib import get_attestation_document as get_nsm_attestation
         
         # Request attestation from NSM device
-        attestation_doc = get_nsm_attestation(
+        attestation_response = get_nsm_attestation(
             user_data=user_data_cbor,
             public_key=public_key.public_bytes(
                 encoding=serialization.Encoding.Raw,
@@ -248,9 +248,12 @@ def get_attestation_document(epoch_id: int) -> Dict[str, Any]:
             )
         )
         
-        # Encode as base64
+        # Extract the raw COSE_Sign1 attestation document from NSM response
+        # NSM returns: {"Attestation": {"document": <bytes - COSE_Sign1>}}
+        # The "document" is already the raw COSE_Sign1 structure (CBOR bytes)
         import base64
-        attestation_b64 = base64.b64encode(cbor2.dumps(attestation_doc)).decode()
+        attestation_bytes = attestation_response["Attestation"]["document"]
+        attestation_b64 = base64.b64encode(attestation_bytes).decode()
         
         print(f"[TEE] ✅ Generated REAL Nitro attestation for epoch {epoch_id}", flush=True)
         

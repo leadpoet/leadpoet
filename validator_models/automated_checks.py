@@ -3528,64 +3528,89 @@ async def run_stage4_5_repscore(
     print("   ✅ Stage 5 passed")
 
     # ========================================================================
-    # Rep Score: Soft Reputation Checks (SOFT)
-    # EXTRACTED VERBATIM from run_automated_checks()
-    # - Wayback Machine (max 6 points), SEC (max 12 points), 
-    #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
-    #   Companies House (max 10 points)
-    # - Always passes, appends scores to lead
-    # - Total: 0-48 points
+    # ENTERPRISE COMPANY SPECIAL HANDLING (10,001+ employees)
+    # Hardcoded rep score: 10 if ICP match, 5 if not
+    # Skips expensive rep score API calls for giant corporations
     # ========================================================================
-    print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
-    
-    # OPTIMIZATION: Run all rep score checks in parallel to save time
-    # Old: Sequential execution = 6-12s total
-    # New: Parallel execution = 3-4s total (time of slowest API)
-    results = await asyncio.gather(
-        check_wayback_machine(lead),
-        check_sec_edgar(lead),
-        check_whois_dnsbl_reputation(lead),
-        check_gdelt_mentions(lead),
-        check_companies_house(lead),
-        return_exceptions=True  # Don't fail entire batch if one check fails
-    )
-    
-    # Unpack results (handle exceptions gracefully)
-    wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
-    sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
-    whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
-    gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
-    companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
-    
-    total_rep_score = (
-        wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
-        companies_house_score
-    )
-    
-    # Append to lead data
-    lead["rep_score"] = total_rep_score
-    lead["rep_score_details"] = {
-        "wayback": wayback_data,
-        "sec": sec_data,
-        "whois_dnsbl": whois_dnsbl_data,
-        "gdelt": gdelt_data,
-        "companies_house": companies_house_data
-    }
-    
-    # Append to automated_checks_data
-    automated_checks_data["rep_score"] = {
-        "total_score": total_rep_score,
-        "max_score": MAX_REP_SCORE,
-        "breakdown": {
-            "wayback_machine": wayback_score,       # 0-6 points
-            "sec_edgar": sec_score,                 # 0-12 points
-            "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
-            "gdelt": gdelt_score,                   # 0-10 points
-            "companies_house": companies_house_score      # 0-10 points
+    if is_enterprise_company(lead):
+        matches_icp = _matches_icp_definitions(lead)
+        hardcoded_score = 10 if matches_icp else 5
+        
+        lead["rep_score"] = hardcoded_score
+        lead["rep_score_details"] = {
+            "enterprise_company": True,
+            "matches_icp": matches_icp,
+            "hardcoded_score": hardcoded_score,
+            "reason": "10,001+ employees - rep score checks skipped"
         }
-    }
-    
-    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
+        automated_checks_data["rep_score"] = {
+            "total_score": hardcoded_score,
+            "max_score": MAX_REP_SCORE,
+            "breakdown": {"enterprise_company_hardcoded": hardcoded_score},
+            "enterprise_company": True,
+            "matches_icp": matches_icp
+        }
+        print(f"   🏢 ENTERPRISE COMPANY (10,001+): Hardcoded rep score = {hardcoded_score} ({'ICP match' if matches_icp else 'No ICP match'})")
+    else:
+        # ========================================================================
+        # Rep Score: Soft Reputation Checks (SOFT)
+        # EXTRACTED VERBATIM from run_automated_checks()
+        # - Wayback Machine (max 6 points), SEC (max 12 points), 
+        #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
+        #   Companies House (max 10 points)
+        # - Always passes, appends scores to lead
+        # - Total: 0-48 points
+        # ========================================================================
+        print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
+        
+        # OPTIMIZATION: Run all rep score checks in parallel to save time
+        # Old: Sequential execution = 6-12s total
+        # New: Parallel execution = 3-4s total (time of slowest API)
+        results = await asyncio.gather(
+            check_wayback_machine(lead),
+            check_sec_edgar(lead),
+            check_whois_dnsbl_reputation(lead),
+            check_gdelt_mentions(lead),
+            check_companies_house(lead),
+            return_exceptions=True  # Don't fail entire batch if one check fails
+        )
+        
+        # Unpack results (handle exceptions gracefully)
+        wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
+        sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
+        whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
+        gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
+        companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
+        
+        total_rep_score = (
+            wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
+            companies_house_score
+        )
+        
+        # Append to lead data
+        lead["rep_score"] = total_rep_score
+        lead["rep_score_details"] = {
+            "wayback": wayback_data,
+            "sec": sec_data,
+            "whois_dnsbl": whois_dnsbl_data,
+            "gdelt": gdelt_data,
+            "companies_house": companies_house_data
+        }
+        
+        # Append to automated_checks_data
+        automated_checks_data["rep_score"] = {
+            "total_score": total_rep_score,
+            "max_score": MAX_REP_SCORE,
+            "breakdown": {
+                "wayback_machine": wayback_score,       # 0-6 points
+                "sec_edgar": sec_score,                 # 0-12 points
+                "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
+                "gdelt": gdelt_score,                   # 0-10 points
+                "companies_house": companies_house_score      # 0-10 points
+            }
+        }
+        
+        print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
     # ========================================================================
     # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)
@@ -10430,6 +10455,16 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
      * Completely DIFFERENT industry (e.g., "software company" vs "construction firm")
      * Fundamentally different product type (e.g., "SaaS platform" vs "consulting services")
    - IMPORTANT: The industry "{matched_industry}" has already been verified - use this as a guide
+
+5. DESCRIPTION QUALITY CHECK:
+   - description_coherent = true if the description is readable, well-formed English text
+   - description_coherent = false if ANY of these issues:
+     * Contains garbled/corrupted Unicode characters (e.g., "ä½" "é—œæ³¨" "ผู้ติดตาม")
+     * Contains non-English text mixed with English (e.g., Thai, Chinese characters mixed in)
+     * Contains LinkedIn metadata like "X followers on LinkedIn" or "ลิงก์ภายนอกสำหรับ"
+     * Is mostly fragments or incomplete sentences (ends with "..." or has "..." in middle)
+     * Contains website navigation text ("About us. Website: ... Follow ... Report this company")
+   - This is about TEXT QUALITY, not accuracy - a coherent description can still be wrong about the company
 """)
     
     claims_section = "\n".join(claims_to_verify)
@@ -10445,6 +10480,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     response_fields.append('"sub_industry_match": true/false,\n    "sub_industry_reasoning": "does company match the sub-industry definition?"')
     if claimed_description:
         response_fields.append('"description_match": true/false,\n    "description_reasoning": "is description accurate?"')
+        response_fields.append('"description_coherent": true/false,\n    "coherence_issue": "null or describe the quality issue (garbled text, non-English, LinkedIn metadata, etc.)"')
     response_fields.append('"confidence": 0.0-1.0,\n    "reasoning": "Brief explanation"')
     
     response_format = ",\n    ".join(response_fields)
@@ -10603,9 +10639,24 @@ RESPOND WITH JSON ONLY:
                 # Description verification (if description was provided)
                 description_match = True
                 description_reasoning = "No description provided"
+                description_coherent = True
+                coherence_issue = None
                 if claimed_description:
                     description_match = result.get("description_match", True)
                     description_reasoning = result.get("description_reasoning", "")
+                    description_coherent = result.get("description_coherent", True)
+                    coherence_issue = result.get("coherence_issue")
+                    
+                    # Check coherence FIRST - if description has garbled text, reject immediately
+                    if not description_coherent:
+                        print(f"   ❌ DESCRIPTION INCOHERENT: {coherence_issue}")
+                        return False, {
+                            "stage": "Stage 5: Description Quality",
+                            "check_name": "check_stage5_unified",
+                            "message": f"Description quality check failed: {coherence_issue}",
+                            "failed_fields": ["description"],
+                            "coherence_issue": coherence_issue
+                        }
                     
                     if not description_match:
                         # TARGETED OVERRIDE: If verified sub-industry keywords appear in description,
@@ -10653,8 +10704,10 @@ RESPOND WITH JSON ONLY:
                 lead["stage5_sub_industry_reason"] = sub_industry_reasoning
                 lead["stage5_description_match"] = description_match
                 lead["stage5_description_reasoning"] = description_reasoning
+                lead["stage5_description_coherent"] = description_coherent
+                lead["stage5_coherence_issue"] = coherence_issue
                 
-                all_match = role_match and region_match and industry_match and sub_industry_match and description_match
+                all_match = role_match and region_match and industry_match and sub_industry_match and description_match and description_coherent
                 
                 # Store results on lead
                 lead["stage5_role_match"] = role_match
@@ -10788,6 +10841,36 @@ def _matches_icp_definitions(lead: dict) -> bool:
             return True
     
     return False
+
+
+def is_enterprise_company(lead: dict) -> bool:
+    """
+    Check if a lead is from an enterprise company (10,001+ employees).
+    
+    Enterprise companies get hardcoded rep scores:
+    - 10 if matches ICP definition
+    - 5 if doesn't match ICP definition
+    
+    This skips expensive rep score API calls for giant corporations
+    where rep score verification is less meaningful.
+    
+    Returns:
+        True if employee_count indicates 10,001+ employees
+        False otherwise
+    """
+    employee_count = lead.get("employee_count", "")
+    if not employee_count:
+        return False
+    
+    # Parse the employee count
+    parsed = parse_employee_count(str(employee_count))
+    if not parsed:
+        return False
+    
+    emp_min, emp_max = parsed
+    
+    # Enterprise = 10,001+ employees (minimum 10001)
+    return emp_min >= 10001
 
 
 def calculate_icp_adjustment(lead: dict) -> int:
@@ -10970,11 +11053,12 @@ def calculate_icp_adjustment(lead: dict) -> int:
             
             # Large company penalty (stacks with capped bonus)
             # Note: Uses emp_min to determine the MINIMUM company size
-            if emp_min > 5000:
-                # 5,001+ employees (includes 10,001+)
+            # Note: 10,001+ (enterprise) companies already have hardcoded rep scores, no ICP penalty
+            if 5000 < emp_min < 10001:
+                # 5,001-10,000 employees only (enterprise 10,001+ handled separately)
                 penalty = 15
                 breakdown["employee_penalty"] = -15
-                print(f"   🏭 LARGE COMPANY (>5k): -15 points")
+                print(f"   🏭 LARGE COMPANY (5k-10k): -15 points")
             elif emp_min > 1000:
                 # 1,001-5,000 employees
                 penalty = 10
@@ -11355,63 +11439,88 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     print("   ✅ Stage 5 passed")
 
     # ========================================================================
-    # Rep Score: Soft Reputation Checks (SOFT)
-    # - Wayback Machine (max 6 points), SEC (max 12 points), 
-    #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
-    #   Companies House (max 10 points)
-    # - Always passes, appends scores to lead
-    # - Total: 0-48 points
+    # ENTERPRISE COMPANY SPECIAL HANDLING (10,001+ employees)
+    # Hardcoded rep score: 10 if ICP match, 5 if not
+    # Skips expensive rep score API calls for giant corporations
     # ========================================================================
-    print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
-    
-    # OPTIMIZATION: Run all rep score checks in parallel to save time
-    # Old: Sequential execution = 6-12s total
-    # New: Parallel execution = 3-4s total (time of slowest API)
-    results = await asyncio.gather(
-        check_wayback_machine(lead),
-        check_sec_edgar(lead),
-        check_whois_dnsbl_reputation(lead),
-        check_gdelt_mentions(lead),
-        check_companies_house(lead),
-        return_exceptions=True  # Don't fail entire batch if one check fails
-    )
-    
-    # Unpack results (handle exceptions gracefully)
-    wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
-    sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
-    whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
-    gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
-    companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
-    
-    total_rep_score = (
-        wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
-        companies_house_score
-    )
-    
-    # Append to lead data
-    lead["rep_score"] = total_rep_score
-    lead["rep_score_details"] = {
-        "wayback": wayback_data,
-        "sec": sec_data,
-        "whois_dnsbl": whois_dnsbl_data,
-        "gdelt": gdelt_data,
-        "companies_house": companies_house_data
-    }
-    
-    # Append to automated_checks_data
-    automated_checks_data["rep_score"] = {
-        "total_score": total_rep_score,
-        "max_score": MAX_REP_SCORE,
-        "breakdown": {
-            "wayback_machine": wayback_score,       # 0-6 points
-            "sec_edgar": sec_score,                 # 0-12 points
-            "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
-            "gdelt": gdelt_score,                   # 0-10 points
-            "companies_house": companies_house_score      # 0-10 points
+    if is_enterprise_company(lead):
+        matches_icp = _matches_icp_definitions(lead)
+        hardcoded_score = 10 if matches_icp else 5
+        
+        lead["rep_score"] = hardcoded_score
+        lead["rep_score_details"] = {
+            "enterprise_company": True,
+            "matches_icp": matches_icp,
+            "hardcoded_score": hardcoded_score,
+            "reason": "10,001+ employees - rep score checks skipped"
         }
-    }
-    
-    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
+        automated_checks_data["rep_score"] = {
+            "total_score": hardcoded_score,
+            "max_score": MAX_REP_SCORE,
+            "breakdown": {"enterprise_company_hardcoded": hardcoded_score},
+            "enterprise_company": True,
+            "matches_icp": matches_icp
+        }
+        print(f"   🏢 ENTERPRISE COMPANY (10,001+): Hardcoded rep score = {hardcoded_score} ({'ICP match' if matches_icp else 'No ICP match'})")
+    else:
+        # ========================================================================
+        # Rep Score: Soft Reputation Checks (SOFT)
+        # - Wayback Machine (max 6 points), SEC (max 12 points), 
+        #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
+        #   Companies House (max 10 points)
+        # - Always passes, appends scores to lead
+        # - Total: 0-48 points
+        # ========================================================================
+        print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
+        
+        # OPTIMIZATION: Run all rep score checks in parallel to save time
+        # Old: Sequential execution = 6-12s total
+        # New: Parallel execution = 3-4s total (time of slowest API)
+        results = await asyncio.gather(
+            check_wayback_machine(lead),
+            check_sec_edgar(lead),
+            check_whois_dnsbl_reputation(lead),
+            check_gdelt_mentions(lead),
+            check_companies_house(lead),
+            return_exceptions=True  # Don't fail entire batch if one check fails
+        )
+        
+        # Unpack results (handle exceptions gracefully)
+        wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
+        sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
+        whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
+        gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
+        companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
+        
+        total_rep_score = (
+            wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
+            companies_house_score
+        )
+        
+        # Append to lead data
+        lead["rep_score"] = total_rep_score
+        lead["rep_score_details"] = {
+            "wayback": wayback_data,
+            "sec": sec_data,
+            "whois_dnsbl": whois_dnsbl_data,
+            "gdelt": gdelt_data,
+            "companies_house": companies_house_data
+        }
+        
+        # Append to automated_checks_data
+        automated_checks_data["rep_score"] = {
+            "total_score": total_rep_score,
+            "max_score": MAX_REP_SCORE,
+            "breakdown": {
+                "wayback_machine": wayback_score,       # 0-6 points
+                "sec_edgar": sec_score,                 # 0-12 points
+                "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
+                "gdelt": gdelt_score,                   # 0-10 points
+                "companies_house": companies_house_score      # 0-10 points
+            }
+        }
+        
+        print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
     # ========================================================================
     # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)

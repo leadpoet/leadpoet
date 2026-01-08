@@ -291,11 +291,68 @@ def check_description_sanity(desc_raw: str) -> tuple:
         return ("desc_truncated", "Description appears truncated (ends with '...'). Please provide complete description.")
     
     # ==========================================
-    # Check 6: LinkedIn follower count pattern
+    # Check 6: LinkedIn follower count pattern (English)
     # ==========================================
     # Pattern: "Company | 2457 followers on LinkedIn" - this is scraped junk, not a description
-    if re.search(r'\|\s*\d+\s*followers?\s*(on\s*)?linkedin', desc_lower):
+    # Also catches without pipe: "34,857 followers on LinkedIn"
+    if re.search(r'\d[\d,\.]*\s*followers?\s*(on\s*)?linkedin', desc_lower):
         return ("desc_linkedin_followers", "Description contains LinkedIn follower count instead of actual company description.")
+    
+    # ==========================================
+    # Check 6b: LinkedIn follower patterns (non-English)
+    # ==========================================
+    # Spanish: "seguidores en LinkedIn"
+    # French: "abonnés" 
+    # German: "Follower:innen auf LinkedIn"
+    # Czech: "sledujících uživatelů na LinkedIn"
+    # Arabic: "متابع" or "من المتابعين"
+    # Thai: "ผู้ติดตาม X คนบน LinkedIn"
+    linkedin_foreign_patterns = [
+        r'\d[\d,\.]*\s*seguidores?\s*(en\s*)?linkedin',  # Spanish
+        r'\d[\d,\.]*\s*abonnés?',  # French
+        r'\d[\d,\.]*\s*follower:?innen\s*(auf\s*)?linkedin',  # German
+        r'\d[\d,\.]*\s*sledujících',  # Czech
+        r'متابع.*linkedin',  # Arabic
+        r'ผู้ติดตาม.*linkedin',  # Thai
+    ]
+    for pattern in linkedin_foreign_patterns:
+        if re.search(pattern, desc_lower, re.IGNORECASE):
+            return ("desc_linkedin_foreign", "Description contains non-English LinkedIn metadata instead of actual company description.")
+    
+    # ==========================================
+    # Check 6c: Thai text mixed with English
+    # ==========================================
+    # Thai characters indicate scraped LinkedIn with wrong locale
+    thai_pattern = re.compile(r'[\u0e00-\u0e7f]')
+    if thai_pattern.search(desc_raw):
+        latin_count = len(re.findall(r'[a-zA-Z]', desc_raw))
+        thai_count = len(thai_pattern.findall(desc_raw))
+        # If Thai is mixed with significant Latin text, it's scraped junk
+        if latin_count > 20 and thai_count > 3:
+            return ("desc_thai_mixed", "Description contains Thai text mixed with English (scraped LinkedIn metadata).")
+    
+    # ==========================================
+    # Check 6d: Website navigation/UI text
+    # ==========================================
+    # Catches: "Follow · Report this company; Close menu"
+    # These are scraped from LinkedIn UI, not actual descriptions
+    nav_patterns = [
+        r'report\s+this\s+company',
+        r'close\s+menu',
+        r'view\s+all\s*[\.;]?\s*about\s+us',
+        r'follow\s*[·•]\s*report',
+        r'external\s+(na\s+)?link\s+(for|para)',  # Filipino/Spanish
+        r'enlace\s+externo\s+para',  # Spanish
+        r'laki\s+ng\s+kompanya',  # Filipino
+        r'tamaño\s+de\s+la\s+empresa',  # Spanish  
+        r'webbplats:\s*http',  # Swedish
+        r'nettsted:\s*http',  # Norwegian
+        r'sitio\s+web:\s*http',  # Spanish
+        r'om\s+oss\.',  # Norwegian "About us."
+    ]
+    for pattern in nav_patterns:
+        if re.search(pattern, desc_lower):
+            return ("desc_navigation_text", "Description contains website navigation/UI text instead of actual company description.")
     
     # ==========================================
     # Check 7: Non-Latin/garbled Unicode characters
@@ -314,6 +371,17 @@ def check_description_sanity(desc_raw: str) -> tuple:
         # If CJK is mixed with significant Latin text, it's garbled
         if latin_count > 20 and cjk_count > 0:
             return ("desc_garbled_unicode", "Description contains garbled Unicode characters. Please provide clean text.")
+    
+    # ==========================================
+    # Check 7b: Arabic text mixed with English
+    # ==========================================
+    arabic_pattern = re.compile(r'[\u0600-\u06ff]')
+    if arabic_pattern.search(desc_raw):
+        latin_count = len(re.findall(r'[a-zA-Z]', desc_raw))
+        arabic_count = len(arabic_pattern.findall(desc_raw))
+        # If Arabic is mixed with significant Latin text, it's scraped junk
+        if latin_count > 20 and arabic_count > 3:
+            return ("desc_arabic_mixed", "Description contains Arabic text mixed with English (scraped LinkedIn metadata).")
     
     # ==========================================
     # Check 8: Gibberish (no vowels in long text)

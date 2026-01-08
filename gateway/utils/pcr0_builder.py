@@ -12,6 +12,12 @@ TRUSTLESSNESS:
 - Subnet owner CANNOT inject fake PCR0 values
 - Only code actually in GitHub can produce valid PCR0
 
+REPRODUCIBILITY (Option 1 - Pinned Dockerfile):
+- Dockerfile.enclave uses pinned base image SHA256
+- requirements.txt uses pinned pip package versions
+- Same code = ALWAYS same PCR0 (regardless of when built)
+- No TTL needed - builds are deterministic
+
 MONITORED FILES (changes trigger rebuild):
 - validator_tee/Dockerfile.enclave
 - validator_tee/enclave/*
@@ -50,12 +56,14 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 # How often to check for updates (seconds)
 PCR0_CHECK_INTERVAL = int(os.environ.get("PCR0_CHECK_INTERVAL", "480"))  # 8 minutes
 
-# How many commits to keep PCR0 for
+# How many CODE VERSIONS to cache PCR0 for
+# Allows validators on older code to still be accepted
 PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "3"))
 
-# Cache TTL in seconds (rebuild even if code didn't change, to handle base image updates)
-# Default: 24 hours - balances freshness with build cost
-PCR0_CACHE_TTL = int(os.environ.get("PCR0_CACHE_TTL", str(24 * 60 * 60)))
+# NOTE: No TTL needed with pinned Dockerfile!
+# With pinned base image + pinned pip versions, builds are DETERMINISTIC.
+# Same code = same PCR0, regardless of when it's built.
+# Security patches require manually updating the Dockerfile pins.
 
 # Files that affect PCR0 (if any of these change, rebuild)
 MONITORED_FILES: Set[str] = {
@@ -431,35 +439,17 @@ async def check_and_build_pcr0():
             return
         
         # Check if we already have this content hash cached
+        # With pinned Dockerfile, same content = same PCR0, so no need to rebuild
         if content_hash in _pcr0_cache:
-            cached_entry = _pcr0_cache[content_hash]
-            built_at = cached_entry.get("built_at", "")
-            
-            # Check if cache entry is still fresh (within TTL)
-            try:
-                built_time = datetime.fromisoformat(built_at.replace("Z", "+00:00"))
-                age_seconds = (datetime.utcnow() - built_time.replace(tzinfo=None)).total_seconds()
-                
-                if age_seconds < PCR0_CACHE_TTL:
-                    logger.info(f"[PCR0] Content hash {content_hash} cached (age: {age_seconds/3600:.1f}h), skipping build")
-                    _last_content_hash = content_hash
-                    return
-                else:
-                    logger.info(f"[PCR0] Cache expired (age: {age_seconds/3600:.1f}h > {PCR0_CACHE_TTL/3600:.0f}h TTL), rebuilding...")
-                    # Remove expired entry
-                    del _pcr0_cache[content_hash]
-            except Exception as e:
-                logger.warning(f"[PCR0] Could not parse cache timestamp, rebuilding: {e}")
-        
-        # Check if content actually changed
-        if _last_content_hash == content_hash:
-            logger.info(f"[PCR0] No changes to monitored files (hash: {content_hash})")
+            logger.info(f"[PCR0] Content hash {content_hash} already cached, skipping build")
+            print(f"[PCR0] Content hash {content_hash} already cached, skipping build")
+            _last_content_hash = content_hash
             return
         
-        print(f"[PCR0] Content changed! Old: {_last_content_hash}, New: {content_hash}")
-        logger.info(f"[PCR0] Content changed! Old: {_last_content_hash}, New: {content_hash}")
+        # If we get here, content hash is not in cache - need to build
+        print(f"[PCR0] New content detected! Hash: {content_hash} (previous: {_last_content_hash})")
+        logger.info(f"[PCR0] New content detected - building PCR0...")
         print(f"[PCR0] Building PCR0 for content hash {content_hash}...")
-        logger.info(f"[PCR0] Building PCR0 for content hash {content_hash}...")
         
         # Get commit hash for reference (optional, just for logging)
         commits = await get_latest_commits(repo_dir, 1)
@@ -589,6 +579,8 @@ def start_pcr0_builder():
     print(f"   Branch: {GITHUB_BRANCH}")
     print(f"   Interval: {PCR0_CHECK_INTERVAL // 60} minutes")
     print(f"   Cache size: {PCR0_CACHE_SIZE} versions")
+    print(f"   Mode: PINNED DOCKERFILE (reproducible builds)")
+    print(f"   TTL: None (pinned builds are deterministic)")
 
 
 # =============================================================================

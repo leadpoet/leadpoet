@@ -177,11 +177,13 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
     git_env["GIT_TERMINAL_PROMPT"] = "0"  # Don't prompt for credentials
     
     # Sparse checkout paths - only what's needed for PCR0
+    # NOTE: Leading slashes are required in --no-cone mode for single files
     sparse_paths = [
-        "validator_tee/",
-        "leadpoet_canonical/",
-        "neurons/validator.py",
-        "validator_models/automated_checks.py",
+        "/.dockerignore",  # Critical for reproducible builds
+        "/validator_tee/",
+        "/leadpoet_canonical/",
+        "/neurons/validator.py",
+        "/validator_models/automated_checks.py",
     ]
     
     if os.path.exists(os.path.join(repo_dir, ".git")):

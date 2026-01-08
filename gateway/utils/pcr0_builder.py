@@ -67,6 +67,7 @@ PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "3"))
 
 # Files that affect PCR0 (if any of these change, rebuild)
 MONITORED_FILES: Set[str] = {
+    ".dockerignore",  # Affects Docker build context
     "validator_tee/Dockerfile.enclave",
     "validator_tee/enclave/requirements.txt",
     "validator_tee/enclave/__init__.py",

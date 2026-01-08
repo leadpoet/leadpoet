@@ -2803,6 +2803,10 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Consumer Electronics', 'Hardware'],
         "definition": "Companies that produce computing devices intended to be worn on the body."
     },
+    "Web3 Investor": {
+        "industries": ['Financial Services', 'Lending and Investments', 'Blockchain and Cryptocurrency'],
+        "definition": "Investment firms, venture capital funds, and hedge funds that focus specifically on blockchain, cryptocurrency, DeFi, NFTs, and other Web3 technologies. Includes crypto VCs, token funds, and Web3-focused angel investors."
+    },
     "Web Apps": {
         "industries": ['Apps', 'Software'],
         "definition": "Companies that develop a software app for use in web browsers."

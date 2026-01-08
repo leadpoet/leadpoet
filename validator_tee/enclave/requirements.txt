@@ -1,9 +1,21 @@
 # Validator TEE Enclave Requirements
-# Minimal dependencies for enclave signing operations
+# ============================================================
+# PINNED VERSIONS FOR REPRODUCIBLE PCR0
+# ============================================================
+# These exact versions ensure that building the enclave at 
+# different times produces the SAME PCR0 value.
+# 
+# To update versions (for security patches):
+# 1. Update version numbers below
+# 2. Rebuild enclave on validator
+# 3. Push to GitHub - gateway will rebuild with same versions
+# ============================================================
 
 # Cryptography for Ed25519 key generation and signing
-cryptography>=41.0.0
+# Latest as of Jan 2026
+cryptography==46.0.3
 
 # CBOR encoding for attestation documents
-cbor2>=5.4.0
+# Latest as of Jan 2026
+cbor2==5.8.0
 

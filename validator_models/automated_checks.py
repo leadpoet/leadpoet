@@ -330,8 +330,36 @@ ICP_DEFINITIONS = [
                     "niger", "chad", "somalia", "benin", "togo", "sierra leone", "liberia",
                     "central african republic", "congo", "eritrea", "gambia", "guinea", "lesotho",
                     "madagascar", "mauritania", "swaziland", "eswatini"],
-        # Custom multiplier for Africa leads (higher value than default 1.5x)
-        "multiplier": 5.0
+        # HIGH VALUE: +100 bonus for Africa broadcasting/media leads (very rare, high value)
+        "bonus": 100
+    },
+    
+    {
+        # Blockchain/Crypto/Web3 Investors - Investment Roles at Crypto Companies/Funds
+        # HIGH VALUE: Targets people with investment roles at blockchain/crypto companies
+        # This catches: crypto VCs, blockchain fund managers, token investors, web3 funds
+        "sub_industries": ["Blockchain", "Cryptocurrency", "Bitcoin", "Ethereum",
+                          "Venture Capital", "Hedge Funds", "Angel Investment", 
+                          "Impact Investing", "Financial Services"],
+        "role_details": [
+            # Investment Leadership / Partners
+            "partner", "general partner", "gp", "managing partner", "managing director",
+            "principal", "venture partner", "investment partner", "limited partner",
+            # Investment Operations
+            "cio", "chief investment officer", "director of investments", "vp of investments",
+            "vp investments", "head of investments", "investment director",
+            "portfolio manager", "fund manager", "investment manager", "asset manager",
+            # Founder/Leadership (likely to be investors too)
+            "founder", "co-founder", "ceo", "chief executive officer",
+            # Investment Team Roles
+            "investor", "venture capitalist", "vc", "investment analyst", "research analyst",
+            "associate", "senior associate", "investment associate",
+            "vice president", "vp", "director", "head of",
+            # Crypto/Web3 Specific
+            "token fund manager", "crypto fund manager", "defi lead", "web3 investor"
+        ],
+        # HIGH VALUE: +100 bonus for blockchain/crypto investors (very rare, high value)
+        "bonus": 100
     },
     
     {
@@ -10823,6 +10851,22 @@ def _matches_icp_definitions(lead: dict) -> bool:
         True if lead matches any ICP definition
         False otherwise
     """
+    return _get_icp_bonus(lead) > 0
+
+
+def _get_icp_bonus(lead: dict) -> int:
+    """
+    Get the ICP bonus points for a lead.
+    
+    Returns:
+        - 0 if no ICP match
+        - 50 (default) if ICP match but no custom "bonus" field
+        - Custom "bonus" value if specified in matching ICP definition
+        
+    Some ICPs have higher bonuses for rare, high-value profiles:
+        - Africa Broadcasting: +100
+        - Blockchain/Crypto Investors: +100
+    """
     sub_industry = lead.get("sub_industry", "").strip().lower()
     role = lead.get("role", "").strip().lower()
     region = lead.get("region", "").strip().lower()
@@ -10831,6 +10875,9 @@ def _matches_icp_definitions(lead: dict) -> bool:
         text_lower = text.lower()
         return any(keyword.lower() in text_lower for keyword in keywords)
     
+    # Track highest bonus (in case lead matches multiple ICPs)
+    highest_bonus = 0
+    
     for icp in ICP_DEFINITIONS:
         if not matches_any(sub_industry, icp["sub_industries"]):
             continue
@@ -10838,9 +10885,11 @@ def _matches_icp_definitions(lead: dict) -> bool:
             if not matches_any(region, icp["regions"]):
                 continue
         if matches_any(role, icp["role_details"]):
-            return True
+            # Get bonus: use custom "bonus" field, or default to 50
+            icp_bonus = icp.get("bonus", 50)
+            highest_bonus = max(highest_bonus, icp_bonus)
     
-    return False
+    return highest_bonus
 
 
 def is_enterprise_company(lead: dict) -> bool:
@@ -10878,7 +10927,9 @@ def calculate_icp_adjustment(lead: dict) -> int:
     Calculate ICP adjustment points (NEW SYSTEM - replaces multiplier).
     
     This function calculates an absolute point adjustment based on:
-    1. ICP Definition Match: +50 points
+    1. ICP Definition Match: +50 points (default), or custom bonus for high-value ICPs:
+       - Africa Broadcasting/Media: +100 points
+       - Blockchain/Crypto/Web3 Investors: +100 points
     2. Small Company in Major Hub Bonus: +50 points
        - ≤10 employees AND in major hub (NYC, SF, LA, Austin, Chicago, etc.)
     3. Small Company Bonus:
@@ -10887,22 +10938,21 @@ def calculate_icp_adjustment(lead: dict) -> int:
        - >1,000 employees: -10 points
        - >5,000 or >10,000 employees: -15 points
     
-    MAX POSITIVE BONUS: +50 (ICP and small company bonuses do NOT stack beyond 50)
+    DYNAMIC CAP: Cap is +50 for normal leads, or ICP bonus for high-value ICPs
     PENALTIES STACK: Penalties are applied AFTER capping the bonus
     
     Args:
         lead: Lead dictionary with employee_count, city, and ICP-relevant fields
         
     Returns:
-        Integer adjustment (bonus capped at +50, then penalties applied)
+        Integer adjustment (bonus capped, then penalties applied)
         
     Examples:
         - ICP match only = +50
+        - High-value ICP (Africa/Crypto) = +100
         - ICP + ≤50 employees = +70 → capped to +50
-        - ICP + >1k employees = +50 - 10 = +40
-        - ICP + >5k employees = +50 - 15 = +35
+        - High-value ICP + >1k employees = +100 - 10 = +90
         - Small hub (≤10 + NYC) = +50
-        - Small hub + >1k employees = +50 - 10 = +40
         - Non-ICP + ≤50 employees = +20
         - Non-ICP + >5k employees = -15
     """
@@ -11022,12 +11072,17 @@ def calculate_icp_adjustment(lead: dict) -> int:
             matched_hub = f"{city} ({country})"
     
     # ========================================================================
-    # STEP 1: ICP Definition Match (+50 points)
+    # STEP 1: ICP Definition Match (+50 default, or custom bonus)
+    # High-value ICPs (Africa Broadcasting, Blockchain/Crypto Investors) get +100
     # ========================================================================
-    if _matches_icp_definitions(lead):
-        bonus += 50
-        breakdown["icp_match"] = 50
-        print(f"   🎯 ICP MATCH: +50 points")
+    icp_bonus = _get_icp_bonus(lead)
+    if icp_bonus > 0:
+        bonus += icp_bonus
+        breakdown["icp_match"] = icp_bonus
+        if icp_bonus > 50:
+            print(f"   🎯 HIGH-VALUE ICP MATCH: +{icp_bonus} points")
+        else:
+            print(f"   🎯 ICP MATCH: +{icp_bonus} points")
     
     # ========================================================================
     # STEP 2: Employee Count Bonuses and Penalties
@@ -11068,17 +11123,21 @@ def calculate_icp_adjustment(lead: dict) -> int:
         print(f"   📋 No employee count available - no size adjustment")
     
     # ========================================================================
-    # STEP 3: Cap bonus at +50, then apply penalties
+    # STEP 3: Cap bonus, then apply penalties
+    # Cap is dynamic: +50 for normal ICPs, or ICP bonus value for high-value ICPs
     # ========================================================================
-    if bonus > 50:
-        print(f"   ⚠️  Bonus {bonus} exceeds cap, capping at +50")
-        bonus = 50
+    # Determine cap: use ICP bonus if > 50 (high-value ICP), otherwise 50
+    bonus_cap = max(50, icp_bonus) if icp_bonus > 0 else 50
+    
+    if bonus > bonus_cap:
+        print(f"   ⚠️  Bonus {bonus} exceeds cap, capping at +{bonus_cap}")
+        bonus = bonus_cap
     
     # Penalties stack with capped bonus
     adjustment = bonus - penalty
     
     print(f"   📊 FINAL ICP ADJUSTMENT: {adjustment:+d} points")
-    print(f"      Bonus (capped at 50): {min(bonus, 50):+d} = ICP:{breakdown['icp_match']:+d} + Hub:{breakdown['major_hub_bonus']:+d} + Size:{breakdown['employee_bonus']:+d}")
+    print(f"      Bonus (capped at {bonus_cap}): {min(bonus, bonus_cap):+d} = ICP:{breakdown['icp_match']:+d} + Hub:{breakdown['major_hub_bonus']:+d} + Size:{breakdown['employee_bonus']:+d}")
     print(f"      Penalty: {-penalty:+d}")
     
     return adjustment

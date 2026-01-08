@@ -40,6 +40,31 @@ class AttestationError(Exception):
     pass
 
 
+def _get_cert_not_valid_before(cert) -> datetime:
+    """Get certificate not_valid_before, compatible with old and new cryptography versions."""
+    # cryptography >= 42.0.0 uses not_valid_before_utc
+    # cryptography < 42.0.0 uses not_valid_before
+    if hasattr(cert, 'not_valid_before_utc'):
+        return cert.not_valid_before_utc
+    else:
+        # Old version returns naive datetime, make it UTC-aware
+        nvb = cert.not_valid_before
+        if nvb.tzinfo is None:
+            return nvb.replace(tzinfo=timezone.utc)
+        return nvb
+
+
+def _get_cert_not_valid_after(cert) -> datetime:
+    """Get certificate not_valid_after, compatible with old and new cryptography versions."""
+    if hasattr(cert, 'not_valid_after_utc'):
+        return cert.not_valid_after_utc
+    else:
+        nva = cert.not_valid_after
+        if nva.tzinfo is None:
+            return nva.replace(tzinfo=timezone.utc)
+        return nva
+
+
 # =============================================================================
 # PINNED VALUES - PRODUCTION CONFIGURATION
 # =============================================================================
@@ -327,10 +352,12 @@ def verify_nitro_attestation_full(
             
             # Verify certificate is currently valid
             now = datetime.now(timezone.utc)
-            if now < leaf_cert.not_valid_before_utc:
-                raise AttestationError(f"Certificate not yet valid (starts {leaf_cert.not_valid_before_utc})")
-            if now > leaf_cert.not_valid_after_utc:
-                raise AttestationError(f"Certificate expired ({leaf_cert.not_valid_after_utc})")
+            cert_not_before = _get_cert_not_valid_before(leaf_cert)
+            cert_not_after = _get_cert_not_valid_after(leaf_cert)
+            if now < cert_not_before:
+                raise AttestationError(f"Certificate not yet valid (starts {cert_not_before})")
+            if now > cert_not_after:
+                raise AttestationError(f"Certificate expired ({cert_not_after})")
             
             result["verification_steps"].append("✓ Leaf certificate valid and not expired")
             
@@ -958,8 +985,8 @@ def test_root_cert_parsing():
         print(f"✅ Root certificate parsed successfully")
         print(f"   Subject: {root_cert.subject}")
         print(f"   Issuer: {root_cert.issuer}")
-        print(f"   Valid from: {root_cert.not_valid_before_utc}")
-        print(f"   Valid until: {root_cert.not_valid_after_utc}")
+        print(f"   Valid from: {_get_cert_not_valid_before(root_cert)}")
+        print(f"   Valid until: {_get_cert_not_valid_after(root_cert)}")
     except Exception as e:
         print(f"❌ Failed to parse root certificate: {e}")
 

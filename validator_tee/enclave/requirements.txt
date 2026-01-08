@@ -12,8 +12,8 @@
 # ============================================================
 
 # Cryptography for Ed25519 key generation and signing
-# Latest as of Jan 2026
-cryptography==46.0.3
+# Latest available for Python 3.7 (amazonlinux:2) as of Jan 2026
+cryptography==45.0.7
 
 # CBOR encoding for attestation documents
 # Latest as of Jan 2026

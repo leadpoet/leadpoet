@@ -53,6 +53,10 @@ PCR0_CHECK_INTERVAL = int(os.environ.get("PCR0_CHECK_INTERVAL", "480"))  # 8 min
 # How many commits to keep PCR0 for
 PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "3"))
 
+# Cache TTL in seconds (rebuild even if code didn't change, to handle base image updates)
+# Default: 24 hours - balances freshness with build cost
+PCR0_CACHE_TTL = int(os.environ.get("PCR0_CACHE_TTL", str(24 * 60 * 60)))
+
 # Files that affect PCR0 (if any of these change, rebuild)
 MONITORED_FILES: Set[str] = {
     "validator_tee/Dockerfile.enclave",
@@ -257,10 +261,13 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
     eif_path = os.path.join(repo_dir, "validator-enclave.eif")
     
     try:
-        # Step 1: Build Docker image
-        logger.info("[PCR0] Building Docker image...")
+        # Step 1: Build Docker image with --no-cache for REPRODUCIBLE builds
+        # CRITICAL: Without --no-cache, Docker can reuse cached layers which
+        # produces different PCR0 values from fresh builds!
+        logger.info("[PCR0] Building Docker image (--no-cache for reproducibility)...")
         proc = await asyncio.create_subprocess_exec(
-            "docker", "build",
+            "sudo", "docker", "build",
+            "--no-cache",  # CRITICAL: Ensures reproducible builds
             "-f", "validator_tee/Dockerfile.enclave",
             "-t", docker_image,
             ".",
@@ -314,7 +321,7 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
         try:
             # Remove Docker image
             proc = await asyncio.create_subprocess_exec(
-                "docker", "rmi", "-f", docker_image,
+                "sudo", "docker", "rmi", "-f", docker_image,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -424,9 +431,24 @@ async def check_and_build_pcr0():
         
         # Check if we already have this content hash cached
         if content_hash in _pcr0_cache:
-            logger.info(f"[PCR0] Content hash {content_hash} already cached, skipping build")
-            _last_content_hash = content_hash
-            return
+            cached_entry = _pcr0_cache[content_hash]
+            built_at = cached_entry.get("built_at", "")
+            
+            # Check if cache entry is still fresh (within TTL)
+            try:
+                built_time = datetime.fromisoformat(built_at.replace("Z", "+00:00"))
+                age_seconds = (datetime.utcnow() - built_time.replace(tzinfo=None)).total_seconds()
+                
+                if age_seconds < PCR0_CACHE_TTL:
+                    logger.info(f"[PCR0] Content hash {content_hash} cached (age: {age_seconds/3600:.1f}h), skipping build")
+                    _last_content_hash = content_hash
+                    return
+                else:
+                    logger.info(f"[PCR0] Cache expired (age: {age_seconds/3600:.1f}h > {PCR0_CACHE_TTL/3600:.0f}h TTL), rebuilding...")
+                    # Remove expired entry
+                    del _pcr0_cache[content_hash]
+            except Exception as e:
+                logger.warning(f"[PCR0] Could not parse cache timestamp, rebuilding: {e}")
         
         # Check if content actually changed
         if _last_content_hash == content_hash:
@@ -479,15 +501,78 @@ async def check_and_build_pcr0():
         _build_in_progress = False
 
 
+async def check_prerequisites() -> bool:
+    """Check that required tools are available."""
+    # Check for nitro-cli
+    proc = await asyncio.create_subprocess_exec(
+        "which", "nitro-cli",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    
+    if proc.returncode != 0:
+        logger.error("[PCR0] ❌ nitro-cli not found! PCR0 builder cannot run.")
+        return False
+    
+    logger.info(f"[PCR0] ✓ nitro-cli found: {stdout.decode().strip()}")
+    
+    # Check for docker
+    proc = await asyncio.create_subprocess_exec(
+        "which", "docker",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    
+    if proc.returncode != 0:
+        logger.error("[PCR0] ❌ docker not found! PCR0 builder cannot run.")
+        return False
+    
+    logger.info(f"[PCR0] ✓ docker found: {stdout.decode().strip()}")
+    
+    # Check for git
+    proc = await asyncio.create_subprocess_exec(
+        "which", "git",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    
+    if proc.returncode != 0:
+        logger.error("[PCR0] ❌ git not found! PCR0 builder cannot run.")
+        return False
+    
+    logger.info(f"[PCR0] ✓ git found: {stdout.decode().strip()}")
+    
+    return True
+
+
 async def pcr0_builder_task():
     """Background task that runs every 8 minutes."""
-    logger.info(f"[PCR0] Starting PCR0 builder task (interval: {PCR0_CHECK_INTERVAL}s)")
+    logger.info(f"[PCR0] ========================================")
+    logger.info(f"[PCR0] Starting PCR0 builder task")
+    logger.info(f"[PCR0] Interval: {PCR0_CHECK_INTERVAL}s ({PCR0_CHECK_INTERVAL // 60} minutes)")
+    logger.info(f"[PCR0] Cache size: {PCR0_CACHE_SIZE}")
+    logger.info(f"[PCR0] GitHub repo: {GITHUB_REPO_URL}")
+    logger.info(f"[PCR0] GitHub branch: {GITHUB_BRANCH}")
+    logger.info(f"[PCR0] Build dir: {BUILD_DIR}")
+    logger.info(f"[PCR0] ========================================")
+    
+    # Check prerequisites
+    if not await check_prerequisites():
+        logger.error("[PCR0] Prerequisites check failed. PCR0 builder disabled.")
+        return
     
     # Initial build on startup
+    logger.info("[PCR0] Running initial PCR0 build...")
     await check_and_build_pcr0()
+    
+    logger.info(f"[PCR0] Initial build complete. Cache status: {get_cache_status()}")
     
     while True:
         await asyncio.sleep(PCR0_CHECK_INTERVAL)
+        logger.info(f"[PCR0] Timer fired - checking for updates...")
         await check_and_build_pcr0()
 
 
@@ -495,6 +580,11 @@ def start_pcr0_builder():
     """Start the background PCR0 builder task."""
     asyncio.create_task(pcr0_builder_task())
     logger.info("[PCR0] Background builder task started")
+    print("🔐 [PCR0] Background builder task started")
+    print(f"   Repo: {GITHUB_REPO_URL}")
+    print(f"   Branch: {GITHUB_BRANCH}")
+    print(f"   Interval: {PCR0_CHECK_INTERVAL // 60} minutes")
+    print(f"   Cache size: {PCR0_CACHE_SIZE} versions")
 
 
 # =============================================================================

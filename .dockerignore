@@ -1,8 +1,13 @@
 # Exclude Python cache directories for reproducible PCR0 builds
+# Use ** pattern to match at any directory level
+**/__pycache__/
+**/__pycache__
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+**/*.pyc
+**/*.pyo
 .Python
 
 # Exclude git and IDE files

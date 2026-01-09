@@ -22,8 +22,19 @@ FROM amazonlinux:2@sha256:0b09112ad58d45fd7e46a399048133f4572a834b8ccfeebbfb6215
 
 # Install Python 3 and pip
 # yum packages in amazonlinux:2 are stable (won't change without base image change)
+#
+# IMPORTANT: We delete non-deterministic files created by yum/rpm to ensure
+# reproducible builds across different machines. These files contain timestamps,
+# transaction IDs, or other build-time-specific data.
 RUN yum install -y \
     python3 \
     python3-pip \
-    && yum clean all
+    && yum clean all \
+    && rm -rf /var/cache/ldconfig/aux-cache \
+    && rm -rf /var/cache/yum \
+    && rm -rf /var/lib/rpm/__db.* \
+    && rm -f /var/lib/rpm/Installtid \
+    && rm -f /var/lib/rpm/Packages \
+    && rm -rf /var/lib/yum/history \
+    && rm -f /var/log/yum.log
 

@@ -159,6 +159,18 @@ def normalize_docker_image(image_name, normalized_name):
         with open(work_dir / "manifest.json", "w") as f:
             json.dump(manifest, f)
         
+        # Update index.json if it exists (OCI format requires this)
+        index_path = work_dir / "index.json"
+        if index_path.exists():
+            with open(index_path) as f:
+                index = json.load(f)
+            for m in index.get("manifests", []):
+                if m.get("digest", "").startswith("sha256:"):
+                    m["digest"] = "sha256:" + new_config_hash
+            with open(index_path, "w") as f:
+                json.dump(index, f)
+            print("   Updated index.json for OCI format")
+        
         # Create normalized tar
         with tarfile.open(f"{work_dir}/normalized.tar", "w") as tar:
             for item in work_dir.iterdir():

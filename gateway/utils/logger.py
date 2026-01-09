@@ -63,6 +63,7 @@ import asyncio
 import json
 import logging
 import hashlib
+import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional
 from pathlib import Path
@@ -302,6 +303,7 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
             # Store full signed envelope in "signed_log_entry" for auditor verification
             supabase_entry = {
                 "event_type": event_type,
+                "nonce": str(uuid.uuid4()),  # Required by DB NOT NULL constraint
                 "payload": payload,  # ORIGINAL payload (unchanged for dashboards)
                 "signed_log_entry": log_entry,  # Full signed envelope (for auditors)
                 "event_hash": event_hash,

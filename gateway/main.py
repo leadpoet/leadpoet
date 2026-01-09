@@ -69,6 +69,25 @@ async def lifespan(app: FastAPI):
     - Bulletproof: No WebSocket subscriptions = No WebSocket failures
     """
     
+    # ════════════════════════════════════════════════════════════════
+    # TEE ENCLAVE KEYPAIR INITIALIZATION (CRITICAL FOR EVENT SIGNING)
+    # ════════════════════════════════════════════════════════════════
+    print("="*80)
+    print("🔐 INITIALIZING TEE ENCLAVE KEYPAIR")
+    print("="*80)
+    try:
+        from gateway.tee.enclave_signer import initialize_enclave_keypair, is_keypair_initialized
+        enclave_pubkey = initialize_enclave_keypair()
+        print(f"✅ TEE enclave keypair initialized")
+        print(f"   Pubkey: {enclave_pubkey[:32]}...")
+        print("✅ Event signing ENABLED (TEE-signed transparency log)")
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR initializing enclave keypair: {e}")
+        print("   Event signing will FAIL!")
+        print("   Weight submissions will return 500 errors!")
+        print("   This is a critical failure - check TEE enclave health")
+    print("="*80 + "\n")
+    
     # Load gateway keypair for signed receipts
     print("="*80)
     print("🔐 LOADING GATEWAY KEYPAIR")

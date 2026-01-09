@@ -449,30 +449,21 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
         logger.warning(f"[SNAPSHOT] ⚠️ Could not capture chain snapshot: {e}")
     
     # Log event FIRST to get event_hash
+    # Using NEW signed format (TEE signs event, returns event_hash)
     submission_payload = {
+        "actor_hotkey": submission.validator_hotkey,  # Required for indexing
+        "validator_signature": submission.validator_signature,  # For reference
         "epoch_id": submission.epoch_id,
         "netuid": submission.netuid,
         "block": submission.block,
         "weights_hash": submission.weights_hash,
-        "validator_hotkey": submission.validator_hotkey,
         "weights_count": len(submission.uids),
         "chain_snapshot_block": chain_snapshot_block,
         "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
     }
-    submission_payload_hash = hashlib.sha256(
-        json.dumps(submission_payload, sort_keys=True).encode()
-    ).hexdigest()
     
-    log_entry = await log_event({
-        "event_type": "WEIGHT_SUBMISSION",
-        "actor_hotkey": submission.validator_hotkey,
-        "nonce": str(uuid.uuid4()),
-        "ts": datetime.utcnow().isoformat(),
-        "payload_hash": submission_payload_hash,
-        "build_id": BUILD_ID,
-        "signature": submission.validator_signature,  # Use the actual validator signature
-        "payload": submission_payload,
-    })
+    # NEW FORMAT: log_event(event_type, payload) - TEE signed, returns event_hash
+    log_entry = await log_event("WEIGHT_SUBMISSION", submission_payload)
     weight_submission_event_hash = log_entry.get("event_hash")
     
     # Store bundle (including PCR0 for auditor verification)

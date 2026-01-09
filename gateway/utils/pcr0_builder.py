@@ -826,6 +826,182 @@ async def check_and_build_pcr0():
         _build_in_progress = False
 
 
+async def build_pcr0_for_recent_commits(num_commits: int = None):
+    """
+    Build PCR0s for the last N commits on startup.
+    
+    This ensures that even after gateway restart, validators running
+    slightly older code versions are still accepted.
+    
+    LOGIC:
+    1. Get the last N commits that touched monitored files
+    2. For each commit (newest to oldest):
+       - Checkout that version
+       - Compute content hash
+       - If not already cached, build PCR0
+       - Cache it
+    3. Return to HEAD after done
+    
+    This is called ONCE on startup, not on every check interval.
+    """
+    global _pcr0_cache, _build_in_progress
+    
+    if num_commits is None:
+        num_commits = PCR0_CACHE_SIZE
+    
+    if _build_in_progress:
+        logger.info("[PCR0] Build already in progress, skipping historical build")
+        return
+    
+    _build_in_progress = True
+    repo_dir = BUILD_DIR
+    
+    try:
+        logger.info(f"[PCR0] ========================================")
+        logger.info(f"[PCR0] Building PCR0s for last {num_commits} commits...")
+        print(f"[PCR0] Building PCR0s for last {num_commits} commits (startup cache warming)...")
+        
+        # Clone/update repo first
+        if not await clone_or_update_repo(repo_dir):
+            logger.error("[PCR0] Failed to clone/update repo for historical build")
+            return
+        
+        # Get commits that touched monitored files
+        # Use git log with path filter for monitored files
+        monitored_paths = list(MONITORED_FILES) + [d.rstrip('/') for d in MONITORED_DIRS]
+        path_args = ["--"] + monitored_paths
+        
+        proc = await asyncio.create_subprocess_exec(
+            "git", "log", f"-{num_commits * 2}",  # Get more to filter
+            "--format=%H|%s|%ai",
+            *path_args,
+            cwd=repo_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode != 0:
+            logger.warning(f"[PCR0] git log with path filter failed, falling back to regular log")
+            # Fallback: just get last N commits
+            commits = await get_latest_commits(repo_dir, num_commits)
+        else:
+            commits = []
+            for line in stdout.decode().strip().split("\n"):
+                if "|" in line:
+                    parts = line.split("|", 2)
+                    commits.append({
+                        "hash": parts[0],
+                        "message": parts[1] if len(parts) > 1 else "",
+                        "date": parts[2] if len(parts) > 2 else "",
+                    })
+            commits = commits[:num_commits]  # Limit to requested count
+        
+        if not commits:
+            logger.warning("[PCR0] No commits found for historical build")
+            return
+        
+        logger.info(f"[PCR0] Found {len(commits)} commits to process")
+        
+        # Store original HEAD
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "HEAD",
+            cwd=repo_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        original_head = stdout.decode().strip()
+        
+        built_count = 0
+        
+        for i, commit in enumerate(commits):
+            commit_hash = commit["hash"]
+            commit_msg = commit["message"][:50]
+            
+            logger.info(f"[PCR0] [{i+1}/{len(commits)}] Processing commit {commit_hash[:8]}: {commit_msg}")
+            print(f"[PCR0] [{i+1}/{len(commits)}] Processing commit {commit_hash[:8]}: {commit_msg}")
+            
+            # Checkout this commit
+            proc = await asyncio.create_subprocess_exec(
+                "git", "checkout", commit_hash,
+                cwd=repo_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            
+            if proc.returncode != 0:
+                logger.warning(f"[PCR0] Failed to checkout {commit_hash[:8]}: {stderr.decode()}")
+                continue
+            
+            # Compute content hash for this version
+            content_hash = compute_files_content_hash(repo_dir)
+            if not content_hash:
+                logger.warning(f"[PCR0] Failed to compute content hash for {commit_hash[:8]}")
+                continue
+            
+            # Check if already cached
+            if content_hash in _pcr0_cache:
+                logger.info(f"[PCR0] Content {content_hash} already cached, skipping")
+                continue
+            
+            # Build PCR0 for this version
+            logger.info(f"[PCR0] Building PCR0 for {commit_hash[:8]} (content: {content_hash})...")
+            print(f"[PCR0] Building PCR0 for {commit_hash[:8]}...")
+            
+            pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
+            
+            if pcr0:
+                async with _cache_lock:
+                    _pcr0_cache[content_hash] = {
+                        "pcr0": pcr0,
+                        "content_hash": content_hash,
+                        "commit_hash": commit_hash,
+                        "built_at": datetime.utcnow().isoformat(),
+                    }
+                built_count += 1
+                logger.info(f"[PCR0] ✅ Cached PCR0 for {commit_hash[:8]}: {pcr0[:32]}...")
+                print(f"[PCR0] ✅ Cached PCR0 for {commit_hash[:8]}: {pcr0[:32]}...")
+            else:
+                logger.warning(f"[PCR0] ❌ Failed to build PCR0 for {commit_hash[:8]}")
+            
+            # Stop if we have enough
+            if len(_pcr0_cache) >= PCR0_CACHE_SIZE:
+                logger.info(f"[PCR0] Cache full ({PCR0_CACHE_SIZE} entries), stopping")
+                break
+        
+        # Return to original HEAD
+        proc = await asyncio.create_subprocess_exec(
+            "git", "checkout", original_head,
+            cwd=repo_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        
+        logger.info(f"[PCR0] ========================================")
+        logger.info(f"[PCR0] Historical build complete: {built_count} new PCR0s cached")
+        logger.info(f"[PCR0] Total cached: {len(_pcr0_cache)} versions")
+        print(f"[PCR0] ✅ Startup cache warming complete: {len(_pcr0_cache)} PCR0s cached")
+        
+    except Exception as e:
+        logger.exception(f"[PCR0] Error in historical build: {e}")
+    finally:
+        _build_in_progress = False
+        # Ensure we're back on HEAD
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "checkout", GITHUB_BRANCH,
+                cwd=repo_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+        except:
+            pass
+
+
 async def check_prerequisites() -> bool:
     """Check that required tools are available."""
     # Check for nitro-cli
@@ -889,11 +1065,13 @@ async def pcr0_builder_task():
         logger.error("[PCR0] Prerequisites check failed. PCR0 builder disabled.")
         return
     
-    # Initial build on startup
-    logger.info("[PCR0] Running initial PCR0 build...")
-    await check_and_build_pcr0()
+    # STARTUP: Build PCR0s for last N commits (cache warming)
+    # This ensures validators on slightly older code versions are accepted
+    # even right after gateway restart
+    logger.info("[PCR0] Running startup cache warming (last N commits)...")
+    await build_pcr0_for_recent_commits(PCR0_CACHE_SIZE)
     
-    logger.info(f"[PCR0] Initial build complete. Cache status: {get_cache_status()}")
+    logger.info(f"[PCR0] Startup complete. Cache status: {get_cache_status()}")
     
     while True:
         await asyncio.sleep(PCR0_CHECK_INTERVAL)

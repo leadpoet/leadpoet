@@ -301,9 +301,15 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
             # Create Supabase entry (NEW column set with TEE fields)
             # CRITICAL: Keep "payload" as original payload for dashboard compatibility
             # Store full signed envelope in "signed_log_entry" for auditor verification
+            
+            # Compute payload_hash for consistency with legacy format
+            payload_hash = compute_payload_hash(payload)
+            
             supabase_entry = {
                 "event_type": event_type,
                 "nonce": str(uuid.uuid4()),  # Required by DB NOT NULL constraint
+                "ts": signed_event["timestamp"],  # Legacy column (same as created_at)
+                "payload_hash": payload_hash,  # For consistency with legacy format
                 "payload": payload,  # ORIGINAL payload (unchanged for dashboards)
                 "signed_log_entry": log_entry,  # Full signed envelope (for auditors)
                 "event_hash": event_hash,

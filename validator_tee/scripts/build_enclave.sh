@@ -26,7 +26,29 @@ echo "Validator TEE dir: $VALIDATOR_TEE_DIR"
 echo "Repo root: $REPO_ROOT"
 echo ""
 
+# Step 0: Normalize file permissions for reproducibility
+# Docker COPY includes file permissions in layer hash
+# Different machines may have different umask settings (644 vs 664)
+# We normalize ALL files to 644 to ensure identical layer hashes
+echo "🔧 Step 0: Normalizing file permissions..."
+cd "$REPO_ROOT"
+
+# Normalize permissions on all files that will be copied into the enclave
+chmod 644 validator_tee/enclave/requirements.txt 2>/dev/null || true
+chmod 644 validator_tee/enclave/*.py 2>/dev/null || true
+chmod 644 leadpoet_canonical/*.py 2>/dev/null || true
+chmod 644 neurons/validator.py 2>/dev/null || true
+chmod 644 validator_models/automated_checks.py 2>/dev/null || true
+
+# Also normalize any other Python files that might be included
+find validator_tee/enclave -type f -name "*.py" -exec chmod 644 {} \; 2>/dev/null || true
+find validator_tee/enclave -type f -name "*.txt" -exec chmod 644 {} \; 2>/dev/null || true
+find leadpoet_canonical -type f -name "*.py" -exec chmod 644 {} \; 2>/dev/null || true
+
+echo "   ✓ File permissions normalized to 644"
+
 # Step 1: Ensure base image exists (built once, cached)
+echo ""
 echo "📦 Step 1: Checking base image..."
 if ! docker images -q validator-base:v1 | grep -q .; then
     echo "   Building base image (one-time operation)..."

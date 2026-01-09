@@ -557,6 +557,31 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             logger.error("[PCR0] Cannot proceed without base image")
             return None
         
+        # Step 0.5: Normalize file permissions for reproducibility
+        # Docker COPY includes file permissions in layer hash
+        # Different machines may have different umask settings (644 vs 664)
+        # We normalize ALL files to 644 to ensure identical layer hashes
+        logger.info("[PCR0] Normalizing file permissions to 644...")
+        permission_files = [
+            "validator_tee/enclave/requirements.txt",
+            "neurons/validator.py",
+            "validator_models/automated_checks.py",
+        ]
+        for pf in permission_files:
+            full_path = os.path.join(repo_dir, pf)
+            if os.path.exists(full_path):
+                os.chmod(full_path, 0o644)
+        
+        # Also normalize Python files in directories
+        for subdir in ["validator_tee/enclave", "leadpoet_canonical"]:
+            subdir_path = os.path.join(repo_dir, subdir)
+            if os.path.isdir(subdir_path):
+                for fname in os.listdir(subdir_path):
+                    if fname.endswith(".py") or fname.endswith(".txt"):
+                        fpath = os.path.join(subdir_path, fname)
+                        if os.path.isfile(fpath):
+                            os.chmod(fpath, 0o644)
+        
         # Step 1: Build Docker image with --no-cache
         # The base image is cached, so only our code layers rebuild
         logger.info("[PCR0] Building Docker image (--no-cache for code layers)...")

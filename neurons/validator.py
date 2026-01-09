@@ -2664,7 +2664,7 @@ class Validator(BaseValidatorNeuron):
                     "end_block": (current_epoch + 1) * 360,
                     "miner_scores": {},
                     "approved_lead_count": 0,  # Track number of approved leads for linear emissions
-                    "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', 50),  # Persist for restart recovery
+                    "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', 2000),  # Persist for restart recovery
                     "last_updated": datetime.utcnow().isoformat()
                 }
                 # Save immediately so epoch exists even if all leads are denied
@@ -2726,7 +2726,7 @@ class Validator(BaseValidatorNeuron):
                 "end_block": (current_epoch + 1) * 360,
                 "miner_scores": epoch_data["miner_scores"].copy(),  # Deep copy of scores
                 "approved_lead_count": epoch_data.get("approved_lead_count", 0),  # Track for linear emissions
-                "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', epoch_data.get("max_leads_per_epoch", 50)),  # Persist for restart recovery
+                "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', epoch_data.get("max_leads_per_epoch", 2000)),  # Persist for restart recovery
                 "last_updated": datetime.utcnow().isoformat()
             }
             
@@ -2816,13 +2816,13 @@ class Validator(BaseValidatorNeuron):
                         with open(history_file, 'r') as f:
                             history_data = json.load(f)
                         epoch_data = history_data.get(str(current_epoch), {})
-                        MAX_LEADS_PER_EPOCH = epoch_data.get("max_leads_per_epoch", 50)
+                        MAX_LEADS_PER_EPOCH = epoch_data.get("max_leads_per_epoch", 2000)
                         print(f"   ℹ️  Recovered max_leads_per_epoch={MAX_LEADS_PER_EPOCH} from history file")
                     else:
-                        MAX_LEADS_PER_EPOCH = 50
+                        MAX_LEADS_PER_EPOCH = 2000
                 except Exception as e:
                     print(f"   ⚠️  Could not recover max_leads_per_epoch from history: {e}")
-                    MAX_LEADS_PER_EPOCH = 50
+                    MAX_LEADS_PER_EPOCH = 2000
             ROLLING_WINDOW = 30
             
             # ═══════════════════════════════════════════════════════════════════

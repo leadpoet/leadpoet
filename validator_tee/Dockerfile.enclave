@@ -1,34 +1,48 @@
 # ============================================================
-# PINNED DOCKERFILE FOR REPRODUCIBLE PCR0
+# VALIDATOR ENCLAVE DOCKERFILE
 # ============================================================
-# This Dockerfile uses pinned versions to ensure that building
-# at different times produces the EXACT SAME PCR0 value.
+# This Dockerfile builds the validator TEE enclave image.
+#
+# TWO-STAGE REPRODUCIBILITY:
+# 1. Base image (Dockerfile.base) - built ONCE with yum install, cached
+# 2. This Dockerfile - uses base, only does COPY operations = deterministic
+#
+# IMPORTANT: Before building, ensure base image exists:
+#   docker build -f validator_tee/Dockerfile.base -t validator-base:v1 .
+#
+# WHY THIS APPROACH?
+# - yum install is non-deterministic (different file order each time)
+# - By using a cached base image, we skip the non-deterministic step
+# - All operations here (COPY, pip install) become deterministic
+# - Combined with post-build timestamp normalization = reproducible PCR0
 #
 # HOW TO UPDATE (for security patches):
-# 1. Get the current amazonlinux:2 digest:
-#    docker pull amazonlinux:2
-#    docker inspect --format='{{index .RepoDigests 0}}' amazonlinux:2
-# 2. Update the digest below
-# 3. Update pip versions in requirements.txt
-# 4. Rebuild and push to GitHub
+# 1. Rebuild base image (see Dockerfile.base)
+# 2. Rebuild this image
 # ============================================================
 
-# PINNED BASE IMAGE
-# To get the digest: docker inspect --format='{{index .RepoDigests 0}}' amazonlinux:2
-# Last updated: Jan 8, 2026
-FROM amazonlinux:2@sha256:0b09112ad58d45fd7e46a399048133f4572a834b8ccfeebbfb6215b0092acfc6
+# Use the pre-built base image with Python already installed
+# This MUST be built first: docker build -f Dockerfile.base -t validator-base:v1 .
+FROM validator-base:v1
 
-# Install Python 3 and pip with version locking
-# yum packages in amazonlinux:2 are stable (won't change without base image change)
-RUN yum install -y \
-    python3 \
-    python3-pip \
-    && yum clean all
+# =============================================================================
+# Set SOURCE_DATE_EPOCH for reproducible timestamps
+# This forces all file timestamps to 1970-01-01 00:00:00 UTC
+# =============================================================================
+ENV SOURCE_DATE_EPOCH=0
 
 # Copy requirements and install dependencies
-# Using --no-cache-dir to prevent pip cache from affecting image size
+# --no-cache-dir: prevents pip cache from affecting image
+# --no-compile: skips .pyc generation (bytecode has embedded timestamps)
 COPY validator_tee/enclave/requirements.txt /tmp/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir --no-compile -r /tmp/requirements.txt
+
+# =============================================================================
+# Normalize timestamps on all installed Python packages
+# Even with SOURCE_DATE_EPOCH, some tools ignore it
+# =============================================================================
+RUN find /usr/lib/python3.7 -type f -exec touch -t 197001010000.00 {} + 2>/dev/null || true
+RUN find /usr/lib64/python3.7 -type f -exec touch -t 197001010000.00 {} + 2>/dev/null || true
 
 # Set working directory
 WORKDIR /app
@@ -47,6 +61,12 @@ COPY leadpoet_canonical/ /app/leadpoet_canonical/
 # =============================================================================
 COPY neurons/validator.py /app/neurons/validator.py
 COPY validator_models/automated_checks.py /app/validator_models/automated_checks.py
+
+# =============================================================================
+# Normalize timestamps on all copied application files
+# This ensures COPY commands don't introduce timestamp variations
+# =============================================================================
+RUN find /app -type f -exec touch -t 197001010000.00 {} +
 
 # Run the validator TEE service
 # -u flag: unbuffered output (CRITICAL for debugging)

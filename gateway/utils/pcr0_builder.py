@@ -557,6 +557,21 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             logger.error("[PCR0] Cannot proceed without base image")
             return None
         
+        # Step 0.4: Clean Python cache files for reproducibility
+        # __pycache__ directories and .pyc files can differ between machines
+        logger.info("[PCR0] Cleaning Python cache files...")
+        import shutil
+        for root, dirs, files in os.walk(repo_dir):
+            for d in dirs:
+                if d == "__pycache__":
+                    shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+            for f in files:
+                if f.endswith(".pyc") or f.endswith(".pyo"):
+                    try:
+                        os.remove(os.path.join(root, f))
+                    except:
+                        pass
+        
         # Step 0.5: Normalize file permissions for reproducibility
         # Docker COPY includes file permissions in layer hash
         # Different machines may have different umask settings (644 vs 664)

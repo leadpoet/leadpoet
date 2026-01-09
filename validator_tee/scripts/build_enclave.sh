@@ -26,12 +26,21 @@ echo "Validator TEE dir: $VALIDATOR_TEE_DIR"
 echo "Repo root: $REPO_ROOT"
 echo ""
 
-# Step 0: Normalize file permissions for reproducibility
+# Step 0: Clean Python cache files for reproducibility
+# __pycache__ directories and .pyc files can differ between machines
+# They MUST be removed before Docker build or they'll be included in layers
+echo "🧹 Step 0a: Cleaning Python cache files..."
+cd "$REPO_ROOT"
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find . -type f -name "*.pyc" -delete 2>/dev/null || true
+find . -type f -name "*.pyo" -delete 2>/dev/null || true
+echo "   ✓ Python cache cleaned"
+
+# Step 0b: Normalize file permissions for reproducibility
 # Docker COPY includes file permissions in layer hash
 # Different machines may have different umask settings (644 vs 664)
 # We normalize ALL files to 644 to ensure identical layer hashes
-echo "🔧 Step 0: Normalizing file permissions..."
-cd "$REPO_ROOT"
+echo "🔧 Step 0b: Normalizing file permissions..."
 
 # Normalize permissions on all files that will be copied into the enclave
 chmod 644 validator_tee/enclave/requirements.txt 2>/dev/null || true

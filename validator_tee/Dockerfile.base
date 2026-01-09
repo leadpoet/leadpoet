@@ -1,0 +1,29 @@
+# ============================================================
+# BASE IMAGE FOR VALIDATOR ENCLAVE
+# ============================================================
+# This Dockerfile creates a base image with Python and pip installed.
+# Build this ONCE and cache it - the enclave Dockerfile uses this as base.
+#
+# WHY SEPARATE?
+# - yum install is non-deterministic (different file order each time)
+# - By building base once and caching, we get reproducible builds
+# - The enclave Dockerfile only does COPY operations = deterministic
+#
+# HOW TO REBUILD (for security patches):
+# 1. Get new amazonlinux:2 digest:
+#    docker pull amazonlinux:2
+#    docker inspect --format='{{index .RepoDigests 0}}' amazonlinux:2
+# 2. Update the digest below
+# 3. Rebuild: docker build -f Dockerfile.base -t validator-base:v1 .
+# 4. Update Dockerfile.enclave to use new base
+# ============================================================
+
+FROM amazonlinux:2@sha256:0b09112ad58d45fd7e46a399048133f4572a834b8ccfeebbfb6215b0092acfc6
+
+# Install Python 3 and pip
+# yum packages in amazonlinux:2 are stable (won't change without base image change)
+RUN yum install -y \
+    python3 \
+    python3-pip \
+    && yum clean all
+

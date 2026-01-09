@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import shutil
+import tarfile
 import tempfile
 import time
 from datetime import datetime
@@ -68,6 +69,7 @@ PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "3"))
 # Files that affect PCR0 (if any of these change, rebuild)
 MONITORED_FILES: Set[str] = {
     ".dockerignore",  # Affects Docker build context
+    "validator_tee/Dockerfile.base",  # Base image definition
     "validator_tee/Dockerfile.enclave",
     "validator_tee/enclave/requirements.txt",
     "validator_tee/enclave/__init__.py",
@@ -180,7 +182,7 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
     # NOTE: Leading slashes are required in --no-cone mode for single files
     sparse_paths = [
         "/.dockerignore",  # Critical for reproducible builds
-        "/validator_tee/",
+        "/validator_tee/",  # Includes both Dockerfile.base and Dockerfile.enclave
         "/leadpoet_canonical/",
         "/neurons/validator.py",
         "/validator_models/automated_checks.py",
@@ -264,22 +266,226 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
 
 
 # =============================================================================
+# Image Timestamp Normalization (for reproducible PCR0)
+# =============================================================================
+
+def normalize_docker_image(image_name: str, normalized_name: str) -> bool:
+    """
+    Normalize a Docker image to have deterministic timestamps.
+    
+    Docker builds are non-deterministic - layer tar archives contain file 
+    modification timestamps from build time. This causes different PCR0 values
+    even with identical source code.
+    
+    Solution: After building, normalize ALL timestamps to epoch 0:
+    1. Export image to tar
+    2. Rewrite each layer tar with mtime=0 for all files
+    3. Update config JSON with created="1970-01-01T00:00:00Z"
+    4. Recompute all hashes
+    5. Load normalized image
+    
+    This ensures: Same code → Same normalized image → Same PCR0
+    """
+    work_dir = Path(tempfile.mkdtemp(prefix="pcr0_normalize_"))
+    
+    try:
+        # Export image
+        logger.info(f"[PCR0] Normalizing image {image_name}...")
+        export_result = os.system(f"docker save {image_name} -o {work_dir}/orig.tar")
+        if export_result != 0:
+            logger.error("[PCR0] Failed to export image")
+            return False
+        
+        # Extract
+        with tarfile.open(f"{work_dir}/orig.tar", "r") as tar:
+            tar.extractall(work_dir)
+        
+        # Read manifest
+        with open(work_dir / "manifest.json") as f:
+            manifest = json.load(f)
+        
+        layers = manifest[0]["Layers"]
+        config_path = manifest[0]["Config"]
+        
+        logger.info(f"[PCR0] Normalizing {len(layers)} layers...")
+        
+        # Process each layer - normalize tar timestamps
+        new_layers = []
+        for layer_path in layers:
+            full_path = work_dir / layer_path
+            norm_path = str(full_path) + ".norm"
+            
+            # Rewrite tar with all timestamps = 0
+            with tarfile.open(str(full_path), "r") as old_tar:
+                with tarfile.open(norm_path, "w") as new_tar:
+                    for member in old_tar.getmembers():
+                        member.mtime = 0  # Epoch timestamp
+                        if member.isfile():
+                            content = old_tar.extractfile(member)
+                            new_tar.addfile(member, content)
+                        else:
+                            new_tar.addfile(member)
+            
+            # Compute new hash
+            h = hashlib.sha256()
+            with open(norm_path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            new_hash = h.hexdigest()
+            
+            new_layer_name = "blobs/sha256/" + new_hash
+            new_layer_full = work_dir / new_layer_name
+            new_layer_full.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(norm_path, new_layer_full)
+            
+            # Remove old layer
+            if str(full_path) != str(new_layer_full):
+                try:
+                    os.remove(full_path)
+                except:
+                    pass
+            
+            new_layers.append(new_layer_name)
+        
+        # Normalize config JSON
+        with open(work_dir / config_path) as f:
+            config = json.load(f)
+        
+        config["created"] = "1970-01-01T00:00:00Z"
+        
+        # Update rootfs layer digests
+        new_diff_ids = []
+        for layer in new_layers:
+            layer_hash = layer.split("/")[-1]
+            new_diff_ids.append("sha256:" + layer_hash)
+        config["rootfs"]["diff_ids"] = new_diff_ids
+        
+        # Normalize history timestamps
+        if "history" in config:
+            for h in config["history"]:
+                if "created" in h:
+                    h["created"] = "1970-01-01T00:00:00Z"
+        
+        # Write normalized config
+        config_json = json.dumps(config, separators=(",", ":"))
+        new_config_hash = hashlib.sha256(config_json.encode()).hexdigest()
+        new_config_path = work_dir / "blobs" / "sha256" / new_config_hash
+        new_config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(new_config_path, "w") as f:
+            f.write(config_json)
+        
+        # Remove old config
+        try:
+            os.remove(work_dir / config_path)
+        except:
+            pass
+        
+        # Update manifest
+        manifest[0]["Layers"] = new_layers
+        manifest[0]["Config"] = "blobs/sha256/" + new_config_hash
+        manifest[0]["RepoTags"] = [normalized_name]
+        
+        with open(work_dir / "manifest.json", "w") as f:
+            json.dump(manifest, f)
+        
+        # Create normalized tar
+        with tarfile.open(f"{work_dir}/normalized.tar", "w") as tar:
+            for item in work_dir.iterdir():
+                if item.name not in ["orig.tar", "normalized.tar"]:
+                    tar.add(item, arcname=item.name)
+        
+        # Load normalized image
+        load_result = os.system(f"docker load -i {work_dir}/normalized.tar 2>/dev/null")
+        if load_result != 0:
+            logger.error("[PCR0] Failed to load normalized image")
+            return False
+        
+        # Tag the loaded image
+        os.system(f"docker tag sha256:{new_config_hash} {normalized_name} 2>/dev/null")
+        
+        logger.info(f"[PCR0] ✓ Image normalized: {normalized_name}")
+        return True
+        
+    except Exception as e:
+        logger.exception(f"[PCR0] Normalization failed: {e}")
+        return False
+    finally:
+        # Cleanup work directory
+        try:
+            shutil.rmtree(work_dir)
+        except:
+            pass
+
+
+# =============================================================================
 # Enclave Build
 # =============================================================================
+
+# Base image name - built once and cached
+BASE_IMAGE_NAME = "validator-base:v1"
+
+
+async def ensure_base_image_exists(repo_dir: str) -> bool:
+    """
+    Ensure the base image exists. Build it if not present.
+    
+    The base image contains yum-installed Python and is NON-DETERMINISTIC.
+    However, once built and cached, it's stable. The enclave image built
+    on top uses only COPY operations which are deterministic.
+    
+    This two-stage approach allows reproducible PCR0 values.
+    """
+    # Check if base image exists
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "images", "-q", BASE_IMAGE_NAME,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    
+    if stdout.decode().strip():
+        logger.info(f"[PCR0] Base image {BASE_IMAGE_NAME} already exists")
+        return True
+    
+    # Build base image (this is done ONCE and cached)
+    logger.info(f"[PCR0] Building base image {BASE_IMAGE_NAME} (one-time operation)...")
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "docker", "build",
+        "-f", "validator_tee/Dockerfile.base",
+        "-t", BASE_IMAGE_NAME,
+        ".",
+        cwd=repo_dir,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    
+    if proc.returncode != 0:
+        logger.error(f"[PCR0] Failed to build base image: {stderr.decode()[-500:]}")
+        return False
+    
+    logger.info(f"[PCR0] ✓ Base image {BASE_IMAGE_NAME} built successfully")
+    return True
+
 
 async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
     """Build the validator enclave and extract PCR0."""
     docker_image = f"validator-enclave-build-{int(time.time())}"
+    normalized_image = f"{docker_image}-normalized"
     eif_path = os.path.join(repo_dir, "validator-enclave.eif")
     
     try:
-        # Step 1: Build Docker image with --no-cache for REPRODUCIBLE builds
-        # CRITICAL: Without --no-cache, Docker can reuse cached layers which
-        # produces different PCR0 values from fresh builds!
-        logger.info("[PCR0] Building Docker image (--no-cache for reproducibility)...")
+        # Step 0: Ensure base image exists (built once, cached)
+        if not await ensure_base_image_exists(repo_dir):
+            logger.error("[PCR0] Cannot proceed without base image")
+            return None
+        
+        # Step 1: Build Docker image with --no-cache
+        # The base image is cached, so only our code layers rebuild
+        logger.info("[PCR0] Building Docker image (--no-cache for code layers)...")
         proc = await asyncio.create_subprocess_exec(
             "sudo", "docker", "build",
-            "--no-cache",  # CRITICAL: Ensures reproducible builds
+            "--no-cache",
             "-f", "validator_tee/Dockerfile.enclave",
             "-t", docker_image,
             ".",
@@ -293,11 +499,18 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             logger.error(f"[PCR0] Docker build failed: {stderr.decode()[-500:]}")
             return None
         
-        # Step 2: Build enclave and extract PCR0
+        # Step 2: NORMALIZE the image for reproducible PCR0
+        # This ensures identical PCR0 regardless of when image was built
+        logger.info("[PCR0] Normalizing image timestamps for reproducibility...")
+        if not normalize_docker_image(docker_image, normalized_image):
+            logger.error("[PCR0] Failed to normalize Docker image")
+            return None
+        
+        # Step 3: Build enclave from NORMALIZED image
         logger.info("[PCR0] Building enclave with nitro-cli...")
         proc = await asyncio.create_subprocess_exec(
             "sudo", "nitro-cli", "build-enclave",
-            "--docker-uri", docker_image,
+            "--docker-uri", normalized_image,
             "--output-file", eif_path,
             cwd=repo_dir,
             stdout=asyncio.subprocess.PIPE,
@@ -310,10 +523,8 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             return None
         
         # Parse PCR0 from output
-        # Output format: {"Measurements": {"PCR0": "...", ...}}
         output = stdout.decode()
         try:
-            # Find JSON in output
             start = output.find("{")
             end = output.rfind("}") + 1
             if start >= 0 and end > start:
@@ -330,19 +541,18 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
         
     finally:
         # Cleanup
-        try:
-            # Remove Docker image
-            proc = await asyncio.create_subprocess_exec(
-                "sudo", "docker", "rmi", "-f", docker_image,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-        except Exception:
-            pass
+        for img in [docker_image, normalized_image]:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "sudo", "docker", "rmi", "-f", img,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+            except Exception:
+                pass
         
         try:
-            # Remove EIF file
             if os.path.exists(eif_path):
                 os.remove(eif_path)
         except Exception:

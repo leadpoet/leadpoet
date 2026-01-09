@@ -36,5 +36,6 @@ RUN yum install -y \
     && rm -f /var/lib/rpm/Installtid \
     && rm -f /var/lib/rpm/Packages \
     && rm -rf /var/lib/yum/history \
+    && rm -rf /var/lib/yum/yumdb \
     && rm -f /var/log/yum.log
 

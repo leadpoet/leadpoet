@@ -564,6 +564,7 @@ async def get_latest_weights(netuid: int, epoch_id: int) -> dict:
         "validator_signature": bundle["validator_signature"],
         "validator_attestation_b64": bundle["validator_attestation_b64"],
         "validator_code_hash": bundle["validator_code_hash"],
+        "validator_pcr0": bundle.get("validator_pcr0"),  # For auditor PCR0 verification
         "chain_snapshot_block": bundle.get("chain_snapshot_block"),
         "chain_snapshot_compare_hash": bundle.get("chain_snapshot_compare_hash"),
         "weight_submission_event_hash": bundle.get("weight_submission_event_hash"),
@@ -605,6 +606,7 @@ async def get_current_weights(netuid: int) -> dict:
         "validator_signature": bundle["validator_signature"],
         "validator_attestation_b64": bundle["validator_attestation_b64"],
         "validator_code_hash": bundle["validator_code_hash"],
+        "validator_pcr0": bundle.get("validator_pcr0"),  # For auditor PCR0 verification
         "chain_snapshot_block": bundle.get("chain_snapshot_block"),
         "chain_snapshot_compare_hash": bundle.get("chain_snapshot_compare_hash"),
         "weight_submission_event_hash": bundle.get("weight_submission_event_hash"),

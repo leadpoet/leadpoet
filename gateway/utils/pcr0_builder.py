@@ -484,7 +484,7 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
 async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
     """Build the validator enclave and extract PCR0."""
     docker_image = f"validator-enclave-build-{int(time.time())}"
-    normalized_image = f"{docker_image}-normalized"
+    normalized_image = f"{docker_image}-normalized:latest"
     eif_path = os.path.join(repo_dir, "validator-enclave.eif")
     
     try:

@@ -439,18 +439,60 @@ def normalize_docker_image(image_name: str, normalized_name: str) -> bool:
 
 # Base image name - built once and cached
 BASE_IMAGE_NAME = "validator-base:v1"
+# Label used to track Dockerfile.base content hash
+BASE_IMAGE_HASH_LABEL = "dockerfile.base.hash"
+
+
+def compute_dockerfile_base_hash(repo_dir: str) -> Optional[str]:
+    """Compute SHA256 hash of Dockerfile.base content."""
+    dockerfile_path = os.path.join(repo_dir, "validator_tee", "Dockerfile.base")
+    try:
+        with open(dockerfile_path, 'rb') as f:
+            content = f.read()
+        return hashlib.sha256(content).hexdigest()[:16]
+    except Exception as e:
+        logger.error(f"[PCR0] Cannot read Dockerfile.base: {e}")
+        return None
+
+
+async def get_base_image_hash_label() -> Optional[str]:
+    """Get the dockerfile.base.hash label from existing base image."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "inspect", BASE_IMAGE_NAME,
+        "--format", "{{index .Config.Labels \"" + BASE_IMAGE_HASH_LABEL + "\"}}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    
+    if proc.returncode != 0:
+        return None  # Image doesn't exist
+    
+    label_value = stdout.decode().strip()
+    if not label_value or label_value == "<no value>":
+        return None  # Label not set
+    
+    return label_value
 
 
 async def ensure_base_image_exists(repo_dir: str) -> bool:
     """
-    Ensure the base image exists. Build it if not present.
+    Ensure the base image exists AND is up-to-date with current Dockerfile.base.
     
     The base image contains yum-installed Python and is NON-DETERMINISTIC.
     However, once built and cached, it's stable. The enclave image built
     on top uses only COPY operations which are deterministic.
     
-    This two-stage approach allows reproducible PCR0 values.
+    This function tracks Dockerfile.base content via a Docker label. When
+    Dockerfile.base changes, the old base image is deleted and rebuilt.
+    This ensures automatic updates when Dockerfile.base is pushed to GitHub.
     """
+    # Compute current Dockerfile.base hash
+    current_hash = compute_dockerfile_base_hash(repo_dir)
+    if not current_hash:
+        logger.error("[PCR0] Cannot compute Dockerfile.base hash")
+        return False
+    
     # Check if base image exists
     proc = await asyncio.create_subprocess_exec(
         "docker", "images", "-q", BASE_IMAGE_NAME,
@@ -458,17 +500,36 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await proc.communicate()
+    image_exists = bool(stdout.decode().strip())
     
-    if stdout.decode().strip():
-        logger.info(f"[PCR0] Base image {BASE_IMAGE_NAME} already exists")
-        return True
+    if image_exists:
+        # Check if the existing image matches current Dockerfile.base
+        existing_hash = await get_base_image_hash_label()
+        
+        if existing_hash == current_hash:
+            logger.info(f"[PCR0] Base image {BASE_IMAGE_NAME} up-to-date (hash: {current_hash})")
+            return True
+        
+        # Hash mismatch - Dockerfile.base changed, need to rebuild
+        logger.info(f"[PCR0] Dockerfile.base changed! Old hash: {existing_hash}, New hash: {current_hash}")
+        logger.info(f"[PCR0] Deleting stale base image {BASE_IMAGE_NAME}...")
+        
+        # Delete the old base image
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "rmi", "-f", BASE_IMAGE_NAME,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        # Ignore errors - image might be in use, but we'll build a new one anyway
     
-    # Build base image (this is done ONCE and cached)
-    logger.info(f"[PCR0] Building base image {BASE_IMAGE_NAME} (one-time operation)...")
+    # Build base image with hash label
+    logger.info(f"[PCR0] Building base image {BASE_IMAGE_NAME} (hash: {current_hash})...")
     proc = await asyncio.create_subprocess_exec(
         "sudo", "docker", "build",
         "-f", "validator_tee/Dockerfile.base",
         "-t", BASE_IMAGE_NAME,
+        "--label", f"{BASE_IMAGE_HASH_LABEL}={current_hash}",
         ".",
         cwd=repo_dir,
         stdout=asyncio.subprocess.PIPE,
@@ -480,7 +541,7 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
         logger.error(f"[PCR0] Failed to build base image: {stderr.decode()[-500:]}")
         return False
     
-    logger.info(f"[PCR0] ✓ Base image {BASE_IMAGE_NAME} built successfully")
+    logger.info(f"[PCR0] ✓ Base image {BASE_IMAGE_NAME} built successfully (hash: {current_hash})")
     return True
 
 

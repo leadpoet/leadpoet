@@ -310,6 +310,7 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
                 "nonce": str(uuid.uuid4()),  # Required by DB NOT NULL constraint
                 "ts": signed_event["timestamp"],  # Legacy column (same as created_at)
                 "payload_hash": payload_hash,  # For consistency with legacy format
+                "signature": log_entry["enclave_signature"],  # TEE signature for this event
                 "payload": payload,  # ORIGINAL payload (unchanged for dashboards)
                 "signed_log_entry": log_entry,  # Full signed envelope (for auditors)
                 "event_hash": event_hash,

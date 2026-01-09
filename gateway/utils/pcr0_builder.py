@@ -309,16 +309,19 @@ def normalize_docker_image(image_name: str, normalized_name: str) -> bool:
         
         logger.info(f"[PCR0] Normalizing {len(layers)} layers...")
         
-        # Process each layer - normalize tar timestamps
+        # Process each layer - normalize tar timestamps AND file order
         new_layers = []
         for layer_path in layers:
             full_path = work_dir / layer_path
             norm_path = str(full_path) + ".norm"
             
-            # Rewrite tar with all timestamps = 0
+            # Rewrite tar with all timestamps = 0 AND sorted file order
+            # Sorting ensures identical layers regardless of yum install order
             with tarfile.open(str(full_path), "r") as old_tar:
                 with tarfile.open(norm_path, "w") as new_tar:
-                    for member in old_tar.getmembers():
+                    # Sort members alphabetically by name for deterministic order
+                    members = sorted(old_tar.getmembers(), key=lambda m: m.name)
+                    for member in members:
                         member.mtime = 0  # Epoch timestamp
                         if member.isfile():
                             content = old_tar.extractfile(member)

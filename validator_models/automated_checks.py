@@ -4775,6 +4775,7 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         company_lower = company_lower.replace("'", "'").replace("'", "'").replace("`", "'")
         company_lower = re.sub(r"\s*'\s*", "'", company_lower)  # "mcdonald ' s" → "mcdonald's"
         company_lower = re.sub(r"\s*-\s*", "-", company_lower)  # "chick - fil - a" → "chick-fil-a"
+        company_lower = re.sub(r"\s*,\s*", ", ", company_lower)  # "rock , paper , shotgun" → "rock, paper, shotgun"
         
         # Normalize company name by removing common legal suffixes
         # e.g., "Bank Of America Corporation" → "Bank Of America"
@@ -4816,6 +4817,7 @@ async def verify_linkedin_with_llm(full_name: str, company: str, linkedin_url: s
         first_title = first_title.replace("'", "'").replace("'", "'").replace("`", "'")
         first_title = re.sub(r"\s*'\s*", "'", first_title)  # "mcdonald ' s" → "mcdonald's"
         first_title = re.sub(r"\s*-\s*", "-", first_title)  # "chick - fil - a" → "chick-fil-a"
+        first_title = re.sub(r"\s*,\s*", ", ", first_title)  # "rock , paper , shotgun" → "rock, paper, shotgun"
         
         # Extract ONLY the headline part (before "| linkedin")
         # ScrapingDog often concatenates descriptions after "| LinkedIn"

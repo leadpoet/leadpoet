@@ -338,16 +338,25 @@ async def get_epoch_leads(
                 
                 try:
                     # Insert EPOCH_INITIALIZATION event (idempotent - will fail if exists)
-                    # NOTE: epoch_id is INSIDE init_payload, not as a column (column doesn't exist)
-                    # CRITICAL: Must include actor_hotkey="system" - NOT NULL constraint in DB
+                    # CRITICAL: Must match epoch_lifecycle.py format with all required fields
+                    import json
+                    from uuid import uuid4
+                    
+                    payload_json = json.dumps(init_payload, sort_keys=True)
+                    payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
+                    
                     await asyncio.wait_for(
                         asyncio.to_thread(
                             lambda: supabase.table("transparency_log")
                                 .insert({
                                     "event_type": "EPOCH_INITIALIZATION",
-                                    "actor_hotkey": "system",  # System-generated event (required NOT NULL)
-                                    "payload": init_payload,
-                                    "created_at": datetime.utcnow().isoformat()
+                                    "actor_hotkey": "system",
+                                    "nonce": str(uuid4()),  # Required NOT NULL
+                                    "ts": datetime.utcnow().isoformat(),
+                                    "payload_hash": payload_hash,
+                                    "build_id": "epoch_leads_fallback",
+                                    "signature": "system",
+                                    "payload": init_payload
                                 })
                                 .execute()
                         ),

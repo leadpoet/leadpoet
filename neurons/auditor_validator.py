@@ -64,9 +64,8 @@ logger = logging.getLogger(__name__)
 # Default gateway URL
 DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
 
-# Expected code hashes for production (pinned builds)
-EXPECTED_GATEWAY_CODE_HASH = os.environ.get("EXPECTED_GATEWAY_CODE_HASH")
-EXPECTED_VALIDATOR_CODE_HASH = os.environ.get("EXPECTED_VALIDATOR_CODE_HASH")
+# PCR0 allowlist is fetched from GitHub automatically by leadpoet_canonical.nitro
+# No need for hardcoded code hashes - dynamic verification via pcr0_allowlist.json
 
 
 class AuditorValidator:
@@ -117,9 +116,8 @@ class AuditorValidator:
         self.validator_hotkey = None
         
         # Trust level tracking (CRITICAL for auditor output)
-        # "full_nitro" = Full Nitro attestation verification passed
-        # "signature_only" = Only Ed25519 signatures verified (weaker trust)
-        self.trust_level = "signature_only"  # Default until Nitro verification implemented
+        # Always starts as None, set to "full_nitro" after attestation verification
+        self.trust_level = None
         
         logger.info("✅ Auditor Validator initialized")
         print(f"✅ Auditor Validator initialized")
@@ -259,55 +257,36 @@ class AuditorValidator:
             return False
         
         try:
-            # Decode attestation
-            att_bytes = base64.b64decode(self.gateway_attestation)
+            # FULL NITRO VERIFICATION - NO DEV MODE
+            from leadpoet_canonical.nitro import verify_nitro_attestation_full
             
-            # Check if we're in production mode
-            is_production = os.environ.get("ENVIRONMENT") == "production"
+            valid, data = verify_nitro_attestation_full(
+                self.gateway_attestation,  # Already base64 encoded
+                expected_pcr0=None,  # Uses allowlist from GitHub automatically
+                expected_pubkey=self.gateway_pubkey,
+                expected_purpose=None,  # Gateway attestation purpose varies
+                expected_epoch_id=None,  # Gateway attestation doesn't have epoch_id
+                role="gateway",  # Uses ALLOWED_GATEWAY_PCR0_VALUES
+            )
             
-            if is_production:
-                # PRODUCTION: Full Nitro verification REQUIRED
-                if not EXPECTED_GATEWAY_CODE_HASH:
-                    logger.error("EXPECTED_GATEWAY_CODE_HASH not set in production!")
-                    print(f"❌ FAIL-CLOSED: EXPECTED_GATEWAY_CODE_HASH not configured")
-                    return False
-                
-                try:
-                    from leadpoet_canonical.nitro import verify_nitro_attestation_full
-                    
-                    result = verify_nitro_attestation_full(
-                        att_bytes,
-                        expected_pcr0=None,  # TODO: Add when PCR0 allowlist available
-                        expected_pubkey=self.gateway_pubkey,
-                        expected_epoch_id=None,  # Gateway attestation doesn't have epoch_id
-                    )
-                    
-                    if result:
-                        self.trust_level = "full_nitro"
-                        logger.info("Gateway attestation verified (full Nitro)")
-                        print(f"✅ Gateway attestation: FULL NITRO VERIFICATION")
-                        return True
-                    else:
-                        logger.error("Gateway Nitro verification failed")
-                        print(f"❌ Gateway Nitro verification FAILED")
-                        return False
-                        
-                except NotImplementedError:
-                    logger.error("Full Nitro verification not implemented - FAIL CLOSED in production")
-                    print(f"❌ FAIL-CLOSED: Nitro verification not implemented")
-                    return False
-            else:
-                # DEV MODE: Signature-only with warning
-                self.trust_level = "signature_only"
-                logger.warning("DEV MODE: Gateway attestation signature-only (no Nitro)")
-                print(f"⚠️ DEV MODE: Gateway attestation SIGNATURE-ONLY")
-                print(f"   In production, this would require full Nitro verification")
-                print(f"   Trust level: {self.trust_level}")
+            if valid:
+                self.trust_level = "full_nitro"
+                pcr0 = data.get("pcr0", "N/A")[:32]
+                logger.info(f"Gateway attestation verified (full Nitro, PCR0: {pcr0}...)")
+                print(f"✅ Gateway attestation: FULL NITRO VERIFICATION")
+                print(f"   PCR0: {pcr0}...")
                 return True
+            else:
+                logger.error(f"Gateway Nitro verification failed: {data}")
+                print(f"❌ Gateway Nitro verification FAILED")
+                print(f"   Details: {data.get('error', 'Unknown error')}")
+                return False
                 
         except Exception as e:
             logger.error(f"Gateway attestation verification failed: {e}")
             print(f"❌ Gateway attestation verification failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def verify_validator_attestation(self, bundle: Dict) -> bool:
@@ -336,65 +315,32 @@ class AuditorValidator:
             return False
         
         try:
-            # Decode attestation
-            att_bytes = base64.b64decode(attestation_b64)
+            # FULL NITRO VERIFICATION - NO DEV MODE
+            from leadpoet_canonical.nitro import verify_nitro_attestation_full
             
-            # Check if we're in production mode
-            is_production = os.environ.get("ENVIRONMENT") == "production"
+            valid, data = verify_nitro_attestation_full(
+                attestation_b64,  # Already base64 encoded
+                expected_pcr0=None,  # Uses allowlist from GitHub automatically
+                expected_pubkey=pubkey,
+                expected_purpose="validator_weights",
+                expected_epoch_id=epoch_id,  # CRITICAL: Replay protection
+                role="validator",  # Uses ALLOWED_VALIDATOR_PCR0_VALUES
+            )
             
-            if is_production:
-                # PRODUCTION: Full Nitro verification REQUIRED
-                expected_code_hash = EXPECTED_VALIDATOR_CODE_HASH
-                
-                if not expected_code_hash:
-                    logger.error("EXPECTED_VALIDATOR_CODE_HASH not set in production!")
-                    print(f"❌ FAIL-CLOSED: EXPECTED_VALIDATOR_CODE_HASH not configured")
-                    return False
-                
-                # Verify code_hash matches expected
-                if code_hash != expected_code_hash:
-                    logger.error(f"Validator code_hash mismatch: {code_hash} != {expected_code_hash}")
-                    print(f"❌ Validator code_hash does not match pinned value")
-                    return False
-                
-                try:
-                    from leadpoet_canonical.nitro import verify_nitro_attestation_full
-                    
-                    result = verify_nitro_attestation_full(
-                        att_bytes,
-                        expected_pcr0=None,  # TODO: Add when PCR0 allowlist available
-                        expected_pubkey=pubkey,
-                        expected_epoch_id=epoch_id,  # CRITICAL: Replay protection
-                    )
-                    
-                    if result:
-                        self.trust_level = "full_nitro"
-                        logger.info(f"Validator attestation verified (full Nitro) for epoch {epoch_id}")
-                        print(f"✅ Validator attestation: FULL NITRO VERIFICATION")
-                        return True
-                    else:
-                        logger.error("Validator Nitro verification failed")
-                        print(f"❌ Validator Nitro verification FAILED")
-                        return False
-                        
-                except NotImplementedError:
-                    logger.error("Full Nitro verification not implemented - FAIL CLOSED in production")
-                    print(f"❌ FAIL-CLOSED: Nitro verification not implemented")
-                    return False
-            else:
-                # DEV MODE: Check fields present, signature-only trust
-                if not pubkey or not attestation_b64:
-                    logger.error("Missing validator attestation fields")
-                    print(f"❌ Missing validator attestation fields")
-                    return False
-                
-                # In dev mode, we trust the signature but warn about reduced trust
-                self.trust_level = "signature_only"
-                logger.warning(f"DEV MODE: Validator attestation signature-only for epoch {epoch_id}")
-                print(f"⚠️ DEV MODE: Validator attestation SIGNATURE-ONLY")
-                print(f"   Epoch: {epoch_id}, Pubkey: {pubkey[:16]}...")
-                print(f"   In production, this would require full Nitro verification")
+            if valid:
+                self.trust_level = "full_nitro"
+                pcr0 = data.get("pcr0", "N/A")[:32]
+                logger.info(f"Validator attestation verified (full Nitro) for epoch {epoch_id}")
+                print(f"✅ Validator attestation: FULL NITRO VERIFICATION")
+                print(f"   Epoch: {epoch_id}")
+                print(f"   PCR0: {pcr0}...")
+                print(f"   Pubkey: {pubkey[:16]}...")
                 return True
+            else:
+                logger.error(f"Validator Nitro verification failed: {data}")
+                print(f"❌ Validator Nitro verification FAILED")
+                print(f"   Details: {data.get('error', 'Unknown error')}")
+                return False
                 
         except Exception as e:
             logger.error(f"Validator attestation verification failed: {e}")
@@ -853,9 +799,9 @@ SECURITY MODEL:
     3. Anti-equivocation (chain snapshot match)
   Then copies the verified weights to its own chain submission.
 
-TRUST LEVELS:
-  - full_nitro: Full AWS Nitro attestation verified
-  - signature_only: Only Ed25519 signatures verified (weaker)
+TRUST LEVEL:
+  - full_nitro: Full AWS Nitro attestation verified (ALWAYS REQUIRED)
+  - PCR0 verified against GitHub allowlist automatically
 
 VERIFICATION FAILURE HANDLING:
   If verification fails (equivocation, attestation, signature/hash):
@@ -911,20 +857,10 @@ EXAMPLES:
     print(f"   Log level: {args.log_level}")
     print(f"{'='*60}")
     
-    # Check for production environment variables
-    if os.environ.get("ENVIRONMENT") == "production":
-        print(f"\n⚠️  PRODUCTION MODE DETECTED")
-        if not EXPECTED_GATEWAY_CODE_HASH:
-            print(f"   ❌ EXPECTED_GATEWAY_CODE_HASH not set!")
-        else:
-            print(f"   ✅ Gateway code hash: {EXPECTED_GATEWAY_CODE_HASH[:16]}...")
-        if not EXPECTED_VALIDATOR_CODE_HASH:
-            print(f"   ❌ EXPECTED_VALIDATOR_CODE_HASH not set!")
-        else:
-            print(f"   ✅ Validator code hash: {EXPECTED_VALIDATOR_CODE_HASH[:16]}...")
-    else:
-        print(f"\n⚠️  DEV MODE: Attestation verification is SIGNATURE-ONLY")
-        print(f"   Set ENVIRONMENT=production for full Nitro verification")
+    # Full Nitro verification is ALWAYS enabled - no dev mode
+    print(f"\n🔐 FULL NITRO VERIFICATION ENABLED")
+    print(f"   PCR0 allowlist fetched from GitHub automatically")
+    print(f"   All attestations verified against AWS Nitro root certificate")
     
     print(f"{'='*60}\n")
     

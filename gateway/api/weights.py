@@ -440,14 +440,26 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
         
         if primary_uid is not None:
             chain_snapshot_block = subtensor.get_current_block()
-            chain_weights = subtensor.weights(netuid=submission.netuid, uid=primary_uid)
+            # subtensor.weights() returns ALL weights for the subnet as:
+            # list[tuple[int, list[tuple[int, int]]]] = [(uid, [(target_uid, weight), ...]), ...]
+            all_chain_weights = subtensor.weights(netuid=submission.netuid)
             
-            if chain_weights:
-                chain_pairs = normalize_chain_weights(chain_weights)
+            # Find the primary validator's weights in the list
+            primary_weights = None
+            for uid, weights_list in all_chain_weights:
+                if uid == primary_uid:
+                    primary_weights = weights_list
+                    break
+            
+            if primary_weights:
+                # primary_weights is list of (target_uid, weight) tuples
+                chain_pairs = normalize_chain_weights(primary_weights)
                 chain_snapshot_compare_hash = compare_weights_hash(
                     submission.netuid, submission.epoch_id, chain_pairs
                 )
                 print(f"   📸 Chain snapshot captured at block {chain_snapshot_block}")
+            else:
+                print(f"   ⚠️ Primary validator UID {primary_uid} has no weights on chain yet")
     except Exception as e:
         logger.warning(f"[SNAPSHOT] ⚠️ Could not capture chain snapshot: {e}")
     

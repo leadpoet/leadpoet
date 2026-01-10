@@ -64,8 +64,8 @@ logger = logging.getLogger(__name__)
 # Default gateway URL
 DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
 
-# PCR0 allowlist is fetched from GitHub automatically by leadpoet_canonical.nitro
-# No need for hardcoded code hashes - dynamic verification via pcr0_allowlist.json
+# Auditors skip PCR0 verification (requires nitro-cli to verify independently)
+# AWS cert chain + COSE signature verification proves it's a REAL Nitro enclave
 
 # File to store pending equivocation check (overwritten each epoch)
 PENDING_EQUIVOCATION_FILE = os.path.join(_SCRIPT_DIR, ".pending_equivocation_check.json")

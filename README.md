@@ -338,6 +338,7 @@ python neurons/auditor_validator.py \
 - Verifies Ed25519 signature and recomputes hash (doesn't trust claimed hash)
 - Verifies AWS Nitro attestation (proves weights came from real enclave)
 - Submits verified weights to chain
+- Auto-updates from GitHub on each restart
 
 **Trust Model:**
 - AWS certificate chain verified (proves REAL Nitro enclave)

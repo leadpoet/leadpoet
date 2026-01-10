@@ -148,8 +148,8 @@ Miners must submit prospects with the following structure:
   "industry": "Science and Engineering",   # REQUIRED - must be from industry_taxonomy.py
   "sub_industry": "Aerospace",             # REQUIRED - must be from industry_taxonomy.py
   "country": "United States",              # REQUIRED - see Country Format below
-  "state": "California",                   # REQUIRED for US leads only
-  "city": "Hawthorne",                     # REQUIRED for all leads
+  "state": "Texas",                        # REQUIRED for US leads only
+  "city": "Austin",                        # REQUIRED for all leads
   "linkedin": "https://linkedin.com/in/elonmusk", # REQUIRED
   "company_linkedin": "https://linkedin.com/company/spacex", # REQUIRED
   "source_url": "https://spacex.com/careers", # REQUIRED (URL where lead was found, OR "proprietary_database")
@@ -320,6 +320,33 @@ Validators receive batches of ~50 leads per epoch. Each validator independently 
 2. **Company & Contact verification**: Website, LinkedIn, Google search
 
 Validators must label leads with valid emails as "Valid" or "valid".
+
+### Auditor Validator (Optional)
+
+For validators who want to run a lightweight alternative that copies TEE-verified weights from the primary validator:
+
+```bash
+python neurons/auditor_validator.py \
+    --netuid 71 \
+    --subtensor.network finney \
+    --wallet.name validator \
+    --wallet.hotkey default
+```
+
+**How it works:**
+- Fetches weight bundles from the gateway (signed by primary validator's TEE)
+- Verifies Ed25519 signature and recomputes hash (doesn't trust claimed hash)
+- Verifies AWS Nitro attestation (proves weights came from real enclave)
+- Submits verified weights to chain
+
+**Trust Model:**
+- ✅ AWS certificate chain verified (proves REAL Nitro enclave)
+- ✅ COSE signature verified (proves authentic attestation)  
+- ✅ Ed25519 signature verified (proves weights from enclave)
+- ✅ Epoch binding verified (replay protection)
+- ⚠️ PCR0 NOT verified without `nitro-cli` (requires AWS EC2 with Nitro)
+
+This is ideal for validators who want to participate in consensus without running the full validation logic.
 
 ### Community Audit Tool
 

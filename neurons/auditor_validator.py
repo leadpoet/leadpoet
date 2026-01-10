@@ -902,6 +902,42 @@ class AuditorValidator:
             if success:
                 print(f"✅ Weights submitted for epoch {epoch_id}")
                 self.last_submitted_epoch = epoch_id
+                
+                # Verify submission landed on chain
+                print(f"   🔍 Verifying submission landed on chain...")
+                import time
+                time.sleep(2)  # Brief wait for chain propagation
+                
+                try:
+                    all_chain_weights = self.subtensor.weights(netuid=self.config.netuid)
+                    my_uid = self.uid
+                    
+                    for uid, weights_list in all_chain_weights:
+                        if uid == my_uid:
+                            # Check if first few weights match what we submitted
+                            chain_sample = [(u, w) for u, w in weights_list[:3]]
+                            submitted_sample = [(uids[i], weights_u16[i]) for i in range(min(3, len(uids)))]
+                            print(f"   Chain sample (UID {my_uid}): {chain_sample}")
+                            print(f"   Submitted sample: {submitted_sample}")
+                            
+                            # Quick sanity check
+                            if chain_sample and submitted_sample:
+                                # Compare first weight
+                                chain_first_w = dict(chain_sample).get(submitted_sample[0][0])
+                                submitted_first_w = submitted_sample[0][1]
+                                if chain_first_w is not None:
+                                    diff = abs(chain_first_w - submitted_first_w)
+                                    if diff <= 1:
+                                        print(f"   ✅ Verified: Chain matches submitted (diff={diff})")
+                                    else:
+                                        print(f"   ⚠️  WARNING: Chain differs from submitted (diff={diff})")
+                                        print(f"      Chain has OLD weights - submission may have failed!")
+                            break
+                    else:
+                        print(f"   ⚠️  Could not find our weights on chain (UID {my_uid})")
+                except Exception as e:
+                    print(f"   ⚠️  Could not verify chain weights: {e}")
+                
                 return True
             else:
                 print(f"❌ Weight submission failed")

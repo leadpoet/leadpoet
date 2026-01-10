@@ -542,50 +542,20 @@ class AuditorValidator:
             print(f"   snapshot_compare: {snapshot_hash}")
             return False
         
-        # FALLBACK: Live chain query (with loud warning)
+        # NO SNAPSHOT AVAILABLE - Skip anti-equivocation check
+        # 
+        # WHY WE SKIP (not fallback to live chain):
+        # 1. subtensor.weights() returns CURRENT weights, not historical
+        # 2. Live chain query is unreliable (may give false positive)
+        # 3. Anti-equivocation relies on gateway-captured snapshot (trust issue)
+        # 4. The 5 other verifications (AWS cert, COSE, epoch, sig, hash) are trustless
+        #
+        # This check would only catch if validator submitted DIFFERENT weights
+        # to chain vs gateway, but without snapshot we can't verify this reliably.
         print(f"   ⚠️  No chain_snapshot_compare_hash in bundle.")
-        print(f"   ⚠️  FALLBACK: Querying live chain (may give false positive!)")
-        
-        # Get primary validator UID
-        primary_uid = self._get_primary_validator_uid(bundle)
-        if primary_uid is None:
-            print(f"   ❌ Cannot determine primary validator UID")
-            return False
-        
-        # Fetch on-chain weights for primary validator
-        try:
-            on_chain_weights = self.subtensor.weights(netuid=netuid, uid=primary_uid)
-        except Exception as e:
-            print(f"   ❌ Failed to fetch on-chain weights: {e}")
-            return False
-        
-        if not on_chain_weights:
-            print(f"   ⚠️  Primary validator has not set weights on-chain yet")
-            return True  # Not equivocation - just not submitted yet
-        
-        # Normalize chain weights using canonical function
-        chain_pairs = normalize_chain_weights(on_chain_weights)
-        chain_compare = compare_weights_hash(netuid, epoch_id, chain_pairs)
-        
-        # Check exact match first
-        if chain_compare == bundle_compare:
-            print(f"   ✅ MATCH (exact)")
-            print(f"   bundle_compare: {bundle_compare}")
-            print(f"   chain_compare:  {chain_compare}")
-            return True
-        
-        # Check with tolerance (±1 u16 drift from float round-trip)
-        if weights_within_tolerance(weights_pairs, chain_pairs, tolerance=1):
-            print(f"   ✅ MATCH (within tolerance)")
-            print(f"   bundle_compare: {bundle_compare}")
-            print(f"   chain_compare:  {chain_compare}")
-            return True
-        
-        print(f"\n   ❌ MISMATCH!")
-        print(f"   bundle_compare: {bundle_compare}")
-        print(f"   chain_compare:  {chain_compare}")
-        print(f"   ⚠️  This may be false positive if weights changed after the epoch.")
-        return False
+        print(f"   ⚠️  SKIPPING anti-equivocation check (no reliable snapshot)")
+        print(f"   ℹ️  Other 5 verifications (AWS cert, COSE, epoch, signature, hash) still apply")
+        return True  # Skip this check - rely on the other 5 trustless verifications
     
     # ═══════════════════════════════════════════════════════════════════════════
     # Weight Submission
@@ -614,26 +584,22 @@ class AuditorValidator:
             uids = [0]
             weights_floats = [1.0]  # 100% to UID 0
             
-            # TEMPORARILY DISABLED - uncomment when ready for production
-            # success = self.subtensor.set_weights(
-            #     netuid=self.config.netuid,
-            #     wallet=self.wallet,
-            #     uids=uids,
-            #     weights=weights_floats,
-            #     wait_for_finalization=True,
-            # )
-            print(f"⚠️  BURN DISABLED FOR TESTING - would have burned to UID 0")
-            self.last_submitted_epoch = epoch_id
-            return True  # Pretend success for testing
+            success = self.subtensor.set_weights(
+                netuid=self.config.netuid,
+                wallet=self.wallet,
+                uids=uids,
+                weights=weights_floats,
+                wait_for_finalization=True,
+            )
             
-            # if success:
-            #     print(f"🔥 BURN COMPLETE - 100% weight to UID 0 for epoch {epoch_id}")
-            #     self.last_submitted_epoch = epoch_id
-            #     logger.warning(f"BURN: 100% to UID 0 for epoch {epoch_id} - reason: {reason}")
-            #     return True
-            # else:
-            #     print(f"❌ Burn submission failed")
-            #     return False
+            if success:
+                print(f"🔥 BURN COMPLETE - 100% weight to UID 0 for epoch {epoch_id}")
+                self.last_submitted_epoch = epoch_id
+                logger.warning(f"BURN: 100% to UID 0 for epoch {epoch_id} - reason: {reason}")
+                return True
+            else:
+                print(f"❌ Burn submission failed")
+                return False
                 
         except Exception as e:
             print(f"❌ Burn submission error: {e}")
@@ -670,25 +636,21 @@ class AuditorValidator:
             
             print(f"📤 Submitting weights for {len(uids)} UIDs...")
             
-            # TEMPORARILY DISABLED - uncomment when ready for production
-            # success = self.subtensor.set_weights(
-            #     netuid=self.config.netuid,
-            #     wallet=self.wallet,
-            #     uids=uids,
-            #     weights=weights_floats,
-            #     wait_for_finalization=True,  # CRITICAL: Wait for finalization
-            # )
-            print(f"⚠️  WEIGHT SUBMISSION DISABLED FOR TESTING - would have submitted {len(uids)} UIDs")
-            self.last_submitted_epoch = epoch_id
-            return True  # Pretend success for testing
+            success = self.subtensor.set_weights(
+                netuid=self.config.netuid,
+                wallet=self.wallet,
+                uids=uids,
+                weights=weights_floats,
+                wait_for_finalization=True,  # CRITICAL: Wait for finalization
+            )
             
-            # if success:
-            #     print(f"✅ Weights submitted for epoch {epoch_id}")
-            #     self.last_submitted_epoch = epoch_id
-            #     return True
-            # else:
-            #     print(f"❌ Weight submission failed")
-            #     return False
+            if success:
+                print(f"✅ Weights submitted for epoch {epoch_id}")
+                self.last_submitted_epoch = epoch_id
+                return True
+            else:
+                print(f"❌ Weight submission failed")
+                return False
                 
         except Exception as e:
             print(f"❌ Weight submission error: {e}")

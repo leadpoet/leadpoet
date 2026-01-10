@@ -752,6 +752,9 @@ class AuditorValidator:
             print(f"\n🔥 BURNING WEIGHTS TO UID 0")
             print(f"   Reason: {reason}")
             print(f"   Epoch: {epoch_id}")
+            print(f"   Weight breakdown:")
+            print(f"      UID 0 (Burn): 100.00%")
+            print(f"   Total: 100.00%")
             
             # Submit 100% weight to UID 0
             uids = [0]
@@ -807,7 +810,15 @@ class AuditorValidator:
             # ✅ CORRECT: Use function that guarantees exact round-trip
             weights_floats = u16_to_emit_floats(uids, weights_u16)
             
-            print(f"📤 Submitting weights for {len(uids)} UIDs...")
+            # Print weight breakdown (same format as primary validator)
+            print(f"\n📤 Submitting weights for {len(uids)} UIDs...")
+            print(f"   Weight breakdown (copying from primary validator):")
+            total_weight = sum(weights_floats)
+            for uid, weight in zip(uids, weights_floats):
+                pct = (weight / total_weight * 100) if total_weight > 0 else 0
+                label = "(Burn)" if uid == 0 else ""
+                print(f"      UID {uid} {label}: {pct:.2f}%")
+            print(f"   Total: {sum(weights_floats) / total_weight * 100:.2f}%")
             
             success = self.subtensor.set_weights(
                 netuid=self.config.netuid,

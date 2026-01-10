@@ -197,7 +197,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Default gateway URL
+# gateway URL
 DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
 
 # Auditors skip PCR0 verification (requires nitro-cli to verify independently)

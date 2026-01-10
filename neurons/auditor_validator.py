@@ -354,7 +354,7 @@ class AuditorValidator:
                     print(f"   Missing on chain: {sorted(missing_on_chain)[:10]}...")
                 if extra_on_chain:
                     print(f"   Extra on chain: {sorted(extra_on_chain)[:10]}...")
-                logger.error(f"EQUIVOCATION: Epoch {epoch_id} - UID mismatch")
+                logger.warning(f"UID_MISMATCH: Epoch {epoch_id} - Bundle and chain have different UIDs (investigating)")
                 self.clear_pending_equivocation_check()
                 return False
             
@@ -374,7 +374,7 @@ class AuditorValidator:
                     print(f"      UID {uid}: bundle={bw}, chain={cw}, diff={diff}")
                 if len(mismatches) > 10:
                     print(f"      ... and {len(mismatches) - 10} more")
-                logger.error(f"EQUIVOCATION: Epoch {epoch_id} - {len(mismatches)} weight mismatches beyond tolerance")
+                logger.warning(f"WEIGHT_MISMATCH: Epoch {epoch_id} - {len(mismatches)} weights differ beyond ±1 tolerance (investigating)")
                 self.clear_pending_equivocation_check()
                 return False
             
@@ -1036,9 +1036,10 @@ class AuditorValidator:
                     if pending and pending.get("epoch_id") == current_epoch - 1:
                         if not await self.perform_soft_equivocation_check():
                             logger.error(f"Soft equivocation check FAILED for epoch {current_epoch - 1}")
-                            print(f"   🔥 EQUIVOCATION DETECTED - Primary validator may have cheated!")
+                            print(f"   ⚠️  MISMATCH DETECTED - Bundle vs chain weights differ (investigating...)")
                             # Note: We don't burn here since we already submitted weights
                             # This is a SOFT check - logs the issue for investigation
+                            # Mismatch could be due to: timing, normalization differences, or actual equivocation
                 
                 # Refresh metagraph periodically (at epoch start)
                 if block_within_epoch == 0:

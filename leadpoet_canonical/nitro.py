@@ -244,6 +244,7 @@ def verify_nitro_attestation_full(
     expected_purpose: str = None,
     expected_epoch_id: Optional[int] = None,
     role: str = "gateway",  # "gateway" or "validator"
+    skip_pcr0_verification: bool = False,  # For auditors without nitro-cli
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Full AWS Nitro attestation verification.
@@ -262,6 +263,11 @@ def verify_nitro_attestation_full(
         expected_epoch_id: Expected epoch_id for validator attestations (required if
                           purpose is "validator_weights")
         role: "gateway" or "validator" - determines which PCR0 allowlist to use
+        skip_pcr0_verification: If True, skip PCR0 verification against allowlist/GitHub.
+                               STILL verifies AWS cert chain + COSE signature (proves REAL
+                               Nitro enclave), but doesn't verify the specific CODE.
+                               Use for auditors without nitro-cli who cannot independently
+                               verify PCR0. Trust level will be "aws_verified".
                           
     Returns:
         Tuple of (success, extracted_data)
@@ -272,6 +278,8 @@ def verify_nitro_attestation_full(
         - PCR0 is the ROOT OF TRUST, NOT user_data.code_hash
         - Certificate chain MUST be verified to pinned Amazon Nitro root
         - Epoch binding prevents replay of old validator attestations
+        - With skip_pcr0_verification=True, you prove it's a REAL Nitro enclave
+          but NOT that it's running specific code. Auditors should note this.
     """
     try:
         import cbor2
@@ -418,11 +426,23 @@ def verify_nitro_attestation_full(
         result["pcr2"] = pcrs.get(2, b"").hex() if pcrs.get(2) else None
         
         # PCR0 verification mode:
+        # - If skip_pcr0_verification: extract PCR0 but don't verify (for auditors without nitro-cli)
         # - If expected_pcr0 is provided: strict match required
         # - If role == "validator": use dynamic PCR0 builder (gateway computes from GitHub)
         # - Otherwise: check against static allowlist
         
-        if expected_pcr0:
+        if skip_pcr0_verification:
+            # AUDITOR MODE: Skip PCR0 verification
+            # We've already verified:
+            # - AWS certificate chain (proves REAL Nitro enclave)
+            # - COSE signature (proves attestation is authentic)
+            # - Certificate validity (not expired)
+            # We extract PCR0 for logging but DON'T verify it against any allowlist
+            result["verification_steps"].append("⚠️ PCR0 verification SKIPPED (auditor mode)")
+            result["pcr0_verification_mode"] = "skipped"
+            result["trust_level"] = "aws_verified"  # Lower trust level - proves real enclave, not specific code
+            logger.info(f"[NITRO] ⚠️ PCR0 verification skipped (auditor mode), PCR0: {pcr0_hex[:32]}...")
+        elif expected_pcr0:
             # Strict mode: must match specific PCR0
             if pcr0_hex != expected_pcr0:
                 raise AttestationError(

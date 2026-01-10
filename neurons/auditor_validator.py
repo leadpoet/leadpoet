@@ -293,16 +293,31 @@ class AuditorValidator:
         """
         Verify the validator attestation from a weight bundle.
         
-        SECURITY MODEL:
-        - Attestation includes epoch_id for replay protection
-        - In production: Full Nitro verification required
-        - In dev: Signature-only mode with warning
+        SECURITY MODEL FOR AUDITORS:
+        - Verifies AWS certificate chain (proves REAL Nitro enclave)
+        - Verifies COSE signature (proves attestation is authentic)
+        - Verifies epoch binding (replay protection)
+        - SKIPS PCR0 verification (auditors can't independently verify without nitro-cli)
+        
+        WHY SKIP PCR0?
+        - PCR0 verification requires either:
+          a) nitro-cli to build enclave and compute expected PCR0, OR
+          b) Trusting an allowlist published by subnet owners
+        - Auditors don't have nitro-cli (not on AWS EC2)
+        - Auditors shouldn't trust subnet-owner-published allowlists
+        - So we verify "it's a REAL Nitro enclave" but not "which code it runs"
+        
+        WHAT THIS PROVES:
+        ✅ The attestation came from a REAL AWS Nitro enclave (AWS-signed)
+        ✅ The weights were signed by that enclave's private key
+        ✅ The attestation is for THIS epoch (replay protection)
+        ❌ Does NOT prove which code is running (would need nitro-cli)
         
         Args:
             bundle: Weight bundle containing validator_attestation_b64
             
         Returns:
-            True if attestation is valid (or acceptable for dev mode)
+            True if attestation is valid
         """
         attestation_b64 = bundle.get("validator_attestation_b64")
         pubkey = bundle.get("validator_enclave_pubkey")
@@ -315,30 +330,35 @@ class AuditorValidator:
             return False
         
         try:
-            # FULL NITRO VERIFICATION - NO DEV MODE
             from leadpoet_canonical.nitro import verify_nitro_attestation_full
             
+            # AUDITOR MODE: Skip PCR0 verification
+            # We verify AWS cert chain + COSE signature (proves REAL enclave)
+            # but skip PCR0 check (can't verify without nitro-cli)
             valid, data = verify_nitro_attestation_full(
                 attestation_b64,  # Already base64 encoded
-                expected_pcr0=None,  # Uses allowlist from GitHub automatically
+                expected_pcr0=None,
                 expected_pubkey=pubkey,
                 expected_purpose="validator_weights",
                 expected_epoch_id=epoch_id,  # CRITICAL: Replay protection
-                role="validator",  # Uses ALLOWED_VALIDATOR_PCR0_VALUES
+                role="validator",
+                skip_pcr0_verification=True,  # Auditors can't verify PCR0
             )
             
             if valid:
-                self.trust_level = "full_nitro"
+                self.trust_level = data.get("trust_level", "aws_verified")
                 pcr0 = data.get("pcr0", "N/A")[:32]
-                logger.info(f"Validator attestation verified (full Nitro) for epoch {epoch_id}")
-                print(f"✅ Validator attestation: FULL NITRO VERIFICATION")
+                logger.info(f"Validator attestation verified for epoch {epoch_id} (trust_level={self.trust_level})")
+                print(f"✅ Validator attestation: AWS VERIFIED")
+                print(f"   Trust level: {self.trust_level.upper()}")
                 print(f"   Epoch: {epoch_id}")
-                print(f"   PCR0: {pcr0}...")
+                print(f"   PCR0: {pcr0}... (not verified - requires nitro-cli)")
                 print(f"   Pubkey: {pubkey[:16]}...")
+                print(f"   ℹ️  AWS cert chain + COSE signature verified (proves real Nitro enclave)")
                 return True
             else:
-                logger.error(f"Validator Nitro verification failed: {data}")
-                print(f"❌ Validator Nitro verification FAILED")
+                logger.error(f"Validator attestation verification failed: {data}")
+                print(f"❌ Validator attestation verification FAILED")
                 print(f"   Details: {data.get('error', 'Unknown error')}")
                 return False
                 
@@ -594,22 +614,26 @@ class AuditorValidator:
             uids = [0]
             weights_floats = [1.0]  # 100% to UID 0
             
-            success = self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
-                uids=uids,
-                weights=weights_floats,
-                wait_for_finalization=True,
-            )
+            # TEMPORARILY DISABLED - uncomment when ready for production
+            # success = self.subtensor.set_weights(
+            #     netuid=self.config.netuid,
+            #     wallet=self.wallet,
+            #     uids=uids,
+            #     weights=weights_floats,
+            #     wait_for_finalization=True,
+            # )
+            print(f"⚠️  BURN DISABLED FOR TESTING - would have burned to UID 0")
+            self.last_submitted_epoch = epoch_id
+            return True  # Pretend success for testing
             
-            if success:
-                print(f"🔥 BURN COMPLETE - 100% weight to UID 0 for epoch {epoch_id}")
-                self.last_submitted_epoch = epoch_id
-                logger.warning(f"BURN: 100% to UID 0 for epoch {epoch_id} - reason: {reason}")
-                return True
-            else:
-                print(f"❌ Burn submission failed")
-                return False
+            # if success:
+            #     print(f"🔥 BURN COMPLETE - 100% weight to UID 0 for epoch {epoch_id}")
+            #     self.last_submitted_epoch = epoch_id
+            #     logger.warning(f"BURN: 100% to UID 0 for epoch {epoch_id} - reason: {reason}")
+            #     return True
+            # else:
+            #     print(f"❌ Burn submission failed")
+            #     return False
                 
         except Exception as e:
             print(f"❌ Burn submission error: {e}")
@@ -646,21 +670,25 @@ class AuditorValidator:
             
             print(f"📤 Submitting weights for {len(uids)} UIDs...")
             
-            success = self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
-                uids=uids,
-                weights=weights_floats,
-                wait_for_finalization=True,  # CRITICAL: Wait for finalization
-            )
+            # TEMPORARILY DISABLED - uncomment when ready for production
+            # success = self.subtensor.set_weights(
+            #     netuid=self.config.netuid,
+            #     wallet=self.wallet,
+            #     uids=uids,
+            #     weights=weights_floats,
+            #     wait_for_finalization=True,  # CRITICAL: Wait for finalization
+            # )
+            print(f"⚠️  WEIGHT SUBMISSION DISABLED FOR TESTING - would have submitted {len(uids)} UIDs")
+            self.last_submitted_epoch = epoch_id
+            return True  # Pretend success for testing
             
-            if success:
-                print(f"✅ Weights submitted for epoch {epoch_id}")
-                self.last_submitted_epoch = epoch_id
-                return True
-            else:
-                print(f"❌ Weight submission failed")
-                return False
+            # if success:
+            #     print(f"✅ Weights submitted for epoch {epoch_id}")
+            #     self.last_submitted_epoch = epoch_id
+            #     return True
+            # else:
+            #     print(f"❌ Weight submission failed")
+            #     return False
                 
         except Exception as e:
             print(f"❌ Weight submission error: {e}")
@@ -864,11 +892,14 @@ EXAMPLES:
     print(f"   Log level: {args.log_level}")
     print(f"{'='*60}")
     
-    # Full Nitro verification is ALWAYS enabled for VALIDATOR attestations
-    print(f"\n🔐 FULL NITRO VERIFICATION ENABLED")
-    print(f"   Validator attestations verified against AWS Nitro root certificate")
-    print(f"   PCR0 allowlist fetched from GitHub automatically")
-    print(f"   NOTE: Gateway runs on EC2 host (no attestation), Validator runs in Nitro Enclave")
+    # Auditor verification mode - verify AWS signature, skip PCR0
+    print(f"\n🔐 AUDITOR VERIFICATION MODE")
+    print(f"   ✅ AWS certificate chain verified (proves REAL Nitro enclave)")
+    print(f"   ✅ COSE signature verified (proves authentic attestation)")
+    print(f"   ✅ Ed25519 signature verified (proves weights from enclave)")
+    print(f"   ✅ Epoch binding verified (replay protection)")
+    print(f"   ⚠️  PCR0 NOT verified (requires nitro-cli or trusting subnet owner)")
+    print(f"   ℹ️  Trust level: AWS_VERIFIED (real enclave, unverified code)")
     
     print(f"{'='*60}\n")
     

@@ -440,9 +440,6 @@ class AuditorValidator:
             current_block = self.subtensor.get_current_block()
             current_epoch = current_block // EPOCH_LENGTH
             print(f"   Bundle UIDs: {len(bundle_pairs)}, Chain UIDs: {len(chain_pairs)}")
-            print(f"   Bundle epoch: {epoch_id}, Current epoch: {current_epoch}")
-            if current_epoch > epoch_id:
-                print(f"   ⚠️  NOTE: Chain weights are CURRENT - if primary already submitted epoch {current_epoch}, comparison is invalid")
             
             # Check if UIDs match
             bundle_uid_set = set(bundle_uids)
@@ -1167,9 +1164,9 @@ class AuditorValidator:
                         else:
                             logger.error(f"Weight submission failed for epoch {target_epoch}")
                 
-                # Soft anti-equivocation check at block 50-150 of each epoch
+                # Soft anti-equivocation check at block 50-100 of each epoch
                 # Check 2 epochs back to ensure weights have definitely propagated
-                if 50 <= block_within_epoch <= 150:
+                if 50 <= block_within_epoch <= 100:
                     # Check if we have a pending equivocation check from 2 epochs ago
                     target_epoch = current_epoch - 2
                     pending = self.load_pending_equivocation_check(target_epoch=target_epoch)

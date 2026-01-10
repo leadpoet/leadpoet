@@ -71,7 +71,7 @@ from pathlib import Path
 # Enclave signing (CRITICAL: This is the signing authority)
 # Try both import paths to support local dev and EC2 deployment
 try:
-    from gateway.tee.enclave_signer import sign_event, is_keypair_initialized
+from gateway.tee.enclave_signer import sign_event, is_keypair_initialized
 except ImportError:
     from tee.enclave_signer import sign_event, is_keypair_initialized
 
@@ -85,8 +85,8 @@ def _get_supabase():
     """Get Supabase write client for logging events."""
     try:
         # Try both import paths to support local dev and EC2 deployment
-        try:
-            from gateway.db.client import get_write_client
+    try:
+        from gateway.db.client import get_write_client
         except ImportError:
             from db.client import get_write_client
         return get_write_client()
@@ -435,8 +435,8 @@ async def get_log_entry_by_hash(event_hash: str) -> Optional[Dict[str, Any]]:
     """
     try:
         # Try both import paths to support local dev and EC2 deployment
-        try:
-            from gateway.db.client import get_read_client
+    try:
+        from gateway.db.client import get_read_client
         except ImportError:
             from db.client import get_read_client
         read_client = get_read_client()
@@ -478,8 +478,8 @@ async def get_log_entries_for_epoch(
     """
     try:
         # Try both import paths to support local dev and EC2 deployment
-        try:
-            from gateway.db.client import get_read_client
+    try:
+        from gateway.db.client import get_read_client
         except ImportError:
             from db.client import get_read_client
         read_client = get_read_client()
@@ -526,7 +526,7 @@ def get_signer_info() -> Dict[str, Any]:
     """
     # Try both import paths to support local dev and EC2 deployment
     try:
-        from gateway.tee.enclave_signer import get_signer_state
+    from gateway.tee.enclave_signer import get_signer_state
     except ImportError:
         from tee.enclave_signer import get_signer_state
     return get_signer_state()

@@ -172,7 +172,7 @@ class AuditorVerifier:
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as response:
                     if response.status == 200:
-                        data = await response.json()
+                    data = await response.json()
                         # /attest returns: attestation_document (hex), enclave_public_key, code_hash, pcr0
                         self.gateway_pubkey = data.get("enclave_public_key")
                         self.gateway_code_hash = data.get("code_hash")
@@ -187,8 +187,8 @@ class AuditorVerifier:
                                 print(f"   ❌ Failed to fetch attestation: {fallback_response.status}")
                                 return False
                             data = await fallback_response.json()
-                            self.gateway_pubkey = data.get("enclave_pubkey")
-                            self.gateway_code_hash = data.get("code_hash")
+            self.gateway_pubkey = data.get("enclave_pubkey")
+            self.gateway_code_hash = data.get("code_hash")
                             attestation_doc = data.get("attestation_document")  # may be b64
                     else:
                         print(f"   ❌ Failed to fetch attestation: {response.status}")
@@ -325,7 +325,7 @@ class AuditorVerifier:
             except ValueError:
                 # Already base64
                 attestation_b64 = attestation_input
-                attestation_bytes = base64.b64decode(attestation_b64)
+            attestation_bytes = base64.b64decode(attestation_b64)
             
             print(f"      Attestation size: {len(attestation_bytes)} bytes")
             print(f"      Role: {role}")
@@ -383,10 +383,10 @@ class AuditorVerifier:
                 if success:
                     pcr0 = result.get("pcr0", "N/A")
                     print(f"      PCR0 (unverified): {pcr0[:32]}..." if pcr0 and len(pcr0) > 32 else f"      PCR0: {pcr0}")
-                    print(f"   ⚠️  SIGNATURE-ONLY MODE: Cannot verify enclave authenticity")
-                    print(f"   ⚠️  Trust model is WEAKER - pubkey may not be from pinned code")
-                    # self.trust_level remains "signature_only"
-                    return True
+            print(f"   ⚠️  SIGNATURE-ONLY MODE: Cannot verify enclave authenticity")
+            print(f"   ⚠️  Trust model is WEAKER - pubkey may not be from pinned code")
+            # self.trust_level remains "signature_only"
+            return True
                 else:
                     error = result.get("error", "Unknown error")
                     print(f"   ❌ Attestation parsing failed: {error}")

@@ -3579,65 +3579,65 @@ async def run_stage4_5_repscore(
         }
         print(f"   🏢 ENTERPRISE COMPANY (10,001+): Hardcoded rep score = {hardcoded_score} ({'ICP match' if matches_icp else 'No ICP match'})")
     else:
-        # ========================================================================
-        # Rep Score: Soft Reputation Checks (SOFT)
-        # EXTRACTED VERBATIM from run_automated_checks()
-        # - Wayback Machine (max 6 points), SEC (max 12 points), 
-        #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
-        #   Companies House (max 10 points)
-        # - Always passes, appends scores to lead
-        # - Total: 0-48 points
-        # ========================================================================
-        print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
-        
-        # OPTIMIZATION: Run all rep score checks in parallel to save time
-        # Old: Sequential execution = 6-12s total
-        # New: Parallel execution = 3-4s total (time of slowest API)
-        results = await asyncio.gather(
-            check_wayback_machine(lead),
-            check_sec_edgar(lead),
-            check_whois_dnsbl_reputation(lead),
-            check_gdelt_mentions(lead),
-            check_companies_house(lead),
-            return_exceptions=True  # Don't fail entire batch if one check fails
-        )
-        
-        # Unpack results (handle exceptions gracefully)
-        wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
-        sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
-        whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
-        gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
-        companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
-        
-        total_rep_score = (
-            wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
-            companies_house_score
-        )
-        
-        # Append to lead data
-        lead["rep_score"] = total_rep_score
-        lead["rep_score_details"] = {
-            "wayback": wayback_data,
-            "sec": sec_data,
-            "whois_dnsbl": whois_dnsbl_data,
-            "gdelt": gdelt_data,
-            "companies_house": companies_house_data
+    # ========================================================================
+    # Rep Score: Soft Reputation Checks (SOFT)
+    # EXTRACTED VERBATIM from run_automated_checks()
+    # - Wayback Machine (max 6 points), SEC (max 12 points), 
+    #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
+    #   Companies House (max 10 points)
+    # - Always passes, appends scores to lead
+    # - Total: 0-48 points
+    # ========================================================================
+    print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
+    
+    # OPTIMIZATION: Run all rep score checks in parallel to save time
+    # Old: Sequential execution = 6-12s total
+    # New: Parallel execution = 3-4s total (time of slowest API)
+    results = await asyncio.gather(
+        check_wayback_machine(lead),
+        check_sec_edgar(lead),
+        check_whois_dnsbl_reputation(lead),
+        check_gdelt_mentions(lead),
+        check_companies_house(lead),
+        return_exceptions=True  # Don't fail entire batch if one check fails
+    )
+    
+    # Unpack results (handle exceptions gracefully)
+    wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
+    sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
+    whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
+    gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
+    companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
+    
+    total_rep_score = (
+        wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
+        companies_house_score
+    )
+    
+    # Append to lead data
+    lead["rep_score"] = total_rep_score
+    lead["rep_score_details"] = {
+        "wayback": wayback_data,
+        "sec": sec_data,
+        "whois_dnsbl": whois_dnsbl_data,
+        "gdelt": gdelt_data,
+        "companies_house": companies_house_data
+    }
+    
+    # Append to automated_checks_data
+    automated_checks_data["rep_score"] = {
+        "total_score": total_rep_score,
+        "max_score": MAX_REP_SCORE,
+        "breakdown": {
+            "wayback_machine": wayback_score,       # 0-6 points
+            "sec_edgar": sec_score,                 # 0-12 points
+            "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
+            "gdelt": gdelt_score,                   # 0-10 points
+            "companies_house": companies_house_score      # 0-10 points
         }
-        
-        # Append to automated_checks_data
-        automated_checks_data["rep_score"] = {
-            "total_score": total_rep_score,
-            "max_score": MAX_REP_SCORE,
-            "breakdown": {
-                "wayback_machine": wayback_score,       # 0-6 points
-                "sec_edgar": sec_score,                 # 0-12 points
-                "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
-                "gdelt": gdelt_score,                   # 0-10 points
-                "companies_house": companies_house_score      # 0-10 points
-            }
-        }
-        
-        print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
+    }
+    
+    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
     # ========================================================================
     # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)
@@ -9027,7 +9027,7 @@ def _gse_search_stage5_sync(
             # These removals reduce false positives from 77 to 56 per 800 leads
             
             # Query 1 (was Q4): LinkedIn URL + claimed role (90.7% accuracy)
-            if role_simplified:
+        if role_simplified:
                 queries.append(f'"{linkedin_url}" "{role_simplified}"')
             
             # Query 2 (was Q5): Name + role + company (91.3% accuracy, highest extraction)
@@ -9158,12 +9158,12 @@ def _gse_search_stage5_sync(
                     all_results.extend(matching_results)
                     # Check if we found a role from matching results
                     for r in matching_results:
-                        title = r.get("title", "")
-                        snippet = r.get("body", "")
-                        extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
+                    title = r.get("title", "")
+                    snippet = r.get("body", "")
+                    extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
                         if extracted and len(extracted) > 3:
-                            role_found = True
-                            break
+                        role_found = True
+                        break
             elif search_type == "person_location":
                 # For person_location: only return if we actually extracted a location
                 # Otherwise continue to next query (e.g., Query 2 or 3)
@@ -9203,10 +9203,10 @@ def _gse_search_stage5_sync(
         return all_results
     
     # Try fallback queries for non-role searches
-    for query in fallback_queries:
-        results = gse_search_with_fallback(query, max_results)
-        if results:
-            return results
+        for query in fallback_queries:
+            results = gse_search_with_fallback(query, max_results)
+            if results:
+                return results
     
     return []
 
@@ -10904,7 +10904,7 @@ def is_enterprise_company(lead: dict) -> bool:
     """
     employee_count = lead.get("employee_count", "")
     if not employee_count:
-        return False
+    return False
     
     # Parse the employee count
     parsed = parse_employee_count(str(employee_count))
@@ -11517,64 +11517,64 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         }
         print(f"   🏢 ENTERPRISE COMPANY (10,001+): Hardcoded rep score = {hardcoded_score} ({'ICP match' if matches_icp else 'No ICP match'})")
     else:
-        # ========================================================================
-        # Rep Score: Soft Reputation Checks (SOFT)
-        # - Wayback Machine (max 6 points), SEC (max 12 points), 
-        #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
-        #   Companies House (max 10 points)
-        # - Always passes, appends scores to lead
-        # - Total: 0-48 points
-        # ========================================================================
-        print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
-        
-        # OPTIMIZATION: Run all rep score checks in parallel to save time
-        # Old: Sequential execution = 6-12s total
-        # New: Parallel execution = 3-4s total (time of slowest API)
-        results = await asyncio.gather(
-            check_wayback_machine(lead),
-            check_sec_edgar(lead),
-            check_whois_dnsbl_reputation(lead),
-            check_gdelt_mentions(lead),
-            check_companies_house(lead),
-            return_exceptions=True  # Don't fail entire batch if one check fails
-        )
-        
-        # Unpack results (handle exceptions gracefully)
-        wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
-        sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
-        whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
-        gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
-        companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
-        
-        total_rep_score = (
-            wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
-            companies_house_score
-        )
-        
-        # Append to lead data
-        lead["rep_score"] = total_rep_score
-        lead["rep_score_details"] = {
-            "wayback": wayback_data,
-            "sec": sec_data,
-            "whois_dnsbl": whois_dnsbl_data,
-            "gdelt": gdelt_data,
-            "companies_house": companies_house_data
+    # ========================================================================
+    # Rep Score: Soft Reputation Checks (SOFT)
+    # - Wayback Machine (max 6 points), SEC (max 12 points), 
+    #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
+    #   Companies House (max 10 points)
+    # - Always passes, appends scores to lead
+    # - Total: 0-48 points
+    # ========================================================================
+    print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
+    
+    # OPTIMIZATION: Run all rep score checks in parallel to save time
+    # Old: Sequential execution = 6-12s total
+    # New: Parallel execution = 3-4s total (time of slowest API)
+    results = await asyncio.gather(
+        check_wayback_machine(lead),
+        check_sec_edgar(lead),
+        check_whois_dnsbl_reputation(lead),
+        check_gdelt_mentions(lead),
+        check_companies_house(lead),
+        return_exceptions=True  # Don't fail entire batch if one check fails
+    )
+    
+    # Unpack results (handle exceptions gracefully)
+    wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
+    sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
+    whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
+    gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
+    companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
+    
+    total_rep_score = (
+        wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
+        companies_house_score
+    )
+    
+    # Append to lead data
+    lead["rep_score"] = total_rep_score
+    lead["rep_score_details"] = {
+        "wayback": wayback_data,
+        "sec": sec_data,
+        "whois_dnsbl": whois_dnsbl_data,
+        "gdelt": gdelt_data,
+        "companies_house": companies_house_data
+    }
+    
+    # Append to automated_checks_data
+    automated_checks_data["rep_score"] = {
+        "total_score": total_rep_score,
+        "max_score": MAX_REP_SCORE,
+        "breakdown": {
+            "wayback_machine": wayback_score,       # 0-6 points
+            "sec_edgar": sec_score,                 # 0-12 points
+            "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
+            "gdelt": gdelt_score,                   # 0-10 points
+            "companies_house": companies_house_score      # 0-10 points
         }
-        
-        # Append to automated_checks_data
-        automated_checks_data["rep_score"] = {
-            "total_score": total_rep_score,
-            "max_score": MAX_REP_SCORE,
-            "breakdown": {
-                "wayback_machine": wayback_score,       # 0-6 points
-                "sec_edgar": sec_score,                 # 0-12 points
-                "whois_dnsbl": whois_dnsbl_score,       # 0-10 points
-                "gdelt": gdelt_score,                   # 0-10 points
-                "companies_house": companies_house_score      # 0-10 points
-            }
-        }
-        
-        print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
+    }
+    
+    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
     # ========================================================================
     # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)

@@ -1599,7 +1599,7 @@ async def submit_lead(event: SubmitLeadEvent):
             )
 
         print(f"   ✅ Description sanity check passed: '{desc_raw[:60]}{'...' if len(desc_raw) > 60 else ''}'")
-
+        
         # ========================================
         # Validate country/state/city logic
         # ========================================

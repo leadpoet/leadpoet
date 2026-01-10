@@ -456,14 +456,14 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
     submission_payload = {
         "actor_hotkey": submission.validator_hotkey,  # Required for indexing
         "validator_signature": submission.validator_signature,  # For reference
-            "epoch_id": submission.epoch_id,
-            "netuid": submission.netuid,
-            "block": submission.block,
-            "weights_hash": submission.weights_hash,
-            "weights_count": len(submission.uids),
-            "chain_snapshot_block": chain_snapshot_block,
-            "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
-        }
+        "epoch_id": submission.epoch_id,
+        "netuid": submission.netuid,
+        "block": submission.block,
+        "weights_hash": submission.weights_hash,
+        "weights_count": len(submission.uids),
+        "chain_snapshot_block": chain_snapshot_block,
+        "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
+    }
     
     # NEW FORMAT: log_event(event_type, payload) - TEE signed, returns event_hash
     log_entry = await log_event("WEIGHT_SUBMISSION", submission_payload)

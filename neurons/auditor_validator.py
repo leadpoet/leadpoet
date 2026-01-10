@@ -106,6 +106,8 @@ class AuditorValidator:
         
         self.should_exit = False
         self.last_submitted_epoch = None
+        self.consecutive_errors = 0
+        self.max_consecutive_errors = 5  # Reconnect subtensor after this many errors
         
         # Gateway attestation (for log verification)
         self.gateway_pubkey = None
@@ -134,6 +136,39 @@ class AuditorValidator:
         if hotkey in self.metagraph.hotkeys:
             return self.metagraph.hotkeys.index(hotkey)
         return None
+    
+    def _reconnect_subtensor(self):
+        """
+        Reconnect to subtensor after connection errors.
+        
+        CRITICAL: Validators run for days. Websocket connections WILL drop.
+        This ensures the validator keeps running after network issues.
+        """
+        print(f"\n🔄 Reconnecting to subtensor...")
+        logger.info("Reconnecting to subtensor after connection error")
+        
+        try:
+            # Create new subtensor instance
+            self.subtensor = bt.subtensor(config=self.config)
+            self.metagraph = self.subtensor.metagraph(self.config.netuid)
+            
+            # Verify we're still registered
+            new_uid = self._get_uid()
+            if new_uid is None:
+                logger.error("Lost registration after reconnect!")
+                print(f"❌ Lost registration after reconnect!")
+            else:
+                self.uid = new_uid
+                print(f"✅ Reconnected to subtensor (UID: {self.uid})")
+                logger.info(f"Reconnected to subtensor (UID: {self.uid})")
+            
+            self.consecutive_errors = 0
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to reconnect to subtensor: {e}")
+            print(f"❌ Failed to reconnect: {e}")
+            return False
     
     def _get_primary_validator_uid(self, weights_data: Dict) -> Optional[int]:
         """
@@ -928,16 +963,49 @@ class AuditorValidator:
                     print(f"\n🔄 Refreshing metagraph...")
                     self.metagraph = self.subtensor.metagraph(self.config.netuid)
                 
+                # Reset error counter on successful iteration
+                self.consecutive_errors = 0
+                
                 await asyncio.sleep(12)  # ~1 block
                 
             except KeyboardInterrupt:
                 print(f"\n\n⛔ Shutting down...")
                 self.should_exit = True
+            except (TimeoutError, ConnectionError, OSError) as e:
+                # Network/connection errors - common and recoverable
+                self.consecutive_errors += 1
+                print(f"\n⚠️  Connection error ({self.consecutive_errors}/{self.max_consecutive_errors}): {type(e).__name__}")
+                logger.warning(f"Connection error: {e}")
+                
+                if self.consecutive_errors >= self.max_consecutive_errors:
+                    print(f"   Too many consecutive errors - reconnecting subtensor...")
+                    self._reconnect_subtensor()
+                
+                # Exponential backoff: 30s, 60s, 120s, max 300s
+                backoff = min(30 * (2 ** (self.consecutive_errors - 1)), 300)
+                print(f"   Retrying in {backoff}s...")
+                await asyncio.sleep(backoff)
             except Exception as e:
-                print(f"\n❌ Error in main loop: {e}")
+                # Other errors - log and continue
+                self.consecutive_errors += 1
+                error_type = type(e).__name__
+                print(f"\n❌ Error in main loop ({error_type}): {e}")
+                logger.error(f"Main loop error: {e}")
+                
+                # Check if it's a websocket-related error
+                error_str = str(e).lower()
+                if any(x in error_str for x in ['websocket', 'ssl', 'connection', 'timeout', 'handshake']):
+                    print(f"   Connection-related error detected")
+                    if self.consecutive_errors >= self.max_consecutive_errors:
+                        self._reconnect_subtensor()
+                
                 import traceback
                 traceback.print_exc()
-                await asyncio.sleep(30)
+                
+                # Exponential backoff
+                backoff = min(30 * (2 ** (self.consecutive_errors - 1)), 300)
+                print(f"   Retrying in {backoff}s...")
+                await asyncio.sleep(backoff)
 
 
 def main():

@@ -199,71 +199,173 @@ class AuditorValidator:
         Save bundle compare hash for retroactive equivocation check.
         
         Called after successful weight verification at block 345.
-        Overwrites previous epoch's data (only stores last epoch).
+        APPENDS to existing data (stores last 2 epochs for N-2 checking).
+        
+        File structure:
+        {
+            "20256": {"bundle_compare_hash": "...", "validator_hotkey": "...", "saved_at": "..."},
+            "20257": {"bundle_compare_hash": "...", "validator_hotkey": "...", "saved_at": "..."}
+        }
         """
         import json
         from datetime import datetime, timezone
-        data = {
-            "epoch_id": epoch_id,
+        
+        # Load existing data
+        existing_data = {}
+        try:
+            if os.path.exists(PENDING_EQUIVOCATION_FILE):
+                with open(PENDING_EQUIVOCATION_FILE, 'r') as f:
+                    existing_data = json.load(f)
+                    # Handle old format (single epoch) - migrate to new format
+                    if "epoch_id" in existing_data:
+                        old_epoch = str(existing_data["epoch_id"])
+                        existing_data = {
+                            old_epoch: {
+                                "bundle_compare_hash": existing_data.get("bundle_compare_hash"),
+                                "validator_hotkey": existing_data.get("validator_hotkey"),
+                                "saved_at": existing_data.get("saved_at"),
+                            }
+                        }
+        except Exception as e:
+            logger.warning(f"Could not load existing equivocation data: {e}")
+            existing_data = {}
+        
+        # Add new epoch data
+        existing_data[str(epoch_id)] = {
             "bundle_compare_hash": bundle_compare_hash,
             "validator_hotkey": validator_hotkey,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
+        
+        # Keep only last 3 epochs (current + 2 previous for safety)
+        epoch_keys = sorted(existing_data.keys(), key=int, reverse=True)
+        if len(epoch_keys) > 3:
+            for old_key in epoch_keys[3:]:
+                del existing_data[old_key]
+        
         try:
             with open(PENDING_EQUIVOCATION_FILE, 'w') as f:
-                json.dump(data, f, indent=2)
+                json.dump(existing_data, f, indent=2)
             print(f"   📝 Saved pending equivocation check for epoch {epoch_id}")
+            print(f"      Epochs in file: {sorted(existing_data.keys(), key=int)}")
         except Exception as e:
             logger.warning(f"Failed to save pending equivocation check: {e}")
     
-    def load_pending_equivocation_check(self) -> Optional[Dict]:
+    def load_pending_equivocation_check(self, target_epoch: int = None) -> Optional[Dict]:
         """
-        Load pending equivocation check data.
+        Load pending equivocation check data for a specific epoch.
         
+        Args:
+            target_epoch: Specific epoch to load (if None, returns all epochs)
+            
         Returns:
-            Dict with epoch_id, bundle_compare_hash, validator_hotkey
-            None if no pending check or file doesn't exist
+            Dict with bundle_compare_hash, validator_hotkey for the target epoch
+            None if not found or file doesn't exist
         """
         import json
         try:
             if not os.path.exists(PENDING_EQUIVOCATION_FILE):
                 return None
             with open(PENDING_EQUIVOCATION_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+            
+            # Handle old format (single epoch with epoch_id key)
+            if "epoch_id" in data:
+                old_epoch = data["epoch_id"]
+                if target_epoch is None or target_epoch == old_epoch:
+                    return {
+                        "epoch_id": old_epoch,
+                        "bundle_compare_hash": data.get("bundle_compare_hash"),
+                        "validator_hotkey": data.get("validator_hotkey"),
+                    }
+                return None
+            
+            # New format: dict keyed by epoch_id string
+            if target_epoch is not None:
+                epoch_data = data.get(str(target_epoch))
+                if epoch_data:
+                    return {
+                        "epoch_id": target_epoch,
+                        "bundle_compare_hash": epoch_data.get("bundle_compare_hash"),
+                        "validator_hotkey": epoch_data.get("validator_hotkey"),
+                    }
+                return None
+            
+            # Return all data if no target specified
+            return data
+            
         except Exception as e:
             logger.warning(f"Failed to load pending equivocation check: {e}")
             return None
     
-    def clear_pending_equivocation_check(self):
-        """Clear the pending equivocation check file after verification."""
+    def clear_pending_equivocation_check(self, epoch_id: int = None):
+        """
+        Clear a specific epoch from the pending equivocation check file.
+        
+        Args:
+            epoch_id: Specific epoch to remove. If None, clears entire file.
+        """
+        import json
         try:
-            if os.path.exists(PENDING_EQUIVOCATION_FILE):
+            if not os.path.exists(PENDING_EQUIVOCATION_FILE):
+                return
+                
+            if epoch_id is None:
+                # Clear entire file
                 os.remove(PENDING_EQUIVOCATION_FILE)
+                return
+            
+            # Load existing data
+            with open(PENDING_EQUIVOCATION_FILE, 'r') as f:
+                data = json.load(f)
+            
+            # Handle old format
+            if "epoch_id" in data:
+                if data["epoch_id"] == epoch_id:
+                    os.remove(PENDING_EQUIVOCATION_FILE)
+                return
+            
+            # Remove specific epoch from new format
+            if str(epoch_id) in data:
+                del data[str(epoch_id)]
+                print(f"   🗑️  Cleared epoch {epoch_id} from pending checks")
+                
+                if data:
+                    # Write remaining epochs back
+                    with open(PENDING_EQUIVOCATION_FILE, 'w') as f:
+                        json.dump(data, f, indent=2)
+                else:
+                    # No epochs left, delete file
+                    os.remove(PENDING_EQUIVOCATION_FILE)
+                    
         except Exception as e:
             logger.warning(f"Failed to clear pending equivocation check: {e}")
     
-    async def perform_soft_equivocation_check(self) -> bool:
+    async def perform_soft_equivocation_check(self, target_epoch: int) -> bool:
         """
-        Retroactively verify previous epoch's weights against chain.
+        Retroactively verify a specific epoch's weights against chain.
         
-        Called at block 30-60 of each new epoch.
+        Called at block 30-80 of each new epoch to check N-2 epoch.
         Compares stored bundle hash with what's actually on chain.
+        
+        Args:
+            target_epoch: The epoch to check (typically current_epoch - 2)
         
         Returns:
             True if check passed or no pending check
             False if equivocation detected
         """
-        pending = self.load_pending_equivocation_check()
+        pending = self.load_pending_equivocation_check(target_epoch=target_epoch)
         if not pending:
-            return True  # No pending check
+            return True  # No pending check for this epoch
         
-        epoch_id = pending.get("epoch_id")
+        epoch_id = target_epoch
         bundle_compare_hash = pending.get("bundle_compare_hash")
         validator_hotkey = pending.get("validator_hotkey")
         
-        if not all([epoch_id, bundle_compare_hash, validator_hotkey]):
-            logger.warning("Invalid pending equivocation data")
-            self.clear_pending_equivocation_check()
+        if not all([bundle_compare_hash, validator_hotkey]):
+            logger.warning(f"Invalid pending equivocation data for epoch {epoch_id}")
+            self.clear_pending_equivocation_check(epoch_id)
             return True
         
         print(f"\n{'='*60}")
@@ -275,7 +377,7 @@ class AuditorValidator:
             # Find validator's UID
             if validator_hotkey not in self.metagraph.hotkeys:
                 print(f"   ⚠️  Validator hotkey not in metagraph, skipping check")
-                self.clear_pending_equivocation_check()
+                self.clear_pending_equivocation_check(epoch_id)
                 return True
             
             validator_uid = self.metagraph.hotkeys.index(validator_hotkey)
@@ -301,7 +403,7 @@ class AuditorValidator:
             
             if not chain_weights:
                 print(f"   ⚠️  No weights on chain for validator UID {validator_uid}")
-                self.clear_pending_equivocation_check()
+                self.clear_pending_equivocation_check(epoch_id)
                 return True
             
             # Normalize chain weights to pairs
@@ -319,7 +421,7 @@ class AuditorValidator:
             
             if not bundle:
                 print(f"   ⚠️  Could not fetch bundle for epoch {epoch_id}, skipping check")
-                self.clear_pending_equivocation_check()
+                self.clear_pending_equivocation_check(epoch_id)
                 return True
             
             bundle_uids = bundle.get("uids", [])
@@ -355,7 +457,7 @@ class AuditorValidator:
                 if extra_on_chain:
                     print(f"   Extra on chain: {sorted(extra_on_chain)[:10]}...")
                 logger.warning(f"UID_MISMATCH: Epoch {epoch_id} - Bundle and chain have different UIDs (investigating)")
-                self.clear_pending_equivocation_check()
+                self.clear_pending_equivocation_check(epoch_id)
                 return False
             
             # Compare weights with ±1 tolerance (u16 round-trip tolerance)
@@ -375,19 +477,19 @@ class AuditorValidator:
                 if len(mismatches) > 10:
                     print(f"      ... and {len(mismatches) - 10} more")
                 logger.warning(f"WEIGHT_MISMATCH: Epoch {epoch_id} - {len(mismatches)} weights differ beyond ±1 tolerance (investigating)")
-                self.clear_pending_equivocation_check()
+                self.clear_pending_equivocation_check(epoch_id)
                 return False
             
             # All weights within tolerance
             print(f"   ✅ MATCH - All {len(bundle_pairs)} weights within ±1 tolerance")
             print(f"   No equivocation detected for epoch {epoch_id}")
-            self.clear_pending_equivocation_check()
+            self.clear_pending_equivocation_check(epoch_id)
             return True
                 
         except Exception as e:
             print(f"   ⚠️  Soft equivocation check failed: {e}")
             logger.warning(f"Soft equivocation check error: {e}")
-            self.clear_pending_equivocation_check()
+            self.clear_pending_equivocation_check(epoch_id)
             return True  # Don't block on errors
     
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1065,13 +1167,15 @@ class AuditorValidator:
                         else:
                             logger.error(f"Weight submission failed for epoch {target_epoch}")
                 
-                # Soft anti-equivocation check at block 30-80 of each epoch
-                if 30 <= block_within_epoch <= 80:
-                    # Check if we have a pending equivocation check from previous epoch
-                    pending = self.load_pending_equivocation_check()
-                    if pending and pending.get("epoch_id") == current_epoch - 1:
-                        if not await self.perform_soft_equivocation_check():
-                            logger.error(f"Soft equivocation check FAILED for epoch {current_epoch - 1}")
+                # Soft anti-equivocation check at block 50-150 of each epoch
+                # Check 2 epochs back to ensure weights have definitely propagated
+                if 50 <= block_within_epoch <= 150:
+                    # Check if we have a pending equivocation check from 2 epochs ago
+                    target_epoch = current_epoch - 2
+                    pending = self.load_pending_equivocation_check(target_epoch=target_epoch)
+                    if pending:
+                        if not await self.perform_soft_equivocation_check(target_epoch):
+                            logger.error(f"Soft equivocation check FAILED for epoch {target_epoch}")
                             print(f"   ⚠️  MISMATCH DETECTED - Bundle vs chain weights differ (investigating...)")
                             # Note: We don't burn here since we already submitted weights
                             # This is a SOFT check - logs the issue for investigation

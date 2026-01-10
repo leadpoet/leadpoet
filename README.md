@@ -138,30 +138,30 @@ Miners must submit prospects with the following structure:
 
 ```json
 {
-  "business": "SpaceX",                    # REQUIRED
-  "full_name": "Elon Musk",                # REQUIRED
-  "first": "Elon",                         # REQUIRED
-  "last": "Musk",                          # REQUIRED
-  "email": "elon@spacex.com",              # REQUIRED
+  "business": "Microsoft",                 # REQUIRED
+  "full_name": "Satya Nadella",            # REQUIRED
+  "first": "Satya",                        # REQUIRED
+  "last": "Nadella",                       # REQUIRED
+  "email": "satya@microsoft.com",          # REQUIRED
   "role": "CEO",                           # REQUIRED
-  "website": "https://spacex.com",         # REQUIRED
-  "industry": "Science and Engineering",   # REQUIRED - must be from industry_taxonomy.py
-  "sub_industry": "Aerospace",             # REQUIRED - must be from industry_taxonomy.py
+  "website": "https://microsoft.com",      # REQUIRED
+  "industry": "Technology",                # REQUIRED - must be from industry_taxonomy.py
+  "sub_industry": "Software",              # REQUIRED - must be from industry_taxonomy.py
   "country": "United States",              # REQUIRED - see Country Format below
-  "state": "Texas",                        # REQUIRED for US leads only
-  "city": "Austin",                        # REQUIRED for all leads
-  "linkedin": "https://linkedin.com/in/elonmusk", # REQUIRED
-  "company_linkedin": "https://linkedin.com/company/spacex", # REQUIRED
-  "source_url": "https://spacex.com/careers", # REQUIRED (URL where lead was found, OR "proprietary_database")
-  "description": "Aerospace manufacturer focused on reducing space transportation costs", # REQUIRED
-  "employee_count": "1,001-5,000",         # REQUIRED - valid ranges: "0-1", "2-10", "11-50", "51-200", "201-500", "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
+  "state": "Washington",                   # REQUIRED for US leads only
+  "city": "Redmond",                       # REQUIRED for all leads
+  "linkedin": "https://linkedin.com/in/satyanadella", # REQUIRED
+  "company_linkedin": "https://linkedin.com/company/microsoft", # REQUIRED
+  "source_url": "https://microsoft.com/about", # REQUIRED (URL where lead was found, OR "proprietary_database")
+  "description": "Technology company developing software, cloud services, and AI solutions", # REQUIRED
+  "employee_count": "10,001+",             # REQUIRED - valid ranges: "0-1", "2-10", "11-50", "51-200", "201-500", "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
   "source_type": "company_site",
-  "phone_numbers": ["+1-310-363-6000"],
-  "founded_year": 2002,
-  "ownership_type": "Private",
+  "phone_numbers": ["+1-425-882-8080"],
+  "founded_year": 1975,
+  "ownership_type": "Public",
   "company_type": "Corporation",
-  "number_of_locations": 5,
-  "socials": {"twitter": "spacex"}
+  "number_of_locations": 100,
+  "socials": {"twitter": "Microsoft"}
 }
 ```
 
@@ -344,6 +344,7 @@ python neurons/auditor_validator.py \
 - COSE signature verified (proves authentic attestation)  
 - Ed25519 signature verified (proves weights from enclave)
 - Epoch binding verified (replay protection)
+- Soft anti-equivocation check (retroactively verifies bundle weights match on-chain weights)
 
 This is for validators who want to participate in consensus without running the full validation logic and paying the costs associated with it.
 

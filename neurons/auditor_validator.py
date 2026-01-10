@@ -40,9 +40,10 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_AUDITOR_WRAPPER_ACTIVE") 
     repo_root = os.path.dirname(script_dir)
     wrapper_path = os.path.join(repo_root, ".auditor_auto_update_wrapper.sh") 
     
-    # Inline wrapper script - simple and clean
+    # Inline wrapper script - pulls on start only, not every 5 minutes
     wrapper_content = '''#!/bin/bash
 # Auto-generated wrapper for Leadpoet auditor validator auto-updates
+# Pulls latest code ONCE on start, then runs until clean exit
 set -e
 
 REPO_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -50,38 +51,39 @@ cd "$REPO_ROOT"
 
 echo "════════════════════════════════════════════════════════════════"
 echo "🔍 Leadpoet Auto-Updating Auditor Validator"
-echo "   Repository updates every 5 minutes"
+echo "   Repository updates on each manual restart"
 echo "   GitHub: github.com/leadpoet/leadpoet"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
+
+# Pull latest code ONCE at startup
+echo "────────────────────────────────────────────────────────────────"
+echo "🔍 Checking for updates from GitHub..."
+
+# Stash any local changes and pull latest
+if git stash 2>/dev/null; then
+    echo "   💾 Stashed local changes"
+fi
+
+if git pull origin main 2>/dev/null; then
+    CURRENT_COMMIT=$(git rev-parse --short HEAD)
+    echo "✅ Repository updated"
+    echo "   Current commit: $CURRENT_COMMIT"
+    
+    # Auto-install new/updated Python packages if requirements.txt changed
+    if git diff HEAD@{1} HEAD --name-only 2>/dev/null | grep -q "requirements.txt"; then
+        echo "📦 requirements.txt changed - updating packages..."
+        pip3 install -r requirements.txt --quiet || echo "   ⚠️  Package install failed (continuing anyway)"
+    fi
+else
+    echo "⏭️  Could not update (offline or not a git repo)"
+    echo "   Continuing with current version..."
+fi
 
 RESTART_COUNT=0
 MAX_RESTARTS=5
 
 while true; do
-    echo "────────────────────────────────────────────────────────────────"
-    echo "🔍 Checking for updates from GitHub..."
-    
-    # Stash any local changes and pull latest
-    if git stash 2>/dev/null; then
-        echo "   💾 Stashed local changes"
-    fi
-    
-    if git pull origin main 2>/dev/null; then
-        CURRENT_COMMIT=$(git rev-parse --short HEAD)
-        echo "✅ Repository updated"
-        echo "   Current commit: $CURRENT_COMMIT"
-        
-        # Auto-install new/updated Python packages if requirements.txt changed
-        if git diff HEAD@{1} HEAD --name-only | grep -q "requirements.txt"; then
-            echo "📦 requirements.txt changed - updating packages..."
-            pip3 install -r requirements.txt --quiet || echo "   ⚠️  Package install failed (continuing anyway)"
-        fi
-    else
-        echo "⏭️  Could not update (offline or not a git repo)"
-        echo "   Continuing with current version..."
-    fi
-    
     echo "────────────────────────────────────────────────────────────────"
     echo "🟢 Starting auditor validator (attempt $(($RESTART_COUNT + 1)))..."
     echo ""
@@ -97,7 +99,7 @@ while true; do
     
     if [ $EXIT_CODE -eq 0 ]; then
         echo "✅ Auditor exited cleanly (exit code: 0)"
-        echo "   Shutting down auto-updater..."
+        echo "   Shutting down. Run the command again to pull latest updates."
         break
     elif [ $EXIT_CODE -eq 137 ] || [ $EXIT_CODE -eq 9 ]; then
         echo "⚠️  Auditor was killed (exit code: $EXIT_CODE) - likely Out of Memory"
@@ -129,17 +131,10 @@ while true; do
         echo "   Restarting in 10 seconds... (attempt $RESTART_COUNT/$MAX_RESTARTS)"
         sleep 10
     fi
-    
-    echo ""
-    echo "⏰ Next update check in 5 minutes..."
-    sleep 300
-    
-    # Reset restart counter after successful check
-    RESTART_COUNT=0
 done
 
 echo "════════════════════════════════════════════════════════════════"
-echo "🛑 Auditor auto-updater stopped"
+echo "🛑 Auditor stopped. Run command again to pull latest and restart."
 '''
     
     # Write wrapper script

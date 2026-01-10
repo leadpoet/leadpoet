@@ -67,6 +67,9 @@ DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000"
 # PCR0 allowlist is fetched from GitHub automatically by leadpoet_canonical.nitro
 # No need for hardcoded code hashes - dynamic verification via pcr0_allowlist.json
 
+# File to store pending equivocation check (overwritten each epoch)
+PENDING_EQUIVOCATION_FILE = os.path.join(_SCRIPT_DIR, ".pending_equivocation_check.json")
+
 
 class AuditorValidator:
     """
@@ -151,6 +154,135 @@ class AuditorValidator:
         
         print(f"⚠️  Validator hotkey {validator_hotkey[:16]}... not found in metagraph")
         return None
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Soft Anti-Equivocation (Retroactive Check)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def save_pending_equivocation_check(self, epoch_id: int, bundle_compare_hash: str, validator_hotkey: str):
+        """
+        Save bundle compare hash for retroactive equivocation check.
+        
+        Called after successful weight verification at block 345.
+        Overwrites previous epoch's data (only stores last epoch).
+        """
+        import json
+        data = {
+            "epoch_id": epoch_id,
+            "bundle_compare_hash": bundle_compare_hash,
+            "validator_hotkey": validator_hotkey,
+            "saved_at": canonical_timestamp() if 'canonical_timestamp' in dir() else None,
+        }
+        try:
+            with open(PENDING_EQUIVOCATION_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+            print(f"   📝 Saved pending equivocation check for epoch {epoch_id}")
+        except Exception as e:
+            logger.warning(f"Failed to save pending equivocation check: {e}")
+    
+    def load_pending_equivocation_check(self) -> Optional[Dict]:
+        """
+        Load pending equivocation check data.
+        
+        Returns:
+            Dict with epoch_id, bundle_compare_hash, validator_hotkey
+            None if no pending check or file doesn't exist
+        """
+        import json
+        try:
+            if not os.path.exists(PENDING_EQUIVOCATION_FILE):
+                return None
+            with open(PENDING_EQUIVOCATION_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load pending equivocation check: {e}")
+            return None
+    
+    def clear_pending_equivocation_check(self):
+        """Clear the pending equivocation check file after verification."""
+        try:
+            if os.path.exists(PENDING_EQUIVOCATION_FILE):
+                os.remove(PENDING_EQUIVOCATION_FILE)
+        except Exception as e:
+            logger.warning(f"Failed to clear pending equivocation check: {e}")
+    
+    def perform_soft_equivocation_check(self) -> bool:
+        """
+        Retroactively verify previous epoch's weights against chain.
+        
+        Called at block 30-60 of each new epoch.
+        Compares stored bundle hash with what's actually on chain.
+        
+        Returns:
+            True if check passed or no pending check
+            False if equivocation detected
+        """
+        pending = self.load_pending_equivocation_check()
+        if not pending:
+            return True  # No pending check
+        
+        epoch_id = pending.get("epoch_id")
+        bundle_compare_hash = pending.get("bundle_compare_hash")
+        validator_hotkey = pending.get("validator_hotkey")
+        
+        if not all([epoch_id, bundle_compare_hash, validator_hotkey]):
+            logger.warning("Invalid pending equivocation data")
+            self.clear_pending_equivocation_check()
+            return True
+        
+        print(f"\n{'='*60}")
+        print(f"🔍 SOFT EQUIVOCATION CHECK (Epoch {epoch_id})")
+        print(f"{'='*60}")
+        print(f"   Checking previous epoch's weights against chain...")
+        
+        try:
+            # Find validator's UID
+            if validator_hotkey not in self.metagraph.hotkeys:
+                print(f"   ⚠️  Validator hotkey not in metagraph, skipping check")
+                self.clear_pending_equivocation_check()
+                return True
+            
+            validator_uid = self.metagraph.hotkeys.index(validator_hotkey)
+            
+            # Get chain weights for the validator
+            all_chain_weights = self.subtensor.weights(netuid=self.config.netuid)
+            
+            chain_weights = None
+            for uid, weights_list in all_chain_weights:
+                if uid == validator_uid:
+                    chain_weights = weights_list
+                    break
+            
+            if not chain_weights:
+                print(f"   ⚠️  No weights on chain for validator UID {validator_uid}")
+                self.clear_pending_equivocation_check()
+                return True
+            
+            # Normalize and compute hash
+            chain_pairs = normalize_chain_weights(chain_weights)
+            chain_compare_hash = compare_weights_hash(self.config.netuid, epoch_id, chain_pairs)
+            
+            print(f"   Bundle hash:  {bundle_compare_hash[:32]}...")
+            print(f"   Chain hash:   {chain_compare_hash[:32]}...")
+            
+            if bundle_compare_hash == chain_compare_hash:
+                print(f"   ✅ MATCH - No equivocation detected for epoch {epoch_id}")
+                self.clear_pending_equivocation_check()
+                return True
+            else:
+                print(f"\n   ❌ EQUIVOCATION DETECTED!")
+                print(f"   Primary validator submitted different weights to chain!")
+                print(f"   Bundle hash: {bundle_compare_hash}")
+                print(f"   Chain hash:  {chain_compare_hash}")
+                logger.error(f"EQUIVOCATION: Epoch {epoch_id} - bundle hash {bundle_compare_hash[:16]} != chain hash {chain_compare_hash[:16]}")
+                self.clear_pending_equivocation_check()
+                return False
+                
+        except Exception as e:
+            print(f"   ⚠️  Soft equivocation check failed: {e}")
+            logger.warning(f"Soft equivocation check error: {e}")
+            self.clear_pending_equivocation_check()
+            return True  # Don't block on errors
     
     # ═══════════════════════════════════════════════════════════════════════════
     # Gateway Communication
@@ -528,19 +660,25 @@ class AuditorValidator:
         
         bundle_compare = compare_weights_hash(netuid, epoch_id, weights_pairs)
         
-        # PREFER snapshot hash (captured at block ~345)
+        # SKIP ANTI-EQUIVOCATION CHECK
+        #
+        # WHY: The chain snapshot is captured BEFORE the validator submits to chain,
+        # so it contains the PREVIOUS epoch's weights, not the current submission.
+        # This causes false positives (mismatch between epoch N bundle vs epoch N-1 snapshot).
+        #
+        # TIMING ISSUE:
+        # 1. Validator submits to gateway → snapshot captures chain (epoch N-1 weights)
+        # 2. Validator submits to chain (epoch N weights)
+        # 3. Auditor compares bundle (N) vs snapshot (N-1) → FALSE MISMATCH
+        #
+        # The other 5 verifications are trustless and sufficient:
+        # ✅ AWS cert chain, COSE signature, epoch binding, Ed25519 signature, hash recompute
         snapshot_hash = bundle.get("chain_snapshot_compare_hash")
         if snapshot_hash:
-            print(f"   Using chain snapshot (captured at block {bundle.get('chain_snapshot_block', 'N/A')})")
-            
-            if snapshot_hash == bundle_compare:
-                print(f"   ✅ MATCH: bundle weights match chain snapshot")
-                return True
-            
-            print(f"\n   ❌ EQUIVOCATION DETECTED (snapshot mismatch)!")
-            print(f"   bundle_compare:   {bundle_compare}")
-            print(f"   snapshot_compare: {snapshot_hash}")
-            return False
+            print(f"   ⚠️  Skipping anti-equivocation (snapshot timing issue)")
+            print(f"   ℹ️  Snapshot was captured BEFORE chain submission")
+            print(f"   ℹ️  Other 5 trustless verifications already passed")
+            return True  # Skip - rely on other 5 trustless verifications
         
         # NO SNAPSHOT AVAILABLE - Skip anti-equivocation check
         # 
@@ -759,10 +897,31 @@ class AuditorValidator:
                         print(f"\n   ✅ All verifications passed")
                         print(f"   🔐 Trust level: {self.trust_level.upper()}")
                         
+                        # Save pending equivocation check for next epoch verification
+                        weights_pairs = list(zip(weights_data.get("uids", []), weights_data.get("weights_u16", [])))
+                        if weights_pairs:
+                            bundle_compare = compare_weights_hash(self.config.netuid, target_epoch, weights_pairs)
+                            self.save_pending_equivocation_check(
+                                target_epoch, 
+                                bundle_compare, 
+                                weights_data.get("validator_hotkey", "")
+                            )
+                        
                         if self.submit_weights_to_chain(target_epoch, weights_data):
                             logger.info(f"Weights submitted for epoch {target_epoch}")
                         else:
                             logger.error(f"Weight submission failed for epoch {target_epoch}")
+                
+                # Soft anti-equivocation check at block 30-60 of each epoch
+                if 30 <= block_within_epoch <= 60:
+                    # Check if we have a pending equivocation check from previous epoch
+                    pending = self.load_pending_equivocation_check()
+                    if pending and pending.get("epoch_id") == current_epoch - 1:
+                        if not self.perform_soft_equivocation_check():
+                            logger.error(f"Soft equivocation check FAILED for epoch {current_epoch - 1}")
+                            print(f"   🔥 EQUIVOCATION DETECTED - Primary validator may have cheated!")
+                            # Note: We don't burn here since we already submitted weights
+                            # This is a SOFT check - logs the issue for investigation
                 
                 # Refresh metagraph periodically (at epoch start)
                 if block_within_epoch == 0:

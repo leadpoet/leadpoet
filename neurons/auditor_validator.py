@@ -242,7 +242,7 @@ class AuditorValidator:
         except Exception as e:
             logger.warning(f"Failed to clear pending equivocation check: {e}")
     
-    def perform_soft_equivocation_check(self) -> bool:
+    async def perform_soft_equivocation_check(self) -> bool:
         """
         Retroactively verify previous epoch's weights against chain.
         
@@ -279,14 +279,24 @@ class AuditorValidator:
                 return True
             
             validator_uid = self.metagraph.hotkeys.index(validator_hotkey)
+            print(f"   Primary validator: {validator_hotkey[:16]}... → UID {validator_uid}")
             
             # Get chain weights for the validator
+            print(f"   Fetching chain weights for UID {validator_uid}...")
             all_chain_weights = self.subtensor.weights(netuid=self.config.netuid)
+            
+            # Debug: show how many validators have weights on chain
+            validators_with_weights = [uid for uid, _ in all_chain_weights]
+            print(f"   Validators with weights on chain: {validators_with_weights}")
             
             chain_weights = None
             for uid, weights_list in all_chain_weights:
                 if uid == validator_uid:
                     chain_weights = weights_list
+                    # Debug: show raw chain weights before normalization
+                    print(f"   Raw chain weights (first 5):")
+                    for target_uid, w in weights_list[:5]:
+                        print(f"      UID {target_uid}: {w} (type: {type(w).__name__})")
                     break
             
             if not chain_weights:
@@ -305,10 +315,7 @@ class AuditorValidator:
             # (hash comparison is too strict due to ±1 u16 round-trip tolerance)
             print(f"   Fetching bundle for epoch {epoch_id} to compare weights...")
             
-            import asyncio
-            bundle = asyncio.get_event_loop().run_until_complete(
-                self.fetch_verified_weights(epoch_id)
-            )
+            bundle = await self.fetch_verified_weights(epoch_id)
             
             if not bundle:
                 print(f"   ⚠️  Could not fetch bundle for epoch {epoch_id}, skipping check")
@@ -319,11 +326,21 @@ class AuditorValidator:
             bundle_weights = bundle.get("weights_u16", [])
             bundle_pairs = list(zip(bundle_uids, bundle_weights))
             
+            # Debug: show bundle weights for comparison
+            print(f"   Bundle weights (first 5):")
+            for uid, w in bundle_pairs[:5]:
+                print(f"      UID {uid}: {w}")
+            
             # Convert chain_pairs to dict for comparison
             chain_dict = {uid: w for uid, w in chain_pairs}
             bundle_dict = {uid: w for uid, w in bundle_pairs}
             
+            current_block = self.subtensor.get_current_block()
+            current_epoch = current_block // EPOCH_LENGTH
             print(f"   Bundle UIDs: {len(bundle_pairs)}, Chain UIDs: {len(chain_pairs)}")
+            print(f"   Bundle epoch: {epoch_id}, Current epoch: {current_epoch}")
+            if current_epoch > epoch_id:
+                print(f"   ⚠️  NOTE: Chain weights are CURRENT - if primary already submitted epoch {current_epoch}, comparison is invalid")
             
             # Check if UIDs match
             bundle_uid_set = set(bundle_uids)
@@ -1012,12 +1029,12 @@ class AuditorValidator:
                         else:
                             logger.error(f"Weight submission failed for epoch {target_epoch}")
                 
-                # Soft anti-equivocation check at block 30-60 of each epoch
-                if 30 <= block_within_epoch <= 60:
+                # Soft anti-equivocation check at block 30-80 of each epoch
+                if 30 <= block_within_epoch <= 80:
                     # Check if we have a pending equivocation check from previous epoch
                     pending = self.load_pending_equivocation_check()
                     if pending and pending.get("epoch_id") == current_epoch - 1:
-                        if not self.perform_soft_equivocation_check():
+                        if not await self.perform_soft_equivocation_check():
                             logger.error(f"Soft equivocation check FAILED for epoch {current_epoch - 1}")
                             print(f"   🔥 EQUIVOCATION DETECTED - Primary validator may have cheated!")
                             # Note: We don't burn here since we already submitted weights

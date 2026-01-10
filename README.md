@@ -321,7 +321,7 @@ Validators receive batches of ~50 leads per epoch. Each validator independently 
 
 Validators must label leads with valid emails as "Valid" or "valid".
 
-### Auditor Validator (Optional)
+### Auditor Validator
 
 For validators who want to run a lightweight alternative that copies TEE-verified weights from the primary validator:
 
@@ -340,35 +340,12 @@ python neurons/auditor_validator.py \
 - Submits verified weights to chain
 
 **Trust Model:**
-- ✅ AWS certificate chain verified (proves REAL Nitro enclave)
-- ✅ COSE signature verified (proves authentic attestation)  
-- ✅ Ed25519 signature verified (proves weights from enclave)
-- ✅ Epoch binding verified (replay protection)
-- ⚠️ PCR0 NOT verified without `nitro-cli` (requires AWS EC2 with Nitro)
+- AWS certificate chain verified (proves REAL Nitro enclave)
+- COSE signature verified (proves authentic attestation)  
+- Ed25519 signature verified (proves weights from enclave)
+- Epoch binding verified (replay protection)
 
-This is ideal for validators who want to participate in consensus without running the full validation logic.
-
-### Community Audit Tool
-
-The `leadpoet-audit` CLI allows anyone to verify validation outcomes by querying public transparency logs:
-
-```bash
-# Install
-pip install -e .
-
-# Generate audit report for epoch
-leadpoet-audit report 19000
-
-# Save report to JSON
-leadpoet-audit report 19000 --output report.json
-
-# Query transparency logs by date, hours, or lead UUID (outputs ALL database fields)
-leadpoet-audit logs --date 2025-11-14 --output report.json
-leadpoet-audit logs --hours 4 --output report.json
-leadpoet-audit logs --lead-id 8183c849-c017-4f4c-b9fe-7f407873a799 --output report.json
-```
-
-The audit tool queries **public data only** (transparency log) and shows consensus results, rejection reasons, and miner performance statistics.
+This is for validators who want to participate in consensus without running the full validation logic and paying the costs associated with it.
 
 ## 🔐 Gateway Verification & Transparency
 

@@ -294,25 +294,78 @@ class AuditorValidator:
                 self.clear_pending_equivocation_check()
                 return True
             
-            # Normalize and compute hash
+            # Normalize chain weights to pairs
             chain_pairs = normalize_chain_weights(chain_weights)
-            chain_compare_hash = compare_weights_hash(self.config.netuid, epoch_id, chain_pairs)
             
-            print(f"   Bundle hash:  {bundle_compare_hash[:32]}...")
-            print(f"   Chain hash:   {chain_compare_hash[:32]}...")
+            # We need to reconstruct bundle weights pairs from the hash
+            # Since we only stored the hash, we need to fetch the bundle again
+            # OR use tolerance-based comparison on the actual weights
             
-            if bundle_compare_hash == chain_compare_hash:
-                print(f"   ✅ MATCH - No equivocation detected for epoch {epoch_id}")
+            # For soft check, we'll fetch the bundle and compare with tolerance
+            # (hash comparison is too strict due to ±1 u16 round-trip tolerance)
+            print(f"   Fetching bundle for epoch {epoch_id} to compare weights...")
+            
+            import asyncio
+            bundle = asyncio.get_event_loop().run_until_complete(
+                self.fetch_verified_weights(epoch_id)
+            )
+            
+            if not bundle:
+                print(f"   ⚠️  Could not fetch bundle for epoch {epoch_id}, skipping check")
                 self.clear_pending_equivocation_check()
                 return True
-            else:
-                print(f"\n   ❌ EQUIVOCATION DETECTED!")
-                print(f"   Primary validator submitted different weights to chain!")
-                print(f"   Bundle hash: {bundle_compare_hash}")
-                print(f"   Chain hash:  {chain_compare_hash}")
-                logger.error(f"EQUIVOCATION: Epoch {epoch_id} - bundle hash {bundle_compare_hash[:16]} != chain hash {chain_compare_hash[:16]}")
+            
+            bundle_uids = bundle.get("uids", [])
+            bundle_weights = bundle.get("weights_u16", [])
+            bundle_pairs = list(zip(bundle_uids, bundle_weights))
+            
+            # Convert chain_pairs to dict for comparison
+            chain_dict = {uid: w for uid, w in chain_pairs}
+            bundle_dict = {uid: w for uid, w in bundle_pairs}
+            
+            print(f"   Bundle UIDs: {len(bundle_pairs)}, Chain UIDs: {len(chain_pairs)}")
+            
+            # Check if UIDs match
+            bundle_uid_set = set(bundle_uids)
+            chain_uid_set = set(uid for uid, _ in chain_pairs)
+            
+            if bundle_uid_set != chain_uid_set:
+                missing_on_chain = bundle_uid_set - chain_uid_set
+                extra_on_chain = chain_uid_set - bundle_uid_set
+                print(f"\n   ❌ UID MISMATCH!")
+                if missing_on_chain:
+                    print(f"   Missing on chain: {sorted(missing_on_chain)[:10]}...")
+                if extra_on_chain:
+                    print(f"   Extra on chain: {sorted(extra_on_chain)[:10]}...")
+                logger.error(f"EQUIVOCATION: Epoch {epoch_id} - UID mismatch")
                 self.clear_pending_equivocation_check()
                 return False
+            
+            # Compare weights with ±1 tolerance (u16 round-trip tolerance)
+            mismatches = []
+            for uid in bundle_uid_set:
+                bundle_w = bundle_dict.get(uid, 0)
+                chain_w = chain_dict.get(uid, 0)
+                diff = abs(bundle_w - chain_w)
+                if diff > 1:  # Allow ±1 tolerance
+                    mismatches.append((uid, bundle_w, chain_w, diff))
+            
+            if mismatches:
+                print(f"\n   ❌ WEIGHT MISMATCH (beyond ±1 tolerance)!")
+                print(f"   {len(mismatches)} UIDs with significant differences:")
+                for uid, bw, cw, diff in mismatches[:10]:
+                    print(f"      UID {uid}: bundle={bw}, chain={cw}, diff={diff}")
+                if len(mismatches) > 10:
+                    print(f"      ... and {len(mismatches) - 10} more")
+                logger.error(f"EQUIVOCATION: Epoch {epoch_id} - {len(mismatches)} weight mismatches beyond tolerance")
+                self.clear_pending_equivocation_check()
+                return False
+            
+            # All weights within tolerance
+            print(f"   ✅ MATCH - All {len(bundle_pairs)} weights within ±1 tolerance")
+            print(f"   No equivocation detected for epoch {epoch_id}")
+            self.clear_pending_equivocation_check()
+            return True
                 
         except Exception as e:
             print(f"   ⚠️  Soft equivocation check failed: {e}")

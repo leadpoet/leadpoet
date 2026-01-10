@@ -373,12 +373,15 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
             detail=f"Invalid validator attestation: {error_detail}"
         )
     
-    # Extract verified PCR0 (stored in bundle for auditor verification)
+    # Extract verified PCR0 and commit hash (stored in bundle for auditor verification)
     verified_pcr0 = attestation_data.get("pcr0", "N/A")
     pcr0_mode = attestation_data.get("pcr0_verification_mode", "allowlist")
+    pcr0_commit_hash = attestation_data.get("pcr0_commit")  # Git commit hash for auditability
     print(f"   ✅ Nitro attestation OK")
     print(f"      PCR0: {verified_pcr0[:32]}...")
     print(f"      Mode: {pcr0_mode} (auditors verify against GitHub)")
+    if pcr0_commit_hash:
+        print(f"      Commit: {pcr0_commit_hash[:8]}... (auditors can verify this commit exists)")
     
     # --- Step 5: Hotkey binding verification ---
     print(f"   Step 5: Verifying hotkey binding...")
@@ -466,7 +469,10 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
     log_entry = await log_event("WEIGHT_SUBMISSION", submission_payload)
     weight_submission_event_hash = log_entry.get("event_hash")
     
-    # Store bundle (including PCR0 for auditor verification)
+    # Store bundle (including PCR0 + commit hash for auditor verification)
+    # The commit_hash is CRITICAL for auditability - auditors can verify:
+    # 1. This commit exists on GitHub (not amended/deleted)
+    # 2. Building from this commit produces the same PCR0
     bundle_data = {
         "netuid": submission.netuid,
         "epoch_id": submission.epoch_id,
@@ -480,6 +486,7 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
         "validator_attestation_b64": submission.validator_attestation_b64,
         "validator_code_hash": submission.validator_code_hash,
         "validator_pcr0": verified_pcr0,  # Extracted from AWS-signed attestation for auditor verification
+        "pcr0_commit_hash": pcr0_commit_hash,  # Git commit hash - auditors verify this exists
         "chain_snapshot_block": chain_snapshot_block,
         "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
         "weight_submission_event_hash": weight_submission_event_hash,
@@ -565,6 +572,7 @@ async def get_latest_weights(netuid: int, epoch_id: int) -> dict:
         "validator_attestation_b64": bundle["validator_attestation_b64"],
         "validator_code_hash": bundle["validator_code_hash"],
         "validator_pcr0": bundle.get("validator_pcr0"),  # For auditor PCR0 verification
+        "pcr0_commit_hash": bundle.get("pcr0_commit_hash"),  # Git commit - auditors verify exists
         "chain_snapshot_block": bundle.get("chain_snapshot_block"),
         "chain_snapshot_compare_hash": bundle.get("chain_snapshot_compare_hash"),
         "weight_submission_event_hash": bundle.get("weight_submission_event_hash"),
@@ -607,6 +615,7 @@ async def get_current_weights(netuid: int) -> dict:
         "validator_attestation_b64": bundle["validator_attestation_b64"],
         "validator_code_hash": bundle["validator_code_hash"],
         "validator_pcr0": bundle.get("validator_pcr0"),  # For auditor PCR0 verification
+        "pcr0_commit_hash": bundle.get("pcr0_commit_hash"),  # Git commit - auditors verify exists
         "chain_snapshot_block": bundle.get("chain_snapshot_block"),
         "chain_snapshot_compare_hash": bundle.get("chain_snapshot_compare_hash"),
         "weight_submission_event_hash": bundle.get("weight_submission_event_hash"),

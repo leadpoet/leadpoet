@@ -202,11 +202,12 @@ class AuditorValidator:
         Overwrites previous epoch's data (only stores last epoch).
         """
         import json
+        from datetime import datetime, timezone
         data = {
             "epoch_id": epoch_id,
             "bundle_compare_hash": bundle_compare_hash,
             "validator_hotkey": validator_hotkey,
-            "saved_at": canonical_timestamp() if 'canonical_timestamp' in dir() else None,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
             with open(PENDING_EQUIVOCATION_FILE, 'w') as f:

@@ -680,17 +680,24 @@ class AuditorValidator:
         print(f"{'='*60}")
         logger.info("Auditor validator starting")
         
-        # Fetch and verify GATEWAY attestation at startup
-        # NOTE: Validator attestation comes from weight bundles, not here
+        # Fetch gateway pubkey (for log verification)
+        # NOTE: Gateway attestation is OPTIONAL - gateway runs on EC2 host, not in enclave
+        # The CRITICAL verification is the VALIDATOR attestation (validator DOES run in enclave)
         if await self.fetch_gateway_attestation():
-            if self.verify_gateway_attestation():
-                logger.info(f"Gateway attestation verified (trust_level={self.trust_level})")
+            print(f"✅ Gateway pubkey fetched: {self.gateway_pubkey[:16]}...")
+            # Gateway attestation verification is optional since gateway doesn't run in Nitro
+            if self.gateway_attestation:
+                if self.verify_gateway_attestation():
+                    logger.info(f"Gateway attestation verified (trust_level={self.trust_level})")
+                else:
+                    # Non-fatal - gateway may not have attestation
+                    print(f"ℹ️  Gateway attestation not available (gateway runs on EC2 host, not enclave)")
             else:
-                logger.warning("Gateway attestation verification failed")
-                print(f"⚠️ Gateway attestation verification failed")
+                print(f"ℹ️  Gateway runs on EC2 host (no Nitro attestation)")
+                print(f"   This is expected - only the PRIMARY VALIDATOR runs in Nitro Enclave")
         else:
-            logger.warning("Could not fetch gateway attestation")
-            print(f"⚠️ Could not fetch gateway attestation (continuing anyway)")
+            logger.warning("Could not fetch gateway info")
+            print(f"⚠️ Could not fetch gateway info")
         
         while not self.should_exit:
             try:
@@ -857,10 +864,11 @@ EXAMPLES:
     print(f"   Log level: {args.log_level}")
     print(f"{'='*60}")
     
-    # Full Nitro verification is ALWAYS enabled - no dev mode
+    # Full Nitro verification is ALWAYS enabled for VALIDATOR attestations
     print(f"\n🔐 FULL NITRO VERIFICATION ENABLED")
+    print(f"   Validator attestations verified against AWS Nitro root certificate")
     print(f"   PCR0 allowlist fetched from GitHub automatically")
-    print(f"   All attestations verified against AWS Nitro root certificate")
+    print(f"   NOTE: Gateway runs on EC2 host (no attestation), Validator runs in Nitro Enclave")
     
     print(f"{'='*60}\n")
     

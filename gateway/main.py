@@ -76,10 +76,23 @@ async def lifespan(app: FastAPI):
     print("🔐 INITIALIZING TEE ENCLAVE KEYPAIR")
     print("="*80)
     try:
-        from gateway.tee.enclave_signer import initialize_enclave_keypair, is_keypair_initialized
+        from gateway.tee.enclave_signer import initialize_enclave_keypair, generate_attestation_document, get_cached_code_hash
         enclave_pubkey = initialize_enclave_keypair()
         print(f"✅ TEE enclave keypair initialized")
         print(f"   Pubkey: {enclave_pubkey[:32]}...")
+        
+        # Generate attestation document (required for auditor verification)
+        try:
+            from gateway.tee.gateway_tee_service import compute_code_hash
+            code_hash = compute_code_hash()
+            attestation_doc = generate_attestation_document(code_hash)
+            if attestation_doc and len(attestation_doc) > 0:
+                print(f"✅ Attestation document generated ({len(attestation_doc)} bytes)")
+            else:
+                print(f"⚠️  Attestation document empty (non-Nitro environment)")
+        except Exception as att_err:
+            print(f"⚠️  Could not generate attestation: {att_err}")
+        
         print("✅ Event signing ENABLED (TEE-signed transparency log)")
     except Exception as e:
         print(f"❌ CRITICAL ERROR initializing enclave keypair: {e}")

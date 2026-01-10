@@ -19,12 +19,18 @@ If verification fails (equivocation, attestation, signature/hash):
 - Applies to: equivocation, attestation failure, signature/hash failure
 
 USAGE:
-    python neurons/auditor_validator.py --netuid 71 --gateway-url http://54.226.209.164:8000
+    python neurons/auditor_validator.py --netuid 71 --wallet.name my_wallet --wallet.hotkey default
 """
 
 import os
 import sys
 import argparse
+
+# Add repo root to path so leadpoet_canonical can be imported from anywhere
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 import asyncio
 import logging
 import base64

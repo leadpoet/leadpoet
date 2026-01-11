@@ -3555,31 +3555,6 @@ async def run_stage4_5_repscore(
     print("   ✅ Stage 5 passed")
 
     # ========================================================================
-    # ENTERPRISE COMPANY SPECIAL HANDLING (10,001+ employees)
-    # Hardcoded rep score: 10 if ICP match, 5 if not
-    # Skips expensive rep score API calls for giant corporations
-    # ========================================================================
-    if is_enterprise_company(lead):
-        matches_icp = _matches_icp_definitions(lead)
-        hardcoded_score = 10 if matches_icp else 5
-        
-        lead["rep_score"] = hardcoded_score
-        lead["rep_score_details"] = {
-            "enterprise_company": True,
-            "matches_icp": matches_icp,
-            "hardcoded_score": hardcoded_score,
-            "reason": "10,001+ employees - rep score checks skipped"
-        }
-        automated_checks_data["rep_score"] = {
-            "total_score": hardcoded_score,
-            "max_score": MAX_REP_SCORE,
-            "breakdown": {"enterprise_company_hardcoded": hardcoded_score},
-            "enterprise_company": True,
-            "matches_icp": matches_icp
-        }
-        print(f"   🏢 ENTERPRISE COMPANY (10,001+): Hardcoded rep score = {hardcoded_score} ({'ICP match' if matches_icp else 'No ICP match'})")
-    else:
-    # ========================================================================
     # Rep Score: Soft Reputation Checks (SOFT)
     # EXTRACTED VERBATIM from run_automated_checks()
     # - Wayback Machine (max 6 points), SEC (max 12 points), 
@@ -3614,8 +3589,26 @@ async def run_stage4_5_repscore(
         companies_house_score
     )
     
+    # ========================================================================
+    # ENTERPRISE COMPANY REP SCORE MULTIPLIER (10,001+ employees)
+    # For enterprise companies, apply a multiplier that caps rep score:
+    # - ICP match: target = 10, multiplier = min(0, 10 - rep_score)
+    # - No ICP match: target = 5, multiplier = min(0, 5 - rep_score)
+    # Final rep = rep_score + multiplier (so it never exceeds target)
+    # ========================================================================
+    enterprise_multiplier = 0
+    is_enterprise = is_enterprise_company(lead)
+    if is_enterprise:
+        matches_icp = _matches_icp_definitions(lead)
+        target_score = 10 if matches_icp else 5
+        enterprise_multiplier = min(0, target_score - total_rep_score)
+        final_rep_score = total_rep_score + enterprise_multiplier
+        print(f"   🏢 ENTERPRISE COMPANY (10,001+): Raw rep={total_rep_score:.1f}, target={target_score}, multiplier={enterprise_multiplier:.1f}, final={final_rep_score:.1f} ({'ICP match' if matches_icp else 'No ICP match'})")
+    else:
+        final_rep_score = total_rep_score
+    
     # Append to lead data
-    lead["rep_score"] = total_rep_score
+    lead["rep_score"] = final_rep_score
     lead["rep_score_details"] = {
         "wayback": wayback_data,
         "sec": sec_data,
@@ -3623,10 +3616,14 @@ async def run_stage4_5_repscore(
         "gdelt": gdelt_data,
         "companies_house": companies_house_data
     }
+    if is_enterprise:
+        lead["rep_score_details"]["enterprise_company"] = True
+        lead["rep_score_details"]["enterprise_multiplier"] = enterprise_multiplier
+        lead["rep_score_details"]["raw_rep_score"] = total_rep_score
     
     # Append to automated_checks_data
     automated_checks_data["rep_score"] = {
-        "total_score": total_rep_score,
+        "total_score": final_rep_score,
         "max_score": MAX_REP_SCORE,
         "breakdown": {
             "wayback_machine": wayback_score,       # 0-6 points
@@ -3636,8 +3633,12 @@ async def run_stage4_5_repscore(
             "companies_house": companies_house_score      # 0-10 points
         }
     }
+    if is_enterprise:
+        automated_checks_data["rep_score"]["enterprise_company"] = True
+        automated_checks_data["rep_score"]["enterprise_multiplier"] = enterprise_multiplier
+        automated_checks_data["rep_score"]["raw_rep_score"] = total_rep_score
     
-    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
+    print(f"   📊 Rep Score: {final_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
     # ========================================================================
     # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)
@@ -9027,7 +9028,7 @@ def _gse_search_stage5_sync(
             # These removals reduce false positives from 77 to 56 per 800 leads
             
             # Query 1 (was Q4): LinkedIn URL + claimed role (90.7% accuracy)
-        if role_simplified:
+            if role_simplified:
                 queries.append(f'"{linkedin_url}" "{role_simplified}"')
             
             # Query 2 (was Q5): Name + role + company (91.3% accuracy, highest extraction)
@@ -9158,12 +9159,12 @@ def _gse_search_stage5_sync(
                     all_results.extend(matching_results)
                     # Check if we found a role from matching results
                     for r in matching_results:
-                    title = r.get("title", "")
-                    snippet = r.get("body", "")
-                    extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
+                        title = r.get("title", "")
+                        snippet = r.get("body", "")
+                        extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
                         if extracted and len(extracted) > 3:
-                        role_found = True
-                        break
+                            role_found = True
+                            break
             elif search_type == "person_location":
                 # For person_location: only return if we actually extracted a location
                 # Otherwise continue to next query (e.g., Query 2 or 3)
@@ -10891,12 +10892,14 @@ def is_enterprise_company(lead: dict) -> bool:
     """
     Check if a lead is from an enterprise company (10,001+ employees).
     
-    Enterprise companies get hardcoded rep scores:
-    - 10 if matches ICP definition
-    - 5 if doesn't match ICP definition
+    Enterprise companies get a rep score multiplier that caps their final score:
+    - ICP match: target = 10, multiplier = min(0, 10 - raw_rep_score)
+    - No ICP match: target = 5, multiplier = min(0, 5 - raw_rep_score)
+    - Final rep = raw_rep_score + multiplier
     
-    This skips expensive rep score API calls for giant corporations
-    where rep score verification is less meaningful.
+    This means:
+    - If raw rep score is <= target, no change (multiplier = 0)
+    - If raw rep score > target, it gets capped at target
     
     Returns:
         True if employee_count indicates 10,001+ employees
@@ -10904,7 +10907,7 @@ def is_enterprise_company(lead: dict) -> bool:
     """
     employee_count = lead.get("employee_count", "")
     if not employee_count:
-    return False
+        return False
     
     # Parse the employee count
     parsed = parse_employee_count(str(employee_count))
@@ -11493,31 +11496,6 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     print("   ✅ Stage 5 passed")
 
     # ========================================================================
-    # ENTERPRISE COMPANY SPECIAL HANDLING (10,001+ employees)
-    # Hardcoded rep score: 10 if ICP match, 5 if not
-    # Skips expensive rep score API calls for giant corporations
-    # ========================================================================
-    if is_enterprise_company(lead):
-        matches_icp = _matches_icp_definitions(lead)
-        hardcoded_score = 10 if matches_icp else 5
-        
-        lead["rep_score"] = hardcoded_score
-        lead["rep_score_details"] = {
-            "enterprise_company": True,
-            "matches_icp": matches_icp,
-            "hardcoded_score": hardcoded_score,
-            "reason": "10,001+ employees - rep score checks skipped"
-        }
-        automated_checks_data["rep_score"] = {
-            "total_score": hardcoded_score,
-            "max_score": MAX_REP_SCORE,
-            "breakdown": {"enterprise_company_hardcoded": hardcoded_score},
-            "enterprise_company": True,
-            "matches_icp": matches_icp
-        }
-        print(f"   🏢 ENTERPRISE COMPANY (10,001+): Hardcoded rep score = {hardcoded_score} ({'ICP match' if matches_icp else 'No ICP match'})")
-    else:
-    # ========================================================================
     # Rep Score: Soft Reputation Checks (SOFT)
     # - Wayback Machine (max 6 points), SEC (max 12 points), 
     #   WHOIS/DNSBL (max 10 points), GDELT Press/Media (max 10 points),
@@ -11551,8 +11529,26 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         companies_house_score
     )
     
+    # ========================================================================
+    # ENTERPRISE COMPANY REP SCORE MULTIPLIER (10,001+ employees)
+    # For enterprise companies, apply a multiplier that caps rep score:
+    # - ICP match: target = 10, multiplier = min(0, 10 - rep_score)
+    # - No ICP match: target = 5, multiplier = min(0, 5 - rep_score)
+    # Final rep = rep_score + multiplier (so it never exceeds target)
+    # ========================================================================
+    enterprise_multiplier = 0
+    is_enterprise = is_enterprise_company(lead)
+    if is_enterprise:
+        matches_icp = _matches_icp_definitions(lead)
+        target_score = 10 if matches_icp else 5
+        enterprise_multiplier = min(0, target_score - total_rep_score)
+        final_rep_score = total_rep_score + enterprise_multiplier
+        print(f"   🏢 ENTERPRISE COMPANY (10,001+): Raw rep={total_rep_score:.1f}, target={target_score}, multiplier={enterprise_multiplier:.1f}, final={final_rep_score:.1f} ({'ICP match' if matches_icp else 'No ICP match'})")
+    else:
+        final_rep_score = total_rep_score
+    
     # Append to lead data
-    lead["rep_score"] = total_rep_score
+    lead["rep_score"] = final_rep_score
     lead["rep_score_details"] = {
         "wayback": wayback_data,
         "sec": sec_data,
@@ -11560,10 +11556,14 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         "gdelt": gdelt_data,
         "companies_house": companies_house_data
     }
+    if is_enterprise:
+        lead["rep_score_details"]["enterprise_company"] = True
+        lead["rep_score_details"]["enterprise_multiplier"] = enterprise_multiplier
+        lead["rep_score_details"]["raw_rep_score"] = total_rep_score
     
     # Append to automated_checks_data
     automated_checks_data["rep_score"] = {
-        "total_score": total_rep_score,
+        "total_score": final_rep_score,
         "max_score": MAX_REP_SCORE,
         "breakdown": {
             "wayback_machine": wayback_score,       # 0-6 points
@@ -11573,8 +11573,12 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
             "companies_house": companies_house_score      # 0-10 points
         }
     }
+    if is_enterprise:
+        automated_checks_data["rep_score"]["enterprise_company"] = True
+        automated_checks_data["rep_score"]["enterprise_multiplier"] = enterprise_multiplier
+        automated_checks_data["rep_score"]["raw_rep_score"] = total_rep_score
     
-    print(f"   📊 Rep Score: {total_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
+    print(f"   📊 Rep Score: {final_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
     
     # ========================================================================
     # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)

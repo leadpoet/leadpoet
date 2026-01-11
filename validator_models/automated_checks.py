@@ -9204,10 +9204,10 @@ def _gse_search_stage5_sync(
         return all_results
     
     # Try fallback queries for non-role searches
-        for query in fallback_queries:
-            results = gse_search_with_fallback(query, max_results)
-            if results:
-                return results
+    for query in fallback_queries:
+        results = gse_search_with_fallback(query, max_results)
+        if results:
+            return results
     
     return []
 

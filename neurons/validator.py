@@ -14,6 +14,7 @@ import numpy as np
 import bittensor as bt
 import argparse
 import json
+import gc  # For explicit memory cleanup
 from datetime import datetime, timedelta, timezone
 from Leadpoet.base.validator import BaseValidatorNeuron
 from Leadpoet.protocol import LeadRequest
@@ -2597,6 +2598,12 @@ class Validator(BaseValidatorNeuron):
             
             # Check if we should submit weights (block 345+)
             await self.submit_weights_at_epoch_end()
+            
+            # MEMORY CLEANUP: Force garbage collection after each epoch
+            # This prevents memory accumulation over long-running sessions
+            collected = gc.collect()
+            if collected > 100:  # Only log if significant cleanup
+                print(f"🧹 Memory cleanup: freed {collected} objects")
             
         except Exception as e:
             print(f"[DEBUG] Exception caught in gateway validation workflow: {e}")
@@ -5264,6 +5271,11 @@ def run_lightweight_worker(config):
                     
                     print(f"✅ Worker {container_id}: Completed {len(validated_leads)} validations")
                     print(f"   Results saved to {results_file}")
+                    
+                    # MEMORY CLEANUP: Force garbage collection after each epoch
+                    collected = gc.collect()
+                    if collected > 100:
+                        print(f"🧹 Worker {container_id}: Memory cleanup freed {collected} objects")
                     
                     # Wait before checking for next epoch
                     await asyncio.sleep(30)

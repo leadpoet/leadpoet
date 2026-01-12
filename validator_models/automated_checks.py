@@ -6531,8 +6531,10 @@ async def check_licensed_resale_proof(lead: dict) -> Tuple[bool, dict]:
 
 import time
 
-# GeoPy geocoding cache
+# GeoPy geocoding cache (LIMITED to prevent memory leaks)
 _geocode_cache: Dict[str, Dict] = {}
+_geocode_cache_order: list = []  # Track insertion order for LRU eviction
+_GEOCODE_CACHE_MAX_SIZE = 500  # Limit cache size to prevent memory growth
 _last_geocode_time = 0
 
 def _geocode_location(location: str) -> Optional[Dict]:
@@ -6541,7 +6543,7 @@ def _geocode_location(location: str) -> Optional[Dict]:
     Returns dict with city, state, country, lat, lon or None if not found.
     Rate limited to 1 request/second per Nominatim policy.
     """
-    global _last_geocode_time, _geocode_cache
+    global _last_geocode_time, _geocode_cache, _geocode_cache_order
     
     if not location or len(location.strip()) < 2:
         return None
@@ -6573,14 +6575,25 @@ def _geocode_location(location: str) -> Optional[Dict]:
                 "lon": geo.longitude,
                 "display": geo.address
             }
+            # Add to cache with LRU eviction
+            if len(_geocode_cache) >= _GEOCODE_CACHE_MAX_SIZE:
+                # Evict oldest entry
+                oldest_key = _geocode_cache_order.pop(0)
+                del _geocode_cache[oldest_key]
             _geocode_cache[cache_key] = result
+            _geocode_cache_order.append(cache_key)
             return result
     except ImportError:
         pass
     except Exception as e:
         print(f"   ⚠️ Geocoding failed for '{location}': {e}")
     
+    # Cache negative result too (with LRU eviction)
+    if len(_geocode_cache) >= _GEOCODE_CACHE_MAX_SIZE:
+        oldest_key = _geocode_cache_order.pop(0)
+        del _geocode_cache[oldest_key]
     _geocode_cache[cache_key] = None
+    _geocode_cache_order.append(cache_key)
     return None
 
 

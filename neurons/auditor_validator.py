@@ -1443,7 +1443,6 @@ EXAMPLES:
     print(f"   ✅ COSE signature verified (proves authentic attestation)")
     print(f"   ✅ Ed25519 signature verified (proves weights from enclave)")
     print(f"   ✅ Epoch binding verified (replay protection)")
-    print(f"   ⚠️  PCR0 NOT verified (requires nitro-cli or trusting subnet owner)")
     print(f"   ℹ️  Trust level: AWS_VERIFIED (real enclave, unverified code)")
     
     print(f"{'='*60}\n")

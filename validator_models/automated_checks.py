@@ -700,7 +700,7 @@ RESPOND WITH JSON ONLY:
                 json={
                     "model": "openai/gpt-5-nano",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 2000,  # GPT-5-nano needs ~800 tokens for reasoning + output
+                    "max_tokens": 4000,  # GPT-5-nano uses 1500-2000 tokens for reasoning on complex prompts
                     "temperature": 0
                 },
                 timeout=60  # GPT-5-nano uses reasoning tokens, needs more time
@@ -5018,7 +5018,7 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
             "model": "openai/gpt-5-nano",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,  # Zero temperature for deterministic results
-            "max_tokens": 2000  # GPT-5-nano needs ~800 tokens for reasoning + output
+            "max_tokens": 4000  # GPT-5-nano uses 1500-2000 tokens for reasoning on complex prompts
         }
         
         async with aiohttp.ClientSession() as session:
@@ -10576,7 +10576,7 @@ RESPOND WITH JSON ONLY:
                 json={
                     "model": "openai/gpt-5-nano",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 2000,  # GPT-5-nano needs ~800 tokens for reasoning + output
+                    "max_tokens": 4000,  # GPT-5-nano uses 1500-2000 tokens for reasoning on complex prompts
                     "temperature": 0
                 },
                 timeout=60  # GPT-5-nano uses reasoning tokens, needs more time

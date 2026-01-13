@@ -2519,6 +2519,22 @@ class Validator(BaseValidatorNeuron):
                 except Exception as e:
                     print(f"   ⚠️  Could not clean up stale files: {e}")
                 
+                # Clean up stale worker result files from previous epochs
+                try:
+                    for old_worker_file in weights_dir.glob("worker_*_epoch_*_results.json"):
+                        try:
+                            # Extract epoch from filename: worker_X_epoch_YYYY_results.json
+                            parts = old_worker_file.stem.split('_')
+                            epoch_idx = parts.index('epoch') + 1
+                            file_epoch = int(parts[epoch_idx])
+                            if file_epoch < current_epoch:
+                                os.remove(old_worker_file)
+                                print(f"   🧹 Cleaned up stale worker file: {old_worker_file.name}")
+                        except (IndexError, ValueError):
+                            pass
+                except Exception as e:
+                    print(f"   ⚠️  Could not clean up stale worker files: {e}")
+                
                 # ═══════════════════════════════════════════════════════════════════
                 # COORDINATOR: Accumulate weights for ALL leads (coordinator + workers)
                 # This ensures all leads are counted in validator_weights_history

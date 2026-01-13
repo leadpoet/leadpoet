@@ -698,26 +698,18 @@ RESPOND WITH JSON ONLY:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "openai/gpt-5-nano",
+                    "model": "openai/gpt-4o-mini",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 4000,  # GPT-5-nano uses 1500-2000 tokens for reasoning on complex prompts
+                    "max_tokens": 300,
                     "temperature": 0
                 },
-                timeout=60  # GPT-5-nano uses reasoning tokens, needs more time
+                timeout=20
             ) as response:
                 if response.status != 200:
                     return False, f"LLM API error: HTTP {response.status}", 0.0
                 
                 data = await response.json()
-                message = data["choices"][0]["message"]
-                llm_response = (message.get("content") or "").strip()
-                
-                # GPT-5-nano sometimes only puts response in reasoning field
-                if not llm_response and message.get("reasoning"):
-                    reasoning_text = message.get("reasoning", "")
-                    json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', reasoning_text)
-                    if json_match:
-                        llm_response = json_match.group()
+                llm_response = data["choices"][0]["message"]["content"].strip()
                 
                 # Parse JSON response
                 if llm_response.startswith("```"):
@@ -5015,10 +5007,9 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
         }
         
         payload = {
-            "model": "openai/gpt-5-nano",
+            "model": "openai/gpt-4o-mini",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,  # Zero temperature for deterministic results
-            "max_tokens": 4000  # GPT-5-nano uses 1500-2000 tokens for reasoning on complex prompts
+            "temperature": 0  # Zero temperature for deterministic results
         }
         
         async with aiohttp.ClientSession() as session:
@@ -5026,23 +5017,16 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=60  # GPT-5-nano uses reasoning tokens, needs more time
+                timeout=15
             ) as response:
                 if response.status != 200:
                     return False, f"LLM API error: HTTP {response.status}"
                 
                 data = await response.json()
-                message = data["choices"][0]["message"]
-                llm_response = (message.get("content") or "").strip()
-                
-                # GPT-5-nano sometimes only puts response in reasoning field
-                if not llm_response and message.get("reasoning"):
-                    reasoning_text = message.get("reasoning", "")
-                    json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', reasoning_text)
-                    if json_match:
-                        llm_response = json_match.group()
+                llm_response = data["choices"][0]["message"]["content"]
                 
                 # Strip markdown code blocks if present (LLM sometimes wraps JSON in ```json ... ```)
+                llm_response = llm_response.strip()
                 if llm_response.startswith("```"):
                     # Remove opening ```json or ```
                     lines = llm_response.split("\n")
@@ -10574,12 +10558,12 @@ RESPOND WITH JSON ONLY:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "openai/gpt-5-nano",
+                    "model": "openai/gpt-4o-mini",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 4000,  # GPT-5-nano uses 1500-2000 tokens for reasoning on complex prompts
+                    "max_tokens": 500,
                     "temperature": 0
                 },
-                timeout=60  # GPT-5-nano uses reasoning tokens, needs more time
+                timeout=20
             ) as response:
                 if response.status != 200:
                     return False, {
@@ -10590,17 +10574,7 @@ RESPOND WITH JSON ONLY:
                     }
                 
                 data = await response.json()
-                message = data["choices"][0]["message"]
-                llm_response = (message.get("content") or "").strip()
-                
-                # GPT-5-nano sometimes only puts response in reasoning field
-                if not llm_response and message.get("reasoning"):
-                    reasoning = message.get("reasoning", "")
-                    # Extract JSON from reasoning
-                    json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', reasoning)
-                    if json_match:
-                        llm_response = json_match.group()
-                        print(f"   📝 Extracted JSON from reasoning field")
+                llm_response = data["choices"][0]["message"]["content"].strip()
                 
                 if llm_response.startswith("```"):
                     lines = llm_response.split("\n")

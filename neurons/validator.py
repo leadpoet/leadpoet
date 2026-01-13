@@ -852,6 +852,7 @@ class Validator(BaseValidatorNeuron):
         bt.logging.debug(f"Updated R_v: {self.reputation}, Trusted: {self.trusted_validator}")
 
     async def handle_buyer_feedback(self, leads: list, feedback_score: float):
+        """Legacy method - buyer feedback not currently used in gateway architecture."""
         feedback_map = {
             (0, 1): (-20, 0.0),
             (1, 5): (-10, 0.2),
@@ -863,9 +864,6 @@ class Validator(BaseValidatorNeuron):
         for (low, high), (p_adj, f_new) in feedback_map.items():
             if low < feedback_score <= high:
                 self.precision = max(0, min(100, self.precision + p_adj))
-                for validation in self.validation_history:
-                    if validation["leads"] == leads:
-                        validation["F"] = f_new
                 bt.logging.info(f"Applied buyer feedback B={feedback_score}: P_v={self.precision}, F={f_new}")
                 break
         self.update_reputation()
@@ -1152,7 +1150,7 @@ class Validator(BaseValidatorNeuron):
                 self.precision = min(100, self.precision + 10)
             elif s["O_v"] > 0 and not await self.run_automated_checks(s["leads"]):
                 self.precision = max(0, self.precision - 15)
-            self.validation_history.append({"O_v": s["O_v"], "F": F, "timestamp": datetime.now(), "leads": s["leads"]})
+            self.validation_history.append({"O_v": s["O_v"], "F": F, "timestamp": datetime.now()})
         
         self.update_consistency()
         self.update_reputation()

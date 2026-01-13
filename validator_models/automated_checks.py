@@ -3452,12 +3452,6 @@ async def run_stage4_5_repscore(
         lead["email_verifier_status"] = "Valid"
         email_status = "valid"
         email_passed = True
-    elif batch_status == "accept_all":
-        lead["email_verifier_status"] = "Catch-All"
-        email_status = "catch-all"
-        # Catch-all passes only if SPF exists (checked in Stage 1)
-        has_spf = automated_checks_data.get("stage_1_dns", {}).get("has_spf", False)
-        email_passed = has_spf
     elif batch_status in ["disposable"]:
         lead["email_verifier_status"] = "Disposable"
         email_status = "invalid"

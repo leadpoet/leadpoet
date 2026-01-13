@@ -698,7 +698,7 @@ RESPOND WITH JSON ONLY:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "openai/gpt-5-mini",
+                    "model": "openai/gpt-4o-mini",
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 300,
                     "temperature": 0
@@ -5007,7 +5007,7 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
         }
         
         payload = {
-            "model": "openai/gpt-5-mini",
+            "model": "openai/gpt-4o-mini",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0  # Zero temperature for deterministic results
         }
@@ -10558,7 +10558,7 @@ RESPOND WITH JSON ONLY:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "openai/gpt-5-mini",
+                    "model": "openai/gpt-4o-mini",
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 500,
                     "temperature": 0

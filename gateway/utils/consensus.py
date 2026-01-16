@@ -17,7 +17,7 @@ from supabase import create_client
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
-async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
+async def compute_weighted_consensus(lead_id: str, epoch_id: int, evidence_data: List = None) -> Dict:
     """
     Compute v_trust × stake weighted consensus for lead outcome.
     
@@ -35,6 +35,8 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
     Args:
         lead_id: Lead UUID
         epoch_id: Epoch number
+        evidence_data: Optional pre-fetched evidence data for this lead (list of dicts).
+                       If provided, skips database query. Used for batch optimization.
     
     Returns:
         {
@@ -71,25 +73,35 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int) -> Dict:
     """
     
     # ========================================
-    # Step 1: Query all revealed validations for this lead - RUN IN THREAD
+    # Step 1: Get validations (from pre-fetched data or database)
     # ========================================
     try:
-        print(f"   🔍 Fetching validations for lead {lead_id[:8]}... from validation_evidence_private")
-        result = await asyncio.to_thread(
-            lambda: supabase.table("validation_evidence_private")
-                .select("validator_hotkey, decision, rep_score, rejection_reason, v_trust, stake")
-                .eq("lead_id", lead_id)
-                .eq("epoch_id", epoch_id)
-                .not_.is_("decision", "null")
-                .not_.is_("rep_score", "null")
-                .execute()
-        )
-        
-        validations = result.data
-        print(f"   ✅ Found {len(validations)} validations for lead {lead_id[:8]}...")
+        if evidence_data is not None:
+            # Use pre-fetched data (O(1) - no database query needed)
+            # Filter for revealed validations with non-null decision and rep_score
+            validations = [
+                ev for ev in evidence_data 
+                if ev.get('decision') is not None and ev.get('rep_score') is not None
+            ]
+            print(f"   ✅ Found {len(validations)} validations for lead {lead_id[:8]}... (from pre-fetched data)")
+        else:
+            # Fallback: Query database (for backwards compatibility)
+            print(f"   🔍 Fetching validations for lead {lead_id[:8]}... from validation_evidence_private")
+            result = await asyncio.to_thread(
+                lambda: supabase.table("validation_evidence_private")
+                    .select("validator_hotkey, decision, rep_score, rejection_reason, v_trust, stake")
+                    .eq("lead_id", lead_id)
+                    .eq("epoch_id", epoch_id)
+                    .not_.is_("decision", "null")
+                    .not_.is_("rep_score", "null")
+                    .execute()
+            )
+            
+            validations = result.data
+            print(f"   ✅ Found {len(validations)} validations for lead {lead_id[:8]}...")
     
     except Exception as e:
-        print(f"❌ Error querying validations for lead {lead_id}: {e}")
+        print(f"❌ Error getting validations for lead {lead_id}: {e}")
         return {
             "lead_id": lead_id,
             "epoch_id": epoch_id,

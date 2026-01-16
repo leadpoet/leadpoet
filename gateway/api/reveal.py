@@ -832,15 +832,39 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
                     .execute()
             )
         
+        # Helper to detect transient Supabase/connection errors that should be retried
+        def is_transient_error(error: Exception) -> bool:
+            error_str = str(error)
+            # Errno 11: Resource temporarily unavailable (connection pool exhausted)
+            # Errno 104: Connection reset by peer
+            # 502/500: Supabase/Cloudflare temporary errors
+            return any(x in error_str for x in ['Errno 11', 'Errno 104', 'code": 502', 'code": 500', 'code\': 502', 'code\': 500'])
+        
         # CHUNKED UPDATES: Process in batches of 50 to avoid connection pool exhaustion
         # [Errno 11] Resource temporarily unavailable occurs with 300+ parallel connections
         DB_CHUNK_SIZE = 50
+        MAX_CHUNK_RETRIES = 3
         total_updated = 0
         
         for i in range(0, len(verified_reveals), DB_CHUNK_SIZE):
             chunk = verified_reveals[i:i + DB_CHUNK_SIZE]
-            await asyncio.gather(*[update_one(r) for r in chunk])
-            total_updated += len(chunk)
+            
+            # Retry loop for transient errors only
+            for attempt in range(1, MAX_CHUNK_RETRIES + 1):
+                try:
+                    await asyncio.gather(*[update_one(r) for r in chunk])
+                    total_updated += len(chunk)
+                    break  # Success - exit retry loop
+                except Exception as chunk_error:
+                    if is_transient_error(chunk_error) and attempt < MAX_CHUNK_RETRIES:
+                        # Transient error - wait and retry
+                        wait_time = attempt * 2  # 2s, 4s backoff
+                        print(f"⚠️  Chunk {i//DB_CHUNK_SIZE + 1} transient error (attempt {attempt}/{MAX_CHUNK_RETRIES}): {chunk_error}")
+                        print(f"   Retrying in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        # Non-transient error or max retries exceeded - re-raise
+                        raise
             
             # Brief pause between chunks to let connection pool recover
             if i + DB_CHUNK_SIZE < len(verified_reveals):

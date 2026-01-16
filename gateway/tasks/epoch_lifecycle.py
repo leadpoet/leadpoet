@@ -748,6 +748,73 @@ async def compute_epoch_consensus(epoch_id: int):
         
         print(f"   📊 Step 2: Computing consensus for {len(unique_leads)} leads...\n")
         
+        # ========================================================================
+        # OPTIMIZATION: Pre-fetch ALL evidence data for this epoch in ONE query
+        # This eliminates ~4 queries per lead (4 × 2700 = 10,800 queries → 1 query)
+        # ========================================================================
+        print(f"   🚀 Pre-fetching all evidence data for epoch {epoch_id}...")
+        
+        all_evidence_data = []
+        evidence_offset = 0
+        evidence_batch_size = 1000
+        
+        while True:
+            evidence_batch = await asyncio.to_thread(
+                lambda o=evidence_offset: supabase.table("validation_evidence_private")
+                    .select("lead_id, validator_hotkey, decision, rep_score, rejection_reason, revealed_ts, v_trust, stake, evidence_blob, evidence_id")
+                    .eq("epoch_id", epoch_id)
+                    .range(o, o + evidence_batch_size - 1)
+                    .execute()
+            )
+            
+            if not evidence_batch.data:
+                break
+            
+            all_evidence_data.extend(evidence_batch.data)
+            
+            if len(evidence_batch.data) < evidence_batch_size:
+                break
+            
+            evidence_offset += evidence_batch_size
+        
+        print(f"   ✅ Pre-fetched {len(all_evidence_data)} evidence records")
+        
+        # Group evidence by lead_id for O(1) lookup
+        evidence_by_lead = {}
+        for ev in all_evidence_data:
+            lid = ev['lead_id']
+            if lid not in evidence_by_lead:
+                evidence_by_lead[lid] = []
+            evidence_by_lead[lid].append(ev)
+        
+        # Pre-fetch all lead_blobs for rejection count tracking (batch query)
+        print(f"   🚀 Pre-fetching lead_blobs for {len(unique_leads)} leads...")
+        
+        all_lead_blobs = {}
+        leads_batch_size = 500  # Smaller batches to avoid URL length limits
+        
+        for batch_start in range(0, len(unique_leads), leads_batch_size):
+            batch_ids = unique_leads[batch_start:batch_start + leads_batch_size]
+            
+            leads_batch = await asyncio.to_thread(
+                lambda ids=batch_ids: supabase.table("leads_private")
+                    .select("lead_id, lead_blob")
+                    .in_("lead_id", ids)
+                    .execute()
+            )
+            
+            if leads_batch.data:
+                for lead in leads_batch.data:
+                    all_lead_blobs[lead['lead_id']] = lead.get('lead_blob', {})
+        
+        print(f"   ✅ Pre-fetched {len(all_lead_blobs)} lead_blobs")
+        print(f"   🏁 Starting consensus computation with pre-fetched data...\n")
+        
+        # Helper class for backwards compatibility with code expecting .data attribute
+        class MockResult:
+            def __init__(self, data):
+                self.data = data
+        
         approved_count = 0
         rejected_count = 0
         
@@ -758,7 +825,9 @@ async def compute_epoch_consensus(epoch_id: int):
                 # ========================================================================
                 # PRIORITY 3: Compute weighted consensus using v_trust × stake
                 # ========================================================================
-                outcome = await compute_weighted_consensus(lead_id, epoch_id)
+                # Pass pre-fetched evidence data to avoid database query
+                lead_evidence = evidence_by_lead.get(lead_id, [])
+                outcome = await compute_weighted_consensus(lead_id, epoch_id, evidence_data=lead_evidence)
                 print(f"         📊 Consensus: {outcome['final_decision']} (rep: {outcome['final_rep_score']:.2f}, weight: {outcome['consensus_weight']:.2f})")
                 
                 # ========================================================================
@@ -766,18 +835,14 @@ async def compute_epoch_consensus(epoch_id: int):
                 # ========================================================================
                 print(f"         📦 Aggregating validator responses...")
                 
-                # Query all validator responses for this lead - RUN IN THREAD
-                responses_result = await asyncio.to_thread(
-                    lambda: supabase.table("validation_evidence_private")
-                        .select("validator_hotkey, decision, rep_score, rejection_reason, revealed_ts, v_trust, stake")
-                        .eq("lead_id", lead_id)
-                        .eq("epoch_id", epoch_id)
-                        .not_.is_("decision", "null")
-                        .execute()
-                )
+                # Use pre-fetched evidence data (O(1) lookup instead of DB query)
+                lead_evidence = evidence_by_lead.get(lead_id, [])
+                # Filter to only revealed decisions (decision != NULL)
+                revealed_responses = [ev for ev in lead_evidence if ev.get('decision') is not None]
+                responses_result = MockResult(revealed_responses)
                 
                 # DEBUG: Log query results
-                print(f"         🔍 Query returned {len(responses_result.data)} validator responses")
+                print(f"         🔍 Found {len(responses_result.data)} validator responses (from pre-fetched data)")
                 
                 # ========================================================================
                 # CRITICAL: If 0 responses, leave lead as pending_validation (FIFO queue)
@@ -789,15 +854,10 @@ async def compute_epoch_consensus(epoch_id: int):
                     print(f"            2. Validators skipped this lead (timeout, error, etc.)")
                     print(f"            3. Query filters are too restrictive")
                     
-                    # Query again WITHOUT the decision filter to debug
-                    debug_result = await asyncio.to_thread(
-                        lambda: supabase.table("validation_evidence_private")
-                            .select("evidence_id, validator_hotkey, decision, revealed_ts")
-                            .eq("lead_id", lead_id)
-                            .eq("epoch_id", epoch_id)
-                            .execute()
-                    )
-                    print(f"            Debug query (no decision filter): {len(debug_result.data)} records found")
+                    # Use pre-fetched data for debug (no decision filter)
+                    debug_data = evidence_by_lead.get(lead_id, [])
+                    debug_result = MockResult(debug_data)
+                    print(f"            Debug check (no decision filter): {len(debug_result.data)} records found")
                     if len(debug_result.data) > 0:
                         for rec in debug_result.data:
                             print(f"               - Validator {rec['validator_hotkey'][:10]}...: decision={rec['decision']}, revealed={rec['revealed_ts']}")
@@ -875,17 +935,13 @@ async def compute_epoch_consensus(epoch_id: int):
                 # We need to extract it from the consensus-winning validators' evidence
                 is_icp_multiplier = 0.0  # Default for new leads (0 adjustment)
                 try:
-                    # Query evidence_blobs from validators who approved this lead
-                    # We'll take the average if validators disagree (shouldn't happen)
-                    evidence_result = await asyncio.to_thread(
-                        lambda: supabase.table("validation_evidence_private")
-                            .select("evidence_blob")
-                            .eq("lead_id", lead_id)
-                            .eq("epoch_id", epoch_id)
-                            .eq("decision", "approve")  # Only from approving validators
-                            .not_.is_("evidence_blob", "null")
-                            .execute()
-                    )
+                    # Use pre-fetched evidence data - filter for approving validators with evidence_blob
+                    lead_evidence = evidence_by_lead.get(lead_id, [])
+                    approving_with_blob = [
+                        ev for ev in lead_evidence 
+                        if ev.get('decision') == 'approve' and ev.get('evidence_blob') is not None
+                    ]
+                    evidence_result = MockResult(approving_with_blob)
                     
                     if evidence_result.data and len(evidence_result.data) > 0:
                         # Extract is_icp_multiplier from each validator's evidence_blob
@@ -975,16 +1031,10 @@ async def compute_epoch_consensus(epoch_id: int):
                     try:
                         print(f"         📊 Lead rejected - incrementing miner's rejection count...")
                         
-                        # Fetch miner hotkey from lead_blob - RUN IN THREAD
-                        lead_result = await asyncio.to_thread(
-                            lambda: supabase.table("leads_private")
-                                .select("lead_blob")
-                                .eq("lead_id", lead_id)
-                                .execute()
-                        )
+                        # Use pre-fetched lead_blob data (O(1) lookup instead of DB query)
+                        lead_blob = all_lead_blobs.get(lead_id, {})
                         
-                        if lead_result.data and len(lead_result.data) > 0:
-                            lead_blob = lead_result.data[0].get("lead_blob", {})
+                        if lead_blob:
                             miner_hotkey = lead_blob.get("wallet_ss58")
                             
                             if miner_hotkey:
@@ -1016,6 +1066,14 @@ async def compute_epoch_consensus(epoch_id: int):
         print(f"      ✅ {approved_count} leads approved")
         print(f"      ❌ {rejected_count} leads denied")
         print(f"      📊 Total leads processed: {len(unique_leads)}")
+        
+        # ========================================================================
+        # MEMORY CLEANUP: Delete pre-fetched data to free memory
+        # ========================================================================
+        del all_evidence_data
+        del evidence_by_lead
+        del all_lead_blobs
+        print(f"   🧹 Cleaned up pre-fetched data from memory")
     
     except Exception as e:
         print(f"   ❌ Failed to compute epoch consensus: {e}")

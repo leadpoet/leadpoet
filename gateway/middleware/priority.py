@@ -9,9 +9,11 @@ Design:
 - Miner paths are throttled (max concurrent limit)
 - Simple, safe, no changes to database logic
 
-Validator Priority Paths:
+Validator Priority Paths (time-sensitive, can fail if delayed):
 - GET /epoch/{id}/leads (validators fetching leads for validation)
-- POST /validate (validators submitting decision hashes/reveals)
+- POST /validate (validators submitting decision hashes)
+- POST /reveal/ and /reveal/batch (validators revealing decisions)
+- POST /weights/submit (auditor validators submitting weights)
 
 Miner Throttled Paths:
 - POST /presign (miners requesting presigned URLs)
@@ -54,10 +56,13 @@ class PriorityMiddleware(BaseHTTPMiddleware):
     
     def _is_validator_request(self, path: str) -> bool:
         """Check if request is from a validator (high priority)."""
-        # Validator paths get priority
+        # Validator paths get priority - these are time-sensitive operations
+        # that can fail if delayed by miner traffic
         validator_paths = [
-            "/epoch/",      # GET /epoch/{id}/leads
-            "/validate",    # POST /validate (hashes/reveals)
+            "/epoch/",      # GET /epoch/{id}/leads - validators fetching leads
+            "/validate",    # POST /validate - validators submitting decision hashes
+            "/reveal",      # POST /reveal/ and /reveal/batch - validators revealing decisions
+            "/weights",     # POST /weights/submit - auditor validators submitting weights
         ]
         return any(vpath in path for vpath in validator_paths)
     

@@ -2290,15 +2290,18 @@ class Validator(BaseValidatorNeuron):
                     # Coordinator in containerized mode: Will re-accumulate all after aggregation
                     container_mode = getattr(self.config.neuron, 'mode', None)
                     
-                    # Store weight info in local_validation_data for aggregation
+                                       # Store weight info in local_validation_data for aggregation
+                    # CRITICAL FIX: Get is_icp_multiplier from automated_checks_data (where it's calculated)
+                    # NOT from lead (which is the gateway lead object, not the lead_blob that was validated)
                     if len(local_validation_data) > 0:
-                        local_validation_data[-1]["is_icp_multiplier"] = lead.get("is_icp_multiplier", 1.0)
+                        local_validation_data[-1]["is_icp_multiplier"] = automated_checks_data.get("is_icp_multiplier", 0.0)
                     
                     # Only accumulate now if NOT in container mode (backward compatibility)
                     # In container mode, coordinator will accumulate ALL leads after aggregation
                     if container_mode is None:
                         # Traditional single-validator mode
-                        is_icp_multiplier = lead.get("is_icp_multiplier", 1.0)
+                        # CRITICAL FIX: Get from automated_checks_data, not lead
+                        is_icp_multiplier = automated_checks_data.get("is_icp_multiplier", 0.0)
                         await self.accumulate_miner_weights(
                             miner_hotkey=lead.get("miner_hotkey"),
                             rep_score=rep_score,
@@ -2544,7 +2547,8 @@ class Validator(BaseValidatorNeuron):
                     miner_hotkey = val_data.get("miner_hotkey")
                     decision = val_data.get("decision")
                     rep_score = val_data.get("rep_score", 0)
-                    is_icp_multiplier = val_data.get("is_icp_multiplier", 1.0)
+                    # Default to 0.0 (new format: no adjustment) instead of 1.0 (old format: multiplier)
+                    is_icp_multiplier = val_data.get("is_icp_multiplier", 0.0)
                     
                     await self.accumulate_miner_weights(
                         miner_hotkey=miner_hotkey,
@@ -2685,7 +2689,7 @@ class Validator(BaseValidatorNeuron):
                     "end_block": (current_epoch + 1) * 360,
                     "miner_scores": {},
                     "approved_lead_count": 0,  # Track number of approved leads for linear emissions
-                    "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', 2000),  # Persist for restart recovery
+                    "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', 3000),  # Persist for restart recovery
                     "last_updated": datetime.utcnow().isoformat()
                 }
                 # Save immediately so epoch exists even if all leads are denied
@@ -2747,7 +2751,7 @@ class Validator(BaseValidatorNeuron):
                 "end_block": (current_epoch + 1) * 360,
                 "miner_scores": epoch_data["miner_scores"].copy(),  # Deep copy of scores
                 "approved_lead_count": epoch_data.get("approved_lead_count", 0),  # Track for linear emissions
-                "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', epoch_data.get("max_leads_per_epoch", 2000)),  # Persist for restart recovery
+                "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', epoch_data.get("max_leads_per_epoch", 3000)),  # Persist for restart recovery
                 "last_updated": datetime.utcnow().isoformat()
             }
             
@@ -2837,13 +2841,13 @@ class Validator(BaseValidatorNeuron):
                         with open(history_file, 'r') as f:
                             history_data = json.load(f)
                         epoch_data = history_data.get(str(current_epoch), {})
-                        MAX_LEADS_PER_EPOCH = epoch_data.get("max_leads_per_epoch", 2000)
+                        MAX_LEADS_PER_EPOCH = epoch_data.get("max_leads_per_epoch", 3000)
                         print(f"   ℹ️  Recovered max_leads_per_epoch={MAX_LEADS_PER_EPOCH} from history file")
                     else:
-                        MAX_LEADS_PER_EPOCH = 2000
+                        MAX_LEADS_PER_EPOCH = 3000
                 except Exception as e:
                     print(f"   ⚠️  Could not recover max_leads_per_epoch from history: {e}")
-                    MAX_LEADS_PER_EPOCH = 2000
+                    MAX_LEADS_PER_EPOCH = 3000
             ROLLING_WINDOW = 30
             
             # ═══════════════════════════════════════════════════════════════════

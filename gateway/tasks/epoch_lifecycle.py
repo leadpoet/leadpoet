@@ -1020,7 +1020,9 @@ async def compute_epoch_consensus(epoch_id: int):
                     continue
                 
                 # Log CONSENSUS_RESULT publicly for miner transparency
-                await log_consensus_result(lead_id, epoch_id, outcome)
+                # Pass pre-fetched lead_blob to avoid redundant DB query
+                prefetched_lead_blob = all_lead_blobs.get(lead_id, {})
+                await log_consensus_result(lead_id, epoch_id, outcome, lead_blob=prefetched_lead_blob, is_icp_value=is_icp_multiplier)
                 
                 if outcome['final_decision'] == 'approve':
                     approved_count += 1
@@ -1079,9 +1081,10 @@ async def compute_epoch_consensus(epoch_id: int):
         print(f"   ❌ Failed to compute epoch consensus: {e}")
         import traceback
         traceback.print_exc()
+        raise  # Re-raise so caller knows consensus failed and can retry
 
 
-async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
+async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict, lead_blob: dict = None, is_icp_value: float = None):
     """
     Log CONSENSUS_RESULT event to transparency log for miner transparency.
     
@@ -1099,21 +1102,31 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
         lead_id: Lead UUID
         epoch_id: Epoch ID
         outcome: Consensus result from compute_weighted_consensus()
+        lead_blob: Optional pre-fetched lead_blob (avoids DB query if provided)
+        is_icp_value: Optional pre-fetched is_icp_multiplier value
     """
     try:
-        # Fetch lead_blob to compute email_hash and get ICP multiplier
-        lead_result = await asyncio.to_thread(
-            lambda: supabase.table("leads_private")
-                .select("lead_blob, is_icp_multiplier")
-                .eq("lead_id", lead_id)
-                .execute()
-        )
-        
         email_hash = None
         linkedin_combo_hash = None
-        is_icp_multiplier = 1.0  # Default for old leads
-        if lead_result.data and len(lead_result.data) > 0:
-            lead_blob = lead_result.data[0].get("lead_blob", {})
+        is_icp_multiplier = is_icp_value if is_icp_value is not None else 0.0  # Default for new leads
+        
+        # Use pre-fetched lead_blob if provided, otherwise fetch from DB
+        if lead_blob is None or lead_blob == {}:
+            # Fallback: Fetch lead_blob from DB (for backwards compatibility)
+            lead_result = await asyncio.to_thread(
+                lambda: supabase.table("leads_private")
+                    .select("lead_blob, is_icp_multiplier")
+                    .eq("lead_id", lead_id)
+                    .execute()
+            )
+            
+            if lead_result.data and len(lead_result.data) > 0:
+                lead_blob = lead_result.data[0].get("lead_blob", {})
+                if isinstance(lead_blob, str):
+                    lead_blob = json.loads(lead_blob)
+                is_icp_multiplier = lead_result.data[0].get("is_icp_multiplier", 0.0)
+        
+        if lead_blob:
             if isinstance(lead_blob, str):
                 lead_blob = json.loads(lead_blob)
             
@@ -1126,9 +1139,6 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict):
             linkedin_url = lead_blob.get("linkedin", "")
             company_linkedin_url = lead_blob.get("company_linkedin", "")
             linkedin_combo_hash = compute_linkedin_combo_hash(linkedin_url, company_linkedin_url)
-            
-            # Get ICP adjustment/multiplier (from DB column, falls back to 0 for new format if missing)
-            is_icp_multiplier = lead_result.data[0].get("is_icp_multiplier", 0.0)
         
         payload = {
             "lead_id": lead_id,

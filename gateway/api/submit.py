@@ -95,12 +95,17 @@ from gateway.utils.geo_normalize import normalize_location, validate_location, n
 # Role Sanity Check Function
 # ============================================================
 
-def check_role_sanity(role_raw: str) -> tuple:
+def check_role_sanity(role_raw: str, full_name: str = "", company: str = "") -> tuple:
     """
     Validate role format - returns (error_code, error_message) or (None, None) if valid.
 
     Checks loaded from role_patterns.json for easy maintenance.
     Catches garbage roles at gateway BEFORE entering validation queue.
+
+    Args:
+        role_raw: The role/job title to validate
+        full_name: Person's full name (for name-in-role check)
+        company: Company/business name (for company-in-role check)
     """
     role_raw = role_raw.strip()
     role_lower = role_raw.lower()
@@ -108,16 +113,20 @@ def check_role_sanity(role_raw: str) -> tuple:
     letters_only = re.sub(r'[^a-zA-Z]', '', role_raw)
 
     # ==========================================
-    # CURRENT 11 CHECKS
+    # BASIC LENGTH CHECKS
     # ==========================================
 
     # Check 1: Too short
     if len(role_raw) < thresholds['min_length']:
         return ("role_too_short", f"Role too short ({len(role_raw)} chars). Minimum {thresholds['min_length']} characters required.")
 
-    # Check 2: Too long
+    # Check 2: Too long (general limit from config)
     if len(role_raw) > thresholds['max_length']:
         return ("role_too_long", f"Role too long ({len(role_raw)} chars). Maximum {thresholds['max_length']} characters allowed.")
+
+    # Check 2b: Anti-gaming length limit (stricter - 80 chars max for legitimate job titles)
+    if len(role_raw) > 80:
+        return ("role_too_long_gaming", f"Role too long ({len(role_raw)} chars > 80). Remove taglines and extra info.")
 
     # Check 3: No letters
     if not any(c.isalpha() for c in role_raw):
@@ -189,6 +198,10 @@ def check_role_sanity(role_raw: str) -> tuple:
     if role_raw and role_raw[0] in ROLE_PATTERNS['special_chars']:
         return ("role_starts_special_char", "Role cannot start with a special character.")
 
+    # Check 16b: Ends with special character
+    if role_raw and role_raw[-1] in ROLE_PATTERNS['special_chars']:
+        return ("role_ends_special_char", "Role cannot end with a special character.")
+
     # Check 17: Achievement/stat statements
     for pattern in ROLE_PATTERNS['achievement_patterns']:
         if re.search(pattern, role_raw, re.IGNORECASE):
@@ -228,6 +241,74 @@ def check_role_sanity(role_raw: str) -> tuple:
         vowels = sum(1 for c in letters_only.lower() if c in 'aeiou')
         if vowels / len(letters_only) < thresholds['min_vowel_ratio']:
             return ("role_gibberish", "Role appears to be gibberish (no vowels).")
+
+    # ==========================================
+    # CHECKS FROM STAGE 4 (check_role_validity)
+    # ==========================================
+
+    # Check 25: Not a job title (student, intern, etc.)
+    not_job_titles = ['student', 'mba', 'phd', 'intern', 'trainee', 'volunteer', 'retired']
+    if role_lower in not_job_titles:
+        return ("role_not_job_title", f"'{role_raw}' is not a job title.")
+
+    # Check 26: Ends with intern/trainee suffix
+    if role_lower.endswith(' intern') or role_lower.endswith(' trainee'):
+        return ("role_intern_trainee", "Intern/trainee roles are not accepted.")
+
+    # Check 27: Contains 'participant'
+    if 'participant' in role_lower:
+        return ("role_participant", "Role contains 'participant' - not a job title.")
+
+    # Check 28: Truncated role (ends with preposition)
+    if role_lower.endswith(' in') or role_lower.endswith(' at') or role_lower.endswith(' for'):
+        return ("role_truncated", "Role appears truncated (ends with 'in', 'at', or 'for').")
+
+    # Check 29: Contains degree (MA, JD, etc.)
+    if re.search(r',\s*m\.?a\.?\s*in', role_lower) or re.search(r'juris|doctorate', role_lower):
+        return ("role_has_degree", "Role contains degree information. Use just the job title.")
+
+    # Check 30: Marketing taglines (period + sentence in long roles)
+    if '. ' in role_raw and len(role_raw) > 40:
+        return ("role_marketing_tagline", "Role contains marketing tagline. Use just the job title.")
+
+    # Check 31: Multiple periods or exclamation marks
+    if role_raw.count('.') > 1 or role_raw.count('!') > 0:
+        return ("role_excessive_punctuation", "Role has excessive punctuation. Use just the job title.")
+
+    # Check 32: Geographic location at end (anti-gaming)
+    geo_end_pattern = r'[-|]\s*(?:APAC|EMEA|LATAM|MENA|Americas|Europe|Asia|Africa|' \
+                      r'Vietnam|Cambodia|Thailand|Singapore|Malaysia|Indonesia|Philippines|' \
+                      r'India|China|Japan|Korea|Taiwan|Hong Kong|UAE|Dubai|' \
+                      r'UK|Germany|France|Spain|Italy|Netherlands|' \
+                      r'US|USA|Canada|Mexico|Brazil|Argentina)\s*$'
+    if re.search(geo_end_pattern, role_raw, re.IGNORECASE):
+        return ("role_geo_at_end", "Role ends with geographic location. Put location in region/country field.")
+
+    # Check 33: Person's name in role (anti-gaming)
+    if full_name:
+        name_parts = full_name.lower().split()
+        common_words = {'the', 'and', 'for', 'manager', 'director', 'senior', 'junior', 'lead', 'head', 'chief',
+                        'grant', 'case', 'mark', 'bill', 'will', 'ray', 'joy', 'hope', 'faith', 'grace', 'dean', 'chase'}
+        for part in name_parts:
+            if len(part) > 2 and part not in common_words:
+                if re.search(rf'\b{re.escape(part)}\b', role_lower):
+                    return ("role_contains_name", f"Role contains person's name '{part}'. Use just the job title.")
+
+    # Check 34: Company name in role (anti-gaming)
+    if company:
+        company_lower = company.lower().strip()
+        # Check if full company name appears in role
+        if company_lower in role_lower:
+            # Allow "at Company" pattern but reject "CEO Company" or "Company CEO"
+            if f" at {company_lower}" not in role_lower and f"@ {company_lower}" not in role_lower:
+                return ("role_contains_company_name", f"Role contains company name '{company}'. Use just the job title.")
+        # Check first word of company (for "Microsoft" in "Microsoft Engineer")
+        company_parts = company_lower.split()
+        if company_parts:
+            company_first = company_parts[0]
+            if len(company_first) > 3 and company_first in role_lower:
+                if f" at {company_first}" not in role_lower:
+                    return ("role_contains_company_name", f"Role contains company name '{company_first}'. Use just the job title.")
 
     return (None, None)  # Passed all checks
 
@@ -441,6 +522,134 @@ def check_description_sanity(desc_raw: str) -> tuple:
     if desc_raw.startswith('|') or desc_raw.startswith(' |'):
         return ("desc_formatting_junk", "Description contains formatting artifacts. Please provide clean text.")
     
+    return (None, None)  # Passed all checks
+
+
+# ============================================================
+# Industry Taxonomy Check Function
+# ============================================================
+# Load industry taxonomy from validator_models (723 sub-industries)
+import sys
+_validator_models_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+if _validator_models_path not in sys.path:
+    sys.path.insert(0, _validator_models_path)
+
+from validator_models.industry_taxonomy import INDUSTRY_TAXONOMY
+
+# Build set of valid industries (parent categories)
+VALID_INDUSTRIES = set()
+for sub_ind, data in INDUSTRY_TAXONOMY.items():
+    for ind in data.get("industries", []):
+        VALID_INDUSTRIES.add(ind)
+
+print(f"[submit.py] Loaded industry taxonomy: {len(INDUSTRY_TAXONOMY)} sub-industries, {len(VALID_INDUSTRIES)} industries")
+
+
+def check_industry_taxonomy(industry: str, sub_industry: str) -> tuple:
+    """
+    Validate industry and sub_industry against the taxonomy.
+    Returns (error_code, error_message) or (None, None) if valid.
+
+    Checks:
+    1. sub_industry must exist in INDUSTRY_TAXONOMY
+    2. industry must be a valid parent for this sub_industry
+    """
+    industry = industry.strip()
+    sub_industry = sub_industry.strip()
+
+    # Check 1: sub_industry exists in taxonomy
+    if sub_industry not in INDUSTRY_TAXONOMY:
+        # Try case-insensitive match
+        sub_industry_lower = sub_industry.lower()
+        matched_sub = None
+        for key in INDUSTRY_TAXONOMY.keys():
+            if key.lower() == sub_industry_lower:
+                matched_sub = key
+                break
+
+        if not matched_sub:
+            return ("invalid_sub_industry",
+                    f"Sub-industry '{sub_industry}' not found in taxonomy. Please use a valid sub-industry.")
+        sub_industry = matched_sub
+
+    # Check 2: industry is valid for this sub_industry
+    valid_industries = INDUSTRY_TAXONOMY[sub_industry].get("industries", [])
+
+    if industry not in valid_industries:
+        # Try case-insensitive match
+        industry_lower = industry.lower()
+        matched_ind = None
+        for ind in valid_industries:
+            if ind.lower() == industry_lower:
+                matched_ind = ind
+                break
+
+        if not matched_ind:
+            return ("invalid_industry_pairing",
+                    f"Industry '{industry}' is not valid for sub-industry '{sub_industry}'. "
+                    f"Valid industries: {valid_industries}")
+
+    return (None, None)  # Passed all checks
+
+
+# ============================================================
+# LinkedIn URL Format Validation
+# ============================================================
+
+def check_linkedin_url_format(linkedin_url: str, company_linkedin_url: str) -> tuple:
+    """
+    Validate LinkedIn URL formats - returns (error_code, error_message) or (None, None) if valid.
+
+    Validates:
+    1. `linkedin` (personal profile) must contain /in/ path
+    2. `company_linkedin` must contain /company/ path
+    3. `company_linkedin` must NOT contain /in/ (common mistake: putting personal profile in company field)
+
+    This prevents miners from:
+    - Submitting invalid/malformed LinkedIn URLs
+    - Swapping personal and company LinkedIn URLs
+    - Gaming the system with fake URLs
+    """
+    linkedin_url = linkedin_url.strip().lower() if linkedin_url else ""
+    company_linkedin_url = company_linkedin_url.strip().lower() if company_linkedin_url else ""
+
+    # ========================================
+    # Check 1: Personal LinkedIn URL format
+    # ========================================
+    if linkedin_url:
+        # Must be a LinkedIn URL
+        if "linkedin.com" not in linkedin_url:
+            return ("invalid_linkedin_url",
+                    f"LinkedIn URL '{linkedin_url}' is not a valid LinkedIn URL. Must contain 'linkedin.com'.")
+
+        # Must be a personal profile (/in/)
+        if "/in/" not in linkedin_url:
+            # Check if they accidentally put a company URL in the personal field
+            if "/company/" in linkedin_url:
+                return ("linkedin_url_wrong_type",
+                        f"LinkedIn URL '{linkedin_url}' is a company page, not a personal profile. Use /in/ URLs for personal LinkedIn field.")
+            return ("linkedin_url_missing_profile",
+                    f"LinkedIn URL '{linkedin_url}' must be a personal profile URL (contain '/in/').")
+
+    # ========================================
+    # Check 2: Company LinkedIn URL format
+    # ========================================
+    if company_linkedin_url:
+        # Must be a LinkedIn URL
+        if "linkedin.com" not in company_linkedin_url:
+            return ("invalid_company_linkedin_url",
+                    f"Company LinkedIn URL '{company_linkedin_url}' is not a valid LinkedIn URL. Must contain 'linkedin.com'.")
+
+        # Must NOT be a personal profile (/in/) - common mistake
+        if "/in/" in company_linkedin_url:
+            return ("company_linkedin_wrong_type",
+                    f"Company LinkedIn URL '{company_linkedin_url}' is a personal profile, not a company page. Use /company/ URLs for company LinkedIn field.")
+
+        # Must be a company page (/company/)
+        if "/company/" not in company_linkedin_url:
+            return ("company_linkedin_missing_company_path",
+                    f"Company LinkedIn URL '{company_linkedin_url}' must be a company page URL (contain '/company/').")
+
     return (None, None)  # Passed all checks
 
 
@@ -1474,12 +1683,14 @@ async def submit_lead(event: SubmitLeadEvent):
         # ========================================
         # Catch obviously garbage roles at gateway BEFORE entering validation queue
         # Saves validator time and API costs by rejecting spam/garbage early
-        # Checks loaded from role_patterns.json (24 checks total)
+        # Checks loaded from role_patterns.json + Stage 4 checks (34 checks total)
         print(f"   🔍 Validating role format (early sanity check)...")
         role_raw = lead_blob.get("role", "").strip()
+        full_name_for_check = lead_blob.get("full_name", "").strip()
+        company_for_check = lead_blob.get("business", "").strip()
 
-        # Call comprehensive role sanity check function
-        error_code, error_message = check_role_sanity(role_raw)
+        # Call comprehensive role sanity check function (includes name/company in role checks)
+        error_code, error_message = check_role_sanity(role_raw, full_name_for_check, company_for_check)
         role_sanity_error = (error_code, error_message) if error_code else None
 
         # Reject if any sanity check failed
@@ -1599,7 +1810,74 @@ async def submit_lead(event: SubmitLeadEvent):
             )
 
         print(f"   ✅ Description sanity check passed: '{desc_raw[:60]}{'...' if len(desc_raw) > 60 else ''}'")
-        
+
+        # ========================================
+        # EARLY EXIT: Industry Taxonomy Validation
+        # ========================================
+        # Validate industry/sub_industry against taxonomy BEFORE any API calls
+        # Rejects invalid industry/sub_industry pairs at gateway
+        print(f"   🔍 Validating industry taxonomy (early check)...")
+        industry_raw = lead_blob.get("industry", "").strip()
+        sub_industry_raw = lead_blob.get("sub_industry", "").strip()
+
+        # Call industry taxonomy check
+        ind_error_code, ind_error_message = check_industry_taxonomy(industry_raw, sub_industry_raw)
+
+        if ind_error_code:
+            print(f"❌ Industry taxonomy check failed: {ind_error_code}")
+            print(f"   Industry: '{industry_raw}', Sub-industry: '{sub_industry_raw}'")
+
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            print(f"   📊 Rate limit updated: rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+            # Log VALIDATION_FAILED event
+            try:
+                from datetime import timezone as tz_module
+                validation_failed_event = {
+                    "event_type": "VALIDATION_FAILED",
+                    "actor_hotkey": event.actor_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.now(tz_module.utc).isoformat(),
+                    "payload_hash": hashlib.sha256(json.dumps({
+                        "lead_id": event.payload.lead_id,
+                        "reason": ind_error_code,
+                        "industry": industry_raw,
+                        "sub_industry": sub_industry_raw
+                    }, sort_keys=True).encode()).hexdigest(),
+                    "build_id": "gateway",
+                    "signature": "industry_taxonomy_check",
+                    "payload": {
+                        "lead_id": event.payload.lead_id,
+                        "reason": ind_error_code,
+                        "industry": industry_raw,
+                        "sub_industry": sub_industry_raw,
+                        "miner_hotkey": event.actor_hotkey
+                    }
+                }
+                await log_event(validation_failed_event)
+                print(f"   ✅ Logged VALIDATION_FAILED ({ind_error_code}) to TEE buffer")
+            except Exception as e:
+                print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": ind_error_code,
+                    "message": ind_error_message,
+                    "industry": industry_raw,
+                    "sub_industry": sub_industry_raw,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": updated_stats["reset_at"]
+                    }
+                }
+            )
+
+        print(f"   ✅ Industry taxonomy check passed: industry='{industry_raw}', sub_industry='{sub_industry_raw}'")
+
         # ========================================
         # Validate country/state/city logic
         # ========================================
@@ -1786,7 +2064,73 @@ async def submit_lead(event: SubmitLeadEvent):
             )
         
         print(f"   ✅ Source provenance verified: source_type={source_type}")
-        
+
+        # ========================================
+        # Validate LinkedIn URL formats
+        # ========================================
+        linkedin_url = lead_blob.get("linkedin", "").strip()
+        company_linkedin_url = lead_blob.get("company_linkedin", "").strip()
+
+        linkedin_error_code, linkedin_error_message = check_linkedin_url_format(linkedin_url, company_linkedin_url)
+
+        if linkedin_error_code:
+            print(f"❌ LinkedIn URL format check failed: {linkedin_error_code}")
+            print(f"   Personal LinkedIn: {linkedin_url[:60] if linkedin_url else '(empty)'}...")
+            print(f"   Company LinkedIn: {company_linkedin_url[:60] if company_linkedin_url else '(empty)'}...")
+
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            print(f"   📊 Rate limit updated: rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+            # Log VALIDATION_FAILED event
+            try:
+                from datetime import timezone as tz_module
+                validation_failed_event = {
+                    "event_type": "VALIDATION_FAILED",
+                    "actor_hotkey": event.actor_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.now(tz_module.utc).isoformat(),
+                    "payload_hash": hashlib.sha256(json.dumps({
+                        "lead_id": event.payload.lead_id,
+                        "reason": linkedin_error_code,
+                        "linkedin": linkedin_url[:100] if linkedin_url else "",
+                        "company_linkedin": company_linkedin_url[:100] if company_linkedin_url else ""
+                    }, sort_keys=True).encode()).hexdigest(),
+                    "build_id": "gateway",
+                    "signature": "linkedin_url_format_check",
+                    "payload": {
+                        "lead_id": event.payload.lead_id,
+                        "reason": linkedin_error_code,
+                        "linkedin": linkedin_url[:100] if linkedin_url else "",
+                        "company_linkedin": company_linkedin_url[:100] if company_linkedin_url else "",
+                        "miner_hotkey": event.actor_hotkey
+                    }
+                }
+                await log_event(validation_failed_event)
+                print(f"   ✅ Logged VALIDATION_FAILED ({linkedin_error_code}) to TEE buffer")
+            except Exception as e:
+                print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": linkedin_error_code,
+                    "message": linkedin_error_message,
+                    "linkedin": linkedin_url[:100] if linkedin_url else "",
+                    "company_linkedin": company_linkedin_url[:100] if company_linkedin_url else "",
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": updated_stats["reset_at"]
+                    }
+                }
+            )
+
+        linkedin_display = linkedin_url[:50] if linkedin_url else "(empty)"
+        company_linkedin_display = company_linkedin_url[:50] if company_linkedin_url else "(empty)"
+        print(f"   ✅ LinkedIn URL formats validated: personal={linkedin_display}, company={company_linkedin_display}")
+
         # ========================================
         # CRITICAL: Verify Miner Attestation (Trustless Model)
         # ========================================

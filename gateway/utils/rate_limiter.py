@@ -2,9 +2,9 @@
 Trustless Rate Limiter for Gateway
 
 Prevents DoS attacks by rate-limiting miner submissions:
-- 250 submissions max per miner per day
-- 50 rejections max per miner per day
-- Daily reset at midnight EST (05:00 UTC)
+- 500 submissions max per miner per day
+- 100 rejections max per miner per day
+- Daily reset at midnight UTC (00:00 UTC)
 
 Design:
 - In-memory cache for fast lookups (O(1))
@@ -50,30 +50,23 @@ MAX_SUBMISSIONS_PER_DAY = 500
 MAX_REJECTIONS_PER_DAY = 100
 MIN_SECONDS_BETWEEN_SUBMISSIONS = 45  # Cooldown between submissions (anti-spam)
 
-# EST timezone offset (UTC-5, or UTC-4 during DST)
-# For simplicity, we'll use UTC-5 (EST) year-round
-EST_OFFSET = -5
-
-
-def get_next_midnight_est() -> datetime:
+def get_next_midnight_utc() -> datetime:
     """
-    Calculate the next midnight EST (05:00 UTC).
+    Calculate the next midnight UTC (00:00 UTC).
     
     Returns:
-        datetime: Next midnight EST in UTC
+        datetime: Next midnight UTC
     """
     now_utc = datetime.now(timezone.utc)
     
-    # Convert to EST (UTC-5)
-    est_now = now_utc + timedelta(hours=EST_OFFSET)
+    # Get next midnight UTC
+    next_midnight = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     
-    # Get next midnight EST
-    next_midnight_est = est_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    
-    # Convert back to UTC
-    next_midnight_utc = next_midnight_est - timedelta(hours=EST_OFFSET)
-    
-    return next_midnight_utc
+    return next_midnight
+
+
+# Keep old function name as alias for backward compatibility during transition
+get_next_midnight_est = get_next_midnight_utc
 
 
 def _load_cache_from_supabase():
@@ -231,7 +224,7 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
             hours_left = int(time_until_reset.total_seconds() / 3600)
             return (
                 False,
-                f"Daily submission limit reached ({MAX_SUBMISSIONS_PER_DAY}/day). Resets in {hours_left}h at midnight EST.",
+                f"Daily submission limit reached ({MAX_SUBMISSIONS_PER_DAY}/day). Resets in {hours_left}h at midnight UTC.",
                 {
                     "submissions": entry["submissions"],
                     "max_submissions": MAX_SUBMISSIONS_PER_DAY,
@@ -248,7 +241,7 @@ def check_rate_limit(miner_hotkey: str) -> Tuple[bool, str, Dict]:
             hours_left = int(time_until_reset.total_seconds() / 3600)
             return (
                 False,
-                f"Daily rejection limit reached ({MAX_REJECTIONS_PER_DAY}/day). Resets in {hours_left}h at midnight EST.",
+                f"Daily rejection limit reached ({MAX_REJECTIONS_PER_DAY}/day). Resets in {hours_left}h at midnight UTC.",
                 {
                     "submissions": entry["submissions"],
                     "max_submissions": MAX_SUBMISSIONS_PER_DAY,
@@ -532,7 +525,7 @@ def reserve_submission_slot(miner_hotkey: str) -> Tuple[bool, str, Dict]:
             hours_left = int(time_until_reset.total_seconds() / 3600)
             return (
                 False,
-                f"Daily submission limit reached ({MAX_SUBMISSIONS_PER_DAY}/day). Resets in {hours_left}h at midnight EST.",
+                f"Daily submission limit reached ({MAX_SUBMISSIONS_PER_DAY}/day). Resets in {hours_left}h at midnight UTC.",
                 {
                     "submissions": entry["submissions"],
                     "max_submissions": MAX_SUBMISSIONS_PER_DAY,
@@ -549,7 +542,7 @@ def reserve_submission_slot(miner_hotkey: str) -> Tuple[bool, str, Dict]:
             hours_left = int(time_until_reset.total_seconds() / 3600)
             return (
                 False,
-                f"Daily rejection limit reached ({MAX_REJECTIONS_PER_DAY}/day). Resets in {hours_left}h at midnight EST.",
+                f"Daily rejection limit reached ({MAX_REJECTIONS_PER_DAY}/day). Resets in {hours_left}h at midnight UTC.",
                 {
                     "submissions": entry["submissions"],
                     "max_submissions": MAX_SUBMISSIONS_PER_DAY,

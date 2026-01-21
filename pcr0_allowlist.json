@@ -18,6 +18,12 @@
       "version": "v1.0.0",
       "deployed": "2026-01-06",
       "notes": "Initial validator enclave"
+    },
+    {
+      "pcr0": "503efd9c21ea01bd2051aa45c87240957ad00f4cbd9f3fe646be6d5f24e75223ed59558a90e6c4ef5f042332915af07b",
+      "version": "v1.0.1-temp",
+      "deployed": "2026-01-21",
+      "notes": "TEMPORARY - validator on commit 4014536, remove after enclave rebuild"
     }
   ]
 }

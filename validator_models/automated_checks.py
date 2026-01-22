@@ -9804,11 +9804,12 @@ def calculate_icp_adjustment(lead: dict) -> int:
                 penalty = 15
                 breakdown["employee_penalty"] = -15
                 print(f"   🏭 LARGE COMPANY (5k-10k): -15 points")
-            elif emp_min > 1000:
-                # 1,001-5,000 employees
+            elif 1000 < emp_min <= 5000:
+                # 1,001-5,000 employees (NOT 10,001+ which is enterprise)
                 penalty = 10
                 breakdown["employee_penalty"] = -10
-                print(f"   🏭 LARGE COMPANY (>1k): -10 points")
+                print(f"   🏭 LARGE COMPANY (1k-5k): -10 points")
+            # Note: 10,001+ employees (enterprise) get NO ICP penalty - they have hardcoded rep scores
     else:
         print(f"   📋 No employee count available - no size adjustment")
     

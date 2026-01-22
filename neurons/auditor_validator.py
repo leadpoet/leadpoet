@@ -198,7 +198,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # default gateway URL
-DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
 
 # Auditors skip PCR0 verification (requires nitro-cli to verify independently)
 # AWS cert chain + COSE signature verification proves it's a REAL Nitro enclave

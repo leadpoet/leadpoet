@@ -34,7 +34,7 @@ pip install cbor2 cryptography requests
 **Purpose**: Verify the gateway is running inside a genuine AWS Nitro Enclave and extract the code integrity proof (PCR0).
 
 ```bash
-python scripts/verify_attestation.py http://54.80.97.12:8000
+python scripts/verify_attestation.py http://52.91.135.79:8000
 ```
 
 **What it does**:

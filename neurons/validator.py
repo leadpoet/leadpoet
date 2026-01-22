@@ -3235,7 +3235,7 @@ class Validator(BaseValidatorNeuron):
             return None
         
         # Check if gateway submission is enabled
-        gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
         if os.environ.get("DISABLE_GATEWAY_WEIGHT_SUBMISSION", "").lower() == "true":
             bt.logging.info("ℹ️ Gateway weight submission disabled via env var")
             return None

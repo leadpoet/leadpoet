@@ -19,8 +19,8 @@ echo "==========================================================================
 # Use absolute path (not $HOME) since this runs with sudo
 EIF_PATH="/home/ec2-user/tee/tee-enclave.eif"
 ENCLAVE_CID=16
-CPU_COUNT=32
-MEMORY_MB=65536  # High Performance (32 CPUs, 64 GB) - Half of 64 vCPU / 128 GB instance
+CPU_COUNT=24
+MEMORY_MB=65536  # High Performance (24 CPUs, 64 GB) - For m5n.8xlarge (32 vCPU / 128 GB instance)
 
 # Check if EIF exists
 if [ ! -f "$EIF_PATH" ]; then

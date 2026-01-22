@@ -58,10 +58,10 @@ pip install -e .
 **Step A: Get attestation and extract PCR0**
 ```bash
 # Get attestation
-curl http://54.80.97.12:8000/attest > attestation.json
+curl http://52.91.135.79:8000/attest > attestation.json
 
 # Verify AWS Nitro signature + extract PCR0
-python scripts/verify_attestation.py http://54.80.97.12:8000
+python scripts/verify_attestation.py http://52.91.135.79:8000
 ```
 
 **Step B: Verify PCR0 matches expected code**

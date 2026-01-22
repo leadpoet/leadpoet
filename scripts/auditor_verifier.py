@@ -77,7 +77,7 @@ PINNED_GATEWAY_CODE_HASH = os.environ.get("EXPECTED_GATEWAY_CODE_HASH")
 PINNED_VALIDATOR_CODE_HASH = os.environ.get("EXPECTED_VALIDATOR_CODE_HASH")
 
 # Default gateway URL
-DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
 DEFAULT_NETUID = int(os.environ.get("NETUID", "71"))
 
 
@@ -986,7 +986,7 @@ EXAMPLES:
     python scripts/auditor_verifier.py verify-all --epoch 12345
 
 ENVIRONMENT VARIABLES:
-    GATEWAY_URL              Gateway URL (default: http://54.226.209.164:8000)
+    GATEWAY_URL              Gateway URL (default: http://52.91.135.79:8000)
     NETUID                   Subnet ID (default: 71)
     SUPABASE_URL             Supabase project URL (required for log verification)
     SUPABASE_ANON_KEY        Supabase anonymous key (required for log verification)

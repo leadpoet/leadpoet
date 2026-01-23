@@ -594,10 +594,10 @@ def check_locations_match(extracted: str, ground_truth: str) -> Tuple[bool, str]
             return True, 'ext_city_in_gt'
 
     ext_words = set(ext_norm.replace(',', ' ').split())
-    gt_words = set(gt_norm.replace(',', ' ').split())
-    overlap = ext_words & gt_words
-    meaningful = [w for w in overlap if len(w) > 2]
-    if meaningful:
+    # Only use city (first part) from ground truth for word overlap
+    gt_city = ground_truth.split(',')[0].strip().lower() if ground_truth else ''
+    gt_words = set(gt_city.split()) if gt_city and len(gt_city) > 2 else set()
+    if gt_words and gt_words.issubset(ext_words):
         return True, 'word_overlap'
 
     return False, 'no_match'

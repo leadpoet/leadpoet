@@ -95,7 +95,9 @@ from gateway.utils.geo_normalize import normalize_location, validate_location, n
 # Role Sanity Check Function
 # ============================================================
 
-def check_role_sanity(role_raw: str, full_name: str = "", company: str = "") -> tuple:
+def check_role_sanity(role_raw: str, full_name: str = "", company: str = "",
+                      city: str = "", state: str = "", country: str = "",
+                      industry: str = "") -> tuple:
     """
     Validate role format - returns (error_code, error_message) or (None, None) if valid.
 
@@ -106,6 +108,10 @@ def check_role_sanity(role_raw: str, full_name: str = "", company: str = "") -> 
         role_raw: The role/job title to validate
         full_name: Person's full name (for name-in-role check)
         company: Company/business name (for company-in-role check)
+        city: Miner's submitted city (for location-in-role check)
+        state: Miner's submitted state (for location-in-role check)
+        country: Miner's submitted country (for location-in-role check)
+        industry: Miner's submitted industry (for industry-in-role check)
     """
     role_raw = role_raw.strip()
     role_lower = role_raw.lower()
@@ -309,6 +315,193 @@ def check_role_sanity(role_raw: str, full_name: str = "", company: str = "") -> 
             if len(company_first) > 3 and company_first in role_lower:
                 if f" at {company_first}" not in role_lower:
                     return ("role_contains_company_name", f"Role contains company name '{company_first}'. Use just the job title.")
+
+    # ==========================================
+    # ANTI-GAMING CHECKS (NEW)
+    # ==========================================
+
+    # Check 35: Role cannot be miner's submitted location (city/state/country)
+    role_lower_stripped = role_lower.strip()
+    if city and role_lower_stripped == city.lower().strip():
+        return ("role_is_city", "Role cannot be the city name. Please provide an actual job title.")
+    if state and role_lower_stripped == state.lower().strip():
+        return ("role_is_state", "Role cannot be the state name. Please provide an actual job title.")
+    if country and role_lower_stripped == country.lower().strip():
+        return ("role_is_country", "Role cannot be the country name. Please provide an actual job title.")
+
+    # Check 36: Role cannot be miner's submitted industry
+    if industry and role_lower_stripped == industry.lower().strip():
+        return ("role_is_industry", "Role cannot be the industry name. Please provide an actual job title.")
+
+    # Check 37: Tagline/mission statement (not a job title)
+    tagline_patterns = [
+        r'\bhelping\s+(you|companies|businesses|entrepreneurs|clients|organizations|people|teams|brands|startups|firms|individuals|others)',
+        r'^i\s+help\b',
+        r'\bi\s+am\s+a?\b',  # "I am a..." statements
+        r'\bpassionate\s+about\b',
+        r'\bhelping\s+to\b',
+        r'\bhelping\s*$',  # "Helping" at end of role
+        r'\bdedicated\s+to\b',
+        r'\bcommitted\s+to\b',
+        r'\bempowering\b',
+        r'\btransforming\b',
+        r'\bdriving\b.*\bgrowth\b',
+        r'\bmaking\s+a\s+difference\b',
+        r'\bbuilding\b.*\bfuture\b',
+        r'\bconnecting\b.*\bwith\b',
+        r'\bserving\b.*\bclients\b',
+        r'\bdelivering\b.*\bsolutions\b',
+        r'\bfocused\s+on\b',
+        r'\bspecializing\s+in\b.*\bhelp',
+    ]
+    for pattern in tagline_patterns:
+        if re.search(pattern, role_lower):
+            return ("role_is_tagline", "Role appears to be a tagline/mission statement, not a job title.")
+
+    # Check 38: Degree as role (education, not job title)
+    # Block roles starting with degree UNLESS followed by legitimate job keywords
+    degree_abbrevs = r'(mba|phd|msc|bsc|ma|ba|ms|bs|bba|bcom|mcom|llb|llm|md|mphil|dba|mph|mfa|med|edd)'
+    job_keywords_after_degree = r'(director|manager|coordinator|advisor|adviser|recruiter|program|admissions|career|student\s+services|alumni|faculty|professor|instructor|teacher|coach|mentor|counselor|specialist|officer|lead|head|dean|chair)'
+
+    # Check if role starts with a degree
+    degree_start_match = re.match(rf'^{degree_abbrevs}\b', role_lower)
+    if degree_start_match:
+        # Get what comes after the degree
+        after_degree = role_lower[degree_start_match.end():].strip()
+
+        # If nothing after degree, reject
+        if not after_degree:
+            return ("role_is_degree", "Role cannot be just a degree. Please provide an actual job title.")
+
+        # If followed by job keyword, allow it (e.g., "MBA Program Director")
+        if re.match(rf'^{job_keywords_after_degree}\b', after_degree):
+            pass  # Allow legitimate job titles
+        else:
+            # Block everything else (e.g., "MBA in Finance", "MBA NMIMS Mumbai", "PhD Candidate")
+            return ("role_is_degree", "Role cannot be a degree/education. Please provide an actual job title.")
+
+    # Also catch full degree names
+    full_degree_patterns = [
+        r"^bachelor'?s?\s+(degree|in|of)\b",
+        r"^master'?s?\s+(degree|in|of)\b",
+        r'^doctorate\s+(in|of)\b',
+        r'^doctor\s+of\s+',
+        r'^associate\s+degree\b',
+    ]
+    for pattern in full_degree_patterns:
+        if re.search(pattern, role_lower):
+            return ("role_is_degree", "Role cannot be a degree/education. Please provide an actual job title.")
+
+    # Check 39: Pronouns (not a job title)
+    pronoun_patterns = [
+        r'^(he|she|they)\s*/\s*(him|her|them)$',
+        r'^(he|she|they)\s*/\s*(him|her|them)\s*/\s*(his|hers|theirs)$',
+        r'^\s*(he|she|they)\s*[/|]\s*(him|her|them)\s*$',
+    ]
+    for pattern in pronoun_patterns:
+        if re.search(pattern, role_lower):
+            return ("role_is_pronouns", "Role cannot be pronouns. Please provide an actual job title.")
+
+    # Check 40: Status statements (not a job title)
+    status_patterns = [
+        r'^open\s+to\s+work\b',
+        r'^looking\s+for\s+(opportunities|work|job|new)\b',
+        r'^seeking\s+(new\s+)?(opportunities|employment|work|job|role|position)\b',
+        r'^actively\s+seeking\b',
+        r'^available\s+for\s+(hire|work|opportunities)\b',
+        r'^in\s+transition\b',
+        r'^between\s+(jobs|roles|opportunities)\b',
+        r'^job\s+seeker\b',
+        r'^career\s+transition\b',
+    ]
+    for pattern in status_patterns:
+        if re.search(pattern, role_lower):
+            return ("role_is_status", "Role cannot be a job-seeking status. Please provide an actual job title.")
+
+    # Check 41: Hashtags (not a job title)
+    if re.search(r'#\w+', role_raw):
+        return ("role_contains_hashtag", "Role cannot contain hashtags. Please provide an actual job title.")
+
+    # Check 42: Too generic standalone terms (not enough context)
+    # Only block truly meaningless terms - legitimate standalone titles like
+    # "Consultant", "Manager", "Director", "Analyst" are allowed
+    generic_standalone = {
+        'professional', 'expert', 'freelancer', 'self-employed', 'self employed',
+        'entrepreneur', 'leader', 'employee', 'worker', 'staff', 'member',
+        'individual', 'person', 'human', 'adult',
+    }
+    if role_lower_stripped in generic_standalone:
+        return ("role_too_generic", f"'{role_raw}' is too generic. Please provide a more specific job title.")
+
+    # Check 43: Certification alone (not a job title)
+    cert_only_patterns = [
+        r'^(cpa|pmp|cfa|cma|cisa|cissp|ccna|ccnp|aws|azure|gcp|scrum|csm|psm|safe|itil|prince2|six sigma|lean)\s*$',
+        r'^certified\s+(public\s+accountant|project\s+manager|financial\s+analyst)\s*$',
+    ]
+    for pattern in cert_only_patterns:
+        if re.search(pattern, role_lower):
+            return ("role_is_certification", "Role cannot be just a certification. Please provide an actual job title.")
+
+    # Check 44: Just a skill (not a job title)
+    skill_only = {
+        'python', 'java', 'javascript', 'typescript', 'react', 'angular', 'vue',
+        'node', 'nodejs', 'sql', 'mysql', 'postgresql', 'mongodb', 'excel',
+        'powerpoint', 'word', 'salesforce', 'sap', 'oracle', 'aws', 'azure', 'gcp',
+        'docker', 'kubernetes', 'linux', 'windows', 'macos', 'ios', 'android',
+        'html', 'css', 'php', 'ruby', 'go', 'rust', 'scala', 'kotlin', 'swift',
+        'c++', 'c#', 'sales', 'marketing', 'finance', 'accounting', 'hr',
+        'photoshop', 'illustrator', 'figma', 'sketch', 'tableau', 'power bi',
+    }
+    if role_lower_stripped in skill_only:
+        return ("role_is_skill", f"'{role_raw}' is a skill, not a job title. Please provide an actual job title.")
+
+    # Check 45: Just a language (not a job title)
+    language_only = {
+        'english', 'spanish', 'french', 'german', 'italian', 'portuguese',
+        'chinese', 'mandarin', 'cantonese', 'japanese', 'korean', 'arabic',
+        'hindi', 'russian', 'dutch', 'swedish', 'norwegian', 'danish', 'finnish',
+        'polish', 'turkish', 'hebrew', 'greek', 'thai', 'vietnamese', 'indonesian',
+        'malay', 'tagalog', 'bengali', 'urdu', 'persian', 'farsi',
+        'bilingual', 'trilingual', 'multilingual', 'polyglot',
+    }
+    if role_lower_stripped in language_only:
+        return ("role_is_language", f"'{role_raw}' is a language, not a job title. Please provide an actual job title.")
+
+    # Check 46: Years of experience (not a job title)
+    experience_patterns = [
+        r'^\d+\+?\s*years?\s*(of\s+)?(experience|exp)\b',
+        r'^\d+\+?\s*years?\s+in\s+',
+        r'^over\s+\d+\s*years?\b',
+        r'^experienced\s+in\b',
+        r'^\d+\s*yrs?\s*(of\s+)?(experience|exp)\b',
+    ]
+    for pattern in experience_patterns:
+        if re.search(pattern, role_lower):
+            return ("role_is_experience", "Role cannot be years of experience. Please provide an actual job title.")
+
+    # Check 47: Retired/Former without actual title
+    retired_patterns = [
+        r'^retired\s*$',
+        r'^former\s*$',
+        r'^ex-?\s*$',
+        r'^previously\s*$',
+        r'^past\s*$',
+    ]
+    for pattern in retired_patterns:
+        if re.search(pattern, role_lower):
+            return ("role_is_retired", "Role cannot be just 'retired' or 'former'. Please provide an actual job title if applicable.")
+
+    # Check 48: Aspiring/Future patterns (not a current job title)
+    aspiring_patterns = [
+        r'^aspiring\s+',
+        r'^future\s+',
+        r'^wannabe\s+',
+        r'^soon\s+to\s+be\s+',
+        r'^studying\s+to\s+(be|become)\s+',
+    ]
+    for pattern in aspiring_patterns:
+        if re.search(pattern, role_lower):
+            return ("role_is_aspiring", "Role cannot be an aspiring/future title. Please provide your current job title.")
 
     return (None, None)  # Passed all checks
 
@@ -528,13 +721,8 @@ def check_description_sanity(desc_raw: str) -> tuple:
 # ============================================================
 # Industry Taxonomy Check Function
 # ============================================================
-# Load industry taxonomy from validator_models (723 sub-industries)
-import sys
-_validator_models_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-if _validator_models_path not in sys.path:
-    sys.path.insert(0, _validator_models_path)
-
-from validator_models.industry_taxonomy import INDUSTRY_TAXONOMY
+# Load industry taxonomy from gateway utils (723 sub-industries)
+from gateway.utils.industry_taxonomy import INDUSTRY_TAXONOMY
 
 # Build set of valid industries (parent categories)
 VALID_INDUSTRIES = set()
@@ -1683,14 +1871,22 @@ async def submit_lead(event: SubmitLeadEvent):
         # ========================================
         # Catch obviously garbage roles at gateway BEFORE entering validation queue
         # Saves validator time and API costs by rejecting spam/garbage early
-        # Checks loaded from role_patterns.json + Stage 4 checks (34 checks total)
+        # Checks loaded from role_patterns.json + Stage 4 checks (48 checks total)
         print(f"   🔍 Validating role format (early sanity check)...")
         role_raw = lead_blob.get("role", "").strip()
         full_name_for_check = lead_blob.get("full_name", "").strip()
         company_for_check = lead_blob.get("business", "").strip()
+        city_for_check = lead_blob.get("city", "").strip()
+        state_for_check = lead_blob.get("state", "").strip()
+        country_for_check = lead_blob.get("country", "").strip()
+        industry_for_check = lead_blob.get("industry", "").strip()
 
-        # Call comprehensive role sanity check function (includes name/company in role checks)
-        error_code, error_message = check_role_sanity(role_raw, full_name_for_check, company_for_check)
+        # Call comprehensive role sanity check function (includes name/company/location/industry in role checks)
+        error_code, error_message = check_role_sanity(
+            role_raw, full_name_for_check, company_for_check,
+            city=city_for_check, state=state_for_check, country=country_for_check,
+            industry=industry_for_check
+        )
         role_sanity_error = (error_code, error_message) if error_code else None
 
         # Reject if any sanity check failed
@@ -2542,4 +2738,5 @@ async def submit_lead(event: SubmitLeadEvent):
                 }
             }
         )
+
 

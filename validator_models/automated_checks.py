@@ -9557,11 +9557,35 @@ def _get_icp_bonus(lead: dict) -> int:
     # Null-safe extraction - handles None values gracefully
     sub_industry = (lead.get("sub_industry") or "").strip().lower()
     role = (lead.get("role") or "").strip().lower()
-    region = (lead.get("region") or "").strip().lower()
+    
+    # SECURITY FIX: Use VALIDATED location fields, not miner-submitted 'region'
+    # 'country' and 'state' are verified against LinkedIn data in Stage 4
+    # 'region' is unvalidated and was being gamed by miners
+    country = (lead.get("country") or "").strip().lower()
+    state = (lead.get("state") or "").strip().lower()
     
     def matches_any(text: str, keywords: list) -> bool:
         text_lower = text.lower()
         return any(keyword.lower() in text_lower for keyword in keywords)
+    
+    def matches_regional_filter(icp_regions: list) -> bool:
+        """
+        Check if lead's VALIDATED location matches ICP regional filter.
+        
+        Uses country (primary) and state (secondary) - both validated in Stage 4.
+        Does NOT use miner-submitted 'region' field which is unvalidated.
+        """
+        # Check country first (e.g., "nigeria", "south africa", "united states")
+        if matches_any(country, icp_regions):
+            return True
+        
+        # Check state for US-specific ICPs (e.g., "california", "new york")
+        # Only applies when country is US and ICP has US state names
+        if country in ["united states", "usa", "us", "america"]:
+            if matches_any(state, icp_regions):
+                return True
+        
+        return False
     
     # Track highest bonus (in case lead matches multiple ICPs)
     highest_bonus = 0
@@ -9570,7 +9594,8 @@ def _get_icp_bonus(lead: dict) -> int:
         if not matches_any(sub_industry, icp["sub_industries"]):
             continue
         if "regions" in icp:
-            if not matches_any(region, icp["regions"]):
+            # SECURITY: Use validated country/state, NOT unvalidated region
+            if not matches_regional_filter(icp["regions"]):
                 continue
         if matches_any(role, icp["role_details"]):
             # Get bonus: use custom "bonus" field, or default to 50

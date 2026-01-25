@@ -2589,6 +2589,10 @@ class Validator(BaseValidatorNeuron):
                 }
 
                 for val_data in local_validation_data:
+                    # Safety check: skip if val_data is None (prevents crashes)
+                    if val_data is None:
+                        print(f"   ⚠️ Skipping None val_data entry")
+                        continue
                     miner_hotkey = val_data.get("miner_hotkey")
                     decision = val_data.get("decision")
                     rep_score = val_data.get("rep_score", 0)
@@ -2600,8 +2604,8 @@ class Validator(BaseValidatorNeuron):
                     # Miners were gaming ICP by setting region="africa" with country="United States"
                     # Penalty: -100,000 to rapidly reduce their rolling window score
                     # ═══════════════════════════════════════════════════════════════════
-                    lead_region = val_data.get("region", "").lower().strip()
-                    lead_country = val_data.get("country", "").lower().strip()
+                    lead_region = (val_data.get("region") or "").lower().strip()
+                    lead_country = (val_data.get("country") or "").lower().strip()
                     final_rep_score = rep_score
                     
                     # Only penalize if region CLAIMS Africa but country is NOT African
@@ -5546,3 +5550,4 @@ if __name__ == "__main__":
         print(f"❌ Validator crashed: {e}")
         cleanup_handler()
         raise
+

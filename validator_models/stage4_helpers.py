@@ -1005,10 +1005,8 @@ def validate_lead(
                         location_method = f'non_linkedin_{loc_method}'
                         result['checks']['location']['extracted'] = r_loc
                         break
-                if city_lower in r_text.lower():
-                    location_passed = True
-                    location_method = 'non_linkedin_city'
-                    break
+                # Removed: non-LinkedIn city fallback was too loose
+                # It matched company HQ locations instead of person locations
 
     # Q3 location fallback when not found
     if not location_passed and use_q3 and scrapingdog_api_key and city and linkedin:

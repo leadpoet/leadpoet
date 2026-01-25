@@ -2281,7 +2281,9 @@ class Validator(BaseValidatorNeuron):
                         "decision": decision,
                         "rep_score": rep_score,
                         "rejection_reason": rejection_reason,
-                        "salt": salt.hex()
+                        "salt": salt.hex(),
+                        "region": lead_blob.get("region", ""),  # For gaming detection
+                        "country": lead_blob.get("country", "")  # For gaming detection
                     })
                     
                     # Store weight data for later accumulation
@@ -2302,9 +2304,38 @@ class Validator(BaseValidatorNeuron):
                         # Traditional single-validator mode
                         # CRITICAL FIX: Get from automated_checks_data, not lead
                         is_icp_multiplier = automated_checks_data.get("is_icp_multiplier", 0.0)
+                        
+                        # ═══════════════════════════════════════════════════════════════════
+                        # GAMING PENALTY: Detect region="africa" with non-African country
+                        # Miners were gaming ICP by setting region="africa" with country="United States"
+                        # Penalty: -100,000 to rapidly reduce their rolling window score
+                        # ═══════════════════════════════════════════════════════════════════
+                        AFRICAN_COUNTRIES = {
+                            "nigeria", "south africa", "kenya", "ghana", "egypt", "morocco",
+                            "ethiopia", "tanzania", "uganda", "algeria", "sudan", "angola",
+                            "mozambique", "cameroon", "senegal", "zambia", "zimbabwe", "rwanda",
+                            "tunisia", "libya", "botswana", "namibia", "mauritius", "gabon",
+                            "malawi", "mali", "burkina faso", "niger", "chad", "somalia",
+                            "benin", "togo", "sierra leone", "liberia", "congo", "eritrea",
+                            "gambia", "guinea", "lesotho", "madagascar", "mauritania", "eswatini",
+                            "swaziland", "ivory coast", "côte d'ivoire", "drc",
+                            "democratic republic of congo", "central african republic"
+                        }
+                        
+                        lead_region = lead_blob.get("region", "").lower().strip()
+                        lead_country = lead_blob.get("country", "").lower().strip()
+                        final_rep_score = rep_score
+                        
+                        # Only penalize if region CLAIMS Africa but country is NOT African
+                        if "africa" in lead_region and lead_country not in AFRICAN_COUNTRIES:
+                            final_rep_score = -100000
+                            print(f"   🚨 AFRICA GAMING DETECTED!")
+                            print(f"      region='{lead_region}', country='{lead_country}'")
+                            print(f"      🔥 PENALTY: -100,000 points (miner: {lead.get('miner_hotkey', 'unknown')[:16]}...)")
+
                         await self.accumulate_miner_weights(
                             miner_hotkey=lead.get("miner_hotkey"),
-                            rep_score=rep_score,
+                            rep_score=final_rep_score,
                             is_icp_multiplier=is_icp_multiplier,
                             decision=decision
                         )
@@ -2543,6 +2574,20 @@ class Validator(BaseValidatorNeuron):
                 # This ensures all leads are counted in validator_weights_history
                 # ═══════════════════════════════════════════════════════════════════
                 print(f"   ⚖️  Accumulating weights for all {len(local_validation_data)} leads...")
+                
+                # GAMING PENALTY: Define African countries for gaming detection
+                AFRICAN_COUNTRIES = {
+                    "nigeria", "south africa", "kenya", "ghana", "egypt", "morocco",
+                    "ethiopia", "tanzania", "uganda", "algeria", "sudan", "angola",
+                    "mozambique", "cameroon", "senegal", "zambia", "zimbabwe", "rwanda",
+                    "tunisia", "libya", "botswana", "namibia", "mauritius", "gabon",
+                    "malawi", "mali", "burkina faso", "niger", "chad", "somalia",
+                    "benin", "togo", "sierra leone", "liberia", "congo", "eritrea",
+                    "gambia", "guinea", "lesotho", "madagascar", "mauritania", "eswatini",
+                    "swaziland", "ivory coast", "côte d'ivoire", "drc",
+                    "democratic republic of congo", "central african republic"
+                }
+
                 for val_data in local_validation_data:
                     miner_hotkey = val_data.get("miner_hotkey")
                     decision = val_data.get("decision")
@@ -2550,9 +2595,26 @@ class Validator(BaseValidatorNeuron):
                     # Default to 0.0 (new format: no adjustment) instead of 1.0 (old format: multiplier)
                     is_icp_multiplier = val_data.get("is_icp_multiplier", 0.0)
                     
+                    # ═══════════════════════════════════════════════════════════════════
+                    # GAMING PENALTY: Detect region="africa" with non-African country
+                    # Miners were gaming ICP by setting region="africa" with country="United States"
+                    # Penalty: -100,000 to rapidly reduce their rolling window score
+                    # ═══════════════════════════════════════════════════════════════════
+                    lead_region = val_data.get("region", "").lower().strip()
+                    lead_country = val_data.get("country", "").lower().strip()
+                    final_rep_score = rep_score
+                    
+                    # Only penalize if region CLAIMS Africa but country is NOT African
+                    if "africa" in lead_region and lead_country not in AFRICAN_COUNTRIES:
+                        final_rep_score = -100000
+                        print(f"   🚨 AFRICA GAMING DETECTED!")
+                        print(f"      region='{lead_region}', country='{lead_country}'")
+                        print(f"      🔥 PENALTY: -100,000 points (miner: {miner_hotkey[:16] if miner_hotkey else 'unknown'}...)")
+
+                    
                     await self.accumulate_miner_weights(
                         miner_hotkey=miner_hotkey,
-                        rep_score=rep_score,
+                        rep_score=final_rep_score,
                         is_icp_multiplier=is_icp_multiplier,
                         decision=decision
                     )

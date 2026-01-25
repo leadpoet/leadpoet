@@ -3810,7 +3810,7 @@ class Validator(BaseValidatorNeuron):
             # Returns list of {'prospect_id': UUID, 'data': lead_dict}
             prospects_batch = fetch_prospects_from_cloud(
                 wallet=self.wallet,
-                limit=50,
+                limit=3000,
                 network=self.config.subtensor.network,
                 netuid=self.config.netuid
             )

@@ -2238,7 +2238,7 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
         result = response.json()
         returned_epoch = result.get("epoch_id")
         leads = result.get("leads", [])
-        max_leads_per_epoch = result.get("max_leads_per_epoch", 50)  # Default to 50 for backwards compatibility
+        max_leads_per_epoch = result.get("max_leads_per_epoch", 3000)  # Default to 50 for backwards compatibility
         
         # CRITICAL: Validate gateway returned the correct epoch
         if returned_epoch != epoch_id:
@@ -2267,10 +2267,10 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
         # Timeout is common during epoch transitions (gateway processing epoch lifecycle)
         # This is NOT a fatal error - validator will retry automatically
         bt.logging.warning(f"⏳ Gateway timeout fetching leads for epoch {epoch_id} - this is normal during epoch transitions. Validator will retry automatically.")
-        return ([], 50)  # Return empty list (not None) to indicate "retry later", default max
+        return ([], 3000)  # Return empty list (not None) to indicate "retry later", default max
     except Exception as e:
         bt.logging.error(f"Failed to get epoch leads: {e}")
-        return ([], 50)  # Return empty list (not None) to indicate "retry later", default max
+        return ([], 3000)  # Return empty list (not None) to indicate "retry later", default max
 
 
 def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_results: List[Dict]) -> bool:

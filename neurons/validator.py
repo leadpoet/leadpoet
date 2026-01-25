@@ -2322,8 +2322,8 @@ class Validator(BaseValidatorNeuron):
                             "democratic republic of congo", "central african republic"
                         }
                         
-                        lead_region = lead_blob.get("region", "").lower().strip()
-                        lead_country = lead_blob.get("country", "").lower().strip()
+                        lead_region = (lead_blob.get("region") or "").lower().strip()
+                        lead_country = (lead_blob.get("country") or "").lower().strip()
                         final_rep_score = rep_score
                         
                         # Only penalize if region CLAIMS Africa but country is NOT African

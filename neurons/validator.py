@@ -2774,10 +2774,20 @@ class Validator(BaseValidatorNeuron):
                 effective_rep_score = rep_score * is_icp_multiplier
                 print(f"      📊 Legacy ICP multiplier: {rep_score} × {is_icp_multiplier} = {effective_rep_score}")
             else:
-                # NEW FORMAT: Use addition with floor at 0
+                # NEW FORMAT: Use addition with floor at 0 (for normal leads)
                 icp_adjustment = int(is_icp_multiplier)
-                effective_rep_score = max(0, rep_score + icp_adjustment)
-                print(f"      📊 ICP adjustment: {rep_score} + ({icp_adjustment:+d}) = {effective_rep_score}")
+                
+                # CRITICAL: Allow negative rep_scores (gaming penalties) to pass through
+                # Gaming penalties set rep_score to -100,000 to punish miners
+                # These MUST NOT be clamped to 0, otherwise the penalty has no effect!
+                if rep_score < 0:
+                    # Gaming penalty detected - let the massive negative through
+                    effective_rep_score = rep_score
+                    print(f"      🚨 GAMING PENALTY: {rep_score} points (NOT clamped)")
+                else:
+                    # Normal lead - apply ICP adjustment with floor at 0
+                    effective_rep_score = max(0, rep_score + icp_adjustment)
+                    print(f"      📊 ICP adjustment: {rep_score} + ({icp_adjustment:+d}) = {effective_rep_score}")
             
             # Add effective score to miner's total (only for approved leads)
             epoch_data = weights_data[str(current_epoch)]

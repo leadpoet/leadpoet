@@ -3149,36 +3149,54 @@ class Validator(BaseValidatorNeuron):
             uid_weights[UID_ZERO] = total_burn_share + current_dereg_burn + rolling_dereg_burn
             
             # Distribute to REGISTERED current epoch miners
+            # CRITICAL: Clamp negative scores to 0 for weight calculation
+            # Gaming penalties (e.g., -100,000) should result in 0% weight, not negative
+            clamped_current_scores = {h: max(0, p) for h, p in registered_current_scores.items()}
+            clamped_current_total = sum(clamped_current_scores.values())
+            
             print(f"    Current Epoch ({effective_current_to_miners*100:.2f}% to registered miners):")
-            if registered_current_total > 0 and effective_current_to_miners > 0:
+            if clamped_current_total > 0 and effective_current_to_miners > 0:
                 for hotkey, points in registered_current_scores.items():
                     uid = hotkey_to_uid[hotkey]
-                    miner_proportion = points / registered_current_total
+                    clamped_points = max(0, points)
+                    miner_proportion = clamped_points / clamped_current_total
                     miner_weight = effective_current_to_miners * miner_proportion
                     
                     if uid not in uid_weights:
                         uid_weights[uid] = 0
                     uid_weights[uid] += miner_weight
                     
-                    print(f"      UID {uid}: {points}/{registered_current_total} pts = {miner_weight*100:.2f}%")
+                    if points < 0:
+                        print(f"      UID {uid}: {points} pts (GAMING PENALTY → 0%)")
+                    else:
+                        print(f"      UID {uid}: {points}/{clamped_current_total} pts = {miner_weight*100:.2f}%")
             else:
-                print(f"      (No registered miners)")
+                print(f"      (No registered miners with positive scores)")
             
             # Distribute to REGISTERED rolling epoch miners
+            # CRITICAL: Clamp negative scores to 0 for weight calculation
+            # Rolling scores from gaming epochs should result in 0% weight, not negative
+            clamped_rolling_scores = {h: max(0, p) for h, p in registered_rolling_scores.items()}
+            clamped_rolling_total = sum(clamped_rolling_scores.values())
+            
             print(f"\n    Rolling {ROLLING_WINDOW} Epochs ({effective_rolling_to_miners*100:.2f}% to registered miners):")
-            if registered_rolling_total > 0 and effective_rolling_to_miners > 0:
+            if clamped_rolling_total > 0 and effective_rolling_to_miners > 0:
                 for hotkey, points in registered_rolling_scores.items():
                     uid = hotkey_to_uid[hotkey]
-                    miner_proportion = points / registered_rolling_total
+                    clamped_points = max(0, points)
+                    miner_proportion = clamped_points / clamped_rolling_total
                     miner_weight = effective_rolling_to_miners * miner_proportion
                     
                     if uid not in uid_weights:
                         uid_weights[uid] = 0
                     uid_weights[uid] += miner_weight
                     
-                    print(f"      UID {uid}: {points}/{registered_rolling_total} pts = {miner_weight*100:.2f}%")
+                    if points < 0:
+                        print(f"      UID {uid}: {points} pts (GAMING PENALTY → 0%)")
+                    else:
+                        print(f"      UID {uid}: {points}/{clamped_rolling_total} pts = {miner_weight*100:.2f}%")
             else:
-                print(f"      (No registered miners)")
+                print(f"      (No registered miners with positive scores)")
             
             # Convert to final lists
             final_uids = list(uid_weights.keys())

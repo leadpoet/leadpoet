@@ -1,2271 +1,3108 @@
 {
   "_description": "City to metropolitan area mappings for LinkedIn location validation.",
   "_source": "Cities from geo_lookup_fast.json (validated spellings)",
+  "_format": "Each area has state (for US) or country (for international) plus cities list",
   "mappings": {
-    "San Francisco Bay Area": [
-      "Alameda",
-      "Antioch",
-      "Benicia",
-      "Berkeley",
-      "Brentwood",
-      "Burlingame",
-      "Campbell",
-      "Concord",
-      "Corte Madera",
-      "Cupertino",
-      "Daly City",
-      "Dublin",
-      "Fairfield",
-      "Foster City",
-      "Fremont",
-      "Gilroy",
-      "Half Moon Bay",
-      "Hayward",
-      "Hollister",
-      "Livermore",
-      "Los Gatos",
-      "Manteca",
-      "Menlo Park",
-      "Milpitas",
-      "Modesto",
-      "Monterey",
-      "Morgan Hill",
-      "Mountain View",
-      "Napa",
-      "Newark",
-      "Novato",
-      "Oakland",
-      "Pacifica",
-      "Palo Alto",
-      "Petaluma",
-      "Pittsburg",
-      "Pleasanton",
-      "Redwood City",
-      "Richmond",
-      "Sacramento",
-      "Salinas",
-      "San Bruno",
-      "San Francisco",
-      "San Jose",
-      "San Leandro",
-      "San Mateo",
-      "San Rafael",
-      "San Ramon",
-      "Santa Clara",
-      "Santa Cruz",
-      "Santa Rosa",
-      "Saratoga",
-      "South San Francisco",
-      "Stockton",
-      "Sunnyvale",
-      "Tracy",
-      "Union City",
-      "Vallejo",
-      "Walnut Creek",
-      "Watsonville"
-    ],
-    "Los Angeles Metropolitan Area": [
-      "Anaheim",
-      "Burbank",
-      "Carlsbad",
-      "Carson",
-      "Compton",
-      "Corona",
-      "Costa Mesa",
-      "Downey",
-      "El Cajon",
-      "El Monte",
-      "Encinitas",
-      "Escondido",
-      "Fontana",
-      "Fullerton",
-      "Garden Grove",
-      "Glendale",
-      "Huntington Beach",
-      "Inglewood",
-      "Irvine",
-      "La Jolla",
-      "Laguna Beach",
-      "Long Beach",
-      "Los Angeles",
-      "Moreno Valley",
-      "Newport Beach",
-      "Norwalk",
-      "Oceanside",
-      "Ontario",
-      "Palmdale",
-      "Pasadena",
-      "Pomona",
-      "Rancho Cucamonga",
-      "San Clemente",
-      "San Marcos",
-      "Santa Ana",
-      "Santa Clarita",
-      "Santa Monica",
-      "South Gate",
-      "Torrance",
-      "Vista",
-      "West Covina",
-      "Whittier"
-    ],
-    "San Diego Metropolitan Area": [
-      "Carlsbad",
-      "Chula Vista",
-      "Coronado",
-      "Del Mar",
-      "El Cajon",
-      "Encinitas",
-      "Escondido",
-      "Imperial Beach",
-      "La Mesa",
-      "Lemon Grove",
-      "National City",
-      "Oceanside",
-      "Poway",
-      "San Diego",
-      "San Marcos",
-      "Santee",
-      "Solana Beach",
-      "Vista"
-    ],
-    "Greater Seattle Area": [
-      "Auburn",
-      "Bellevue",
-      "Bellingham",
-      "Bothell",
-      "Burien",
-      "Edmonds",
-      "Everett",
-      "Federal Way",
-      "Issaquah",
-      "Kent",
-      "Kirkland",
-      "Lakewood",
-      "Lynnwood",
-      "Mercer Island",
-      "Olympia",
-      "Redmond",
-      "Renton",
-      "Sammamish",
-      "Seatac",
-      "Seattle",
-      "Shoreline",
-      "Spokane",
-      "Tacoma",
-      "Tukwila",
-      "Woodinville"
-    ],
-    "Spokane-Coeur d'Alene Area": [
-      "Airway Heights",
-      "Cheney",
-      "Liberty Lake",
-      "Spokane",
-      "Spokane Valley"
-    ],
-    "Dallas-Fort Worth Area": [
-      "Addison",
-      "Allen",
-      "Arlington",
-      "Bedford",
-      "Carrollton",
-      "Cedar Hill",
-      "Colleyville",
-      "Coppell",
-      "Dallas",
-      "Denton",
-      "Euless",
-      "Flower Mound",
-      "Fort Worth",
-      "Frisco",
-      "Garland",
-      "Grand Prairie",
-      "Grapevine",
-      "Irving",
-      "Lewisville",
-      "Mckinney",
-      "Mesquite",
-      "Plano",
-      "Richardson",
-      "Rockwall",
-      "Rowlett",
-      "Southlake",
-      "Wylie"
-    ],
-    "Greater Houston Area": [
-      "Baytown",
-      "Conroe",
-      "Cypress",
-      "Deer Park",
-      "Friendswood",
-      "Galveston",
-      "Houston",
-      "Humble",
-      "Katy",
-      "La Porte",
-      "League City",
-      "Missouri City",
-      "Pasadena",
-      "Pearland",
-      "Spring",
-      "Sugar Land",
-      "Texas City",
-      "The Woodlands",
-      "Tomball"
-    ],
-    "Austin Metropolitan Area": [
-      "Austin",
-      "Bastrop",
-      "Bee Cave",
-      "Buda",
-      "Cedar Park",
-      "Georgetown",
-      "Hutto",
-      "Kyle",
-      "Lakeway",
-      "Leander",
-      "Pflugerville",
-      "Round Rock",
-      "San Marcos",
-      "Taylor"
-    ],
-    "San Antonio Metropolitan Area": [
-      "Alamo Heights",
-      "Boerne",
-      "Cibolo",
-      "Converse",
-      "Helotes",
-      "Leon Valley",
-      "Live Oak",
-      "New Braunfels",
-      "San Antonio",
-      "Schertz",
-      "Selma",
-      "Universal City"
-    ],
-    "El Paso Metropolitan Area": [
-      "Anthony",
-      "Clint",
-      "El Paso",
-      "Horizon City",
-      "San Elizario",
-      "Socorro"
-    ],
-    "Greater Abilene Area": [
-      "Abilene",
-      "Albany",
-      "Breckenridge",
-      "Cisco",
-      "Eastland",
-      "Sweetwater"
-    ],
-    "Longview-Marshall Area": [
-      "Carthage",
-      "Gilmer",
-      "Henderson",
-      "Kilgore",
-      "Longview",
-      "Marshall"
-    ],
-    "Greater Chicago Area": [
-      "Addison",
-      "Arlington Heights",
-      "Aurora",
-      "Berwyn",
-      "Bloomington",
-      "Bolingbrook",
-      "Buffalo Grove",
-      "Champaign",
-      "Chicago",
-      "Cicero",
-      "Crystal Lake",
-      "Des Plaines",
-      "Downers Grove",
-      "Elgin",
-      "Elmhurst",
-      "Evanston",
-      "Glenview",
-      "Hoffman Estates",
-      "Joliet",
-      "Lombard",
-      "Mount Prospect",
-      "Naperville",
-      "Normal",
-      "Northbrook",
-      "Oak Lawn",
-      "Oak Park",
-      "Orland Park",
-      "Palatine",
-      "Rockford",
-      "Romeoville",
-      "Schaumburg",
-      "Skokie",
-      "Tinley Park",
-      "Waukegan",
-      "Wheaton"
-    ],
-    "Peoria Metropolitan Area": [
-      "Chillicothe",
-      "East Peoria",
-      "Eureka",
-      "Morton",
-      "Pekin",
-      "Peoria",
-      "Washington"
-    ],
-    "Greater Tampa Bay Area": [
-      "Apollo Beach",
-      "Brandon",
-      "Clearwater",
-      "Dunedin",
-      "Lakeland",
-      "Largo",
-      "New Port Richey",
-      "Oldsmar",
-      "Palm Harbor",
-      "Plant City",
-      "Riverview",
-      "Safety Harbor",
-      "Spring Hill",
-      "Tampa",
-      "Tarpon Springs",
-      "Temple Terrace",
-      "Wesley Chapel"
-    ],
-    "Miami-Fort Lauderdale Area": [
-      "Aventura",
-      "Boca Raton",
-      "Boynton Beach",
-      "Coral Gables",
-      "Coral Springs",
-      "Davie",
-      "Deerfield Beach",
-      "Delray Beach",
-      "Doral",
-      "Fort Lauderdale",
-      "Hialeah",
-      "Hollywood",
-      "Homestead",
-      "Kendall",
-      "Miami",
-      "Miami Beach",
-      "Miami Gardens",
-      "Miramar",
-      "Pembroke Pines",
-      "Plantation",
-      "Pompano Beach",
-      "Sunrise",
-      "Tamarac",
-      "Weston"
-    ],
-    "Orlando Metropolitan Area": [
-      "Altamonte Springs",
-      "Apopka",
-      "Casselberry",
-      "Clermont",
-      "Daytona Beach",
-      "Deltona",
-      "Kissimmee",
-      "Lake Mary",
-      "Longwood",
-      "Maitland",
-      "Ocoee",
-      "Orlando",
-      "Oviedo",
-      "Sanford",
-      "Winter Garden",
-      "Winter Park",
-      "Winter Springs"
-    ],
-    "Jacksonville Metropolitan Area": [
-      "Atlantic Beach",
-      "Fernandina Beach",
-      "Fleming Island",
-      "Jacksonville",
-      "Jacksonville Beach",
-      "Neptune Beach",
-      "Orange Park",
-      "Ponte Vedra Beach"
-    ],
-    "Denver Metropolitan Area": [
-      "Arvada",
-      "Aurora",
-      "Boulder",
-      "Brighton",
-      "Broomfield",
-      "Castle Rock",
-      "Centennial",
-      "Colorado Springs",
-      "Denver",
-      "Englewood",
-      "Erie",
-      "Fort Collins",
-      "Golden",
-      "Greeley",
-      "Lafayette",
-      "Lakewood",
-      "Littleton",
-      "Longmont",
-      "Louisville",
-      "Loveland",
-      "Parker",
-      "Pueblo",
-      "Superior",
-      "Thornton",
-      "Westminster"
-    ],
-    "Greater Phoenix Area": [
-      "Apache Junction",
-      "Avondale",
-      "Buckeye",
-      "Carefree",
-      "Casa Grande",
-      "Cave Creek",
-      "Chandler",
-      "Flagstaff",
-      "Fountain Hills",
-      "Gilbert",
-      "Glendale",
-      "Goodyear",
-      "Lake Havasu City",
-      "Maricopa",
-      "Mesa",
-      "Paradise Valley",
-      "Peoria",
-      "Phoenix",
-      "Queen Creek",
-      "Scottsdale",
-      "Surprise",
-      "Tempe",
-      "Tucson",
-      "Yuma"
-    ],
-    "Greater Tucson Area": [
-      "Catalina Foothills",
-      "Marana",
-      "Oro Valley",
-      "Sahuarita",
-      "South Tucson",
-      "Tucson"
-    ],
-    "Greater Boston Area": [
-      "Amherst",
-      "Attleboro",
-      "Beverly",
-      "Boston",
-      "Brockton",
-      "Brookline",
-      "Cambridge",
-      "Chelsea",
-      "Chicopee",
-      "Fall River",
-      "Fitchburg",
-      "Framingham",
-      "Haverhill",
-      "Holyoke",
-      "Lawrence",
-      "Leominster",
-      "Lowell",
-      "Lynn",
-      "Malden",
-      "Marlborough",
-      "Medford",
-      "Methuen",
-      "Natick",
-      "New Bedford",
-      "Newton",
-      "Northampton",
-      "Peabody",
-      "Pittsfield",
-      "Quincy",
-      "Revere",
-      "Salem",
-      "Somerville",
-      "Springfield",
-      "Taunton",
-      "Waltham",
-      "Westborough",
-      "Westfield",
-      "Weymouth",
-      "Woburn",
-      "Worcester"
-    ],
-    "Detroit Metropolitan Area": [
-      "Ann Arbor",
-      "Battle Creek",
-      "Birmingham",
-      "Bloomfield Hills",
-      "Dearborn",
-      "Dearborn Heights",
-      "Detroit",
-      "East Lansing",
-      "Farmington Hills",
-      "Flint",
-      "Grand Rapids",
-      "Kalamazoo",
-      "Lansing",
-      "Livonia",
-      "Midland",
-      "Muskegon",
-      "Novi",
-      "Pontiac",
-      "Portage",
-      "Rochester Hills",
-      "Roseville",
-      "Royal Oak",
-      "Saginaw",
-      "Southfield",
-      "Sterling Heights",
-      "Taylor",
-      "Troy",
-      "Warren",
-      "Westland",
-      "Wyoming"
-    ],
-    "Grand Rapids Metropolitan Area": [
-      "Battle Creek",
-      "East Grand Rapids",
-      "Grand Rapids",
-      "Grandville",
-      "Holland",
-      "Kalamazoo",
-      "Kentwood",
-      "Muskegon",
-      "Norton Shores",
-      "Portage",
-      "Walker",
-      "Wyoming"
-    ],
-    "Greater Madison Area": [
-      "Deforest",
-      "Fitchburg",
-      "Madison",
-      "Mcfarland",
-      "Middleton",
-      "Monona",
-      "Mount Horeb",
-      "Oregon",
-      "Stoughton",
-      "Sun Prairie",
-      "Verona",
-      "Waunakee"
-    ],
-    "Greater Milwaukee Area": [
-      "Brookfield",
-      "Cedarburg",
-      "Franklin",
-      "Grafton",
-      "Greenfield",
-      "Kenosha",
-      "Menomonee Falls",
-      "Mequon",
-      "Milwaukee",
-      "New Berlin",
-      "Oak Creek",
-      "Port Washington",
-      "Racine",
-      "Waukesha",
-      "Wauwatosa",
-      "West Allis",
-      "West Bend"
-    ],
-    "New York Metropolitan Area": [
-      "Albany",
-      "Atlantic City",
-      "Bayonne",
-      "Binghamton",
-      "Brick",
-      "Bridgeport",
-      "Bristol",
-      "Buffalo",
-      "Camden",
-      "Cherry Hill",
-      "Clifton",
-      "Danbury",
-      "East Hartford",
-      "East Orange",
-      "Edison",
-      "Elizabeth",
-      "Englewood",
-      "Fairfield",
-      "Fort Lee",
-      "Freeport",
-      "Greenwich",
-      "Hackensack",
-      "Hamden",
-      "Hartford",
-      "Hempstead",
-      "Hoboken",
-      "Ithaca",
-      "Jersey City",
-      "Kearny",
-      "Kingston",
-      "Linden",
-      "Long Beach",
-      "Manchester",
-      "Meriden",
-      "Middletown",
-      "Milford",
-      "Montclair",
-      "Morristown",
-      "Mount Vernon",
-      "New Britain",
-      "New Brunswick",
-      "New Haven",
-      "New Rochelle",
-      "New York City",
-      "Newark",
-      "Niagara Falls",
-      "Norwalk",
-      "Passaic",
-      "Paterson",
-      "Perth Amboy",
-      "Plainfield",
-      "Poughkeepsie",
-      "Princeton",
-      "Ridgewood",
-      "Rochester",
-      "Rome",
-      "Saratoga Springs",
-      "Sayreville",
-      "Schenectady",
-      "Spring Valley",
-      "Stamford",
-      "Stratford",
-      "Summit",
-      "Syracuse",
-      "Trenton",
-      "Troy",
-      "Union City",
-      "Utica",
-      "Valley Stream",
-      "Vineland",
-      "Waterbury",
-      "West Hartford",
-      "West Haven",
-      "West New York",
-      "White Plains",
-      "Woodbridge",
-      "Yonkers"
-    ],
-    "New York City Metropolitan Area": [
-      "Atlantic City",
-      "Bayonne",
-      "Brick",
-      "Camden",
-      "Cherry Hill",
-      "Clifton",
-      "East Orange",
-      "Edison",
-      "Elizabeth",
-      "Englewood",
-      "Fort Lee",
-      "Freeport",
-      "Hackensack",
-      "Hempstead",
-      "Hoboken",
-      "Jersey City",
-      "Kearny",
-      "Linden",
-      "Long Beach",
-      "Montclair",
-      "Morristown",
-      "Mount Vernon",
-      "New Brunswick",
-      "New Rochelle",
-      "New York City",
-      "Newark",
-      "Passaic",
-      "Paterson",
-      "Perth Amboy",
-      "Plainfield",
-      "Princeton",
-      "Ridgewood",
-      "Sayreville",
-      "Spring Valley",
-      "Summit",
-      "Trenton",
-      "Union City",
-      "Valley Stream",
-      "Vineland",
-      "West New York",
-      "White Plains",
-      "Woodbridge",
-      "Yonkers"
-    ],
-    "Buffalo-Niagara Falls Area": [
-      "Amherst",
-      "Buffalo",
-      "Cheektowaga",
-      "Depew",
-      "Kenmore",
-      "Lackawanna",
-      "Lancaster",
-      "Niagara Falls",
-      "Tonawanda",
-      "West Seneca",
-      "Williamsville"
-    ],
-    "Cincinnati Metropolitan Area": [
-      "Blue Ash",
-      "Cincinnati",
-      "Fairfield",
-      "Hamilton",
-      "Lebanon",
-      "Loveland",
-      "Mason",
-      "Middletown",
-      "Milford",
-      "Norwood",
-      "Oxford",
-      "Sharonville"
-    ],
-    "Cleveland Metropolitan Area": [
-      "Akron",
-      "Canton",
-      "Cleveland",
-      "Cuyahoga Falls",
-      "Elyria",
-      "Euclid",
-      "Lakewood",
-      "Lorain",
-      "Medina",
-      "Mentor",
-      "Parma",
-      "Strongsville",
-      "Youngstown"
-    ],
-    "Columbus Metropolitan Area": [
-      "Columbus",
-      "Delaware",
-      "Dublin",
-      "Gahanna",
-      "Grove City",
-      "Hilliard",
-      "Pickerington",
-      "Powell",
-      "Reynoldsburg",
-      "Upper Arlington",
-      "Westerville",
-      "Worthington"
-    ],
-    "Greater Philadelphia Area": [
-      "Allentown",
-      "Bethlehem",
-      "Chester",
-      "Conshohocken",
-      "Doylestown",
-      "Harrisburg",
-      "King Of Prussia",
-      "Lancaster",
-      "Media",
-      "Newtown",
-      "Norristown",
-      "Philadelphia",
-      "Pittsburgh",
-      "Reading",
-      "Scranton",
-      "Wayne",
-      "Wilkes-Barre",
-      "York"
-    ],
-    "Greater Pittsburgh Area": [
-      "Bethel Park",
-      "Cranberry Township",
-      "Monroeville",
-      "Mount Lebanon",
-      "Pittsburgh",
-      "Sewickley",
-      "Wexford"
-    ],
-    "Greater Harrisburg Area": [
-      "Camp Hill",
-      "Carlisle",
-      "Enola",
-      "Harrisburg",
-      "Hershey",
-      "Lancaster",
-      "Lemoyne",
-      "Mechanicsburg",
-      "New Cumberland",
-      "Palmyra",
-      "York"
-    ],
-    "Nashville Metropolitan Area": [
-      "Brentwood",
-      "Clarksville",
-      "Franklin",
-      "Gallatin",
-      "Hendersonville",
-      "Lebanon",
-      "Murfreesboro",
-      "Nashville",
-      "Smyrna",
-      "Spring Hill"
-    ],
-    "Memphis Metropolitan Area": [
-      "Arlington",
-      "Bartlett",
-      "Collierville",
-      "Cordova",
-      "Germantown",
-      "Lakeland",
-      "Memphis",
-      "Millington"
-    ],
-    "Knoxville Metropolitan Area": [
-      "Alcoa",
-      "Clinton",
-      "Farragut",
-      "Knoxville",
-      "Lenoir City",
-      "Maryville",
-      "Morristown",
-      "Oak Ridge",
-      "Sevierville"
-    ],
-    "Greater Atlanta Area": [
-      "Acworth",
-      "Alpharetta",
-      "Atlanta",
-      "Brookhaven",
-      "Cartersville",
-      "Decatur",
-      "Duluth",
-      "Dunwoody",
-      "Johns Creek",
-      "Kennesaw",
-      "Lawrenceville",
-      "Marietta",
-      "Peachtree City",
-      "Roswell",
-      "Sandy Springs",
-      "Smyrna",
-      "Suwanee",
-      "Woodstock"
-    ],
-    "Charlotte Metropolitan Area": [
-      "Cary",
-      "Chapel Hill",
-      "Charlotte",
-      "Concord",
-      "Cornelius",
-      "Davidson",
-      "Durham",
-      "Fayetteville",
-      "Gastonia",
-      "Greensboro",
-      "High Point",
-      "Huntersville",
-      "Indian Trail",
-      "Matthews",
-      "Pineville",
-      "Raleigh",
-      "Wilmington",
-      "Winston-Salem"
-    ],
-    "Raleigh-Durham Area": [
-      "Apex",
-      "Carrboro",
-      "Cary",
-      "Chapel Hill",
-      "Durham",
-      "Fuquay-Varina",
-      "Garner",
-      "Holly Springs",
-      "Knightdale",
-      "Morrisville",
-      "Raleigh",
-      "Wake Forest"
-    ],
-    "Salt Lake City Metropolitan Area": [
-      "American Fork",
-      "Bountiful",
-      "Cedar City",
-      "Clearfield",
-      "Cottonwood Heights",
-      "Draper",
-      "Herriman",
-      "Holladay",
-      "Kaysville",
-      "Layton",
-      "Lehi",
-      "Logan",
-      "Midvale",
-      "Millcreek",
-      "Murray",
-      "Ogden",
-      "Orem",
-      "Pleasant Grove",
-      "Provo",
-      "Riverton",
-      "Roy",
-      "Salt Lake City",
-      "Sandy",
-      "South Jordan",
-      "Spanish Fork",
-      "Springville",
-      "Syracuse",
-      "Taylorsville",
-      "Tooele",
-      "West Jordan",
-      "West Valley City"
-    ],
-    "Louisville Metropolitan Area": [
-      "Bowling Green",
-      "Covington",
-      "Elizabethtown",
-      "Florence",
-      "Georgetown",
-      "Jeffersontown",
-      "Lexington",
-      "Louisville",
-      "Nicholasville",
-      "Owensboro",
-      "Richmond",
-      "Shively"
-    ],
-    "Greater Lexington Area": [
-      "Berea",
-      "Danville",
-      "Frankfort",
-      "Georgetown",
-      "Lexington",
-      "Nicholasville",
-      "Paris",
-      "Richmond",
-      "Versailles",
-      "Winchester"
-    ],
-    "Little Rock Metropolitan Area": [
-      "Benton",
-      "Bryant",
-      "Cabot",
-      "Conway",
-      "Hot Springs",
-      "Jacksonville",
-      "Little Rock",
-      "Maumelle",
-      "North Little Rock",
-      "Sherwood"
-    ],
-    "Greater Bismarck Area": [
-      "Bismarck",
-      "Dickinson",
-      "Mandan",
-      "Minot",
-      "Williston"
-    ],
-    "Washington DC-Baltimore Area": [
-      "Alexandria",
-      "Annandale",
-      "Annapolis",
-      "Arlington",
-      "Ashburn",
-      "Baltimore",
-      "Bethesda",
-      "Bowie",
-      "Burke",
-      "Centreville",
-      "Chantilly",
-      "Chevy Chase",
-      "College Park",
-      "Columbia",
-      "Ellicott City",
-      "Fairfax",
-      "Falls Church",
-      "Frederick",
-      "Gaithersburg",
-      "Germantown",
-      "Glen Burnie",
-      "Greenbelt",
-      "Herndon",
-      "Hyattsville",
-      "Laurel",
-      "Leesburg",
-      "Manassas",
-      "Mclean",
-      "Reston",
-      "Rockville",
-      "Silver Spring",
-      "Springfield",
-      "Sterling",
-      "Takoma Park",
-      "Tysons",
-      "Vienna",
-      "Washington",
-      "Woodbridge"
-    ],
-    "Greater Sydney Area": [
-      "Bankstown",
-      "Blacktown",
-      "Bondi",
-      "Campbelltown",
-      "Chatswood",
-      "Hornsby",
-      "Hurstville",
-      "Liverpool",
-      "Manly",
-      "Parramatta",
-      "Penrith",
-      "Randwick",
-      "Sydney"
-    ],
-    "Greater Melbourne Area": [
-      "Ballarat",
-      "Bendigo",
-      "Box Hill",
-      "Dandenong",
-      "Footscray",
-      "Frankston",
-      "Geelong",
-      "Melbourne",
-      "Ringwood",
-      "Sunbury",
-      "Werribee"
-    ],
-    "Greater Brisbane Area": [
-      "Brisbane",
-      "Caboolture",
-      "Chermside",
-      "Gold Coast",
-      "Ipswich",
-      "Redcliffe",
-      "Springwood",
-      "Sunnybank",
-      "Toowoomba"
-    ],
-    "London Area": [
-      "Barnet",
-      "Brent",
-      "Bromley",
-      "Chelsea",
-      "Croydon",
-      "Ealing",
-      "Enfield",
-      "Hackney",
-      "Hammersmith",
-      "Harrow",
-      "Islington",
-      "Kensington",
-      "Lambeth",
-      "London",
-      "Richmond",
-      "Sutton",
-      "Walthamstow",
-      "Wandsworth"
-    ],
-    "Greater Bristol Area": [
-      "Bath",
-      "Bristol",
-      "Clevedon",
-      "Keynsham",
-      "Portishead",
-      "Weston-Super-Mare"
-    ],
-    "Greater Manchester Area": [
-      "Bolton",
-      "Bury",
-      "Manchester",
-      "Oldham",
-      "Rochdale",
-      "Salford",
-      "Stockport",
-      "Wigan"
-    ],
-    "Greater Birmingham Area": [
-      "Alabaster",
-      "Auburn",
-      "Birmingham",
-      "Coventry",
-      "Decatur",
-      "Dothan",
-      "Dudley",
-      "Enterprise",
-      "Florence",
-      "Gadsden",
-      "Homewood",
-      "Hoover",
-      "Huntsville",
-      "Madison",
-      "Mobile",
-      "Montgomery",
-      "Opelika",
-      "Phenix City",
-      "Prattville",
-      "Solihull",
-      "Sutton Coldfield",
-      "Tuscaloosa",
-      "Vestavia Hills",
-      "Walsall",
-      "West Bromwich",
-      "Wolverhampton"
-    ],
-    "Greater Exeter Area": [
-      "Crediton",
-      "Dawlish",
-      "Exeter",
-      "Exmouth",
-      "Tiverton"
-    ],
-    "Bruges Metropolitan Area": [
-      "Blankenberge",
-      "Bruges",
-      "Brugge",
-      "Knokke",
-      "Oostende"
-    ],
-    "Ghent Metropolitan Area": [
-      "Aalst",
-      "Dendermonde",
-      "Gent",
-      "Ghent",
-      "Lokeren"
-    ],
-    "Greater Barcelona Metropolitan Area": [
-      "Badalona",
-      "Barcelona",
-      "Hospitalet",
-      "Mataro",
-      "Sabadell",
-      "Terrassa"
-    ],
-    "Greater Castell\u00f3n de la Plana Area": [
-      "Almassora",
-      "Burriana",
-      "Castellon",
-      "Castell\u00f3n",
-      "Vila-real"
-    ],
-    "Belfast Metropolitan Area": [
-      "Bangor",
-      "Belfast",
-      "Carrickfergus",
-      "Lisburn",
-      "Newtownabbey"
-    ],
-    "Minneapolis-St. Paul Area": [
-      "Blaine",
-      "Bloomington",
-      "Brooklyn Park",
-      "Burnsville",
-      "Coon Rapids",
-      "Duluth",
-      "Eagan",
-      "Eden Prairie",
-      "Edina",
-      "Lakeville",
-      "Mankato",
-      "Maple Grove",
-      "Minneapolis",
-      "Minnetonka",
-      "Moorhead",
-      "Plymouth",
-      "Prior Lake",
-      "Richfield",
-      "Rochester",
-      "Saint Paul",
-      "Savage",
-      "Shakopee",
-      "Woodbury"
-    ],
-    "Kansas City Metropolitan Area": [
-      "Dodge City",
-      "Garden City",
-      "Hutchinson",
-      "Kansas City",
-      "Lawrence",
-      "Leavenworth",
-      "Leawood",
-      "Lenexa",
-      "Manhattan",
-      "Merriam",
-      "Olathe",
-      "Overland Park",
-      "Prairie Village",
-      "Salina",
-      "Shawnee",
-      "Topeka",
-      "Wichita"
-    ],
-    "Greater St. Louis Area": [
-      "Ballwin",
-      "Chesterfield",
-      "Columbia",
-      "Florissant",
-      "Hazelwood",
-      "Independence",
-      "Kirkwood",
-      "Maryland Heights",
-      "Springfield",
-      "University City",
-      "Webster Groves",
-      "Wildwood"
-    ],
-    "Greater Portland Area": [
-      "Albany",
-      "Beaverton",
-      "Bend",
-      "Corvallis",
-      "Eugene",
-      "Gresham",
-      "Hillsboro",
-      "Lake Oswego",
-      "Medford",
-      "Milwaukie",
-      "Oregon City",
-      "Portland",
-      "Salem",
-      "Sherwood",
-      "Springfield",
-      "Tigard",
-      "Tualatin",
-      "West Linn",
-      "Wilsonville"
-    ],
-    "Las Vegas Metropolitan Area": [
-      "Boulder City",
-      "Carson City",
-      "Elko",
-      "Fallon",
-      "Fernley",
-      "Henderson",
-      "Las Vegas",
-      "Mesquite",
-      "North Las Vegas",
-      "Reno",
-      "Sparks",
-      "Winnemucca"
-    ],
-    "Greater Indianapolis Area": [
-      "Avon",
-      "Bloomington",
-      "Carmel",
-      "Evansville",
-      "Fishers",
-      "Fort Wayne",
-      "Gary",
-      "Greenwood",
-      "Hammond",
-      "Indianapolis",
-      "Lafayette",
-      "Muncie",
-      "Noblesville",
-      "Plainfield",
-      "South Bend",
-      "Terre Haute",
-      "Westfield",
-      "Zionsville"
-    ],
-    "Greater Richmond Area": [
-      "Alexandria",
-      "Charlottesville",
-      "Chesapeake",
-      "Colonial Heights",
-      "Glen Allen",
-      "Hampton",
-      "Henrico",
-      "Lynchburg",
-      "Mechanicsville",
-      "Midlothian",
-      "Newport News",
-      "Norfolk",
-      "Portsmouth",
-      "Richmond",
-      "Roanoke",
-      "Suffolk",
-      "Virginia Beach"
-    ],
-    "Greater Providence Area": [
-      "Central Falls",
-      "Cranston",
-      "East Providence",
-      "Newport",
-      "North Providence",
-      "Pawtucket",
-      "Providence",
-      "Warwick",
-      "West Warwick",
-      "Westerly",
-      "Woonsocket"
-    ],
-    "Greater Albuquerque Area": [
-      "Alamogordo",
-      "Albuquerque",
-      "Carlsbad",
-      "Clovis",
-      "Corrales",
-      "Farmington",
-      "Gallup",
-      "Hobbs",
-      "Las Cruces",
-      "Los Lunas",
-      "Rio Rancho",
-      "Roswell",
-      "Santa Fe"
-    ],
-    "Greater Honolulu Area": [
-      "Aiea",
-      "Ewa Beach",
-      "Hilo",
-      "Honolulu",
-      "Kahului",
-      "Kailua",
-      "Kaneohe",
-      "Kapolei",
-      "Kihei",
-      "Makakilo",
-      "Mililani",
-      "Pearl City",
-      "Waipahu"
-    ],
-    "Greater Anchorage Area": [
-      "Anchorage",
-      "Bethel",
-      "Fairbanks",
-      "Juneau",
-      "Kenai",
-      "Ketchikan",
-      "Kodiak",
-      "Palmer",
-      "Sitka",
-      "Wasilla"
-    ],
-    "Greater Boise Area": [
-      "Boise",
-      "Caldwell",
-      "Eagle",
-      "Idaho Falls",
-      "Kuna",
-      "Lewiston",
-      "Meridian",
-      "Mountain Home",
-      "Nampa",
-      "Pocatello",
-      "Post Falls",
-      "Twin Falls"
-    ],
-    "Greater Des Moines Area": [
-      "Ames",
-      "Ankeny",
-      "Bettendorf",
-      "Cedar Falls",
-      "Cedar Rapids",
-      "Clive",
-      "Council Bluffs",
-      "Davenport",
-      "Des Moines",
-      "Dubuque",
-      "Iowa City",
-      "Johnston",
-      "Marion",
-      "Sioux City",
-      "Urbandale",
-      "Waterloo",
-      "Waukee",
-      "West Des Moines"
-    ],
-    "Greater Omaha Area": [
-      "Bellevue",
-      "Columbus",
-      "Fremont",
-      "Grand Island",
-      "Hastings",
-      "Kearney",
-      "La Vista",
-      "Lincoln",
-      "Norfolk",
-      "North Platte",
-      "Omaha",
-      "Papillion",
-      "Scottsbluff"
-    ],
-    "Greater New Orleans Area": [
-      "Alexandria",
-      "Baton Rouge",
-      "Bossier City",
-      "Chalmette",
-      "Gretna",
-      "Harvey",
-      "Houma",
-      "Kenner",
-      "Lafayette",
-      "Lake Charles",
-      "Laplace",
-      "Marrero",
-      "Metairie",
-      "Monroe",
-      "New Iberia",
-      "New Orleans",
-      "Shreveport",
-      "Slidell",
-      "Terrytown"
-    ],
-    "Oklahoma City Metropolitan Area": [
-      "Ardmore",
-      "Bartlesville",
-      "Bixby",
-      "Broken Arrow",
-      "Del City",
-      "Duncan",
-      "Edmond",
-      "Enid",
-      "Lawton",
-      "Midwest City",
-      "Moore",
-      "Muskogee",
-      "Norman",
-      "Oklahoma City",
-      "Owasso",
-      "Ponca City",
-      "Shawnee",
-      "Stillwater",
-      "Tulsa",
-      "Yukon"
-    ],
-    "Greater Hartford Area": [
-      "Bridgeport",
-      "Bristol",
-      "Danbury",
-      "East Hartford",
-      "Hartford",
-      "Manchester",
-      "Meriden",
-      "Middletown",
-      "Milford",
-      "New Britain",
-      "New Haven",
-      "Newington",
-      "Norwalk",
-      "Shelton",
-      "Stamford",
-      "Torrington",
-      "Waterbury",
-      "West Hartford"
-    ],
-    "Greater Columbia Area": [
-      "Anderson",
-      "Charleston",
-      "Columbia",
-      "Florence",
-      "Goose Creek",
-      "Greenville",
-      "Hilton Head Island",
-      "Irmo",
-      "Lexington",
-      "Mount Pleasant",
-      "Myrtle Beach",
-      "North Charleston",
-      "Rock Hill",
-      "Spartanburg",
-      "Summerville",
-      "Sumter"
-    ],
-    "Greater Jackson Area": [
-      "Biloxi",
-      "Brandon",
-      "Clinton",
-      "Columbus",
-      "Flowood",
-      "Greenville",
-      "Gulfport",
-      "Hattiesburg",
-      "Horn Lake",
-      "Jackson",
-      "Madison",
-      "Meridian",
-      "Olive Branch",
-      "Pearl",
-      "Ridgeland",
-      "Southaven",
-      "Starkville",
-      "Tupelo"
-    ],
-    "Sacramento Metropolitan Area": [
-      "Auburn",
-      "Citrus Heights",
-      "Davis",
-      "Elk Grove",
-      "Folsom",
-      "Grass Valley",
-      "Lincoln",
-      "Marysville",
-      "Placerville",
-      "Rancho Cordova",
-      "Rocklin",
-      "Roseville",
-      "Sacramento",
-      "Vacaville",
-      "West Sacramento",
-      "Woodland",
-      "Yuba City"
-    ],
-    "Greater Fresno Area": [
-      "Bakersfield",
-      "Clovis",
-      "Delano",
-      "Fresno",
-      "Hanford",
-      "Lodi",
-      "Madera",
-      "Manteca",
-      "Merced",
-      "Porterville",
-      "Selma",
-      "Tulare",
-      "Turlock",
-      "Visalia"
-    ],
-    "Greater Mobile Area": [
-      "Bayou La Batre",
-      "Chickasaw",
-      "Daphne",
-      "Fairhope",
-      "Mobile",
-      "Prichard",
-      "Saraland",
-      "Spanish Fort"
-    ],
-    "Greater Huntsville Area": [
-      "Albertville",
-      "Athens",
-      "Decatur",
-      "Florence",
-      "Huntsville",
-      "Madison"
-    ],
-    "Greater Montgomery Area": [
-      "Millbrook",
-      "Montgomery",
-      "Prattville",
-      "Tallassee",
-      "Wetumpka"
-    ],
-    "Greater Fairbanks Area": [
-      "Fairbanks",
-      "North Pole"
-    ],
-    "Greater Flagstaff Area": [
-      "Cottonwood",
-      "Flagstaff",
-      "Prescott",
-      "Sedona",
-      "Williams"
-    ],
-    "Greater Fayetteville Area": [
-      "Bentonville",
-      "Fayetteville",
-      "Lowell",
-      "Rogers",
-      "Siloam Springs",
-      "Springdale"
-    ],
-    "Greater Fort Smith Area": [
-      "Alma",
-      "Fort Smith",
-      "Greenwood",
-      "Van Buren"
-    ],
-    "Greater Bakersfield Area": [
-      "Arvin",
-      "Bakersfield",
-      "Delano",
-      "Ridgecrest",
-      "Shafter",
-      "Tehachapi",
-      "Wasco"
-    ],
-    "Greater Riverside Area": [
-      "Corona",
-      "Hemet",
-      "Lake Elsinore",
-      "Moreno Valley",
-      "Murrieta",
-      "Perris",
-      "Riverside",
-      "Temecula"
-    ],
-    "Greater San Bernardino Area": [
-      "Chino",
-      "Fontana",
-      "Hesperia",
-      "Ontario",
-      "Rancho Cucamonga",
-      "Redlands",
-      "Rialto",
-      "San Bernardino",
-      "Upland",
-      "Victorville"
-    ],
-    "Greater Stockton Area": [
-      "Lodi",
-      "Manteca",
-      "Stockton",
-      "Tracy"
-    ],
-    "Greater Modesto Area": [
-      "Ceres",
-      "Modesto",
-      "Oakdale",
-      "Patterson",
-      "Turlock"
-    ],
-    "Greater Santa Barbara Area": [
-      "Carpinteria",
-      "Goleta",
-      "Lompoc",
-      "San Luis Obispo",
-      "Santa Barbara",
-      "Santa Maria"
-    ],
-    "Greater Ventura Area": [
-      "Camarillo",
-      "Moorpark",
-      "Oxnard",
-      "Port Hueneme",
-      "Simi Valley",
-      "Thousand Oaks",
-      "Ventura"
-    ],
-    "Greater Colorado Springs Area": [
-      "Canon City",
-      "Colorado Springs",
-      "Fountain",
-      "Manitou Springs",
-      "Monument",
-      "Pueblo",
-      "Woodland Park"
-    ],
-    "Greater Boulder Area": [
-      "Boulder",
-      "Broomfield",
-      "Lafayette",
-      "Longmont",
-      "Louisville",
-      "Superior"
-    ],
-    "Greater Fort Collins Area": [
-      "Estes Park",
-      "Fort Collins",
-      "Greeley",
-      "Loveland",
-      "Windsor"
-    ],
-    "Greater New Haven Area": [
-      "Branford",
-      "East Haven",
-      "Guilford",
-      "Hamden",
-      "Milford",
-      "New Haven",
-      "North Haven",
-      "West Haven"
-    ],
-    "Greater Bridgeport Area": [
-      "Bridgeport",
-      "Fairfield",
-      "Milford",
-      "Shelton",
-      "Stratford",
-      "Trumbull"
-    ],
-    "Greater Stamford Area": [
-      "Darien",
-      "Greenwich",
-      "New Canaan",
-      "Norwalk",
-      "Stamford",
-      "Westport"
-    ],
-    "Greater Wilmington Area": [
-      "Carolina Beach",
-      "Jacksonville",
-      "Leland",
-      "Wilmington",
-      "Wrightsville Beach"
-    ],
-    "Greater West Palm Beach Area": [
-      "Boca Raton",
-      "Boynton Beach",
-      "Delray Beach",
-      "Jupiter",
-      "Lake Worth",
-      "Palm Beach Gardens",
-      "Royal Palm Beach",
-      "Wellington",
-      "West Palm Beach"
-    ],
-    "Greater Sarasota Area": [
-      "Bradenton",
-      "Englewood",
-      "North Port",
-      "Palmetto",
-      "Sarasota",
-      "Venice"
-    ],
-    "Greater Pensacola Area": [
-      "Crestview",
-      "Destin",
-      "Fort Walton Beach",
-      "Gulf Breeze",
-      "Milton",
-      "Navarre",
-      "Pace",
-      "Pensacola"
-    ],
-    "Greater Tallahassee Area": [
-      "Crawfordville",
-      "Havana",
-      "Midway",
-      "Quincy",
-      "Tallahassee"
-    ],
-    "Greater Fort Myers Area": [
-      "Bonita Springs",
-      "Cape Coral",
-      "Estero",
-      "Fort Myers",
-      "Lehigh Acres",
-      "Marco Island",
-      "Naples"
-    ],
-    "Greater Savannah Area": [
-      "Hinesville",
-      "Pooler",
+    "San Francisco Bay Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Alameda",
+        "Antioch",
+        "Benicia",
+        "Berkeley",
+        "Brentwood",
+        "Burlingame",
+        "Campbell",
+        "Concord",
+        "Corte Madera",
+        "Cupertino",
+        "Daly City",
+        "Dublin",
+        "Fairfield",
+        "Foster City",
+        "Fremont",
+        "Gilroy",
+        "Half Moon Bay",
+        "Hayward",
+        "Hollister",
+        "Livermore",
+        "Los Gatos",
+        "Manteca",
+        "Menlo Park",
+        "Milpitas",
+        "Monterey",
+        "Morgan Hill",
+        "Mountain View",
+        "Napa",
+        "Newark",
+        "Novato",
+        "Oakland",
+        "Pacifica",
+        "Palo Alto",
+        "Petaluma",
+        "Pittsburg",
+        "Pleasanton",
+        "Redwood City",
+        "Richmond",
+        "Salinas",
+        "San Bruno",
+        "San Francisco",
+        "San Jose",
+        "San Leandro",
+        "San Mateo",
+        "San Rafael",
+        "San Ramon",
+        "Santa Clara",
+        "Santa Cruz",
+        "Santa Rosa",
+        "Saratoga",
+        "South San Francisco",
+        "Sunnyvale",
+        "Tracy",
+        "Union City",
+        "Vallejo",
+        "Walnut Creek",
+        "Watsonville"
+      ]
+    },
+    "Los Angeles Metropolitan Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Anaheim",
+        "Burbank",
+        "Carson",
+        "Compton",
+        "Corona",
+        "Costa Mesa",
+        "Downey",
+        "El Monte",
+        "Fontana",
+        "Fullerton",
+        "Garden Grove",
+        "Glendale",
+        "Huntington Beach",
+        "Inglewood",
+        "Irvine",
+        "Laguna Beach",
+        "Long Beach",
+        "Los Angeles",
+        "Moreno Valley",
+        "Newport Beach",
+        "Norwalk",
+        "Ontario",
+        "Palmdale",
+        "Pasadena",
+        "Pomona",
+        "Rancho Cucamonga",
+        "San Clemente",
+        "Santa Ana",
+        "Santa Clarita",
+        "Santa Monica",
+        "South Gate",
+        "Torrance",
+        "West Covina",
+        "Whittier"
+      ]
+    },
+    "San Diego Metropolitan Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Carlsbad",
+        "Chula Vista",
+        "Coronado",
+        "Del Mar",
+        "El Cajon",
+        "Encinitas",
+        "Escondido",
+        "Imperial Beach",
+        "La Mesa",
+        "Lemon Grove",
+        "National City",
+        "Oceanside",
+        "Poway",
+        "San Diego",
+        "San Marcos",
+        "Santee",
+        "Solana Beach",
+        "Vista"
+      ]
+    },
+    "Greater Seattle Area": {
+      "state": "Washington",
+      "country": "United States",
+      "cities": [
+        "Auburn",
+        "Bellevue",
+        "Bellingham",
+        "Bothell",
+        "Burien",
+        "Edmonds",
+        "Everett",
+        "Federal Way",
+        "Issaquah",
+        "Kent",
+        "Kirkland",
+        "Lakewood",
+        "Lynnwood",
+        "Mercer Island",
+        "Olympia",
+        "Redmond",
+        "Renton",
+        "Sammamish",
+        "Seatac",
+        "Seattle",
+        "Shoreline",
+        "Spokane",
+        "Tacoma",
+        "Tukwila",
+        "Woodinville"
+      ]
+    },
+    "Spokane-Coeur d'Alene Area": {
+      "state": "Washington",
+      "country": "United States",
+      "cities": [
+        "Airway Heights",
+        "Cheney",
+        "Liberty Lake",
+        "Spokane",
+        "Spokane Valley"
+      ]
+    },
+    "Dallas-Fort Worth Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Addison",
+        "Allen",
+        "Arlington",
+        "Bedford",
+        "Carrollton",
+        "Cedar Hill",
+        "Colleyville",
+        "Coppell",
+        "Dallas",
+        "Denton",
+        "Euless",
+        "Flower Mound",
+        "Fort Worth",
+        "Frisco",
+        "Garland",
+        "Grand Prairie",
+        "Grapevine",
+        "Irving",
+        "Lewisville",
+        "Mckinney",
+        "Mesquite",
+        "Plano",
+        "Richardson",
+        "Rockwall",
+        "Rowlett",
+        "Southlake",
+        "Wylie"
+      ]
+    },
+    "Greater Houston Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Baytown",
+        "Conroe",
+        "Cypress",
+        "Deer Park",
+        "Friendswood",
+        "Galveston",
+        "Houston",
+        "Humble",
+        "Katy",
+        "La Porte",
+        "League City",
+        "Missouri City",
+        "Pasadena",
+        "Pearland",
+        "Spring",
+        "Sugar Land",
+        "Texas City",
+        "The Woodlands",
+        "Tomball"
+      ]
+    },
+    "Austin Metropolitan Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Austin",
+        "Bastrop",
+        "Bee Cave",
+        "Buda",
+        "Cedar Park",
+        "Georgetown",
+        "Hutto",
+        "Kyle",
+        "Lakeway",
+        "Leander",
+        "Pflugerville",
+        "Round Rock",
+        "San Marcos",
+        "Taylor"
+      ]
+    },
+    "San Antonio Metropolitan Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Alamo Heights",
+        "Boerne",
+        "Cibolo",
+        "Converse",
+        "Helotes",
+        "Leon Valley",
+        "Live Oak",
+        "New Braunfels",
+        "San Antonio",
+        "Schertz",
+        "Selma",
+        "Universal City"
+      ]
+    },
+    "El Paso Metropolitan Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Anthony",
+        "Clint",
+        "El Paso",
+        "Horizon City",
+        "San Elizario",
+        "Socorro"
+      ]
+    },
+    "Greater Abilene Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Abilene",
+        "Albany",
+        "Breckenridge",
+        "Cisco",
+        "Eastland",
+        "Sweetwater"
+      ]
+    },
+    "Longview-Marshall Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Carthage",
+        "Gilmer",
+        "Henderson",
+        "Kilgore",
+        "Longview",
+        "Marshall"
+      ]
+    },
+    "Greater Chicago Area": {
+      "state": "Illinois",
+      "country": "United States",
+      "cities": [
+        "Addison",
+        "Arlington Heights",
+        "Aurora",
+        "Berwyn",
+        "Bloomington",
+        "Bolingbrook",
+        "Buffalo Grove",
+        "Champaign",
+        "Chicago",
+        "Cicero",
+        "Crystal Lake",
+        "Des Plaines",
+        "Downers Grove",
+        "Elgin",
+        "Elmhurst",
+        "Evanston",
+        "Glenview",
+        "Hoffman Estates",
+        "Joliet",
+        "Lombard",
+        "Mount Prospect",
+        "Naperville",
+        "Normal",
+        "Northbrook",
+        "Oak Lawn",
+        "Oak Park",
+        "Orland Park",
+        "Palatine",
+        "Rockford",
+        "Romeoville",
+        "Schaumburg",
+        "Skokie",
+        "Tinley Park",
+        "Waukegan",
+        "Wheaton"
+      ]
+    },
+    "Peoria Metropolitan Area": {
+      "state": "Illinois",
+      "country": "United States",
+      "cities": [
+        "Chillicothe",
+        "East Peoria",
+        "Eureka",
+        "Morton",
+        "Pekin",
+        "Peoria",
+        "Washington"
+      ]
+    },
+    "Greater Tampa Bay Area": {
+      "state": "Florida",
+      "country": "United States",
+      "cities": [
+        "Apollo Beach",
+        "Brandon",
+        "Clearwater",
+        "Dunedin",
+        "Lakeland",
+        "Largo",
+        "New Port Richey",
+        "Oldsmar",
+        "Palm Harbor",
+        "Plant City",
+        "Riverview",
+        "Safety Harbor",
+        "Spring Hill",
+        "Tampa",
+        "Tarpon Springs",
+        "Temple Terrace",
+        "Wesley Chapel"
+      ]
+    },
+    "Miami-Fort Lauderdale Area": {
+      "state": "Florida",
+      "country": "United States",
+      "cities": [
+        "Aventura",
+        "Boca Raton",
+        "Boynton Beach",
+        "Coral Gables",
+        "Coral Springs",
+        "Davie",
+        "Deerfield Beach",
+        "Delray Beach",
+        "Doral",
+        "Fort Lauderdale",
+        "Hialeah",
+        "Hollywood",
+        "Homestead",
+        "Kendall",
+        "Miami",
+        "Miami Beach",
+        "Miami Gardens",
+        "Miramar",
+        "Pembroke Pines",
+        "Plantation",
+        "Pompano Beach",
+        "Sunrise",
+        "Tamarac",
+        "Weston"
+      ]
+    },
+    "Orlando Metropolitan Area": {
+      "state": "Florida",
+      "country": "United States",
+      "cities": [
+        "Altamonte Springs",
+        "Apopka",
+        "Casselberry",
+        "Clermont",
+        "Daytona Beach",
+        "Deltona",
+        "Kissimmee",
+        "Lake Mary",
+        "Longwood",
+        "Maitland",
+        "Ocoee",
+        "Orlando",
+        "Oviedo",
+        "Sanford",
+        "Winter Garden",
+        "Winter Park",
+        "Winter Springs"
+      ]
+    },
+    "Jacksonville Metropolitan Area": {
+      "state": "Florida",
+      "country": "United States",
+      "cities": [
+        "Atlantic Beach",
+        "Fernandina Beach",
+        "Fleming Island",
+        "Jacksonville",
+        "Jacksonville Beach",
+        "Neptune Beach",
+        "Orange Park",
+        "Ponte Vedra Beach"
+      ]
+    },
+    "Denver Metropolitan Area": {
+      "state": "Colorado",
+      "country": "United States",
+      "cities": [
+        "Arvada",
+        "Aurora",
+        "Boulder",
+        "Brighton",
+        "Broomfield",
+        "Castle Rock",
+        "Centennial",
+        "Colorado Springs",
+        "Denver",
+        "Englewood",
+        "Erie",
+        "Fort Collins",
+        "Golden",
+        "Greeley",
+        "Lafayette",
+        "Lakewood",
+        "Littleton",
+        "Longmont",
+        "Louisville",
+        "Loveland",
+        "Parker",
+        "Pueblo",
+        "Superior",
+        "Thornton",
+        "Westminster"
+      ]
+    },
+    "Greater Phoenix Area": {
+      "state": "Arizona",
+      "country": "United States",
+      "cities": [
+        "Apache Junction",
+        "Avondale",
+        "Buckeye",
+        "Carefree",
+        "Casa Grande",
+        "Cave Creek",
+        "Chandler",
+        "Flagstaff",
+        "Fountain Hills",
+        "Gilbert",
+        "Glendale",
+        "Goodyear",
+        "Lake Havasu City",
+        "Maricopa",
+        "Mesa",
+        "Paradise Valley",
+        "Peoria",
+        "Phoenix",
+        "Queen Creek",
+        "Scottsdale",
+        "Surprise",
+        "Tempe",
+        "Tucson",
+        "Yuma"
+      ]
+    },
+    "Greater Tucson Area": {
+      "state": "Arizona",
+      "country": "United States",
+      "cities": [
+        "Catalina Foothills",
+        "Marana",
+        "Oro Valley",
+        "Sahuarita",
+        "South Tucson",
+        "Tucson"
+      ]
+    },
+    "Greater Boston Area": {
+      "state": "Massachusetts",
+      "country": "United States",
+      "cities": [
+        "Amherst",
+        "Attleboro",
+        "Beverly",
+        "Boston",
+        "Brockton",
+        "Brookline",
+        "Cambridge",
+        "Chelsea",
+        "Chicopee",
+        "Fall River",
+        "Fitchburg",
+        "Framingham",
+        "Haverhill",
+        "Holyoke",
+        "Lawrence",
+        "Leominster",
+        "Lowell",
+        "Lynn",
+        "Malden",
+        "Marlborough",
+        "Medford",
+        "Methuen",
+        "Natick",
+        "New Bedford",
+        "Newton",
+        "Northampton",
+        "Peabody",
+        "Pittsfield",
+        "Quincy",
+        "Revere",
+        "Salem",
+        "Somerville",
+        "Springfield",
+        "Taunton",
+        "Waltham",
+        "Westborough",
+        "Westfield",
+        "Weymouth",
+        "Woburn",
+        "Worcester"
+      ]
+    },
+    "Detroit Metropolitan Area": {
+      "state": "Michigan",
+      "country": "United States",
+      "cities": [
+        "Ann Arbor",
+        "Battle Creek",
+        "Birmingham",
+        "Bloomfield Hills",
+        "Dearborn",
+        "Dearborn Heights",
+        "Detroit",
+        "East Lansing",
+        "Farmington Hills",
+        "Flint",
+        "Grand Rapids",
+        "Kalamazoo",
+        "Lansing",
+        "Livonia",
+        "Midland",
+        "Muskegon",
+        "Novi",
+        "Pontiac",
+        "Portage",
+        "Rochester Hills",
+        "Roseville",
+        "Royal Oak",
+        "Saginaw",
+        "Southfield",
+        "Sterling Heights",
+        "Taylor",
+        "Troy",
+        "Warren",
+        "Westland",
+        "Wyoming"
+      ]
+    },
+    "Grand Rapids Metropolitan Area": {
+      "state": "Michigan",
+      "country": "United States",
+      "cities": [
+        "Battle Creek",
+        "East Grand Rapids",
+        "Grand Rapids",
+        "Grandville",
+        "Holland",
+        "Kalamazoo",
+        "Kentwood",
+        "Muskegon",
+        "Norton Shores",
+        "Portage",
+        "Walker",
+        "Wyoming"
+      ]
+    },
+    "Greater Madison Area": {
+      "state": "Wisconsin",
+      "country": "United States",
+      "cities": [
+        "Deforest",
+        "Fitchburg",
+        "Madison",
+        "Mcfarland",
+        "Middleton",
+        "Monona",
+        "Mount Horeb",
+        "Oregon",
+        "Stoughton",
+        "Sun Prairie",
+        "Verona",
+        "Waunakee"
+      ]
+    },
+    "Greater Milwaukee Area": {
+      "state": "Wisconsin",
+      "country": "United States",
+      "cities": [
+        "Brookfield",
+        "Cedarburg",
+        "Franklin",
+        "Grafton",
+        "Greenfield",
+        "Kenosha",
+        "Menomonee Falls",
+        "Mequon",
+        "Milwaukee",
+        "New Berlin",
+        "Oak Creek",
+        "Port Washington",
+        "Racine",
+        "Waukesha",
+        "Wauwatosa",
+        "West Allis",
+        "West Bend"
+      ]
+    },
+    "New York Metropolitan Area": {
+      "state": "New York",
+      "country": "United States",
+      "cities": [
+        "Albany",
+        "Atlantic City",
+        "Bayonne",
+        "Binghamton",
+        "Brick",
+        "Bridgeport",
+        "Bristol",
+        "Buffalo",
+        "Camden",
+        "Cherry Hill",
+        "Clifton",
+        "Danbury",
+        "East Hartford",
+        "East Orange",
+        "Edison",
+        "Elizabeth",
+        "Englewood",
+        "Fairfield",
+        "Fort Lee",
+        "Freeport",
+        "Greenwich",
+        "Hackensack",
+        "Hamden",
+        "Hartford",
+        "Hempstead",
+        "Hoboken",
+        "Ithaca",
+        "Jersey City",
+        "Kearny",
+        "Kingston",
+        "Linden",
+        "Long Beach",
+        "Manchester",
+        "Meriden",
+        "Middletown",
+        "Milford",
+        "Montclair",
+        "Morristown",
+        "Mount Vernon",
+        "New Britain",
+        "New Brunswick",
+        "New Haven",
+        "New Rochelle",
+        "New York City",
+        "Newark",
+        "Niagara Falls",
+        "Norwalk",
+        "Passaic",
+        "Paterson",
+        "Perth Amboy",
+        "Plainfield",
+        "Poughkeepsie",
+        "Princeton",
+        "Ridgewood",
+        "Rochester",
+        "Rome",
+        "Saratoga Springs",
+        "Sayreville",
+        "Schenectady",
+        "Spring Valley",
+        "Stamford",
+        "Stratford",
+        "Summit",
+        "Syracuse",
+        "Trenton",
+        "Troy",
+        "Union City",
+        "Utica",
+        "Valley Stream",
+        "Vineland",
+        "Waterbury",
+        "West Hartford",
+        "West Haven",
+        "West New York",
+        "White Plains",
+        "Woodbridge",
+        "Yonkers"
+      ]
+    },
+    "New York City Metropolitan Area": {
+      "state": "New York",
+      "country": "United States",
+      "cities": [
+        "Atlantic City",
+        "Bayonne",
+        "Brick",
+        "Camden",
+        "Cherry Hill",
+        "Clifton",
+        "East Orange",
+        "Edison",
+        "Elizabeth",
+        "Englewood",
+        "Fort Lee",
+        "Freeport",
+        "Hackensack",
+        "Hempstead",
+        "Hoboken",
+        "Jersey City",
+        "Kearny",
+        "Linden",
+        "Long Beach",
+        "Montclair",
+        "Morristown",
+        "Mount Vernon",
+        "New Brunswick",
+        "New Rochelle",
+        "New York City",
+        "Newark",
+        "Passaic",
+        "Paterson",
+        "Perth Amboy",
+        "Plainfield",
+        "Princeton",
+        "Ridgewood",
+        "Sayreville",
+        "Spring Valley",
+        "Summit",
+        "Trenton",
+        "Union City",
+        "Valley Stream",
+        "Vineland",
+        "West New York",
+        "White Plains",
+        "Woodbridge",
+        "Yonkers"
+      ]
+    },
+    "Buffalo-Niagara Falls Area": {
+      "state": "New York",
+      "country": "United States",
+      "cities": [
+        "Amherst",
+        "Buffalo",
+        "Cheektowaga",
+        "Depew",
+        "Kenmore",
+        "Lackawanna",
+        "Lancaster",
+        "Niagara Falls",
+        "Tonawanda",
+        "West Seneca",
+        "Williamsville"
+      ]
+    },
+    "Cincinnati Metropolitan Area": {
+      "state": "Ohio",
+      "country": "United States",
+      "cities": [
+        "Blue Ash",
+        "Cincinnati",
+        "Fairfield",
+        "Hamilton",
+        "Lebanon",
+        "Loveland",
+        "Mason",
+        "Middletown",
+        "Milford",
+        "Norwood",
+        "Oxford",
+        "Sharonville"
+      ]
+    },
+    "Cleveland Metropolitan Area": {
+      "state": "Ohio",
+      "country": "United States",
+      "cities": [
+        "Akron",
+        "Canton",
+        "Cleveland",
+        "Cuyahoga Falls",
+        "Elyria",
+        "Euclid",
+        "Lakewood",
+        "Lorain",
+        "Medina",
+        "Mentor",
+        "Parma",
+        "Strongsville",
+        "Youngstown"
+      ]
+    },
+    "Columbus Metropolitan Area": {
+      "state": "Ohio",
+      "country": "United States",
+      "cities": [
+        "Columbus",
+        "Delaware",
+        "Dublin",
+        "Gahanna",
+        "Grove City",
+        "Hilliard",
+        "Pickerington",
+        "Powell",
+        "Reynoldsburg",
+        "Upper Arlington",
+        "Westerville",
+        "Worthington"
+      ]
+    },
+    "Greater Philadelphia Area": {
+      "state": "Pennsylvania",
+      "country": "United States",
+      "cities": [
+        "Allentown",
+        "Bethlehem",
+        "Chester",
+        "Conshohocken",
+        "Doylestown",
+        "Harrisburg",
+        "King Of Prussia",
+        "Lancaster",
+        "Media",
+        "Newtown",
+        "Norristown",
+        "Philadelphia",
+        "Pittsburgh",
+        "Reading",
+        "Scranton",
+        "Wayne",
+        "Wilkes-Barre",
+        "York"
+      ]
+    },
+    "Greater Pittsburgh Area": {
+      "state": "Pennsylvania",
+      "country": "United States",
+      "cities": [
+        "Bethel Park",
+        "Cranberry Township",
+        "Monroeville",
+        "Mount Lebanon",
+        "Pittsburgh",
+        "Sewickley",
+        "Wexford"
+      ]
+    },
+    "Greater Harrisburg Area": {
+      "state": "Pennsylvania",
+      "country": "United States",
+      "cities": [
+        "Camp Hill",
+        "Carlisle",
+        "Enola",
+        "Harrisburg",
+        "Hershey",
+        "Lancaster",
+        "Lemoyne",
+        "Mechanicsburg",
+        "New Cumberland",
+        "Palmyra",
+        "York"
+      ]
+    },
+    "Nashville Metropolitan Area": {
+      "state": "Tennessee",
+      "country": "United States",
+      "cities": [
+        "Brentwood",
+        "Clarksville",
+        "Franklin",
+        "Gallatin",
+        "Hendersonville",
+        "Lebanon",
+        "Murfreesboro",
+        "Nashville",
+        "Smyrna",
+        "Spring Hill"
+      ]
+    },
+    "Memphis Metropolitan Area": {
+      "state": "Tennessee",
+      "country": "United States",
+      "cities": [
+        "Arlington",
+        "Bartlett",
+        "Collierville",
+        "Cordova",
+        "Germantown",
+        "Lakeland",
+        "Memphis",
+        "Millington"
+      ]
+    },
+    "Knoxville Metropolitan Area": {
+      "state": "Tennessee",
+      "country": "United States",
+      "cities": [
+        "Alcoa",
+        "Clinton",
+        "Farragut",
+        "Knoxville",
+        "Lenoir City",
+        "Maryville",
+        "Morristown",
+        "Oak Ridge",
+        "Sevierville"
+      ]
+    },
+    "Greater Atlanta Area": {
+      "state": "Georgia",
+      "country": "United States",
+      "cities": [
+        "Acworth",
+        "Alpharetta",
+        "Atlanta",
+        "Brookhaven",
+        "Cartersville",
+        "Decatur",
+        "Duluth",
+        "Dunwoody",
+        "Johns Creek",
+        "Kennesaw",
+        "Lawrenceville",
+        "Marietta",
+        "Peachtree City",
+        "Roswell",
+        "Sandy Springs",
+        "Smyrna",
+        "Suwanee",
+        "Woodstock"
+      ]
+    },
+    "Charlotte Metropolitan Area": {
+      "state": "North Carolina",
+      "country": "United States",
+      "cities": [
+        "Cary",
+        "Chapel Hill",
+        "Charlotte",
+        "Concord",
+        "Cornelius",
+        "Davidson",
+        "Durham",
+        "Fayetteville",
+        "Gastonia",
+        "Greensboro",
+        "High Point",
+        "Huntersville",
+        "Indian Trail",
+        "Matthews",
+        "Pineville",
+        "Raleigh",
+        "Wilmington",
+        "Winston-Salem"
+      ]
+    },
+    "Raleigh-Durham Area": {
+      "state": "North Carolina",
+      "country": "United States",
+      "cities": [
+        "Apex",
+        "Carrboro",
+        "Cary",
+        "Chapel Hill",
+        "Durham",
+        "Fuquay-Varina",
+        "Garner",
+        "Holly Springs",
+        "Knightdale",
+        "Morrisville",
+        "Raleigh",
+        "Wake Forest"
+      ]
+    },
+    "Salt Lake City Metropolitan Area": {
+      "state": "Utah",
+      "country": "United States",
+      "cities": [
+        "American Fork",
+        "Bountiful",
+        "Cedar City",
+        "Clearfield",
+        "Cottonwood Heights",
+        "Draper",
+        "Herriman",
+        "Holladay",
+        "Kaysville",
+        "Layton",
+        "Lehi",
+        "Logan",
+        "Midvale",
+        "Millcreek",
+        "Murray",
+        "Ogden",
+        "Orem",
+        "Pleasant Grove",
+        "Provo",
+        "Riverton",
+        "Roy",
+        "Salt Lake City",
+        "Sandy",
+        "South Jordan",
+        "Spanish Fork",
+        "Springville",
+        "Syracuse",
+        "Taylorsville",
+        "Tooele",
+        "West Jordan",
+        "West Valley City"
+      ]
+    },
+    "Louisville Metropolitan Area": {
+      "state": "Kentucky",
+      "country": "United States",
+      "cities": [
+        "Bowling Green",
+        "Covington",
+        "Elizabethtown",
+        "Florence",
+        "Georgetown",
+        "Jeffersontown",
+        "Lexington",
+        "Louisville",
+        "Nicholasville",
+        "Owensboro",
+        "Richmond",
+        "Shively"
+      ]
+    },
+    "Greater Lexington Area": {
+      "state": "Kentucky",
+      "country": "United States",
+      "cities": [
+        "Berea",
+        "Danville",
+        "Frankfort",
+        "Georgetown",
+        "Lexington",
+        "Nicholasville",
+        "Paris",
+        "Richmond",
+        "Versailles",
+        "Winchester"
+      ]
+    },
+    "Little Rock Metropolitan Area": {
+      "state": "Arkansas",
+      "country": "United States",
+      "cities": [
+        "Benton",
+        "Bryant",
+        "Cabot",
+        "Conway",
+        "Hot Springs",
+        "Jacksonville",
+        "Little Rock",
+        "Maumelle",
+        "North Little Rock",
+        "Sherwood"
+      ]
+    },
+    "Greater Bismarck Area": {
+      "state": "North Dakota",
+      "country": "United States",
+      "cities": [
+        "Bismarck",
+        "Dickinson",
+        "Mandan",
+        "Minot",
+        "Williston"
+      ]
+    },
+    "Washington DC-Baltimore Area": {
+      "state": "District of Columbia",
+      "country": "United States",
+      "cities": [
+        "Alexandria",
+        "Annandale",
+        "Annapolis",
+        "Arlington",
+        "Ashburn",
+        "Baltimore",
+        "Bethesda",
+        "Bowie",
+        "Burke",
+        "Centreville",
+        "Chantilly",
+        "Chevy Chase",
+        "College Park",
+        "Columbia",
+        "Ellicott City",
+        "Fairfax",
+        "Falls Church",
+        "Frederick",
+        "Gaithersburg",
+        "Germantown",
+        "Glen Burnie",
+        "Greenbelt",
+        "Herndon",
+        "Hyattsville",
+        "Laurel",
+        "Leesburg",
+        "Manassas",
+        "Mclean",
+        "Reston",
+        "Rockville",
+        "Silver Spring",
+        "Springfield",
+        "Sterling",
+        "Takoma Park",
+        "Tysons",
+        "Vienna",
+        "Washington",
+        "Woodbridge"
+      ]
+    },
+    "Greater Sydney Area": {
+      "state": "",
+      "country": "Australia",
+      "cities": [
+        "Bankstown",
+        "Blacktown",
+        "Bondi",
+        "Campbelltown",
+        "Chatswood",
+        "Hornsby",
+        "Hurstville",
+        "Liverpool",
+        "Manly",
+        "Parramatta",
+        "Penrith",
+        "Randwick",
+        "Sydney"
+      ]
+    },
+    "Greater Melbourne Area": {
+      "state": "",
+      "country": "Australia",
+      "cities": [
+        "Ballarat",
+        "Bendigo",
+        "Box Hill",
+        "Dandenong",
+        "Footscray",
+        "Frankston",
+        "Geelong",
+        "Melbourne",
+        "Ringwood",
+        "Sunbury",
+        "Werribee"
+      ]
+    },
+    "Greater Brisbane Area": {
+      "state": "",
+      "country": "Australia",
+      "cities": [
+        "Brisbane",
+        "Caboolture",
+        "Chermside",
+        "Gold Coast",
+        "Ipswich",
+        "Redcliffe",
+        "Springwood",
+        "Sunnybank",
+        "Toowoomba"
+      ]
+    },
+    "London Area": {
+      "state": "",
+      "country": "United Kingdom",
+      "cities": [
+        "Barnet",
+        "Brent",
+        "Bromley",
+        "Chelsea",
+        "Croydon",
+        "Ealing",
+        "Enfield",
+        "Hackney",
+        "Hammersmith",
+        "Harrow",
+        "Islington",
+        "Kensington",
+        "Lambeth",
+        "London",
+        "Richmond",
+        "Sutton",
+        "Walthamstow",
+        "Wandsworth"
+      ]
+    },
+    "Greater Bristol Area": {
+      "state": "",
+      "country": "United Kingdom",
+      "cities": [
+        "Bath",
+        "Bristol",
+        "Clevedon",
+        "Keynsham",
+        "Portishead",
+        "Weston-Super-Mare"
+      ]
+    },
+    "Greater Manchester Area": {
+      "state": "",
+      "country": "United Kingdom",
+      "cities": [
+        "Bolton",
+        "Bury",
+        "Manchester",
+        "Oldham",
+        "Rochdale",
+        "Salford",
+        "Stockport",
+        "Wigan"
+      ]
+    },
+    "Greater Birmingham Area": {
+      "state": "Alabama",
+      "country": "United States",
+      "cities": [
+        "Alabaster",
+        "Auburn",
+        "Bessemer",
+        "Birmingham",
+        "Decatur",
+        "Dothan",
+        "Enterprise",
+        "Florence",
+        "Gadsden",
+        "Homewood",
+        "Hoover",
+        "Huntsville",
+        "Madison",
+        "Mobile",
+        "Montgomery",
+        "Opelika",
+        "Pelham",
+        "Phenix City",
+        "Prattville",
+        "Trussville",
+        "Tuscaloosa",
+        "Vestavia Hills"
+      ]
+    },
+    "Birmingham UK Metropolitan Area": {
+      "state": "",
+      "country": "United Kingdom",
+      "cities": [
+        "Birmingham",
+        "Coventry",
+        "Dudley",
+        "Sandwell",
+        "Solihull",
+        "Sutton Coldfield",
+        "Walsall",
+        "West Bromwich",
+        "Wolverhampton"
+      ]
+    },
+    "Greater Exeter Area": {
+      "state": "",
+      "country": "United Kingdom",
+      "cities": [
+        "Crediton",
+        "Dawlish",
+        "Exeter",
+        "Exmouth",
+        "Tiverton"
+      ]
+    },
+    "Bruges Metropolitan Area": {
+      "state": "",
+      "country": "Belgium",
+      "cities": [
+        "Blankenberge",
+        "Bruges",
+        "Brugge",
+        "Knokke",
+        "Oostende"
+      ]
+    },
+    "Ghent Metropolitan Area": {
+      "state": "",
+      "country": "Belgium",
+      "cities": [
+        "Aalst",
+        "Dendermonde",
+        "Gent",
+        "Ghent",
+        "Lokeren"
+      ]
+    },
+    "Greater Barcelona Metropolitan Area": {
+      "state": "",
+      "country": "Spain",
+      "cities": [
+        "Badalona",
+        "Barcelona",
+        "Hospitalet",
+        "Mataro",
+        "Sabadell",
+        "Terrassa"
+      ]
+    },
+    "Greater Castell\u00f3n de la Plana Area": {
+      "state": "",
+      "country": "Spain",
+      "cities": [
+        "Almassora",
+        "Burriana",
+        "Castellon",
+        "Castell\u00f3n",
+        "Vila-real"
+      ]
+    },
+    "Belfast Metropolitan Area": {
+      "state": "",
+      "country": "United Kingdom",
+      "cities": [
+        "Bangor",
+        "Belfast",
+        "Carrickfergus",
+        "Lisburn",
+        "Newtownabbey"
+      ]
+    },
+    "Minneapolis-St. Paul Area": {
+      "state": "Minnesota",
+      "country": "United States",
+      "cities": [
+        "Blaine",
+        "Bloomington",
+        "Brooklyn Park",
+        "Burnsville",
+        "Coon Rapids",
+        "Duluth",
+        "Eagan",
+        "Eden Prairie",
+        "Edina",
+        "Lakeville",
+        "Mankato",
+        "Maple Grove",
+        "Minneapolis",
+        "Minnetonka",
+        "Moorhead",
+        "Plymouth",
+        "Prior Lake",
+        "Richfield",
+        "Rochester",
+        "Saint Paul",
+        "Savage",
+        "Shakopee",
+        "Woodbury"
+      ]
+    },
+    "Kansas City Metropolitan Area": {
+      "state": "Kansas",
+      "country": "United States",
+      "cities": [
+        "Dodge City",
+        "Garden City",
+        "Hutchinson",
+        "Kansas City",
+        "Lawrence",
+        "Leavenworth",
+        "Leawood",
+        "Lenexa",
+        "Manhattan",
+        "Merriam",
+        "Olathe",
+        "Overland Park",
+        "Prairie Village",
+        "Salina",
+        "Shawnee",
+        "Topeka",
+        "Wichita"
+      ]
+    },
+    "Greater St. Louis Area": {
+      "state": "Missouri",
+      "country": "United States",
+      "cities": [
+        "Ballwin",
+        "Chesterfield",
+        "Columbia",
+        "Florissant",
+        "Hazelwood",
+        "Independence",
+        "Kirkwood",
+        "Maryland Heights",
+        "Springfield",
+        "University City",
+        "Webster Groves",
+        "Wildwood"
+      ]
+    },
+    "Greater Portland Area": {
+      "state": "Oregon",
+      "country": "United States",
+      "cities": [
+        "Albany",
+        "Beaverton",
+        "Bend",
+        "Corvallis",
+        "Eugene",
+        "Gresham",
+        "Hillsboro",
+        "Lake Oswego",
+        "Medford",
+        "Milwaukie",
+        "Oregon City",
+        "Portland",
+        "Salem",
+        "Sherwood",
+        "Springfield",
+        "Tigard",
+        "Tualatin",
+        "West Linn",
+        "Wilsonville"
+      ]
+    },
+    "Las Vegas Metropolitan Area": {
+      "state": "Nevada",
+      "country": "United States",
+      "cities": [
+        "Boulder City",
+        "Carson City",
+        "Elko",
+        "Fallon",
+        "Fernley",
+        "Henderson",
+        "Las Vegas",
+        "Mesquite",
+        "North Las Vegas",
+        "Reno",
+        "Sparks",
+        "Winnemucca"
+      ]
+    },
+    "Greater Indianapolis Area": {
+      "state": "Indiana",
+      "country": "United States",
+      "cities": [
+        "Avon",
+        "Bloomington",
+        "Carmel",
+        "Evansville",
+        "Fishers",
+        "Fort Wayne",
+        "Gary",
+        "Greenwood",
+        "Hammond",
+        "Indianapolis",
+        "Lafayette",
+        "Muncie",
+        "Noblesville",
+        "Plainfield",
+        "South Bend",
+        "Terre Haute",
+        "Westfield",
+        "Zionsville"
+      ]
+    },
+    "Greater Richmond Area": {
+      "state": "Virginia",
+      "country": "United States",
+      "cities": [
+        "Alexandria",
+        "Charlottesville",
+        "Chesapeake",
+        "Colonial Heights",
+        "Glen Allen",
+        "Hampton",
+        "Henrico",
+        "Lynchburg",
+        "Mechanicsville",
+        "Midlothian",
+        "Newport News",
+        "Norfolk",
+        "Portsmouth",
+        "Richmond",
+        "Roanoke",
+        "Suffolk",
+        "Virginia Beach"
+      ]
+    },
+    "Greater Providence Area": {
+      "state": "Rhode Island",
+      "country": "United States",
+      "cities": [
+        "Central Falls",
+        "Cranston",
+        "East Providence",
+        "Newport",
+        "North Providence",
+        "Pawtucket",
+        "Providence",
+        "Warwick",
+        "West Warwick",
+        "Westerly",
+        "Woonsocket"
+      ]
+    },
+    "Greater Albuquerque Area": {
+      "state": "New Mexico",
+      "country": "United States",
+      "cities": [
+        "Alamogordo",
+        "Albuquerque",
+        "Carlsbad",
+        "Clovis",
+        "Corrales",
+        "Farmington",
+        "Gallup",
+        "Hobbs",
+        "Las Cruces",
+        "Los Lunas",
+        "Rio Rancho",
+        "Roswell",
+        "Santa Fe"
+      ]
+    },
+    "Greater Honolulu Area": {
+      "state": "Hawaii",
+      "country": "United States",
+      "cities": [
+        "Aiea",
+        "Ewa Beach",
+        "Hilo",
+        "Honolulu",
+        "Kahului",
+        "Kailua",
+        "Kaneohe",
+        "Kapolei",
+        "Kihei",
+        "Makakilo",
+        "Mililani",
+        "Pearl City",
+        "Waipahu"
+      ]
+    },
+    "Greater Anchorage Area": {
+      "state": "Alaska",
+      "country": "United States",
+      "cities": [
+        "Anchorage",
+        "Bethel",
+        "Fairbanks",
+        "Juneau",
+        "Kenai",
+        "Ketchikan",
+        "Kodiak",
+        "Palmer",
+        "Sitka",
+        "Wasilla"
+      ]
+    },
+    "Greater Boise Area": {
+      "state": "Idaho",
+      "country": "United States",
+      "cities": [
+        "Boise",
+        "Caldwell",
+        "Eagle",
+        "Idaho Falls",
+        "Kuna",
+        "Lewiston",
+        "Meridian",
+        "Mountain Home",
+        "Nampa",
+        "Pocatello",
+        "Post Falls",
+        "Twin Falls"
+      ]
+    },
+    "Greater Des Moines Area": {
+      "state": "Iowa",
+      "country": "United States",
+      "cities": [
+        "Ames",
+        "Ankeny",
+        "Bettendorf",
+        "Cedar Falls",
+        "Cedar Rapids",
+        "Clive",
+        "Council Bluffs",
+        "Davenport",
+        "Des Moines",
+        "Dubuque",
+        "Iowa City",
+        "Johnston",
+        "Marion",
+        "Sioux City",
+        "Urbandale",
+        "Waterloo",
+        "Waukee",
+        "West Des Moines"
+      ]
+    },
+    "Greater Omaha Area": {
+      "state": "Nebraska",
+      "country": "United States",
+      "cities": [
+        "Bellevue",
+        "Columbus",
+        "Fremont",
+        "Grand Island",
+        "Hastings",
+        "Kearney",
+        "La Vista",
+        "Lincoln",
+        "Norfolk",
+        "North Platte",
+        "Omaha",
+        "Papillion",
+        "Scottsbluff"
+      ]
+    },
+    "Greater New Orleans Area": {
+      "state": "Louisiana",
+      "country": "United States",
+      "cities": [
+        "Alexandria",
+        "Baton Rouge",
+        "Bossier City",
+        "Chalmette",
+        "Gretna",
+        "Harvey",
+        "Houma",
+        "Kenner",
+        "Lafayette",
+        "Lake Charles",
+        "Laplace",
+        "Marrero",
+        "Metairie",
+        "Monroe",
+        "New Iberia",
+        "New Orleans",
+        "Shreveport",
+        "Slidell",
+        "Terrytown"
+      ]
+    },
+    "Oklahoma City Metropolitan Area": {
+      "state": "Oklahoma",
+      "country": "United States",
+      "cities": [
+        "Ardmore",
+        "Bartlesville",
+        "Bixby",
+        "Broken Arrow",
+        "Del City",
+        "Duncan",
+        "Edmond",
+        "Enid",
+        "Lawton",
+        "Midwest City",
+        "Moore",
+        "Muskogee",
+        "Norman",
+        "Oklahoma City",
+        "Owasso",
+        "Ponca City",
+        "Shawnee",
+        "Stillwater",
+        "Tulsa",
+        "Yukon"
+      ]
+    },
+    "Greater Hartford Area": {
+      "state": "Connecticut",
+      "country": "United States",
+      "cities": [
+        "Bridgeport",
+        "Bristol",
+        "Danbury",
+        "East Hartford",
+        "Hartford",
+        "Manchester",
+        "Meriden",
+        "Middletown",
+        "Milford",
+        "New Britain",
+        "New Haven",
+        "Newington",
+        "Norwalk",
+        "Shelton",
+        "Stamford",
+        "Torrington",
+        "Waterbury",
+        "West Hartford"
+      ]
+    },
+    "Greater Columbia Area": {
+      "state": "South Carolina",
+      "country": "United States",
+      "cities": [
+        "Anderson",
+        "Charleston",
+        "Columbia",
+        "Florence",
+        "Goose Creek",
+        "Greenville",
+        "Hilton Head Island",
+        "Irmo",
+        "Lexington",
+        "Mount Pleasant",
+        "Myrtle Beach",
+        "North Charleston",
+        "Rock Hill",
+        "Spartanburg",
+        "Summerville",
+        "Sumter"
+      ]
+    },
+    "Greater Jackson Area": {
+      "state": "Mississippi",
+      "country": "United States",
+      "cities": [
+        "Biloxi",
+        "Brandon",
+        "Clinton",
+        "Columbus",
+        "Flowood",
+        "Greenville",
+        "Gulfport",
+        "Hattiesburg",
+        "Horn Lake",
+        "Jackson",
+        "Madison",
+        "Meridian",
+        "Olive Branch",
+        "Pearl",
+        "Ridgeland",
+        "Southaven",
+        "Starkville",
+        "Tupelo"
+      ]
+    },
+    "Sacramento Metropolitan Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Auburn",
+        "Citrus Heights",
+        "Davis",
+        "Elk Grove",
+        "Folsom",
+        "Grass Valley",
+        "Lincoln",
+        "Marysville",
+        "Placerville",
+        "Rancho Cordova",
+        "Rocklin",
+        "Roseville",
+        "Sacramento",
+        "Vacaville",
+        "West Sacramento",
+        "Woodland",
+        "Yuba City"
+      ]
+    },
+    "Greater Fresno Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Clovis",
+        "Fresno",
+        "Hanford",
+        "Madera",
+        "Merced",
+        "Porterville",
+        "Selma",
+        "Tulare",
+        "Turlock",
+        "Visalia"
+      ]
+    },
+    "Greater Mobile Area": {
+      "state": "Alabama",
+      "country": "United States",
+      "cities": [
+        "Bayou La Batre",
+        "Chickasaw",
+        "Daphne",
+        "Fairhope",
+        "Mobile",
+        "Prichard",
+        "Saraland",
+        "Spanish Fort"
+      ]
+    },
+    "Greater Huntsville Area": {
+      "state": "Alabama",
+      "country": "United States",
+      "cities": [
+        "Albertville",
+        "Athens",
+        "Decatur",
+        "Florence",
+        "Huntsville",
+        "Madison"
+      ]
+    },
+    "Greater Montgomery Area": {
+      "state": "Alabama",
+      "country": "United States",
+      "cities": [
+        "Millbrook",
+        "Montgomery",
+        "Prattville",
+        "Tallassee",
+        "Wetumpka"
+      ]
+    },
+    "Greater Fairbanks Area": {
+      "state": "Alaska",
+      "country": "United States",
+      "cities": [
+        "Fairbanks",
+        "North Pole"
+      ]
+    },
+    "Greater Flagstaff Area": {
+      "state": "Arizona",
+      "country": "United States",
+      "cities": [
+        "Cottonwood",
+        "Flagstaff",
+        "Prescott",
+        "Sedona",
+        "Williams"
+      ]
+    },
+    "Greater Fayetteville Area": {
+      "state": "Arkansas",
+      "country": "United States",
+      "cities": [
+        "Bentonville",
+        "Fayetteville",
+        "Lowell",
+        "Rogers",
+        "Siloam Springs",
+        "Springdale"
+      ]
+    },
+    "Greater Fort Smith Area": {
+      "state": "Arkansas",
+      "country": "United States",
+      "cities": [
+        "Alma",
+        "Fort Smith",
+        "Greenwood",
+        "Van Buren"
+      ]
+    },
+    "Greater Bakersfield Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Arvin",
+        "Bakersfield",
+        "Delano",
+        "Ridgecrest",
+        "Shafter",
+        "Tehachapi",
+        "Wasco"
+      ]
+    },
+    "Greater Riverside Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Corona",
+        "Hemet",
+        "Lake Elsinore",
+        "Moreno Valley",
+        "Murrieta",
+        "Perris",
+        "Riverside",
+        "Temecula"
+      ]
+    },
+    "Greater San Bernardino Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Chino",
+        "Fontana",
+        "Hesperia",
+        "Ontario",
+        "Rancho Cucamonga",
+        "Redlands",
+        "Rialto",
+        "San Bernardino",
+        "Upland",
+        "Victorville"
+      ]
+    },
+    "Greater Stockton Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Lodi",
+        "Manteca",
+        "Stockton",
+        "Tracy"
+      ]
+    },
+    "Greater Modesto Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Ceres",
+        "Modesto",
+        "Oakdale",
+        "Patterson",
+        "Turlock"
+      ]
+    },
+    "Greater Santa Barbara Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Carpinteria",
+        "Goleta",
+        "Lompoc",
+        "San Luis Obispo",
+        "Santa Barbara",
+        "Santa Maria"
+      ]
+    },
+    "Greater Ventura Area": {
+      "state": "California",
+      "country": "United States",
+      "cities": [
+        "Camarillo",
+        "Moorpark",
+        "Oxnard",
+        "Port Hueneme",
+        "Simi Valley",
+        "Thousand Oaks",
+        "Ventura"
+      ]
+    },
+    "Greater Colorado Springs Area": {
+      "state": "Colorado",
+      "country": "United States",
+      "cities": [
+        "Canon City",
+        "Colorado Springs",
+        "Fountain",
+        "Manitou Springs",
+        "Monument",
+        "Pueblo",
+        "Woodland Park"
+      ]
+    },
+    "Greater Boulder Area": {
+      "state": "Colorado",
+      "country": "United States",
+      "cities": [
+        "Boulder",
+        "Broomfield",
+        "Lafayette",
+        "Longmont",
+        "Louisville",
+        "Superior"
+      ]
+    },
+    "Greater Fort Collins Area": {
+      "state": "Colorado",
+      "country": "United States",
+      "cities": [
+        "Estes Park",
+        "Fort Collins",
+        "Greeley",
+        "Loveland",
+        "Windsor"
+      ]
+    },
+    "Greater New Haven Area": {
+      "state": "Connecticut",
+      "country": "United States",
+      "cities": [
+        "Branford",
+        "East Haven",
+        "Guilford",
+        "Hamden",
+        "Milford",
+        "New Haven",
+        "North Haven",
+        "West Haven"
+      ]
+    },
+    "Greater Bridgeport Area": {
+      "state": "Connecticut",
+      "country": "United States",
+      "cities": [
+        "Bridgeport",
+        "Fairfield",
+        "Milford",
+        "Shelton",
+        "Stratford",
+        "Trumbull"
+      ]
+    },
+    "Greater Stamford Area": {
+      "state": "Connecticut",
+      "country": "United States",
+      "cities": [
+        "Darien",
+        "Greenwich",
+        "New Canaan",
+        "Norwalk",
+        "Stamford",
+        "Westport"
+      ]
+    },
+    "Greater Wilmington Area": {
+      "state": "North Carolina",
+      "country": "United States",
+      "cities": [
+        "Carolina Beach",
+        "Jacksonville",
+        "Leland",
+        "Wilmington",
+        "Wrightsville Beach"
+      ]
+    },
+    "Greater West Palm Beach Area": {
+      "state": "Florida",
+      "country": "United States",
+      "cities": [
+        "Boca Raton",
+        "Boynton Beach",
+        "Delray Beach",
+        "Jupiter",
+        "Lake Worth",
+        "Palm Beach Gardens",
+        "Royal Palm Beach",
+        "Wellington",
+        "West Palm Beach"
+      ]
+    },
+    "Greater Sarasota Area": {
+      "state": "Florida",
+      "country": "United States",
+      "cities": [
+        "Bradenton",
+        "Englewood",
+        "North Port",
+        "Palmetto",
+        "Sarasota",
+        "Venice"
+      ]
+    },
+    "Greater Pensacola Area": {
+      "state": "Florida",
+      "country": "United States",
+      "cities": [
+        "Crestview",
+        "Destin",
+        "Fort Walton Beach",
+        "Gulf Breeze",
+        "Milton",
+        "Navarre",
+        "Pace",
+        "Pensacola"
+      ]
+    },
+    "Greater Tallahassee Area": {
+      "state": "Florida",
+      "country": "United States",
+      "cities": [
+        "Crawfordville",
+        "Havana",
+        "Midway",
+        "Quincy",
+        "Tallahassee"
+      ]
+    },
+    "Greater Fort Myers Area": {
+      "state": "Florida",
+      "country": "United States",
+      "cities": [
+        "Bonita Springs",
+        "Cape Coral",
+        "Estero",
+        "Fort Myers",
+        "Lehigh Acres",
+        "Marco Island",
+        "Naples"
+      ]
+    },
+    "Greater Savannah Area": {
+      "state": "Georgia",
+      "country": "United States",
+      "cities": [
+        "Hinesville",
+        "Pooler",
+        "Richmond Hill",
+        "Savannah",
+        "Statesboro"
+      ]
+    },
+    "Greater Augusta Area": {
+      "state": "Georgia",
+      "country": "United States",
+      "cities": [
+        "Augusta",
+        "Evans",
+        "Grovetown",
+        "Martinez",
+        "Thomson"
+      ]
+    },
+    "Greater Idaho Falls Area": {
+      "state": "Idaho",
+      "country": "United States",
+      "cities": [
+        "Ammon",
+        "Blackfoot",
+        "Idaho Falls",
+        "Pocatello",
+        "Rexburg"
+      ]
+    },
+    "Greater Springfield Area": {
+      "state": "Missouri",
+      "country": "United States",
+      "cities": [
+        "Branson",
+        "Joplin",
+        "Nixa",
+        "Ozark",
+        "Republic",
+        "Springfield"
+      ]
+    },
+    "Greater Rockford Area": {
+      "state": "Illinois",
+      "country": "United States",
+      "cities": [
+        "Belvidere",
+        "Freeport",
+        "Loves Park",
+        "Machesney Park",
+        "Rockford"
+      ]
+    },
+    "Greater Fort Wayne Area": {
+      "state": "Indiana",
+      "country": "United States",
+      "cities": [
+        "Angola",
+        "Auburn",
+        "Decatur",
+        "Fort Wayne",
+        "Huntington",
+        "New Haven"
+      ]
+    },
+    "Greater South Bend Area": {
+      "state": "Indiana",
+      "country": "United States",
+      "cities": [
+        "Elkhart",
+        "Goshen",
+        "Granger",
+        "Mishawaka",
+        "South Bend"
+      ]
+    },
+    "Greater Evansville Area": {
+      "state": "Indiana",
+      "country": "United States",
+      "cities": [
+        "Evansville",
+        "Jasper",
+        "Newburgh",
+        "Princeton",
+        "Vincennes"
+      ]
+    },
+    "Greater Cedar Rapids Area": {
+      "state": "Iowa",
+      "country": "United States",
+      "cities": [
+        "Cedar Rapids",
+        "Coralville",
+        "Iowa City",
+        "Marion",
+        "North Liberty"
+      ]
+    },
+    "Greater Davenport Area": {
+      "state": "Iowa",
+      "country": "United States",
+      "cities": [
+        "Bettendorf",
+        "Clinton",
+        "Davenport",
+        "Muscatine"
+      ]
+    },
+    "Greater Wichita Area": {
+      "state": "Kansas",
+      "country": "United States",
+      "cities": [
+        "Andover",
+        "Derby",
+        "El Dorado",
+        "Hutchinson",
+        "Newton",
+        "Wichita"
+      ]
+    },
+    "Greater Topeka Area": {
+      "state": "Kansas",
+      "country": "United States",
+      "cities": [
+        "Junction City",
+        "Lawrence",
+        "Manhattan",
+        "Topeka"
+      ]
+    },
+    "Greater Bowling Green Area": {
+      "state": "Kentucky",
+      "country": "United States",
+      "cities": [
+        "Bowling Green",
+        "Elizabethtown",
+        "Franklin",
+        "Glasgow"
+      ]
+    },
+    "Greater Baton Rouge Area": {
+      "state": "Louisiana",
+      "country": "United States",
+      "cities": [
+        "Baker",
+        "Baton Rouge",
+        "Central",
+        "Denham Springs",
+        "Gonzales",
+        "Prairieville",
+        "Zachary"
+      ]
+    },
+    "Greater Shreveport Area": {
+      "state": "Louisiana",
+      "country": "United States",
+      "cities": [
+        "Bossier City",
+        "Minden",
+        "Natchitoches",
+        "Ruston",
+        "Shreveport"
+      ]
+    },
+    "Greater Bangor Area": {
+      "state": "Maine",
+      "country": "United States",
+      "cities": [
+        "Bangor",
+        "Brewer",
+        "Hampden",
+        "Old Town",
+        "Orono"
+      ]
+    },
+    "Greater Worcester Area": {
+      "state": "Massachusetts",
+      "country": "United States",
+      "cities": [
+        "Auburn",
+        "Fitchburg",
+        "Leominster",
+        "Marlborough",
+        "Shrewsbury",
+        "Westborough",
+        "Worcester"
+      ]
+    },
+    "Greater Lansing Area": {
+      "state": "Michigan",
+      "country": "United States",
+      "cities": [
+        "Dewitt",
+        "East Lansing",
+        "Grand Ledge",
+        "Haslett",
+        "Lansing",
+        "Okemos"
+      ]
+    },
+    "Greater Ann Arbor Area": {
+      "state": "Michigan",
+      "country": "United States",
+      "cities": [
+        "Ann Arbor",
+        "Chelsea",
+        "Dexter",
+        "Saline",
+        "Ypsilanti"
+      ]
+    },
+    "Greater Flint Area": {
+      "state": "Michigan",
+      "country": "United States",
+      "cities": [
+        "Burton",
+        "Davison",
+        "Fenton",
+        "Flint",
+        "Flushing",
+        "Grand Blanc"
+      ]
+    },
+    "Greater Rochester Area": {
+      "state": "New York",
+      "country": "United States",
+      "cities": [
+        "Brighton",
+        "Greece",
+        "Henrietta",
+        "Irondequoit",
+        "Pittsford",
+        "Rochester",
+        "Webster"
+      ]
+    },
+    "Greater Duluth Area": {
+      "state": "Minnesota",
+      "country": "United States",
+      "cities": [
+        "Cloquet",
+        "Duluth",
+        "Hermantown"
+      ]
+    },
+    "Greater Biloxi Area": {
+      "state": "Mississippi",
+      "country": "United States",
+      "cities": [
+        "Biloxi",
+        "Gulfport",
+        "Moss Point",
+        "Ocean Springs",
+        "Pascagoula"
+      ]
+    },
+    "Greater Billings Area": {
+      "state": "Montana",
+      "country": "United States",
+      "cities": [
+        "Billings",
+        "Laurel",
+        "Livingston",
+        "Miles City"
+      ]
+    },
+    "Greater Missoula Area": {
+      "state": "Montana",
+      "country": "United States",
+      "cities": [
+        "Butte",
+        "Great Falls",
+        "Helena",
+        "Kalispell",
+        "Missoula"
+      ]
+    },
+    "Greater Lincoln Area": {
+      "state": "Nebraska",
+      "country": "United States",
+      "cities": [
+        "Beatrice",
+        "Crete",
+        "Lincoln",
+        "Seward",
+        "York"
+      ]
+    },
+    "Greater Reno Area": {
+      "state": "Nevada",
+      "country": "United States",
+      "cities": [
+        "Carson City",
+        "Fallon",
+        "Fernley",
+        "Reno",
+        "Sparks"
+      ]
+    },
+    "Greater Nashua Area": {
+      "state": "New Hampshire",
+      "country": "United States",
+      "cities": [
+        "Bedford",
+        "Concord",
+        "Derry",
+        "Manchester",
+        "Merrimack",
+        "Nashua",
+        "Salem"
+      ]
+    },
+    "Greater Trenton Area": {
+      "state": "New Jersey",
+      "country": "United States",
+      "cities": [
+        "Ewing",
+        "Princeton",
+        "Trenton"
+      ]
+    },
+    "Greater Atlantic City Area": {
+      "state": "New Jersey",
+      "country": "United States",
+      "cities": [
+        "Absecon",
+        "Atlantic City",
+        "Millville",
+        "Pleasantville",
+        "Vineland"
+      ]
+    },
+    "Greater Santa Fe Area": {
+      "state": "New Mexico",
+      "country": "United States",
+      "cities": [
+        "Los Alamos",
+        "Santa Fe",
+        "Taos"
+      ]
+    },
+    "Greater Las Cruces Area": {
+      "state": "New Mexico",
+      "country": "United States",
+      "cities": [
+        "Alamogordo",
+        "Deming",
+        "Las Cruces",
+        "Silver City"
+      ]
+    },
+    "Greater Syracuse Area": {
+      "state": "New York",
+      "country": "United States",
+      "cities": [
+        "Auburn",
+        "Cicero",
+        "Clay",
+        "Cortland",
+        "Fulton",
+        "Liverpool",
+        "Oswego",
+        "Syracuse"
+      ]
+    },
+    "Greater Albany Area": {
+      "state": "New York",
+      "country": "United States",
+      "cities": [
+        "Albany",
+        "Clifton Park",
+        "Colonie",
+        "Guilderland",
+        "Saratoga Springs",
+        "Schenectady",
+        "Troy"
+      ]
+    },
+    "Greater Greensboro Area": {
+      "state": "North Carolina",
+      "country": "United States",
+      "cities": [
+        "Asheboro",
+        "Burlington",
+        "Greensboro",
+        "High Point",
+        "Lexington",
+        "Thomasville"
+      ]
+    },
+    "Greater Winston-Salem Area": {
+      "state": "North Carolina",
+      "country": "United States",
+      "cities": [
+        "Clemmons",
+        "Kernersville",
+        "Lewisville",
+        "Mount Airy",
+        "Winston-Salem"
+      ]
+    },
+    "Greater Asheville Area": {
+      "state": "North Carolina",
+      "country": "United States",
+      "cities": [
+        "Asheville",
+        "Black Mountain",
+        "Brevard",
+        "Hendersonville",
+        "Waynesville",
+        "Weaverville"
+      ]
+    },
+    "Greater Fargo Area": {
+      "state": "North Dakota",
+      "country": "United States",
+      "cities": [
+        "Fargo",
+        "Grand Forks",
+        "Minot",
+        "West Fargo"
+      ]
+    },
+    "Greater Toledo Area": {
+      "state": "Ohio",
+      "country": "United States",
+      "cities": [
+        "Bowling Green",
+        "Findlay",
+        "Maumee",
+        "Oregon",
+        "Perrysburg",
+        "Sylvania",
+        "Toledo"
+      ]
+    },
+    "Greater Akron Area": {
+      "state": "Ohio",
+      "country": "United States",
+      "cities": [
+        "Akron",
+        "Barberton",
+        "Canton",
+        "Cuyahoga Falls",
+        "Green",
+        "Kent",
+        "Massillon",
+        "Stow"
+      ]
+    },
+    "Greater Dayton Area": {
+      "state": "Ohio",
+      "country": "United States",
+      "cities": [
+        "Beavercreek",
+        "Dayton",
+        "Fairborn",
+        "Huber Heights",
+        "Kettering",
+        "Springfield",
+        "Troy",
+        "Xenia"
+      ]
+    },
+    "Greater Youngstown Area": {
+      "state": "Ohio",
+      "country": "United States",
+      "cities": [
+        "Austintown",
+        "Boardman",
+        "Girard",
+        "Niles",
+        "Warren",
+        "Youngstown"
+      ]
+    },
+    "Greater Tulsa Area": {
+      "state": "Oklahoma",
+      "country": "United States",
+      "cities": [
+        "Bartlesville",
+        "Bixby",
+        "Broken Arrow",
+        "Claremore",
+        "Jenks",
+        "Owasso",
+        "Sand Springs",
+        "Sapulpa",
+        "Tulsa"
+      ]
+    },
+    "Greater Eugene Area": {
+      "state": "Oregon",
+      "country": "United States",
+      "cities": [
+        "Albany",
+        "Corvallis",
+        "Cottage Grove",
+        "Eugene",
+        "Springfield"
+      ]
+    },
+    "Greater Salem Area": {
+      "state": "Oregon",
+      "country": "United States",
+      "cities": [
+        "Dallas",
+        "Keizer",
+        "Salem",
+        "Silverton",
+        "Stayton",
+        "Woodburn"
+      ]
+    },
+    "Greater Bend Area": {
+      "state": "Oregon",
+      "country": "United States",
+      "cities": [
+        "Bend",
+        "La Pine",
+        "Madras",
+        "Prineville",
+        "Redmond"
+      ]
+    },
+    "Greater Allentown Area": {
+      "state": "Pennsylvania",
+      "country": "United States",
+      "cities": [
+        "Allentown",
+        "Bethlehem",
+        "Easton",
+        "Emmaus",
+        "Northampton",
+        "Whitehall"
+      ]
+    },
+    "Greater Scranton Area": {
+      "state": "Pennsylvania",
+      "country": "United States",
+      "cities": [
+        "Carbondale",
+        "Hazleton",
+        "Kingston",
+        "Pittston",
+        "Scranton",
+        "Wilkes-Barre"
+      ]
+    },
+    "Greater Erie Area": {
+      "state": "Pennsylvania",
+      "country": "United States",
+      "cities": [
+        "Corry",
+        "Edinboro",
+        "Erie",
+        "Meadville",
+        "Titusville"
+      ]
+    },
+    "Greater Charleston Area": {
+      "state": "South Carolina",
+      "country": "United States",
+      "cities": [
+        "Charleston",
+        "Huntington",
+        "Morgantown",
+        "Parkersburg",
+        "Weirton",
+        "Wheeling"
+      ]
+    },
+    "Greater Greenville Area": {
+      "state": "South Carolina",
+      "country": "United States",
+      "cities": [
+        "Anderson",
+        "Easley",
+        "Greenville",
+        "Greer",
+        "Mauldin",
+        "Simpsonville",
+        "Spartanburg"
+      ]
+    },
+    "Greater Myrtle Beach Area": {
+      "state": "South Carolina",
+      "country": "United States",
+      "cities": [
+        "Conway",
+        "Georgetown",
+        "Myrtle Beach",
+        "North Myrtle Beach",
+        "Surfside Beach"
+      ]
+    },
+    "Greater Sioux Falls Area": {
+      "state": "South Dakota",
+      "country": "United States",
+      "cities": [
+        "Brandon",
+        "Brookings",
+        "Mitchell",
+        "Sioux Falls",
+        "Watertown"
+      ]
+    },
+    "Greater Rapid City Area": {
+      "state": "South Dakota",
+      "country": "United States",
+      "cities": [
+        "Deadwood",
+        "Rapid City",
+        "Spearfish",
+        "Sturgis"
+      ]
+    },
+    "Greater Chattanooga Area": {
+      "state": "Tennessee",
+      "country": "United States",
+      "cities": [
+        "Chattanooga",
+        "Cleveland",
+        "East Ridge",
+        "Red Bank",
+        "Signal Mountain",
+        "Soddy-Daisy"
+      ]
+    },
+    "Greater Clarksville Area": {
+      "state": "Tennessee",
+      "country": "United States",
+      "cities": [
+        "Clarksville"
+      ]
+    },
+    "Greater Corpus Christi Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Alice",
+        "Corpus Christi",
+        "Kingsville",
+        "Portland",
+        "Rockport"
+      ]
+    },
+    "Greater Lubbock Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Brownfield",
+        "Levelland",
+        "Lubbock",
+        "Plainview",
+        "Snyder"
+      ]
+    },
+    "Greater Amarillo Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Amarillo",
+        "Borger",
+        "Canyon",
+        "Hereford",
+        "Pampa"
+      ]
+    },
+    "Greater Waco Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Belton",
+        "Copperas Cove",
+        "Harker Heights",
+        "Killeen",
+        "Temple",
+        "Waco"
+      ]
+    },
+    "Greater McAllen Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Edinburg",
+        "Mcallen",
+        "Mission",
+        "Pharr",
+        "Weslaco"
+      ]
+    },
+    "Greater Brownsville Area": {
+      "state": "Texas",
+      "country": "United States",
+      "cities": [
+        "Brownsville",
+        "Harlingen",
+        "Los Fresnos",
+        "San Benito"
+      ]
+    },
+    "Greater Provo Area": {
+      "state": "Utah",
+      "country": "United States",
+      "cities": [
+        "American Fork",
+        "Lehi",
+        "Orem",
+        "Payson",
+        "Pleasant Grove",
+        "Provo",
+        "Spanish Fork",
+        "Springville"
+      ]
+    },
+    "Greater Ogden Area": {
+      "state": "Utah",
+      "country": "United States",
+      "cities": [
+        "Clearfield",
+        "Kaysville",
+        "Layton",
+        "North Ogden",
+        "Ogden",
+        "Roy",
+        "Syracuse"
+      ]
+    },
+    "Greater St. George Area": {
+      "state": "Utah",
+      "country": "United States",
+      "cities": [
+        "Cedar City",
+        "Hurricane",
+        "Ivins",
+        "Washington"
+      ]
+    },
+    "Greater Burlington Area": {
+      "state": "Vermont",
+      "country": "United States",
+      "cities": [
+        "Barre",
+        "Burlington",
+        "Colchester",
+        "Montpelier",
+        "South Burlington",
+        "Williston",
+        "Winooski"
+      ]
+    },
+    "Greater Virginia Beach Area": {
+      "state": "Virginia",
+      "country": "United States",
+      "cities": [
+        "Chesapeake",
+        "Hampton",
+        "Newport News",
+        "Norfolk",
+        "Portsmouth",
+        "Suffolk",
+        "Virginia Beach"
+      ]
+    },
+    "Greater Roanoke Area": {
+      "state": "Virginia",
+      "country": "United States",
+      "cities": [
+        "Blacksburg",
+        "Christiansburg",
+        "Radford",
+        "Roanoke",
+        "Salem"
+      ]
+    },
+    "Greater Tacoma Area": {
+      "state": "Washington",
+      "country": "United States",
+      "cities": [
+        "Bonney Lake",
+        "Federal Way",
+        "Gig Harbor",
+        "Lakewood",
+        "Puyallup",
+        "Tacoma",
+        "University Place"
+      ]
+    },
+    "Greater Vancouver Area": {
+      "state": "Washington",
+      "country": "United States",
+      "cities": [
+        "Battle Ground",
+        "Camas",
+        "Ridgefield",
+        "Vancouver",
+        "Washougal"
+      ]
+    },
+    "Greater Vancouver Metropolitan Area": {
+      "state": "British Columbia",
+      "country": "Canada",
+      "cities": [
+        "Burnaby",
+        "Coquitlam",
+        "Delta",
+        "Langley",
+        "Maple Ridge",
+        "New Westminster",
+        "North Vancouver",
+        "Pitt Meadows",
+        "Port Coquitlam",
+        "Port Moody",
+        "Richmond",
+        "Surrey",
+        "Vancouver",
+        "West Vancouver",
+        "White Rock"
+      ]
+    },
+    "Greater Green Bay Area": {
+      "state": "Wisconsin",
+      "country": "United States",
+      "cities": [
+        "Appleton",
+        "Ashwaubenon",
+        "De Pere",
+        "Green Bay",
+        "Menasha",
+        "Neenah",
+        "Oshkosh"
+      ]
+    },
+    "Greater Cheyenne Area": {
+      "state": "Wyoming",
+      "country": "United States",
+      "cities": [
+        "Casper",
+        "Cheyenne",
+        "Gillette",
+        "Laramie",
+        "Rock Springs"
+      ]
+    },
+    "Greater Toronto Area": {
+      "state": "Ontario",
+      "country": "Canada",
+      "cities": [
+        "Toronto",
+        "Mississauga",
+        "Brampton",
+        "Markham",
+        "Vaughan",
+        "Richmond Hill",
+        "Oakville",
+        "Burlington",
+        "Pickering",
+        "Ajax",
+        "Whitby",
+        "Oshawa"
+      ]
+    },
+    "Greater New York City Area": {
+      "state": "New York",
+      "country": "United States",
+      "cities": [
+        "New York",
+        "New York City",
+        "Manhattan",
+        "Brooklyn",
+        "Queens",
+        "Bronx",
+        "Staten Island",
+        "Jersey City",
+        "Newark",
+        "Yonkers",
+        "White Plains"
+      ]
+    },
+    "Greater Montreal Area": {
+      "state": "Quebec",
+      "country": "Canada",
+      "cities": [
+        "Montreal",
+        "Montr\u00e9al",
+        "Laval",
+        "Longueuil",
+        "Brossard",
+        "Terrebonne",
+        "Repentigny",
+        "Saint-Laurent",
+        "Dollard-des-Ormeaux",
+        "Pointe-Claire"
+      ]
+    }
+  },
+  "Greater Toronto Area": {
+    "cities": [
+      "Toronto",
+      "Mississauga",
+      "Brampton",
+      "Markham",
+      "Vaughan",
       "Richmond Hill",
-      "Savannah",
-      "Statesboro"
+      "Oakville",
+      "Burlington",
+      "Pickering",
+      "Ajax",
+      "Whitby",
+      "Oshawa"
     ],
-    "Greater Augusta Area": [
-      "Augusta",
-      "Evans",
-      "Grovetown",
-      "Martinez",
-      "Thomson"
-    ],
-    "Greater Idaho Falls Area": [
-      "Ammon",
-      "Blackfoot",
-      "Idaho Falls",
-      "Pocatello",
-      "Rexburg"
-    ],
-    "Greater Springfield Area": [
-      "Branson",
-      "Joplin",
-      "Nixa",
-      "Ozark",
-      "Republic",
-      "Springfield"
-    ],
-    "Greater Rockford Area": [
-      "Belvidere",
-      "Freeport",
-      "Loves Park",
-      "Machesney Park",
-      "Rockford"
-    ],
-    "Greater Fort Wayne Area": [
-      "Angola",
-      "Auburn",
-      "Decatur",
-      "Fort Wayne",
-      "Huntington",
-      "New Haven"
-    ],
-    "Greater South Bend Area": [
-      "Elkhart",
-      "Goshen",
-      "Granger",
-      "Mishawaka",
-      "South Bend"
-    ],
-    "Greater Evansville Area": [
-      "Evansville",
-      "Jasper",
-      "Newburgh",
-      "Princeton",
-      "Vincennes"
-    ],
-    "Greater Cedar Rapids Area": [
-      "Cedar Rapids",
-      "Coralville",
-      "Iowa City",
-      "Marion",
-      "North Liberty"
-    ],
-    "Greater Davenport Area": [
-      "Bettendorf",
-      "Clinton",
-      "Davenport",
-      "Muscatine"
-    ],
-    "Greater Wichita Area": [
-      "Andover",
-      "Derby",
-      "El Dorado",
-      "Hutchinson",
-      "Newton",
-      "Wichita"
-    ],
-    "Greater Topeka Area": [
-      "Junction City",
-      "Lawrence",
+    "state": "Ontario",
+    "country": "Canada"
+  },
+  "Greater New York City Area": {
+    "cities": [
+      "New York",
+      "New York City",
       "Manhattan",
-      "Topeka"
+      "Brooklyn",
+      "Queens",
+      "Bronx",
+      "Staten Island",
+      "Jersey City",
+      "Newark",
+      "Yonkers",
+      "White Plains"
     ],
-    "Greater Bowling Green Area": [
-      "Bowling Green",
-      "Elizabethtown",
-      "Franklin",
-      "Glasgow"
+    "state": "New York",
+    "country": "United States"
+  },
+  "New York City Metropolitan Area": {
+    "cities": [
+      "New York",
+      "New York City",
+      "Manhattan",
+      "Brooklyn",
+      "Queens",
+      "Bronx",
+      "Staten Island",
+      "Jersey City",
+      "Newark",
+      "Yonkers",
+      "White Plains"
     ],
-    "Greater Baton Rouge Area": [
-      "Baker",
-      "Baton Rouge",
-      "Central",
-      "Denham Springs",
-      "Gonzales",
-      "Prairieville",
-      "Zachary"
-    ],
-    "Greater Shreveport Area": [
-      "Bossier City",
-      "Minden",
-      "Natchitoches",
-      "Ruston",
-      "Shreveport"
-    ],
-    "Greater Bangor Area": [
-      "Bangor",
-      "Brewer",
-      "Hampden",
-      "Old Town",
-      "Orono"
-    ],
-    "Greater Worcester Area": [
-      "Auburn",
-      "Fitchburg",
-      "Leominster",
-      "Marlborough",
-      "Shrewsbury",
-      "Westborough",
-      "Worcester"
-    ],
-    "Greater Lansing Area": [
-      "Dewitt",
-      "East Lansing",
-      "Grand Ledge",
-      "Haslett",
-      "Lansing",
-      "Okemos"
-    ],
-    "Greater Ann Arbor Area": [
-      "Ann Arbor",
-      "Chelsea",
-      "Dexter",
-      "Saline",
-      "Ypsilanti"
-    ],
-    "Greater Flint Area": [
-      "Burton",
-      "Davison",
-      "Fenton",
-      "Flint",
-      "Flushing",
-      "Grand Blanc"
-    ],
-    "Greater Rochester Area": [
-      "Brighton",
-      "Greece",
-      "Henrietta",
-      "Irondequoit",
-      "Pittsford",
-      "Rochester",
-      "Webster"
-    ],
-    "Greater Duluth Area": [
-      "Cloquet",
-      "Duluth",
-      "Hermantown"
-    ],
-    "Greater Biloxi Area": [
-      "Biloxi",
-      "Gulfport",
-      "Moss Point",
-      "Ocean Springs",
-      "Pascagoula"
-    ],
-    "Greater Billings Area": [
-      "Billings",
-      "Laurel",
-      "Livingston",
-      "Miles City"
-    ],
-    "Greater Missoula Area": [
-      "Butte",
-      "Great Falls",
-      "Helena",
-      "Kalispell",
-      "Missoula"
-    ],
-    "Greater Lincoln Area": [
-      "Beatrice",
-      "Crete",
-      "Lincoln",
-      "Seward",
-      "York"
-    ],
-    "Greater Reno Area": [
-      "Carson City",
-      "Fallon",
-      "Fernley",
-      "Reno",
-      "Sparks"
-    ],
-    "Greater Nashua Area": [
-      "Bedford",
-      "Concord",
-      "Derry",
-      "Manchester",
-      "Merrimack",
-      "Nashua",
-      "Salem"
-    ],
-    "Greater Trenton Area": [
-      "Ewing",
-      "Princeton",
-      "Trenton"
-    ],
-    "Greater Atlantic City Area": [
-      "Absecon",
-      "Atlantic City",
-      "Millville",
-      "Pleasantville",
-      "Vineland"
-    ],
-    "Greater Santa Fe Area": [
-      "Los Alamos",
-      "Santa Fe",
-      "Taos"
-    ],
-    "Greater Las Cruces Area": [
-      "Alamogordo",
-      "Deming",
-      "Las Cruces",
-      "Silver City"
-    ],
-    "Greater Syracuse Area": [
-      "Auburn",
-      "Cicero",
-      "Clay",
-      "Cortland",
-      "Fulton",
-      "Liverpool",
-      "Oswego",
-      "Syracuse"
-    ],
-    "Greater Albany Area": [
-      "Albany",
-      "Clifton Park",
-      "Colonie",
-      "Guilderland",
-      "Saratoga Springs",
-      "Schenectady",
-      "Troy"
-    ],
-    "Greater Greensboro Area": [
-      "Asheboro",
-      "Burlington",
-      "Greensboro",
-      "High Point",
-      "Lexington",
-      "Thomasville"
-    ],
-    "Greater Winston-Salem Area": [
-      "Clemmons",
-      "Kernersville",
-      "Lewisville",
-      "Mount Airy",
-      "Winston-Salem"
-    ],
-    "Greater Asheville Area": [
-      "Asheville",
-      "Black Mountain",
-      "Brevard",
-      "Hendersonville",
-      "Waynesville",
-      "Weaverville"
-    ],
-    "Greater Fargo Area": [
-      "Fargo",
-      "Grand Forks",
-      "Minot",
-      "West Fargo"
-    ],
-    "Greater Toledo Area": [
-      "Bowling Green",
-      "Findlay",
-      "Maumee",
-      "Oregon",
-      "Perrysburg",
-      "Sylvania",
-      "Toledo"
-    ],
-    "Greater Akron Area": [
-      "Akron",
-      "Barberton",
-      "Canton",
-      "Cuyahoga Falls",
-      "Green",
-      "Kent",
-      "Massillon",
-      "Stow"
-    ],
-    "Greater Dayton Area": [
-      "Beavercreek",
-      "Dayton",
-      "Fairborn",
-      "Huber Heights",
-      "Kettering",
-      "Springfield",
-      "Troy",
-      "Xenia"
-    ],
-    "Greater Youngstown Area": [
-      "Austintown",
-      "Boardman",
-      "Girard",
-      "Niles",
-      "Warren",
-      "Youngstown"
-    ],
-    "Greater Tulsa Area": [
-      "Bartlesville",
-      "Bixby",
-      "Broken Arrow",
-      "Claremore",
-      "Jenks",
-      "Owasso",
-      "Sand Springs",
-      "Sapulpa",
-      "Tulsa"
-    ],
-    "Greater Eugene Area": [
-      "Albany",
-      "Corvallis",
-      "Cottage Grove",
-      "Eugene",
-      "Springfield"
-    ],
-    "Greater Salem Area": [
-      "Dallas",
-      "Keizer",
-      "Salem",
-      "Silverton",
-      "Stayton",
-      "Woodburn"
-    ],
-    "Greater Bend Area": [
-      "Bend",
-      "La Pine",
-      "Madras",
-      "Prineville",
-      "Redmond"
-    ],
-    "Greater Allentown Area": [
-      "Allentown",
-      "Bethlehem",
-      "Easton",
-      "Emmaus",
-      "Northampton",
-      "Whitehall"
-    ],
-    "Greater Scranton Area": [
-      "Carbondale",
-      "Hazleton",
-      "Kingston",
-      "Pittston",
-      "Scranton",
-      "Wilkes-Barre"
-    ],
-    "Greater Erie Area": [
-      "Corry",
-      "Edinboro",
-      "Erie",
-      "Meadville",
-      "Titusville"
-    ],
-    "Greater Charleston Area": [
-      "Charleston",
-      "Huntington",
-      "Morgantown",
-      "Parkersburg",
-      "Weirton",
-      "Wheeling"
-    ],
-    "Greater Greenville Area": [
-      "Anderson",
-      "Easley",
-      "Greenville",
-      "Greer",
-      "Mauldin",
-      "Simpsonville",
-      "Spartanburg"
-    ],
-    "Greater Myrtle Beach Area": [
-      "Conway",
-      "Georgetown",
-      "Myrtle Beach",
-      "North Myrtle Beach",
-      "Surfside Beach"
-    ],
-    "Greater Sioux Falls Area": [
-      "Brandon",
-      "Brookings",
-      "Mitchell",
-      "Sioux Falls",
-      "Watertown"
-    ],
-    "Greater Rapid City Area": [
-      "Deadwood",
-      "Rapid City",
-      "Spearfish",
-      "Sturgis"
-    ],
-    "Greater Chattanooga Area": [
-      "Chattanooga",
-      "Cleveland",
-      "East Ridge",
-      "Red Bank",
-      "Signal Mountain",
-      "Soddy-Daisy"
-    ],
-    "Greater Clarksville Area": [
-      "Clarksville"
-    ],
-    "Greater Corpus Christi Area": [
-      "Alice",
-      "Corpus Christi",
-      "Kingsville",
-      "Portland",
-      "Rockport"
-    ],
-    "Greater Lubbock Area": [
-      "Brownfield",
-      "Levelland",
-      "Lubbock",
-      "Plainview",
-      "Snyder"
-    ],
-    "Greater Amarillo Area": [
-      "Amarillo",
-      "Borger",
-      "Canyon",
-      "Hereford",
-      "Pampa"
-    ],
-    "Greater Waco Area": [
-      "Belton",
-      "Copperas Cove",
-      "Harker Heights",
-      "Killeen",
-      "Temple",
-      "Waco"
-    ],
-    "Greater McAllen Area": [
-      "Edinburg",
-      "Mcallen",
-      "Mission",
-      "Pharr",
-      "Weslaco"
-    ],
-    "Greater Brownsville Area": [
-      "Brownsville",
-      "Harlingen",
-      "Los Fresnos",
-      "San Benito"
-    ],
-    "Greater Provo Area": [
-      "American Fork",
-      "Lehi",
-      "Orem",
-      "Payson",
-      "Pleasant Grove",
-      "Provo",
-      "Spanish Fork",
-      "Springville"
-    ],
-    "Greater Ogden Area": [
-      "Clearfield",
-      "Kaysville",
-      "Layton",
-      "North Ogden",
-      "Ogden",
-      "Roy",
-      "Syracuse"
-    ],
-    "Greater St. George Area": [
-      "Cedar City",
-      "Hurricane",
-      "Ivins",
-      "Washington"
-    ],
-    "Greater Burlington Area": [
-      "Barre",
-      "Burlington",
-      "Colchester",
-      "Montpelier",
-      "South Burlington",
-      "Williston",
-      "Winooski"
-    ],
-    "Greater Virginia Beach Area": [
-      "Chesapeake",
-      "Hampton",
-      "Newport News",
-      "Norfolk",
-      "Portsmouth",
-      "Suffolk",
-      "Virginia Beach"
-    ],
-    "Greater Roanoke Area": [
-      "Blacksburg",
-      "Christiansburg",
-      "Radford",
-      "Roanoke",
-      "Salem"
-    ],
-    "Greater Tacoma Area": [
-      "Bonney Lake",
-      "Federal Way",
-      "Gig Harbor",
-      "Lakewood",
-      "Puyallup",
-      "Tacoma",
-      "University Place"
-    ],
-    "Greater Vancouver Area": [
-      "Battle Ground",
-      "Camas",
-      "Ridgefield",
-      "Vancouver",
-      "Washougal"
-    ],
-    "Greater Green Bay Area": [
-      "Appleton",
-      "Ashwaubenon",
-      "De Pere",
-      "Green Bay",
-      "Menasha",
-      "Neenah",
-      "Oshkosh"
-    ],
-    "Greater Cheyenne Area": [
-      "Casper",
-      "Cheyenne",
-      "Gillette",
-      "Laramie",
-      "Rock Springs"
-    ]
+    "state": "New York",
+    "country": "United States"
   }
 }

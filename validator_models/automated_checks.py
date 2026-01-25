@@ -429,6 +429,48 @@ ICP_DEFINITIONS = [
                     "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
                     "idaho", "west virginia", "hawaii", "maine", "montana", "rhode island",
                     "delaware", "south dakota", "north dakota", "alaska", "vermont", "wyoming"]
+    },
+    
+    {
+        # HR Leaders - Italy (201-500 employees)
+        # Industry: All (no sub_industry filter)
+        # Company Size: 201-500 employees
+        # Geo: Italy
+        "sub_industries": ["*"],  # Wildcard - matches all industries
+        "role_details": [
+            # HR Directors
+            "hr director", "director of hr", "director of human resources",
+            "head of hr", "head of human resources", "hr head",
+            "vp of hr", "vp hr", "vp of human resources", "vp human resources",
+            "vice president of hr", "vice president of human resources",
+            # HR Managers
+            "hr manager", "human resources manager", "hr lead",
+            "senior hr manager", "hr business partner", "hrbp"
+        ],
+        "regions": ["italy", "italia", "italian"],
+        "employee_ranges": ["201-500"]
+        # No "bonus" field = default 50 points
+    },
+    
+    {
+        # HR Leaders - Italy (501-1000 employees)
+        # Industry: All (no sub_industry filter)
+        # Company Size: 501-1000 employees
+        # Geo: Italy
+        "sub_industries": ["*"],  # Wildcard - matches all industries
+        "role_details": [
+            # HR Directors
+            "hr director", "director of hr", "director of human resources",
+            "head of hr", "head of human resources", "hr head",
+            "vp of hr", "vp hr", "vp of human resources", "vp human resources",
+            "vice president of hr", "vice president of human resources",
+            # HR Managers
+            "hr manager", "human resources manager", "hr lead",
+            "senior hr manager", "hr business partner", "hrbp"
+        ],
+        "regions": ["italy", "italia", "italian"],
+        "employee_ranges": ["501-1000"]
+        # No "bonus" field = default 50 points
     }
 ]
 
@@ -9590,13 +9632,46 @@ def _get_icp_bonus(lead: dict) -> int:
     # Track highest bonus (in case lead matches multiple ICPs)
     highest_bonus = 0
     
+    # Get employee count for ICPs that filter by company size
+    employee_count = (lead.get("employee_count") or "").strip()
+    lead_emp_range = parse_employee_count(employee_count) if employee_count else None
+    
     for icp in ICP_DEFINITIONS:
-        if not matches_any(sub_industry, icp["sub_industries"]):
-            continue
+        # Check sub_industry: "*" means all industries (skip check)
+        icp_sub_industries = icp.get("sub_industries", [])
+        if icp_sub_industries != ["*"]:
+            if not matches_any(sub_industry, icp_sub_industries):
+                continue
+        
+        # Check regions if specified
         if "regions" in icp:
             # SECURITY: Use validated country/state, NOT unvalidated region
             if not matches_regional_filter(icp["regions"]):
                 continue
+        
+        # Check employee_ranges if specified (e.g., ["201-500", "501-1000"])
+        if "employee_ranges" in icp:
+            if not lead_emp_range:
+                continue  # No employee count in lead, skip this ICP
+            
+            lead_min, lead_max = lead_emp_range
+            range_matched = False
+            
+            for emp_range in icp["employee_ranges"]:
+                icp_range = parse_employee_count(emp_range)
+                if icp_range:
+                    icp_min, icp_max = icp_range
+                    # Check if lead's range overlaps with ICP's range
+                    # Lead range [lead_min, lead_max] overlaps [icp_min, icp_max]
+                    # if lead_min <= icp_max AND lead_max >= icp_min
+                    if lead_min <= icp_max and lead_max >= icp_min:
+                        range_matched = True
+                        break
+            
+            if not range_matched:
+                continue
+        
+        # Check role match
         if matches_any(role, icp["role_details"]):
             # Get bonus: use custom "bonus" field, or default to 50
             icp_bonus = icp.get("bonus", 50)

@@ -37,6 +37,9 @@ from .stage4_helpers import (
     is_valid_state,
     is_area_in_mappings,
     is_city_in_area_approved,
+    should_reject_city_match,
+    GEO_LOOKUP,
+    CITY_EQUIVALENTS,
 )
 
 # API Keys from environment
@@ -295,32 +298,69 @@ async def run_lead_validation_stage4(
         parts = extracted_loc.split(',')
         if len(parts) >= 2:
             state_part = parts[1].strip()
-            if state_part and not is_valid_state(state_part):
-                non_us_valid = any(x.lower() in extracted_loc.lower() for x in [
-                    'India', 'UK', 'Canada', 'Australia', 'Germany', 'France',
-                    'England', 'Scotland', 'Karnataka', 'Maharashtra', 'Tamil Nadu',
-                    'Area', 'Metropolitan', 'Greater'
-                ])
-                if not non_us_valid:
-                    extracted_loc = ''
-            else:
+
+            # Case 1: Valid US state - this is a structured US location
+            if state_part and is_valid_state(state_part):
                 structured_loc_valid = True
+
+            # Case 2: Check if it's an international location (use GEO_LOOKUP)
+            elif state_part:
+                # Check parts[2] for country if exists, or parts[1] if 2-part location
+                valid_countries = [c.lower() for c in GEO_LOOKUP.get('countries', [])]
+                country_part = parts[2].strip().lower() if len(parts) >= 3 else parts[1].strip().lower()
+
+                if country_part in valid_countries and country_part != 'united states':
+                    structured_loc_valid = True
+                else:
+                    # Check for metro area patterns which are still valid
+                    is_metro = any(x.lower() in extracted_loc.lower() for x in ['Area', 'Metropolitan', 'Greater'])
+                    if not is_metro:
+                        extracted_loc = ''  # Invalid location format
+            # Case 3: Empty state_part - not a valid structured location
+            # structured_loc_valid remains False
 
     result['data']['extracted_location'] = extracted_loc
 
     location_passed = False
     location_method = None
 
-    # 6a. Structured city check
+    # 6a. Structured city check (validates BOTH city AND state)
     if structured_loc_valid and extracted_loc and city:
-        ext_city = extracted_loc.split(',')[0].strip().lower()
+        parts = extracted_loc.split(',')
+        ext_city = parts[0].strip().lower()
+        ext_state = parts[1].strip().lower() if len(parts) >= 2 else ''
         claimed_city = city.lower().strip()
-        city_match = (claimed_city in ext_city or ext_city in claimed_city)
+        claimed_state = state.lower().strip() if state else ''
 
-        if city_match:
+        # Normalize city names using equivalents (e.g., Bangalore = Bengaluru)
+        ext_city_norm = CITY_EQUIVALENTS.get(ext_city, ext_city)
+        claimed_city_norm = CITY_EQUIVALENTS.get(claimed_city, claimed_city)
+        city_match = (claimed_city_norm in ext_city_norm or ext_city_norm in claimed_city_norm or
+                      claimed_city in ext_city or ext_city in claimed_city)
+
+        # Normalize state abbreviations for comparison
+        state_abbr = GEO_LOOKUP.get('state_abbr', {})
+        if ext_state in state_abbr:
+            ext_state_full = state_abbr[ext_state].lower()
+        else:
+            ext_state_full = ext_state
+        if claimed_state in state_abbr:
+            claimed_state_full = state_abbr[claimed_state].lower()
+        else:
+            claimed_state_full = claimed_state
+
+        state_match = (
+            not claimed_state or  # No claimed state - skip state check
+            claimed_state_full in ext_state_full or
+            ext_state_full in claimed_state_full or
+            claimed_state in ext_state or
+            ext_state in claimed_state
+        )
+
+        if city_match and state_match:
             location_passed = True
             location_method = 'structured_city_match'
-        else:
+        elif not city_match:
             # DIRECT FAIL - city mismatch, no Q3
             result['data']['query_used'] = '+'.join(queries_used)
             result['data']['location_method'] = 'city_mismatch'
@@ -333,6 +373,19 @@ async def run_lead_validation_stage4(
                 "claimed_city": city
             }
             return result
+        elif not state_match:
+            # DIRECT FAIL - state mismatch, no Q3
+            result['data']['query_used'] = '+'.join(queries_used)
+            result['data']['location_method'] = 'state_mismatch'
+            result['rejection_reason'] = {
+                "stage": "Stage 4: Lead Validation",
+                "check_name": "lead_validation_stage4",
+                "message": f"State mismatch: extracted '{ext_state}' but claimed '{state}'",
+                "failed_fields": ["state"],
+                "extracted_location": extracted_loc,
+                "claimed_state": state
+            }
+            return result
 
     # 6b. Other location checks
     if not location_passed and city:
@@ -341,7 +394,7 @@ async def run_lead_validation_stage4(
 
         # Flexible location match
         if not structured_loc_valid and extracted_loc:
-            loc_match, loc_method = check_locations_match(extracted_loc, gt_location)
+            loc_match, loc_method = check_locations_match(extracted_loc, gt_location, full_text)
             if loc_match:
                 location_passed = True
                 location_method = loc_method
@@ -349,8 +402,14 @@ async def run_lead_validation_stage4(
         # City fallback
         if not location_passed:
             if city_lower in full_text.lower():
-                location_passed = True
-                location_method = 'city_fallback'
+                # Get result URL for domain check
+                result_url = url_matched_result.get('link', '') if url_matched_result else linkedin_url
+                # Check for institution context, ambiguous cities, and URL domain
+                if should_reject_city_match(city_lower, state, country, full_text, full_name, linkedin_url=result_url, role=role):
+                    pass  # Skip - institution context, ambiguous city, or contradicting location
+                else:
+                    location_passed = True
+                    location_method = 'city_fallback'
 
         # Area check
         if not location_passed:
@@ -359,7 +418,7 @@ async def run_lead_validation_stage4(
             if area_match:
                 area_found = area_match.group(0).strip()
                 if city_lower not in area_found.lower():
-                    if is_city_in_area_approved(city, area_found):
+                    if is_city_in_area_approved(city, area_found, state, country):
                         location_passed = True
                         location_method = 'area_approved'
                         result['data']['extracted_location'] = area_found
@@ -377,7 +436,9 @@ async def run_lead_validation_stage4(
                         }
                         return result
 
-        # Non-LinkedIn fallback
+        # Non-LinkedIn fallback (structured location only, no city-only fallback)
+        # Note: City-only fallback from non-LinkedIn sources was too loose
+        # (matched company HQ locations instead of person locations)
         if not location_passed:
             for r in all_results[:5]:
                 if get_linkedin_id(r.get('link', '')):
@@ -385,16 +446,12 @@ async def run_lead_validation_stage4(
                 r_text = f"{r.get('title', '')} {r.get('snippet', '')}"
                 r_loc = extract_location_from_text(r_text)
                 if r_loc:
-                    loc_match, loc_method = check_locations_match(r_loc, gt_location)
+                    loc_match, loc_method = check_locations_match(r_loc, gt_location, r_text)
                     if loc_match:
                         location_passed = True
                         location_method = f'non_linkedin_{loc_method}'
                         result['data']['extracted_location'] = r_loc
                         break
-                if city_lower in r_text.lower():
-                    location_passed = True
-                    location_method = 'non_linkedin_city'
-                    break
 
     # 6c. Q3 Location Fallback
     if not location_passed and city and linkedin_url:
@@ -402,8 +459,8 @@ async def run_lead_validation_stage4(
         result['data']['q3_called'] = True
         queries_used.append('Q3')
 
-        # Run Q3 search
-        q3_result = check_q3_location_fallback(full_name, company, city, linkedin_url, api_key)
+        # Run Q3 search (pass state/country for ambiguous city verification)
+        q3_result = check_q3_location_fallback(full_name, company, city, linkedin_url, api_key, state, country)
 
         if q3_result.get('passed'):
             location_passed = True
@@ -576,6 +633,8 @@ async def run_location_validation_only(
     city = (lead.get("city") or lead.get("City") or "").strip()
     state = (lead.get("state") or lead.get("State") or "").strip()
     country = (lead.get("country") or lead.get("Country") or "").strip()
+    role = (lead.get("role") or lead.get("Role") or
+            lead.get("job_title") or lead.get("Job_title") or "").strip()
 
     result = {
         'passed': False,
@@ -594,43 +653,88 @@ async def run_location_validation_only(
     full_text = f"{url_matched_result.get('title', '')} {url_matched_result.get('snippet', '')}"
     extracted_loc = extract_location_from_text(full_text)
 
-    # Validate extracted state
+    # Validate extracted state for structured locations
     structured_loc_valid = False
     if extracted_loc and ',' in extracted_loc:
         parts = extracted_loc.split(',')
         if len(parts) >= 2:
             state_part = parts[1].strip()
-            if state_part and not is_valid_state(state_part):
-                non_us_valid = any(x.lower() in extracted_loc.lower() for x in [
-                    'India', 'UK', 'Canada', 'Australia', 'Germany', 'France',
-                    'England', 'Scotland', 'Karnataka', 'Maharashtra', 'Tamil Nadu',
-                    'Area', 'Metropolitan', 'Greater'
-                ])
-                if not non_us_valid:
-                    extracted_loc = ''
-            else:
+
+            # Case 1: Valid US state - this is a structured US location
+            if state_part and is_valid_state(state_part):
                 structured_loc_valid = True
+
+            # Case 2: Check if it's an international location (use GEO_LOOKUP)
+            elif state_part:
+                # Check parts[2] for country if exists, or parts[1] if 2-part location
+                valid_countries = [c.lower() for c in GEO_LOOKUP.get('countries', [])]
+                country_part = parts[2].strip().lower() if len(parts) >= 3 else parts[1].strip().lower()
+
+                if country_part in valid_countries and country_part != 'united states':
+                    structured_loc_valid = True
+                else:
+                    # Check for metro area patterns which are still valid
+                    is_metro = any(x.lower() in extracted_loc.lower() for x in ['Area', 'Metropolitan', 'Greater'])
+                    if not is_metro:
+                        extracted_loc = ''  # Invalid location format
+            # Case 3: Empty state_part - not a valid structured location
+            # structured_loc_valid remains False
 
     result['extracted_location'] = extracted_loc
 
     location_passed = False
     location_method = None
 
-    # Structured city check
+    # Structured city check (validates BOTH city AND state)
     if structured_loc_valid and extracted_loc and city:
-        ext_city = extracted_loc.split(',')[0].strip().lower()
+        parts = extracted_loc.split(',')
+        ext_city = parts[0].strip().lower()
+        ext_state = parts[1].strip().lower() if len(parts) >= 2 else ''
         claimed_city = city.lower().strip()
-        city_match = (claimed_city in ext_city or ext_city in claimed_city)
+        claimed_state = state.lower().strip() if state else ''
 
-        if city_match:
+        # Normalize city names using equivalents (e.g., Bangalore = Bengaluru)
+        ext_city_norm = CITY_EQUIVALENTS.get(ext_city, ext_city)
+        claimed_city_norm = CITY_EQUIVALENTS.get(claimed_city, claimed_city)
+        city_match = (claimed_city_norm in ext_city_norm or ext_city_norm in claimed_city_norm or
+                      claimed_city in ext_city or ext_city in claimed_city)
+
+        # Normalize state abbreviations for comparison
+        state_abbr = GEO_LOOKUP.get('state_abbr', {})
+        if ext_state in state_abbr:
+            ext_state_full = state_abbr[ext_state].lower()
+        else:
+            ext_state_full = ext_state
+        if claimed_state in state_abbr:
+            claimed_state_full = state_abbr[claimed_state].lower()
+        else:
+            claimed_state_full = claimed_state
+
+        state_match = (
+            not claimed_state or  # No claimed state - skip state check
+            claimed_state_full in ext_state_full or
+            ext_state_full in claimed_state_full or
+            claimed_state in ext_state or
+            ext_state in claimed_state
+        )
+
+        if city_match and state_match:
             location_passed = True
             location_method = 'structured_city_match'
-        else:
+        elif not city_match:
             result['method'] = 'city_mismatch'
             result['rejection_reason'] = {
                 "message": f"City mismatch: extracted '{ext_city}' but claimed '{city}'",
                 "extracted_city": ext_city,
                 "claimed_city": city
+            }
+            return result
+        elif not state_match:
+            result['method'] = 'state_mismatch'
+            result['rejection_reason'] = {
+                "message": f"State mismatch: extracted '{ext_state}' but claimed '{state}'",
+                "extracted_state": ext_state,
+                "claimed_state": state
             }
             return result
 
@@ -640,14 +744,20 @@ async def run_location_validation_only(
         city_lower = city.lower().strip()
 
         if not structured_loc_valid and extracted_loc:
-            loc_match, loc_method = check_locations_match(extracted_loc, gt_location)
+            loc_match, loc_method = check_locations_match(extracted_loc, gt_location, full_text)
             if loc_match:
                 location_passed = True
                 location_method = loc_method
 
         if not location_passed and city_lower in full_text.lower():
-            location_passed = True
-            location_method = 'city_fallback'
+            # Get result URL for domain check
+            result_url = url_matched_result.get('link', '') if url_matched_result else linkedin_url
+            # Check for institution context, ambiguous cities, and URL domain
+            if should_reject_city_match(city_lower, state, country, full_text, full_name, linkedin_url=result_url, role=role):
+                pass  # Skip - institution context, ambiguous city, or contradicting location
+            else:
+                location_passed = True
+                location_method = 'city_fallback'
 
         # Area check
         if not location_passed:
@@ -656,7 +766,7 @@ async def run_location_validation_only(
             if area_match:
                 area_found = area_match.group(0).strip()
                 if city_lower not in area_found.lower():
-                    if is_city_in_area_approved(city, area_found):
+                    if is_city_in_area_approved(city, area_found, state, country):
                         location_passed = True
                         location_method = 'area_approved'
                         result['extracted_location'] = area_found
@@ -669,7 +779,8 @@ async def run_location_validation_only(
                         }
                         return result
 
-        # Non-LinkedIn fallback
+        # Non-LinkedIn fallback (structured location only, no city-only fallback)
+        # Note: City-only fallback from non-LinkedIn sources was too loose
         if not location_passed:
             for r in search_results[:5]:
                 if get_linkedin_id(r.get('link', '')):
@@ -677,21 +788,17 @@ async def run_location_validation_only(
                 r_text = f"{r.get('title', '')} {r.get('snippet', '')}"
                 r_loc = extract_location_from_text(r_text)
                 if r_loc:
-                    loc_match, loc_method = check_locations_match(r_loc, gt_location)
+                    loc_match, loc_method = check_locations_match(r_loc, gt_location, r_text)
                     if loc_match:
                         location_passed = True
                         location_method = f'non_linkedin_{loc_method}'
                         result['extracted_location'] = r_loc
                         break
-                if city_lower in r_text.lower():
-                    location_passed = True
-                    location_method = 'non_linkedin_city'
-                    break
 
-    # Q3 Fallback
+    # Q3 Fallback (pass state/country for ambiguous city verification)
     if not location_passed and city and linkedin_url and api_key:
         result['q3_called'] = True
-        q3_result = check_q3_location_fallback(full_name, company, city, linkedin_url, api_key)
+        q3_result = check_q3_location_fallback(full_name, company, city, linkedin_url, api_key, state, country, role)
 
         if q3_result.get('passed'):
             location_passed = True

@@ -1099,6 +1099,118 @@ def set_standardized_company_name(company_slug: str, standardized_name: str) -> 
         print(f"   💾 Cached company name: '{slug_normalized}' → '{standardized_name}'")
     return success
 
+# ========================================================================
+# Role Batch Validation
+# ========================================================================
+
+ROLE_LLM_PROMPT = """You are a job title validator. Analyze each role and determine if it's a VALID professional job title.
+
+VALID roles:
+- Real job titles (CEO, Marketing Manager, Software Engineer, etc.)
+- Abbreviations (VP, SVP, CFO, CMO, etc.)
+- Seniority levels (Senior, Junior, Lead, Head of, etc.)
+- Academic titles (Professor, Dean, Researcher, etc.)
+- Government/Military titles (Colonel, Senator, Ambassador, etc.)
+
+INVALID roles:
+- Random words or gibberish (A Cargo, Hello World, Test User)
+- Personal descriptions (Coffee Lover, Tech Enthusiast)
+- Hobbies (Golfer, Traveler, Photographer as hobby)
+- Marketing slogans or taglines
+- Single letters or meaningless strings
+- Product/company names used as roles
+- Non-job descriptions (Looking for work, Open to opportunities)
+- Degrees alone (MBA, PhD - unless part of title like "PhD Student")
+
+For each role, respond with ONLY "VALID" or "INVALID".
+
+Roles to validate:
+{roles}
+
+Respond in this exact format (one per line, matching order):
+1. VALID or INVALID
+2. VALID or INVALID
+...
+
+Be strict - when in doubt, mark as INVALID."""
+
+ROLE_LLM_BATCH_SIZE = 20
+
+async def batch_validate_roles_llm(roles: List[str]) -> Dict[str, bool]:
+    """
+    Validate roles using Gemini LLM via OpenRouter.
+    Returns dict mapping role -> is_valid (True/False).
+    """
+    if not roles:
+        return {}
+
+    if not OPENROUTER_KEY:
+        print("   ⚠️ OPENROUTER_KEY not set, skipping LLM role validation")
+        return {role: True for role in roles}
+
+    results = {}
+
+    for batch_start in range(0, len(roles), ROLE_LLM_BATCH_SIZE):
+        batch = roles[batch_start:batch_start + ROLE_LLM_BATCH_SIZE]
+        batch_num = (batch_start // ROLE_LLM_BATCH_SIZE) + 1
+        total_batches = (len(roles) + ROLE_LLM_BATCH_SIZE - 1) // ROLE_LLM_BATCH_SIZE
+
+        print(f"   🤖 Role LLM batch {batch_num}/{total_batches}: Validating {len(batch)} roles...")
+
+        roles_text = "\n".join([f"{i+1}. {role}" for i, role in enumerate(batch)])
+        prompt = ROLE_LLM_PROMPT.format(roles=roles_text)
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "google/gemini-2.5-flash-lite",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 500,
+                        "temperature": 0
+                    }
+                ) as response:
+                    if response.status != 200:
+                        print(f"   ⚠️ Role LLM API error: HTTP {response.status}, passing batch")
+                        for role in batch:
+                            results[role] = True
+                        continue
+
+                    data = await response.json()
+                    llm_response = data["choices"][0]["message"]["content"].strip()
+                    lines = llm_response.strip().split('\n')
+
+                    for i, role in enumerate(batch):
+                        if i < len(lines):
+                            line = lines[i].strip().upper()
+                            is_valid = "VALID" in line and "INVALID" not in line
+                            results[role] = is_valid
+                            if not is_valid:
+                                print(f"      ❌ LLM rejected: '{role}'")
+                        else:
+                            results[role] = True
+
+        except asyncio.TimeoutError:
+            print(f"   ⚠️ Role LLM timeout, passing batch")
+            for role in batch:
+                results[role] = True
+        except Exception as e:
+            print(f"   ⚠️ Role LLM error: {e}, passing batch")
+            for role in batch:
+                results[role] = True
+
+    valid_count = sum(1 for v in results.values() if v)
+    invalid_count = sum(1 for v in results.values() if not v)
+    print(f"   📊 Role LLM results: {valid_count} valid, {invalid_count} invalid")
+
+    return results
+
 def get_cache_key(prefix: str, identifier: str) -> str:
     """Generate consistent cache key for validation results"""
     return f"{prefix}_{identifier}"
@@ -4344,7 +4456,48 @@ async def run_batch_automated_checks(
             results[i] = (False, rejection_data)
     
     print(f"   📊 Categorization: {len(stage4_5_queue)} ready for Stage 4-5, {sum(1 for r in results if r and r[0] == False)} rejected, {len(needs_retry)} need retry")
-    
+
+    # ========================================================================
+    # Role Batch Validation
+    # ========================================================================
+    if stage4_5_queue:
+        print(f"\n   🔍 Role Batch Validation: {len(stage4_5_queue)} leads...")
+
+        # Extract unique roles from queue
+        roles_to_validate = list(set(
+            (lead.get("role") or "").strip()
+            for _, lead, _, _ in stage4_5_queue
+            if (lead.get("role") or "").strip()
+        ))
+
+        if roles_to_validate:
+            role_validation_results = await batch_validate_roles_llm(roles_to_validate)
+
+            # Filter queue - remove leads with invalid roles
+            valid_queue = []
+            for item in stage4_5_queue:
+                idx, lead, email_result, stage0_2_data = item
+                role = (lead.get("role") or "").strip()
+
+                if not role or role_validation_results.get(role, True):
+                    valid_queue.append(item)
+                else:
+                    rejection_data = stage0_2_data.copy()
+                    rejection_data["passed"] = False
+                    rejection_data["rejection_reason"] = {
+                        "stage": "Role Batch Validation",
+                        "check_name": "role_batch_validation",
+                        "message": f"Invalid role format.",
+                        "failed_fields": ["role"]
+                    }
+                    results[idx] = (False, rejection_data)
+
+            rejected_by_llm = len(stage4_5_queue) - len(valid_queue)
+            stage4_5_queue = valid_queue
+            print(f"   📊 Role Batch Validation complete: {len(stage4_5_queue)} passed, {rejected_by_llm} rejected")
+        else:
+            print(f"   ℹ️ No roles to validate (all empty)")
+
     # ========================================================================
     # Step 6: Start Stage 4-5 SEQUENTIALLY + Handle retries in parallel
     # ========================================================================

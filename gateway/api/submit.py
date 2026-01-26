@@ -184,6 +184,10 @@ def check_role_sanity(role_raw: str, full_name: str = "", company: str = "",
     if ROLE_NON_LATIN_RE.findall(role_raw):
         return ("role_non_english", "Role contains non-English characters.")
 
+    # Check 12b
+    if re.search(r'[àâäéèêëïîôùûüÿçñáíóúÀÂÄÉÈÊËÏÎÔÙÛÜŸÇÑÁÍÓÚßöÖ]', role_raw):
+        return ("role_invalid_format", "Invalid role format.")
+
     # Check 13: URLs and websites (comprehensive TLD check)
     role_for_url = role_lower.replace('.net', '_NET_')  # Preserve .NET framework
     for pattern in ROLE_URL_PATTERNS:
@@ -207,6 +211,54 @@ def check_role_sanity(role_raw: str, full_name: str = "", company: str = "",
     # Check 16b: Ends with special character
     if role_raw and role_raw[-1] in ROLE_PATTERNS['special_chars']:
         return ("role_ends_special_char", "Role cannot end with a special character.")
+
+    # Check 16c
+    bad_chars = '%@#$^*[]{}|;\\`~<>?+'
+    for char in role_raw:
+        if char in bad_chars:
+            return ("role_invalid_format", "Invalid role format.")
+
+    # Check 16d
+    if re.match(r'^\d+\s', role_raw):
+        return ("role_invalid_format", "Invalid role format.")
+
+    # Check 16e
+    if re.search(r'\d+\s*[xX]\b', role_raw):
+        return ("role_invalid_format", "Invalid role format.")
+
+    # Check 16f
+    if re.search(r'\b[Aa][Tt]\s+[A-Z][a-zA-Z]+', role_raw):
+        return ("role_invalid_format", "Invalid role format.")
+
+    # Check 16g
+    if re.search(r'\b[Ii][Nn]\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*\s*$', role_raw):
+        return ("role_invalid_format", "Invalid role format.")
+
+    # Check 16h
+    if re.search(r'\b401\s*\(?k\)?\b', role_lower):
+        return ("role_invalid_format", "Invalid role format.")
+
+    # Check 16i
+    invalid_abbrev_prefixes = ['aba ', 'abm ', 'abl ', 'abh ', 'abs ', 'acca ', 'cma ']
+    for prefix in invalid_abbrev_prefixes:
+        if role_lower.startswith(prefix):
+            return ("role_invalid_format", "Invalid role format.")
+
+    # Check 16j
+    invalid_abbreviations = {'aba', 'abm', 'abl', 'abh', 'abs', 'acca', 'cma'}
+    if role_lower.strip() in invalid_abbreviations:
+        return ("role_invalid_format", "Invalid role format.")
+
+    # Check 16k
+    non_english_words = [
+        'abogado', 'abogada', 'abteilung', 'leiter', 'direktor', 'berater',
+        'kaufmann', 'buchhalter', 'ingenieur', 'gerente', 'diretor',
+        'analista', 'coordenador', 'consultor', 'directeur', 'responsable',
+        'conseiller', 'comptable'
+    ]
+    for word in non_english_words:
+        if re.search(rf'\b{word}\b', role_lower):
+            return ("role_invalid_format", "Invalid role format.")
 
     # Check 17: Achievement/stat statements
     for pattern in ROLE_PATTERNS['achievement_patterns']:
@@ -264,6 +316,12 @@ def check_role_sanity(role_raw: str, full_name: str = "", company: str = "",
     # Check 27: Contains 'participant'
     if 'participant' in role_lower:
         return ("role_participant", "Role contains 'participant' - not a job title.")
+
+    # Check 27b
+    hobby_words = ['enthusiast', 'hobbyist', 'lover', 'buff', 'aficionado', 'junkie', 'geek', 'nerd', 'addict']
+    for word in hobby_words:
+        if re.search(rf'\b{word}\b', role_lower):
+            return ("role_invalid_format", "Invalid role format.")
 
     # Check 28: Truncated role (ends with preposition)
     if role_lower.endswith(' in') or role_lower.endswith(' at') or role_lower.endswith(' for'):
@@ -2085,6 +2143,34 @@ async def submit_lead(event: SubmitLeadEvent):
         country = normalize_country(country_raw)
         if country != country_raw:
             print(f"   📝 Country normalized: '{country_raw}' → '{country}'")
+
+        # ALLOWED REGIONS: Only US cities and Dubai from UAE
+        # Block all other countries at entry point
+        country_lower = country.lower()
+        is_allowed_region = (
+            country_lower == "united states" or
+            (country_lower == "united arab emirates" and city.lower().strip() == "dubai")
+        )
+        if not is_allowed_region:
+            if country_lower == "united arab emirates":
+                error_msg = f"Only Dubai is accepted from UAE. City '{city}' is not allowed."
+            else:
+                error_msg = f"Only United States and Dubai (UAE) leads are accepted. Country '{country}' is not allowed."
+
+            print(f"❌ Region blocked: {city}/{state}/{country}")
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "region_not_allowed",
+                    "message": error_msg,
+                    "rejection_reason": "region_blocked",
+                    "country": country,
+                    "city": city,
+                    "stats": updated_stats
+                }
+            )
 
         # Validate location: country (199 valid), state (51 US states), city (exists in state/country)
         is_valid, rejection_reason = validate_location(city, state, country)

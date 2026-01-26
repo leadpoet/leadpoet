@@ -1230,7 +1230,7 @@ def should_reject_city_match(city: str, state: str, country: str, full_text: str
 
     if needs_strict_validation:
         # First check if "City, State/Country" format appears in text
-        if _verify_state_or_country_for_strict_validation(city, state, country, full_text):
+        if _verify_state_or_country_for_strict_validation(city, state, country, full_text, linkedin_url):
             return False  # Accept - verified location format in text
 
         # Check if text contains a CONTRADICTING state/province/country
@@ -1248,7 +1248,7 @@ def should_reject_city_match(city: str, state: str, country: str, full_text: str
     return False  # Accept the match (normal city)
 
 
-def _verify_state_or_country_for_strict_validation(city: str, state: str, country: str, text: str) -> bool:
+def _verify_state_or_country_for_strict_validation(city: str, state: str, country: str, text: str, linkedin_url: str = '') -> bool:
     """
     Verify state (for US) or country (for international) appears AFTER the city in text.
 
@@ -1261,11 +1261,15 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
     - "Reading, Pennsylvania" or "Reading, PA"
     - "Nice, France"
 
+    For international locations, if country cannot be found in text, the LinkedIn
+    profile URL domain (e.g., uk.linkedin.com) can be used to verify country.
+
     Args:
         city: The city name
         state: The claimed state (for US locations)
         country: The claimed country
         text: The text to search in
+        linkedin_url: Optional LinkedIn URL for domain-based country verification
 
     Returns:
         True if state/country is verified AFTER city in text, False otherwise
@@ -1326,8 +1330,19 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
                         break
         return False
     else:
-        # For international, verify country appears AFTER city with proper delimiter
+        # For international, verify country
         if claimed_country_lower:
+            # First: Check LinkedIn URL domain if available (authoritative)
+            # e.g., uk.linkedin.com for United Kingdom
+            if linkedin_url:
+                url_country = get_linkedin_url_country(linkedin_url)
+                if url_country:
+                    # Domain available - this is authoritative
+                    # Match → PASS, No match → FAIL
+                    return url_country == claimed_country_lower
+
+            # No domain available - fall back to text verification
+            # Check if country appears AFTER city with proper delimiter
             for match in city_matches:
                 city_end_pos = match.end()
                 text_after_city = text_lower[city_end_pos:city_end_pos + MAX_DISTANCE]
@@ -1340,6 +1355,30 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
                 pattern = r'\b' + escaped + r'(?![a-z-])'
                 if re.search(pattern, text_after_city):
                     return True
+
+            # Special case: United Kingdom - also accept "England" after city (only for English cities)
+            # Cities in Scotland (Edinburgh, Glasgow), Wales (Cardiff), N.Ireland (Belfast) should NOT match England
+            if claimed_country_lower == 'united kingdom':
+                ENGLISH_CITIES = {
+                    'london', 'manchester', 'birmingham', 'liverpool', 'leeds', 'sheffield',
+                    'bristol', 'newcastle', 'nottingham', 'leicester', 'southampton', 'portsmouth',
+                    'brighton', 'plymouth', 'coventry', 'reading', 'derby', 'wolverhampton',
+                    'milton keynes', 'york', 'oxford', 'cambridge', 'norwich', 'exeter',
+                    'bournemouth', 'chester', 'bath', 'canterbury', 'hull', 'stoke',
+                    'sunderland', 'middlesbrough', 'blackpool', 'luton', 'watford', 'ipswich',
+                    'peterborough', 'slough', 'warrington', 'huddersfield', 'blackburn',
+                    'bolton', 'oldham', 'rochdale', 'wigan', 'stockport', 'salford',
+                }
+                if city_lower in ENGLISH_CITIES:
+                    for match in city_matches:
+                        city_end_pos = match.end()
+                        text_after_city = text_lower[city_end_pos:city_end_pos + MAX_DISTANCE]
+
+                        if not re.match(r'^[\s]*[,\-|:]', text_after_city):
+                            continue
+
+                        if re.search(r'\bengland\b', text_after_city):
+                            return True
         return False
 
 
@@ -1997,7 +2036,7 @@ def check_q3_location_fallback(
 
                     if needs_strict_validation:
                         # Check if "City, State/Country" format in text
-                        has_state_country = _verify_state_or_country_for_strict_validation(city_lower, state, country, full_text)
+                        has_state_country = _verify_state_or_country_for_strict_validation(city_lower, state, country, full_text, linkedin_url)
                         # Check area mapping fallback
                         has_area_mapping = is_city_in_area_with_matching_state(city_lower, state, country)
 

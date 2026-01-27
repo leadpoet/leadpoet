@@ -2152,22 +2152,35 @@ async def submit_lead(event: SubmitLeadEvent):
             (country_lower == "united arab emirates" and city.lower().strip() == "dubai")
         )
         if not is_allowed_region:
-            if country_lower == "united arab emirates":
-                error_msg = f"Only Dubai is accepted from UAE. City '{city}' is not allowed."
-            else:
-                error_msg = f"Only United States and Dubai (UAE) leads are accepted. Country '{country}' is not allowed."
-
             print(f"❌ Region blocked: {city}/{state}/{country}")
             updated_stats = mark_submission_failed(event.actor_hotkey)
 
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "region_not_allowed",
-                    "message": error_msg,
-                    "rejection_reason": "region_blocked",
+                    "error": "invalid_region_format",
+                    "message": "Invalid region format.",
+                    "rejection_reason": "invalid_region_format",
                     "country": country,
                     "city": city,
+                    "stats": updated_stats
+                }
+            )
+
+        # UAE has no states - reject if state is provided
+        if country_lower == "united arab emirates" and state.strip():
+            print(f"❌ UAE with state rejected: {city}/{state}/{country}")
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_region_format",
+                    "message": "Invalid region format.",
+                    "rejection_reason": "invalid_region_format",
+                    "country": country,
+                    "city": city,
+                    "state": state,
                     "stats": updated_stats
                 }
             )

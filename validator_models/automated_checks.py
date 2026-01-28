@@ -471,6 +471,27 @@ ICP_DEFINITIONS = [
         "regions": ["italy", "italia", "italian"],
         "employee_ranges": ["501-1000"]
         # No "bonus" field = default 50 points
+    },
+    
+    {
+        # Cyber Security / IT Management - Business Owners (Midwest US, 10-50 employees)
+        # Target: Small business owners/founders/executives in cybersecurity and IT management
+        # Company Size: 10-50 employees
+        # Geo: Midwest US states
+        "sub_industries": ["Cyber Security", "IT Management"],
+        "role_details": [
+            # Business Owners
+            "owner", "co-owner", "business owner",
+            # Founders
+            "founder", "co-founder",
+            # Executive Leadership
+            "ceo", "chief executive officer", "president"
+        ],
+        "regions": ["illinois", "indiana", "michigan", "ohio", "wisconsin",
+                    "iowa", "kansas", "minnesota", "missouri", "nebraska",
+                    "north dakota", "south dakota"],
+        "employee_ranges": ["10-50"]
+        # No "bonus" field = default 50 points
     }
 ]
 

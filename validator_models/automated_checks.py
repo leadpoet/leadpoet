@@ -297,48 +297,6 @@ ICP_DEFINITIONS = [
     },
     
     {
-        # Broadcasting/Media (Africa Focus) - Technology & Content Leaders
-        "sub_industries": ["Broadcasting", "Video", "Digital Media", "Content", 
-                          "Content Delivery Network", "Telecommunications", 
-                          "Digital Entertainment"],
-        "role_details": [
-            # Technology Leadership
-            "cto", "chief technology officer", "cfo", "chief financial officer",
-            "head of engineering", "vp of engineering", "vp engineering", "engineering director",
-            "director of engineering",
-            # Video/Streaming Specific
-            "head of video", "head of streaming", "director of video", "director of streaming",
-            "vp of video", "vp video", "vp of streaming", "vp streaming",
-            "head of ott", "director of ott", "vp of ott", "vp ott", "ott director",
-            "cdn architect", "video architect", "streaming architect", "media architect",
-            "head of cdn", "director of cdn", "vp of cdn",
-            # Content Operations
-            "head of content operations", "director of content operations", "vp of content operations",
-            "content operations manager", "head of media operations", "director of media operations",
-            # Broadcast Operations
-            "broadcast ops manager", "broadcast operations manager", "director of broadcast operations",
-            "head of broadcast operations", "vp of broadcast operations",
-            # Post-Production/Media Ops
-            "post-production manager", "head of post-production", "director of post-production",
-            "media ops manager", "media operations manager", "head of media ops",
-            # Product (OTT)
-            "head of product", "director of product", "vp of product", "vp product",
-            "product director", "chief product officer", "cpo"
-        ],
-        # Region filter - only match leads from Africa
-        "regions": ["africa", "african", "nigeria", "south africa", "kenya", "ghana", "egypt",
-                    "morocco", "ethiopia", "tanzania", "uganda", "algeria", "sudan", "angola",
-                    "mozambique", "cameroon", "ivory coast", "côte d'ivoire", "senegal", "zambia",
-                    "zimbabwe", "rwanda", "tunisia", "libya", "democratic republic of congo", "drc",
-                    "botswana", "namibia", "mauritius", "gabon", "malawi", "mali", "burkina faso",
-                    "niger", "chad", "somalia", "benin", "togo", "sierra leone", "liberia",
-                    "central african republic", "congo", "eritrea", "gambia", "guinea", "lesotho",
-                    "madagascar", "mauritania", "swaziland", "eswatini"],
-        # HIGH VALUE: +100 bonus for Africa broadcasting/media leads (very rare, high value)
-        "bonus": 100
-    },
-    
-    {
         # Blockchain/Crypto/Web3 Companies - Investment & Leadership Roles
         # HIGH VALUE: Targets investment roles at companies that ARE blockchain/crypto
         # NOTE: Only matches companies with blockchain-specific sub_industries, NOT generic VCs
@@ -432,48 +390,6 @@ ICP_DEFINITIONS = [
     },
     
     {
-        # HR Leaders - Italy (201-500 employees)
-        # Industry: All (no sub_industry filter)
-        # Company Size: 201-500 employees
-        # Geo: Italy
-        "sub_industries": ["*"],  # Wildcard - matches all industries
-        "role_details": [
-            # HR Directors
-            "hr director", "director of hr", "director of human resources",
-            "head of hr", "head of human resources", "hr head",
-            "vp of hr", "vp hr", "vp of human resources", "vp human resources",
-            "vice president of hr", "vice president of human resources",
-            # HR Managers
-            "hr manager", "human resources manager", "hr lead",
-            "senior hr manager", "hr business partner", "hrbp"
-        ],
-        "regions": ["italy", "italia", "italian"],
-        "employee_ranges": ["201-500"]
-        # No "bonus" field = default 50 points
-    },
-    
-    {
-        # HR Leaders - Italy (501-1000 employees)
-        # Industry: All (no sub_industry filter)
-        # Company Size: 501-1000 employees
-        # Geo: Italy
-        "sub_industries": ["*"],  # Wildcard - matches all industries
-        "role_details": [
-            # HR Directors
-            "hr director", "director of hr", "director of human resources",
-            "head of hr", "head of human resources", "hr head",
-            "vp of hr", "vp hr", "vp of human resources", "vp human resources",
-            "vice president of hr", "vice president of human resources",
-            # HR Managers
-            "hr manager", "human resources manager", "hr lead",
-            "senior hr manager", "hr business partner", "hrbp"
-        ],
-        "regions": ["italy", "italia", "italian"],
-        "employee_ranges": ["501-1000"]
-        # No "bonus" field = default 50 points
-    },
-    
-    {
         # Cyber Security / IT Management - Business Owners (Midwest US, 10-50 employees)
         # Target: Small business owners/founders/executives in cybersecurity and IT management
         # Company Size: 10-50 employees
@@ -492,6 +408,38 @@ ICP_DEFINITIONS = [
                     "north dakota", "south dakota"],
         "employee_ranges": ["10-50"]
         # No "bonus" field = default 50 points
+    },
+    
+    {
+        # UAE/Dubai Investors - Investment & Fund Management Leaders
+        # Target: Investors, fund managers, and investment leaders in Dubai, UAE
+        # HIGH VALUE: +100 bonus for Dubai-based investors (strategic market)
+        # NOTE: Gateway only accepts UAE leads from Dubai city (submit.py line 2152)
+        "sub_industries": ["Angel Investment", "Asset Management", "Hedge Funds", 
+                          "Impact Investing", "Incubators", "Real Estate Investment", 
+                          "Venture Capital", "Web3 Investor", "Web3 Fund", "Wealth Management"],
+        "role_details": [
+            # Investment Leadership / Partners
+            "partner", "general partner", "gp", "managing partner", "managing director",
+            "principal", "venture partner", "investment partner", "limited partner",
+            # Investment Operations
+            "cio", "chief investment officer", "director of investments", "vp of investments",
+            "vp investments", "head of investments", "investment director",
+            "portfolio manager", "fund manager", "investment manager", "asset manager",
+            # Founder/Leadership
+            "founder", "co-founder", "ceo", "chief executive officer", "president",
+            # Investment Team Roles
+            "investor", "venture capitalist", "vc", "investment analyst", "research analyst",
+            "associate", "senior associate", "investment associate",
+            "vice president", "vp", "director", "head of",
+            # Wealth Management Specific
+            "wealth manager", "private banker", "relationship manager",
+            "family office manager", "head of family office", "family office director"
+        ],
+        # Region filter - UAE/Dubai only (city filter required since UAE = Dubai only)
+        "regions": ["united arab emirates", "uae", "dubai", "emirati"],
+        # HIGH VALUE: +100 bonus for Dubai investors
+        "bonus": 100
     }
 ]
 
@@ -9775,10 +9723,11 @@ def _get_icp_bonus(lead: dict) -> int:
     role = (lead.get("role") or "").strip().lower()
     
     # SECURITY FIX: Use VALIDATED location fields, not miner-submitted 'region'
-    # 'country' and 'state' are verified against LinkedIn data in Stage 4
+    # 'country', 'state', and 'city' are verified against LinkedIn data in Stage 4
     # 'region' is unvalidated and was being gamed by miners
     country = (lead.get("country") or "").strip().lower()
     state = (lead.get("state") or "").strip().lower()
+    city = (lead.get("city") or "").strip().lower()
     
     def matches_any(text: str, keywords: list) -> bool:
         text_lower = text.lower()
@@ -9788,10 +9737,10 @@ def _get_icp_bonus(lead: dict) -> int:
         """
         Check if lead's VALIDATED location matches ICP regional filter.
         
-        Uses country (primary) and state (secondary) - both validated in Stage 4.
+        Uses country (primary), state (secondary), and city (tertiary) - all validated in Stage 4.
         Does NOT use miner-submitted 'region' field which is unvalidated.
         """
-        # Check country first (e.g., "nigeria", "south africa", "united states")
+        # Check country first (e.g., "united arab emirates", "united states")
         if matches_any(country, icp_regions):
             return True
         
@@ -9800,6 +9749,11 @@ def _get_icp_bonus(lead: dict) -> int:
         if country in ["united states", "usa", "us", "america"]:
             if matches_any(state, icp_regions):
                 return True
+        
+        # Check city for city-specific ICPs (e.g., "dubai" for UAE)
+        # This is needed since UAE leads are only accepted from Dubai
+        if matches_any(city, icp_regions):
+            return True
         
         return False
     

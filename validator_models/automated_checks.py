@@ -394,6 +394,7 @@ ICP_DEFINITIONS = [
         # Target: Small business owners/founders/executives in cybersecurity and IT management
         # Company Size: 10-50 employees
         # Geo: Midwest US states
+        # HIGH VALUE: +100 bonus for Midwest cybersecurity business owners
         "sub_industries": ["Cyber Security", "IT Management"],
         "role_details": [
             # Business Owners
@@ -406,8 +407,8 @@ ICP_DEFINITIONS = [
         "regions": ["illinois", "indiana", "michigan", "ohio", "wisconsin",
                     "iowa", "kansas", "minnesota", "missouri", "nebraska",
                     "north dakota", "south dakota"],
-        "employee_ranges": ["10-50"]
-        # No "bonus" field = default 50 points
+        "employee_ranges": ["10-50"],
+        "bonus": 100
     },
     
     {
@@ -9717,6 +9718,7 @@ def _get_icp_bonus(lead: dict) -> int:
     Some ICPs have higher bonuses for rare, high-value profiles:
         - Blockchain/Crypto Investors: +100
         - UAE/Dubai Investors: +100
+        - Cyber Security/IT Management (Midwest US): +100
     """
     # Null-safe extraction - handles None values gracefully
     sub_industry = (lead.get("sub_industry") or "").strip().lower()

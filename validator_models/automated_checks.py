@@ -9715,8 +9715,8 @@ def _get_icp_bonus(lead: dict) -> int:
         - Custom "bonus" value if specified in matching ICP definition
         
     Some ICPs have higher bonuses for rare, high-value profiles:
-        - Africa Broadcasting: +100
         - Blockchain/Crypto Investors: +100
+        - UAE/Dubai Investors: +100
     """
     # Null-safe extraction - handles None values gracefully
     sub_industry = (lead.get("sub_industry") or "").strip().lower()

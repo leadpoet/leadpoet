@@ -2238,7 +2238,7 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
         result = response.json()
         returned_epoch = result.get("epoch_id")
         leads = result.get("leads", [])
-        max_leads_per_epoch = result.get("max_leads_per_epoch", 3000)  # Default to 50 for backwards compatibility
+        max_leads_per_epoch = result.get("max_leads_per_epoch", 3000)  # Default to 3000
         
         # CRITICAL: Validate gateway returned the correct epoch
         if returned_epoch != epoch_id:
@@ -2396,6 +2396,7 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
     """
     Submit revealed validation results after epoch closes (POST /reveal).
     Batches large reveal sets to prevent gateway timeouts.
+    Sends batches in PARALLEL to avoid event loop starvation on gateway.
     Retries up to 3 times with fresh nonce/signature on gateway timeout.
     
     Args:
@@ -2406,9 +2407,12 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
     Returns:
         bool: Success status
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
     # BATCHING: Split large reveal sets to prevent gateway 500 errors
     # Gateway struggles with 900+ reveals in one request (DB query/update bottleneck)
     BATCH_SIZE = 300  # Optimal batch size based on testing
+    PARALLEL_BATCHES = 4  # Send 4 batches in parallel to avoid event loop starvation
     
     total_reveals = len(reveal_results)
     
@@ -2416,35 +2420,69 @@ def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List
         # Single batch - no splitting needed
         return _submit_reveal_batch(wallet, epoch_id, reveal_results, 1, 1)
     
-    # Multiple batches
+    # Split into batches
     num_batches = (total_reveals + BATCH_SIZE - 1) // BATCH_SIZE  # Ceiling division
-    bt.logging.info(f"📦 Splitting {total_reveals} reveals into {num_batches} batches of ~{BATCH_SIZE} each")
-    
-    all_success = True
+    batches = []
     for batch_num in range(num_batches):
         start_idx = batch_num * BATCH_SIZE
         end_idx = min(start_idx + BATCH_SIZE, total_reveals)
-        batch = reveal_results[start_idx:end_idx]
+        batches.append({
+            "data": reveal_results[start_idx:end_idx],
+            "batch_num": batch_num + 1,
+            "total": num_batches
+        })
+    
+    bt.logging.info(f"📦 Splitting {total_reveals} reveals into {num_batches} batches of ~{BATCH_SIZE} each")
+    bt.logging.info(f"🚀 Sending batches in PARALLEL groups of {PARALLEL_BATCHES} (avoids gateway event loop starvation)")
+    
+    all_success = True
+    total_submitted = 0
+    
+    # Process batches in parallel groups
+    # This pre-queues all requests on gateway, avoiding miner request pile-up between batches
+    for i in range(0, len(batches), PARALLEL_BATCHES):
+        group = batches[i:i + PARALLEL_BATCHES]
+        group_nums = [b["batch_num"] for b in group]
+        bt.logging.info(f"📤 Sending parallel group: batches {group_nums}")
         
-        bt.logging.info(f"📤 Batch {batch_num + 1}/{num_batches}: Submitting {len(batch)} reveals...")
+        with ThreadPoolExecutor(max_workers=PARALLEL_BATCHES) as executor:
+            # Submit all batches in this group simultaneously
+            futures = {
+                executor.submit(
+                    _submit_reveal_batch, 
+                    wallet, 
+                    epoch_id, 
+                    batch["data"], 
+                    batch["batch_num"], 
+                    batch["total"]
+                ): batch["batch_num"]
+                for batch in group
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(futures):
+                batch_num = futures[future]
+                try:
+                    success = future.result()
+                    if success:
+                        bt.logging.info(f"✅ Batch {batch_num}/{num_batches} succeeded")
+                        total_submitted += 1
+                    else:
+                        bt.logging.error(f"❌ Batch {batch_num}/{num_batches} failed!")
+                        all_success = False
+                except Exception as e:
+                    bt.logging.error(f"❌ Batch {batch_num}/{num_batches} exception: {e}")
+                    all_success = False
         
-        success = _submit_reveal_batch(wallet, epoch_id, batch, batch_num + 1, num_batches)
-        
-        if not success:
-            bt.logging.error(f"❌ Batch {batch_num + 1}/{num_batches} failed!")
-            all_success = False
-            # Continue with other batches - partial reveal is better than none
-        else:
-            bt.logging.info(f"✅ Batch {batch_num + 1}/{num_batches} succeeded")
-        
-        # Brief delay between batches to avoid overwhelming gateway
-        if batch_num < num_batches - 1:
-            time.sleep(2)
+        # Brief pause between parallel groups if more groups remain
+        if i + PARALLEL_BATCHES < len(batches):
+            bt.logging.info(f"   ⏳ Brief pause before next parallel group...")
+            time.sleep(1)
     
     if all_success:
         bt.logging.info(f"✅ All {num_batches} batches submitted successfully ({total_reveals} total reveals)")
     else:
-        bt.logging.warning(f"⚠️  Some batches failed - partial reveal submitted")
+        bt.logging.warning(f"⚠️  {total_submitted}/{num_batches} batches succeeded - partial reveal submitted")
     
     return all_success
 

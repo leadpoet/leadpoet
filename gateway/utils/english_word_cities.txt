@@ -869,6 +869,7 @@ cot
 cotes
 couches
 coulombs
+council
 court
 coven
 cowpen
@@ -2190,6 +2191,7 @@ patola
 patria
 patu
 pau
+paul
 paulista
 pavia
 pawing

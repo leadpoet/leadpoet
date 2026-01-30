@@ -495,25 +495,25 @@ def normalize_state(state: str, country: str = "") -> str:
     return state.strip().title()
 
 
-def normalize_city(city: str) -> str:
+def normalize_city(city: str, country: str = "") -> str:
     """
     Normalize city name using:
     1. US_CITY_ALIASES for US variations (nyc, sf, etc.)
-    2. INTERNATIONAL_CITY_ALIASES for international variations
+    2. INTERNATIONAL_CITY_ALIASES for non-US international variations
     3. Title case fallback
-    
-    Note: This is for display normalization. Validation uses separate
-    alias dictionaries based on country to avoid conflicts.
+
+    Country parameter ensures international aliases (e.g. san jose -> san josé)
+    are NOT applied to US cities that share names with international ones.
     """
     if not city:
         return ""
 
     cleaned = city.strip().lower().replace(".", "")
 
-    # Check US aliases first, then international
+    # Check US aliases first, then international (only for non-US)
     if cleaned in US_CITY_ALIASES:
         return US_CITY_ALIASES[cleaned].title()
-    if cleaned in INTERNATIONAL_CITY_ALIASES:
+    if country.lower() != "united states" and cleaned in INTERNATIONAL_CITY_ALIASES:
         return INTERNATIONAL_CITY_ALIASES[cleaned].title()
 
     # Fallback to title case
@@ -576,8 +576,8 @@ def normalize_location(city: str, state: str, country: str) -> Tuple[str, str, s
         if inferred.lower() in VALID_COUNTRIES_SET:
             country = inferred
     
-    # Step 3: Normalize city only
-    norm_city = normalize_city(city)
+    # Step 3: Normalize city (country-aware to avoid international alias conflicts)
+    norm_city = normalize_city(city, country)
     
     # Step 4: Return country as-is (submit.py handles validation/normalization)
     # Only strip whitespace, don't change the value

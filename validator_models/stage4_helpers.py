@@ -93,14 +93,10 @@ else:
     GEO_LOOKUP = {}
 
 # Build sets of duplicate/ambiguous cities that require state/country validation
-# These are cities that appear in multiple states (US) or multiple countries (International)
-# or cities that appear in both US and International lists
+# US duplicates: cities in multiple US states (e.g., Richmond in VA, CA, KY...)
+# US-Intl overlap: US cities that also exist internationally (accent-aware)
 def _build_duplicate_city_sets():
     """Build sets of cities that need state/country validation."""
-    us_duplicates = set()  # Cities appearing in multiple US states
-    intl_duplicates = set()  # Cities appearing in multiple countries
-    us_intl_overlap = set()  # Cities appearing in both US and International
-
     # Find US cities in multiple states
     us_city_states = {}
     for state, cities in GEO_LOOKUP.get('us_states', {}).items():
@@ -111,27 +107,32 @@ def _build_duplicate_city_sets():
             us_city_states[city_lower].append(state)
     us_duplicates = {city for city, states in us_city_states.items() if len(states) > 1}
 
-    # Find international cities in multiple countries
-    intl_city_countries = {}
+    # Find US-International overlap (accent-aware)
+    # e.g., US "san jose" matches intl "san josé" when accents are stripped
+    def _strip_accents(s):
+        return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
+    intl_all = set()
     for country, cities in GEO_LOOKUP.get('cities', {}).items():
         for city in cities:
-            city_lower = city.lower().strip()
-            if city_lower not in intl_city_countries:
-                intl_city_countries[city_lower] = []
-            intl_city_countries[city_lower].append(country)
-    intl_duplicates = {city for city, countries in intl_city_countries.items() if len(countries) > 1}
+            intl_all.add(city.lower().strip())
 
-    # Find cities in both US and International
     us_all = set(us_city_states.keys())
-    intl_all = set(intl_city_countries.keys())
+    # Exact match overlap
     us_intl_overlap = us_all & intl_all
+    # Accent-stripped overlap: find US cities that match intl cities when accents removed
+    us_stripped = {_strip_accents(c): c for c in us_all}
+    intl_stripped = {_strip_accents(c) for c in intl_all}
+    for stripped, us_city in us_stripped.items():
+        if stripped in intl_stripped and us_city not in us_intl_overlap:
+            us_intl_overlap.add(us_city)
 
-    return us_duplicates, intl_duplicates, us_intl_overlap
+    return us_duplicates, us_intl_overlap
 
-US_DUPLICATE_CITIES, INTL_DUPLICATE_CITIES, US_INTL_OVERLAP_CITIES = _build_duplicate_city_sets()
+US_DUPLICATE_CITIES, US_INTL_OVERLAP_CITIES = _build_duplicate_city_sets()
 
 # All ambiguous cities that need state/country validation
-AMBIGUOUS_CITIES = US_DUPLICATE_CITIES | INTL_DUPLICATE_CITIES | US_INTL_OVERLAP_CITIES
+AMBIGUOUS_CITIES = US_DUPLICATE_CITIES | US_INTL_OVERLAP_CITIES
 
 # Load cities requiring strict validation
 ENGLISH_WORD_CITIES_PATH = GATEWAY_UTILS_PATH / 'english_word_cities.txt'
@@ -776,7 +777,7 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
 
         # Check what comes BEFORE the city
         text_before = text_lower[:start_pos].rstrip()
-        # Check for "[Institution] of" pattern before city
+        # Check for "[Institution] of [City]" pattern before city
         if text_before.endswith(' of'):
             before_of = text_before[:-3].rstrip()
             # Check if word before "of" is an institution word
@@ -786,6 +787,14 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
                 if last_word in institution_prefixes:
                     # This is "[Institution] of [City]" pattern - skip this occurrence
                     continue
+
+        # Check for "[Institution] of [Place], [City]" pattern before city
+        # e.g., "University of California, San Diego"
+        # e.g., "University of North Carolina, Charlotte"
+        if text_before.endswith(','):
+            before_comma = text_before[:-1].rstrip()
+            if re.search(r'\b(' + '|'.join(institution_prefixes) + r')\s+of\s+[\w\s]+$', before_comma):
+                continue
 
         # Get what comes immediately after the city
         text_after = text_lower[end_pos:]

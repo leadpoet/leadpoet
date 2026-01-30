@@ -1002,6 +1002,36 @@ def is_city_matching_person_name(city: str, full_name: str, full_text: str) -> b
     # Find all occurrences of city and check if ANY is independent (not adjacent to other name parts)
     other_name_parts = [p for p in name_parts if p != city_lower and len(p) > 2]
 
+    # If none of the other name parts appear anywhere in the text, we can't do
+    # adjacency checks (Google likely truncated the name, e.g. "Donna M." instead
+    # of "Donna Medrek").  In that case, if city exactly matches a name part,
+    # treat every occurrence as name-related → reject.
+    # BUT: if any occurrence is followed by a state/country delimiter (e.g.
+    # "Donna, TX"), there IS a real location reference → allow.
+    if other_name_parts:
+        any_other_in_text = any(
+            re.search(r'\b' + re.escape(p) + r'\b', text_lower)
+            for p in other_name_parts
+        )
+        if not any_other_in_text:
+            # Check if any occurrence looks like a location (city followed by state/country)
+            state_abbr = GEO_LOOKUP.get('state_abbr', {})
+            us_states = set(GEO_LOOKUP.get('us_states', {}).keys())
+            valid_countries = {c.lower() for c in GEO_LOOKUP.get('countries', [])}
+            city_pattern = r'\b' + re.escape(city_lower) + r'\b'
+            has_location_context = False
+            for match in re.finditer(city_pattern, text_lower):
+                after = text_lower[match.end():match.end() + 30]
+                # Must be followed by delimiter then state/country
+                m = re.match(r'^[\s]*[,\-|:]\s*(\S+)', after)
+                if m:
+                    token = m.group(1).rstrip('.,;:').lower()
+                    if token in state_abbr or token in us_states or token in valid_countries:
+                        has_location_context = True
+                        break
+            if not has_location_context:
+                return True  # No location context; city is clearly the person's name
+
     # Find all positions where city appears
     city_pattern = r'\b' + re.escape(city_lower) + r'\b'
     for match in re.finditer(city_pattern, text_lower):
@@ -1175,7 +1205,7 @@ def _has_contradicting_state_or_province(city: str, state: str, country: str, fu
     return False
 
 
-def should_reject_city_match(city: str, state: str, country: str, full_text: str, full_name: str = "", city_only_fallback: bool = True, linkedin_url: str = "", role: str = "") -> bool:
+def should_reject_city_match(city: str, state: str, country: str, full_text: str, full_name: str = "", city_only_fallback: bool = True, linkedin_url: str = "", role: str = "", company: str = "") -> bool:
     """
     Check if a city-only match should be rejected due to institution context or ambiguity.
 
@@ -1183,11 +1213,12 @@ def should_reject_city_match(city: str, state: str, country: str, full_text: str
     0. If city is a common word that shouldn't be treated as a city (e.g., "Research")
     1. If city appears only as part of person's name (false positive filter)
     2. If city appears only in an institution name (false positive filter)
-    3. If city only appears in role/job title context (false positive filter)
-    4. If LinkedIn URL domain contradicts claimed country (applies to ALL cities)
-    5. If city is ambiguous and state/country cannot be verified in text
-    6. If city is an English word and state/country cannot be verified (only in city_only_fallback mode)
-    7. If city is in an area mapping with matching state, approve it
+    3. If city only appears in company name context (false positive filter)
+    4. If city only appears in role/job title context (false positive filter)
+    5. If LinkedIn URL domain contradicts claimed country (applies to ALL cities)
+    6. If city is ambiguous and state/country cannot be verified in text
+    7. If city is an English word and state/country cannot be verified (only in city_only_fallback mode)
+    8. If city is in an area mapping with matching state, approve it
 
     Args:
         city: The city name to check (lowercase)
@@ -1199,6 +1230,7 @@ def should_reject_city_match(city: str, state: str, country: str, full_text: str
                            Set to False when structured location is already being validated.
         linkedin_url: Optional - LinkedIn URL to check for country-specific domains (ca.linkedin.com = Canada)
         role: Optional - job role/title to check if city only appears in role context
+        company: Optional - company name to check if city only appears in company name context
 
     Returns:
         True if the match should be rejected, False if it should be accepted
@@ -1214,6 +1246,12 @@ def should_reject_city_match(city: str, state: str, country: str, full_text: str
         return True  # Reject - city matches person's name, not a real location
     if is_city_only_in_institution_context(city, full_text):
         return True  # Reject - city appears only in institution name
+
+    # Check if city only appears as part of company name (e.g., "Merlin" in "Merlin Cyber")
+    if company and city_lower in company.lower():
+        text_without_company = full_text.lower().replace(company.lower(), '')
+        if city_lower not in text_without_company:
+            return True  # Reject - city only appears in company name, not as location
 
     # Check if city only appears in role/job title context (e.g., "Distribution Centre Supervisor")
     if role and city_lower in role.lower():
@@ -2324,7 +2362,7 @@ def validate_lead(
 
         if not location_passed:
             city_lower = city.lower().strip()
-            if city_lower in full_text.lower():
+            if re.search(r'\b' + re.escape(city_lower) + r'\b', full_text.lower()):
                 # Get the result URL for domain check
                 result_url = url_matched_result.get('link', '') if url_matched_result else linkedin
                 if should_reject_city_match(city_lower, state, country, full_text, name, linkedin_url=result_url, role=role):

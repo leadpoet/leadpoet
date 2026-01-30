@@ -37,6 +37,9 @@ from .stage4_helpers import (
     is_valid_state,
     is_area_in_mappings,
     is_city_in_area_approved,
+    is_ambiguous_city,
+    is_english_word_city,
+    _verify_state_or_country_for_strict_validation,
     should_reject_city_match,
     GEO_LOOKUP,
     CITY_EQUIVALENTS,
@@ -396,8 +399,18 @@ async def run_lead_validation_stage4(
         if not structured_loc_valid and extracted_loc:
             loc_match, loc_method = check_locations_match(extracted_loc, gt_location, full_text)
             if loc_match:
-                location_passed = True
-                location_method = loc_method
+                # Ambiguous/English word cities need state verification even on
+                # non-structured match (e.g. "Richmond" alone could be VA, CA, KY...)
+                needs_strict = is_ambiguous_city(city_lower) or is_english_word_city(city_lower)
+                if needs_strict:
+                    has_state = _verify_state_or_country_for_strict_validation(
+                        city_lower, state, country, full_text, linkedin_url)
+                    if has_state:
+                        location_passed = True
+                        location_method = loc_method
+                else:
+                    location_passed = True
+                    location_method = loc_method
 
         # City fallback
         if not location_passed:
@@ -746,8 +759,18 @@ async def run_location_validation_only(
         if not structured_loc_valid and extracted_loc:
             loc_match, loc_method = check_locations_match(extracted_loc, gt_location, full_text)
             if loc_match:
-                location_passed = True
-                location_method = loc_method
+                # Ambiguous/English word cities need state verification even on
+                # non-structured match (e.g. "Richmond" alone could be VA, CA, KY...)
+                needs_strict = is_ambiguous_city(city_lower) or is_english_word_city(city_lower)
+                if needs_strict:
+                    has_state = _verify_state_or_country_for_strict_validation(
+                        city_lower, state, country, full_text, linkedin_url)
+                    if has_state:
+                        location_passed = True
+                        location_method = loc_method
+                else:
+                    location_passed = True
+                    location_method = loc_method
 
         if not location_passed and city_lower in full_text.lower():
             # Get result URL for domain check

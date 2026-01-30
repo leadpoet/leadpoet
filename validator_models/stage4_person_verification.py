@@ -780,12 +780,22 @@ async def run_location_validation_only(
                         return result
 
         # Non-LinkedIn fallback (structured location only, no city-only fallback)
-        # Note: City-only fallback from non-LinkedIn sources was too loose
+        # Note: Require name AND company in result text to avoid matching
+        # a different person with the same name from aggregator sites
         if not location_passed:
+            name_lower = full_name.lower()
+            company_lower = company.lower() if company else ''
             for r in search_results[:5]:
                 if get_linkedin_id(r.get('link', '')):
                     continue
                 r_text = f"{r.get('title', '')} {r.get('snippet', '')}"
+                r_text_lower = r_text.lower()
+                # Must contain person's name
+                if name_lower not in r_text_lower:
+                    continue
+                # Must contain company if available
+                if company_lower and company_lower not in r_text_lower:
+                    continue
                 r_loc = extract_location_from_text(r_text)
                 if r_loc:
                     loc_match, loc_method = check_locations_match(r_loc, gt_location, r_text)

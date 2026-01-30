@@ -20,6 +20,7 @@ Usage in automated_checks.py:
 """
 
 import os
+import re
 import asyncio
 from typing import Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -414,11 +415,11 @@ async def run_lead_validation_stage4(
 
         # City fallback
         if not location_passed:
-            if city_lower in full_text.lower():
+            if re.search(r'\b' + re.escape(city_lower) + r'\b', full_text.lower()):
                 # Get result URL for domain check
                 result_url = url_matched_result.get('link', '') if url_matched_result else linkedin_url
                 # Check for institution context, ambiguous cities, and URL domain
-                if should_reject_city_match(city_lower, state, country, full_text, full_name, linkedin_url=result_url, role=role):
+                if should_reject_city_match(city_lower, state, country, full_text, full_name, linkedin_url=result_url, role=role, company=company):
                     pass  # Skip - institution context, ambiguous city, or contradicting location
                 else:
                     location_passed = True
@@ -772,11 +773,11 @@ async def run_location_validation_only(
                     location_passed = True
                     location_method = loc_method
 
-        if not location_passed and city_lower in full_text.lower():
+        if not location_passed and re.search(r'\b' + re.escape(city_lower) + r'\b', full_text.lower()):
             # Get result URL for domain check
             result_url = url_matched_result.get('link', '') if url_matched_result else linkedin_url
             # Check for institution context, ambiguous cities, and URL domain
-            if should_reject_city_match(city_lower, state, country, full_text, full_name, linkedin_url=result_url, role=role):
+            if should_reject_city_match(city_lower, state, country, full_text, full_name, linkedin_url=result_url, role=role, company=company):
                 pass  # Skip - institution context, ambiguous city, or contradicting location
             else:
                 location_passed = True

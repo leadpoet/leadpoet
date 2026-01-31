@@ -1090,7 +1090,6 @@ def _has_contradicting_state_or_province(city: str, state: str, country: str, fu
     # Check LinkedIn URL domain for country contradiction
     # LinkedIn uses country-code subdomains: ca.linkedin.com (Canada), uk.linkedin.com (UK), etc.
     if linkedin_url:
-        import re
         # Match pattern: https://XX.linkedin.com where XX is 2 letters (country code)
         country_domain_match = re.search(r'https?://([a-z]{2})\.linkedin\.com', linkedin_url.lower())
         if country_domain_match:
@@ -1176,7 +1175,6 @@ def _has_contradicting_state_or_province(city: str, state: str, country: str, fu
     }
 
     # Find city in text and check what follows
-    import re
     city_pattern = re.compile(r'\b' + re.escape(city_lower) + r'\b', re.IGNORECASE)
 
     for match in city_pattern.finditer(text_lower):

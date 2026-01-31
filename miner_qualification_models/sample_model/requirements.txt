@@ -1,0 +1,4 @@
+# Sample Qualification Model Dependencies
+# These are installed in the sandbox environment
+
+supabase>=2.0.0

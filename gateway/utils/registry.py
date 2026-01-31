@@ -338,19 +338,32 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
         print(f"   Active: {active}")
         print(f"   Validator Permit: {validator_permit}")
         
-        # This handles validators who haven't set active flag but have significant stake
-        STAKE_THRESHOLD = 500000  # 500K TAO minimum for stake-based validator classification
+        # Validator classification logic:
+        # On TESTNET: validator_permit=True is sufficient (low stake is common)
+        # On MAINNET: require active=True OR high stake (500K+ TAO)
+        from gateway.config import BITTENSOR_NETWORK
+        is_testnet = BITTENSOR_NETWORK == "test"
         
-        # Validators must have:
-        # 1. BOTH active=True AND validator_permit=True (normal path), OR
-        # 2. Stake > 500K TAO AND validator_permit=True (temporary stake-based override)
-        if (active and validator_permit) or (stake > STAKE_THRESHOLD and validator_permit):
+        STAKE_THRESHOLD = 500000  # 500K TAO for mainnet stake-based classification
+        
+        # Validators are identified by:
+        # 1. validator_permit=True AND active=True (normal path), OR
+        # 2. validator_permit=True AND stake > threshold (mainnet high-stake), OR
+        # 3. validator_permit=True on testnet (testnet has low stake)
+        is_validator = (
+            (active and validator_permit) or
+            (stake > STAKE_THRESHOLD and validator_permit) or
+            (is_testnet and validator_permit)
+        )
+        
+        if is_validator:
             role = "validator"
             if active and validator_permit:
                 print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
+            elif is_testnet and validator_permit:
+                print(f"   ✅ Role: VALIDATOR (testnet, permit=True, active={active})")
             else:
                 print(f"   ✅ Role: VALIDATOR (stake={stake:.0f} τ > {STAKE_THRESHOLD}, permit=True)")
-                print(f"      ⚠️  TEMPORARY: Stake-based classification (active={active})")
         else:
             role = "miner"
             print(f"   ✅ Role: MINER (active={active}, permit={validator_permit}, stake={stake:.0f})")
@@ -403,20 +416,32 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         print(f"   Active: {active}")
         print(f"   Validator Permit: {validator_permit}")
         
-        # TEMPORARY: Allow high-stake validators even if active=False
-        # This handles validators who haven't set active flag but have significant stake
-        STAKE_THRESHOLD = 500000  # 500K TAO minimum for stake-based validator classification
+        # Validator classification logic:
+        # On TESTNET: validator_permit=True is sufficient (low stake is common)
+        # On MAINNET: require active=True OR high stake (500K+ TAO)
+        from gateway.config import BITTENSOR_NETWORK
+        is_testnet = BITTENSOR_NETWORK == "test"
         
-        # Validators must have:
-        # 1. BOTH active=True AND validator_permit=True (normal path), OR
-        # 2. Stake > 500K TAO AND validator_permit=True (temporary stake-based override)
-        if (active and validator_permit) or (stake > STAKE_THRESHOLD and validator_permit):
+        STAKE_THRESHOLD = 500000  # 500K TAO for mainnet stake-based classification
+        
+        # Validators are identified by:
+        # 1. validator_permit=True AND active=True (normal path), OR
+        # 2. validator_permit=True AND stake > threshold (mainnet high-stake), OR
+        # 3. validator_permit=True on testnet (testnet has low stake)
+        is_validator = (
+            (active and validator_permit) or
+            (stake > STAKE_THRESHOLD and validator_permit) or
+            (is_testnet and validator_permit)
+        )
+        
+        if is_validator:
             role = "validator"
             if active and validator_permit:
                 print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
+            elif is_testnet and validator_permit:
+                print(f"   ✅ Role: VALIDATOR (testnet, permit=True, active={active})")
             else:
                 print(f"   ✅ Role: VALIDATOR (stake={stake:.0f} τ > {STAKE_THRESHOLD}, permit=True)")
-                print(f"      ⚠️  TEMPORARY: Stake-based classification (active={active})")
         else:
             role = "miner"
             print(f"   ✅ Role: MINER (active={active}, permit={validator_permit}, stake={stake:.0f})")

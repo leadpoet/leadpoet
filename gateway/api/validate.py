@@ -33,7 +33,7 @@ from gateway.utils.signature import verify_wallet_signature, compute_payload_has
 from gateway.utils.registry import is_registered_hotkey_async  # Use async version
 from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
 from gateway.utils.logger import log_event
-from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BITTENSOR_NETWORK
 from supabase import create_client, Client
 
 # Initialize Supabase client
@@ -376,23 +376,35 @@ async def submit_validation(event: ValidationEvent):
         
         # Insert all evidence records in batch (with timeout to prevent hanging)
         import asyncio
-        try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    lambda: supabase.table("validation_evidence_private").insert(evidence_records).execute()
-                ),
-                timeout=30.0  # 30 second timeout for Supabase insert
-            )
-            print(f"✅ Stored {len(evidence_records)} evidence blobs in private DB")
+        
+        # ════════════════════════════════════════════════════════════════════════
+        # TESTNET GUARD: Prevent testnet from writing to production validation_evidence_private
+        # TODO: REMOVE THIS BLOCK BEFORE PRODUCTION DEPLOYMENT
+        # This is safe on mainnet - it only blocks writes when BITTENSOR_NETWORK="test"
+        # ════════════════════════════════════════════════════════════════════════
+        if BITTENSOR_NETWORK == "test":
+            print(f"   ⚠️  TESTNET MODE: Skipping validation_evidence_private insert to protect production DB")
+            print(f"   ℹ️  Would have stored {len(evidence_records)} evidence blobs")
             print(f"   Validator stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
-        except asyncio.TimeoutError:
-            # FAIL the entire request - validator will retry
-            # This preserves atomicity: either everything succeeds or nothing succeeds
-            print(f"❌ Supabase insert timed out after 30s")
-            raise HTTPException(
-                status_code=504,
-                detail="Database timeout while storing evidence blobs - please retry"
-            )
+        else:
+            # MAINNET: Normal operation - insert to validation_evidence_private
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda: supabase.table("validation_evidence_private").insert(evidence_records).execute()
+                    ),
+                    timeout=30.0  # 30 second timeout for Supabase insert
+                )
+                print(f"✅ Stored {len(evidence_records)} evidence blobs in private DB")
+                print(f"   Validator stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
+            except asyncio.TimeoutError:
+                # FAIL the entire request - validator will retry
+                # This preserves atomicity: either everything succeeds or nothing succeeds
+                print(f"❌ Supabase insert timed out after 30s")
+                raise HTTPException(
+                    status_code=504,
+                    detail="Database timeout while storing evidence blobs - please retry"
+                )
     
     except HTTPException:
         # Re-raise HTTPException (timeout or other HTTP errors) to fail the request
@@ -440,46 +452,72 @@ async def submit_validation(event: ValidationEvent):
         "signature": event.signature,
         "build_id": event.build_id
     }
-    await log_event(log_entry)
     
-    print(f"✅ Batch validation logged to TEE buffer")
+    # ════════════════════════════════════════════════════════════════════════
+    # TESTNET GUARD: Prevent testnet from writing to production transparency_log
+    # TODO: REMOVE THIS BLOCK BEFORE PRODUCTION DEPLOYMENT
+    # This is safe on mainnet - it only blocks writes when BITTENSOR_NETWORK="test"
+    # ════════════════════════════════════════════════════════════════════════
+    if BITTENSOR_NETWORK == "test":
+        print(f"   ⚠️  TESTNET MODE: Skipping VALIDATION_RESULT_BATCH log to protect production transparency_log")
+        print(f"   ℹ️  Would have logged {len(event.payload.validations)} validations for epoch {event.payload.epoch_id}")
+    else:
+        # MAINNET: Normal operation - log to transparency_log
+        await log_event(log_entry)
+        print(f"✅ Batch validation logged to TEE buffer")
     
     # ========================================
     # Step 9: Update lead status to prevent re-assignment
     # ========================================
     # CRITICAL FIX: Mark leads as "validating" so they're not re-assigned in next epoch
     # Leads will stay "validating" until consensus runs and marks them approved/denied
-    try:
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # TESTNET GUARD: Prevent testnet from writing to production leads_private
+    # TODO: REMOVE THIS BLOCK BEFORE PRODUCTION DEPLOYMENT
+    # This is safe on mainnet - it only blocks writes when BITTENSOR_NETWORK="test"
+    # ════════════════════════════════════════════════════════════════════════
+    if BITTENSOR_NETWORK == "test":
         lead_ids = [v.lead_id for v in event.payload.validations]
-        
-        # Update leads in batches of 300 to avoid Supabase .in_() limit
-        # (Same batch size as reveal submissions - proven to work)
-        BATCH_SIZE = 300
-        total_updated = 0
-        
-        for i in range(0, len(lead_ids), BATCH_SIZE):
-            batch = lead_ids[i:i + BATCH_SIZE]
-            
-            supabase.table("leads_private")\
-                .update({"status": "validating"})\
-                .in_("lead_id", batch)\
-                .execute()
-            
-            total_updated += len(batch)
-        
-        print(f"✅ Marked {total_updated} leads as 'validating' (removed from pending queue)")
-        
-        # CRITICAL: Invalidate epoch cache after status change
-        # Without this, cached leads will still show as "pending_validation"
-        # causing other validators to receive already-assigned leads
+        print(f"   ⚠️  TESTNET MODE: Skipping leads_private status update to protect production DB")
+        print(f"   ℹ️  Would have marked {len(lead_ids)} leads as 'validating'")
+        # Still invalidate cache to maintain consistency
         from gateway.utils.leads_cache import clear_epoch_cache
         clear_epoch_cache(event.payload.epoch_id)
-        print(f"✅ Invalidated epoch {event.payload.epoch_id} cache (prevents duplicate assignments)")
-        
-    except Exception as e:
-        # Don't fail the entire validation if status update fails
-        # Evidence is already stored, which is the source of truth
-        print(f"⚠️  Warning: Failed to update lead status: {e}")
+        print(f"   ✅ Invalidated epoch {event.payload.epoch_id} cache (local only)")
+    else:
+        # MAINNET: Normal operation - update leads_private
+        try:
+            lead_ids = [v.lead_id for v in event.payload.validations]
+            
+            # Update leads in batches of 300 to avoid Supabase .in_() limit
+            # (Same batch size as reveal submissions - proven to work)
+            BATCH_SIZE = 300
+            total_updated = 0
+            
+            for i in range(0, len(lead_ids), BATCH_SIZE):
+                batch = lead_ids[i:i + BATCH_SIZE]
+                
+                supabase.table("leads_private")\
+                    .update({"status": "validating"})\
+                    .in_("lead_id", batch)\
+                    .execute()
+                
+                total_updated += len(batch)
+            
+            print(f"✅ Marked {total_updated} leads as 'validating' (removed from pending queue)")
+            
+            # CRITICAL: Invalidate epoch cache after status change
+            # Without this, cached leads will still show as "pending_validation"
+            # causing other validators to receive already-assigned leads
+            from gateway.utils.leads_cache import clear_epoch_cache
+            clear_epoch_cache(event.payload.epoch_id)
+            print(f"✅ Invalidated epoch {event.payload.epoch_id} cache (prevents duplicate assignments)")
+            
+        except Exception as e:
+            # Don't fail the entire validation if status update fails
+            # Evidence is already stored, which is the source of truth
+            print(f"⚠️  Warning: Failed to update lead status: {e}")
     
     # ========================================
     # Step 10: Return success

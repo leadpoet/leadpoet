@@ -20,7 +20,7 @@ from gateway.utils.assignment import get_validator_set  # deterministic_lead_ass
 from gateway.utils.signature import verify_wallet_signature
 from gateway.utils.registry import is_registered_hotkey_async  # Use async version
 from gateway.utils.leads_cache import get_cached_leads  # Import cache for instant lead distribution
-from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BITTENSOR_NETWORK
 from supabase import create_client
 
 # Supabase client
@@ -336,91 +336,101 @@ async def get_epoch_leads(
                 print(f"   📝 Creating EPOCH_INITIALIZATION for epoch {epoch_id} (fallback mode)...")
                 print(f"   📊 Queue Root: {queue_root[:16]}...")
                 
-                try:
-                    # Insert EPOCH_INITIALIZATION event (idempotent - will fail if exists)
-                    # CRITICAL: Must match epoch_lifecycle.py format with all required fields
-                    import json
-                    from uuid import uuid4
-                    
-                    payload_json = json.dumps(init_payload, sort_keys=True)
-                    payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
-                    
-                    await asyncio.wait_for(
-                        asyncio.to_thread(
-                            lambda: supabase.table("transparency_log")
-                                .insert({
-                                    "event_type": "EPOCH_INITIALIZATION",
-                                    "actor_hotkey": "system",
-                                    "nonce": str(uuid4()),  # Required NOT NULL
-                                    "ts": datetime.utcnow().isoformat(),
-                                    "payload_hash": payload_hash,
-                                    "build_id": "epoch_leads_fallback",
-                                    "signature": "system",
-                                    "payload": init_payload
-                                })
-                                .execute()
-                        ),
-                        timeout=30.0
-                    )
-                    print(f"   ✅ EPOCH_INITIALIZATION created successfully")
-                except Exception as init_err:
-                    # If it already exists (race condition), that's fine - use existing one
-                    if "duplicate" in str(init_err).lower() or "unique" in str(init_err).lower():
-                        print(f"   ℹ️  EPOCH_INITIALIZATION already exists (created by another request)")
-                    elif "null value" in str(init_err).lower() or "actor_hotkey" in str(init_err).lower():
-                        # This means epoch_lifecycle already created it, but we hit a race condition
-                        # where our query didn't find it yet. RETRY the query instead of proceeding
-                        # with potentially stale leads from the wrong epoch!
-                        print(f"   ⚠️  Failed to create EPOCH_INITIALIZATION (actor_hotkey constraint)")
-                        print(f"   🔄 Retrying query for existing EPOCH_INITIALIZATION (may have been created by epoch_lifecycle)...")
+                # ════════════════════════════════════════════════════════════════════════
+                # TESTNET GUARD: Prevent testnet from writing to production transparency_log
+                # TODO: REMOVE THIS BLOCK BEFORE PRODUCTION DEPLOYMENT
+                # This is safe on mainnet - it only blocks writes when BITTENSOR_NETWORK="test"
+                # ════════════════════════════════════════════════════════════════════════
+                if BITTENSOR_NETWORK == "test":
+                    print(f"   ⚠️  TESTNET MODE: Skipping EPOCH_INITIALIZATION insert to protect production DB")
+                    print(f"   ℹ️  Would have created epoch {epoch_id} with {len(assigned_lead_ids)} leads")
+                else:
+                    # MAINNET: Normal operation - insert to transparency_log
+                    try:
+                        # Insert EPOCH_INITIALIZATION event (idempotent - will fail if exists)
+                        # CRITICAL: Must match epoch_lifecycle.py format with all required fields
+                        import json
+                        from uuid import uuid4
                         
-                        try:
-                            retry_result = await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    lambda: supabase.table("transparency_log")
-                                        .select("payload")
-                                        .eq("event_type", "EPOCH_INITIALIZATION")
-                                        .eq("payload->>epoch_id", str(epoch_id))
-                                        .limit(1)
-                                        .execute()
-                                ),
-                                timeout=30.0
-                            )
-                            
-                            if retry_result and retry_result.data:
-                                # Found it! Use the correct EPOCH_INITIALIZATION data
-                                epoch_payload = retry_result.data[0].get("payload", {})
-                                assigned_lead_ids = epoch_payload.get("assignment", {}).get("assigned_lead_ids", [])
-                                queue_root = epoch_payload.get("queue", {}).get("queue_root", "unknown")
-                                validator_count = epoch_payload.get("assignment", {}).get("validator_count", 0)
-                                
-                                print(f"   ✅ RETRY SUCCESS: Found EPOCH_INITIALIZATION with {len(assigned_lead_ids)} leads")
-                                print(f"   🔄 Discarding fallback query results, using official EPOCH_INITIALIZATION")
-                                
-                                # Set leads_result to None to force re-query in Step 5 with correct lead IDs
-                                leads_result = None
-                            else:
-                                # Still can't find it - this is a critical error
-                                print(f"   ❌ RETRY FAILED: EPOCH_INITIALIZATION still not found after retry")
-                                print(f"   ❌ Cannot proceed - serving wrong epoch leads would cause validation failures")
-                                raise HTTPException(
-                                    status_code=503,
-                                    detail=f"EPOCH_INITIALIZATION not found for epoch {epoch_id} - gateway may be initializing"
-                                )
-                        except asyncio.TimeoutError:
-                            print(f"   ❌ RETRY TIMEOUT: Cannot verify EPOCH_INITIALIZATION exists")
-                            raise HTTPException(
-                                status_code=504,
-                                detail="Gateway timeout while verifying epoch initialization"
-                            )
-                    else:
-                        # Unknown error - don't risk serving wrong leads
-                        print(f"   ❌ Failed to create EPOCH_INITIALIZATION: {init_err}")
-                        print(f"   ❌ Cannot proceed - serving wrong epoch leads would cause validation failures")
-                        raise HTTPException(
-                            status_code=500,
-                            detail=f"Failed to initialize epoch {epoch_id}: {str(init_err)}"
+                        payload_json = json.dumps(init_payload, sort_keys=True)
+                        payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
+                        
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                lambda: supabase.table("transparency_log")
+                                    .insert({
+                                        "event_type": "EPOCH_INITIALIZATION",
+                                        "actor_hotkey": "system",
+                                        "nonce": str(uuid4()),  # Required NOT NULL
+                                        "ts": datetime.utcnow().isoformat(),
+                                        "payload_hash": payload_hash,
+                                        "build_id": "epoch_leads_fallback",
+                                        "signature": "system",
+                                        "payload": init_payload
+                                    })
+                                    .execute()
+                            ),
+                            timeout=30.0
                         )
+                        print(f"   ✅ EPOCH_INITIALIZATION created successfully")
+                    except Exception as init_err:
+                        # If it already exists (race condition), that's fine - use existing one
+                        if "duplicate" in str(init_err).lower() or "unique" in str(init_err).lower():
+                            print(f"   ℹ️  EPOCH_INITIALIZATION already exists (created by another request)")
+                        elif "null value" in str(init_err).lower() or "actor_hotkey" in str(init_err).lower():
+                            # This means epoch_lifecycle already created it, but we hit a race condition
+                            # where our query didn't find it yet. RETRY the query instead of proceeding
+                            # with potentially stale leads from the wrong epoch!
+                            print(f"   ⚠️  Failed to create EPOCH_INITIALIZATION (actor_hotkey constraint)")
+                            print(f"   🔄 Retrying query for existing EPOCH_INITIALIZATION (may have been created by epoch_lifecycle)...")
+                            
+                            try:
+                                retry_result = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        lambda: supabase.table("transparency_log")
+                                            .select("payload")
+                                            .eq("event_type", "EPOCH_INITIALIZATION")
+                                            .eq("payload->>epoch_id", str(epoch_id))
+                                            .limit(1)
+                                            .execute()
+                                    ),
+                                    timeout=30.0
+                                )
+                                
+                                if retry_result and retry_result.data:
+                                    # Found it! Use the correct EPOCH_INITIALIZATION data
+                                    epoch_payload = retry_result.data[0].get("payload", {})
+                                    assigned_lead_ids = epoch_payload.get("assignment", {}).get("assigned_lead_ids", [])
+                                    queue_root = epoch_payload.get("queue", {}).get("queue_root", "unknown")
+                                    validator_count = epoch_payload.get("assignment", {}).get("validator_count", 0)
+                                    
+                                    print(f"   ✅ RETRY SUCCESS: Found EPOCH_INITIALIZATION with {len(assigned_lead_ids)} leads")
+                                    print(f"   🔄 Discarding fallback query results, using official EPOCH_INITIALIZATION")
+                                    
+                                    # Set leads_result to None to force re-query in Step 5 with correct lead IDs
+                                    leads_result = None
+                                else:
+                                    # Still can't find it - this is a critical error
+                                    print(f"   ❌ RETRY FAILED: EPOCH_INITIALIZATION still not found after retry")
+                                    print(f"   ❌ Cannot proceed - serving wrong epoch leads would cause validation failures")
+                                    raise HTTPException(
+                                        status_code=503,
+                                        detail=f"EPOCH_INITIALIZATION not found for epoch {epoch_id} - gateway may be initializing"
+                                    )
+                            except asyncio.TimeoutError:
+                                print(f"   ❌ RETRY TIMEOUT: Cannot verify EPOCH_INITIALIZATION exists")
+                                raise HTTPException(
+                                    status_code=504,
+                                    detail="Gateway timeout while verifying epoch initialization"
+                                )
+                        else:
+                            # Unknown error - don't risk serving wrong leads
+                            print(f"   ❌ Failed to create EPOCH_INITIALIZATION: {init_err}")
+                            print(f"   ❌ Cannot proceed - serving wrong epoch leads would cause validation failures")
+                            raise HTTPException(
+                                status_code=500,
+                                detail=f"Failed to initialize epoch {epoch_id}: {str(init_err)}"
+                            )
             else:
                 assigned_lead_ids = []
                 print(f"   ℹ️  No pending leads in queue")

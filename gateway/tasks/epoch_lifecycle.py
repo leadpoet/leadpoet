@@ -43,6 +43,11 @@ from gateway.utils.leads_cache import (
 # Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+# DEDICATED Supabase client for consensus operations
+# This ensures consensus has its own httpx connection pool, isolated from miner traffic
+# Both clients use the same Supabase project - separation is at Python httpx level only
+consensus_supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
 
 async def fetch_full_leads_for_epoch(epoch_id: int) -> list:
     """
@@ -639,13 +644,17 @@ async def compute_epoch_consensus(epoch_id: int):
             batch_size = 1000
             
             while True:
-                evidence_batch = await asyncio.to_thread(
-                    lambda o=offset: supabase.table("validation_evidence_private")
+                # TIMEOUT: 60s per batch to prevent hanging under high load
+                evidence_batch = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda o=offset: consensus_supabase.table("validation_evidence_private")
                     .select("evidence_id, validator_hotkey")
                     .eq("epoch_id", epoch_id)
                     .not_.is_("decision", "null")
                         .range(o, o + batch_size - 1)
                     .execute()
+                    ),
+                    timeout=60
             )
                 
                 if not evidence_batch.data:
@@ -667,11 +676,12 @@ async def compute_epoch_consensus(epoch_id: int):
             
             print(f"   📊 Found {len(evidence_result.data)} revealed validation records")
             
-            # Update v_trust and stake for each validator's evidence
-            for ev in evidence_result.data:
-                validator_hotkey = ev['validator_hotkey']
-                evidence_id = ev['evidence_id']
-                
+            # OPTIMIZATION: Batch update v_trust by unique validator instead of per-record
+            # This reduces 3200+ individual queries to just 1 query per unique validator
+            unique_validators = set(ev['validator_hotkey'] for ev in evidence_result.data)
+            print(f"   📊 Found {len(unique_validators)} unique validator(s) - using batch update")
+            
+            for validator_hotkey in unique_validators:
                 try:
                     # Get validator's UID in metagraph
                     if validator_hotkey in metagraph.hotkeys:
@@ -680,26 +690,33 @@ async def compute_epoch_consensus(epoch_id: int):
                         # Get stake (TAO amount) 
                         stake = float(metagraph.S[uid])
                         
-                        # Get v_trust (validator trust score) - same as registry.py line 283
+                        # Get v_trust (validator trust score)
                         v_trust = float(metagraph.validator_trust[uid]) if hasattr(metagraph, 'validator_trust') else 0.0
                         
-                        # Update evidence record with v_trust and stake - RUN IN THREAD
-                        await asyncio.to_thread(
-                            lambda: supabase.table("validation_evidence_private")
+                        # BATCH UPDATE: Update ALL evidence records for this validator at once
+                        # Instead of 3200 individual queries, this is ONE query per validator
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                lambda hk=validator_hotkey, vt=v_trust, st=stake: consensus_supabase.table("validation_evidence_private")
                                 .update({
-                                    "v_trust": v_trust,
-                                    "stake": stake
+                                        "v_trust": vt,
+                                        "stake": st
                                 })
-                                .eq("evidence_id", evidence_id)
+                                    .eq("epoch_id", epoch_id)
+                                    .eq("validator_hotkey", hk)
                                 .execute()
+                            ),
+                            timeout=60
                         )
                         
-                        print(f"      ✅ Updated {validator_hotkey[:10]}...: v_trust={v_trust:.4f}, stake={stake:.2f} τ")
+                        # Count how many records were updated
+                        record_count = len([ev for ev in evidence_result.data if ev['validator_hotkey'] == validator_hotkey])
+                        print(f"      ✅ Batch updated {record_count} records for {validator_hotkey[:10]}...: v_trust={v_trust:.4f}, stake={stake:.2f} τ")
                     else:
                         print(f"      ⚠️  Validator {validator_hotkey[:10]}... not found in metagraph")
                         
                 except Exception as e:
-                    print(f"      ⚠️  Failed to update v_trust/stake for {validator_hotkey[:10]}...: {e}")
+                    print(f"      ⚠️  Failed to batch update v_trust/stake for {validator_hotkey[:10]}...: {e}")
                     
             print(f"   ✅ Step 1 complete: Validator weights populated\n")
             
@@ -721,7 +738,7 @@ async def compute_epoch_consensus(epoch_id: int):
         
         while True:
             result = await asyncio.to_thread(
-                lambda o=offset: supabase.table("validation_evidence_private")
+                lambda o=offset: consensus_supabase.table("validation_evidence_private")
                     .select("lead_id")
                     .eq("epoch_id", epoch_id)
                     .range(o, o + batch_size - 1)
@@ -760,7 +777,7 @@ async def compute_epoch_consensus(epoch_id: int):
         
         while True:
             evidence_batch = await asyncio.to_thread(
-                lambda o=evidence_offset: supabase.table("validation_evidence_private")
+                lambda o=evidence_offset: consensus_supabase.table("validation_evidence_private")
                     .select("lead_id, validator_hotkey, decision, rep_score, rejection_reason, revealed_ts, v_trust, stake, evidence_blob, evidence_id")
                     .eq("epoch_id", epoch_id)
                     .range(o, o + evidence_batch_size - 1)
@@ -797,7 +814,7 @@ async def compute_epoch_consensus(epoch_id: int):
             batch_ids = unique_leads[batch_start:batch_start + leads_batch_size]
             
             leads_batch = await asyncio.to_thread(
-                lambda ids=batch_ids: supabase.table("leads_private")
+                lambda ids=batch_ids: consensus_supabase.table("leads_private")
                     .select("lead_id, lead_blob")
                     .in_("lead_id", ids)
                     .execute()
@@ -818,9 +835,22 @@ async def compute_epoch_consensus(epoch_id: int):
         approved_count = 0
         rejected_count = 0
         
-        for i, lead_id in enumerate(unique_leads, 1):
+        # ========================================================================
+        # BATCHED CONSENSUS: Process leads in batches of 50 to reduce yield points
+        # This reduces event loop interruptions from 3200 to 64 (50x fewer)
+        # ========================================================================
+        CONSENSUS_BATCH_SIZE = 50
+        
+        async def process_single_lead_consensus(lead_id: str, lead_index: int, total_leads: int):
+            """
+            Process consensus for a single lead. Returns (result, lead_id) where:
+            - result: 'approved', 'denied', 'skipped', or 'error'
+            - lead_id: the lead_id processed
+            
+            This function contains ALL the original consensus logic unchanged.
+            """
             try:
-                print(f"      🔍 [{i}/{len(unique_leads)}] Lead {lead_id[:8]}...")
+                print(f"      🔍 [{lead_index}/{total_leads}] Lead {lead_id[:8]}...")
                 
                 # ========================================================================
                 # PRIORITY 3: Compute weighted consensus using v_trust × stake
@@ -870,8 +900,10 @@ async def compute_epoch_consensus(epoch_id: int):
                     
                     # Clear ALL consensus-related columns to reset for next epoch
                     try:
-                        clear_result = await asyncio.to_thread(
-                            lambda: supabase.table("leads_private")
+                        # TIMEOUT: 30s to prevent hanging under high load
+                        clear_result = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                lambda lid=lead_id: consensus_supabase.table("leads_private")
                                 .update({
                                     "epoch_summary": None,  # Clear epoch summary
                                     "consensus_votes": None,  # Clear consensus votes
@@ -879,16 +911,18 @@ async def compute_epoch_consensus(epoch_id: int):
                                     "validator_responses": None,  # Clear individual validator responses
                                     "rep_score": None,  # Clear reputation score
                                 })
-                                .eq("lead_id", lead_id)
+                                    .eq("lead_id", lid)
                                 .execute()
+                            ),
+                            timeout=30
                         )
                         print(f"         ✅ Cleared all consensus columns (epoch_summary, consensus_votes, validators_responded, validator_responses, rep_score)")
                         print(f"            Lead ready for next epoch with clean slate")
                     except Exception as e:
                         print(f"         ⚠️  Failed to clear consensus columns: {e}")
                     
-                    # Skip to next lead (don't update status)
-                    continue
+                    # Return skipped (no status update needed)
+                    return ('skipped', lead_id)
                 
                 # Build validators_responded array
                 validators_responded = [r['validator_hotkey'] for r in responses_result.data]
@@ -988,36 +1022,70 @@ async def compute_epoch_consensus(epoch_id: int):
                 else:
                     print(f"            - icp_adjustment: {int(is_icp_multiplier):+d} points")
                 
-                try:
-                    update_result = await asyncio.to_thread(
-                        lambda: supabase.table("leads_private")
-                            .update({
-                                "status": final_status,
-                                "validators_responded": validators_responded,
-                                "validator_responses": validator_responses,
-                                "consensus_votes": consensus_votes,
-                                "rep_score": final_rep_score,
-                                "is_icp_multiplier": is_icp_multiplier,
-                                "rep_score_version": "v1/chksv2",  # Shortened to 9 chars (VARCHAR(10) limit)
-                                "epoch_summary": outcome  # Keep existing epoch_summary for backwards compatibility
-                            })
-                            .eq("lead_id", lead_id)
-                            .execute()
-                    )
-                    
-                    # Verify update succeeded
-                    if update_result.data and len(update_result.data) > 0:
-                        print(f"         ✅ leads_private updated successfully")
-                    else:
-                        print(f"         ⚠️  WARNING: Update returned no data (lead_id might not exist or update failed)")
-                        print(f"            Update result: {update_result}")
+                # RETRY LOGIC: Handle transient connection errors
+                # - Errno 11: Resource temporarily unavailable (connection pool exhausted)
+                # - Errno 32: Broken pipe (connection closed by remote end)
+                # - Errno 104: Connection reset by peer
+                # This occurs when connection pool is exhausted during high miner traffic
+                MAX_UPDATE_RETRIES = 5
+                update_success = False
                 
-                except Exception as e:
-                    print(f"         ❌ ERROR: Failed to update leads_private: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Don't stop consensus for other leads - just log the error
-                    continue
+                for update_attempt in range(1, MAX_UPDATE_RETRIES + 1):
+                    try:
+                        # CRITICAL: Capture all variables in lambda defaults to avoid closure issues
+                        # TIMEOUT: 30s per update to prevent hanging under high load
+                        update_result = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                lambda lid=lead_id, fs=final_status, vr=validators_responded, vrsp=validator_responses, cv=consensus_votes, frs=final_rep_score, icp=is_icp_multiplier, oc=outcome: consensus_supabase.table("leads_private")
+                                    .update({
+                                        "status": fs,
+                                        "validators_responded": vr,
+                                        "validator_responses": vrsp,
+                                        "consensus_votes": cv,
+                                        "rep_score": frs,
+                                        "is_icp_multiplier": icp,
+                                        "rep_score_version": "v1/chksv2",  # Shortened to 9 chars (VARCHAR(10) limit)
+                                        "epoch_summary": oc  # Keep existing epoch_summary for backwards compatibility
+                                    })
+                                    .eq("lead_id", lid)
+                                    .execute()
+                            ),
+                            timeout=30
+                        )
+                        
+                        # Verify update succeeded
+                        if update_result.data and len(update_result.data) > 0:
+                            print(f"         ✅ leads_private updated successfully")
+                        else:
+                            print(f"         ⚠️  WARNING: Update returned no data (lead_id might not exist or update failed)")
+                            print(f"            Update result: {update_result}")
+                        
+                        update_success = True
+                        break  # Success - exit retry loop
+                        
+                    except Exception as e:
+                        error_str = str(e)
+                        is_timeout = isinstance(e, asyncio.TimeoutError)
+                        # Check for all transient connection errors
+                        is_transient = any(x in error_str for x in [
+                            'Errno 11', 'Errno 32', 'Errno 104', 'Broken pipe',
+                            'Resource temporarily unavailable', 'Connection reset'
+                        ]) or is_timeout
+                        
+                        if is_transient and update_attempt < MAX_UPDATE_RETRIES:
+                            wait_time = update_attempt  # 1s, 2s, 3s, 4s backoff
+                            error_type = "timeout" if is_timeout else "transient connection error"
+                            print(f"         ⚠️  Update attempt {update_attempt}/{MAX_UPDATE_RETRIES} failed ({error_type}), retrying in {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            print(f"         ❌ ERROR: Failed to update leads_private after {update_attempt} attempts: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            # Don't stop consensus for other leads - return error
+                            return ('error', lead_id)
+                
+                if not update_success:
+                    return ('error', lead_id)
                 
                 # Log CONSENSUS_RESULT publicly for miner transparency
                 # Pass pre-fetched lead_blob to avoid redundant DB query
@@ -1025,10 +1093,9 @@ async def compute_epoch_consensus(epoch_id: int):
                 await log_consensus_result(lead_id, epoch_id, outcome, lead_blob=prefetched_lead_blob, is_icp_value=is_icp_multiplier)
                 
                 if outcome['final_decision'] == 'approve':
-                    approved_count += 1
+                    print(f"      ✅ Lead {lead_id[:8]}...: APPROVED (rep: {final_rep_score if final_rep_score else 0:.2f}, validators: {len(validators_responded)})")
+                    return ('approved', lead_id)
                 else:
-                    rejected_count += 1
-                    
                     # CRITICAL: Increment rejection count for miner (validator-rejected leads)
                     try:
                         print(f"         📊 Lead rejected - incrementing miner's rejection count...")
@@ -1057,12 +1124,54 @@ async def compute_epoch_consensus(epoch_id: int):
                     except Exception as e:
                         print(f"         ⚠️  Failed to increment rejection count: {e}")
                 
-                print(f"      ✅ Lead {lead_id[:8]}...: {final_status.upper()} (rep: {final_rep_score if final_rep_score else 0:.2f}, validators: {len(validators_responded)})")
+                    print(f"      ✅ Lead {lead_id[:8]}...: DENIED (rep: {final_rep_score if final_rep_score else 0:.2f}, validators: {len(validators_responded)})")
+                    return ('denied', lead_id)
             
             except Exception as e:
                 print(f"      ❌ Failed to compute consensus for lead {lead_id[:8]}...: {e}")
                 import traceback
                 traceback.print_exc()
+                return ('error', lead_id)
+        
+        # ========================================================================
+        # MAIN CONSENSUS LOOP: Process in batches of 50 with asyncio.gather
+        # ========================================================================
+        print(f"   🚀 Processing {len(unique_leads)} leads in batches of {CONSENSUS_BATCH_SIZE}...")
+        print(f"      (Reduces yield points from {len(unique_leads)} to {(len(unique_leads) + CONSENSUS_BATCH_SIZE - 1) // CONSENSUS_BATCH_SIZE})")
+        
+        for batch_start in range(0, len(unique_leads), CONSENSUS_BATCH_SIZE):
+            batch_end = min(batch_start + CONSENSUS_BATCH_SIZE, len(unique_leads))
+            batch = unique_leads[batch_start:batch_end]
+            batch_num = batch_start // CONSENSUS_BATCH_SIZE + 1
+            total_batches = (len(unique_leads) + CONSENSUS_BATCH_SIZE - 1) // CONSENSUS_BATCH_SIZE
+            
+            print(f"\n   📦 Batch {batch_num}/{total_batches} ({len(batch)} leads)...")
+            
+            # Create tasks for all leads in this batch
+            tasks = [
+                process_single_lead_consensus(
+                    lead_id=lead_id,
+                    lead_index=batch_start + i + 1,
+                    total_leads=len(unique_leads)
+                )
+                for i, lead_id in enumerate(batch)
+            ]
+            
+            # Run all tasks concurrently - only 1 yield point for entire batch!
+            results = await asyncio.gather(*tasks)
+            
+            # Count results
+            for result, _ in results:
+                if result == 'approved':
+                    approved_count += 1
+                elif result == 'denied':
+                    rejected_count += 1
+                # 'skipped' and 'error' don't affect counts
+            
+            # Brief pause between batches to let connection pool recover
+            # This prevents [Errno 11] Resource temporarily unavailable errors
+            if batch_end < len(unique_leads):
+                await asyncio.sleep(0.5)
         
         print(f"\n   📊 Epoch {epoch_id} consensus complete:")
         print(f"      ✅ {approved_count} leads approved")
@@ -1114,7 +1223,7 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict, lead_
         if lead_blob is None or lead_blob == {}:
             # Fallback: Fetch lead_blob from DB (for backwards compatibility)
             lead_result = await asyncio.to_thread(
-                lambda: supabase.table("leads_private")
+                lambda: consensus_supabase.table("leads_private")
                     .select("lead_blob, is_icp_multiplier")
                     .eq("lead_id", lead_id)
                     .execute()

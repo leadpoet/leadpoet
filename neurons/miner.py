@@ -3,6 +3,7 @@ import asyncio
 import threading
 import argparse
 import traceback
+import sys
 import bittensor as bt
 import socket
 from Leadpoet.base.miner import BaseMinerNeuron
@@ -31,6 +32,8 @@ from Leadpoet.utils.cloud_db import (
     check_linkedin_combo_duplicate,
 )
 import logging
+import httpx
+import requests
 import random
 import grpc
 from pathlib import Path
@@ -1033,6 +1036,757 @@ class Miner(BaseMinerNeuron):
             bt.logging.error(traceback.format_exc())
 
 
+# =============================================================================
+# QUALIFICATION MODEL SUBMISSION
+# =============================================================================
+
+QUALIFICATION_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
+QUALIFICATION_SUBMISSION_COST_USD = float(os.environ.get("QUALIFICATION_SUBMISSION_COST_USD", "5.0"))  # $5 submission cost
+
+# =============================================================================
+# LeadPoet Payment Wallet - COLDKEY addresses
+# =============================================================================
+# These are the coldkeys that receive qualification submission payments.
+# The gateway verifies on-chain that payments go to the correct address.
+#
+# MAINNET (netuid 71):
+#   Coldkey: 5ExoWGyajvzucCqS5GxZSpuzzXEzG1oNFcDqdW3sXeTujoD7
+#
+# TESTNET (netuid 401):
+#   Validator Hotkey: 5CJyMxw6YJJvLhPf58gSpMB7mvSKSCMx9RXhXJum6cNfqMEz
+#   Validator Coldkey: 5Gh5kw7rV1x7FDDd5E3Uc7YYMoeQtm4gn93c7VYeL5oUyoAD
+#
+LEADPOET_COLDKEY_MAINNET = "5ExoWGyajvzucCqS5GxZSpuzzXEzG1oNFcDqdW3sXeTujoD7"
+LEADPOET_COLDKEY_TESTNET = "5Gh5kw7rV1x7FDDd5E3Uc7YYMoeQtm4gn93c7VYeL5oUyoAD"
+
+def get_leadpoet_coldkey(netuid: int) -> str:
+    """Get the correct LeadPoet coldkey based on netuid."""
+    if netuid == 71:
+        return LEADPOET_COLDKEY_MAINNET
+    elif netuid == 401:
+        return LEADPOET_COLDKEY_TESTNET
+    else:
+        # Unknown netuid - use testnet for safety
+        print(f"⚠️  Unknown netuid {netuid}, using testnet coldkey")
+        return LEADPOET_COLDKEY_TESTNET
+
+
+def get_tao_price_sync() -> float:
+    """
+    Get current TAO price from CoinGecko (sync version for CLI).
+    
+    Raises:
+        Exception: If CoinGecko API fails or is rate-limited
+    """
+    import requests
+    import time
+    
+    # Try multiple times with delays between attempts
+    # Retry schedule: 0s, wait 30s, wait 45s (total ~75s)
+    retry_delays = [0, 30, 45]
+    last_error = None
+    
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": "bittensor", "vs_currencies": "usd"},
+                timeout=15 + (attempt * 5)  # 15s, 20s, 25s
+            )
+            response.raise_for_status()
+            data = response.json()
+            price = data.get("bittensor", {}).get("usd")
+            if price:
+                return float(price)
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                delay = retry_delays[attempt + 1]
+                print(f"   ⚠️  CoinGecko error: {e}")
+                print(f"   ⏳ Waiting {delay}s before retry {attempt + 2}/3...")
+                time.sleep(delay)
+            else:
+                print(f"❌ Could not fetch TAO price after 3 attempts: {e}")
+    
+    # No fallback - raise exception
+    raise Exception(f"CoinGecko API failed: {last_error}")
+
+
+def calculate_tao_required(usd_amount: float) -> float:
+    """
+    Calculate how much TAO is needed for a given USD amount.
+    
+    Returns:
+        float: Amount of TAO required
+        
+    Raises:
+        Exception: If TAO price cannot be fetched from CoinGecko
+    """
+    try:
+        tao_price = get_tao_price_sync()
+        tao_required = usd_amount / tao_price
+        return round(tao_required, 6)  # Round to 6 decimals (nano precision)
+    except Exception as e:
+        # Re-raise with helpful message
+        raise Exception(
+            f"\n❌ Cannot calculate TAO amount: {e}\n\n"
+            "CoinGecko is rate-limiting API requests. Please:\n"
+            "   1. Wait 60 seconds and try again\n"
+            "   2. OR check https://www.coingecko.com/en/coins/bittensor for current price\n"
+            "   3. OR try again in a few minutes\n"
+        )
+
+
+def transfer_tao(wallet, dest_coldkey: str, amount_tao: float, subtensor) -> tuple:
+    """
+    Transfer TAO to destination coldkey using direct substrate calls.
+    
+    Uses substrate-interface directly to get the actual block hash
+    and extrinsic index of the transfer (not just chain head).
+    
+    Returns:
+        tuple: (success: bool, block_hash: str or None, extrinsic_index: int or None, error: str or None)
+    """
+    print(f"\n💸 Initiating TAO transfer...")
+    print(f"   To: {dest_coldkey}")
+    print(f"   Amount: {amount_tao:.6f} TAO")
+    print("")
+    
+    # Retry logic for websocket errors (testnet can be flaky)
+    max_retries = 3
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                print(f"   Retry {attempt + 1}/{max_retries}...")
+                import time
+                time.sleep(2)  # Wait before retry
+            
+            # Use direct substrate extrinsic for better control
+            # This gives us the actual block hash containing our transfer
+            
+            # Create the transfer extrinsic
+            call = subtensor.substrate.compose_call(
+                call_module="Balances",
+                call_function="transfer_keep_alive",
+                call_params={
+                    "dest": dest_coldkey,
+                    "value": int(amount_tao * 1e9)  # Convert to rao
+                }
+            )
+            
+            # Create and sign the extrinsic
+            extrinsic = subtensor.substrate.create_signed_extrinsic(
+                call=call,
+                keypair=wallet.coldkey
+            )
+            
+            # Submit and wait for inclusion
+            print(f"   Submitting transfer...")
+            receipt = subtensor.substrate.submit_extrinsic(
+                extrinsic,
+                wait_for_inclusion=True,
+                wait_for_finalization=False
+            )
+            
+            if receipt.is_success:
+                block_hash = receipt.block_hash
+                extrinsic_index = receipt.extrinsic_idx
+                print(f"✅ Transfer successful!")
+                print(f"   Block hash: {block_hash}")
+                print(f"   Extrinsic index: {extrinsic_index}")
+                return True, block_hash, extrinsic_index, None
+            else:
+                error_msg = f"Transfer failed: {receipt.error_message}"
+                print(f"❌ {error_msg}")
+                return False, None, None, error_msg
+                
+        except Exception as e:
+            last_error = str(e)
+            # Check if it's a retryable websocket error
+            if "close frame" in last_error.lower() or "websocket" in last_error.lower() or "connection" in last_error.lower():
+                print(f"   ⚠️  Connection error: {last_error}")
+                continue  # Retry
+            else:
+                # Non-retryable error
+                print(f"❌ Transfer failed: {last_error}")
+                return False, None, None, last_error
+    
+    # All retries exhausted
+    print(f"❌ Transfer failed after {max_retries} attempts: {last_error}")
+    return False, None, None, last_error
+
+
+# =============================================================================
+# Qualification Model Submission (Direct S3 Upload - Frontrunning Protected)
+# =============================================================================
+
+def create_model_tarball(model_path: str) -> tuple:
+    """
+    Create a tarball from the model directory and compute its hash.
+    
+    Args:
+        model_path: Path to the model directory
+    
+    Returns:
+        Tuple of (tarball_path, code_hash)
+    """
+    import tarfile
+    import hashlib
+    import tempfile
+    import uuid
+    
+    # Expand user path (~) and make absolute
+    model_path = os.path.abspath(os.path.expanduser(model_path))
+    
+    if not os.path.isdir(model_path):
+        raise ValueError(f"Model path does not exist or is not a directory: {model_path}")
+    
+    # Create tarball in temp directory
+    tarball_name = f"model_{uuid.uuid4().hex[:8]}.tar.gz"
+    tarball_path = os.path.join(tempfile.gettempdir(), tarball_name)
+    
+    print(f"   Creating tarball from: {model_path}")
+    
+    # Create gzipped tarball
+    with tarfile.open(tarball_path, "w:gz") as tar:
+        tar.add(model_path, arcname="model")
+    
+    # Compute SHA256 hash
+    sha256 = hashlib.sha256()
+    with open(tarball_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    
+    code_hash = sha256.hexdigest()
+    file_size = os.path.getsize(tarball_path)
+    
+    print(f"   ✅ Tarball created: {tarball_path}")
+    print(f"   ✅ Size: {file_size / (1024*1024):.2f} MB")
+    print(f"   ✅ Code hash: {code_hash[:16]}...")
+    
+    return tarball_path, code_hash
+
+
+def get_presigned_upload_url(wallet) -> dict:
+    """
+    Get a presigned URL from the gateway for direct S3 upload.
+    
+    Also checks rate limits - gateway will reject if limit reached.
+    This happens BEFORE payment so miner doesn't waste TAO.
+    
+    Args:
+        wallet: Bittensor wallet for signing
+    
+    Returns:
+        dict with upload_url, s3_key, expires_in_seconds, rate_limit_info
+        or dict with "error" and "rate_limit_exceeded" keys on failure
+    """
+    import requests
+    import time
+    
+    hotkey = wallet.hotkey.ss58_address
+    timestamp = int(time.time())
+    
+    # Create and sign the presign request
+    presign_data = {
+        "miner_hotkey": hotkey,
+        "timestamp": timestamp,
+    }
+    message = json.dumps(presign_data, sort_keys=True)
+    signature = wallet.hotkey.sign(message.encode()).hex()
+    presign_data["signature"] = signature
+    
+    print(f"\n📡 Getting presigned upload URL from gateway...")
+    print(f"   (This also checks your submission rate limit)")
+    
+    try:
+        response = requests.post(
+            f"{QUALIFICATION_GATEWAY_URL}/qualification/model/presign",
+            json=presign_data,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            # Display rate limit info from response
+            daily_used = result.get('daily_submissions_used', 0)
+            daily_max = result.get('daily_submissions_max', 2)
+            credits = result.get('submission_credits', 0)
+            print(f"   📊 Submissions today: {daily_used}/{daily_max}")
+            if credits > 0:
+                print(f"   💳 Retry credits available: {credits}")
+            print(f"   ✅ Got presigned URL (expires in {result.get('expires_in_seconds')}s)")
+            return result
+            
+        elif response.status_code == 429:
+            # Rate limit exceeded - display friendly message
+            error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {"detail": response.text}
+            error_msg = error_data.get('detail', 'Rate limit exceeded')
+            print(f"\n❌ RATE LIMIT EXCEEDED")
+            print(f"   {error_msg}")
+            print(f"\n   ⚠️  You cannot submit until the limit resets at midnight UTC.")
+            print(f"   💡 TIP: Wait until tomorrow or use retry credits if available.")
+            return {"error": error_msg, "rate_limit_exceeded": True}
+            
+        else:
+            error = response.json() if response.headers.get('content-type', '').startswith('application/json') else response.text
+            print(f"   ❌ Failed to get presigned URL: {response.status_code}")
+            print(f"      Error: {error}")
+            return {"error": error}
+            
+    except Exception as e:
+        print(f"   ❌ Error getting presigned URL: {e}")
+        return {"error": str(e)}
+
+
+def upload_to_s3_presigned(tarball_path: str, upload_url: str) -> bool:
+    """
+    Upload the tarball to S3 using the presigned URL.
+    Includes retry logic for transient network/SSL errors.
+    
+    Args:
+        tarball_path: Path to the local tarball file
+        upload_url: Presigned S3 URL for PUT
+    
+    Returns:
+        True on success, False on failure
+    """
+    import requests
+    import time
+    
+    file_size = os.path.getsize(tarball_path)
+    print(f"\n📤 Uploading model to S3 ({file_size / (1024*1024):.2f} MB)...")
+    
+    # Retry logic: attempt 1, wait 10s + attempt 2, wait 20s + attempt 3
+    retry_delays = [0, 10, 20]  # First attempt immediately, then 10s, then 20s
+    
+    for attempt, delay in enumerate(retry_delays, 1):
+        if delay > 0:
+            print(f"   ⏳ Waiting {delay}s before retry {attempt}/3...")
+            time.sleep(delay)
+        
+        try:
+            print(f"   🔄 Upload attempt {attempt}/3...")
+            with open(tarball_path, 'rb') as f:
+                response = requests.put(
+                    upload_url,
+                    data=f,
+                    headers={
+                        'Content-Type': 'application/gzip',
+                        'Content-Length': str(file_size)
+                    },
+                    timeout=300  # 5 minutes for large files
+                )
+            
+            if response.status_code in [200, 201, 204]:
+                print(f"   ✅ Upload successful!")
+                return True
+            else:
+                print(f"   ⚠️  Attempt {attempt}/3 failed: HTTP {response.status_code}")
+                print(f"      Response: {response.text[:200]}")
+                if attempt == len(retry_delays):
+                    print(f"   ❌ All upload attempts failed.")
+                    return False
+                    
+        except Exception as e:
+            print(f"   ⚠️  Attempt {attempt}/3 error: {e}")
+            if attempt == len(retry_delays):
+                print(f"   ❌ All upload attempts failed.")
+                return False
+    
+    return False
+
+
+def submit_qualification_model(wallet, s3_key: str, code_hash: str,
+                                block_hash: str, extrinsic_index: int,
+                                model_name: str = None) -> dict:
+    """
+    Submit a qualification model to the gateway (after S3 upload).
+    
+    NEW FLOW (Direct S3 Upload - Frontrunning Protected):
+    This is called AFTER the model has been uploaded to S3.
+    The gateway will verify the S3 object exists and hash matches.
+    
+    Args:
+        wallet: Bittensor wallet
+        s3_key: S3 object key from presign response
+        code_hash: SHA256 hash of the tarball (computed locally)
+        block_hash: Block hash containing the payment
+        extrinsic_index: Extrinsic index within the block
+        model_name: Optional human-readable name for the model
+    
+    Returns:
+        dict with model_id on success, or error on failure
+    """
+    import requests
+    
+    # Prepare submission data
+    import time
+    hotkey = wallet.hotkey.ss58_address
+    timestamp = int(time.time())
+    
+    submission_data = {
+        "miner_hotkey": hotkey,
+        "s3_key": s3_key,
+        "code_hash": code_hash,
+        "payment_block_hash": block_hash,
+        "payment_extrinsic_index": extrinsic_index,
+        "timestamp": timestamp,  # Required for signature verification
+    }
+    
+    if model_name:
+        submission_data["model_name"] = model_name
+    
+    # Sign the submission (exclude signature field)
+    message = json.dumps(submission_data, sort_keys=True)
+    signature = wallet.hotkey.sign(message.encode()).hex()
+    submission_data["signature"] = signature
+    
+    print(f"\n📤 Submitting model to gateway...")
+    print(f"   S3 Key: {s3_key}")
+    print(f"   Code Hash: {code_hash[:16]}...")
+    if model_name:
+        print(f"   Model Name: {model_name}")
+    
+    try:
+        response = requests.post(
+            f"{QUALIFICATION_GATEWAY_URL}/qualification/model/submit",
+            json=submission_data,
+            timeout=60
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"   ✅ Model submitted successfully!")
+            print(f"   Model ID: {result.get('model_id')}")
+            print(f"   Status: {result.get('status')}")
+            
+            # Display rate limit info
+            daily_remaining = result.get('daily_submissions_remaining')
+            credits_remaining = result.get('submission_credits_remaining')
+            if daily_remaining is not None or credits_remaining is not None:
+                print(f"\n   📊 Rate Limit Status:")
+                if daily_remaining is not None:
+                    print(f"      Daily submissions remaining: {daily_remaining}/2")
+                if credits_remaining is not None:
+                    print(f"      Retry credits available: {credits_remaining}")
+            
+            return result
+        else:
+            error = response.json() if response.headers.get('content-type', '').startswith('application/json') else response.text
+            print(f"   ❌ Submission failed: {response.status_code}")
+            print(f"      Error: {error}")
+            return {"error": error, "status_code": response.status_code}
+            
+    except Exception as e:
+        print(f"   ❌ Submission error: {e}")
+        return {"error": str(e)}
+
+
+def run_qualification_submission_flow(wallet, config, netuid: int):
+    """
+    Run the interactive qualification model submission flow.
+    
+    NEW FLOW (Direct S3 Upload - Frontrunning Protected):
+    1. Ask for model directory path (local folder with qualify.py)
+    2. Create tarball and compute hash locally
+    3. Get presigned S3 URL from gateway
+    4. Upload tarball to S3
+    5. Calculate required TAO
+    6. Connect to chain (AFTER user input to avoid WebSocket timeout)
+    7. Confirm and execute transfer
+    8. Submit to gateway with s3_key + code_hash
+    
+    This prevents frontrunning because:
+    - Code is uploaded to private S3 before any public disclosure
+    - Hash is computed locally and verified by gateway
+    
+    Args:
+        wallet: Bittensor wallet
+        config: Bittensor config (used to create subtensor when needed)
+        netuid: Network UID (71 for mainnet, 401 for testnet)
+    """
+    # Determine correct coldkey based on netuid
+    dest_coldkey = get_leadpoet_coldkey(netuid)
+    is_testnet = netuid == 401
+    
+    print("\n" + "="*80)
+    print(" 🏆 QUALIFICATION MODEL SUBMISSION")
+    if is_testnet:
+        print(" 🧪 TESTNET MODE (netuid 401)")
+    print("="*80)
+    print("")
+    print("Submit your lead qualification model to compete for 5% of subnet emissions!")
+    print(f"Submission cost: ${QUALIFICATION_SUBMISSION_COST_USD:.2f} USD (paid in TAO)")
+    print("")
+    
+    # Step 1: Get model directory path
+    print("📦 Step 1: Enter the path to your model directory")
+    print("   This should be a folder containing your qualify.py and any dependencies.")
+    print("   Example: ~/my-lead-qualifier/  or  /Users/you/projects/qualifier")
+    print("")
+    print("   Required file structure:")
+    print("   └── your-model/")
+    print("       ├── qualify.py      # REQUIRED: Must have qualify(lead, icp) function")
+    print("       ├── requirements.txt  # Optional: Dependencies")
+    print("       └── ...             # Any other files your model needs")
+    print("")
+    
+    model_path = input("   Model directory path: ").strip()
+    
+    if not model_path:
+        print("❌ No path provided.")
+        return False
+    
+    # Expand ~ and make absolute
+    model_path = os.path.abspath(os.path.expanduser(model_path))
+    
+    if not os.path.isdir(model_path):
+        print(f"❌ Directory does not exist: {model_path}")
+        return False
+    
+    # Check for qualify.py
+    qualify_file = os.path.join(model_path, "qualify.py")
+    if not os.path.isfile(qualify_file):
+        print(f"❌ Missing required file: qualify.py")
+        print(f"   Expected at: {qualify_file}")
+        return False
+    
+    print(f"   ✅ Found model directory: {model_path}")
+    print(f"   ✅ Found qualify.py")
+    
+    # Step 2: Create tarball and compute hash
+    print("\n📦 Step 2: Creating tarball and computing hash...")
+    
+    try:
+        tarball_path, code_hash = create_model_tarball(model_path)
+    except Exception as e:
+        print(f"❌ Failed to create tarball: {e}")
+        return False
+    
+    # Required: Get model name
+    print("\n📝 Step 3: Model name (REQUIRED)")
+    while True:
+        model_name = input("   Enter a name for your model: ").strip()
+        if model_name:
+            break
+        print("   ⚠️  Model name is required. Please enter a name.")
+    
+    # Step 4: Get presigned URL from gateway
+    print("\n📡 Step 4: Getting upload URL from gateway...")
+    
+    presign_result = get_presigned_upload_url(wallet)
+    
+    if "error" in presign_result:
+        if presign_result.get("rate_limit_exceeded"):
+            # Rate limit message already displayed by get_presigned_upload_url
+            pass
+        else:
+            print(f"❌ Failed to get upload URL: {presign_result['error']}")
+        # Clean up tarball
+        try:
+            os.remove(tarball_path)
+        except:
+            pass
+        return False
+    
+    upload_url = presign_result["upload_url"]
+    s3_key = presign_result["s3_key"]
+    
+    # Step 5: Upload to S3
+    print("\n📤 Step 5: Uploading model to S3...")
+    
+    upload_success = upload_to_s3_presigned(tarball_path, upload_url)
+    
+    # Clean up local tarball
+    try:
+        os.remove(tarball_path)
+        print(f"   ✅ Cleaned up local tarball")
+    except:
+        pass
+    
+    if not upload_success:
+        print("❌ Failed to upload model to S3.")
+        return False
+    
+    # Step 5b: Check if miner already has credit (from previous failed submission)
+    print("\n🔍 Checking submission credit status...")
+    has_existing_credit = False
+    try:
+        credit_response = requests.get(
+            f"{QUALIFICATION_GATEWAY_URL}/qualification/model/rate-limit/{wallet.hotkey.ss58_address}",
+            timeout=10
+        )
+        if credit_response.status_code == 200:
+            credit_status = credit_response.json()
+            existing_credits = credit_status.get("submission_credits", 0)
+            daily_used = credit_status.get("daily_submissions_used", 0)
+            daily_max = credit_status.get("daily_submissions_max", 2)
+            
+            print(f"   📊 Daily submissions: {daily_used}/{daily_max}")
+            print(f"   💳 Unused credits: {existing_credits}")
+            
+            if daily_used >= daily_max:
+                print(f"\n❌ Daily submission limit reached ({daily_max}/day).")
+                print(f"   Please wait until midnight UTC to submit again.")
+                if existing_credits > 0:
+                    print(f"   You have {existing_credits} credit(s) that will be available tomorrow.")
+                return False
+            
+            if existing_credits > 0:
+                has_existing_credit = True
+                print(f"   ✅ You have {existing_credits} credit(s) from a previous payment!")
+                print(f"   ⏭️  Skipping payment - will use existing credit.")
+    except Exception as e:
+        print(f"   ⚠️  Could not check credit status: {e}")
+        print(f"   Proceeding with payment flow...")
+    
+    # Initialize payment variables
+    block_hash = None
+    extrinsic_index = None
+    
+    # Step 6-9: Payment (skip if has existing credit)
+    if not has_existing_credit:
+        # Step 6: Calculate TAO required
+        print("\n💰 Step 6: Calculating payment...")
+        try:
+            tao_price = get_tao_price_sync()
+            tao_required = calculate_tao_required(QUALIFICATION_SUBMISSION_COST_USD)
+        except Exception as e:
+            print(f"\n{e}")
+            print("\n⚠️  Submission cancelled due to CoinGecko rate limiting.")
+            print("   Your model is uploaded to S3 but not yet submitted.")
+            print("   Please try again in 1-2 minutes.")
+            return False
+        
+        print(f"   Current TAO price: ${tao_price:.2f}")
+        print(f"   Submission cost: ${QUALIFICATION_SUBMISSION_COST_USD:.2f}")
+        print(f"   TAO required: {tao_required:.6f} TAO")
+        
+        # Add 1% buffer for price fluctuation
+        tao_with_buffer = round(tao_required * 1.01, 6)
+        print(f"   TAO to send (with 1% buffer): {tao_with_buffer:.6f} TAO")
+        
+        # Step 7: Confirm transfer
+        print(f"\n📝 Step 7: Confirm payment")
+        print(f"   From wallet: {wallet.name}")
+        print(f"   To: {dest_coldkey}")
+        if is_testnet:
+            print(f"   Network: TESTNET (subnet 401)")
+        else:
+            print(f"   Network: MAINNET (subnet 71)")
+        print(f"   Amount: {tao_with_buffer:.6f} TAO (~${QUALIFICATION_SUBMISSION_COST_USD:.2f})")
+        print("")
+        print(f"   Model hash: {code_hash[:16]}...")
+        print(f"   S3 location: {s3_key}")
+        if model_name:
+            print(f"   Model name: {model_name}")
+        
+        confirm = input("\n   Proceed with transfer? (Y/N): ").strip().upper()
+        
+        if confirm != "Y":
+            print("\n❌ Transfer cancelled.")
+            print("   Note: Your model is still uploaded to S3 but submission is not finalized.")
+            return False
+        
+        # Step 8: Connect to chain NOW (after all user input to avoid WebSocket timeout)
+        # Retry logic: attempt 1, wait 10s + attempt 2, wait 20s + attempt 3
+        print("\n🔗 Connecting to chain...")
+        subtensor = None
+        retry_delays = [0, 10, 20]  # First attempt immediately, then 10s, then 20s
+        
+        for attempt, delay in enumerate(retry_delays, 1):
+            if delay > 0:
+                print(f"   ⏳ Waiting {delay}s before retry {attempt}/3...")
+                import time
+                time.sleep(delay)
+            
+            try:
+                print(f"   🔄 Connection attempt {attempt}/3...")
+                subtensor = bt.subtensor(config=config)
+                print(f"   ✅ Connected to: {subtensor.chain_endpoint}")
+                break  # Success - exit retry loop
+            except Exception as e:
+                print(f"   ⚠️  Attempt {attempt}/3 failed: {e}")
+                if attempt == len(retry_delays):
+                    print("   ❌ All connection attempts failed.")
+                    print("   Your model is uploaded but payment could not be processed.")
+                    print("   You can retry the submission later.")
+                    return False
+        
+        if subtensor is None:
+            print("   ❌ Failed to connect to chain after all retries.")
+            print("   Your model is uploaded but payment could not be processed.")
+            return False
+        
+        # Step 9: Execute transfer
+        success, block_hash, extrinsic_index, error = transfer_tao(
+            wallet=wallet,
+            dest_coldkey=dest_coldkey,
+            amount_tao=tao_with_buffer,
+            subtensor=subtensor
+        )
+        
+        if not success:
+            print(f"\n❌ Payment failed: {error}")
+            print("   Your model was NOT submitted (payment required).")
+            return False
+        
+        print("\n✅ Payment confirmed! Finalizing submission with gateway...")
+    else:
+        # Using existing credit - no payment needed
+        print("\n✅ Using existing credit! Finalizing submission with gateway...")
+    
+    # Step 10: Submit to gateway
+    
+    result = submit_qualification_model(
+        wallet=wallet,
+        s3_key=s3_key,
+        code_hash=code_hash,
+        block_hash=block_hash,
+        extrinsic_index=extrinsic_index,
+        model_name=model_name
+    )
+    
+    if "error" in result:
+        print(f"\n❌ Model submission failed: {result['error']}")
+        print("   A submission credit has been preserved for retry.")
+        return False
+    
+    print("\n" + "="*80)
+    print(" 🎉 SUBMISSION COMPLETE!")
+    print("="*80)
+    print(f"   Model ID: {result.get('model_id')}")
+    print(f"   Status: {result.get('status')}")
+    print(f"   Code Hash: {code_hash[:24]}...")
+    if model_name:
+        print(f"   Model Name: {model_name}")
+    
+    # Show rate limit status
+    daily_remaining = result.get('daily_submissions_remaining')
+    credits_remaining = result.get('submission_credits_remaining')
+    if daily_remaining is not None or credits_remaining is not None:
+        print("")
+        print("   📊 Daily Rate Limit:")
+        if daily_remaining is not None:
+            print(f"      Submissions remaining today: {daily_remaining}/2")
+        if credits_remaining is not None:
+            print(f"      Retry credits available: {credits_remaining}")
+    
+    print("")
+    print("   Your model will be evaluated by validators against 100 ICPs.")
+    print("   Check your model status at:")
+    print(f"   {QUALIFICATION_GATEWAY_URL}/qualification/model/{result.get('model_id')}/status")
+    print("")
+    print("   If your model scores higher than the current champion by >5%,")
+    print("   you'll become the new champion and receive 5% of subnet emissions!")
+    print("="*80)
+    
+    return True
+
+
 DATA_DIR = "data"
 SOURCING_LOG = os.path.join(DATA_DIR, "sourcing_logs.json")
 MINERS_LOG = os.path.join(DATA_DIR, "miners.json")
@@ -1270,23 +2024,19 @@ async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
-    parser.add_argument("--wallet_path", type=str, default="~/.bittensor/wallets", help="Path to wallets directory (default: ~/.bittensor/wallets)")
     args = parser.parse_args()
 
     if args.logging_trace:
         bt.logging.set_trace(True)
 
+    # Build config from args (using dot notation like validator.py)
     config = bt.Config()
     config.wallet = bt.Config()
     config.wallet.name = args.wallet_name
     config.wallet.hotkey = args.wallet_hotkey
+    config.wallet.path = str(Path(args.wallet_path).expanduser()) if args.wallet_path else str(Path.home() / ".bittensor" / "wallets")
     config.netuid = args.netuid
     config.subtensor = bt.Config()
-    # Use wallet_path from args, or default to ~/.bittensor/wallets
-    if args.wallet_path:
-        config.wallet.path = str(Path(args.wallet_path).expanduser())
-    else:
-        config.wallet.path = str(Path.home() / ".bittensor" / "wallets")
     config.subtensor.network = args.subtensor_network
     config.blacklist = bt.Config()
     config.blacklist.force_validator_permit = args.blacklist_force_validator_permit
@@ -1398,6 +2148,54 @@ def main():
         else:
             bt.logging.info(f"✅ Contributor terms attestation valid (hash: {TERMS_VERSION_HASH[:16]}...)")
     
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # QUALIFICATION MODEL SUBMISSION (OPTIONAL)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    print("\n" + "="*80)
+    print(" 🏆 QUALIFICATION MODEL COMPETITION")
+    print("="*80)
+    print("")
+    print("Would you like to submit a qualification model for the Lead Qualification")
+    print("Agent Competition? Champions receive 5% of subnet emissions!")
+    print("")
+    print("This is OPTIONAL. If you just want to mine leads, select 'N'.")
+    print("")
+    
+    use_qualification = input("❓ Submit a qualification model? (Y/N): ").strip().upper()
+    
+    if use_qualification == "Y":
+        # Load wallet first (no network connection needed)
+        # Subtensor is created INSIDE run_qualification_submission_flow AFTER user input
+        # to avoid WebSocket timeout while user is typing
+        try:
+            temp_wallet = bt.wallet(config=config)
+            print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
+            
+            # Run the qualification submission flow (pass config so it can create subtensor later)
+            success = run_qualification_submission_flow(temp_wallet, config, config.netuid)
+            
+            if success:
+                print("\n✅ Qualification model submitted! Starting miner...")
+            else:
+                print("\n⚠️  Qualification submission was not completed.")
+                continue_mining = input("   Continue with normal mining? (Y/N): ").strip().upper()
+                if continue_mining != "Y":
+                    print("\n👋 Exiting. Run the miner again when ready.")
+                    sys.exit(0)
+                    
+        except Exception as e:
+            bt.logging.error(f"❌ Error during qualification submission: {e}")
+            import traceback
+            traceback.print_exc()
+            continue_mining = input("\n   Continue with normal mining? (Y/N): ").strip().upper()
+            if continue_mining != "Y":
+                sys.exit(1)
+    else:
+        print("\n✅ Skipping qualification submission. Starting normal miner...")
+    
+    print("")
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     # Create miner and run it properly on the Bittensor network

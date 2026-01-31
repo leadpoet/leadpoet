@@ -15,17 +15,14 @@ class BaseMinerNeuron(BaseNeuron):
         parser.add_argument("--subtensor_network", type=str, help="The network to connect to (e.g., test, main)", default="finney")
         parser.add_argument("--wallet_name", type=str, help="The name of the wallet to use", required=True)
         parser.add_argument("--wallet_hotkey", type=str, help="The hotkey of the wallet to use", required=True)
+        parser.add_argument("--wallet_path", type=str, help="Path to wallets directory", default="~/.bittensor/wallets")
         parser.add_argument("--use_open_source_lead_model", action="store_true", help="Use the open-source lead generation model instead of dummy leads")
         parser.add_argument("--blacklist_force_validator_permit", action="store_true", help="Only allow validators to query the miner", default=False)
         parser.add_argument("--blacklist_allow_non_registered", action="store_true", help="Allow non-registered hotkeys to query the miner", default=False)
         parser.add_argument("--neuron_epoch_length", type=int, help="Number of blocks between metagraph syncs", default=1000)
         parser.add_argument("--logging_trace", action="store_true", help="Enable trace-level logging", default=False)
-        parser.add_argument("--axon_ip", type=str,
-                            help="Public IP address that validators should use to reach this miner",
-                            default=None)
-        parser.add_argument("--axon_port", type=int,
-                            help="Public port that validators should use to reach this miner",
-                            default=None)
+        parser.add_argument("--axon_ip", type=str, help="Public IP address that validators should use to reach this miner", default=None)
+        parser.add_argument("--axon_port", type=int, help="Public port that validators should use to reach this miner", default=None)
 
     def __init__(self, config=None):
         super().__init__(config=config)

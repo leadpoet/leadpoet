@@ -41,11 +41,15 @@ from supabase import create_client, Client
 # Import API routers
 from gateway.api import epoch, validate, reveal, manifest, submit, attest, weights, attestation
 
+# Import qualification router (Lead Qualification Agent Competition - Phase 10)
+from gateway.qualification.api.router import qualification_router
+
 # Import background tasks
 from gateway.tasks.reveal_collector import reveal_collector_task
 from gateway.tasks.checkpoints import checkpoint_task
 from gateway.tasks.anchor import daily_anchor_task
 from gateway.tasks.hourly_batch import start_hourly_batch_task
+from gateway.tasks.icp_generator import icp_rotation_task, ensure_icp_set_exists
 
 # Import epoch monitor (polling-based, like validator)
 from gateway.tasks.epoch_monitor import EpochMonitor
@@ -228,26 +232,64 @@ async def lifespan(app: FastAPI):
         print("🚀 STARTING BACKGROUND TASKS")
         print("="*80)
         
-        # Start epoch monitor (polling loop - bulletproof)
-        epoch_monitor_task = asyncio.create_task(epoch_monitor.start())
-        print("✅ Epoch monitor started (polling mode)")
+        # TODO: REMOVE THIS BEFORE PUSHING TO GITHUB/PRODUCTION
+        # This is for LOCAL TESTNET TESTING ONLY - allows qualification flow testing
+        # without needing the service_role_key for background tasks
+        skip_bg_tasks = os.getenv("DISABLE_BACKGROUND_TASKS", "false").lower() == "true"
         
-        # Start other background tasks
-        reveal_task = asyncio.create_task(reveal_collector_task())
-        print("✅ Reveal collector task started")
+        # ════════════════════════════════════════════════════════════════
+        # ICP SET INITIALIZATION (ALWAYS runs, even with DISABLE_BACKGROUND_TASKS)
+        # This is required for qualification model evaluation to work
+        # ════════════════════════════════════════════════════════════════
+        try:
+            await ensure_icp_set_exists()
+            print("✅ ICP set initialized (benchmark ICPs ready)")
+        except Exception as e:
+            print(f"⚠️  Failed to initialize ICP set: {e}")
+            print("   Qualification model evaluation may not work!")
         
-        checkpoint_task_handle = asyncio.create_task(checkpoint_task())
-        print("✅ Checkpoint task started")
+        if skip_bg_tasks:
+            print("⚠️  DISABLE_BACKGROUND_TASKS=true - Skipping background tasks")
+            print("   This is for LOCAL TESTING ONLY!")
+            epoch_monitor_task = None
+            reveal_task = None
+            checkpoint_task_handle = None
+            anchor_task = None
+            hourly_batch_task_handle = None
+            rate_limiter_task = None
+            
+            # ICP rotation task ALWAYS runs (even with DISABLE_BACKGROUND_TASKS)
+            # This is safe because it ONLY writes to qualification_private_icp_sets
+            # On testnet, transparency_log writes are skipped automatically
+            icp_task = asyncio.create_task(icp_rotation_task())
+            print("✅ ICP rotation task started (EXCEPTION: runs even with DISABLE_BACKGROUND_TASKS)")
+            print("   → Only writes to: qualification_private_icp_sets")
+        else:
+            # Start epoch monitor (polling loop - bulletproof)
+            epoch_monitor_task = asyncio.create_task(epoch_monitor.start())
+            print("✅ Epoch monitor started (polling mode)")
+            
+            # Start other background tasks
+            reveal_task = asyncio.create_task(reveal_collector_task())
+            print("✅ Reveal collector task started")
+            
+            checkpoint_task_handle = asyncio.create_task(checkpoint_task())
+            print("✅ Checkpoint task started")
+            
+            anchor_task = asyncio.create_task(daily_anchor_task())
+            print("✅ Anchor task started")
+            
+            hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
+            print("✅ Hourly Arweave batch task started")
+            
+            from gateway.utils.rate_limiter import rate_limiter_cleanup_task
+            rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
+            print("✅ Rate limiter cleanup task started")
         
-        anchor_task = asyncio.create_task(daily_anchor_task())
-        print("✅ Anchor task started")
-        
-        hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
-        print("✅ Hourly Arweave batch task started")
-        
-        from gateway.utils.rate_limiter import rate_limiter_cleanup_task
-        rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
-        print("✅ Rate limiter cleanup task started")
+            # ICP rotation task (resets daily at 12 AM ET)
+            # Note: Initial ICP set already created above (outside skip_bg_tasks check)
+            icp_task = asyncio.create_task(icp_rotation_task())
+            print("✅ ICP rotation task started (resets 12 AM ET daily)")
         
         # Start PCR0 builder for trustless verification
         from gateway.utils.pcr0_builder import start_pcr0_builder
@@ -282,16 +324,23 @@ async def lifespan(app: FastAPI):
             checkpoint_task_handle,
             anchor_task,
             hourly_batch_task_handle,
-            rate_limiter_task
+            rate_limiter_task,
+            icp_task
         ]
         
-        for task in tasks:
-            if task:  # Check if task exists
+        # Filter out None tasks (when DISABLE_BACKGROUND_TASKS=true)
+        active_tasks = [t for t in tasks if t is not None]
+        
+        for task in active_tasks:
                 task.cancel()
         
         # Wait for all tasks to finish gracefully
         print("   ⏳ Waiting for tasks to finish...")
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if active_tasks:
+            results = await asyncio.gather(*active_tasks, return_exceptions=True)
+        else:
+            results = []
+            print("   (No background tasks were running)")
         
         # Log any errors during shutdown
         for i, result in enumerate(results):
@@ -355,7 +404,7 @@ from gateway.middleware.priority import PriorityMiddleware
 
 app.add_middleware(
     PriorityMiddleware,
-    max_concurrent_miners=40  # Micro compute can handle higher throughput
+    max_concurrent_miners=40  # Pool=150, miners=40, leaves 110 for validators/consensus
 )
 
 # Production middleware: Only log errors and critical paths
@@ -379,6 +428,9 @@ app.include_router(submit.router)
 app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)
 app.include_router(attestation.router)  # TEE attestation endpoint (/attestation/document, /attestation/pubkey)
 app.include_router(weights.router)  # Weights submission for auditor validators
+
+# Lead Qualification Agent Competition API (Phase 10)
+app.include_router(qualification_router)
 
 # ============================================================
 # Health Check Endpoints

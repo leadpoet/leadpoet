@@ -376,99 +376,116 @@ class EpochMonitor:
         epoch to processing_epochs BEFORE creating this task. This prevents
         the race condition where multiple tasks were created for the same epoch.
         On success, epoch moves from processing_epochs to closed_epochs.
-        On failure, epoch is removed from processing_epochs (allows retry).
+        On failure, retries up to MAX_RETRIES times before giving up.
         
         Args:
             epoch_id: Epoch to check for reveals
         """
-        try:
-            # Import utilities
-            from gateway.utils.epoch import is_epoch_closed_async
-            
-            # Check if epoch is actually closed
-            if not await is_epoch_closed_async(epoch_id):
-                return
-            
-            print(f"\n{'='*80}")
-            print(f"🔓 EPOCH {epoch_id} CLOSED - Checking for reveals...")
-            print(f"{'='*80}")
-            
-            # Check if this epoch has validation evidence
-            from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-            from supabase import create_client
-            
-            supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-            
-            # Query validation evidence (run in thread to avoid blocking)
-            import asyncio
-            evidence_check = await asyncio.to_thread(
-                lambda: supabase.table("validation_evidence_private")
-                    .select("lead_id", count="exact")
-                    .eq("epoch_id", epoch_id)
-                    .limit(1)
-                    .execute()
-            )
-            
-            has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
-            
-            if not has_evidence:
-                print(f"   ℹ️  No validation evidence for epoch {epoch_id} - skipping")
-                # Mark as closed so we don't check again (and remove from processing)
+        MAX_RETRIES = 3
+        RETRY_DELAY = 30  # seconds between retries
+        
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                # Import utilities
+                from gateway.utils.epoch import is_epoch_closed_async
+                import asyncio
+                
+                # Check if epoch is actually closed
+                if not await is_epoch_closed_async(epoch_id):
+                    self.processing_epochs.discard(epoch_id)
+                    return
+                
+                print(f"\n{'='*80}")
+                print(f"🔓 EPOCH {epoch_id} CLOSED - Checking for reveals... (attempt {attempt}/{MAX_RETRIES})")
+                print(f"{'='*80}")
+                
+                # Check if this epoch has validation evidence
+                from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+                from supabase import create_client
+                
+                supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+                
+                # Query validation evidence (run in thread to avoid blocking)
+                evidence_check = await asyncio.to_thread(
+                    lambda: supabase.table("validation_evidence_private")
+                        .select("lead_id", count="exact")
+                        .eq("epoch_id", epoch_id)
+                        .limit(1)
+                        .execute()
+                )
+                
+                has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
+                
+                if not has_evidence:
+                    print(f"   ℹ️  No validation evidence for epoch {epoch_id} - skipping")
+                    # Mark as closed so we don't check again (and remove from processing)
+                    self.processing_epochs.discard(epoch_id)
+                    self.closed_epochs.add(epoch_id)
+                    return
+                
+                print(f"   📊 Found validation evidence - processing reveals and consensus...")
+                
+                # Import lifecycle functions
+                from gateway.tasks.epoch_lifecycle import trigger_reveal_phase, compute_epoch_consensus
+                from gateway.utils.epoch import get_epoch_close_time_async
+                
+                epoch_close = await get_epoch_close_time_async(epoch_id)
+                time_since_close = (datetime.utcnow() - epoch_close).total_seconds()
+                
+                print(f"   Closed at: {epoch_close.isoformat()}")
+                print(f"   Time since close: {time_since_close/60:.1f} minutes")
+                
+                # Trigger reveal phase notification
+                await trigger_reveal_phase(epoch_id)
+                
+                # NO WAIT: Consensus triggered at block 330, all reveals should be in already
+                # (Reveals accepted from block 0-327 only, enforced by reveal endpoint)
+                print(f"   📊 Running batch consensus for epoch {epoch_id}...")
+                print(f"   Closed {time_since_close/60:.1f} minutes ago")
+                await compute_epoch_consensus(epoch_id)
+                
+                print(f"   ✅ Epoch {epoch_id} fully processed")
+                
+                # SUCCESS: Move from processing to closed
                 self.processing_epochs.discard(epoch_id)
                 self.closed_epochs.add(epoch_id)
-                return
-            
-            print(f"   📊 Found validation evidence - processing reveals and consensus...")
-            
-            # Import lifecycle functions
-            from gateway.tasks.epoch_lifecycle import trigger_reveal_phase, compute_epoch_consensus
-            from gateway.utils.epoch import get_epoch_close_time_async
-            
-            epoch_close = await get_epoch_close_time_async(epoch_id)
-            time_since_close = (datetime.utcnow() - epoch_close).total_seconds()
-            
-            print(f"   Closed at: {epoch_close.isoformat()}")
-            print(f"   Time since close: {time_since_close/60:.1f} minutes")
-            
-            # Trigger reveal phase notification
-            await trigger_reveal_phase(epoch_id)
-            
-            # NO WAIT: Consensus triggered at block 330, all reveals should be in already
-            # (Reveals accepted from block 0-327 only, enforced by reveal endpoint)
-            print(f"   📊 Running batch consensus for epoch {epoch_id}...")
-            print(f"   Closed {time_since_close/60:.1f} minutes ago")
-            await compute_epoch_consensus(epoch_id)
-            
-            print(f"   ✅ Epoch {epoch_id} fully processed")
-            
-            # SUCCESS: Move from processing to closed
-            self.processing_epochs.discard(epoch_id)
-            self.closed_epochs.add(epoch_id)
-            
-            # Clean up old tracking sets to prevent memory growth
-            if len(self.validation_ended_epochs) > 100:
-                recent = sorted(list(self.validation_ended_epochs))[-50:]
-                self.validation_ended_epochs = set(recent)
-            
-            if len(self.closed_epochs) > 100:
-                recent = sorted(list(self.closed_epochs))[-50:]
-                self.closed_epochs = set(recent)
-            
-            if len(self.processing_epochs) > 100:
-                recent = sorted(list(self.processing_epochs))[-50:]
-                self.processing_epochs = set(recent)
-            
-            if hasattr(self, '_cleanup_epochs') and len(self._cleanup_epochs) > 100:
-                recent = sorted(list(self._cleanup_epochs))[-50:]
-                self._cleanup_epochs = set(recent)
-            
-        except Exception as e:
-            print(f"❌ Error checking reveals for epoch {epoch_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            # FAILURE: Remove from processing so it can retry on next poll cycle
-            self.processing_epochs.discard(epoch_id)
-            print(f"   🔄 Epoch {epoch_id} will retry on next poll cycle")
+                
+                # Clean up old tracking sets to prevent memory growth
+                if len(self.validation_ended_epochs) > 100:
+                    recent = sorted(list(self.validation_ended_epochs))[-50:]
+                    self.validation_ended_epochs = set(recent)
+                
+                if len(self.closed_epochs) > 100:
+                    recent = sorted(list(self.closed_epochs))[-50:]
+                    self.closed_epochs = set(recent)
+                
+                if len(self.processing_epochs) > 100:
+                    recent = sorted(list(self.processing_epochs))[-50:]
+                    self.processing_epochs = set(recent)
+                
+                if hasattr(self, '_cleanup_epochs') and len(self._cleanup_epochs) > 100:
+                    recent = sorted(list(self._cleanup_epochs))[-50:]
+                    self._cleanup_epochs = set(recent)
+                
+                return  # Success - exit retry loop
+                
+            except Exception as e:
+                print(f"❌ Error checking reveals for epoch {epoch_id} (attempt {attempt}/{MAX_RETRIES}): {e}")
+                import traceback
+                traceback.print_exc()
+                
+                if attempt < MAX_RETRIES:
+                    print(f"   🔄 Retrying epoch {epoch_id} in {RETRY_DELAY}s...")
+                    await asyncio.sleep(RETRY_DELAY)
+                else:
+                    print(f"   ❌ FAILED: Epoch {epoch_id} consensus failed after {MAX_RETRIES} attempts!")
+                    print(f"   ⚠️  This epoch's leads will remain in pending_validation status")
+                    # Remove from processing (won't be in closed_epochs, so leads stay pending)
+                    self.processing_epochs.discard(epoch_id)
+                    # Add to a failed set so we can track/retry later if needed
+                    if not hasattr(self, 'failed_epochs'):
+                        self.failed_epochs = set()
+                    self.failed_epochs.add(epoch_id)
     
     async def _run_miner_cleanup(self, epoch_id: int):
         """

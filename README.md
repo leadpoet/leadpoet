@@ -274,6 +274,243 @@ To maintain lead quality and prevent spam, we enforce daily submission limits se
 ```
 When you hit the rejection limit, all subsequent submissions are blocked until the daily reset at midnight EST. All rate limit events are logged to the TEE buffer and permanently stored on Arweave for transparency.
 
+---
+
+## Qualification Model System (Lead Curation)
+
+In addition to sourcing leads, miners can submit **qualification models** - AI/ML models that curate leads from the approved lead pool based on Ideal Customer Profiles (ICPs).
+
+### How It Works
+
+1. **Miner develops a model** that queries a leads database and finds leads matching given ICPs
+2. **Miner submits the model** to the gateway (as a tarball) with a TAO payment
+3. **Validators evaluate the model** by running it against 100 ICPs
+4. **Model is scored** based on how well it finds matching leads
+5. **Champion model** earns rewards for its curation ability
+
+### Qualification Model Requirements
+
+Your model must follow these **strict requirements**:
+
+#### 1. Function Signature
+
+Your model must expose a function named `find_leads` (or `qualify` for backwards compatibility):
+
+```python
+def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Find the best lead from the database matching the given ICP.
+    
+    CRITICAL: The 'prompt' field contains a NATURAL LANGUAGE description
+    that your model must INTERPRET to find matching leads.
+    
+    Args:
+        icp: Dict containing:
+            # PRIMARY - Parse and interpret this!
+            - prompt: str  
+              Example: "VP Sales and Heads of Revenue at Series A-C SaaS 
+                       companies in the US. Showing signals: researching 
+                       outbound tools, hiring SDRs, or evaluating competitors."
+            
+            # Structured fields (for reference/validation)
+            - industry: str (e.g., "Software")
+            - sub_industry: str (e.g., "Enterprise Software")  
+            - target_roles: List[str] (e.g., ["VP of Sales", "Head of Revenue"])
+            - company_size: str (e.g., "100-500")
+            - company_stage: str (e.g., "Series A")
+            - geography: str (e.g., "United States, California")
+            - country: str (e.g., "United States")
+            - intent_signals: List[str] (e.g., ["hiring SDRs", "evaluating CRM"])
+    
+    Returns:
+        Lead dict matching LeadOutput schema, or None if no match found
+    """
+```
+
+**Important:** The `prompt` field is what real customers would type (e.g., "Who should we find for you?"). Your model should **parse and interpret** this natural language prompt to understand what's being asked, not just do direct database field lookups.
+
+#### 2. Database Connection (DO NOT HARDCODE)
+
+Your model receives database credentials via environment variables injected by the validator:
+
+```python
+# Config is injected into icp["_config"] at runtime
+config = icp.get("_config", {})
+supabase_url = config.get("SUPABASE_URL")
+supabase_key = config.get("SUPABASE_ANON_KEY")
+table_name = config.get("QUALIFICATION_LEADS_TABLE")
+
+# Create client
+from supabase import create_client
+client = create_client(supabase_url, supabase_key)
+
+# Query leads
+result = client.table(table_name).select("*").eq("industry", "Technology").execute()
+```
+
+**CRITICAL:** Never hardcode database URLs or API keys. The validator injects these at runtime.
+
+#### 3. Return Schema (LeadOutput)
+
+Your model must return a dict with these required fields:
+
+```python
+{
+    # Required fields
+    "email": "contact@company.com",
+    "full_name": "Contact Name",
+    "business": "Company Name",
+    "role": "VP Engineering",
+    "industry": "Technology",
+    "sub_industry": "SaaS",
+    
+    # Required intent signal
+    "intent_signal": {
+        "source": "company_website",  # or: linkedin, job_board, news, github, etc.
+        "description": "Company description...",
+        "url": "https://company.com",
+        "date": "2026-01-15",
+        "snippet": "Activity indicating interest..."
+    },
+    
+    # Optional fields
+    "first_name": "",
+    "last_name": "",
+    "seniority": "VP",
+    "company_size": "100-500",
+    "geography": "San Francisco, CA, USA",
+    "linkedin_url": "",
+    "phone": "",
+    "company_website": "https://company.com",
+    "company_linkedin": "https://linkedin.com/company/...",
+}
+```
+
+#### 4. Time & Cost Limits
+
+- **8 seconds** maximum per ICP evaluation
+- **$5.00 total** maximum for all 100 ICP evaluations
+- Models exceeding limits receive score penalties or failures
+
+### Test Database for Local Development
+
+To develop and test your qualification model locally, we provide a **public test database** with 50,000 sample leads. This allows you to build and debug your model before submitting it for evaluation.
+
+> **Note:** The test database intentionally includes some leads with bad data quality to test your model's robustness. A good model should filter out or handle these gracefully.
+
+**Test Database Connection:**
+```python
+SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDcwMDUsImV4cCI6MjA2MDQyMzAwNX0.5E0WjAthYDXaCWY6qjzXm2k20EhadWfigak9hleKZk8"
+TABLE_NAME = "test_leads_for_miners"
+```
+
+**Test Database Schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | integer | Row identifier |
+| `business` | text | Company name |
+| `website` | text | Company website |
+| `employee_count` | text | Employee count range |
+| `role` | text | Contact's role/title |
+| `role_type` | text | Role classification (e.g., "Senior Professional") |
+| `industry` | text | Primary industry |
+| `sub_industry` | text | Sub-industry |
+| `city` | text | City |
+| `state` | text | State/Province |
+| `country` | text | Country |
+| `company_linkedin` | text | Company LinkedIn URL |
+| `description` | text | Company description |
+| `last_refreshed_at` | timestamp | When the row was last updated |
+
+**Note:** Personal information (email, name, personal LinkedIn) is NOT available - models find company+role matches, and can enrich contacts using external APIs.
+
+### Sample Model
+
+See `miner_qualification_models/sample_model/qualify.py` for a **foundation example** that demonstrates the basic patterns - miners should build upon this with more sophisticated ICP parsing, database querying, and intent signal discovery to achieve competitive scores.
+
+The sample model:
+1. **Parses the natural language prompt** to extract search criteria
+2. **Queries the test database** using injected credentials
+3. **Intelligently filters** by industry, sub-industry, and country
+4. **Scores candidates** based on role match and prompt keywords
+5. **Returns the best match** in LeadOutput format
+
+The sample model demonstrates:
+- How to parse prompts like "VP Sales at early-stage SaaS companies in the US"
+- How to map prompt keywords to database queries
+- How to score leads based on prompt relevance
+
+### Model Requirements (Quick Reference)
+
+**File Structure:**
+```
+your_model/
+├── qualify.py          # Required: must contain find_leads() or qualify()
+└── requirements.txt    # Optional: additional dependencies
+```
+
+**Required Function:**
+```python
+def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Find a lead matching the ICP's natural language prompt.
+    
+    Config is injected in icp["_config"]:
+        - SUPABASE_URL, SUPABASE_ANON_KEY - Database credentials
+        - QUALIFICATION_LEADS_TABLE - Table name (use "test_leads_for_miners" for local testing)
+        - PROXY_URL - For paid API calls (e.g., "http://localhost:8001")
+    
+    Returns: Dict matching LeadOutput schema, or None
+    """
+    config = icp.get("_config", {})
+    supabase_url = config.get("SUPABASE_URL")
+    table_name = config.get("QUALIFICATION_LEADS_TABLE")
+    proxy_url = config.get("PROXY_URL")
+    # ... your logic ...
+```
+
+**Paid API Calls (via Proxy):**
+```python
+# DON'T call APIs directly - use the proxy (no API key needed)
+# proxy_url is already "http://localhost:8000/qualification/proxy"
+response = httpx.post(
+    f"{proxy_url}/openrouter/chat/completions",  # NOT /proxy/openrouter/
+    json={"model": "openai/gpt-4o-mini", "messages": [...]}
+)  # Proxy injects API key server-side
+```
+
+**Allowed Libraries:** `os`, `sys`, `json`, `re`, `datetime`, `time`, `math`, `random`, `collections`, `typing`, `pandas`, `numpy`, `pydantic`, `requests`, `httpx`, `aiohttp`, `supabase`, `postgrest`, `duckduckgo_search`, `openai`, `fuzzywuzzy`, `rapidfuzz`, `dateutil`
+
+**Blocked Libraries:** `subprocess`, `ctypes`, `pickle`, `marshal`, `socket`, `multiprocessing`, `shutil`, `pathlib`, `glob`, `tempfile`
+
+**Blocked Patterns:** `eval()`, `exec()`, `__import__()`, `os.system()`, `os.popen()`, accessing `.bittensor`, `.ssh`, `/proc/self/environ`
+
+> **Security:** Models are scanned on upload (gateway) AND at runtime (validator sandbox). Obfuscation attempts are caught by the runtime sandbox.
+
+**Allowed APIs:**
+| Type | APIs |
+|------|------|
+| Free | GitHub, StackOverflow, DuckDuckGo, SEC EDGAR, Wayback Machine, GDELT, UK Companies House, Wikipedia, Wikidata |
+| Paid (via proxy) | OpenRouter, ScrapingDog, BuiltWith, Crunchbase, Desearch, NewsAPI, SimilarTech |
+
+### Submitting Your Model
+
+```bash
+# Package your model
+cd your_model_directory
+tar -czvf my_model.tar.gz .
+
+# Submit via miner
+python neurons/miner.py submit-model \
+    --model_path my_model.tar.gz \
+    --wallet_name miner \
+    --wallet_hotkey default
+```
+
+---
+
 ## For Validators
 
 ### Getting Started

@@ -1295,12 +1295,15 @@ def should_reject_city_match(city: str, state: str, country: str, full_text: str
         if _has_contradicting_state_or_province(city, state, country, full_text, ""):
             return True  # Reject - text shows different state/province
 
-        # Fallback: Check if city is in an area mapping with matching state/country
-        # This handles cases like "Boston" or "Cambridge" where snippet shows city but not state
-        if is_city_in_area_with_matching_state(city, state, country):
-            return False  # Accept - city is in area with matching state
+        # NOTE: We intentionally do NOT fall back to is_city_in_area_with_matching_state here.
+        # That static lookup only confirms a city EXISTS in a state, but doesn't verify
+        # the TEXT actually shows that state. This caused false positives like:
+        # - "york" matching "New York" text → area mapping confirmed York in Nebraska → wrong
+        # - "rochester" in "Location: Rochester" → area mapping confirmed Rochester in Minnesota → wrong
+        # The area_approved check (line 430+ in stage4_person_verification.py) is the proper
+        # place for area-based approval since it matches against area names found IN the text.
 
-        return True  # Reject - needs verification but neither format nor area mapping found
+        return True  # Reject - needs verification but state/country not found in text
 
     return False  # Accept the match (normal city)
 
@@ -1360,12 +1363,30 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
     # Reject: "Nice work! Based in France." (no delimiter between city and country)
     MAX_DISTANCE = 30
 
+    # Common prefixes that form compound city names (e.g., "New" York, "San" Francisco)
+    # If city match is preceded by one of these, it's part of a compound name, not standalone
+    COMPOUND_CITY_PREFIXES = {
+        'new', 'san', 'los', 'las', 'el', 'fort', 'saint', 'st', 'port',
+        'west', 'east', 'north', 'south', 'mount', 'mt', 'grand', 'palm',
+        'long', 'salt', 'little', 'santa', 'cape', 'baton', 'corpus',
+        'virginia', 'college', 'del', 'la', 'le'
+    }
+
     if is_us_location:
         # For US, verify state appears AFTER city with proper delimiter
         if claimed_state_lower:
             for match in city_matches:
+                city_start_pos = match.start()
                 city_end_pos = match.end()
                 text_after_city = text_lower[city_end_pos:city_end_pos + MAX_DISTANCE]
+
+                # Skip if city is part of a compound name (e.g., "York" in "New York")
+                if city_start_pos > 0:
+                    pre_text = text_lower[:city_start_pos].rstrip()
+                    if pre_text:
+                        preceding_word = pre_text.split()[-1] if pre_text.split() else ''
+                        if preceding_word in COMPOUND_CITY_PREFIXES:
+                            continue  # Skip - part of compound city name
 
                 # Must start with delimiter (comma, hyphen, pipe, colon) or space+delimiter
                 if not re.match(r'^[\s]*[,\-|:]', text_after_city):
@@ -1377,12 +1398,20 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
                 if re.search(pattern, text_after_city):
                     return True
 
-                # Also check state abbreviation
+                # Also check state abbreviation <-> full name (both directions)
                 state_abbr = GEO_LOOKUP.get('state_abbr', {})
                 for abbr, full_name in state_abbr.items():
                     if full_name.lower() == claimed_state_lower:
+                        # claimed_state is full name → check abbreviation in text
                         abbr_pattern = r'\b' + re.escape(abbr.lower()) + r'\b'
                         if re.search(abbr_pattern, text_after_city):
+                            return True
+                        break
+                    elif abbr.lower() == claimed_state_lower:
+                        # claimed_state is abbreviation → check full name in text
+                        full_escaped = re.escape(full_name.lower()).replace(r'\ ', r'\s+')
+                        full_pattern = r'\b' + full_escaped + r'(?![a-z-])'
+                        if re.search(full_pattern, text_after_city):
                             return True
                         break
         return False
@@ -1401,8 +1430,17 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
             # No domain available - fall back to text verification
             # Check if country appears AFTER city with proper delimiter
             for match in city_matches:
+                city_start_pos = match.start()
                 city_end_pos = match.end()
                 text_after_city = text_lower[city_end_pos:city_end_pos + MAX_DISTANCE]
+
+                # Skip if city is part of a compound name (e.g., "York" in "New York")
+                if city_start_pos > 0:
+                    pre_text = text_lower[:city_start_pos].rstrip()
+                    if pre_text:
+                        preceding_word = pre_text.split()[-1] if pre_text.split() else ''
+                        if preceding_word in COMPOUND_CITY_PREFIXES:
+                            continue  # Skip - part of compound city name
 
                 # Must start with delimiter (comma, hyphen, pipe, colon) or space+delimiter
                 if not re.match(r'^[\s]*[,\-|:]', text_after_city):
@@ -1601,7 +1639,7 @@ def extract_location_from_text(text: str) -> str:
     if not text:
         return ""
     # Try follower count pattern first
-    match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:,\s*[A-Z][a-zA-Z\s]+)*)\.\s*\d+[KMk]?\s*(?:followers?|connections?|volgers?|collegamenti)', text)
+    match = re.search(r'([A-Z][a-z]+(?:[\s\-]+[A-Z][a-z]+)*(?:,\s*[A-Z][a-zA-Z\s]+)*)\.\s*\d+[KMk]?\s*(?:followers?|connections?|volgers?|collegamenti)', text)
     if match:
         loc = match.group(1).strip()
         if not any(x.lower() in loc.lower() for x in ['University', 'College', 'Institute', 'School', 'Inc', 'LLC', 'Ltd', 'Corp']):
@@ -1821,7 +1859,7 @@ def check_locations_match(extracted: str, ground_truth: str, full_text: str = ""
     if extracted:
         ext_city = str(extracted).split(',')[0].strip().lower()
         ext_city = CITY_EQUIVALENTS.get(ext_city, ext_city)
-        if ext_city and len(ext_city) > 2 and ext_city in gt_norm:
+        if ext_city and len(ext_city) > 2 and ext_city in gt_city:
             if should_reject_city_match(ext_city, gt_state, gt_country, full_text, linkedin_url=linkedin_url):
                 pass  # Skip ext_city_in_gt, continue to next strategy
             else:
@@ -2118,10 +2156,8 @@ def check_q3_location_fallback(
                     if needs_strict_validation:
                         # Check if "City, State/Country" format in text
                         has_state_country = _verify_state_or_country_for_strict_validation(city_lower, state, country, full_text, linkedin_url)
-                        # Check area mapping fallback
-                        has_area_mapping = is_city_in_area_with_matching_state(city_lower, state, country)
 
-                        if not has_state_country and not has_area_mapping:
+                        if not has_state_country:
                             error_type = 'English word city' if is_english_word else 'Ambiguous city'
                             return {
                                 'success': True,
@@ -2407,11 +2443,19 @@ def validate_lead(
 
         # Area check
         if not location_passed:
-            area_match = re.search(r'(Greater\s+[\w\s]+|[\w\s]+\s+Metropolitan|[\w\s]+\s+Bay|[\w\s]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
+            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
             if area_match:
                 area_found = area_match.group(0).strip()
                 if city_lower not in area_found.lower():
-                    if is_city_in_area_approved(city, area_found, state, country):
+                    # Check if city appears right before area name in text
+                    area_start = area_match.start()
+                    text_before_area = full_text[:area_start]
+                    city_before_area = re.search(r'\b' + re.escape(city_lower) + r'\b\s*,\s*$', text_before_area.lower())
+                    if city_before_area:
+                        location_passed = True
+                        location_method = 'area_approved'
+                        result['checks']['location']['extracted'] = f"{city}, {area_found}"
+                    elif is_city_in_area_approved(city, area_found, state, country):
                         location_passed = True
                         location_method = 'area_approved'
                         result['checks']['location']['extracted'] = area_found

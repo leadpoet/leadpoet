@@ -127,3 +127,6 @@ docker-compose.minio.yml
 # Company name cache (runtime file)
 validator_models/company_name_cache.json
 neurons/.pending_equivocation_check.json
+
+# Validator logs (local testing)
+validator_logs.txt

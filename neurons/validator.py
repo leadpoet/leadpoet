@@ -23,8 +23,18 @@ from Leadpoet.base.utils.config import add_validator_args
 import threading
 from Leadpoet.base.utils import queue as lead_queue
 from Leadpoet.base.utils import pool as lead_pool
+from Leadpoet.base.utils.pool import (
+    initialize_pool,
+    add_to_pool,
+    record_delivery_rewards,
+    save_curated_leads,
+)
+# Import modules that have inject_async_subtensor methods
+from Leadpoet.validator import reward as reward_module
+from Leadpoet.utils import cloud_db as cloud_db_module
+from Leadpoet.validator.reward import start_epoch_monitor, stop_epoch_monitor
 import asyncio
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from aiohttp import web
 from Leadpoet.utils.cloud_db import (
     fetch_prospects_from_cloud,
@@ -33,6 +43,17 @@ from Leadpoet.utils.cloud_db import (
     push_miner_curation_request,
     fetch_miner_curation_result,
     push_validator_ranking,
+    fetch_broadcast_requests,  # Must be at module level to avoid sandbox blocking
+    # Additional imports moved from lazy to module-level to avoid sandbox blocking:
+    get_supabase_client,
+    broadcast_api_request,
+    fetch_validator_rankings,
+    get_broadcast_status,
+    gateway_get_epoch_leads,
+    gateway_submit_validation,
+    gateway_submit_reveal,
+    submit_validation_assessment,
+    fetch_miner_leads_for_request,
 )
 # TokenManager removed - JWT system deprecated in favor of TEE gateway
 # from Leadpoet.utils.token_manager import TokenManager
@@ -78,6 +99,22 @@ try:
 except ImportError as e:
     TEE_AVAILABLE = False
     # Will log warning at runtime if TEE submission is attempted
+
+# ════════════════════════════════════════════════════════════════════════════
+# QUALIFICATION MODEL EVALUATION IMPORTS
+# ════════════════════════════════════════════════════════════════════════════
+# Imports for evaluating miner-submitted qualification models
+QUALIFICATION_AVAILABLE = False
+QUALIFICATION_IMPORT_ERROR = None
+try:
+    from qualification.validator.main import QualificationValidator
+    from gateway.qualification.config import CONFIG as QUALIFICATION_CONFIG
+    QUALIFICATION_AVAILABLE = True
+    print("✅ Qualification system modules loaded successfully")
+except ImportError as e:
+    QUALIFICATION_IMPORT_ERROR = str(e)
+    print(f"⚠️ Qualification system NOT available: {e}")
+    # Qualification module not installed - will log at runtime if needed
 
 # Additional warning suppression
 warnings.filterwarnings("ignore", message=".*leaked semaphore objects.*")
@@ -308,6 +345,31 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1":
                 print(f"❌ ERROR: {e}")
                 print("   Falling back to non-containerized mode...")
                 print("")
+
+# ════════════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════════════
+# DEDICATED QUALIFICATION CONTAINERS CONFIGURATION
+# ════════════════════════════════════════════════════════════════════════════
+# 5 containers dedicated ONLY to qualification model evaluation.
+# These run PARALLEL to sourcing (not after).
+# Set via QUALIFICATION_WEBSHARE_PROXY_1 through QUALIFICATION_WEBSHARE_PROXY_5
+# ════════════════════════════════════════════════════════════════════════════
+
+QUALIFICATION_CONTAINERS_COUNT = 5  # 5 dedicated qualification containers
+QUALIFICATION_MODELS_PER_CONTAINER = 2  # Each container handles 2 models per epoch
+QUALIFICATION_MAX_MODELS_PER_EPOCH = QUALIFICATION_CONTAINERS_COUNT * QUALIFICATION_MODELS_PER_CONTAINER  # 10 models
+QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK = (QUALIFICATION_CONTAINERS_COUNT - 1) * QUALIFICATION_MODELS_PER_CONTAINER  # 8 models (1 container does rebenchmark)
+
+def detect_qualification_proxies():
+    """Detect QUALIFICATION_WEBSHARE_PROXY_* environment variables."""
+    proxies_found = []
+    for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
+        proxy_var = f"QUALIFICATION_WEBSHARE_PROXY_{i}"
+        proxy_value = os.getenv(proxy_var)
+        if proxy_value and proxy_value != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80":
+            proxies_found.append((proxy_var, proxy_value))
+    return proxies_found
 
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -620,7 +682,7 @@ class Validator(BaseValidatorNeuron):
         self.registration_time = datetime.now()  
         self.appeal_status = None  
         
-        from Leadpoet.base.utils.pool import initialize_pool
+        # initialize_pool imported at module level
         initialize_pool()
 
         self.broadcast_mode = False
@@ -763,7 +825,7 @@ class Validator(BaseValidatorNeuron):
     def _init_supabase_client(self):
         """Initialize or refresh Supabase client with current JWT token."""
         try:
-            from Leadpoet.utils.cloud_db import get_supabase_client
+            # get_supabase_client imported at module level
             
             # Use the centralized client creation function
             # This ensures consistency with miner and other validator operations
@@ -1158,7 +1220,7 @@ class Validator(BaseValidatorNeuron):
         for i, (reward, response) in enumerate(zip(rewards, responses)):
             if reward >= 0.9 and isinstance(response, LeadRequest) and response.leads:
                 if await self.run_automated_checks(response.leads):
-                    from Leadpoet.base.utils.pool import add_to_pool
+                    # add_to_pool imported at module level
                     add_to_pool(response.leads)
                     bt.logging.info(f"Added {len(response.leads)} leads from UID {miner_uids[i]} to pool")
                 else:
@@ -1312,7 +1374,7 @@ class Validator(BaseValidatorNeuron):
 
             # Broadcast the request to all validators and miners
             try:
-                from Leadpoet.utils.cloud_db import broadcast_api_request
+                # broadcast_api_request imported at module level
 
                 # FIX: Wrap synchronous broadcast call to prevent blocking
                 request_id = await asyncio.to_thread(
@@ -1370,7 +1432,7 @@ class Validator(BaseValidatorNeuron):
                 })
 
             # Fetch validator rankings from Firestore
-            from Leadpoet.utils.cloud_db import fetch_validator_rankings, get_broadcast_status
+            # fetch_validator_rankings and get_broadcast_status imported at module level
 
             # Get broadcast request status
             status_data = get_broadcast_status(request_id)
@@ -1598,11 +1660,10 @@ class Validator(BaseValidatorNeuron):
             
             # Inject into reward module
             try:
-                from Leadpoet.validator import reward
-                from Leadpoet.utils import cloud_db
+                # reward_module and cloud_db_module imported at module level
                 
-                reward.inject_async_subtensor(self.async_subtensor)
-                cloud_db._VERIFY.inject_async_subtensor(self.async_subtensor)
+                reward_module.inject_async_subtensor(self.async_subtensor)
+                cloud_db_module._VERIFY.inject_async_subtensor(self.async_subtensor)
                 
                 bt.logging.info("✅ AsyncSubtensor injected into reward and cloud_db modules")
             except Exception as e:
@@ -1665,6 +1726,15 @@ class Validator(BaseValidatorNeuron):
                     except Exception as e:
                         bt.logging.warning(f"Error in process_curation_requests_continuous: {e}")
                         await asyncio.sleep(5)  # Wait before retrying
+                    
+                    # ════════════════════════════════════════════════════════════
+                    # QUALIFICATION MODEL EVALUATION (polls gateway for miner models)
+                    # Enable with: export ENABLE_QUALIFICATION_EVALUATION=true
+                    # ════════════════════════════════════════════════════════════
+                    try:
+                        await self.process_qualification_workflow()
+                    except Exception as e:
+                        bt.logging.warning(f"Error in process_qualification_workflow: {e}")
 
                     # process_broadcast_requests_continuous() runs in background thread
 
@@ -1858,8 +1928,30 @@ class Validator(BaseValidatorNeuron):
             print(f"🔍 EPOCH {current_epoch}: Starting validation workflow")
             print(f"{'='*80}")
             
+            # ═══════════════════════════════════════════════════════════════════
+            # QUALIFICATION MODEL ASSIGNMENT (FIRST - before sourcing!)
+            # ═══════════════════════════════════════════════════════════════════
+            # Coordinator FIRST assigns qualification models to dedicated qual workers
+            # This happens IMMEDIATELY at epoch start, PARALLEL to sourcing
+            # Only coordinator does this - workers just read from assigned files
+            # ═══════════════════════════════════════════════════════════════════
+            container_mode_check = getattr(self.config.neuron, 'mode', None)
+            if container_mode_check == "coordinator" or container_mode_check is None:
+                # Check if qualification is enabled
+                qual_enabled = os.environ.get("ENABLE_QUALIFICATION_EVALUATION", "").lower() in ("true", "1", "yes")
+                qual_proxies = detect_qualification_proxies()
+                
+                if qual_enabled and qual_proxies:
+                    print(f"\n🎯 QUALIFICATION: Assigning models to {len(qual_proxies)} dedicated workers...")
+                    try:
+                        await self._assign_qualification_to_dedicated_workers(current_epoch)
+                        print(f"   ✅ Qualification assignment complete - sourcing begins NOW")
+                    except Exception as qual_assign_err:
+                        print(f"   ⚠️ Qualification assignment failed: {qual_assign_err}")
+                        print(f"   Continuing with sourcing...")
+            
             # Fetch assigned leads from gateway
-            from Leadpoet.utils.cloud_db import gateway_get_epoch_leads, gateway_submit_validation, gateway_submit_reveal
+            # gateway_get_epoch_leads, gateway_submit_validation, gateway_submit_reveal imported at module level
             
             # ═══════════════════════════════════════════════════════════════════
             # OPTIMIZED LEAD FETCHING: Only coordinator calls gateway
@@ -1868,8 +1960,7 @@ class Validator(BaseValidatorNeuron):
             container_mode = getattr(self.config.neuron, 'mode', None)
             container_id = getattr(self.config.neuron, 'container_id', None)
             
-            # Import os and hashlib early (needed for salt generation)
-            import os
+            # hashlib needed for salt generation (os is already imported at module level)
             import hashlib
             
             # CRITICAL: Check if leads file already exists with salt for this epoch
@@ -2281,9 +2372,7 @@ class Validator(BaseValidatorNeuron):
                         "decision": decision,
                         "rep_score": rep_score,
                         "rejection_reason": rejection_reason,
-                        "salt": salt.hex(),
-                        "region": lead_blob.get("region", ""),  # For gaming detection
-                        "country": lead_blob.get("country", "")  # For gaming detection
+                        "salt": salt.hex()
                     })
                     
                     # Store weight data for later accumulation
@@ -2292,7 +2381,7 @@ class Validator(BaseValidatorNeuron):
                     # Coordinator in containerized mode: Will re-accumulate all after aggregation
                     container_mode = getattr(self.config.neuron, 'mode', None)
                     
-                                       # Store weight info in local_validation_data for aggregation
+                    # Store weight info in local_validation_data for aggregation
                     # CRITICAL FIX: Get is_icp_multiplier from automated_checks_data (where it's calculated)
                     # NOT from lead (which is the gateway lead object, not the lead_blob that was validated)
                     if len(local_validation_data) > 0:
@@ -2304,38 +2393,9 @@ class Validator(BaseValidatorNeuron):
                         # Traditional single-validator mode
                         # CRITICAL FIX: Get from automated_checks_data, not lead
                         is_icp_multiplier = automated_checks_data.get("is_icp_multiplier", 0.0)
-                        
-                        # ═══════════════════════════════════════════════════════════════════
-                        # GAMING PENALTY: Detect region="africa" with non-African country
-                        # Miners were gaming ICP by setting region="africa" with country="United States"
-                        # Penalty: -100,000 to rapidly reduce their rolling window score
-                        # ═══════════════════════════════════════════════════════════════════
-                        AFRICAN_COUNTRIES = {
-                            "nigeria", "south africa", "kenya", "ghana", "egypt", "morocco",
-                            "ethiopia", "tanzania", "uganda", "algeria", "sudan", "angola",
-                            "mozambique", "cameroon", "senegal", "zambia", "zimbabwe", "rwanda",
-                            "tunisia", "libya", "botswana", "namibia", "mauritius", "gabon",
-                            "malawi", "mali", "burkina faso", "niger", "chad", "somalia",
-                            "benin", "togo", "sierra leone", "liberia", "congo", "eritrea",
-                            "gambia", "guinea", "lesotho", "madagascar", "mauritania", "eswatini",
-                            "swaziland", "ivory coast", "côte d'ivoire", "drc",
-                            "democratic republic of congo", "central african republic"
-                        }
-                        
-                        lead_region = (lead_blob.get("region") or "").lower().strip()
-                        lead_country = (lead_blob.get("country") or "").lower().strip()
-                        final_rep_score = rep_score
-                        
-                        # Only penalize if region CLAIMS Africa but country is NOT African
-                        if "africa" in lead_region and lead_country not in AFRICAN_COUNTRIES:
-                            final_rep_score = -100000
-                            print(f"   🚨 AFRICA GAMING DETECTED!")
-                            print(f"      region='{lead_region}', country='{lead_country}'")
-                            print(f"      🔥 PENALTY: -100,000 points (miner: {lead.get('miner_hotkey', 'unknown')[:16]}...)")
-
                         await self.accumulate_miner_weights(
                             miner_hotkey=lead.get("miner_hotkey"),
-                            rep_score=final_rep_score,
+                            rep_score=rep_score,
                             is_icp_multiplier=is_icp_multiplier,
                             decision=decision
                         )
@@ -2574,51 +2634,16 @@ class Validator(BaseValidatorNeuron):
                 # This ensures all leads are counted in validator_weights_history
                 # ═══════════════════════════════════════════════════════════════════
                 print(f"   ⚖️  Accumulating weights for all {len(local_validation_data)} leads...")
-                
-                # GAMING PENALTY: Define African countries for gaming detection
-                AFRICAN_COUNTRIES = {
-                    "nigeria", "south africa", "kenya", "ghana", "egypt", "morocco",
-                    "ethiopia", "tanzania", "uganda", "algeria", "sudan", "angola",
-                    "mozambique", "cameroon", "senegal", "zambia", "zimbabwe", "rwanda",
-                    "tunisia", "libya", "botswana", "namibia", "mauritius", "gabon",
-                    "malawi", "mali", "burkina faso", "niger", "chad", "somalia",
-                    "benin", "togo", "sierra leone", "liberia", "congo", "eritrea",
-                    "gambia", "guinea", "lesotho", "madagascar", "mauritania", "eswatini",
-                    "swaziland", "ivory coast", "côte d'ivoire", "drc",
-                    "democratic republic of congo", "central african republic"
-                }
-
                 for val_data in local_validation_data:
-                    # Safety check: skip if val_data is None (prevents crashes)
-                    if val_data is None:
-                        print(f"   ⚠️ Skipping None val_data entry")
-                        continue
                     miner_hotkey = val_data.get("miner_hotkey")
                     decision = val_data.get("decision")
                     rep_score = val_data.get("rep_score", 0)
                     # Default to 0.0 (new format: no adjustment) instead of 1.0 (old format: multiplier)
                     is_icp_multiplier = val_data.get("is_icp_multiplier", 0.0)
                     
-                    # ═══════════════════════════════════════════════════════════════════
-                    # GAMING PENALTY: Detect region="africa" with non-African country
-                    # Miners were gaming ICP by setting region="africa" with country="United States"
-                    # Penalty: -100,000 to rapidly reduce their rolling window score
-                    # ═══════════════════════════════════════════════════════════════════
-                    lead_region = (val_data.get("region") or "").lower().strip()
-                    lead_country = (val_data.get("country") or "").lower().strip()
-                    final_rep_score = rep_score
-                    
-                    # Only penalize if region CLAIMS Africa but country is NOT African
-                    if "africa" in lead_region and lead_country not in AFRICAN_COUNTRIES:
-                        final_rep_score = -100000
-                        print(f"   🚨 AFRICA GAMING DETECTED!")
-                        print(f"      region='{lead_region}', country='{lead_country}'")
-                        print(f"      🔥 PENALTY: -100,000 points (miner: {miner_hotkey[:16] if miner_hotkey else 'unknown'}...)")
-
-                    
                     await self.accumulate_miner_weights(
                         miner_hotkey=miner_hotkey,
-                        rep_score=final_rep_score,
+                        rep_score=rep_score,
                         is_icp_multiplier=is_icp_multiplier,
                         decision=decision
                     )
@@ -2780,18 +2805,8 @@ class Validator(BaseValidatorNeuron):
             else:
                 # NEW FORMAT: Use addition with floor at 0 (for normal leads)
                 icp_adjustment = int(is_icp_multiplier)
-                
-                # CRITICAL: Allow negative rep_scores (gaming penalties) to pass through
-                # Gaming penalties set rep_score to -100,000 to punish miners
-                # These MUST NOT be clamped to 0, otherwise the penalty has no effect!
-                if rep_score < 0:
-                    # Gaming penalty detected - let the massive negative through
-                    effective_rep_score = rep_score
-                    print(f"      🚨 GAMING PENALTY: {rep_score} points (NOT clamped)")
-                else:
-                    # Normal lead - apply ICP adjustment with floor at 0
-                    effective_rep_score = max(0, rep_score + icp_adjustment)
-                    print(f"      📊 ICP adjustment: {rep_score} + ({icp_adjustment:+d}) = {effective_rep_score}")
+                effective_rep_score = max(0, rep_score + icp_adjustment)
+                print(f"      📊 ICP adjustment: {rep_score} + ({icp_adjustment:+d}) = {effective_rep_score}")
             
             # Add effective score to miner's total (only for approved leads)
             epoch_data = weights_data[str(current_epoch)]
@@ -2903,9 +2918,15 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
             EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
-            BASE_BURN_SHARE = 0.05         # 5% base burn to UID 0
+            BASE_BURN_SHARE = 0.04         # 4% base burn to UID 0
+            CHAMPION_SHARE = 0.01          # 1% to qualification model champion
             MAX_CURRENT_EPOCH_SHARE = 0.0  # 0% max to miners (current epoch)
             MAX_ROLLING_EPOCH_SHARE = 0.95 # 95% max to miners (rolling 30 epochs)
+            # Champion beat threshold is defined in qualification/config.py (CHAMPION_DETHRONING_THRESHOLD_PCT)
+            # Currently set to 2% - challenger must beat champion by 2% to dethrone
+            # Champion rebenchmark time is defined in qualification/config.py:
+            #   CHAMPION_REBENCHMARK_HOUR_UTC, CHAMPION_REBENCHMARK_MINUTE_UTC
+            # Default: 05:00 UTC (5:00 AM) - first full epoch after this time triggers rebenchmark
             # Dynamic MAX_LEADS_PER_EPOCH from gateway (fetched during process_gateway_validation_workflow)
             # If not in memory (e.g., after restart), try to recover from history file
             MAX_LEADS_PER_EPOCH = getattr(self, '_max_leads_per_epoch', None)
@@ -3012,6 +3033,42 @@ class Validator(BaseValidatorNeuron):
             print()
             
             # ═══════════════════════════════════════════════════════════════════
+            # QUALIFICATION CHAMPION: Read from local JSON for 1% emission share
+            # ═══════════════════════════════════════════════════════════════════
+            # Champion info is stored locally in validator_weights/qualification_champion.json
+            # Updated when validator evaluates models via _store_qualification_champion()
+            champion_hotkey = None
+            champion_uid = None
+            effective_champion_share = 0.0
+            
+            try:
+                champion_data = self._read_qualification_champion()
+                
+                if champion_data:
+                    champion_hotkey = champion_data.get("miner_hotkey")
+                    print(f"   👑 QUALIFICATION CHAMPION (from local JSON):")
+                    print(f"      Model: {champion_data.get('model_name', 'Unknown')}")
+                    print(f"      Miner: {champion_hotkey[:20] if champion_hotkey else 'Unknown'}...")
+                    print(f"      Score: {champion_data.get('score', 0):.2f}")
+                    print(f"      Since: {champion_data.get('became_champion_at', 'Unknown')}")
+                    
+                    # Verify champion is registered on subnet
+                    if champion_hotkey and champion_hotkey in self.metagraph.hotkeys:
+                        champion_uid = self.metagraph.hotkeys.index(champion_hotkey)
+                        effective_champion_share = CHAMPION_SHARE
+                        print(f"      UID: {champion_uid}")
+                        print(f"      Emission Share: {CHAMPION_SHARE*100:.0f}%")
+                    else:
+                        print(f"      ⚠️  Champion not registered on subnet - share goes to burn")
+                else:
+                    print(f"   📭 No qualification champion yet - {CHAMPION_SHARE*100:.0f}% goes to burn")
+                    print(f"      (File: validator_weights/qualification_champion.json does not exist or is empty)")
+            except Exception as e:
+                print(f"   ⚠️  Error reading champion: {e} - {CHAMPION_SHARE*100:.0f}% goes to burn")
+            
+            print()
+            
+            # ═══════════════════════════════════════════════════════════════════
             # LINEAR EMISSIONS: Calculate approval rates and effective shares
             # Handle case where current epoch has no leads (gateway was down)
             # ═══════════════════════════════════════════════════════════════════
@@ -3029,7 +3086,9 @@ class Validator(BaseValidatorNeuron):
             # Calculate additional burn from unapproved slots
             unused_current_share = MAX_CURRENT_EPOCH_SHARE - effective_current_share
             unused_rolling_share = MAX_ROLLING_EPOCH_SHARE - effective_rolling_share
-            total_burn_share = BASE_BURN_SHARE + unused_current_share + unused_rolling_share
+            # If no champion, their share goes to burn
+            unused_champion_share = CHAMPION_SHARE - effective_champion_share
+            total_burn_share = BASE_BURN_SHARE + unused_current_share + unused_rolling_share + unused_champion_share
             
             print(f"   📈 LINEAR EMISSIONS SCALING:")
             print(f"      Current epoch: {current_epoch_lead_count}/{MAX_LEADS_PER_EPOCH} leads = {current_epoch_approval_rate*100:.1f}% approval")
@@ -3038,7 +3097,8 @@ class Validator(BaseValidatorNeuron):
             print(f"      Rolling {ROLLING_WINDOW} epochs: {rolling_lead_count}/{max_rolling_leads} leads = {rolling_approval_rate*100:.1f}% approval")
             print(f"         → {MAX_ROLLING_EPOCH_SHARE*100:.0f}% × {rolling_approval_rate*100:.1f}% = {effective_rolling_share*100:.2f}% to miners")
             print(f"         → {unused_rolling_share*100:.2f}% burned (unused slots)")
-            print(f"      Total burn: {BASE_BURN_SHARE*100:.0f}% base + {unused_current_share*100:.2f}% + {unused_rolling_share*100:.2f}% = {total_burn_share*100:.2f}%")
+            print(f"      Champion: {effective_champion_share*100:.0f}% to champion, {unused_champion_share*100:.0f}% burned (no champion)")
+            print(f"      Total burn: {BASE_BURN_SHARE*100:.0f}% base + {unused_current_share*100:.2f}% + {unused_rolling_share*100:.2f}% + {unused_champion_share*100:.0f}% = {total_burn_share*100:.2f}%")
             print()
             
             # ═══════════════════════════════════════════════════════════════════
@@ -3142,6 +3202,8 @@ class Validator(BaseValidatorNeuron):
             
             print(f"\n    Alpha Split (with linear emissions):")
             print(f"      {(total_burn_share + current_dereg_burn + rolling_dereg_burn)*100:.2f}% → UID {UID_ZERO} (Burn)")
+            if effective_champion_share > 0 and champion_uid is not None:
+                print(f"      {effective_champion_share*100:.0f}% → UID {champion_uid} (Qualification Champion)")
             print(f"      {effective_current_to_miners*100:.2f}% → Current epoch miners ({len(registered_current_scores)} registered)")
             print(f"      {effective_rolling_to_miners*100:.2f}% → Rolling {ROLLING_WINDOW} epoch miners ({len(registered_rolling_scores)} registered)")
             print()
@@ -3152,55 +3214,44 @@ class Validator(BaseValidatorNeuron):
             # UID 0 gets: base burn + unused slots + deregistered miners' shares
             uid_weights[UID_ZERO] = total_burn_share + current_dereg_burn + rolling_dereg_burn
             
-            # Distribute to REGISTERED current epoch miners
-            # CRITICAL: Clamp negative scores to 0 for weight calculation
-            # Gaming penalties (e.g., -100,000) should result in 0% weight, not negative
-            clamped_current_scores = {h: max(0, p) for h, p in registered_current_scores.items()}
-            clamped_current_total = sum(clamped_current_scores.values())
+            # Champion gets their share (if registered)
+            if effective_champion_share > 0 and champion_uid is not None:
+                if champion_uid not in uid_weights:
+                    uid_weights[champion_uid] = 0
+                uid_weights[champion_uid] += effective_champion_share
+                print(f"    👑 Champion (UID {champion_uid}): {effective_champion_share*100:.0f}%")
             
+            # Distribute to REGISTERED current epoch miners
             print(f"    Current Epoch ({effective_current_to_miners*100:.2f}% to registered miners):")
-            if clamped_current_total > 0 and effective_current_to_miners > 0:
+            if registered_current_total > 0 and effective_current_to_miners > 0:
                 for hotkey, points in registered_current_scores.items():
                     uid = hotkey_to_uid[hotkey]
-                    clamped_points = max(0, points)
-                    miner_proportion = clamped_points / clamped_current_total
+                    miner_proportion = points / registered_current_total
                     miner_weight = effective_current_to_miners * miner_proportion
                     
                     if uid not in uid_weights:
                         uid_weights[uid] = 0
                     uid_weights[uid] += miner_weight
                     
-                    if points < 0:
-                        print(f"      UID {uid}: {points} pts (GAMING PENALTY → 0%)")
-                    else:
-                        print(f"      UID {uid}: {points}/{clamped_current_total} pts = {miner_weight*100:.2f}%")
+                    print(f"      UID {uid}: {points}/{registered_current_total} pts = {miner_weight*100:.2f}%")
             else:
-                print(f"      (No registered miners with positive scores)")
+                print(f"      (No registered miners)")
             
             # Distribute to REGISTERED rolling epoch miners
-            # CRITICAL: Clamp negative scores to 0 for weight calculation
-            # Rolling scores from gaming epochs should result in 0% weight, not negative
-            clamped_rolling_scores = {h: max(0, p) for h, p in registered_rolling_scores.items()}
-            clamped_rolling_total = sum(clamped_rolling_scores.values())
-            
             print(f"\n    Rolling {ROLLING_WINDOW} Epochs ({effective_rolling_to_miners*100:.2f}% to registered miners):")
-            if clamped_rolling_total > 0 and effective_rolling_to_miners > 0:
+            if registered_rolling_total > 0 and effective_rolling_to_miners > 0:
                 for hotkey, points in registered_rolling_scores.items():
                     uid = hotkey_to_uid[hotkey]
-                    clamped_points = max(0, points)
-                    miner_proportion = clamped_points / clamped_rolling_total
+                    miner_proportion = points / registered_rolling_total
                     miner_weight = effective_rolling_to_miners * miner_proportion
                     
                     if uid not in uid_weights:
                         uid_weights[uid] = 0
                     uid_weights[uid] += miner_weight
                     
-                    if points < 0:
-                        print(f"      UID {uid}: {points} pts (GAMING PENALTY → 0%)")
-                    else:
-                        print(f"      UID {uid}: {points}/{clamped_rolling_total} pts = {miner_weight*100:.2f}%")
+                    print(f"      UID {uid}: {points}/{registered_rolling_total} pts = {miner_weight*100:.2f}%")
             else:
-                print(f"      (No registered miners with positive scores)")
+                print(f"      (No registered miners)")
             
             # Convert to final lists
             final_uids = list(uid_weights.keys())
@@ -3329,7 +3380,7 @@ class Validator(BaseValidatorNeuron):
             return None
         
         # Check if gateway submission is enabled
-        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
+        gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
         if os.environ.get("DISABLE_GATEWAY_WEIGHT_SUBMISSION", "").lower() == "true":
             bt.logging.info("ℹ️ Gateway weight submission disabled via env var")
             return None
@@ -3717,7 +3768,7 @@ class Validator(BaseValidatorNeuron):
             print(f"🔍 CHECKING REVEALS: Current epoch {current_epoch}, Block {blocks_into_epoch}/328, Pending: {list(self._pending_reveals.keys())}")
             print(f"{'='*80}")
             
-            from Leadpoet.utils.cloud_db import gateway_submit_reveal
+            # gateway_submit_reveal imported at module level
             
             # CRITICAL: Clean up expired reveals BEFORE attempting submission
             # Reveal window is N+1 only - anything older should be purged
@@ -3806,8 +3857,7 @@ class Validator(BaseValidatorNeuron):
             return  # Pause sourcing during broadcast processing
 
         try:
-            # Import consensus functions
-            from Leadpoet.utils.cloud_db import submit_validation_assessment
+            # submit_validation_assessment imported at module level
             import uuid
             
             # Fetch prospects using the new consensus-aware function
@@ -3943,6 +3993,1590 @@ class Validator(BaseValidatorNeuron):
         push_curation_result({"request_id": req["request_id"], "leads": leads})
         print(f"✅ Curated {len(leads)} leads for request {req['request_id']}")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # QUALIFICATION MODEL EVALUATION WORKFLOW
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    async def process_qualification_workflow(self):
+        """
+        Process qualification model evaluations.
+        
+        This polls the gateway for miner-submitted models and:
+        1. Fetches models that need evaluation (new submissions or rebenchmarks)
+        2. Runs them in TEE sandbox
+        3. Scores the leads they return
+        4. Reports results back to gateway
+        5. Updates champion if a model beats current champion by >5%
+        
+        Called every iteration of main loop if ENABLE_QUALIFICATION_EVALUATION=true.
+        """
+        # Check if qualification is enabled
+        env_value = os.environ.get("ENABLE_QUALIFICATION_EVALUATION", "")
+        if not env_value.lower() in ("true", "1", "yes"):
+            # Only log once to avoid spam
+            if not hasattr(self, '_qual_disabled_logged'):
+                bt.logging.debug(f"🎯 Qualification disabled (env={env_value!r})")
+                self._qual_disabled_logged = True
+            return
+        
+        if not QUALIFICATION_AVAILABLE:
+            # Only log once to avoid spam
+            if not hasattr(self, '_qual_unavailable_logged'):
+                bt.logging.warning(f"🎯 ENABLE_QUALIFICATION_EVALUATION=true but qualification module not available")
+                if QUALIFICATION_IMPORT_ERROR:
+                    bt.logging.warning(f"   Import error: {QUALIFICATION_IMPORT_ERROR}")
+                self._qual_unavailable_logged = True
+            return
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # DEDICATED QUALIFICATION WORKERS: Skip this old flow if active
+        # ═══════════════════════════════════════════════════════════════════
+        # When QUALIFICATION_WEBSHARE_PROXY_* env vars are set, dedicated
+        # qualification workers handle model evaluation PARALLEL to sourcing.
+        # This old "after sourcing" flow should be disabled.
+        # ═══════════════════════════════════════════════════════════════════
+        qual_proxies = detect_qualification_proxies()
+        if qual_proxies:
+            # Dedicated workers are active - collect results instead of running old flow
+            if not hasattr(self, '_qual_dedicated_results_logged'):
+                self._qual_dedicated_results_logged = set()
+            
+            try:
+                current_block = self.subtensor.block
+                current_epoch = current_block // 360
+                blocks_into_epoch = current_block % 360
+            except:
+                return
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # WAIT FOR SOURCING COMPLETE: Hash submission + Reveals attempted
+            # Only collect qualification results AFTER:
+            # 1. Lead validation complete (_last_processed_epoch >= current_epoch)
+            # 2. Reveals have been ATTEMPTED (success OR failure OR none pending)
+            # ═══════════════════════════════════════════════════════════════════
+            last_processed = getattr(self, '_last_processed_epoch', -1)
+            
+            # Check if sourcing is complete for this epoch
+            if last_processed < current_epoch:
+                # Sourcing still in progress - don't collect yet
+                return
+            
+            # Check if reveals have been processed (success, failure, or none pending)
+            # Track which epochs have had their qualification results collected
+            if not hasattr(self, '_qual_results_collected_epochs'):
+                self._qual_results_collected_epochs = set()
+            
+            # Already collected results for this epoch?
+            if current_epoch in self._qual_results_collected_epochs:
+                return
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # QUALIFICATION COLLECTION LOGIC:
+            # 1. WAIT for reveals of previous epochs to complete first
+            # 2. Once reveals are done, check if workers are done IMMEDIATELY
+            # 3. Block 335 is the CUTOFF - but ONLY if reveals have been processed
+            # 4. At block 335, submit whatever is done, clear incomplete workers
+            # ═══════════════════════════════════════════════════════════════════
+            
+            # Check: are there reveals for PREVIOUS epochs that need to be submitted?
+            # Current epoch's reveals will be revealed NEXT epoch, so we DON'T wait for them.
+            has_pending_previous_reveals = False
+            try:
+                pending_reveals = getattr(self, '_pending_reveals', {})
+                for epoch_id in pending_reveals.keys():
+                    if epoch_id < current_epoch:
+                        # This is a PREVIOUS epoch that should be revealed NOW
+                        has_pending_previous_reveals = True
+                        break
+            except:
+                pass
+            
+            # If previous epoch reveals are still pending, ALWAYS wait (even past block 335)
+            # Reveals take priority over qualification submission
+            if has_pending_previous_reveals:
+                if not hasattr(self, '_qual_waiting_for_reveals_logged'):
+                    self._qual_waiting_for_reveals_logged = set()
+                if current_epoch not in self._qual_waiting_for_reveals_logged:
+                    pending_epochs = list(getattr(self, '_pending_reveals', {}).keys())
+                    previous_pending = [e for e in pending_epochs if e < current_epoch]
+                    print(f"🎯 QUALIFICATION: Waiting for reveals of previous epochs (block {blocks_into_epoch}/360)")
+                    print(f"   Previous epochs pending: {previous_pending}")
+                    print(f"   Current epoch in queue: {current_epoch} (will reveal next epoch)")
+                    self._qual_waiting_for_reveals_logged.add(current_epoch)
+                return
+            
+            # Reveals are done! Now check qualification workers.
+            # Block 335 is the CUTOFF - if workers aren't done by then, submit what's ready
+            past_cutoff = blocks_into_epoch >= 335
+            
+            # Collect results (with cutoff logic handled in the collection function)
+            try:
+                results, all_workers_done = await self._collect_dedicated_qualification_results(
+                    current_epoch, 
+                    force_submit=past_cutoff
+                )
+                
+                # If not past cutoff and workers aren't done, wait and show progress
+                if not past_cutoff and not all_workers_done:
+                    # Track last log time for periodic updates
+                    if not hasattr(self, '_qual_waiting_last_log_time'):
+                        self._qual_waiting_last_log_time = 0
+                    if not hasattr(self, '_qual_waiting_last_log_block'):
+                        self._qual_waiting_last_log_block = -1
+                    
+                    import time
+                    current_time = time.time()
+                    # Log every 30 seconds OR on first call OR if block changed significantly
+                    should_log = (
+                        current_time - self._qual_waiting_last_log_time >= 30 or
+                        self._qual_waiting_last_log_block == -1 or
+                        blocks_into_epoch - self._qual_waiting_last_log_block >= 10
+                    )
+                    
+                    if should_log:
+                        # Get worker status for detailed logging
+                        from pathlib import Path
+                        weights_dir = Path("validator_weights")
+                        pending_workers = []
+                        completed_workers = []
+                        for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
+                            work_file = weights_dir / f"qual_worker_{i}_work_{current_epoch}.json"
+                            results_file = weights_dir / f"qual_worker_{i}_results_{current_epoch}.json"
+                            if work_file.exists():
+                                if results_file.exists():
+                                    completed_workers.append(i)
+                                else:
+                                    pending_workers.append(i)
+                        
+                        if pending_workers:
+                            print(f"🎯 QUALIFICATION: Waiting for workers to finish (block {blocks_into_epoch}/335)")
+                            print(f"   ⏳ Pending: Qual Workers {pending_workers}")
+                            if completed_workers:
+                                print(f"   ✅ Complete: Qual Workers {completed_workers}")
+                        
+                        self._qual_waiting_last_log_time = current_time
+                        self._qual_waiting_last_log_block = blocks_into_epoch
+                    return
+                
+                # Log collection
+                print(f"\n{'='*70}")
+                print(f"🎯 QUALIFICATION: Collecting worker results")
+                print(f"{'='*70}")
+                print(f"   Epoch: {current_epoch}")
+                print(f"   Block: {blocks_into_epoch}/360")
+                if past_cutoff and not all_workers_done:
+                    print(f"   ⚠️ Block 335 cutoff reached - submitting available results")
+                else:
+                    print(f"   ✅ All workers complete - submitting results")
+                
+                if results:
+                    print(f"   📊 Collected {len(results)} model result(s) from workers")
+                    await self._process_dedicated_qualification_results(results, current_epoch)
+                else:
+                    print(f"   ℹ️ No qualification results to process")
+                
+                # Mark as collected
+                self._qual_results_collected_epochs.add(current_epoch)
+                self._qual_dedicated_results_logged.add(current_epoch)
+                
+            except Exception as e:
+                print(f"   ⚠️ Error collecting qualification results: {e}")
+                import traceback
+                traceback.print_exc()
+                # Still mark as attempted to avoid infinite retries
+                self._qual_results_collected_epochs.add(current_epoch)
+                self._qual_dedicated_results_logged.add(current_epoch)
+            return
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # DEDICATED QUALIFICATION WORKERS REQUIRED
+        # ═══════════════════════════════════════════════════════════════════
+        # Qualification now runs PARALLEL to sourcing via dedicated workers.
+        # Set QUALIFICATION_WEBSHARE_PROXY_1 through QUALIFICATION_WEBSHARE_PROXY_5
+        # to enable dedicated qualification containers.
+        # ═══════════════════════════════════════════════════════════════════
+        if not hasattr(self, '_qual_no_dedicated_workers_logged'):
+            self._qual_no_dedicated_workers_logged = True
+            print(f"⚠️ QUALIFICATION: No dedicated workers detected")
+            print(f"   Set QUALIFICATION_WEBSHARE_PROXY_1 through QUALIFICATION_WEBSHARE_PROXY_5")
+            print(f"   to enable parallel qualification model evaluation")
+        return
+    
+    async def _qualification_register(self):
+        """Register with the gateway for qualification work."""
+        try:
+            import httpx
+            import hashlib
+            
+            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            hotkey = self.wallet.hotkey.ss58_address
+            timestamp = int(time.time())
+            
+            # Sign timestamp with hotkey
+            message = str(timestamp).encode()
+            signature = self.wallet.hotkey.sign(message).hex()
+            
+            payload = {
+                "timestamp": timestamp,
+                "signed_timestamp": signature,
+                "hotkey": hotkey,
+                "commit_hash": os.environ.get("VALIDATOR_CODE_VERSION", "unknown")
+            }
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{gateway_url}/qualification/validator/register",
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                self._qualification_session_id = data.get("session_id")
+                bt.logging.info(f"🎯 Qualification registered: session={self._qualification_session_id[:8]}...")
+                
+        except Exception as e:
+            bt.logging.warning(f"Qualification registration failed: {e}")
+            raise
+    
+    async def _qualification_request_work(self) -> Optional[Dict]:
+        """Request single evaluation work from gateway (for backwards compatibility)."""
+        if not self._qualification_session_id:
+            return None
+            
+        try:
+            import httpx
+            
+            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{gateway_url}/qualification/validator/request-evaluation",
+                    json={"session_id": self._qualification_session_id}
+                )
+                
+                if response.status_code == 404:
+                    # Session expired, need to re-register
+                    self._qualification_session_id = None
+                    return None
+                    
+                response.raise_for_status()
+                return response.json()
+                
+        except Exception as e:
+            bt.logging.warning(f"Qualification work request failed: {e}")
+            return None
+    
+    async def _qualification_request_batch_work(self, max_models: int = None, epoch: int = None) -> Optional[Dict]:
+        """
+        Request a batch of models for evaluation from gateway.
+        
+        This is the preferred method for coordinator to fetch all pending models
+        at once (FIFO order by created_at, where evaluated_at is NULL).
+        
+        Args:
+            max_models: Max models to request. Defaults to QUALIFICATION_CONFIG.MAX_MODELS_PER_EPOCH
+            epoch: Current epoch (for logging)
+        
+        Returns:
+            Dict with 'has_work', 'models', and 'queue_depth' fields
+        """
+        if not self._qualification_session_id:
+            return None
+        
+        if max_models is None:
+            max_models = QUALIFICATION_CONFIG.MAX_MODELS_PER_EPOCH
+        
+        try:
+            import httpx
+            
+            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            
+            async with httpx.AsyncClient(timeout=60.0) as client:  # Longer timeout for batch
+                response = await client.post(
+                    f"{gateway_url}/qualification/validator/request-batch-evaluation",
+                    json={
+                        "session_id": self._qualification_session_id,
+                        "max_models": max_models,
+                        "epoch": epoch
+                    }
+                )
+                
+                if response.status_code == 404:
+                    # Session expired, need to re-register
+                    self._qualification_session_id = None
+                    return None
+                
+                response.raise_for_status()
+                return response.json()
+                
+        except Exception as e:
+            bt.logging.warning(f"Qualification batch work request failed: {e}")
+            return None
+    
+    async def _qualification_execute_work(self, work: Dict):
+        """Execute qualification evaluation work."""
+        try:
+            import base64
+            import httpx
+            from qualification.validator.sandbox import TEESandbox
+            from gateway.qualification.models import LeadOutput, ICPPrompt, LeadScoreBreakdown
+            from qualification.scoring.lead_scorer import score_lead
+            from qualification.scoring.pre_checks import run_automatic_zero_checks
+            
+            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            evaluation_id = work.get("evaluation_id")
+            model_code_b64 = work.get("agent_code", "")
+            runs = work.get("evaluation_runs", [])
+            is_rebenchmark = work.get("is_rebenchmark", False)  # Skip hardcoding check for rebenchmarks
+            model_name = work.get("model_name", "Unknown")
+            
+            # Decode model code
+            model_code = base64.b64decode(model_code_b64) if model_code_b64 else b""
+            
+            print(f"\n{'='*60}")
+            print(f"🎯 QUALIFICATION EVALUATION STARTING")
+            print(f"   Evaluation ID: {evaluation_id[:16] if evaluation_id else 'N/A'}...")
+            print(f"   Model Name: {model_name}")
+            print(f"   ICPs to test: {len(runs)}")
+            print(f"   Model code size: {len(model_code)} bytes")
+            print(f"   Is Rebenchmark: {'Yes (skipping hardcoding check)' if is_rebenchmark else 'No'}")
+            print(f"{'='*60}")
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # HARDCODING DETECTION: Analyze code BEFORE running (skip for rebenchmarks)
+            # ═══════════════════════════════════════════════════════════════════════
+            if not is_rebenchmark and model_code:
+                try:
+                    from qualification.validator.hardcoding_detector import (
+                        analyze_model_for_hardcoding,
+                        is_detection_enabled
+                    )
+                    
+                    if is_detection_enabled():
+                        print(f"\n🔍 HARDCODING DETECTION: Analyzing model code...")
+                        
+                        # Get ICP samples for context (first 5 ICPs)
+                        icp_samples = [run.get("icp_data", {}) for run in runs[:5]]
+                        
+                        # Run detection with real ICP samples
+                        detection_result = await analyze_model_for_hardcoding(
+                            model_code=model_code,
+                            icp_samples=icp_samples
+                        )
+                        
+                        print(f"   Detection model: {detection_result.get('model_used', 'N/A')}")
+                        print(f"   Confidence hardcoded: {detection_result.get('confidence_hardcoded', 0)}%")
+                        print(f"   Analysis cost: ${detection_result.get('analysis_cost_usd', 0):.4f}")
+                        
+                        if not detection_result.get("passed", True):
+                            # Model appears to be hardcoded - REJECT without running
+                            print(f"\n❌ HARDCODING DETECTED: Model appears to be hardcoded!")
+                            print(f"   Red flags: {detection_result.get('red_flags', [])}")
+                            print(f"   Evidence: {detection_result.get('evidence', 'N/A')[:200]}...")
+                            
+                            # Report error for all runs using existing /report-error endpoint
+                            for run in runs:
+                                await self._qualification_report_error(
+                                    evaluation_run_id=run.get("evaluation_run_id"),
+                                    error_code=1010,  # Error code for hardcoding detection
+                                    error_message=f"Model rejected: Hardcoding detected ({detection_result.get('confidence_hardcoded', 0)}% confidence). "
+                                                  f"Red flags: {', '.join(detection_result.get('red_flags', []))}"
+                                )
+                            
+                            return  # Don't run the model
+                        
+                        print(f"   ✅ Hardcoding check PASSED")
+                    else:
+                        print(f"   ℹ️ Hardcoding detection disabled in config")
+                        
+                except ImportError as ie:
+                    print(f"   ⚠️ Hardcoding detector not available: {ie}")
+                except Exception as det_err:
+                    print(f"   ⚠️ Hardcoding detection error (continuing): {det_err}")
+                    # Don't block on detection errors - allow model to run
+            
+            bt.logging.info(
+                f"🎯 Starting qualification evaluation: "
+                f"id={evaluation_id[:8] if evaluation_id else 'N/A'}..., "
+                f"runs={len(runs)}, code_size={len(model_code)} bytes"
+            )
+            
+            # Track seen companies for duplicate handling
+            seen_companies = set()
+            
+            # Track total evaluation cost for $5 hard stop
+            total_evaluation_cost = 0.0
+            MAX_TOTAL_COST = QUALIFICATION_CONFIG.MAX_COST_PER_EVALUATION_USD  # $5.00
+            evaluation_stopped_early = False
+            
+            # Track total scores and time for summary
+            total_score = 0.0
+            total_time = 0.0
+            leads_scored = 0
+            
+            # Initialize sandbox
+            sandbox = None
+            try:
+                api_proxy_url = f"{gateway_url}/qualification/proxy"
+                
+                sandbox = TEESandbox(
+                    model_code=model_code,
+                    evaluation_run_id=runs[0]["evaluation_run_id"] if runs else None,
+                    api_proxy_url=api_proxy_url,
+                    evaluation_id=evaluation_id
+                )
+                await sandbox.start()
+                
+                # Process each ICP
+                for run_idx, run in enumerate(runs, 1):
+                    # ═══════════════════════════════════════════════════════════
+                    # $5 HARD STOP: Check BEFORE processing each lead
+                    # ═══════════════════════════════════════════════════════════
+                    if total_evaluation_cost >= MAX_TOTAL_COST:
+                        print(f"\n   🛑 $5 HARD STOP: Total cost ${total_evaluation_cost:.2f} >= ${MAX_TOTAL_COST:.2f}")
+                        print(f"   🛑 Stopping evaluation at ICP {run_idx}/{len(runs)} to protect costs")
+                        evaluation_stopped_early = True
+                        # Report remaining runs as cost-stopped
+                        for remaining_run in runs[run_idx-1:]:
+                            await self._qualification_report_error(
+                                evaluation_run_id=remaining_run.get("evaluation_run_id"),
+                                error_code=1005,
+                                error_message=f"Evaluation stopped: $5 cost limit reached (${total_evaluation_cost:.2f})"
+                            )
+                        break
+                    evaluation_run_id = run.get("evaluation_run_id")
+                    icp_data = run.get("icp_data", {})
+                    icp_industry = icp_data.get("industry", "Unknown")
+                    
+                    print(f"\n   📋 ICP {run_idx}/{len(runs)}: {icp_industry}")
+                    
+                    try:
+                        # Create ICP prompt
+                        icp = ICPPrompt(**icp_data)
+                        
+                        # Run model with timeout
+                        start_time = time.time()
+                        result = await asyncio.wait_for(
+                            sandbox.run_model(icp),
+                            timeout=QUALIFICATION_CONFIG.RUNNING_MODEL_TIMEOUT_SECONDS
+                        )
+                        run_time = time.time() - start_time
+                        
+                        # Get cost from sandbox (tracks API calls made by model)
+                        run_cost = sandbox.get_run_cost() if hasattr(sandbox, 'get_run_cost') else 0.01
+                        
+                        # Accumulate total cost for $5 hard stop
+                        total_evaluation_cost += run_cost
+                        
+                        # Parse lead output and check for errors
+                        lead_data = result.get("lead") if isinstance(result, dict) else None
+                        error_msg = result.get("error") if isinstance(result, dict) else None
+                        lead = LeadOutput(**lead_data) if lead_data else None
+                        
+                        # Score lead
+                        if lead:
+                            scores = await score_lead(
+                                lead=lead,
+                                icp=icp,
+                                run_cost_usd=run_cost,
+                                run_time_seconds=run_time,
+                                seen_companies=seen_companies
+                            )
+                        else:
+                            # Use actual error message if available
+                            failure_reason = error_msg if error_msg else "No lead returned"
+                            scores = LeadScoreBreakdown(
+                                icp_fit=0, decision_maker=0, intent_signal_raw=0,
+                                time_decay_multiplier=1.0, intent_signal_final=0,
+                                cost_penalty=0, time_penalty=0, final_score=0,
+                                failure_reason=failure_reason
+                            )
+                        
+                        # Report results
+                        await self._qualification_report_results(
+                            evaluation_run_id=evaluation_run_id,
+                            lead=lead,
+                            scores=scores,
+                            run_cost_usd=run_cost,
+                            run_time_seconds=run_time
+                        )
+                        
+                        # Accumulate scores and time for summary
+                        total_score += scores.final_score
+                        total_time += run_time
+                        leads_scored += 1
+                        
+                        if lead:
+                            print(f"      ✅ Lead returned: {lead.email} @ {lead.business}")
+                            print(f"      📊 Score: {scores.final_score:.2f} (ICP:{scores.icp_fit}, DM:{scores.decision_maker}, Intent:{scores.intent_signal_final:.2f})")
+                        else:
+                            print(f"      ❌ No lead returned: {scores.failure_reason}")
+                        print(f"      ⏱️  Time: {run_time:.2f}s, 💰 Cost: ${run_cost:.6f} (Total: ${total_evaluation_cost:.4f}/${MAX_TOTAL_COST:.2f})")
+                        
+                        bt.logging.info(
+                            f"🎯 Run completed: score={scores.final_score:.2f}, "
+                            f"time={run_time:.2f}s"
+                        )
+                        
+                    except asyncio.TimeoutError:
+                        print(f"      ⚠️  TIMEOUT: Model took too long")
+                        # Still count time for timeouts (use timeout value)
+                        total_time += QUALIFICATION_CONFIG.RUNNING_MODEL_TIMEOUT_SECONDS
+                        await self._qualification_report_error(
+                            evaluation_run_id=evaluation_run_id,
+                            error_code=1010,
+                            error_message="Model timeout"
+                        )
+                    except Exception as e:
+                        print(f"      ❌ ERROR: {e}")
+                        bt.logging.error(f"Qualification run error: {e}")
+                        # Still count time even on errors (run_time is set if sandbox ran)
+                        if 'run_time' in dir() and run_time > 0:
+                            total_time += run_time
+                        await self._qualification_report_error(
+                            evaluation_run_id=evaluation_run_id,
+                            error_code=1000,
+                            error_message=str(e)
+                        )
+                        
+            finally:
+                if sandbox:
+                    try:
+                        await sandbox.cleanup()
+                    except Exception as e:
+                        bt.logging.warning(f"Sandbox cleanup error: {e}")
+            
+            # Calculate final average score
+            avg_score = total_score / leads_scored if leads_scored > 0 else 0.0
+            
+            print(f"\n{'='*60}")
+            if evaluation_stopped_early:
+                print(f"🛑 QUALIFICATION EVALUATION STOPPED - $5 COST LIMIT")
+            else:
+                print(f"🎯 QUALIFICATION EVALUATION COMPLETE")
+            print(f"   Model: {work.get('model_name', 'Unknown')}")
+            print(f"   Miner: {work.get('miner_hotkey', 'Unknown')[:16]}...")
+            print(f"   ICPs evaluated: {run_idx if 'run_idx' in dir() else len(runs)}/{len(runs)}")
+            print(f"   📊 Final Score: {avg_score:.2f} / 100 (avg per ICP)")
+            print(f"   ⏱️  Total Time: {total_time:.2f}s ({total_time/60:.1f} min)")
+            print(f"   💰 Total cost: ${total_evaluation_cost:.4f}")
+            if evaluation_stopped_early:
+                print(f"   ⚠️  Remaining {len(runs) - run_idx + 1} ICPs skipped due to cost limit")
+            print(f"{'='*60}\n")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # CHAMPION DETERMINATION: Done locally by validator (not gateway)
+            # Updates validator_weights/qualification_champion.json
+            # ═══════════════════════════════════════════════════════════════════
+            became_champion, is_rebenchmark = self._update_champion_if_needed(
+                model_id=work.get("model_id", "unknown"),
+                model_name=work.get("model_name", "Unknown"),
+                miner_hotkey=work.get("miner_hotkey", "unknown"),
+                score=avg_score,
+                total_cost_usd=total_evaluation_cost,
+                total_time_seconds=total_time,
+                num_leads=leads_scored
+            )
+            
+            # Send champion status to gateway for Supabase storage (one-way, for auditing)
+            # For rebenchmarks, this updates the champion's score (even if lower)
+            # Include cost/time for full DB update
+            await self._notify_gateway_champion_status(
+                model_id=work.get("model_id", "unknown"),
+                became_champion=became_champion,
+                score=avg_score,
+                is_rebenchmark=is_rebenchmark,
+                evaluation_cost_usd=total_evaluation_cost,
+                evaluation_time_seconds=int(total_time)
+            )
+                        
+        except Exception as e:
+            print(f"❌ QUALIFICATION ERROR: {e}")
+            bt.logging.error(f"Qualification execution error: {e}")
+            import traceback
+            bt.logging.error(traceback.format_exc())
+    
+    async def _qualification_report_results(
+        self,
+        evaluation_run_id: str,
+        lead: Optional[Any],
+        scores: Any,
+        run_cost_usd: float,
+        run_time_seconds: float
+    ):
+        """
+        Report qualification results to gateway.
+        
+        Gateway stores results in Supabase for leaderboard/auditing.
+        Champion determination happens locally via _update_champion_if_needed().
+        
+        Handles both:
+        - LeadOutput/LeadScoreBreakdown objects (from coordinator direct evaluation)
+        - Dict data (from worker results forwarded by coordinator)
+        """
+        try:
+            import httpx
+            
+            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            
+            # Handle both object and dict formats (coordinator vs worker-forwarded data)
+            if hasattr(lead, 'model_dump'):
+                lead_data = lead.model_dump()
+            elif isinstance(lead, dict):
+                lead_data = lead
+            else:
+                lead_data = None
+            
+            if hasattr(scores, 'model_dump'):
+                scores_data = scores.model_dump()
+                icp_fit = scores.icp_fit
+                dm_score = scores.decision_maker
+                intent_score = scores.intent_signal_final
+                cost_penalty = scores.cost_penalty
+                time_penalty = scores.time_penalty
+                final_score = scores.final_score
+            elif isinstance(scores, dict):
+                scores_data = scores
+                icp_fit = scores.get("icp_fit", 0)
+                dm_score = scores.get("decision_maker", 0)
+                intent_score = scores.get("intent_signal_final", 0)
+                cost_penalty = scores.get("cost_penalty", 0)
+                time_penalty = scores.get("time_penalty", 0)
+                final_score = scores.get("final_score", 0)
+            else:
+                scores_data = None
+                icp_fit = dm_score = intent_score = cost_penalty = time_penalty = final_score = 0
+            
+            payload = {
+                "evaluation_run_id": evaluation_run_id,
+                "lead_returned": lead_data,
+                "lead_score": scores_data,
+                "icp_fit_score": icp_fit,
+                "decision_maker_score": dm_score,
+                "intent_signal_score": intent_score,
+                "cost_penalty": cost_penalty,
+                "time_penalty": time_penalty,
+                "final_lead_score": final_score,
+                "run_cost_usd": run_cost_usd,
+                "run_time_seconds": run_time_seconds,
+                "status": "finished"
+            }
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{gateway_url}/qualification/validator/report-results",
+                    json=payload
+                )
+                response.raise_for_status()
+                # Gateway stores for auditing - champion determination is local
+                
+        except Exception as e:
+            bt.logging.warning(f"Failed to report qualification results: {e}")
+    
+    def _update_champion_if_needed(
+        self,
+        model_id: str,
+        model_name: str,
+        miner_hotkey: str,
+        score: float,
+        total_cost_usd: float,
+        total_time_seconds: float,
+        num_leads: int
+    ) -> tuple:
+        """
+        Check if evaluated model should become champion, update local JSON.
+        
+        Champion determination is done LOCALLY by the validator (not gateway).
+        
+        Rules:
+        1. If no current champion exists, new model becomes champion (if score > 0)
+        2. If current champion exists, new model must beat by 2% (CHAMPION_DETHRONING_THRESHOLD_PCT)
+        3. If this is a REBENCHMARK of the existing champion, ALWAYS update the score
+        
+        Format: validator_weights/qualification_champion.json
+        {
+            "current_champion": {
+                "model_id": "...",
+                "miner_hotkey": "...",
+                "score": 0.93,
+                "model_name": "Main7",
+                "became_champion_at": "2026-01-24T...",
+                "avg_cost_per_lead_usd": 0.00003,
+                "avg_time_per_lead_seconds": 0.25
+            },
+            "ex_champion": {...} or null,
+            "last_evaluated_model": {...},
+            "last_updated": "2026-01-24T...",
+            "champion_beat_threshold": 0.02
+        }
+        
+        NOTE: Only stores current + ex champion. When new champion is crowned,
+        old champion becomes ex, previous ex is deleted.
+        
+        Returns:
+            Tuple of (became_champion: bool, is_rebenchmark: bool)
+            - became_champion: True if model is now champion (new or rebenchmarked)
+            - is_rebenchmark: True if this was a rebenchmark of existing champion
+        """
+        from gateway.qualification.config import CONFIG
+        THRESHOLD = CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT
+        
+        try:
+            weights_dir = Path("validator_weights")
+            weights_dir.mkdir(exist_ok=True)
+            champion_file = weights_dir / "qualification_champion.json"
+            
+            # Load existing data
+            existing_data = {}
+            if champion_file.exists():
+                with open(champion_file, 'r') as f:
+                    existing_data = json.load(f)
+            
+            current_champion = existing_data.get("current_champion")
+            
+            # Calculate averages
+            avg_cost = total_cost_usd / num_leads if num_leads > 0 else 0
+            avg_time = total_time_seconds / num_leads if num_leads > 0 else 0
+            timestamp = datetime.utcnow().isoformat()
+            
+            # Build model data
+            model_data = {
+                "model_id": model_id,
+                "model_name": model_name,
+                "miner_hotkey": miner_hotkey,
+                "score": score,
+                "total_cost_usd": total_cost_usd,
+                "total_time_seconds": total_time_seconds,
+                "avg_cost_per_lead_usd": avg_cost,
+                "avg_time_per_lead_seconds": avg_time,
+                "num_leads_evaluated": num_leads
+            }
+            
+            became_champion = False
+            ex_champion = existing_data.get("ex_champion")  # Keep previous ex by default
+            is_rebenchmark = False
+            
+            # Check if this is a REBENCHMARK of the current champion
+            # Rebenchmarks should ALWAYS update the champion's score (regardless of higher/lower)
+            if current_champion and current_champion.get("model_id") == model_id:
+                is_rebenchmark = True
+                old_score = current_champion.get("score", 0)
+                score_change = score - old_score
+                score_change_pct = (score_change / old_score * 100) if old_score > 0 else 0
+                
+                # Update champion's score (ALWAYS for rebenchmark)
+                current_champion["score"] = score
+                current_champion["total_cost_usd"] = total_cost_usd
+                current_champion["total_time_seconds"] = total_time_seconds
+                current_champion["avg_cost_per_lead_usd"] = avg_cost
+                current_champion["avg_time_per_lead_seconds"] = avg_time
+                current_champion["num_leads_evaluated"] = num_leads
+                current_champion["last_rebenchmark_at"] = timestamp
+                
+                # Keep became_champion as True if they were already champion
+                became_champion = True
+                
+                # Log the rebenchmark result
+                change_indicator = "📈" if score_change > 0 else "📉" if score_change < 0 else "➡️"
+                print(f"\n{'='*60}")
+                print(f"🔄 CHAMPION REBENCHMARK COMPLETE")
+                print(f"   Model: {model_name}")
+                print(f"   Miner: {miner_hotkey[:20]}...")
+                print(f"   {change_indicator} Score: {old_score:.2f} → {score:.2f} ({score_change_pct:+.1f}%)")
+                print(f"   Avg Cost/Lead: ${avg_cost:.6f}")
+                print(f"   Avg Time/Lead: {avg_time:.2f}s")
+                print(f"   ✅ Champion score UPDATED to latest rebenchmark")
+                print(f"{'='*60}\n")
+            
+            # Case 1: No current champion - become champion if score > 0
+            elif current_champion is None:
+                if score > 0:
+                    model_data["became_champion_at"] = timestamp
+                    current_champion = model_data
+                    became_champion = True
+                    ex_champion = None  # No ex if this is first champion
+                    print(f"\n{'='*60}")
+                    print(f"👑 FIRST CHAMPION CROWNED!")
+                    print(f"   Model: {model_name}")
+                    print(f"   Miner: {miner_hotkey[:20]}...")
+                    print(f"   Score: {score:.2f}")
+                    print(f"   Avg Cost/Lead: ${avg_cost:.6f}")
+                    print(f"   Avg Time/Lead: {avg_time:.2f}s")
+                    print(f"{'='*60}\n")
+                else:
+                    print(f"\n📊 Model {model_name} scored 0 - cannot become champion")
+            else:
+                # Case 2: Current champion exists - new challenger needs to beat by threshold
+                current_score = current_champion.get("score", 0)
+                required_score = current_score * (1 + THRESHOLD)
+                
+                if score <= current_score:
+                    # Didn't beat current score
+                    print(f"\n📊 Model {model_name} (score: {score:.2f}) did not beat champion (score: {current_score:.2f})")
+                elif score < required_score:
+                    # Beat current but not by enough
+                    improvement = ((score - current_score) / current_score) * 100 if current_score > 0 else 100
+                    print(f"\n{'='*60}")
+                    print(f"📊 CHALLENGER FELL SHORT")
+                    print(f"   Model: {model_name} (score: {score:.2f})")
+                    print(f"   Improvement: +{improvement:.1f}%")
+                    print(f"   Required: +{THRESHOLD*100:.0f}% ({required_score:.2f})")
+                    print(f"   Champion: {current_champion.get('model_name')} (score: {current_score:.2f})")
+                    print(f"{'='*60}\n")
+                else:
+                    # NEW CHAMPION! Beat by required threshold
+                    improvement = ((score - current_score) / current_score) * 100 if current_score > 0 else 100
+                    
+                    # Old champion becomes ex-champion
+                    ex_champion = current_champion.copy()
+                    ex_champion["dethroned_at"] = timestamp
+                    
+                    # New champion
+                    model_data["became_champion_at"] = timestamp
+                    current_champion = model_data
+                    became_champion = True
+                    
+                    print(f"\n{'='*60}")
+                    print(f"👑👑👑 NEW CHAMPION CROWNED! 👑👑👑")
+                    print(f"   New Champion: {model_name}")
+                    print(f"   Miner: {miner_hotkey[:20]}...")
+                    print(f"   Score: {score:.2f} (+{improvement:.1f}%)")
+                    print(f"   Avg Cost/Lead: ${avg_cost:.6f}")
+                    print(f"   Avg Time/Lead: {avg_time:.2f}s")
+                    print(f"   Dethroned: {ex_champion.get('model_name')} (score: {ex_champion.get('score'):.2f})")
+                    print(f"{'='*60}\n")
+            
+            # Get current epoch for tracking rebenchmark timing
+            try:
+                current_block = self.subtensor.block
+                current_epoch = current_block // 360
+            except Exception:
+                current_epoch = 0
+            
+            # Update champion's last evaluated epoch and UTC date if this is the champion or a rebenchmark
+            if current_champion and (became_champion or is_rebenchmark):
+                current_champion["last_evaluated_epoch"] = current_epoch
+                # Track UTC date for ICP set refresh-based rebenchmark
+                from datetime import datetime as dt_datetime, timezone as dt_timezone
+                current_utc_date = dt_datetime.now(dt_timezone.utc).date().isoformat()
+                current_champion["last_evaluated_utc_date"] = current_utc_date
+            
+            # Save to JSON
+            new_data = {
+                "current_champion": current_champion,
+                "ex_champion": ex_champion,
+                "last_evaluated_model": model_data,
+                "last_updated": timestamp,
+                "champion_beat_threshold": THRESHOLD,
+                "current_epoch": current_epoch  # Track epoch for rebenchmark
+            }
+            
+            with open(champion_file, 'w') as f:
+                json.dump(new_data, f, indent=2)
+            
+            bt.logging.info(f"✅ Updated qualification_champion.json (became_champion={became_champion}, is_rebenchmark={is_rebenchmark})")
+            return (became_champion, is_rebenchmark)
+            
+        except Exception as e:
+            bt.logging.error(f"Failed to update champion: {e}")
+            import traceback
+            bt.logging.error(traceback.format_exc())
+            return (False, False)
+    
+    def _read_qualification_champion(self) -> Optional[Dict[str, Any]]:
+        """
+        Read qualification champion info from local JSON file.
+        
+        Returns:
+            Dict with current_champion info, or None if no champion
+        """
+        try:
+            champion_file = Path("validator_weights") / "qualification_champion.json"
+            
+            if not champion_file.exists():
+                bt.logging.debug("No qualification champion file found")
+                return None
+            
+            with open(champion_file, 'r') as f:
+                data = json.load(f)
+            
+            return data.get("current_champion")
+            
+        except Exception as e:
+            bt.logging.warning(f"Failed to read qualification champion: {e}")
+            return None
+    
+    def _check_champion_rebenchmark_needed(self) -> Optional[Dict[str, Any]]:
+        """
+        Check if the current champion needs rebenchmarking.
+        
+        Rebenchmark Logic (ICP Set Refresh):
+        - Rebenchmark on the FIRST FULL epoch that STARTS after 12:05 AM UTC daily
+        - This aligns with when the ICP set is refreshed (12:00 AM UTC)
+        - Track which UTC date the champion was last evaluated on
+        - Only rebenchmark ONCE per day (on the new ICP set)
+        
+        Example:
+        - Epoch 100: 11:30 PM -> 12:42 AM UTC (spans midnight) → Does NOT count
+        - Epoch 101: 12:42 AM -> 1:54 AM UTC (starts after 12:05 AM) → REBENCHMARK
+        - Epoch 102: 1:54 AM -> 3:06 AM UTC → No rebenchmark (already done today)
+        
+        Returns:
+            Dict with champion info if rebenchmark needed, None otherwise
+        """
+        from datetime import datetime, timezone, timedelta
+        
+        try:
+            champion_file = Path("validator_weights") / "qualification_champion.json"
+            
+            if not champion_file.exists():
+                return None
+            
+            with open(champion_file, 'r') as f:
+                data = json.load(f)
+            
+            champion = data.get("current_champion")
+            if not champion:
+                return None
+            
+            # Get current block and calculate epoch timing
+            try:
+                current_block = self.subtensor.block
+                current_epoch = current_block // 360
+            except Exception:
+                bt.logging.warning("Could not get current block for rebenchmark check")
+                return None
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # Calculate when the CURRENT EPOCH STARTED in UTC
+            # Each epoch is 360 blocks, each block is ~12 seconds
+            # ═══════════════════════════════════════════════════════════════════
+            epoch_start_block = current_epoch * 360
+            blocks_since_epoch_start = current_block - epoch_start_block
+            seconds_since_epoch_start = blocks_since_epoch_start * 12  # ~12 sec per block
+            
+            now_utc = datetime.now(timezone.utc)
+            epoch_start_utc = now_utc - timedelta(seconds=seconds_since_epoch_start)
+            
+            # Get the UTC date of the epoch START
+            epoch_start_date = epoch_start_utc.date()
+            epoch_start_hour = epoch_start_utc.hour
+            epoch_start_minute = epoch_start_utc.minute
+            
+            # Check if this epoch STARTED after the configured rebenchmark time (UTC)
+            # Default: 5:00 AM UTC (hour=5, minute=0) - for testing, production uses 12:05 AM
+            rebenchmark_hour = QUALIFICATION_CONFIG.CHAMPION_REBENCHMARK_HOUR_UTC if QUALIFICATION_AVAILABLE else 0
+            rebenchmark_minute = QUALIFICATION_CONFIG.CHAMPION_REBENCHMARK_MINUTE_UTC if QUALIFICATION_AVAILABLE else 5
+            
+            # Convert rebenchmark time and epoch start time to minutes since midnight for comparison
+            rebenchmark_minutes_since_midnight = rebenchmark_hour * 60 + rebenchmark_minute
+            epoch_start_minutes_since_midnight = epoch_start_hour * 60 + epoch_start_minute
+            
+            epoch_started_after_refresh = epoch_start_minutes_since_midnight >= rebenchmark_minutes_since_midnight
+            
+            # Get the UTC date we last evaluated on (if tracked)
+            last_evaluated_utc_date = champion.get("last_evaluated_utc_date")
+            today_utc_date_str = epoch_start_date.isoformat()  # YYYY-MM-DD format
+            
+            print(f"   📊 Rebenchmark check:")
+            print(f"      Current epoch: {current_epoch}")
+            print(f"      Epoch start (UTC): {epoch_start_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"      Rebenchmark trigger time: {rebenchmark_hour:02d}:{rebenchmark_minute:02d} UTC")
+            print(f"      Epoch started after trigger time: {epoch_started_after_refresh}")
+            print(f"      Last evaluated UTC date: {last_evaluated_utc_date or 'Never'}")
+            print(f"      Today's UTC date: {today_utc_date_str}")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # REBENCHMARK CONDITIONS:
+            # 1. This epoch STARTED after 12:05 AM UTC (not spanning midnight)
+            # 2. Champion hasn't been evaluated today (new ICP set)
+            # ═══════════════════════════════════════════════════════════════════
+            needs_rebenchmark = (
+                epoch_started_after_refresh and
+                last_evaluated_utc_date != today_utc_date_str
+            )
+            
+            if needs_rebenchmark:
+                bt.logging.info(
+                    f"🔄 Champion rebenchmark needed: New ICP set for {today_utc_date_str} "
+                    f"(last evaluated: {last_evaluated_utc_date or 'Never'})"
+                )
+                print(f"   ✅ REBENCHMARK TRIGGERED: New ICP set for {today_utc_date_str}")
+                return champion
+            else:
+                if not epoch_started_after_refresh:
+                    print(f"   ⏭️ Skipping: Epoch started before {rebenchmark_hour:02d}:{rebenchmark_minute:02d} UTC")
+                else:
+                    print(f"   ⏭️ Skipping: Already evaluated on today's ICP set ({today_utc_date_str})")
+            
+            return None
+            
+        except Exception as e:
+            bt.logging.warning(f"Failed to check champion rebenchmark: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    async def _request_champion_rebenchmark(self, champion: Dict[str, Any]) -> bool:
+        """
+        Request the gateway to queue the champion model for rebenchmarking.
+        
+        Args:
+            champion: Champion info dict with model_id
+        
+        Returns:
+            True if rebenchmark was queued successfully
+        """
+        try:
+            import httpx
+            
+            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            model_id = champion.get("model_id")
+            
+            if not model_id:
+                bt.logging.warning("Champion has no model_id, cannot request rebenchmark")
+                return False
+            
+            print(f"\n{'='*60}")
+            print(f"🔄 REQUESTING CHAMPION REBENCHMARK")
+            print(f"   Model: {champion.get('model_name', 'Unknown')}")
+            print(f"   Model ID: {model_id[:16]}...")
+            print(f"   Current Score: {champion.get('score', 0):.2f}")
+            print(f"{'='*60}\n")
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{gateway_url}/qualification/validator/request-rebenchmark",
+                    json={
+                        "model_id": model_id,
+                        "session_id": self._qualification_session_id
+                    }
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    bt.logging.info(f"✅ Champion rebenchmark queued: {result}")
+                    return True
+                else:
+                    bt.logging.warning(f"Failed to queue rebenchmark: {response.status_code} - {response.text}")
+                    return False
+                    
+        except Exception as e:
+            bt.logging.warning(f"Failed to request champion rebenchmark: {e}")
+            return False
+    
+    async def _qualification_report_error(
+        self,
+        evaluation_run_id: str,
+        error_code: int,
+        error_message: str
+    ):
+        """Report qualification error to gateway."""
+        try:
+            import httpx
+            
+            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            
+            payload = {
+                "evaluation_run_id": evaluation_run_id,
+                "error_code": error_code,
+                "error_message": error_message,
+                "status": "error"
+            }
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{gateway_url}/qualification/validator/report-error",
+                    json=payload
+                )
+                response.raise_for_status()
+                
+        except Exception as e:
+            bt.logging.warning(f"Failed to report qualification error: {e}")
+    
+    async def _notify_gateway_champion_status(
+        self,
+        model_id: str,
+        became_champion: bool,
+        score: float,
+        is_rebenchmark: bool = False,
+        evaluation_cost_usd: float = None,
+        evaluation_time_seconds: int = None,
+        code_content: str = None
+    ):
+        """
+        Notify gateway about champion status (one-way, for Supabase storage).
+        
+        The validator determines champion locally and tells gateway the result.
+        Gateway stores this in Supabase for leaderboard/auditing purposes.
+        
+        This is a one-way notification - gateway does not send anything back.
+        
+        Args:
+            model_id: UUID of the model
+            became_champion: True if this model is now champion
+            score: The evaluation score
+            is_rebenchmark: True if this is a rebenchmark of the existing champion
+                           (signals gateway to update score even if became_champion=True)
+            evaluation_cost_usd: Total cost of the evaluation (optional)
+            evaluation_time_seconds: Total time of the evaluation in seconds (optional)
+            code_content: JSON string of code files for display (optional)
+        """
+        try:
+            import httpx
+            
+            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            
+            payload = {
+                "model_id": model_id,
+                "became_champion": became_champion,
+                "score": score,
+                "is_rebenchmark": is_rebenchmark,  # Tell gateway this is a rebenchmark
+                "determined_by": "validator"  # Indicates validator made the decision
+            }
+            
+            # Add optional fields if provided (for full DB update)
+            if evaluation_cost_usd is not None:
+                payload["evaluation_cost_usd"] = evaluation_cost_usd
+            if evaluation_time_seconds is not None:
+                payload["evaluation_time_seconds"] = evaluation_time_seconds
+            if code_content is not None:
+                payload["code_content"] = code_content
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{gateway_url}/qualification/validator/champion-status",
+                    json=payload
+                )
+                response.raise_for_status()
+                bt.logging.info(f"✅ Notified gateway of champion status: model={model_id[:8]}..., became_champion={became_champion}")
+                
+        except Exception as e:
+            # Non-critical - local JSON is source of truth
+            bt.logging.warning(f"Failed to notify gateway of champion status: {e}")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # DEDICATED QUALIFICATION WORKERS: Assignment at Epoch Start
+    # ═══════════════════════════════════════════════════════════════════════════
+    # These methods handle assigning models to the 5 dedicated qualification containers
+    # that run PARALLEL to sourcing (not after it)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    async def _assign_qualification_to_dedicated_workers(self, current_epoch: int):
+        """
+        Assign qualification models to dedicated qualification workers at EPOCH START.
+        
+        This runs BEFORE sourcing begins (parallel, not sequential).
+        
+        Distribution logic:
+        - 5 dedicated qualification containers
+        - Each handles up to 2 models per epoch
+        - If rebenchmark needed: Worker 1 does rebenchmark, others get 2 each (8 max from queue)
+        - If no rebenchmark: All 5 workers get 2 each (10 max from queue)
+        
+        Args:
+            current_epoch: Current epoch number
+        """
+        import httpx
+        from pathlib import Path
+        
+        # Check if we've already assigned for this epoch
+        if not hasattr(self, '_qual_dedicated_last_assigned_epoch'):
+            self._qual_dedicated_last_assigned_epoch = -1
+        
+        if self._qual_dedicated_last_assigned_epoch == current_epoch:
+            print(f"   ℹ️ Already assigned qualification work for epoch {current_epoch}")
+            return
+        
+        weights_dir = Path("validator_weights")
+        weights_dir.mkdir(exist_ok=True)
+        
+        # Clean up old qualification worker files
+        for old_file in weights_dir.glob("qual_worker_*_work_*.json"):
+            try:
+                file_epoch = int(old_file.stem.split('_')[-1])
+                if file_epoch < current_epoch:
+                    old_file.unlink()
+                    print(f"   🧹 Cleaned up stale qual work: {old_file.name}")
+            except:
+                pass
+        
+        for old_file in weights_dir.glob("qual_worker_*_results_*.json"):
+            try:
+                file_epoch = int(old_file.stem.split('_')[-1])
+                if file_epoch < current_epoch:
+                    old_file.unlink()
+                    print(f"   🧹 Cleaned up stale qual results: {old_file.name}")
+            except:
+                pass
+        
+        # Initialize qualification validator if needed
+        if not QUALIFICATION_AVAILABLE:
+            print(f"   ⚠️ Qualification module not available")
+            return
+        
+        if not hasattr(self, '_qualification_validator') or not self._qualification_session_id:
+            try:
+                gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+                
+                self._qualification_validator = QualificationValidator(
+                    hotkey=self.wallet.hotkey.ss58_address,
+                    code_version=os.environ.get("VALIDATOR_CODE_VERSION", "unknown"),
+                    platform_url=gateway_url
+                )
+                
+                # Register with gateway
+                await self._qualification_register()
+                
+            except Exception as e:
+                print(f"   ❌ Failed to initialize qualification: {e}")
+                return
+        
+        # Check if rebenchmark is needed
+        rebenchmark_needed = self._check_champion_rebenchmark_needed()
+        rebenchmark_model = None
+        
+        # Determine max models to pull
+        if rebenchmark_needed:
+            # Worker 1 does rebenchmark, others get 2 each = 4*2 = 8 from queue
+            max_models = QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK
+            print(f"   🔄 Rebenchmark needed - pulling max {max_models} new models from queue")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # FETCH REBENCHMARK MODEL: 
+            # 1. Call /request-rebenchmark to queue champion (in-memory)
+            # 2. Call /request-evaluation to get the work item
+            # ═══════════════════════════════════════════════════════════════════
+            try:
+                champion_data = self._read_qualification_champion()
+                if champion_data and champion_data.get("model_id"):
+                    champion_model_id = champion_data.get("model_id")
+                    print(f"   📥 Requesting rebenchmark for champion: {champion_data.get('model_name', 'Unknown')}")
+                    
+                    gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+                    
+                    # Step 1: Queue the rebenchmark (adds to in-memory queue on gateway)
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        rebench_resp = await client.post(
+                            f"{gateway_url}/qualification/validator/request-rebenchmark",
+                            json={
+                                "model_id": champion_model_id,
+                                "session_id": self._qualification_session_id
+                            }
+                        )
+                        if rebench_resp.status_code == 200:
+                            rebench_result = rebench_resp.json()
+                            print(f"   ✅ Champion queued for rebenchmark: {rebench_result.get('status', 'unknown')}")
+                            
+                            # Step 2: Fetch the work item from gateway (now in in-memory queue)
+                            eval_resp = await client.post(
+                                f"{gateway_url}/qualification/validator/request-evaluation",
+                                json={"session_id": self._qualification_session_id}
+                            )
+                            if eval_resp.status_code == 200:
+                                eval_data = eval_resp.json()
+                                if eval_data.get("has_work"):
+                                    rebenchmark_model = {
+                                        "evaluation_id": eval_data.get("evaluation_id"),
+                                        "model_id": eval_data.get("model_id"),
+                                        "model_name": eval_data.get("model_name"),
+                                        "miner_hotkey": eval_data.get("miner_hotkey"),
+                                        "agent_code": eval_data.get("agent_code"),
+                                        "evaluation_runs": [run.__dict__ if hasattr(run, '__dict__') else run for run in eval_data.get("evaluation_runs", [])],
+                                        "icp_set_hash": eval_data.get("icp_set_hash", ""),
+                                        "is_rebenchmark": True
+                                    }
+                                    print(f"   ✅ Got rebenchmark work item: {rebenchmark_model['model_name']}")
+                        else:
+                            print(f"   ⚠️ Failed to queue rebenchmark: {rebench_resp.status_code}")
+                else:
+                    print(f"   ⚠️ No champion found for rebenchmark")
+            except Exception as rebench_err:
+                print(f"   ⚠️ Rebenchmark request failed: {rebench_err}")
+        else:
+            # All 5 workers get 2 each = 10 from queue
+            max_models = QUALIFICATION_MAX_MODELS_PER_EPOCH
+            print(f"   📦 No rebenchmark - pulling max {max_models} models from queue")
+        
+        # Fetch batch of NEW models from gateway (DB query - excludes rebenchmark)
+        all_models = []
+        try:
+            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"{gateway_url}/qualification/validator/request-batch-evaluation",
+                    json={
+                        "session_id": self._qualification_session_id,
+                        "max_models": max_models,
+                        "epoch": current_epoch
+                    }
+                )
+                response.raise_for_status()
+                batch_response = response.json()
+                all_models = batch_response.get("models", [])
+                
+        except Exception as e:
+            print(f"   ❌ Failed to fetch models from gateway: {e}")
+            # Continue with rebenchmark if we have it
+        
+        if not all_models and not rebenchmark_model:
+            print(f"   ℹ️ No models to evaluate this epoch")
+            self._qual_dedicated_last_assigned_epoch = current_epoch
+            return
+        
+        print(f"   📥 Received {len(all_models)} new models" + (f" + 1 rebenchmark" if rebenchmark_model else ""))
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # DISTRIBUTE MODELS TO DEDICATED QUALIFICATION WORKERS (ROUND-ROBIN)
+        # ═══════════════════════════════════════════════════════════════════
+        # Round-robin distribution: 1 model per worker, then wrap around
+        # Example with 6 models and 5 workers:
+        #   Worker 1 → Model 1, Model 6
+        #   Worker 2 → Model 2
+        #   Worker 3 → Model 3
+        #   Worker 4 → Model 4
+        #   Worker 5 → Model 5
+        # If rebenchmark needed: Worker 1 gets rebenchmark only, others get new models
+        # ═══════════════════════════════════════════════════════════════════
+        
+        worker_assignments = {}  # {qual_container_id: {"models": [...], "is_rebenchmark_container": bool}}
+        
+        if rebenchmark_needed and rebenchmark_model:
+            # Worker 1 does ONLY the rebenchmark (full focus)
+            worker_assignments[1] = {
+                "models": [rebenchmark_model],
+                "is_rebenchmark_container": True
+            }
+            # Mark rebenchmark model
+            rebenchmark_model["is_rebenchmark"] = True
+            
+            # Distribute remaining models to workers 2-5 (round-robin)
+            models_to_distribute = all_models
+            available_workers = [2, 3, 4, 5]
+        else:
+            # No rebenchmark - all 5 workers available (round-robin)
+            models_to_distribute = all_models
+            available_workers = [1, 2, 3, 4, 5]
+        
+        # ROUND-ROBIN DISTRIBUTION: Each model goes to next worker, wrap around
+        for model_idx, model in enumerate(models_to_distribute):
+            # Round-robin: model 0 → worker[0], model 1 → worker[1], ...
+            # model 5 → worker[0] again (wrap around)
+            worker_id = available_workers[model_idx % len(available_workers)]
+            
+            if worker_id not in worker_assignments:
+                worker_assignments[worker_id] = {"models": [], "is_rebenchmark_container": False}
+            worker_assignments[worker_id]["models"].append(model)
+        
+        # Write work files for each worker
+        for worker_id, assignment in worker_assignments.items():
+            work_file = weights_dir / f"qual_worker_{worker_id}_work_{current_epoch}.json"
+            with open(work_file, 'w') as f:
+                json.dump({
+                    "epoch": current_epoch,
+                    "qual_worker_id": worker_id,
+                    "models": assignment["models"],
+                    "is_rebenchmark_container": assignment["is_rebenchmark_container"],
+                    "assigned_at": time.time()
+                }, f, indent=2)
+            
+            num_models = len(assignment["models"])
+            rebench_str = " (REBENCHMARK)" if assignment["is_rebenchmark_container"] else ""
+            print(f"   📤 Qual Worker {worker_id}: {num_models} model(s){rebench_str}")
+        
+        self._qual_dedicated_last_assigned_epoch = current_epoch
+        print(f"   ✅ Assigned {sum(len(a['models']) for a in worker_assignments.values())} models to {len(worker_assignments)} workers")
+
+    async def _collect_dedicated_qualification_results(
+        self, 
+        current_epoch: int, 
+        force_submit: bool = False
+    ) -> tuple:
+        """
+        Collect results from dedicated qualification workers.
+        
+        Called by coordinator to aggregate results and update champion status.
+        NO timeout - just checks current state of workers.
+        
+        Args:
+            current_epoch: Current epoch number
+            force_submit: If True (block 335 cutoff), collect whatever is ready and
+                         clear work files for incomplete workers
+            
+        Returns:
+            Tuple of (results_list, all_workers_done)
+            - results_list: List of model results from completed workers
+            - all_workers_done: True if all workers have finished
+        """
+        from pathlib import Path
+        
+        weights_dir = Path("validator_weights")
+        all_results = []
+        
+        # Check which workers have work assigned
+        expected_workers = set()
+        for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
+            work_file = weights_dir / f"qual_worker_{i}_work_{current_epoch}.json"
+            if work_file.exists():
+                expected_workers.add(i)
+        
+        if not expected_workers:
+            return [], True  # No workers = done
+        
+        # Check which workers have completed
+        completed_workers = set()
+        for worker_id in expected_workers:
+            results_file = weights_dir / f"qual_worker_{worker_id}_results_{current_epoch}.json"
+            if results_file.exists():
+                try:
+                    with open(results_file, 'r') as f:
+                        worker_data = json.load(f)
+                    all_results.extend(worker_data.get("model_results", []))
+                    completed_workers.add(worker_id)
+                except Exception as e:
+                    print(f"   ⚠️ Error reading results from worker {worker_id}: {e}")
+        
+        all_done = (completed_workers == expected_workers)
+        
+        # If force_submit (block 335 cutoff), clear work files for incomplete workers
+        # so they can process models for the next epoch
+        if force_submit and not all_done:
+            incomplete_workers = expected_workers - completed_workers
+            print(f"   ⚠️ Block 335 cutoff - clearing {len(incomplete_workers)} incomplete worker(s): {sorted(incomplete_workers)}")
+            for worker_id in incomplete_workers:
+                work_file = weights_dir / f"qual_worker_{worker_id}_work_{current_epoch}.json"
+                try:
+                    work_file.unlink()
+                    print(f"      🗑️ Cleared work file for Qual Worker {worker_id}")
+                except Exception as e:
+                    print(f"      ⚠️ Failed to clear work file for Qual Worker {worker_id}: {e}")
+            print(f"   ℹ️ Models from incomplete workers will be re-evaluated next epoch (status stays 'submitted')")
+        
+        # Log collection status
+        if all_done and completed_workers:
+            print(f"   ✅ All {len(expected_workers)} workers complete")
+            for worker_id in sorted(completed_workers):
+                results_file = weights_dir / f"qual_worker_{worker_id}_results_{current_epoch}.json"
+                try:
+                    with open(results_file, 'r') as f:
+                        worker_data = json.load(f)
+                    model_count = len(worker_data.get('model_results', []))
+                    print(f"      Qual Worker {worker_id}: {model_count} model(s)")
+                except:
+                    pass
+        elif completed_workers:
+            print(f"   📊 {len(completed_workers)}/{len(expected_workers)} workers complete")
+            for worker_id in sorted(completed_workers):
+                results_file = weights_dir / f"qual_worker_{worker_id}_results_{current_epoch}.json"
+                try:
+                    with open(results_file, 'r') as f:
+                        worker_data = json.load(f)
+                    model_count = len(worker_data.get('model_results', []))
+                    print(f"      ✅ Qual Worker {worker_id}: {model_count} model(s)")
+                except:
+                    pass
+            pending = expected_workers - completed_workers
+            print(f"      ⏳ Pending: {sorted(pending)}")
+        
+        return all_results, all_done
+
+    async def _process_dedicated_qualification_results(self, results: List[Dict], current_epoch: int):
+        """
+        Process results from dedicated qualification workers.
+        
+        Updates champion status and notifies gateway.
+        
+        Args:
+            results: List of model results from all qualification workers
+            current_epoch: Current epoch number
+        """
+        if not results:
+            return
+        
+        print(f"\n{'='*70}")
+        print(f"🏆 PROCESSING {len(results)} QUALIFICATION RESULTS")
+        print(f"{'='*70}")
+        
+        # Read current champion
+        champion_data = self._read_qualification_champion()
+        current_champion_score = champion_data.get("score", 0.0) if champion_data else 0.0
+        current_champion_id = champion_data.get("model_id") if champion_data else None
+        
+        # Process each result
+        for result in results:
+            model_id = result.get("model_id", "unknown")
+            model_name = result.get("model_name", "Unknown")
+            avg_score = result.get("avg_score", 0.0)
+            is_rebenchmark = result.get("is_rebenchmark", False)
+            total_cost = result.get("total_cost_usd", 0.0)
+            total_time = result.get("total_time_seconds", 0.0)
+            error = result.get("error")
+            
+            print(f"\n   📊 Model: {model_name}")
+            print(f"      Score: {avg_score:.2f}")
+            print(f"      Cost: ${total_cost:.4f}")
+            print(f"      Time: {total_time:.1f}s")
+            
+            if error:
+                print(f"      ❌ Error: {error}")
+                continue
+            
+            # Determine if this model beats the champion
+            became_champion = False
+            
+            if is_rebenchmark:
+                # Rebenchmark - update champion score
+                print(f"      🔄 Rebenchmark - updating champion score")
+                num_leads = result.get("num_leads_evaluated", 100)
+                self._update_champion_if_needed(
+                    model_id=model_id,
+                    model_name=model_name,
+                    miner_hotkey=result.get("miner_hotkey", "unknown"),
+                    score=avg_score,
+                    total_cost_usd=total_cost,
+                    total_time_seconds=total_time,
+                    num_leads=num_leads
+                )
+                became_champion = True  # Still champion after rebenchmark
+            else:
+                # New challenger - check if beats champion
+                beat_threshold = QUALIFICATION_CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT / 100.0
+                threshold_score = current_champion_score * (1 + beat_threshold)
+                
+                if avg_score > threshold_score:
+                    print(f"      🏆 NEW CHAMPION! Score {avg_score:.2f} > {threshold_score:.2f}")
+                    num_leads = result.get("num_leads_evaluated", 100)
+                    became_champion, _ = self._update_champion_if_needed(
+                        model_id=model_id,
+                        model_name=model_name,
+                        miner_hotkey=result.get("miner_hotkey", "unknown"),
+                        score=avg_score,
+                        total_cost_usd=total_cost,
+                        total_time_seconds=total_time,
+                        num_leads=num_leads
+                    )
+                    current_champion_score = avg_score  # Update for next comparison
+                    current_champion_id = model_id
+                else:
+                    print(f"      ❌ Did not beat champion ({avg_score:.2f} <= {threshold_score:.2f})")
+            
+            # Notify gateway
+            try:
+                await self._notify_gateway_champion_status(
+                    model_id=model_id,
+                    became_champion=became_champion,
+                    score=avg_score,
+                    is_rebenchmark=is_rebenchmark,
+                    evaluation_cost_usd=total_cost,
+                    evaluation_time_seconds=int(total_time)
+                )
+            except Exception as e:
+                print(f"      ⚠️ Failed to notify gateway: {e}")
+        
+        print(f"\n{'='*70}")
+        print(f"✅ QUALIFICATION PROCESSING COMPLETE")
+        print(f"{'='*70}\n")
 
     async def process_broadcast_requests_continuous(self):
         """
@@ -3957,7 +5591,7 @@ class Validator(BaseValidatorNeuron):
                 poll_count += 1
 
                 # Fetch pending broadcast requests from Firestore
-                from Leadpoet.utils.cloud_db import fetch_broadcast_requests
+                # Note: fetch_broadcast_requests imported at module level to avoid sandbox blocking
                 requests_list = fetch_broadcast_requests(self.wallet, role="validator")
 
                 # fetch_broadcast_requests() will print when requests are found
@@ -3991,7 +5625,7 @@ class Validator(BaseValidatorNeuron):
 
                     try:
                         # Wait for miners to send curated leads to Firestore
-                        from Leadpoet.utils.cloud_db import fetch_miner_leads_for_request
+                        # fetch_miner_leads_for_request imported at module level
 
                         MAX_WAIT = 180  
                         POLL_INTERVAL = 2  # Poll every 2 seconds
@@ -4479,7 +6113,7 @@ class Validator(BaseValidatorNeuron):
         source_url = lead.get("source_url", "")
         if source_url:
             try:
-                from Leadpoet.utils.cloud_db import get_supabase_client
+                # get_supabase_client imported at module level
                 supabase = get_supabase_client()
                 
                 if supabase:
@@ -4957,7 +6591,7 @@ async def run_validator(validator_hotkey, queue_maxsize):
                 all_delivered_leads.extend(delivered_leads)
 
                 # Record rewards for ALL delivered leads in this query
-                from Leadpoet.base.utils.pool import record_delivery_rewards
+                # record_delivery_rewards imported at module level
                 record_delivery_rewards(all_delivered_leads)
 
                 # Send leads to buyer
@@ -4969,7 +6603,7 @@ async def run_validator(validator_hotkey, queue_maxsize):
                     print(f"   Lead sourced by: {source_hotkey}")   # show full hotkey
 
                 # Save curated leads to separate file
-                from Leadpoet.base.utils.pool import save_curated_leads
+                # save_curated_leads imported at module level
                 save_curated_leads(delivered_leads)
 
                 # Reset all_delivered_leads after recording rewards
@@ -5101,6 +6735,9 @@ def run_lightweight_worker(config):
         def __init__(self, config):
             self.config = config
             self.should_exit = False
+            # Track completed epochs IN MEMORY (not files, since coordinator deletes result files)
+            # This prevents workers from trying to redo lead validation after coordinator aggregates
+            self._completed_lead_validation_epochs = set()
             
         def _read_shared_block_file(self):
             """Read current block from shared file (written by coordinator)"""
@@ -5148,12 +6785,18 @@ def run_lightweight_worker(config):
                     
                     print(f"\n🔍 WORKER EPOCH {current_epoch}: Starting validation (block {blocks_into_epoch}/360)")
                     
-                    # CRITICAL FIX: Check if we already completed this epoch
-                    # Prevents re-processing the same epoch while waiting for coordinator to aggregate
+                    # CRITICAL FIX: Check if we already completed this epoch using IN-MEMORY tracking
+                    # (Not file-based, because coordinator deletes result files after aggregation)
                     container_id = self.config.neuron.container_id
-                    results_file = Path("validator_weights") / f"worker_{container_id}_epoch_{current_epoch}_results.json"
-                    if results_file.exists():
-                        print(f"⏭️  Worker {container_id}: Already completed epoch {current_epoch}, waiting for next epoch...")
+                    if current_epoch in self._completed_lead_validation_epochs:
+                        # Lead validation already done - wait for next epoch
+                        # (Qualification is now handled by dedicated qualification workers)
+                        # Clear old epochs from memory to prevent unbounded growth
+                        if len(self._completed_lead_validation_epochs) > 10:
+                            oldest = min(self._completed_lead_validation_epochs)
+                            if oldest < current_epoch - 5:
+                                self._completed_lead_validation_epochs.discard(oldest)
+                        print(f"⏭️  Worker {container_id}: Epoch {current_epoch} lead validation complete, waiting for next epoch...")
                         await asyncio.sleep(30)
                         continue
                     
@@ -5362,11 +7005,13 @@ def run_lightweight_worker(config):
                         })
                         
                         # Format for local_validation_data (for gateway reveal submission) - EXACT format
+                        # CRITICAL FIX: Include is_icp_multiplier from automated_checks_data for proper weight calc
                         local_validation_data.append({
                             'lead_id': lead['lead_id'],
                             'miner_hotkey': lead.get('miner_hotkey'),
                             'decision': decision,
                             'rep_score': rep_score,
+                            'is_icp_multiplier': automated_checks_data.get("is_icp_multiplier", 0.0),
                             'rejection_reason': rejection_reason,
                             'salt': salt.hex()
                         })
@@ -5384,13 +7029,18 @@ def run_lightweight_worker(config):
                     print(f"✅ Worker {container_id}: Completed {len(validated_leads)} validations")
                     print(f"   Results saved to {results_file}")
                     
+                    # CRITICAL: Mark epoch as completed IN MEMORY before file gets deleted
+                    # (Coordinator deletes result files after aggregation, so we can't rely on files)
+                    self._completed_lead_validation_epochs.add(current_epoch)
+                    
                     # MEMORY CLEANUP: Force garbage collection after each epoch
                     collected = gc.collect()
                     if collected > 100:
                         print(f"🧹 Worker {container_id}: Memory cleanup freed {collected} objects")
                     
                     # Wait before checking for next epoch
-                    await asyncio.sleep(30)
+                    # (Qualification is handled by dedicated qualification workers, not sourcing workers)
+                    await asyncio.sleep(5)
                     
                 except Exception as e:
                     print(f"❌ Worker error: {e}")
@@ -5409,6 +7059,418 @@ def run_lightweight_worker(config):
         worker.should_exit = True
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+# DEDICATED QUALIFICATION WORKER
+# ════════════════════════════════════════════════════════════════════════════════
+# These 5 containers ONLY evaluate qualification models (not sourcing).
+# They run PARALLEL to sourcing from epoch start.
+# Each container handles 2 models per epoch.
+# ════════════════════════════════════════════════════════════════════════════════
+
+def run_dedicated_qualification_worker(config):
+    """
+    Run a dedicated qualification worker that ONLY evaluates miner models.
+    
+    Unlike regular workers that validate leads, qualification workers:
+    1. Start at EPOCH START (parallel to sourcing)
+    2. ONLY evaluate qualification models (no lead validation)
+    3. Handle 2 models per epoch each
+    4. Container 1 handles rebenchmark when needed
+    
+    No Bittensor connection, no axon, no lead validation.
+    """
+    import asyncio
+    import json
+    import time
+    import base64
+    from pathlib import Path
+    
+    qual_container_id = config.neuron.qualification_container_id
+    total_qual_containers = config.neuron.total_qualification_containers
+    
+    print("🚀 Starting dedicated qualification worker...")
+    print(f"   Qualification Container ID: {qual_container_id}")
+    print(f"   Total qualification containers: {total_qual_containers}")
+    print(f"   Models per container per epoch: {QUALIFICATION_MODELS_PER_CONTAINER}")
+    print("")
+    
+    class DedicatedQualificationWorker:
+        def __init__(self, config):
+            self.config = config
+            self.should_exit = False
+            self._completed_epochs = set()  # Track completed epochs in memory
+            
+        def _read_shared_block_file(self):
+            """Read current block from shared file (written by coordinator)"""
+            block_file = Path("validator_weights") / "current_block.json"
+            
+            if not block_file.exists():
+                raise FileNotFoundError("Coordinator hasn't written block file yet")
+            
+            # Check if file is stale (> 120 seconds old for qualification workers)
+            file_age = time.time() - block_file.stat().st_mtime
+            if file_age > 120:
+                raise Exception(f"Shared block file is stale ({int(file_age)}s old)")
+            
+            with open(block_file, 'r') as f:
+                data = json.load(f)
+                return data['block'], data['epoch'], data['blocks_into_epoch']
+        
+        async def process_qualification_models(self, current_epoch: int):
+            """
+            Process qualification models assigned to this dedicated worker.
+            
+            Qualification workers start at epoch start and process up to 2 models.
+            """
+            qual_container_id = self.config.neuron.qualification_container_id
+            weights_dir = Path("validator_weights")
+            
+            # Check if already completed this epoch
+            if current_epoch in self._completed_epochs:
+                return
+            
+            # Look for work file specific to this qualification worker
+            # Format: qual_worker_{id}_work_{epoch}.json
+            work_file = weights_dir / f"qual_worker_{qual_container_id}_work_{current_epoch}.json"
+            results_file = weights_dir / f"qual_worker_{qual_container_id}_results_{current_epoch}.json"
+            
+            if not work_file.exists():
+                return  # No work assigned yet
+            
+            if results_file.exists():
+                # Already completed
+                self._completed_epochs.add(current_epoch)
+                return
+            
+            print(f"\n{'='*70}")
+            print(f"🎯 QUALIFICATION WORKER {qual_container_id}: Work found for epoch {current_epoch}")
+            print(f"{'='*70}")
+            
+            try:
+                # Read work assignment
+                with open(work_file, 'r') as f:
+                    work_data = json.load(f)
+                
+                models_to_evaluate = work_data.get("models", [])
+                is_rebenchmark_container = work_data.get("is_rebenchmark_container", False)
+                
+                print(f"   📦 Models assigned: {len(models_to_evaluate)}")
+                print(f"   🔄 Rebenchmark container: {is_rebenchmark_container}")
+                
+                # Import qualification modules
+                try:
+                    from qualification.validator.sandbox import TEESandbox
+                    from gateway.qualification.models import LeadOutput, ICPPrompt, LeadScoreBreakdown
+                    from qualification.scoring.lead_scorer import score_lead
+                    from qualification.scoring.pre_checks import run_automatic_zero_checks
+                    from gateway.qualification.config import CONFIG as QUAL_CONFIG
+                except ImportError as e:
+                    print(f"   ❌ Qualification module not available: {e}")
+                    with open(results_file, 'w') as f:
+                        json.dump({
+                            "epoch": current_epoch,
+                            "qual_worker_id": qual_container_id,
+                            "error": f"Qualification module not available: {e}",
+                            "model_results": [],
+                            "timestamp": time.time()
+                        }, f)
+                    self._completed_epochs.add(current_epoch)
+                    return
+                
+                # Process each model
+                model_results = []
+                
+                for model_idx, model in enumerate(models_to_evaluate):
+                    model_name = model.get("model_name", "Unknown")
+                    model_id = model.get("model_id", "unknown")
+                    miner_hotkey = model.get("miner_hotkey", "unknown")
+                    model_code_b64 = model.get("agent_code", "")
+                    runs = model.get("evaluation_runs", [])
+                    is_rebenchmark = model.get("is_rebenchmark", False)
+                    
+                    print(f"\n   📋 [{model_idx + 1}/{len(models_to_evaluate)}] Model: {model_name}")
+                    print(f"      Miner: {miner_hotkey[:16]}...")
+                    print(f"      ICPs: {len(runs)}")
+                    print(f"      Rebenchmark: {is_rebenchmark}")
+                    
+                    # Decode model code
+                    model_code = base64.b64decode(model_code_b64) if model_code_b64 else b""
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # HARDCODING DETECTION: Skip for rebenchmarks
+                    # ═══════════════════════════════════════════════════════════════
+                    if model_code and not is_rebenchmark:
+                        try:
+                            from qualification.validator.hardcoding_detector import (
+                                analyze_model_for_hardcoding,
+                                is_detection_enabled
+                            )
+                            
+                            if is_detection_enabled():
+                                print(f"\n      🔍 HARDCODING DETECTION: Analyzing model code...")
+                                
+                                # Get ICP samples
+                                icp_samples = [run.get("icp_data", {}) for run in runs[:5]]
+                                
+                                detection_result = await analyze_model_for_hardcoding(
+                                    model_code=model_code,
+                                    icp_samples=icp_samples
+                                )
+                                
+                                confidence = detection_result.get("confidence_hardcoded", 0)
+                                verdict = detection_result.get("verdict", "UNKNOWN")
+                                
+                                print(f"      🔍 Hardcoding detection result:")
+                                print(f"         Verdict: {verdict}")
+                                print(f"         Confidence: {confidence}%")
+                                
+                                if verdict == "HARDCODED" and confidence >= 70:
+                                    print(f"      ❌ MODEL REJECTED: Hardcoding detected ({confidence}% confidence)")
+                                    model_results.append({
+                                        "model_id": model_id,
+                                        "model_name": model_name,
+                                        "miner_hotkey": miner_hotkey,
+                                        "error": f"Hardcoding detected ({confidence}% confidence)",
+                                        "rejection_reason": "hardcoding_detected",
+                                        "avg_score": 0.0,
+                                        "total_cost_usd": 0.0,
+                                        "total_time_seconds": 0.0,
+                                        "is_rebenchmark": is_rebenchmark
+                                    })
+                                    continue  # Skip to next model
+                        except Exception as hc_err:
+                            print(f"      ⚠️ Hardcoding detection error: {hc_err}")
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # RUN MODEL EVALUATION (matches OLD LightweightWorker pattern)
+                    # ═══════════════════════════════════════════════════════════════
+                    total_score = 0.0
+                    leads_scored = 0
+                    total_cost = 0.0
+                    total_time = 0.0
+                    per_icp_results = []
+                    seen_companies = set()
+                    MAX_TOTAL_COST = QUAL_CONFIG.MAX_COST_PER_EVALUATION_USD
+                    evaluation_stopped_early = False
+                    
+                    # Get gateway URL and create proxy URL (CRITICAL for cost tracking!)
+                    gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+                    api_proxy_url = f"{gateway_url}/qualification/proxy"
+                    
+                    # Initialize ONE sandbox per model (NOT per ICP!)
+                    sandbox = None
+                    try:
+                        sandbox = TEESandbox(
+                            model_code=model_code,
+                            evaluation_run_id=runs[0]["evaluation_run_id"] if runs else None,
+                            api_proxy_url=api_proxy_url,
+                            evaluation_id=model.get("evaluation_id")
+                        )
+                        await sandbox.start()
+                        
+                        # Process each ICP with the SAME sandbox
+                        for run_idx, run in enumerate(runs, 1):
+                            # $5 cost limit check
+                            if total_cost >= MAX_TOTAL_COST:
+                                print(f"      🛑 $5 HARD STOP at ICP {run_idx}/{len(runs)}")
+                                evaluation_stopped_early = True
+                                break
+                            
+                            evaluation_run_id = run.get("evaluation_run_id")
+                            icp_data = run.get("icp_data", {})
+                            icp_industry = icp_data.get("industry", "Unknown")
+                            
+                            print(f"\n      📋 ICP {run_idx}/{len(runs)}: {icp_industry}")
+                            
+                            try:
+                                # Create ICP prompt
+                                icp = ICPPrompt(**icp_data)
+                                
+                                # Run model with timeout
+                                import asyncio
+                                start_time = time.time()
+                                result = await asyncio.wait_for(
+                                    sandbox.run_model(icp),
+                                    timeout=QUAL_CONFIG.RUNNING_MODEL_TIMEOUT_SECONDS
+                                )
+                                run_time = time.time() - start_time
+                                
+                                # Get cost from sandbox
+                                run_cost = sandbox.get_run_cost() if hasattr(sandbox, 'get_run_cost') else 0.01
+                                total_cost += run_cost
+                                
+                                # Parse result
+                                lead_data = result.get("lead") if isinstance(result, dict) else None
+                                error_msg = result.get("error") if isinstance(result, dict) else None
+                                lead = LeadOutput(**lead_data) if lead_data else None
+                                
+                                # Score lead
+                                if lead:
+                                    scores = await score_lead(
+                                        lead=lead,
+                                        icp=icp,
+                                        run_cost_usd=run_cost,
+                                        run_time_seconds=run_time,
+                                        seen_companies=seen_companies
+                                    )
+                                    score = scores.final_score
+                                else:
+                                    failure_reason = error_msg if error_msg else "No lead returned"
+                                    scores = LeadScoreBreakdown(
+                                        icp_fit=0, decision_maker=0, intent_signal_raw=0,
+                                        time_decay_multiplier=1.0, intent_signal_final=0,
+                                        cost_penalty=0, time_penalty=0, final_score=0,
+                                        failure_reason=failure_reason
+                                    )
+                                    score = 0.0
+                                
+                                # Accumulate
+                                total_score += score
+                                total_time += run_time
+                                leads_scored += 1
+                                
+                                # Store per-ICP result
+                                per_icp_results.append({
+                                    "evaluation_run_id": evaluation_run_id,
+                                    "lead_returned": lead.model_dump() if lead else None,
+                                    "scores": scores.model_dump() if scores else None,
+                                    "run_cost_usd": run_cost,
+                                    "run_time_seconds": run_time
+                                })
+                                
+                                if lead:
+                                    print(f"         ✅ {lead.email} @ {lead.business} (Score: {score:.2f})")
+                                else:
+                                    print(f"         ❌ {scores.failure_reason}")
+                                
+                            except asyncio.TimeoutError:
+                                print(f"         ⚠️ TIMEOUT")
+                                total_time += QUAL_CONFIG.RUNNING_MODEL_TIMEOUT_SECONDS
+                                per_icp_results.append({
+                                    "evaluation_run_id": evaluation_run_id,
+                                    "lead_returned": None,
+                                    "scores": {"final_score": 0, "failure_reason": "timeout"},
+                                    "run_cost_usd": 0,
+                                    "run_time_seconds": QUAL_CONFIG.RUNNING_MODEL_TIMEOUT_SECONDS
+                                })
+                            except Exception as e:
+                                print(f"         ❌ ERROR: {e}")
+                                run_time_val = time.time() - start_time if 'start_time' in dir() else 0
+                                total_time += run_time_val
+                                per_icp_results.append({
+                                    "evaluation_run_id": evaluation_run_id,
+                                    "lead_returned": None,
+                                    "scores": {"final_score": 0, "failure_reason": str(e)[:200]},
+                                    "run_cost_usd": run_cost if 'run_cost' in dir() else 0,
+                                    "run_time_seconds": run_time_val
+                                })
+                    
+                    finally:
+                        # Clean up sandbox
+                        if sandbox:
+                            try:
+                                await sandbox.cleanup()
+                            except Exception:
+                                pass
+                    
+                    avg_score = total_score / leads_scored if leads_scored > 0 else 0.0
+                    
+                    print(f"\n      ✅ Model complete!")
+                    print(f"         Avg Score: {avg_score:.2f}")
+                    print(f"         Total Time: {total_time:.1f}s")
+                    print(f"         Total Cost: ${total_cost:.4f}")
+                    
+                    model_results.append({
+                        "model_id": model_id,
+                        "model_name": model_name,
+                        "miner_hotkey": miner_hotkey,
+                        "avg_score": avg_score,
+                        "total_score": total_score,
+                        "leads_scored": leads_scored,
+                        "total_cost_usd": total_cost,
+                        "total_time_seconds": total_time,
+                        "is_rebenchmark": is_rebenchmark,
+                        "per_icp_results": per_icp_results
+                    })
+                
+                # Write all results
+                with open(results_file, 'w') as f:
+                    json.dump({
+                        "epoch": current_epoch,
+                        "qual_worker_id": qual_container_id,
+                        "is_rebenchmark_container": is_rebenchmark_container,
+                        "model_results": model_results,
+                        "timestamp": time.time()
+                    }, f, indent=2)
+                
+                self._completed_epochs.add(current_epoch)
+                print(f"\n{'='*70}")
+                print(f"✅ QUALIFICATION WORKER {qual_container_id}: Completed {len(model_results)} models")
+                print(f"{'='*70}\n")
+                
+            except Exception as e:
+                print(f"❌ Qualification worker error: {e}")
+                import traceback
+                traceback.print_exc()
+                # Write error result
+                with open(results_file, 'w') as f:
+                    json.dump({
+                        "epoch": current_epoch,
+                        "qual_worker_id": qual_container_id,
+                        "error": str(e),
+                        "model_results": [],
+                        "timestamp": time.time()
+                    }, f)
+                self._completed_epochs.add(current_epoch)
+        
+        async def run_loop(self):
+            """Main loop for dedicated qualification worker."""
+            print("🔄 Qualification worker starting main loop...")
+            print("   (Waiting for coordinator to assign work)")
+            
+            last_epoch = -1
+            
+            while not self.should_exit:
+                try:
+                    # Read current epoch from shared block file
+                    try:
+                        current_block, current_epoch, blocks_into_epoch = self._read_shared_block_file()
+                    except FileNotFoundError:
+                        print("   ⏳ Waiting for coordinator to write block file...")
+                        await asyncio.sleep(10)
+                        continue
+                    except Exception as e:
+                        print(f"   ⚠️ Block file error: {e}")
+                        await asyncio.sleep(10)
+                        continue
+                    
+                    # New epoch - check for work
+                    if current_epoch != last_epoch:
+                        print(f"\n📅 Epoch {current_epoch} (block {blocks_into_epoch}/360)")
+                        last_epoch = current_epoch
+                    
+                    # Process qualification models
+                    await self.process_qualification_models(current_epoch)
+                    
+                    # Sleep briefly
+                    await asyncio.sleep(5)
+                    
+                except Exception as e:
+                    print(f"❌ Qualification worker loop error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    await asyncio.sleep(30)
+    
+    # Create and run qualification worker
+    worker = DedicatedQualificationWorker(config)
+    
+    try:
+        asyncio.run(worker.run_loop())
+    except KeyboardInterrupt:
+        print("\n🛑 Qualification worker shutting down...")
+        worker.should_exit = True
+
+
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Validator")
     add_validator_args(None, parser)
@@ -5420,7 +7482,7 @@ def main():
     parser.add_argument("--logging_trace", action="store_true", help="Enable trace logging")
     parser.add_argument("--container-id", type=int, help="Container ID (0, 1, 2, etc.) for dynamic lead distribution. Container 0 is coordinator.")
     parser.add_argument("--total-containers", type=int, help="Total number of containers running (for dynamic lead distribution)")
-    parser.add_argument("--mode", type=str, choices=["coordinator", "worker"], help="Container mode: 'coordinator' waits for workers and submits to gateway, 'worker' validates and writes results to JSON")
+    parser.add_argument("--mode", type=str, choices=["coordinator", "worker", "qualification_worker"], help="Container mode: 'coordinator' waits for workers and submits to gateway, 'worker' validates leads, 'qualification_worker' evaluates miner models")
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -5474,10 +7536,54 @@ def main():
         return  # Exit early - don't initialize full validator
 
     # ════════════════════════════════════════════════════════════════════════════
+    # QUALIFICATION WORKER MODE: Dedicated model evaluation containers
+    # ════════════════════════════════════════════════════════════════════════════
+    # Qualification workers don't need:
+    # - Bittensor wallet/subtensor/metagraph (no chain connection)
+    # - Axon serving (no API endpoints)
+    # - Lead validation (handled by regular workers)
+    # - Weight setting (only coordinator submits weights)
+    # 
+    # Qualification workers ONLY need:
+    # - Read current_block.json (for epoch timing)
+    # - Read qual_worker_{id}_work_{epoch}.json (model assignments)
+    # - Evaluate miner models via TEE sandbox
+    # - Write results to qual_worker_{id}_results_{epoch}.json
+    # ════════════════════════════════════════════════════════════════════════════
+    if getattr(args, 'mode', None) == "qualification_worker":
+        print("════════════════════════════════════════════════════════════════")
+        print("🎯 DEDICATED QUALIFICATION WORKER MODE")
+        print("════════════════════════════════════════════════════════════════")
+        print("   Skipping heavy initialization:")
+        print("   ✗ Bittensor wallet/subtensor/metagraph")
+        print("   ✗ Axon serving")
+        print("   ✗ Lead validation")
+        print("   ✗ Weight setting")
+        print("")
+        print("   Qualification worker responsibilities:")
+        print("   ✓ Read current_block.json for epoch timing")
+        print("   ✓ Read qual_worker_N_work_EPOCH.json (model assignments)")
+        print("   ✓ Evaluate miner models via TEE sandbox")
+        print(f"   ✓ Process up to {QUALIFICATION_MODELS_PER_CONTAINER} models per epoch")
+        print("   ✓ Write results to qual_worker_N_results_EPOCH.json")
+        print("════════════════════════════════════════════════════════════════")
+        print("")
+        
+        # Create minimal config for qualification worker
+        config = bt.Config()
+        config.neuron = bt.Config()
+        config.neuron.qualification_container_id = getattr(args, 'container_id', 1)
+        config.neuron.total_qualification_containers = QUALIFICATION_CONTAINERS_COUNT
+        config.neuron.mode = "qualification_worker"
+        
+        # Run dedicated qualification worker loop
+        run_dedicated_qualification_worker(config)
+        return  # Exit early - don't initialize full validator
+
+    # ════════════════════════════════════════════════════════════════════════════
     # COORDINATOR MODE: Full initialization
     # ════════════════════════════════════════════════════════════════════════════
-    # Add this near the beginning of your validator startup, after imports
-    from Leadpoet.validator.reward import start_epoch_monitor
+    # start_epoch_monitor imported at module level
 
     # Run the proper Bittensor validator
     config = bt.Config()
@@ -5523,7 +7629,7 @@ if __name__ == "__main__":
         """Clean up resources on shutdown"""
         try:
             print("\n🛑 Shutting down validator...")
-            from Leadpoet.validator.reward import stop_epoch_monitor
+            # stop_epoch_monitor imported at module level
             stop_epoch_monitor()
             
             # Give threads time to clean up
@@ -5550,4 +7656,3 @@ if __name__ == "__main__":
         print(f"❌ Validator crashed: {e}")
         cleanup_handler()
         raise
-

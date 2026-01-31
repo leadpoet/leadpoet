@@ -2734,6 +2734,7 @@ stoke
 stone
 stra
 strass
+strong
 sturt
 suba
 success

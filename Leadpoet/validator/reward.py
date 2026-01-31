@@ -231,7 +231,15 @@ def _background_epoch_monitor():
                 time.sleep(30)
                 
             except Exception as e:
-                print(f"⚠️  Error in background epoch monitor: {e}")
+                # Silence expected sandbox import errors during model evaluation
+                # The RestrictedImporter blocks shutil/etc globally, causing cosmetic errors
+                # in background threads. These are non-fatal - the monitor just retries.
+                error_msg = str(e)
+                if "is not allowed" in error_msg and "ALLOWED_LIBRARIES" in error_msg:
+                    # Expected sandbox restriction error - silently retry
+                    pass
+                else:
+                    print(f"⚠️  Error in background epoch monitor: {e}")
                 subtensor = None
                 time.sleep(60)  # Wait longer on error
     

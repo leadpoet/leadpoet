@@ -427,11 +427,21 @@ async def run_lead_validation_stage4(
 
         # Area check
         if not location_passed:
-            area_match = re.search(r'(Greater\s+[\w\s]+|[\w\s]+\s+Metropolitan|[\w\s]+\s+Bay|[\w\s]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
+            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
             if area_match:
                 area_found = area_match.group(0).strip()
                 if city_lower not in area_found.lower():
-                    if is_city_in_area_approved(city, area_found, state, country):
+                    # Check if city appears right before area name in text
+                    # LinkedIn format: "Rochester, New York Metropolitan Area"
+                    # means Rochester's metro area in NY, not the NYC metro area
+                    area_start = area_match.start()
+                    text_before_area = full_text[:area_start]
+                    city_before_area = re.search(r'\b' + re.escape(city_lower) + r'\b\s*,\s*$', text_before_area.lower())
+                    if city_before_area:
+                        location_passed = True
+                        location_method = 'area_approved'
+                        result['data']['extracted_location'] = f"{city}, {area_found}"
+                    elif is_city_in_area_approved(city, area_found, state, country):
                         location_passed = True
                         location_method = 'area_approved'
                         result['data']['extracted_location'] = area_found
@@ -454,8 +464,9 @@ async def run_lead_validation_stage4(
         # (matched company HQ locations instead of person locations)
         if not location_passed:
             for r in all_results[:5]:
-                if get_linkedin_id(r.get('link', '')):
-                    continue
+                r_link = r.get('link', '').lower()
+                if get_linkedin_id(r_link) or 'linkedin.com' in r_link:
+                    continue  # Skip ALL LinkedIn pages (including /pub/dir/ directories)
                 r_text = f"{r.get('title', '')} {r.get('snippet', '')}"
                 r_loc = extract_location_from_text(r_text)
                 if r_loc:
@@ -784,11 +795,19 @@ async def run_location_validation_only(
 
         # Area check
         if not location_passed:
-            area_match = re.search(r'(Greater\s+[\w\s]+|[\w\s]+\s+Metropolitan|[\w\s]+\s+Bay|[\w\s]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
+            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
             if area_match:
                 area_found = area_match.group(0).strip()
                 if city_lower not in area_found.lower():
-                    if is_city_in_area_approved(city, area_found, state, country):
+                    # Check if city appears right before area name in text
+                    area_start = area_match.start()
+                    text_before_area = full_text[:area_start]
+                    city_before_area = re.search(r'\b' + re.escape(city_lower) + r'\b\s*,\s*$', text_before_area.lower())
+                    if city_before_area:
+                        location_passed = True
+                        location_method = 'area_approved'
+                        result['extracted_location'] = f"{city}, {area_found}"
+                    elif is_city_in_area_approved(city, area_found, state, country):
                         location_passed = True
                         location_method = 'area_approved'
                         result['extracted_location'] = area_found

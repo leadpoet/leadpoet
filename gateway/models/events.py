@@ -41,6 +41,12 @@ class EventType(str, Enum):
     # Consensus
     CONSENSUS_RESULT = "CONSENSUS_RESULT"
 
+    # Lead Qualification Agent Competition (Phase 7.1)
+    MODEL_SUBMITTED = "MODEL_SUBMITTED"
+    EVALUATION_COMPLETE = "EVALUATION_COMPLETE"
+    CHAMPION_SELECTED = "CHAMPION_SELECTED"
+    EMISSIONS_DISTRIBUTED = "EMISSIONS_DISTRIBUTED"
+
 
 class BaseEvent(BaseModel):
     """Base event structure for all transparency log events"""

@@ -470,7 +470,7 @@ async def reveal_validation_result(
     # - Event is buffered in TEE (hardware-protected memory)
     # - Will be included in next hourly Arweave checkpoint (signed by TEE)
     # - Verify gateway code integrity: GET /attest
-    reveal_timestamp = datetime.now(tz.utc).isoformat()
+    reveal_timestamp = datetime.utcnow().isoformat()
     
     return {
         "status": "revealed",
@@ -693,38 +693,62 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
     # ========================================
     lead_ids = [r.lead_id for r in request.reveals]
     
-    try:
-        result = await asyncio.to_thread(
-            lambda: supabase.table("validation_evidence_private")
-                .select("*")
-                .in_("lead_id", lead_ids)
-                .eq("validator_hotkey", request.validator_hotkey)
-                .eq("epoch_id", request.epoch_id)
-                .execute()
-        )
-        
-        # Create evidence lookup dict (key by lead_id)
-        # Note: If duplicates exist, dict takes the last one for each lead_id
-        evidence_map = {e["lead_id"]: e for e in result.data}
-        
-        # Check for missing lead_ids - WARN but don't fail (partial reveals OK)
-        # This handles race conditions where hash submission partially failed
-        missing_leads = set(lead_ids) - set(evidence_map.keys())
-        if missing_leads:
-            print(f"⚠️  PARTIAL REVEAL: {len(missing_leads)} leads have no evidence (will skip)")
-            print(f"   Validator: {request.validator_hotkey[:20]}...")
-            print(f"   Epoch: {request.epoch_id}")
-            print(f"   Requested: {len(lead_ids)}, Found: {len(evidence_map)}")
-            print(f"   Missing lead IDs: {list(missing_leads)[:5]}...")
-            # DON'T fail - just skip the missing ones below
-        
-        if len(result.data) > len(lead_ids):
-            print(f"⚠️  Found {len(result.data)} records for {len(lead_ids)} lead_ids (duplicates exist, using latest)")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch evidence: {str(e)}")
+    # Helper to detect transient Supabase/Cloudflare errors that should be retried
+    def is_transient_supabase_error(error: Exception) -> bool:
+        error_str = str(error)
+        # Errno 11: Resource temporarily unavailable (connection pool exhausted)
+        # Errno 32: Broken pipe (connection closed by remote end)
+        # Errno 104: Connection reset by peer
+        # 502/500: Supabase/Cloudflare temporary errors
+        return any(x in error_str for x in [
+            'Errno 11', 'Errno 32', 'Errno 104', 'Broken pipe',
+            'code": 502', 'code": 500', 'code\': 502', 'code\': 500',
+            'Internal server error', 'Cloudflare'
+        ])
+    
+    # Retry logic for evidence fetch (Supabase can have transient 500/502 errors)
+    FETCH_MAX_RETRIES = 3
+    result = None
+    
+    for fetch_attempt in range(1, FETCH_MAX_RETRIES + 1):
+        try:
+            result = await asyncio.to_thread(
+                lambda: supabase.table("validation_evidence_private")
+                    .select("*")
+                    .in_("lead_id", lead_ids)
+                    .eq("validator_hotkey", request.validator_hotkey)
+                    .eq("epoch_id", request.epoch_id)
+                    .execute()
+            )
+            break  # Success - exit retry loop
+            
+        except Exception as fetch_error:
+            if is_transient_supabase_error(fetch_error) and fetch_attempt < FETCH_MAX_RETRIES:
+                wait_time = fetch_attempt * 2  # 2s, 4s backoff
+                print(f"⚠️  Evidence fetch transient error (attempt {fetch_attempt}/{FETCH_MAX_RETRIES}): {fetch_error}")
+                print(f"   Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                # Non-transient error or max retries exceeded
+                raise HTTPException(status_code=500, detail=f"Failed to fetch evidence after {fetch_attempt} attempts: {str(fetch_error)}")
+    
+    # Create evidence lookup dict (key by lead_id)
+    # Note: If duplicates exist, dict takes the last one for each lead_id
+    evidence_map = {e["lead_id"]: e for e in result.data}
+    
+    # Check for missing lead_ids - WARN but don't fail (partial reveals OK)
+    # This handles race conditions where hash submission partially failed
+    missing_leads = set(lead_ids) - set(evidence_map.keys())
+    if missing_leads:
+        print(f"⚠️  PARTIAL REVEAL: {len(missing_leads)} leads have no evidence (will skip)")
+        print(f"   Validator: {request.validator_hotkey[:20]}...")
+        print(f"   Epoch: {request.epoch_id}")
+        print(f"   Requested: {len(lead_ids)}, Found: {len(evidence_map)}")
+        print(f"   Missing lead IDs: {list(missing_leads)[:5]}...")
+        # DON'T fail - just skip the missing ones below
+    
+    if len(result.data) > len(lead_ids):
+        print(f"⚠️  Found {len(result.data)} records for {len(lead_ids)} lead_ids (duplicates exist, using latest)")
     
     # ========================================
     # Step 4: Verify ALL hashes
@@ -836,9 +860,14 @@ async def batch_reveal_validation_results(request: BatchRevealRequest):
         def is_transient_error(error: Exception) -> bool:
             error_str = str(error)
             # Errno 11: Resource temporarily unavailable (connection pool exhausted)
+            # Errno 32: Broken pipe (connection closed by remote end)
             # Errno 104: Connection reset by peer
             # 502/500: Supabase/Cloudflare temporary errors
-            return any(x in error_str for x in ['Errno 11', 'Errno 104', 'code": 502', 'code": 500', 'code\': 502', 'code\': 500'])
+            return any(x in error_str for x in [
+                'Errno 11', 'Errno 32', 'Errno 104', 'Broken pipe',
+                'code": 502', 'code": 500', 'code\': 502', 'code\': 500',
+                'Internal server error', 'Cloudflare'
+            ])
         
         # CHUNKED UPDATES: Process in batches of 50 to avoid connection pool exhaustion
         # [Errno 11] Resource temporarily unavailable occurs with 300+ parallel connections

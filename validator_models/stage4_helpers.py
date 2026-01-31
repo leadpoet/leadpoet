@@ -777,6 +777,14 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
 
         # Check what comes BEFORE the city
         text_before = text_lower[:start_pos].rstrip()
+
+        # Check for "Education:" / "Studied at" prefix — LinkedIn education context
+        # e.g., "Education: Pontiac Protestant High School"
+        education_prefixes = ('education:', 'studied at', 'alumni of', 'alumnus of', 'graduated from')
+        before_trimmed = text_before.rstrip(' ·\t-')
+        if any(before_trimmed.endswith(ep) for ep in education_prefixes):
+            continue  # Skip - education context, not a location
+
         # Check for "[Institution] of [City]" pattern before city
         if text_before.endswith(' of'):
             before_of = text_before[:-3].rstrip()
@@ -870,6 +878,8 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
                 break
 
             # Check if followed by institution word (specific pattern)
+            # Look at first 4 words to catch patterns like "Pontiac Protestant High School"
+            # where the institution word ("school") isn't the immediate next word
             institution_words = {
                 'university', 'college', 'school', 'institute', 'academy',
                 'hospital', 'medical', 'clinic', 'health', 'healthcare',
@@ -880,7 +890,9 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
                 'zoo', 'aquarium', 'garden', 'gardens', 'park', 'stadium', 'arena',
                 'exchange', 'authority', 'commission', 'board', 'council', 'committee'
             }
-            if first_word in institution_words:
+            # Check first 4 words (handles "[City] [Adj] [Adj] School" patterns)
+            nearby_words = [w.rstrip('.,;:!?').lower() for w in words_after[:4]]
+            if any(w in institution_words for w in nearby_words):
                 # This is institution context, continue checking other occurrences
                 continue
 
@@ -2044,6 +2056,19 @@ def check_q3_location_fallback(
                     city_lower = city.lower()
                     result_url = r.get('link', '')
 
+                    # Google's missing=[] can be unreliable: the knowledge graph
+                    # may associate a city with a company (e.g. CFGI → Boston)
+                    # even when the city doesn't appear in the snippet at all.
+                    # Require the city to literally appear in the text.
+                    if not re.search(r'\b' + re.escape(city_lower) + r'\b', full_text.lower()):
+                        return {
+                            'success': True,
+                            'passed': False,
+                            'snippet': snippet[:200],
+                            'results': formatted_results,
+                            'error': f'City "{city}" not literally in text despite missing=[]'
+                        }
+
                     # Check URL domain for ALL cities - non-US domain for US claim is always invalid
                     if _has_contradicting_state_or_province(city_lower, state, country, full_text, result_url):
                         return {
@@ -2062,6 +2087,17 @@ def check_q3_location_fallback(
                             'snippet': snippet[:200],
                             'results': formatted_results,
                             'error': 'City only in institution context'
+                        }
+
+                    # Check if city only appears as part of person's name
+                    # e.g., "Anderson" in "Alli Anderson" when claiming Anderson, SC
+                    if name and is_city_matching_person_name(city_lower, name, full_text):
+                        return {
+                            'success': True,
+                            'passed': False,
+                            'snippet': snippet[:200],
+                            'results': formatted_results,
+                            'error': 'City only appears as part of person name'
                         }
 
                     # Check if city only appears in role/job title context

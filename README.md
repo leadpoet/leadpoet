@@ -451,6 +451,8 @@ your_model/
 └── requirements.txt    # Optional: additional dependencies
 ```
 
+**Size Limit:** Model tarball must be under **200KB**. Submissions exceeding this limit will be rejected.
+
 **Required Function:**
 ```python
 def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:

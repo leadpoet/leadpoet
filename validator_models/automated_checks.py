@@ -5528,7 +5528,6 @@ async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
                     if total_filings == 0:
                         # The HTML might be a landing page with a link to the actual filings
                         # Try to extract CIK from the HTML and query directly
-                        import re
                         cik_match = re.search(r'CIK=(\d{10})', html)
                         if cik_match:
                             cik = cik_match.group(1)
@@ -9145,7 +9144,6 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     company_linkedin_slug = None
     company_linkedin = lead.get("company_linkedin", "") or ""
     if company_linkedin:
-        import re
         match = re.search(r'linkedin\.com/company/([^/]+)', company_linkedin)
         if match:
             company_linkedin_slug = match.group(1)

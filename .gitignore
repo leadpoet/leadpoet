@@ -97,6 +97,7 @@ Leadpoet/api/
 
 # Auto-generated validator wrapper
 .auto_update_wrapper.sh
+.auditor_auto_update_wrapper.sh
 
 # Legacy miner code - no longer used (replaced by lead_sorcerer_main)
 miner_models/get_leads.py

@@ -427,7 +427,6 @@ async def run_lead_validation_stage4(
 
         # Area check
         if not location_passed:
-            import re
             area_match = re.search(r'(Greater\s+[\w\s]+|[\w\s]+\s+Metropolitan|[\w\s]+\s+Bay|[\w\s]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
             if area_match:
                 area_found = area_match.group(0).strip()
@@ -785,7 +784,6 @@ async def run_location_validation_only(
 
         # Area check
         if not location_passed:
-            import re
             area_match = re.search(r'(Greater\s+[\w\s]+|[\w\s]+\s+Metropolitan|[\w\s]+\s+Bay|[\w\s]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
             if area_match:
                 area_found = area_match.group(0).strip()

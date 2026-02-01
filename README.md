@@ -271,7 +271,7 @@ To maintain lead quality and prevent spam, we enforce daily submission limits se
   - **Validator consensus rejections** - When validator consensus rejects your lead based on quality checks
 
 **What Happens at Rate Limit:**
-```
+
 When you hit the rejection limit, all subsequent submissions are blocked until the daily reset at midnight EST. All rate limit events are logged to the TEE buffer and permanently stored on Arweave for transparency.
 
 ---
@@ -615,27 +615,6 @@ This is for validators who want to participate in consensus without running the 
 Miner Sources Leads → Submit to TEE Gateway (S3 Upload) → 
 Epoch Assignment → Validators Validate (Commit/Reveal) 
 ```
-
-## Roadmap
-
-### Month 1: Launch & Foundation
-- Codebase goes live on SN71
-- Refine sourcing; gatekeep low-quality leads from the DB
-- Ensure stable miner and validator operations
-- Monitor and optimize consensus validation
-
-### Month 2: Curation & Beta Users
-- Miners begin curating leads from the lead pool based on Ideal Customer Profiles (ICPs)
-- Implement curation rewards into the incentive mechanism
-- Onboard initial beta customers for feedback
-- Refine models for lead ranking and scoring
-
-### Month 3: Product Launch & Growth
-- Product launch with marketing and sales campaigns
-- Open Leadpoet platform to paying customers
-- Scale miner curation and sourcing capabilities
-- Introduce weekly ICP themes to incentivize sourcing leads in specific industries
-- Optimize end-to-end lead generation pipeline
 
 ## Troubleshooting
 

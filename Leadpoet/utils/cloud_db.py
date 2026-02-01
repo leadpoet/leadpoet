@@ -2238,7 +2238,7 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
         result = response.json()
         returned_epoch = result.get("epoch_id")
         leads = result.get("leads", [])
-        max_leads_per_epoch = result.get("max_leads_per_epoch", 50)  # Default to 50 for backwards compatibility
+        max_leads_per_epoch = result.get("max_leads_per_epoch", 3600)  # Default to 3600 (production value)
         
         # CRITICAL: Validate gateway returned the correct epoch
         if returned_epoch != epoch_id:

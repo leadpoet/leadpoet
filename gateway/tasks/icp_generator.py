@@ -1169,31 +1169,42 @@ async def icp_rotation_task():
     """
     Background task that rotates ICPs daily at 12:00 AM UTC (midnight UTC).
     
-    Runs continuously, sleeping until the next reset time.
+    Uses polling approach (checks every minute) instead of long sleeps.
+    This is more robust against event loop issues and silent failures.
     """
-    logger.info("Starting ICP rotation task")
+    logger.info("Starting ICP rotation task (polling every 60s)")
+    
+    # Track the last date we generated for (to avoid duplicate generation)
+    last_generated_date: Optional[str] = None
     
     while True:
         try:
-            # Calculate time until next reset
-            next_reset = get_next_reset_time()
             now = datetime.now(timezone.utc)
-            sleep_seconds = (next_reset - now).total_seconds()
+            current_date = now.strftime("%Y-%m-%d")
             
-            if sleep_seconds > 0:
-                logger.info(f"ICP rotation: Next reset at {next_reset} ({sleep_seconds/3600:.1f} hours)")
-                await asyncio.sleep(sleep_seconds)
+            # Check if we're within the first 5 minutes after midnight UTC
+            # AND we haven't already generated for today
+            is_rotation_window = now.hour == 0 and now.minute < 5
             
-            # Generate and activate new ICP set
-            logger.info("ICP rotation: Starting generation...")
-            set_id = await generate_and_activate_icp_set()
+            if is_rotation_window and last_generated_date != current_date:
+                logger.info(f"ICP rotation: Midnight UTC detected ({now}), starting generation...")
+                
+                # Generate and activate new ICP set
+                set_id = await generate_and_activate_icp_set()
+                
+                if set_id:
+                    logger.info(f"ICP rotation: Successfully activated set {set_id}")
+                    last_generated_date = current_date
+                else:
+                    logger.error("ICP rotation: Failed to generate/activate set, will retry next minute")
             
-            if set_id:
-                logger.info(f"ICP rotation: Successfully activated set {set_id}")
-            else:
-                logger.error("ICP rotation: Failed to generate/activate set")
+            # Log status every hour (at minute 0)
+            if now.minute == 0:
+                next_reset = get_next_reset_time()
+                hours_until = (next_reset - now).total_seconds() / 3600
+                logger.info(f"ICP rotation: Next reset at {next_reset} ({hours_until:.1f} hours)")
             
-            # Sleep a bit to avoid re-triggering
+            # Sleep for 60 seconds then check again
             await asyncio.sleep(60)
             
         except asyncio.CancelledError:
@@ -1203,8 +1214,8 @@ async def icp_rotation_task():
             logger.error(f"ICP rotation error: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            # Sleep and retry
-            await asyncio.sleep(300)  # 5 minutes
+            # Sleep briefly and retry
+            await asyncio.sleep(60)
 
 
 # =============================================================================

@@ -195,6 +195,7 @@ start_container() {
     local VSOCK_ARG=""
     local ENCLAVE_CID_ARG=""
     local PRIVILEGED_ARG=""
+    local LOG_DRIVER_ARGS=""
     if [ "$CONTAINER_ID" -eq 0 ]; then
         MODE_ARG="--mode coordinator"
         # Coordinator needs vsock access for Nitro Enclave TEE signing
@@ -209,6 +210,9 @@ start_container() {
             ENCLAVE_CID_ARG="-e ENCLAVE_CID=$ENCLAVE_CID"
             echo "   🔐 Passing ENCLAVE_CID=$ENCLAVE_CID"
         fi
+        # CloudWatch Logs for coordinator container (ships logs directly to AWS, no local files)
+        LOG_DRIVER_ARGS="--log-driver=awslogs --log-opt awslogs-region=us-east-1 --log-opt awslogs-group=/leadpoet/validator/coordinator --log-opt awslogs-stream=coordinator --log-opt awslogs-create-group=true"
+        echo "   📊 CloudWatch Logs: /leadpoet/validator/coordinator"
     else
         MODE_ARG="--mode worker"
     fi
@@ -218,6 +222,7 @@ start_container() {
       --network host \
       --restart unless-stopped \
       $PRIVILEGED_ARG \
+      $LOG_DRIVER_ARGS \
       -v ~/.bittensor/wallets:/root/.bittensor/wallets:ro \
       -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
       -e LEADPOET_CONTAINER_MODE=1 \

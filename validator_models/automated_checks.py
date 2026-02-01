@@ -4306,9 +4306,9 @@ async def run_batch_automated_checks(
                 }
             }))
         
-        # 0.5-second delay between Stage 0-2 leads (rate limiting)
+        # 1.2-second delay between Stage 0-2 leads (rate limiting)
         if i < len(leads) - 1:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.2)
     
     stage0_2_passed_count = sum(1 for passed, _ in stage0_2_results if passed)
     print(f"   ✅ Stage 0-2 complete: {stage0_2_passed_count}/{n} passed")
@@ -4519,7 +4519,7 @@ async def run_batch_automated_checks(
             queue_idx += 1
             
             # No delay between Stage 4-5 leads - ScrapingDog/OpenRouter can handle it
-            # (Stage 0-2 still has 1s delay for DNS/HEAD request rate limiting)
+            # (Stage 0-2 still has 1.2s delay for DNS/HEAD request rate limiting)
         
         # Check if retry batch completed (non-blocking check)
         if retry_task is not None and retry_task.done():
@@ -9753,7 +9753,7 @@ def _get_icp_bonus(lead: dict) -> int:
         # Check city for city-specific ICPs (e.g., "dubai" for UAE)
         # This is needed since UAE leads are only accepted from Dubai
         if matches_any(city, icp_regions):
-            return True
+                return True
         
         return False
     

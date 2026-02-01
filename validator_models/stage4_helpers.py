@@ -29,6 +29,7 @@ Usage:
 
 import re
 import json
+import time
 import unicodedata
 import requests
 from typing import Dict, List, Tuple, Optional, Any
@@ -1295,14 +1296,6 @@ def should_reject_city_match(city: str, state: str, country: str, full_text: str
         if _has_contradicting_state_or_province(city, state, country, full_text, ""):
             return True  # Reject - text shows different state/province
 
-        # NOTE: We intentionally do NOT fall back to is_city_in_area_with_matching_state here.
-        # That static lookup only confirms a city EXISTS in a state, but doesn't verify
-        # the TEXT actually shows that state. This caused false positives like:
-        # - "york" matching "New York" text → area mapping confirmed York in Nebraska → wrong
-        # - "rochester" in "Location: Rochester" → area mapping confirmed Rochester in Minnesota → wrong
-        # The area_approved check (line 430+ in stage4_person_verification.py) is the proper
-        # place for area-based approval since it matches against area names found IN the text.
-
         return True  # Reject - needs verification but state/country not found in text
 
     return False  # Accept the match (normal city)
@@ -2059,12 +2052,39 @@ def check_q3_location_fallback(
     query = f'"{name}" "{company}" "{city}" "{linkedin_url}"'
 
     try:
-        resp = requests.get('https://api.scrapingdog.com/google', params={
-            'api_key': scrapingdog_api_key,
-            'query': query,
-            'results': 3,
-            'country': 'us'
-        }, timeout=30)
+        # Retry loop for transient failures (timeout, 502, 503, 429)
+        resp = None
+        last_error = None
+        for attempt in range(3):
+            try:
+                resp = requests.get('https://api.scrapingdog.com/google', params={
+                    'api_key': scrapingdog_api_key,
+                    'query': query,
+                    'results': 3,
+                    'country': 'us'
+                }, timeout=45)
+
+                if resp.status_code in (502, 503, 429):
+                    last_error = f'HTTP {resp.status_code}'
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)  # 1s, 2s
+                        continue
+                break  # Success or non-retryable HTTP error
+            except requests.exceptions.Timeout:
+                last_error = 'Read timed out'
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                return {'success': False, 'passed': False, 'error': f'Timeout after 3 retries', 'results': []}
+            except requests.exceptions.ConnectionError:
+                last_error = 'Connection error'
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                return {'success': False, 'passed': False, 'error': f'Connection error after 3 retries', 'results': []}
+
+        if resp is None:
+            return {'success': False, 'passed': False, 'error': last_error or 'No response', 'results': []}
 
         if resp.status_code != 200:
             return {'success': False, 'passed': False, 'error': f'HTTP {resp.status_code}', 'results': []}
@@ -2092,9 +2112,6 @@ def check_q3_location_fallback(
                     city_lower = city.lower()
                     result_url = r.get('link', '')
 
-                    # Google's missing=[] can be unreliable: the knowledge graph
-                    # may associate a city with a company (e.g. CFGI → Boston)
-                    # even when the city doesn't appear in the snippet at all.
                     # Require the city to literally appear in the text.
                     if not re.search(r'\b' + re.escape(city_lower) + r'\b', full_text.lower()):
                         return {
@@ -2443,9 +2460,11 @@ def validate_lead(
 
         # Area check
         if not location_passed:
-            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
+            # Normalize "St." to "St " (same length) so regex can match St. Paul, St. Louis etc.
+            area_search_text = re.sub(r'\bSt\.\s', 'St  ', full_text)
+            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', area_search_text, re.IGNORECASE)
             if area_match:
-                area_found = area_match.group(0).strip()
+                area_found = full_text[area_match.start():area_match.end()].strip()
                 if city_lower not in area_found.lower():
                     # Check if city appears right before area name in text
                     area_start = area_match.start()
@@ -2478,8 +2497,6 @@ def validate_lead(
                         location_method = f'non_linkedin_{loc_method}'
                         result['checks']['location']['extracted'] = r_loc
                         break
-                # Removed: non-LinkedIn city fallback was too loose
-                # It matched company HQ locations instead of person locations
 
     # Q3 location fallback when not found
     if not location_passed and use_q3 and scrapingdog_api_key and city and linkedin:
@@ -2581,24 +2598,36 @@ class LeadValidator:
         if not self.scrapingdog_api_key:
             return [], "No ScrapingDog API key"
 
-        try:
-            resp = requests.get('https://api.scrapingdog.com/google', params={
-                'api_key': self.scrapingdog_api_key,
-                'query': query,
-                'results': max_results
-            }, timeout=30)
-            if resp.status_code == 200:
-                data = resp.json()
-                return [{
-                    'title': r.get('title', ''),
-                    'snippet': r.get('snippet', ''),
-                    'link': r.get('link', ''),
-                    'missing': r.get('missing', [])
-                } for r in data.get('organic_results', [])], None
-            else:
-                return [], f"HTTP {resp.status_code}"
-        except Exception as e:
-            return [], str(e)[:100]
+        for attempt in range(3):
+            try:
+                resp = requests.get('https://api.scrapingdog.com/google', params={
+                    'api_key': self.scrapingdog_api_key,
+                    'query': query,
+                    'results': max_results
+                }, timeout=45)
+                if resp.status_code in (502, 503, 429):
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return [], f"HTTP {resp.status_code} after 3 retries"
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return [{
+                        'title': r.get('title', ''),
+                        'snippet': r.get('snippet', ''),
+                        'link': r.get('link', ''),
+                        'missing': r.get('missing', [])
+                    } for r in data.get('organic_results', [])], None
+                else:
+                    return [], f"HTTP {resp.status_code}"
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                return [], f"Timeout after 3 retries"
+            except Exception as e:
+                return [], str(e)[:100]
+        return [], "Max retries exhausted"
 
     def validate(self, lead: Dict[str, Any]) -> Dict[str, Any]:
         """

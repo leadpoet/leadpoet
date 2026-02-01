@@ -21,6 +21,7 @@ Usage in automated_checks.py:
 
 import os
 import re
+import time
 import asyncio
 from typing import Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -59,24 +60,36 @@ async def search_google_async(query: str, api_key: str, max_results: int = 10) -
     import requests
 
     def _search():
-        try:
-            resp = requests.get('https://api.scrapingdog.com/google', params={
-                'api_key': api_key,
-                'query': query,
-                'results': max_results
-            }, timeout=30)
-            if resp.status_code == 200:
-                data = resp.json()
-                return [{
-                    'title': r.get('title', ''),
-                    'snippet': r.get('snippet', ''),
-                    'link': r.get('link', ''),
-                    'missing': r.get('missing', [])
-                } for r in data.get('organic_results', [])], None
-            else:
-                return [], f"HTTP {resp.status_code}"
-        except Exception as e:
-            return [], str(e)[:100]
+        for attempt in range(3):
+            try:
+                resp = requests.get('https://api.scrapingdog.com/google', params={
+                    'api_key': api_key,
+                    'query': query,
+                    'results': max_results
+                }, timeout=45)
+                if resp.status_code in (502, 503, 429):
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return [], f"HTTP {resp.status_code} after 3 retries"
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return [{
+                        'title': r.get('title', ''),
+                        'snippet': r.get('snippet', ''),
+                        'link': r.get('link', ''),
+                        'missing': r.get('missing', [])
+                    } for r in data.get('organic_results', [])], None
+                else:
+                    return [], f"HTTP {resp.status_code}"
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                return [], f"Timeout after 3 retries"
+            except Exception as e:
+                return [], str(e)[:100]
+        return [], "Max retries exhausted"
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_executor, _search)
@@ -427,9 +440,11 @@ async def run_lead_validation_stage4(
 
         # Area check
         if not location_passed:
-            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
+            # Normalize "St." to "St " (same length) so regex can match St. Paul, St. Louis etc.
+            area_search_text = re.sub(r'\bSt\.\s', 'St  ', full_text)
+            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', area_search_text, re.IGNORECASE)
             if area_match:
-                area_found = area_match.group(0).strip()
+                area_found = full_text[area_match.start():area_match.end()].strip()
                 if city_lower not in area_found.lower():
                     # Check if city appears right before area name in text
                     # LinkedIn format: "Rochester, New York Metropolitan Area"
@@ -459,9 +474,8 @@ async def run_lead_validation_stage4(
                         }
                         return result
 
-        # Non-LinkedIn fallback (structured location only, no city-only fallback)
-        # Note: City-only fallback from non-LinkedIn sources was too loose
-        # (matched company HQ locations instead of person locations)
+        # Non-LinkedIn fallback (structured location only)
+
         if not location_passed:
             for r in all_results[:5]:
                 r_link = r.get('link', '').lower()
@@ -795,9 +809,11 @@ async def run_location_validation_only(
 
         # Area check
         if not location_passed:
-            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', full_text, re.IGNORECASE)
+            # Normalize "St." to "St " (same length) so regex can match St. Paul, St. Louis etc.
+            area_search_text = re.sub(r'\bSt\.\s', 'St  ', full_text)
+            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', area_search_text, re.IGNORECASE)
             if area_match:
-                area_found = area_match.group(0).strip()
+                area_found = full_text[area_match.start():area_match.end()].strip()
                 if city_lower not in area_found.lower():
                     # Check if city appears right before area name in text
                     area_start = area_match.start()
@@ -820,9 +836,7 @@ async def run_location_validation_only(
                         }
                         return result
 
-        # Non-LinkedIn fallback (structured location only, no city-only fallback)
-        # Note: Require name AND company in result text to avoid matching
-        # a different person with the same name from aggregator sites
+        # Non-LinkedIn fallback (structured location only)
         if not location_passed:
             name_lower = full_name.lower()
             company_lower = company.lower() if company else ''

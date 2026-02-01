@@ -4306,9 +4306,9 @@ async def run_batch_automated_checks(
                 }
             }))
         
-        # 1-second delay between Stage 0-2 leads (rate limiting)
+        # 0.8-second delay between Stage 0-2 leads (rate limiting)
         if i < len(leads) - 1:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.8)
     
     stage0_2_passed_count = sum(1 for passed, _ in stage0_2_results if passed)
     print(f"   ✅ Stage 0-2 complete: {stage0_2_passed_count}/{n} passed")
@@ -4519,7 +4519,7 @@ async def run_batch_automated_checks(
             queue_idx += 1
             
             # No delay between Stage 4-5 leads - ScrapingDog/OpenRouter can handle it
-            # (Stage 0-2 still has 1s delay for DNS/HEAD request rate limiting)
+            # (Stage 0-2 still has 0.8s delay for DNS/HEAD request rate limiting)
         
         # Check if retry batch completed (non-blocking check)
         if retry_task is not None and retry_task.done():

@@ -281,8 +281,8 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
     echo "============================================================"
     echo ""
     
-    # Kill any existing qualification workers
-    pkill -f "qualification_worker" 2>/dev/null || true
+    # Kill any existing qualification workers (use -9 to force kill suspended processes)
+    pkill -9 -f "qualification_worker" 2>/dev/null || true
     sleep 1
     
     for i in $(seq 1 $QUAL_PROXY_COUNT); do

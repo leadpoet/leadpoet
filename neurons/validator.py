@@ -7088,6 +7088,22 @@ def run_dedicated_qualification_worker(config):
     qual_container_id = config.neuron.qualification_container_id
     total_qual_containers = config.neuron.total_qualification_containers
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SET HTTP PROXY FOR THIS WORKER (so ddgs/free APIs go through different IPs)
+    # ═══════════════════════════════════════════════════════════════════════════
+    proxy_var = f"QUALIFICATION_WEBSHARE_PROXY_{qual_container_id}"
+    proxy_url = os.environ.get(proxy_var)
+    if proxy_url:
+        os.environ["HTTP_PROXY"] = proxy_url
+        os.environ["HTTPS_PROXY"] = proxy_url
+        print(f"🌐 Using proxy for qualification worker {qual_container_id}")
+        print(f"   Proxy: {proxy_url[:50]}...")
+    else:
+        print(f"⚠️ No proxy configured for qualification worker {qual_container_id}")
+        print(f"   Expected env var: {proxy_var}")
+        print(f"   Free APIs (ddgs) will use validator's IP directly")
+    
+    print("")
     print("🚀 Starting dedicated qualification worker...")
     print(f"   Qualification Container ID: {qual_container_id}")
     print(f"   Total qualification containers: {total_qual_containers}")

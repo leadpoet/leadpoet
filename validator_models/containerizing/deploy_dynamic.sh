@@ -51,7 +51,7 @@ fi
 
 echo ""
 
-# Auto-detect proxies from .env.docker
+# Auto-detect SOURCING proxies from .env
 PROXIES=()
 PROXY_COUNT=0
 
@@ -63,6 +63,21 @@ for i in {1..49}; do
     if [ -n "$PROXY_VALUE" ] && [ "$PROXY_VALUE" != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80" ]; then
         PROXIES+=("$PROXY_VALUE")
         PROXY_COUNT=$((PROXY_COUNT + 1))
+    fi
+done
+
+# Auto-detect QUALIFICATION proxies from .env
+QUAL_PROXIES=()
+QUAL_PROXY_COUNT=0
+
+# Check for QUALIFICATION_WEBSHARE_PROXY_1, QUALIFICATION_WEBSHARE_PROXY_2, etc.
+for i in {1..10}; do
+    PROXY_VAR="QUALIFICATION_WEBSHARE_PROXY_$i"
+    PROXY_VALUE="${!PROXY_VAR}"
+    
+    if [ -n "$PROXY_VALUE" ] && [ "$PROXY_VALUE" != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80" ]; then
+        QUAL_PROXIES+=("$PROXY_VALUE")
+        QUAL_PROXY_COUNT=$((QUAL_PROXY_COUNT + 1))
     fi
 done
 
@@ -80,10 +95,14 @@ fi
 # Each proxy gets 1 worker container
 TOTAL_CONTAINERS=$((PROXY_COUNT + 1))
 
-echo "🔍 Auto-detected proxies: $PROXY_COUNT"
-echo "📦 Total containers to deploy: $TOTAL_CONTAINERS"
+echo "🔍 Auto-detected SOURCING proxies: $PROXY_COUNT"
+echo "🔍 Auto-detected QUALIFICATION proxies: $QUAL_PROXY_COUNT"
+echo "📦 Total SOURCING containers to deploy: $TOTAL_CONTAINERS"
 echo "   - 1x Main validator (EC2 native IP)"
 echo "   - ${PROXY_COUNT}x Worker containers (proxied)"
+if [ $QUAL_PROXY_COUNT -gt 0 ]; then
+    echo "📦 Total QUALIFICATION workers to spawn: $QUAL_PROXY_COUNT"
+fi
 echo ""
 
 if [ $PROXY_COUNT -eq 0 ]; then
@@ -242,6 +261,43 @@ for i in $(seq 1 $PROXY_COUNT); do
     start_container "leadpoet-validator-worker-$i" "$PROXY_URL" "$CONTAINER_ID" "Container $CONTAINER_ID: Worker #$i"
 done
 
+# ════════════════════════════════════════════════════════════════════════════════
+# SPAWN QUALIFICATION WORKERS (as background processes, NOT Docker containers)
+# ════════════════════════════════════════════════════════════════════════════════
+# Qualification workers evaluate miner models in parallel to sourcing.
+# They use their own proxies (QUALIFICATION_WEBSHARE_PROXY_*) for ddgs/free APIs.
+# ════════════════════════════════════════════════════════════════════════════════
+
+if [ $QUAL_PROXY_COUNT -gt 0 ]; then
+    echo ""
+    echo "============================================================"
+    echo "🎯 SPAWNING QUALIFICATION WORKERS"
+    echo "============================================================"
+    echo ""
+    
+    # Kill any existing qualification workers
+    pkill -f "qualification_worker" 2>/dev/null || true
+    sleep 1
+    
+    for i in $(seq 1 $QUAL_PROXY_COUNT); do
+        QUAL_PROXY_VAR="QUALIFICATION_WEBSHARE_PROXY_$i"
+        QUAL_PROXY_VALUE="${!QUAL_PROXY_VAR}"
+        
+        echo "🚀 Starting Qualification Worker $i..."
+        echo "   Proxy: ${QUAL_PROXY_VALUE:0:30}..."
+        
+        # Spawn as background process with its proxy
+        cd "$REPO_ROOT"
+        nohup python3 neurons/validator.py --mode qualification_worker --container-id $i > "$REPO_ROOT/qual_worker_$i.log" 2>&1 &
+        
+        echo "   ✅ Started (PID: $!)"
+        echo ""
+    done
+    
+    echo "✅ All $QUAL_PROXY_COUNT qualification workers spawned"
+    echo ""
+fi
+
 # Wait for containers to start
 echo "⏳ Waiting 10 seconds for containers to initialize..."
 sleep 10
@@ -303,7 +359,10 @@ echo "✅ DEPLOYMENT COMPLETE"
 echo "============================================================"
 echo ""
 echo "📊 Summary:"
-echo "   - Total containers: $TOTAL_CONTAINERS"
+echo "   - Sourcing containers: $TOTAL_CONTAINERS (1 coordinator + $PROXY_COUNT workers)"
+if [ $QUAL_PROXY_COUNT -gt 0 ]; then
+    echo "   - Qualification workers: $QUAL_PROXY_COUNT"
+fi
 echo "   - Lead distribution: FULLY DYNAMIC (adapts to gateway MAX_LEADS_PER_EPOCH)"
 echo "   - Unique IPs: $UNIQUE_COUNT / $TOTAL_COUNT"
 echo ""
@@ -313,9 +372,12 @@ echo "   - Gateway @ 900 leads → Each container: 300 leads"
 echo "   - Gateway @ 1200 leads → Each container: 400 leads"
 echo ""
 echo "📋 Next Steps:"
-echo "   1. Monitor logs: docker logs -f leadpoet-validator-main"
-echo "   2. Check resource usage: docker stats"
-echo "   3. Verify lead distribution in logs (each container shows its range)"
+echo "   1. Monitor sourcing logs: docker logs -f leadpoet-validator-main"
+if [ $QUAL_PROXY_COUNT -gt 0 ]; then
+    echo "   2. Monitor qualification logs: tail -f qual_worker_1.log"
+fi
+echo "   3. Check resource usage: docker stats"
+echo "   4. Verify lead distribution in logs (each container shows its range)"
 echo ""
 echo "🔧 To scale up (add more containers):"
 echo "   1. Get another proxy from https://www.webshare.io/"

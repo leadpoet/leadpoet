@@ -267,7 +267,12 @@ echo "🛑 Auto-updater stopped"
 # AUTO-CONTAINERIZATION: Automatically containerize if proxies detected
 # ════════════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1":
+# Skip auto-containerization for worker modes (they should NOT trigger deployment)
+_is_worker_mode = "--mode" in sys.argv and any(
+    m in sys.argv for m in ["qualification_worker", "worker"]
+)
+
+if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" and not _is_worker_mode:
     # Check if proxies are configured for containerization
     proxies_found = []
     for i in range(1, 50):  # Check for up to 49 proxies (supports scaling)

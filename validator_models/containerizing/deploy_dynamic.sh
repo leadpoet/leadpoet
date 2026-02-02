@@ -215,6 +215,9 @@ start_container() {
         echo "   📊 CloudWatch Logs: /leadpoet/validator/coordinator"
     else
         MODE_ARG="--mode worker"
+        # CloudWatch Logs for worker containers (each worker gets its own stream)
+        LOG_DRIVER_ARGS="--log-driver=awslogs --log-opt awslogs-region=us-east-1 --log-opt awslogs-group=/leadpoet/validator/workers --log-opt awslogs-stream=worker-$CONTAINER_ID --log-opt awslogs-create-group=true"
+        echo "   📊 CloudWatch Logs: /leadpoet/validator/workers (stream: worker-$CONTAINER_ID)"
     fi
     
     docker run -d \

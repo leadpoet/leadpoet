@@ -378,18 +378,22 @@ async def run_lead_validation_stage4(
             location_passed = True
             location_method = 'structured_city_match'
         elif not city_match:
-            # DIRECT FAIL - city mismatch, no Q3
-            result['data']['query_used'] = '+'.join(queries_used)
-            result['data']['location_method'] = 'city_mismatch'
-            result['rejection_reason'] = {
-                "stage": "Stage 4: Lead Validation",
-                "check_name": "lead_validation_stage4",
-                "message": f"City mismatch: extracted '{ext_city}' but claimed '{city}'",
-                "failed_fields": ["city"],
-                "extracted_location": extracted_loc,
-                "claimed_city": city
-            }
-            return result
+            company_lower = company.lower().strip() if company else ''
+            if company_lower and (ext_city == company_lower):
+                pass  # Bad extraction — not a real city
+            else:
+                # DIRECT FAIL - city mismatch, no Q3
+                result['data']['query_used'] = '+'.join(queries_used)
+                result['data']['location_method'] = 'city_mismatch'
+                result['rejection_reason'] = {
+                    "stage": "Stage 4: Lead Validation",
+                    "check_name": "lead_validation_stage4",
+                    "message": f"City mismatch: extracted '{ext_city}' but claimed '{city}'",
+                    "failed_fields": ["city"],
+                    "extracted_location": extracted_loc,
+                    "claimed_city": city
+                }
+                return result
         elif not state_match:
             # DIRECT FAIL - state mismatch, no Q3
             result['data']['query_used'] = '+'.join(queries_used)
@@ -413,8 +417,7 @@ async def run_lead_validation_stage4(
         if not structured_loc_valid and extracted_loc:
             loc_match, loc_method = check_locations_match(extracted_loc, gt_location, full_text)
             if loc_match:
-                # Ambiguous/English word cities need state verification even on
-                # non-structured match (e.g. "Richmond" alone could be VA, CA, KY...)
+                # State verification for certain city types
                 needs_strict = is_ambiguous_city(city_lower) or is_english_word_city(city_lower)
                 if needs_strict:
                     has_state = _verify_state_or_country_for_strict_validation(
@@ -443,12 +446,18 @@ async def run_lead_validation_stage4(
             # Normalize "St." to "St " (same length) so regex can match St. Paul, St. Louis etc.
             area_search_text = re.sub(r'\bSt\.\s', 'St  ', full_text)
             area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', area_search_text, re.IGNORECASE)
+
+            if not area_match:
+                greater_match = re.search(r'(Greater\s+[A-Z][a-zA-Z.]+(?:\s+[A-Z][a-zA-Z.]+)*)', full_text)
+                if greater_match:
+                    candidate = greater_match.group(1).strip()
+                    if is_area_in_mappings(candidate):
+                        area_match = greater_match
+
             if area_match:
                 area_found = full_text[area_match.start():area_match.end()].strip()
                 if city_lower not in area_found.lower():
-                    # Check if city appears right before area name in text
-                    # LinkedIn format: "Rochester, New York Metropolitan Area"
-                    # means Rochester's metro area in NY, not the NYC metro area
+                    # Check city-area proximity
                     area_start = area_match.start()
                     text_before_area = full_text[:area_start]
                     city_before_area = re.search(r'\b' + re.escape(city_lower) + r'\b\s*,\s*$', text_before_area.lower())
@@ -508,6 +517,59 @@ async def run_lead_validation_stage4(
         else:
             result['data']['q3_result'] = 'fail'
             print(f"   ❌ Q3 failed: {q3_result.get('error', 'no match')}")
+
+    # 6d. Q5 Location Fallback
+    if not location_passed and city and linkedin_url and state:
+        city_lower = city.lower().strip()
+        is_ambiguous = is_ambiguous_city(city_lower)
+        is_english_word = is_english_word_city(city_lower)
+        if is_ambiguous or is_english_word:
+            state_abbr_map = GEO_LOOKUP.get('state_abbr', {})
+            state_lower = state.lower().strip()
+            # Build full state name and abbreviation
+            if state_lower in state_abbr_map:
+                state_full = state_abbr_map[state_lower].title()
+                state_ab = state.upper().strip()
+            else:
+                state_full = state.strip()
+                state_ab = ''
+                for ab, full in state_abbr_map.items():
+                    if full.lower() == state_lower:
+                        state_ab = ab.upper()
+                        break
+
+            q5_variants = [f'{city}, {state_full}'] if state_full else []
+            if state_ab and state_ab != state_full:
+                q5_variants.append(f'{city}, {state_ab}')
+
+            for variant in q5_variants:
+                q5_query = f'site:linkedin.com/in/{expected_lid} "{variant}"'
+                print(f"   🔍 Q5: {q5_query}")
+                q5_results, q5_error = await search_google_async(q5_query, api_key)
+                queries_used.append('Q5')
+
+                for r in q5_results:
+                    if get_linkedin_id(r.get('link', '')) == expected_lid:
+                        r_text = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
+                        city_in_text = bool(re.search(r'\b' + re.escape(city.lower()) + r'\b', r_text))
+                        state_in_text = (state_full.lower() in r_text) or \
+                            (bool(re.search(r'\b' + re.escape(state_ab.lower()) + r'\b', r_text)) if state_ab else False)
+                        if not state_in_text and len(state_full) >= 3:
+                            for plen in range(3, len(state_full)):
+                                prefix = state_full[:plen].lower()
+                                if re.search(r'\b' + re.escape(prefix), r_text):
+                                    state_in_text = True
+                                    break
+                        if city_in_text and state_in_text:
+                            location_passed = True
+                            location_method = 'q5_slug_city_state'
+                            print(f"   ✅ Q5 passed: found \"{variant}\" on profile")
+                            break
+                if location_passed:
+                    break
+
+            if not location_passed:
+                print(f"   ❌ Q5 failed: \"{city}, {state}\" not found on profile")
 
     result['data']['query_used'] = '+'.join(queries_used)
 
@@ -784,8 +846,7 @@ async def run_location_validation_only(
         if not structured_loc_valid and extracted_loc:
             loc_match, loc_method = check_locations_match(extracted_loc, gt_location, full_text)
             if loc_match:
-                # Ambiguous/English word cities need state verification even on
-                # non-structured match (e.g. "Richmond" alone could be VA, CA, KY...)
+                # State verification for certain city types
                 needs_strict = is_ambiguous_city(city_lower) or is_english_word_city(city_lower)
                 if needs_strict:
                     has_state = _verify_state_or_country_for_strict_validation(
@@ -812,6 +873,14 @@ async def run_location_validation_only(
             # Normalize "St." to "St " (same length) so regex can match St. Paul, St. Louis etc.
             area_search_text = re.sub(r'\bSt\.\s', 'St  ', full_text)
             area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', area_search_text, re.IGNORECASE)
+
+            if not area_match:
+                greater_match = re.search(r'(Greater\s+[A-Z][a-zA-Z.]+(?:\s+[A-Z][a-zA-Z.]+)*)', full_text)
+                if greater_match:
+                    candidate = greater_match.group(1).strip()
+                    if is_area_in_mappings(candidate):
+                        area_match = greater_match
+
             if area_match:
                 area_found = full_text[area_match.start():area_match.end()].strip()
                 if city_lower not in area_found.lower():
@@ -871,6 +940,53 @@ async def run_location_validation_only(
             result['q3_result'] = 'pass'
         else:
             result['q3_result'] = 'fail'
+
+    # Q5 Fallback
+    if not location_passed and city and linkedin_url and state and api_key:
+        city_lower = city.lower().strip()
+        is_ambiguous = is_ambiguous_city(city_lower)
+        is_english_word = is_english_word_city(city_lower)
+        if is_ambiguous or is_english_word:
+            expected_lid = get_linkedin_id(linkedin_url)
+            state_abbr_map = GEO_LOOKUP.get('state_abbr', {})
+            state_lower = state.lower().strip()
+            if state_lower in state_abbr_map:
+                state_full = state_abbr_map[state_lower].title()
+                state_ab = state.upper().strip()
+            else:
+                state_full = state.strip()
+                state_ab = ''
+                for ab, full in state_abbr_map.items():
+                    if full.lower() == state_lower:
+                        state_ab = ab.upper()
+                        break
+
+            q5_variants = [f'{city}, {state_full}'] if state_full else []
+            if state_ab and state_ab != state_full:
+                q5_variants.append(f'{city}, {state_ab}')
+
+            for variant in q5_variants:
+                q5_query = f'site:linkedin.com/in/{expected_lid} "{variant}"'
+                q5_results, q5_error = await search_google_async(q5_query, api_key)
+
+                for r in q5_results:
+                    if get_linkedin_id(r.get('link', '')) == expected_lid:
+                        r_text = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
+                        city_in_text = bool(re.search(r'\b' + re.escape(city.lower()) + r'\b', r_text))
+                        state_in_text = (state_full.lower() in r_text) or \
+                            (bool(re.search(r'\b' + re.escape(state_ab.lower()) + r'\b', r_text)) if state_ab else False)
+                        if not state_in_text and len(state_full) >= 3:
+                            for plen in range(3, len(state_full)):
+                                prefix = state_full[:plen].lower()
+                                if re.search(r'\b' + re.escape(prefix), r_text):
+                                    state_in_text = True
+                                    break
+                        if city_in_text and state_in_text:
+                            location_passed = True
+                            location_method = 'q5_slug_city_state'
+                            break
+                if location_passed:
+                    break
 
     if location_passed:
         result['passed'] = True

@@ -11,14 +11,6 @@ Contains:
 - Name/Company matching helpers
 - Area mapping utilities (is_city_in_area_approved, is_area_in_mappings)
 
-Location check order:
-1. Structured city match (City, State format) → city_mismatch = direct fail
-2. Flexible location match (word overlap, etc.)
-3. City fallback (city in text)
-4. Area mapping check → area_mismatch = direct fail
-5. Non-LinkedIn fallback
-6. Q3 fallback query: "{name}" "{company}" "{city}" "{url}"
-
 Usage:
     from validator_models.stage4_helpers import (
         extract_location_from_text,
@@ -1218,30 +1210,7 @@ def _has_contradicting_state_or_province(city: str, state: str, country: str, fu
 
 def should_reject_city_match(city: str, state: str, country: str, full_text: str, full_name: str = "", city_only_fallback: bool = True, linkedin_url: str = "", role: str = "", company: str = "") -> bool:
     """
-    Check if a city-only match should be rejected due to institution context or ambiguity.
-
-    This helper function consolidates the repeated pattern of checking:
-    0. If city is a common word that shouldn't be treated as a city (e.g., "Research")
-    1. If city appears only as part of person's name (false positive filter)
-    2. If city appears only in an institution name (false positive filter)
-    3. If city only appears in company name context (false positive filter)
-    4. If city only appears in role/job title context (false positive filter)
-    5. If LinkedIn URL domain contradicts claimed country (applies to ALL cities)
-    6. If city is ambiguous and state/country cannot be verified in text
-    7. If city is an English word and state/country cannot be verified (only in city_only_fallback mode)
-    8. If city is in an area mapping with matching state, approve it
-
-    Args:
-        city: The city name to check (lowercase)
-        state: The claimed state
-        country: The claimed country
-        full_text: The full text to search in
-        full_name: Optional - person's full name to check for false positives
-        city_only_fallback: If True, apply strict English word city check (requires "City, State/Country" format).
-                           Set to False when structured location is already being validated.
-        linkedin_url: Optional - LinkedIn URL to check for country-specific domains (ca.linkedin.com = Canada)
-        role: Optional - job role/title to check if city only appears in role context
-        company: Optional - company name to check if city only appears in company name context
+    Validate city match against false positive patterns and geographic constraints.
 
     Returns:
         True if the match should be rejected, False if it should be accepted
@@ -1290,6 +1259,13 @@ def should_reject_city_match(city: str, state: str, country: str, full_text: str
         # First check if "City, State/Country" format appears in text
         if _verify_state_or_country_for_strict_validation(city, state, country, full_text, linkedin_url):
             return False  # Accept - verified location format in text
+
+        greater_m = re.search(r'Greater\s+' + re.escape(city_lower) + r'\b', full_text, re.IGNORECASE)
+        if greater_m:
+            greater_text = greater_m.group(0).strip()
+            if is_city_in_area_approved(city_lower, greater_text, state, country) or \
+               is_city_in_area_approved(city_lower, greater_text + " Area", state, country):
+                return False  # Accept - specific area mapping confirms state
 
         # Check if text contains a CONTRADICTING state/province/country
         # e.g., "Vancouver, British Columbia" when claiming Vancouver, Washington
@@ -2022,19 +1998,7 @@ def check_q3_location_fallback(
     role: str = ''
 ) -> Dict[str, Any]:
     """
-    Q3 Location fallback query: "{name}" "{company}" "{city}" "{url}"
-
-    Only checks exact URL match with missing=[] (all terms found).
-
-    Args:
-        name: Person's name
-        company: Company name
-        city: City name
-        linkedin_url: LinkedIn URL
-        scrapingdog_api_key: API key
-        state: State (for US locations, used for ambiguous city verification)
-        country: Country (for international locations, used for ambiguous city verification)
-        role: Job role/title to check if city only appears in role context
+    Q3 Location fallback search.
 
     Returns:
         {
@@ -2173,6 +2137,14 @@ def check_q3_location_fallback(
                     if needs_strict_validation:
                         # Check if "City, State/Country" format in text
                         has_state_country = _verify_state_or_country_for_strict_validation(city_lower, state, country, full_text, linkedin_url)
+
+                        if not has_state_country:
+                            greater_m = re.search(r'Greater\s+' + re.escape(city_lower), full_text, re.IGNORECASE)
+                            if greater_m:
+                                greater_text = greater_m.group(0).strip()
+                                if is_city_in_area_approved(city_lower, greater_text, state, country) or \
+                                   is_city_in_area_approved(city_lower, greater_text + " Area", state, country):
+                                    has_state_country = True
 
                         if not has_state_country:
                             error_type = 'English word city' if is_english_word else 'Ambiguous city'

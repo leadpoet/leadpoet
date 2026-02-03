@@ -5576,13 +5576,17 @@ class Validator(BaseValidatorNeuron):
             
             # Notify gateway
             try:
+                # Get code_content if available (for displaying model code in leaderboard)
+                code_content = result.get("code_content")
+                
                 await self._notify_gateway_champion_status(
                     model_id=model_id,
                     became_champion=became_champion,
                     score=avg_score,
                     is_rebenchmark=is_rebenchmark,
                     evaluation_cost_usd=total_cost,
-                    evaluation_time_seconds=int(total_time)
+                    evaluation_time_seconds=int(total_time),
+                    code_content=code_content
                 )
             except Exception as e:
                 print(f"      ⚠️ Failed to notify gateway: {e}")
@@ -7229,6 +7233,58 @@ def run_dedicated_qualification_worker(config):
                     model_code = base64.b64decode(model_code_b64) if model_code_b64 else b""
                     
                     # ═══════════════════════════════════════════════════════════════
+                    # EXTRACT CODE CONTENT: For displaying model code in leaderboard
+                    # ═══════════════════════════════════════════════════════════════
+                    code_content = None
+                    if model_code:
+                        try:
+                            import tarfile
+                            import io
+                            
+                            code_files = {}
+                            allowed_extensions = {'.py', '.txt', '.md', '.json', '.yaml', '.yml', '.toml'}
+                            max_file_size = 100 * 1024  # 100KB per file
+                            max_total_size = 500 * 1024  # 500KB total
+                            total_size = 0
+                            
+                            with tarfile.open(fileobj=io.BytesIO(model_code), mode='r:gz') as tar:
+                                for member in tar.getmembers():
+                                    if not member.isfile():
+                                        continue
+                                    
+                                    filename = member.name
+                                    if '/' in filename:
+                                        filename = filename.split('/', 1)[1] if filename.count('/') == 1 else filename
+                                    
+                                    ext = '.' + filename.split('.')[-1].lower() if '.' in filename else ''
+                                    if ext not in allowed_extensions:
+                                        continue
+                                    
+                                    if filename.startswith('.') or '/__' in filename:
+                                        continue
+                                    
+                                    if member.size > max_file_size:
+                                        continue
+                                    
+                                    if total_size + member.size > max_total_size:
+                                        break
+                                    
+                                    try:
+                                        f = tar.extractfile(member)
+                                        if f:
+                                            content = f.read().decode('utf-8', errors='replace')
+                                            code_files[filename] = content
+                                            total_size += member.size
+                                    except Exception:
+                                        continue
+                            
+                            if code_files:
+                                code_content = json.dumps(code_files)
+                                print(f"      📄 Extracted {len(code_files)} code files for display")
+                        except Exception as extract_err:
+                            print(f"      ⚠️ Could not extract code content: {extract_err}")
+                    
+                    # ═══════════════════════════════════════════════════════════════
                     # HARDCODING DETECTION: Skip for rebenchmarks
                     # ═══════════════════════════════════════════════════════════════
                     if model_code and not is_rebenchmark:
@@ -7422,7 +7478,8 @@ def run_dedicated_qualification_worker(config):
                         "total_cost_usd": total_cost,
                         "total_time_seconds": total_time,
                         "is_rebenchmark": is_rebenchmark,
-                        "per_icp_results": per_icp_results
+                        "per_icp_results": per_icp_results,
+                        "code_content": code_content  # For displaying model code in leaderboard
                     })
                 
                 # Write all results

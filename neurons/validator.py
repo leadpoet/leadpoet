@@ -3,6 +3,14 @@
 # Auto-update trigger: 2025-12-12
 import os
 import sys
+from pathlib import Path
+
+# CRITICAL: Add project root to sys.path BEFORE any local imports
+# When running 'python3 neurons/validator.py', sys.path[0] = neurons/
+# But qualification/, gateway/, etc. are in the project root
+# This ensures all local modules can be imported regardless of how the script is run
+sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
+
 os.environ["PYTHONWARNINGS"] = "ignore::UserWarning"
 
 import re

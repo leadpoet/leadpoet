@@ -332,6 +332,7 @@ These are ACTUAL ICPs this model will be evaluated against:
 - Are there lookup tables mapping specific industries to specific leads?
 - Does it ignore the ICP and return the same output every time?
 - Does it generate fake data without querying the database?
+- Does it use random name generators (e.g., `random.choice(FIRST_NAMES)`) to fabricate person data even if company data is from DB?
 
 **Also flag if you see obvious malicious patterns** (auto-fail, 100% confidence):
 - Code that downloads and executes remote payloads, or opens network connections to unknown servers

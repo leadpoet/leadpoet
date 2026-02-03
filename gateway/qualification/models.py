@@ -129,27 +129,43 @@ class LeadOutput(BaseModel):
     # Pydantic config: FORBID extra fields - any extra field = validation error
     model_config = {"extra": "forbid"}
     
-    # Required fields (company + role + intent - NO PII)
+    # =========================================================================
+    # REQUIRED FIELDS - All 13 fields below must be provided
+    # =========================================================================
+    
+    # Company info (from miner_test_leads table)
     business: str = Field(..., description="Company name")
-    role: str = Field(..., description="Lead's job role/title")
+    company_linkedin: str = Field(..., description="Company LinkedIn URL")
+    company_website: str = Field(..., description="Company website URL")
+    employee_count: str = Field(..., description="Employee count range (e.g., '51-200', '1001-5000')")
+    
+    # Industry info
     industry: str = Field(..., description="Company industry")
     sub_industry: str = Field(..., description="Company sub-industry")
+    
+    # Location (separate fields, NOT a combined 'geography' field)
+    country: str = Field(..., description="Country (e.g., 'United States')")
+    city: str = Field(..., description="City (e.g., 'San Francisco')")
+    state: str = Field(..., description="State/region (e.g., 'California')")
+    
+    # Role info
+    role: str = Field(..., description="Job role/title to target")
+    seniority: Seniority = Field(..., description="Seniority level")
+    
+    # Intent signal (evidence of buying intent)
     intent_signal: IntentSignal = Field(..., description="Evidence of buying intent")
     
-    # Optional fields (NO person-level PII allowed)
-    seniority: Optional[Seniority] = Field(None, description="Lead's seniority level")
-    company_size: Optional[str] = Field(None, description="Company size (e.g., '50-200 employees')")
-    geography: Optional[str] = Field(None, description="Location (e.g., 'United States, California')")
-    company_website: Optional[str] = Field(None, description="Company website URL")
-    company_linkedin: Optional[str] = Field(None, description="Company LinkedIn URL")
-    
-    # NOTE: The following fields are EXPLICITLY NOT ALLOWED:
+    # =========================================================================
+    # NOT ALLOWED - Any of these fields will cause instant validation failure
+    # =========================================================================
     # - email (PII - models cannot fabricate)
     # - full_name (PII - models cannot fabricate)
     # - first_name (PII - models cannot fabricate)
     # - last_name (PII - models cannot fabricate)
     # - phone (PII - models cannot fabricate)
     # - linkedin_url (person-level PII)
+    # - geography (use country/city/state instead)
+    # - company_size (use employee_count instead)
 
 
 class LeadOutputRedacted(BaseModel):
@@ -158,15 +174,17 @@ class LeadOutputRedacted(BaseModel):
     Same as LeadOutput since we no longer allow PII fields.
     """
     business: str
-    role: str
+    company_linkedin: str
+    company_website: str
+    employee_count: str
     industry: str
     sub_industry: str
-    seniority: Optional[str] = None
-    company_size: Optional[str] = None
-    geography: Optional[str] = None
+    country: str
+    city: str
+    state: str
+    role: str
+    seniority: str
     intent_signal: IntentSignal
-    company_website: Optional[str] = None
-    company_linkedin: Optional[str] = None
 
 
 # =============================================================================

@@ -301,10 +301,10 @@ LEAD DATA:
 - Industry: {lead.industry}
 - Sub-industry: {lead.sub_industry}
 - Role: {lead.role}
-- Seniority: {lead.seniority or 'Unknown'}
-- Company size: {lead.company_size or 'Unknown'}
+- Seniority: {lead.seniority.value if hasattr(lead.seniority, 'value') else lead.seniority}
+- Employee count: {lead.employee_count}
 - Company: {lead.business}
-- Geography: {lead.geography or 'Unknown'}
+- Location: {lead.city}, {lead.state}, {lead.country}
 
 SCORING GUIDELINES:
 - 18-20: Perfect or near-perfect match on all criteria
@@ -344,7 +344,7 @@ async def score_decision_maker(lead: LeadOutput, icp: ICPPrompt) -> float:
 
 LEAD:
 - Role: {lead.role}
-- Seniority: {lead.seniority or 'Unknown'}
+- Seniority: {lead.seniority.value if hasattr(lead.seniority, 'value') else lead.seniority}
 - Company: {lead.business}
 - Industry: {lead.industry}
 

@@ -7128,9 +7128,12 @@ def run_dedicated_qualification_worker(config):
             if not block_file.exists():
                 raise FileNotFoundError("Coordinator hasn't written block file yet")
             
-            # Check if file is stale (> 120 seconds old for qualification workers)
+            # Check if file is stale (> 1800 seconds = 30 minutes for qualification workers)
+            # NOTE: Coordinator only updates block file during batch validation phase.
+            # Between epochs, the file may be 15-20 minutes old. This is NORMAL.
+            # We use 30 minutes as threshold to detect truly crashed coordinators.
             file_age = time.time() - block_file.stat().st_mtime
-            if file_age > 120:
+            if file_age > 1800:
                 raise Exception(f"Shared block file is stale ({int(file_age)}s old)")
             
             with open(block_file, 'r') as f:

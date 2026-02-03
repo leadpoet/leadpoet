@@ -47,6 +47,12 @@ from .stage4_helpers import (
     CITY_EQUIVALENTS,
 )
 
+_SAINT_PREFIX_RE = re.compile(r'^(?:saint|st\.?)\s+')
+
+def _saint_normalize(city: str) -> str:
+    """Normalize saint/st/st. prefix to canonical 'saint ' form."""
+    return _SAINT_PREFIX_RE.sub('saint ', city)
+
 # API Keys from environment
 SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY", "")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
@@ -349,13 +355,17 @@ async def run_lead_validation_stage4(
         claimed_city = city.lower().strip()
         claimed_state = state.lower().strip() if state else ''
 
-        # Normalize city names using equivalents (e.g., Bangalore = Bengaluru)
         ext_city_norm = CITY_EQUIVALENTS.get(ext_city, ext_city)
         claimed_city_norm = CITY_EQUIVALENTS.get(claimed_city, claimed_city)
-        city_match = (claimed_city_norm in ext_city_norm or ext_city_norm in claimed_city_norm or
-                      claimed_city in ext_city or ext_city in claimed_city)
 
-        # Normalize state abbreviations for comparison
+        # Normalize saint/st prefixes for comparison
+        ext_city_sn = _saint_normalize(ext_city_norm)
+        claimed_city_sn = _saint_normalize(claimed_city_norm)
+
+        city_match = (claimed_city_norm in ext_city_norm or ext_city_norm in claimed_city_norm or
+                      claimed_city in ext_city or ext_city in claimed_city or
+                      (ext_city_sn == claimed_city_sn and _SAINT_PREFIX_RE.match(ext_city_norm) and _SAINT_PREFIX_RE.match(claimed_city_norm)))
+
         state_abbr = GEO_LOOKUP.get('state_abbr', {})
         if ext_state in state_abbr:
             ext_state_full = state_abbr[ext_state].lower()
@@ -367,7 +377,7 @@ async def run_lead_validation_stage4(
             claimed_state_full = claimed_state
 
         state_match = (
-            not claimed_state or  # No claimed state - skip state check
+            not claimed_state or
             claimed_state_full in ext_state_full or
             ext_state_full in claimed_state_full or
             claimed_state in ext_state or
@@ -380,7 +390,7 @@ async def run_lead_validation_stage4(
         elif not city_match:
             company_lower = company.lower().strip() if company else ''
             if company_lower and (ext_city == company_lower):
-                pass  # Bad extraction — not a real city
+                pass
             else:
                 # DIRECT FAIL - city mismatch, no Q3
                 result['data']['query_used'] = '+'.join(queries_used)
@@ -793,13 +803,16 @@ async def run_location_validation_only(
         claimed_city = city.lower().strip()
         claimed_state = state.lower().strip() if state else ''
 
-        # Normalize city names using equivalents (e.g., Bangalore = Bengaluru)
         ext_city_norm = CITY_EQUIVALENTS.get(ext_city, ext_city)
         claimed_city_norm = CITY_EQUIVALENTS.get(claimed_city, claimed_city)
-        city_match = (claimed_city_norm in ext_city_norm or ext_city_norm in claimed_city_norm or
-                      claimed_city in ext_city or ext_city in claimed_city)
 
-        # Normalize state abbreviations for comparison
+        ext_city_sn = _saint_normalize(ext_city_norm)
+        claimed_city_sn = _saint_normalize(claimed_city_norm)
+
+        city_match = (claimed_city_norm in ext_city_norm or ext_city_norm in claimed_city_norm or
+                      claimed_city in ext_city or ext_city in claimed_city or
+                      (ext_city_sn == claimed_city_sn and _SAINT_PREFIX_RE.match(ext_city_norm) and _SAINT_PREFIX_RE.match(claimed_city_norm)))
+
         state_abbr = GEO_LOOKUP.get('state_abbr', {})
         if ext_state in state_abbr:
             ext_state_full = state_abbr[ext_state].lower()
@@ -811,7 +824,7 @@ async def run_location_validation_only(
             claimed_state_full = claimed_state
 
         state_match = (
-            not claimed_state or  # No claimed state - skip state check
+            not claimed_state or
             claimed_state_full in ext_state_full or
             ext_state_full in claimed_state_full or
             claimed_state in ext_state or

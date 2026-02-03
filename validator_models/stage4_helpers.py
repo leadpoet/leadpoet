@@ -85,12 +85,8 @@ if GEO_LOOKUP_PATH.exists():
 else:
     GEO_LOOKUP = {}
 
-# Build sets of duplicate/ambiguous cities that require state/country validation
-# US duplicates: cities in multiple US states (e.g., Richmond in VA, CA, KY...)
-# US-Intl overlap: US cities that also exist internationally (accent-aware)
 def _build_duplicate_city_sets():
-    """Build sets of cities that need state/country validation."""
-    # Find US cities in multiple states
+    """Build sets of cities that need geographic validation."""
     us_city_states = {}
     for state, cities in GEO_LOOKUP.get('us_states', {}).items():
         for city in cities:
@@ -123,11 +119,8 @@ def _build_duplicate_city_sets():
     return us_duplicates, us_intl_overlap
 
 US_DUPLICATE_CITIES, US_INTL_OVERLAP_CITIES = _build_duplicate_city_sets()
-
-# All ambiguous cities that need state/country validation
 AMBIGUOUS_CITIES = US_DUPLICATE_CITIES | US_INTL_OVERLAP_CITIES
 
-# Load cities requiring strict validation
 ENGLISH_WORD_CITIES_PATH = GATEWAY_UTILS_PATH / 'english_word_cities.txt'
 if ENGLISH_WORD_CITIES_PATH.exists():
     with open(ENGLISH_WORD_CITIES_PATH, 'r') as f:
@@ -138,12 +131,7 @@ else:
 
 def is_english_word_city(city: str) -> bool:
     """
-    Check if a city name is also a common English word.
-
-    These cities require strict state/country validation to avoid false positives
-    where the word appears in job titles, company names, or descriptions.
-
-    Examples: research, success, bridge, champion, reading, nice, etc.
+    Check if a city name requires additional validation.
 
     Args:
         city: The city name to check
@@ -427,7 +415,6 @@ def check_linkedin_url_country_match(url: str, claimed_country: str) -> Tuple[bo
     """
     url_country = get_linkedin_url_country(url)
 
-    # No country in URL (www.linkedin.com) - skip check
     if not url_country:
         return True, None
 
@@ -530,13 +517,10 @@ def is_city_in_area_approved(city: str, area: str, claimed_state: str = "", clai
     area_state = area_data.get("state", "") if isinstance(area_data, dict) else ""
     area_country = area_data.get("country", "") if isinstance(area_data, dict) else ""
 
-    # If no claimed state/country provided:
-    # - For ambiguous cities: must reject (can't verify which location)
-    # - For non-ambiguous cities: accept the match
     if not claimed_state_lower and not claimed_country_lower:
         if is_ambiguous_city(city):
-            return False  # Ambiguous city needs state/country to disambiguate
-        return True  # Non-ambiguous city - safe to accept
+            return False
+        return True
 
     area_state_lower = area_state.lower().strip()
     area_country_lower = area_country.lower().strip()
@@ -755,7 +739,6 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
         'area', 'bay', 'metro', 'metropolitan', 'greater', 'city', 'county', 'region', 'district'
     }
 
-    # Institution patterns to check BEFORE the city: "[Institution] of [City]"
     institution_prefixes = {
         'university', 'college', 'school', 'institute', 'academy',
         'hospital', 'bank', 'church', 'museum', 'library', 'port'
@@ -771,27 +754,19 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
         # Check what comes BEFORE the city
         text_before = text_lower[:start_pos].rstrip()
 
-        # Check for "Education:" / "Studied at" prefix — LinkedIn education context
-        # e.g., "Education: Pontiac Protestant High School"
         education_prefixes = ('education:', 'studied at', 'alumni of', 'alumnus of', 'graduated from')
         before_trimmed = text_before.rstrip(' ·\t-')
         if any(before_trimmed.endswith(ep) for ep in education_prefixes):
-            continue  # Skip - education context, not a location
+            continue
 
-        # Check for "[Institution] of [City]" pattern before city
         if text_before.endswith(' of'):
             before_of = text_before[:-3].rstrip()
-            # Check if word before "of" is an institution word
             words_before = before_of.split()
             if words_before:
                 last_word = words_before[-1].lower()
                 if last_word in institution_prefixes:
-                    # This is "[Institution] of [City]" pattern - skip this occurrence
                     continue
 
-        # Check for "[Institution] of [Place], [City]" pattern before city
-        # e.g., "University of California, San Diego"
-        # e.g., "University of North Carolina, Charlotte"
         if text_before.endswith(','):
             before_comma = text_before[:-1].rstrip()
             if re.search(r'\b(' + '|'.join(institution_prefixes) + r')\s+of\s+[\w\s]+$', before_comma):
@@ -910,22 +885,9 @@ def is_ambiguous_city(city: str) -> bool:
 
 
 def verify_state_or_country_in_text(city: str, state: str, country: str, text: str) -> bool:
-    """
-    For ambiguous cities, verify that the claimed state (for US) or country (for international)
-    also appears in the text.
-
-    Args:
-        city: The city name
-        state: The claimed state (for US locations)
-        country: The claimed country
-        text: The text to search in (full_text from Google result)
-
-    Returns:
-        True if state/country is verified, False if ambiguous city without state/country in text
-    """
+    """Verify geographic context in text."""
     city_lower = city.lower().strip()
 
-    # If city is not ambiguous, no additional check needed
     if city_lower not in AMBIGUOUS_CITIES:
         return True
 
@@ -933,12 +895,7 @@ def verify_state_or_country_in_text(city: str, state: str, country: str, text: s
     claimed_country_lower = country.lower().strip() if country else ''
     claimed_state_lower = state.lower().strip() if state else ''
 
-    # Get valid US state names for checking
     us_states_lower = {s.lower() for s in GEO_LOOKUP.get('us_states', {}).keys()}
-
-    # Determine if US location:
-    # 1. Country is explicitly "United States" or common aliases (US, USA, etc.), OR
-    # 2. Country is empty but state is a valid US state name
     us_country_aliases = {'united states', 'us', 'usa', 'u.s.', 'u.s.a.', 'united states of america'}
     is_us_location = (
         claimed_country_lower in us_country_aliases or
@@ -946,29 +903,20 @@ def verify_state_or_country_in_text(city: str, state: str, country: str, text: s
     )
 
     if is_us_location:
-        # State is already normalized to full name (e.g., "Kentucky")
-        # Use word boundary to avoid false positives
         if claimed_state_lower:
-            # Build pattern with word boundaries (works for both single and multi-word)
-            # Escape the state name, then replace spaces with \s+ for flexible matching
-            # Also require the match NOT be followed by a hyphen (to avoid "new york-style")
             escaped = re.escape(claimed_state_lower).replace(r'\ ', r'\s+')
             pattern = r'\b' + escaped + r'(?![a-z-])'
             if re.search(pattern, text_lower):
                 return True
         return False
     else:
-        # For international locations, verify country appears in text
         if claimed_country_lower:
-            # Build pattern with word boundaries (works for both single and multi-word)
             escaped = re.escape(claimed_country_lower).replace(r'\ ', r'\s+')
             pattern = r'\b' + escaped + r'(?![a-z-])'
             if re.search(pattern, text_lower):
                 return True
-        # Check common country aliases with word boundaries (use centralized COUNTRY_ALIASES)
         if claimed_country_lower in COUNTRY_ALIASES:
             for alias in COUNTRY_ALIASES[claimed_country_lower]:
-                # Use word boundary for aliases
                 if re.search(r'\b' + re.escape(alias) + r'\b', text_lower):
                     return True
         return False
@@ -1003,16 +951,8 @@ def is_city_matching_person_name(city: str, full_name: str, full_text: str) -> b
     if not city_in_name:
         return False  # City is not part of person's name
 
-    # City is in person's name - check if it appears independently in text
-    # Find all occurrences of city and check if ANY is independent (not adjacent to other name parts)
     other_name_parts = [p for p in name_parts if p != city_lower and len(p) > 2]
 
-    # If none of the other name parts appear anywhere in the text, we can't do
-    # adjacency checks (Google likely truncated the name, e.g. "Donna M." instead
-    # of "Donna Medrek").  In that case, if city exactly matches a name part,
-    # treat every occurrence as name-related → reject.
-    # BUT: if any occurrence is followed by a state/country delimiter (e.g.
-    # "Donna, TX"), there IS a real location reference → allow.
     if other_name_parts:
         any_other_in_text = any(
             re.search(r'\b' + re.escape(p) + r'\b', text_lower)
@@ -1080,15 +1020,11 @@ def _has_contradicting_state_or_province(city: str, state: str, country: str, fu
 
     claimed_country_lower = country.lower().strip() if country else ""
 
-    # Check LinkedIn URL domain for country contradiction
-    # LinkedIn uses country-code subdomains: ca.linkedin.com (Canada), uk.linkedin.com (UK), etc.
     if linkedin_url:
-        # Match pattern: https://XX.linkedin.com where XX is 2 letters (country code)
         country_domain_match = re.search(r'https?://([a-z]{2})\.linkedin\.com', linkedin_url.lower())
         if country_domain_match:
             url_country_code = country_domain_match.group(1)
-            if url_country_code not in ('ww', 'www'[:2]):  # Skip www.linkedin.com
-                # Map of country names to their LinkedIn domain codes (ISO 3166-1 alpha-2)
+            if url_country_code not in ('ww', 'www'[:2]):
                 country_to_code = {
                     'united states': None, 'us': None, 'usa': None, 'u.s.': None, 'u.s.a.': None,  # US uses www
                     'canada': 'ca', 'uk': 'uk', 'united kingdom': 'uk', 'great britain': 'uk', 'england': 'uk',
@@ -1240,41 +1176,30 @@ def should_reject_city_match(city: str, state: str, country: str, full_text: str
         if city_lower not in text_without_role:
             return True  # Reject - city only appears in role, not as location
 
-    # Check LinkedIn URL domain for ALL cities - non-US domain for US claim is always invalid
-    # This catches cases like ca.linkedin.com when claiming US location
     if linkedin_url and _has_contradicting_state_or_province(city, state, country, full_text, linkedin_url):
-        return True  # Reject - LinkedIn domain or text contradicts claimed location
+        return True
 
-    # Check if city needs strict state/country validation
-    # - Ambiguous cities: ALWAYS need verification (exist in multiple states/countries)
-    # - English word cities: ONLY need verification when state/country validation was NOT done
-    #   (city_only_fallback=True means we only found city in text, no structured validation)
     is_ambiguous = is_ambiguous_city(city)
     is_english_word = is_english_word_city(city) and city_only_fallback
-
-    # Cities that need strict validation (either ambiguous or English word)
     needs_strict_validation = is_ambiguous or is_english_word
 
     if needs_strict_validation:
-        # First check if "City, State/Country" format appears in text
         if _verify_state_or_country_for_strict_validation(city, state, country, full_text, linkedin_url):
-            return False  # Accept - verified location format in text
+            return False
 
         greater_m = re.search(r'Greater\s+' + re.escape(city_lower) + r'\b', full_text, re.IGNORECASE)
         if greater_m:
             greater_text = greater_m.group(0).strip()
             if is_city_in_area_approved(city_lower, greater_text, state, country) or \
                is_city_in_area_approved(city_lower, greater_text + " Area", state, country):
-                return False  # Accept - specific area mapping confirms state
+                return False
 
-        # Check if text contains a CONTRADICTING state/province/country
-        # e.g., "Vancouver, British Columbia" when claiming Vancouver, Washington
         if _has_contradicting_state_or_province(city, state, country, full_text, ""):
-            return True  # Reject - text shows different state/province
+            return True
 
-        return True  # Reject - needs verification but state/country not found in text
+        return True
 
-    return False  # Accept the match (normal city)
+    return False
 
 
 def _verify_state_or_country_for_strict_validation(city: str, state: str, country: str, text: str, linkedin_url: str = '') -> bool:
@@ -1313,27 +1238,17 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
     city_matches = list(re.finditer(city_pattern, text_lower))
 
     if not city_matches:
-        return False  # City not found in text
+        return False
 
-    # Get valid US state names for checking
     us_states_lower = {s.lower() for s in GEO_LOOKUP.get('us_states', {}).keys()}
-
-    # Determine if US location:
-    # 1. Country is explicitly "United States" or common aliases (US, USA, etc.), OR
-    # 2. Country is empty but state is a valid US state name
     us_country_aliases = {'united states', 'us', 'usa', 'u.s.', 'u.s.a.', 'united states of america'}
     is_us_location = (
         claimed_country_lower in us_country_aliases or
         (not claimed_country_lower and claimed_state_lower in us_states_lower)
     )
 
-    # Location format: City must be followed by delimiter then state/country
-    # Valid formats: "City, State", "City - Country", "City, State, Country"
-    # Reject: "Nice work! Based in France." (no delimiter between city and country)
     MAX_DISTANCE = 30
 
-    # Common prefixes that form compound city names (e.g., "New" York, "San" Francisco)
-    # If city match is preceded by one of these, it's part of a compound name, not standalone
     COMPOUND_CITY_PREFIXES = {
         'new', 'san', 'los', 'las', 'el', 'fort', 'saint', 'st', 'port',
         'west', 'east', 'north', 'south', 'mount', 'mt', 'grand', 'palm',
@@ -1342,42 +1257,35 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
     }
 
     if is_us_location:
-        # For US, verify state appears AFTER city with proper delimiter
         if claimed_state_lower:
             for match in city_matches:
                 city_start_pos = match.start()
                 city_end_pos = match.end()
                 text_after_city = text_lower[city_end_pos:city_end_pos + MAX_DISTANCE]
 
-                # Skip if city is part of a compound name (e.g., "York" in "New York")
                 if city_start_pos > 0:
                     pre_text = text_lower[:city_start_pos].rstrip()
                     if pre_text:
                         preceding_word = pre_text.split()[-1] if pre_text.split() else ''
                         if preceding_word in COMPOUND_CITY_PREFIXES:
-                            continue  # Skip - part of compound city name
+                            continue
 
-                # Must start with delimiter (comma, hyphen, pipe, colon) or space+delimiter
                 if not re.match(r'^[\s]*[,\-|:]', text_after_city):
-                    continue  # No delimiter, skip this match
+                    continue
 
-                # Check full state name
                 escaped = re.escape(claimed_state_lower).replace(r'\ ', r'\s+')
                 pattern = r'\b' + escaped + r'(?![a-z-])'
                 if re.search(pattern, text_after_city):
                     return True
 
-                # Also check state abbreviation <-> full name (both directions)
                 state_abbr = GEO_LOOKUP.get('state_abbr', {})
                 for abbr, full_name in state_abbr.items():
                     if full_name.lower() == claimed_state_lower:
-                        # claimed_state is full name → check abbreviation in text
                         abbr_pattern = r'\b' + re.escape(abbr.lower()) + r'\b'
                         if re.search(abbr_pattern, text_after_city):
                             return True
                         break
                     elif abbr.lower() == claimed_state_lower:
-                        # claimed_state is abbreviation → check full name in text
                         full_escaped = re.escape(full_name.lower()).replace(r'\ ', r'\s+')
                         full_pattern = r'\b' + full_escaped + r'(?![a-z-])'
                         if re.search(full_pattern, text_after_city):
@@ -1385,43 +1293,32 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
                         break
         return False
     else:
-        # For international, verify country
         if claimed_country_lower:
-            # First: Check LinkedIn URL domain if available (authoritative)
-            # e.g., uk.linkedin.com for United Kingdom
             if linkedin_url:
                 url_country = get_linkedin_url_country(linkedin_url)
                 if url_country:
-                    # Domain available - this is authoritative
-                    # Match → PASS, No match → FAIL
                     return url_country == claimed_country_lower
 
-            # No domain available - fall back to text verification
-            # Check if country appears AFTER city with proper delimiter
             for match in city_matches:
                 city_start_pos = match.start()
                 city_end_pos = match.end()
                 text_after_city = text_lower[city_end_pos:city_end_pos + MAX_DISTANCE]
 
-                # Skip if city is part of a compound name (e.g., "York" in "New York")
                 if city_start_pos > 0:
                     pre_text = text_lower[:city_start_pos].rstrip()
                     if pre_text:
                         preceding_word = pre_text.split()[-1] if pre_text.split() else ''
                         if preceding_word in COMPOUND_CITY_PREFIXES:
-                            continue  # Skip - part of compound city name
+                            continue
 
-                # Must start with delimiter (comma, hyphen, pipe, colon) or space+delimiter
                 if not re.match(r'^[\s]*[,\-|:]', text_after_city):
-                    continue  # No delimiter, skip this match
+                    continue
 
                 escaped = re.escape(claimed_country_lower).replace(r'\ ', r'\s+')
                 pattern = r'\b' + escaped + r'(?![a-z-])'
                 if re.search(pattern, text_after_city):
                     return True
 
-            # Special case: United Kingdom - also accept "England" after city (only for English cities)
-            # Cities in Scotland (Edinburgh, Glasgow), Wales (Cardiff), N.Ireland (Belfast) should NOT match England
             if claimed_country_lower == 'united kingdom':
                 ENGLISH_CITIES = {
                     'london', 'manchester', 'birmingham', 'liverpool', 'leeds', 'sheffield',
@@ -1448,9 +1345,6 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
 
 # ============================================================================
 # VALIDATION FUNCTIONS
-# ============================================================================
-# NOTE: Role format validation (check_role_validity) has been moved to gateway
-# (submit.py check_role_sanity function) to reject bad roles earlier and save API costs.
 # ============================================================================
 
 def check_name_in_result(full_name: str, result: Dict, linkedin_url: Optional[str] = None) -> bool:
@@ -1803,13 +1697,10 @@ def check_locations_match(extracted: str, ground_truth: str, full_text: str = ""
             else:
                 return True, 'suffix_match'
 
-    # Get city from ground truth for city-only checks (use parsed values from above)
     gt_city = CITY_EQUIVALENTS.get(gt_city_parsed, gt_city_parsed)
     gt_state = gt_state_parsed
     gt_country = gt_country_parsed
 
-    # City-only strategies - require institution context check AND ambiguous city check
-    # Skip city_extract if extracted looks like an area (use area_mapping instead)
     is_area_extraction = any(x in ext_norm for x in ['area', 'metropolitan', 'metro', 'greater'])
     if gt_city and len(gt_city) > 2 and gt_city in ext_norm and not is_area_extraction:
         if should_reject_city_match(gt_city, gt_state, gt_country, full_text, linkedin_url=linkedin_url):
@@ -1834,7 +1725,6 @@ def check_locations_match(extracted: str, ground_truth: str, full_text: str = ""
             else:
                 return True, 'ext_city_in_gt'
 
-    # Word overlap check - skip for area extractions (use area_mapping instead)
     if not is_area_extraction:
         ext_words = set(ext_norm.replace(',', ' ').split())
         # Only use city (first part) from ground truth for word overlap
@@ -1845,6 +1735,18 @@ def check_locations_match(extracted: str, ground_truth: str, full_text: str = ""
                 pass  # Skip word_overlap
             else:
                 return True, 'word_overlap'
+
+    # Saint/St prefix normalization fallback
+    # Handles: "Saint Paul" vs "St Paul", "St. Louis" vs "Saint Louis", etc.
+    _saint_re = re.compile(r'^(?:saint|st\.?)\s+', re.IGNORECASE)
+    ext_city_raw = str(extracted).split(',')[0].strip().lower() if extracted else ''
+    gt_city_raw = gt_city_parsed  # already lowercased
+    if _saint_re.match(ext_city_raw) and _saint_re.match(gt_city_raw):
+        ext_remainder = _saint_re.sub('', ext_city_raw).strip()
+        gt_remainder = _saint_re.sub('', gt_city_raw).strip()
+        if ext_remainder and ext_remainder == gt_remainder:
+            if verify_state_or_country_in_text(gt_city_raw, gt_state, gt_country, full_text):
+                return True, 'saint_st_match'
 
     return False, 'no_match'
 
@@ -2076,7 +1978,6 @@ def check_q3_location_fallback(
                     city_lower = city.lower()
                     result_url = r.get('link', '')
 
-                    # Require the city to literally appear in the text.
                     if not re.search(r'\b' + re.escape(city_lower) + r'\b', full_text.lower()):
                         return {
                             'success': True,
@@ -2086,7 +1987,6 @@ def check_q3_location_fallback(
                             'error': f'City "{city}" not literally in text despite missing=[]'
                         }
 
-                    # Check URL domain for ALL cities - non-US domain for US claim is always invalid
                     if _has_contradicting_state_or_province(city_lower, state, country, full_text, result_url):
                         return {
                             'success': True,
@@ -2096,7 +1996,6 @@ def check_q3_location_fallback(
                             'error': 'Contradicting location in text or URL domain'
                         }
 
-                    # Check if city only appears in institution context
                     if is_city_only_in_institution_context(city_lower, full_text):
                         return {
                             'success': True,
@@ -2106,8 +2005,6 @@ def check_q3_location_fallback(
                             'error': 'City only in institution context'
                         }
 
-                    # Check if city only appears as part of person's name
-                    # e.g., "Anderson" in "Alli Anderson" when claiming Anderson, SC
                     if name and is_city_matching_person_name(city_lower, name, full_text):
                         return {
                             'success': True,
@@ -2117,7 +2014,6 @@ def check_q3_location_fallback(
                             'error': 'City only appears as part of person name'
                         }
 
-                    # Check if city only appears in role/job title context
                     if role and city_lower in role.lower():
                         text_without_role = full_text.lower().replace(role.lower(), '')
                         if city_lower not in text_without_role:
@@ -2129,13 +2025,11 @@ def check_q3_location_fallback(
                                 'error': 'City only in role/title context'
                             }
 
-                    # Check if city needs strict validation (ambiguous OR English word)
                     is_ambiguous = is_ambiguous_city(city_lower)
                     is_english_word = is_english_word_city(city_lower)
                     needs_strict_validation = is_ambiguous or is_english_word
 
                     if needs_strict_validation:
-                        # Check if "City, State/Country" format in text
                         has_state_country = _verify_state_or_country_for_strict_validation(city_lower, state, country, full_text, linkedin_url)
 
                         if not has_state_country:

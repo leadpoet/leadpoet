@@ -1454,7 +1454,7 @@ def submit_qualification_model(wallet, s3_key: str, code_hash: str,
         response = requests.post(
             f"{QUALIFICATION_GATEWAY_URL}/qualification/model/submit",
             json=submission_data,
-            timeout=60
+            timeout=120  # 2 minutes - payment verification can take time for block propagation
         )
         
         if response.status_code == 200:

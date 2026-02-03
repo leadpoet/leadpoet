@@ -130,7 +130,7 @@ class LeadOutput(BaseModel):
     model_config = {"extra": "forbid"}
     
     # =========================================================================
-    # REQUIRED FIELDS - All 13 fields below must be provided
+    # REQUIRED FIELDS - All 14 fields below must be provided
     # =========================================================================
     
     # Company info (from miner_test_leads table)
@@ -149,7 +149,8 @@ class LeadOutput(BaseModel):
     state: str = Field(..., description="State/region (e.g., 'California')")
     
     # Role info
-    role: str = Field(..., description="Job role/title to target")
+    role: str = Field(..., description="Job role/title to target (e.g., 'Software Engineer', 'VP of Sales')")
+    role_type: str = Field(..., description="Role category (e.g., 'Engineer/Technical', 'Sales', 'C-Level Executive')")
     seniority: Seniority = Field(..., description="Seniority level")
     
     # Intent signal (evidence of buying intent)
@@ -183,6 +184,7 @@ class LeadOutputRedacted(BaseModel):
     city: str
     state: str
     role: str
+    role_type: str
     seniority: str
     intent_signal: IntentSignal
 

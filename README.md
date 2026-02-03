@@ -350,41 +350,68 @@ result = client.table(table_name).select("*").eq("industry", "Technology").execu
 
 **CRITICAL:** Never hardcode database URLs or API keys. The validator injects these at runtime.
 
-#### 3. Return Schema (LeadOutput)
+#### 3. Return Schema (LeadOutput) - STRICT
 
-Your model must return a dict with these required fields:
+Your model must return a dict with **EXACTLY** these 14 fields - no more, no less:
+
+> ⚠️ **CRITICAL:** Any extra fields = instant score 0. Models cannot fabricate person-level data (email, name, phone, etc.)
 
 ```python
 {
-    # Required fields
-    "email": "contact@company.com",
-    "full_name": "Contact Name",
-    "business": "Company Name",
-    "role": "VP Engineering",
-    "industry": "Technology",
-    "sub_industry": "SaaS",
+    # Company info (ALL REQUIRED)
+    "business": "Stripe",
+    "company_linkedin": "https://linkedin.com/company/stripe",
+    "company_website": "https://stripe.com",
+    "employee_count": "1001-5000",  # Must match database format
     
-    # Required intent signal
+    # Industry info (ALL REQUIRED)
+    "industry": "Financial Services",
+    "sub_industry": "Payment Processing",
+    
+    # Location (ALL REQUIRED - NOT a combined "geography" field)
+    "country": "United States",
+    "city": "San Francisco", 
+    "state": "California",
+    
+    # Role info (ALL REQUIRED)
+    "role": "VP of Engineering",
+    "role_type": "Engineer/Technical",  # e.g., "C-Level Executive", "Sales", "Marketing"
+    "seniority": "VP",  # Must be: "C-Suite", "VP", "Director", "Manager", "Individual Contributor"
+    
+    # Intent signal (REQUIRED)
     "intent_signal": {
-        "source": "company_website",  # or: linkedin, job_board, news, github, etc.
-        "description": "Company description...",
-        "url": "https://company.com",
-        "date": "2026-01-15",
-        "snippet": "Activity indicating interest..."
-    },
-    
-    # Optional fields
-    "first_name": "",
-    "last_name": "",
-    "seniority": "VP",
-    "company_size": "100-500",
-    "geography": "San Francisco, CA, USA",
-    "linkedin_url": "",
-    "phone": "",
-    "company_website": "https://company.com",
-    "company_linkedin": "https://linkedin.com/company/...",
+        "source": "linkedin",  # One of: linkedin, job_board, social_media, news, github, review_site, company_website, other
+        "description": "Hiring backend engineers for payments infrastructure",
+        "url": "https://linkedin.com/jobs/123456",
+        "date": "2026-01-15",  # ISO format YYYY-MM-DD
+        "snippet": "Looking for senior engineers..."  # Optional
+    }
 }
 ```
+
+**Required Fields Summary (14 total):**
+
+| Field | Type | Example |
+|-------|------|---------|
+| `business` | str | "Stripe" |
+| `company_linkedin` | str | "https://linkedin.com/company/stripe" |
+| `company_website` | str | "https://stripe.com" |
+| `employee_count` | str | "1001-5000" |
+| `industry` | str | "Financial Services" |
+| `sub_industry` | str | "Payment Processing" |
+| `country` | str | "United States" |
+| `city` | str | "San Francisco" |
+| `state` | str | "California" |
+| `role` | str | "VP of Engineering" |
+| `role_type` | str | "Engineer/Technical" |
+| `seniority` | enum | "VP" |
+| `intent_signal` | object | See above |
+
+**NOT ALLOWED (instant score 0 if included):**
+- `email`, `full_name`, `first_name`, `last_name`, `phone`, `linkedin_url` (person-level PII)
+- `geography` (use `country`/`city`/`state` instead)
+- `company_size` (use `employee_count` instead)
+- **ANY other field not listed above**
 
 #### 4. Time & Cost Limits
 

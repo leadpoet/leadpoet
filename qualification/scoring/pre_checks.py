@@ -164,26 +164,23 @@ async def run_automatic_zero_checks(
         logger.info(f"Lead failed role check: {result.reason}")
         return False, result.reason
     
-    # Check 5: Email validation (format, disposable domains)
-    email_valid, email_reason = await validate_email(lead.email)
-    if not email_valid:
-        logger.info(f"Lead failed email check: {email_reason}")
-        return False, f"Invalid email: {email_reason}"
+    # NOTE: Email validation REMOVED - models are not allowed to submit email/name fields
+    # Any model submitting PII fields will fail Pydantic validation with extra='forbid'
     
-    # Check 6: Data quality (placeholder text, suspicious chars, case issues)
+    # Check 5: Data quality (placeholder text, suspicious chars, case issues)
     quality_valid, quality_reason = check_data_quality(lead)
     if not quality_valid:
         logger.info(f"Lead failed data quality check: {quality_reason}")
         return False, f"Data quality issue: {quality_reason}"
     
-    # Check 7: Duplicate company handling (first lead per company wins)
+    # Check 6: Duplicate company handling (first lead per company wins)
     result = check_duplicate_company(lead.business, seen_companies)
     if not result.passed:
         logger.info(f"Lead failed duplicate check: {result.reason}")
         return False, result.reason
     
     # All checks passed
-    logger.debug(f"Lead passed all pre-checks: {lead.email}")
+    logger.debug(f"Lead passed all pre-checks: {lead.business} / {lead.role}")
     return True, None
 
 
@@ -475,8 +472,8 @@ def check_data_quality(lead: LeadOutput) -> Tuple[bool, Optional[str]]:
     """
     
     # Fields to check for quality
+    # NOTE: full_name is NOT allowed in schema anymore - models cannot submit PII
     fields_to_check = [
-        ("full_name", lead.full_name),
         ("business", lead.business),
         ("role", lead.role),
     ]
@@ -495,22 +492,14 @@ def check_data_quality(lead: LeadOutput) -> Tuple[bool, Optional[str]]:
         if field_value and SUSPICIOUS_CHAR_PATTERN.search(field_value):
             return False, f"Suspicious characters in {field_name}: '{field_value}'"
     
-    # Check 3: Name case issues (ALL CAPS or all lowercase)
-    if lead.full_name:
-        name = lead.full_name.strip()
-        # Allow single-word names but check multi-word names
-        if len(name) > 3:  # Skip very short names
-            if name.isupper():
-                return False, f"Name in ALL CAPS: '{lead.full_name}'"
-            if name.islower():
-                return False, f"Name in all lowercase: '{lead.full_name}'"
+    # NOTE: Name case check REMOVED - full_name field no longer exists in schema
     
-    # Check 4: Numeric-only fields (except where expected)
-    for field_name, field_value in [("full_name", lead.full_name), ("business", lead.business)]:
+    # Check 3: Numeric-only fields (except where expected)
+    for field_name, field_value in [("business", lead.business)]:
         if field_value and field_value.strip().isdigit():
             return False, f"Numeric-only {field_name}: '{field_value}'"
     
-    # Check 5: Excessive repetition (e.g., "aaaaaaa" or "1111111")
+    # Check 4: Excessive repetition (e.g., "aaaaaaa" or "1111111")
     for field_name, field_value in fields_to_check:
         if field_value and len(field_value) >= 5:
             # Check if any character is repeated more than 70% of the string

@@ -119,39 +119,43 @@ class LeadOutput(BaseModel):
     """
     Schema for leads returned by qualification models.
     This is what the model's qualify() function must return.
+    
+    IMPORTANT: Models must ONLY return the required fields below.
+    Any extra fields (email, full_name, first_name, last_name, phone, etc.)
+    will cause validation to FAIL with score 0.
+    
+    This prevents models from fabricating person-level data.
     """
-    # Required fields
-    email: str = Field(..., description="Lead's email address")
-    full_name: str = Field(..., description="Lead's full name")
+    # Pydantic config: FORBID extra fields - any extra field = validation error
+    model_config = {"extra": "forbid"}
+    
+    # Required fields (company + role + intent - NO PII)
     business: str = Field(..., description="Company name")
     role: str = Field(..., description="Lead's job role/title")
     industry: str = Field(..., description="Company industry")
     sub_industry: str = Field(..., description="Company sub-industry")
     intent_signal: IntentSignal = Field(..., description="Evidence of buying intent")
     
-    # Optional fields
-    first_name: Optional[str] = Field(None, description="Lead's first name")
-    last_name: Optional[str] = Field(None, description="Lead's last name")
+    # Optional fields (NO person-level PII allowed)
     seniority: Optional[Seniority] = Field(None, description="Lead's seniority level")
     company_size: Optional[str] = Field(None, description="Company size (e.g., '50-200 employees')")
     geography: Optional[str] = Field(None, description="Location (e.g., 'United States, California')")
-    linkedin_url: Optional[str] = Field(None, description="Lead's LinkedIn profile URL")
-    phone: Optional[str] = Field(None, description="Lead's phone number")
     company_website: Optional[str] = Field(None, description="Company website URL")
     company_linkedin: Optional[str] = Field(None, description="Company LinkedIn URL")
     
-    @field_validator('email')
-    @classmethod
-    def validate_email(cls, v: str) -> str:
-        """Basic email format validation."""
-        if '@' not in v or '.' not in v.split('@')[-1]:
-            raise ValueError("Invalid email format")
-        return v.lower().strip()
+    # NOTE: The following fields are EXPLICITLY NOT ALLOWED:
+    # - email (PII - models cannot fabricate)
+    # - full_name (PII - models cannot fabricate)
+    # - first_name (PII - models cannot fabricate)
+    # - last_name (PII - models cannot fabricate)
+    # - phone (PII - models cannot fabricate)
+    # - linkedin_url (person-level PII)
 
 
 class LeadOutputRedacted(BaseModel):
     """
-    Lead output with PII redacted (for miner receipts).
+    Lead output for miner receipts.
+    Same as LeadOutput since we no longer allow PII fields.
     """
     business: str
     role: str
@@ -161,7 +165,8 @@ class LeadOutputRedacted(BaseModel):
     company_size: Optional[str] = None
     geography: Optional[str] = None
     intent_signal: IntentSignal
-    # PII fields are NOT included
+    company_website: Optional[str] = None
+    company_linkedin: Optional[str] = None
 
 
 # =============================================================================

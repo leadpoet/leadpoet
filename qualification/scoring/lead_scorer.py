@@ -109,7 +109,7 @@ async def score_lead(
     Returns:
         LeadScoreBreakdown with all scoring components
     """
-    logger.info(f"Scoring lead: {lead.email} for ICP {icp.icp_id}")
+    logger.info(f"Scoring lead: {lead.business} / {lead.role} for ICP {icp.icp_id}")
     
     # Handle forced failure (from validator when pre-check already failed)
     if force_fail_reason:
@@ -340,10 +340,9 @@ async def score_decision_maker(lead: LeadOutput, icp: ICPPrompt) -> float:
     Returns:
         Score from 0-30
     """
-    prompt = f"""Score whether this person is likely a decision-maker for purchasing "{icp.product_service}" on a scale of 0-30.
+    prompt = f"""Score whether this role is likely a decision-maker for purchasing "{icp.product_service}" on a scale of 0-30.
 
 LEAD:
-- Name: {lead.full_name}
 - Role: {lead.role}
 - Seniority: {lead.seniority or 'Unknown'}
 - Company: {lead.business}

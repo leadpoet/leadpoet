@@ -648,7 +648,8 @@ class QualificationValidator:
         TODO: Implement lead validation
         """
         # Basic validation - check required fields exist
-        if not lead.email or not lead.full_name or not lead.business:
+        # NOTE: email and full_name are NOT allowed (models cannot fabricate PII)
+        if not lead.business:
             return False
         
         if not lead.role or not lead.industry or not lead.sub_industry:
@@ -696,7 +697,7 @@ class QualificationValidator:
         try:
             from qualification.scoring.lead_scorer import score_lead as _score_lead
             
-            logger.info(f"Scoring lead: {lead.email} against ICP {icp.icp_id}")
+            logger.info(f"Scoring lead: {lead.business} / {lead.role} against ICP {icp.icp_id}")
             
             scores = await _score_lead(
                 lead=lead,

@@ -693,9 +693,9 @@ class NetworkInterceptor:
             if api.base_url in url or parsed.netloc in api.base_url:
                 # Route through proxy
                 # Original: https://api.scrapingdog.com/google?api_key=xxx&query=yyy
-                # Proxied:  http://localhost:8001/proxy/scrapingdog/google?query=yyy
+                # Proxied:  http://localhost:8001/scrapingdog/google?query=yyy
                 path = parsed.path + ('?' + parsed.query if parsed.query else '')
-                return f"{self.proxy_url}/proxy/{api.provider_id}{path}"
+                return f"{self.proxy_url}/{api.provider_id}{path}"
         
         return None
     

@@ -4805,9 +4805,10 @@ class Validator(BaseValidatorNeuron):
                 print(f"   ✅ Champion score UPDATED to latest rebenchmark")
                 print(f"{'='*60}\n")
             
-            # Case 1: No current champion - become champion if score > 0
+            # Case 1: No current champion - become champion if score >= MINIMUM_CHAMPION_SCORE
             elif current_champion is None:
-                if score > 0:
+                MINIMUM_CHAMPION_SCORE = CONFIG.MINIMUM_CHAMPION_SCORE
+                if score >= MINIMUM_CHAMPION_SCORE:
                     model_data["became_champion_at"] = timestamp
                     current_champion = model_data
                     became_champion = True
@@ -4821,7 +4822,7 @@ class Validator(BaseValidatorNeuron):
                     print(f"   Avg Time/Lead: {avg_time:.2f}s")
                     print(f"{'='*60}\n")
                 else:
-                    print(f"\n📊 Model {model_name} scored 0 - cannot become champion")
+                    print(f"\n📊 Model {model_name} scored {score:.2f} - below minimum champion threshold ({MINIMUM_CHAMPION_SCORE})")
             else:
                 # Case 2: Current champion exists - new challenger needs to beat by threshold
                 current_score = current_champion.get("score", 0)
@@ -4841,27 +4842,37 @@ class Validator(BaseValidatorNeuron):
                     print(f"   Champion: {current_champion.get('model_name')} (score: {current_score:.2f})")
                     print(f"{'='*60}\n")
                 else:
-                    # NEW CHAMPION! Beat by required threshold
-                    improvement = ((score - current_score) / current_score) * 100 if current_score > 0 else 100
-                    
-                    # Old champion becomes ex-champion
-                    ex_champion = current_champion.copy()
-                    ex_champion["dethroned_at"] = timestamp
-                    
-                    # New champion
-                    model_data["became_champion_at"] = timestamp
-                    current_champion = model_data
-                    became_champion = True
-                    
-                    print(f"\n{'='*60}")
-                    print(f"👑👑👑 NEW CHAMPION CROWNED! 👑👑👑")
-                    print(f"   New Champion: {model_name}")
-                    print(f"   Miner: {miner_hotkey[:20]}...")
-                    print(f"   Score: {score:.2f} (+{improvement:.1f}%)")
-                    print(f"   Avg Cost/Lead: ${avg_cost:.6f}")
-                    print(f"   Avg Time/Lead: {avg_time:.2f}s")
-                    print(f"   Dethroned: {ex_champion.get('model_name')} (score: {ex_champion.get('score'):.2f})")
-                    print(f"{'='*60}\n")
+                    # Check minimum score requirement
+                    MINIMUM_CHAMPION_SCORE = CONFIG.MINIMUM_CHAMPION_SCORE
+                    if score < MINIMUM_CHAMPION_SCORE:
+                        print(f"\n{'='*60}")
+                        print(f"❌ MODEL BEAT CHAMPION BUT BELOW MINIMUM THRESHOLD")
+                        print(f"   Model: {model_name} (score: {score:.2f})")
+                        print(f"   Minimum Required: {MINIMUM_CHAMPION_SCORE}")
+                        print(f"   Cannot become champion - score too low")
+                        print(f"{'='*60}\n")
+                    else:
+                        # NEW CHAMPION! Beat by required threshold AND meets minimum
+                        improvement = ((score - current_score) / current_score) * 100 if current_score > 0 else 100
+                        
+                        # Old champion becomes ex-champion
+                        ex_champion = current_champion.copy()
+                        ex_champion["dethroned_at"] = timestamp
+                        
+                        # New champion
+                        model_data["became_champion_at"] = timestamp
+                        current_champion = model_data
+                        became_champion = True
+                        
+                        print(f"\n{'='*60}")
+                        print(f"👑👑👑 NEW CHAMPION CROWNED! 👑👑👑")
+                        print(f"   New Champion: {model_name}")
+                        print(f"   Miner: {miner_hotkey[:20]}...")
+                        print(f"   Score: {score:.2f} (+{improvement:.1f}%)")
+                        print(f"   Avg Cost/Lead: ${avg_cost:.6f}")
+                        print(f"   Avg Time/Lead: {avg_time:.2f}s")
+                        print(f"   Dethroned: {ex_champion.get('model_name')} (score: {ex_champion.get('score'):.2f})")
+                        print(f"{'='*60}\n")
             
             # Get current epoch for tracking rebenchmark timing
             try:
@@ -4922,6 +4933,61 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.warning(f"Failed to read qualification champion: {e}")
             return None
+    
+    def _clear_qualification_champion(self):
+        """
+        Clear the qualification champion (dethrone without replacement).
+        
+        Called when champion's rebenchmark score falls below minimum threshold.
+        Removes the current_champion from the local JSON file.
+        """
+        try:
+            champion_file = Path("validator_weights") / "qualification_champion.json"
+            
+            if not champion_file.exists():
+                bt.logging.debug("No qualification champion file to clear")
+                return
+            
+            # Read existing data
+            with open(champion_file, 'r') as f:
+                data = json.load(f)
+            
+            # Record who was dethroned
+            old_champion = data.get("current_champion")
+            if old_champion:
+                bt.logging.info(
+                    f"👎 DETHRONING CHAMPION: {old_champion.get('model_name', 'Unknown')} "
+                    f"(score: {old_champion.get('score', 0):.2f})"
+                )
+                
+                # Track dethronement history
+                if "dethronement_history" not in data:
+                    data["dethronement_history"] = []
+                
+                from datetime import datetime, timezone
+                old_champion["dethroned_at"] = datetime.now(timezone.utc).isoformat()
+                old_champion["dethrone_reason"] = "score_below_minimum"
+                data["dethronement_history"].append(old_champion)
+            
+            # Clear current champion
+            data["current_champion"] = None
+            data["last_cleared_at"] = datetime.now(timezone.utc).isoformat()
+            
+            # Save updated data
+            with open(champion_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            bt.logging.info("✅ Champion cleared from local JSON - no champion exists")
+            print(f"\n{'='*60}")
+            print(f"👎 CHAMPION DETHRONED - NO REPLACEMENT")
+            print(f"   There is currently NO CHAMPION")
+            print(f"   Next qualifying model (score >= minimum) will become champion")
+            print(f"{'='*60}\n")
+            
+        except Exception as e:
+            bt.logging.error(f"Failed to clear qualification champion: {e}")
+            import traceback
+            bt.logging.error(traceback.format_exc())
     
     def _check_champion_rebenchmark_needed(self) -> Optional[Dict[str, Any]]:
         """
@@ -5117,6 +5183,7 @@ class Validator(BaseValidatorNeuron):
         became_champion: bool,
         score: float,
         is_rebenchmark: bool = False,
+        was_dethroned: bool = False,
         evaluation_cost_usd: float = None,
         evaluation_time_seconds: int = None,
         code_content: str = None
@@ -5135,6 +5202,7 @@ class Validator(BaseValidatorNeuron):
             score: The evaluation score
             is_rebenchmark: True if this is a rebenchmark of the existing champion
                            (signals gateway to update score even if became_champion=True)
+            was_dethroned: True if champion was dethroned (score below minimum) with NO replacement
             evaluation_cost_usd: Total cost of the evaluation (optional)
             evaluation_time_seconds: Total time of the evaluation in seconds (optional)
             code_content: JSON string of code files for display (optional)
@@ -5149,6 +5217,7 @@ class Validator(BaseValidatorNeuron):
                 "became_champion": became_champion,
                 "score": score,
                 "is_rebenchmark": is_rebenchmark,  # Tell gateway this is a rebenchmark
+                "was_dethroned": was_dethroned,  # Tell gateway champion was dethroned (no replacement)
                 "determined_by": "validator"  # Indicates validator made the decision
             }
             
@@ -5166,7 +5235,7 @@ class Validator(BaseValidatorNeuron):
                     json=payload
                 )
                 response.raise_for_status()
-                bt.logging.info(f"✅ Notified gateway of champion status: model={model_id[:8]}..., became_champion={became_champion}")
+                bt.logging.info(f"✅ Notified gateway of champion status: model={model_id[:8]}..., became_champion={became_champion}, was_dethroned={was_dethroned}")
                 
         except Exception as e:
             # Non-critical - local JSON is source of truth
@@ -5539,32 +5608,31 @@ class Validator(BaseValidatorNeuron):
                 print(f"      ❌ Error: {error}")
                 continue
             
+            # Minimum score required to become/remain champion
+            MINIMUM_CHAMPION_SCORE = QUALIFICATION_CONFIG.MINIMUM_CHAMPION_SCORE
+            
             # Determine if this model beats the champion
             became_champion = False
+            was_dethroned = False
             
             if is_rebenchmark:
-                # Rebenchmark - update champion score
-                print(f"      🔄 Rebenchmark - updating champion score")
-                num_leads = result.get("num_leads_evaluated", 100)
-                self._update_champion_if_needed(
-                    model_id=model_id,
-                    model_name=model_name,
-                    miner_hotkey=result.get("miner_hotkey", "unknown"),
-                    score=avg_score,
-                    total_cost_usd=total_cost,
-                    total_time_seconds=total_time,
-                    num_leads=num_leads
-                )
-                became_champion = True  # Still champion after rebenchmark
-            else:
-                # New challenger - check if beats champion
-                beat_threshold = QUALIFICATION_CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT / 100.0
-                threshold_score = current_champion_score * (1 + beat_threshold)
+                # Rebenchmark - check if champion still meets minimum threshold
+                print(f"      🔄 Rebenchmark - checking champion status")
                 
-                if avg_score > threshold_score:
-                    print(f"      🏆 NEW CHAMPION! Score {avg_score:.2f} > {threshold_score:.2f}")
+                if avg_score < MINIMUM_CHAMPION_SCORE:
+                    # Champion score dropped below minimum - DETHRONE with no replacement
+                    print(f"      👎 CHAMPION DETHRONED! Score {avg_score:.2f} < minimum {MINIMUM_CHAMPION_SCORE}")
+                    print(f"         There is now NO CHAMPION until a model scores >= {MINIMUM_CHAMPION_SCORE}")
+                    
+                    # Clear local champion
+                    self._clear_qualification_champion()
+                    was_dethroned = True
+                    became_champion = False
+                else:
+                    # Champion still meets threshold - update score
+                    print(f"      ✅ Champion score updated: {avg_score:.2f} (above minimum {MINIMUM_CHAMPION_SCORE})")
                     num_leads = result.get("num_leads_evaluated", 100)
-                    became_champion, _ = self._update_champion_if_needed(
+                    self._update_champion_if_needed(
                         model_id=model_id,
                         model_name=model_name,
                         miner_hotkey=result.get("miner_hotkey", "unknown"),
@@ -5573,8 +5641,31 @@ class Validator(BaseValidatorNeuron):
                         total_time_seconds=total_time,
                         num_leads=num_leads
                     )
-                    current_champion_score = avg_score  # Update for next comparison
-                    current_champion_id = model_id
+                    became_champion = True  # Still champion after rebenchmark
+            else:
+                # New challenger - check if beats champion AND meets minimum threshold
+                beat_threshold = QUALIFICATION_CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT / 100.0
+                threshold_score = current_champion_score * (1 + beat_threshold)
+                
+                if avg_score > threshold_score:
+                    # Check minimum score requirement
+                    if avg_score < MINIMUM_CHAMPION_SCORE:
+                        print(f"      ❌ Beat champion but below minimum ({avg_score:.2f} < {MINIMUM_CHAMPION_SCORE})")
+                        print(f"         Cannot become champion - need score >= {MINIMUM_CHAMPION_SCORE}")
+                    else:
+                        print(f"      🏆 NEW CHAMPION! Score {avg_score:.2f} > {threshold_score:.2f}")
+                        num_leads = result.get("num_leads_evaluated", 100)
+                        became_champion, _ = self._update_champion_if_needed(
+                            model_id=model_id,
+                            model_name=model_name,
+                            miner_hotkey=result.get("miner_hotkey", "unknown"),
+                            score=avg_score,
+                            total_cost_usd=total_cost,
+                            total_time_seconds=total_time,
+                            num_leads=num_leads
+                        )
+                        current_champion_score = avg_score  # Update for next comparison
+                        current_champion_id = model_id
                 else:
                     print(f"      ❌ Did not beat champion ({avg_score:.2f} <= {threshold_score:.2f})")
             
@@ -5588,6 +5679,7 @@ class Validator(BaseValidatorNeuron):
                     became_champion=became_champion,
                     score=avg_score,
                     is_rebenchmark=is_rebenchmark,
+                    was_dethroned=was_dethroned,
                     evaluation_cost_usd=total_cost,
                     evaluation_time_seconds=int(total_time),
                     code_content=code_content

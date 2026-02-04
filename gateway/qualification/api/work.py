@@ -38,9 +38,10 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # These can be adjusted without code changes - just update the values here
 
-# Import champion threshold from central config (single source of truth)
+# Import champion thresholds from central config (single source of truth)
 from gateway.qualification.config import CONFIG
 CHAMPION_BEAT_THRESHOLD = CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT  # Currently 2%
+MINIMUM_CHAMPION_SCORE = CONFIG.MINIMUM_CHAMPION_SCORE  # Currently 10.0
 
 router = APIRouter(prefix="/validator", tags=["validator-work"])
 
@@ -470,6 +471,7 @@ class ChampionStatusRequest(BaseModel):
     score: float
     determined_by: str = "validator"  # Always "validator" - validator makes the decision
     is_rebenchmark: bool = False  # True if this is a rebenchmark of the existing champion
+    was_dethroned: bool = False  # True if champion was dethroned (score below minimum) with NO replacement
     # Optional fields for full DB update (cost, time, code)
     evaluation_cost_usd: Optional[float] = None
     evaluation_time_seconds: Optional[int] = None
@@ -604,7 +606,22 @@ async def receive_champion_status(request: ChampionStatusRequest):
         if request.code_content is not None:
             base_update["code_content"] = request.code_content
         
-        if request.became_champion:
+        if request.was_dethroned:
+            # Champion was dethroned due to score falling below minimum threshold
+            # NO replacement champion - there is now NO champion
+            dethrone_update = {
+                **base_update,
+                "is_champion": False,
+                "dethroned_at": datetime.now(timezone.utc).isoformat()
+            }
+            supabase.table("qualification_models").update(dethrone_update).eq("id", request.model_id).execute()
+            
+            logger.info(
+                f"👎 CHAMPION DETHRONED! Model {request.model_id[:8]}... score dropped to {request.score:.2f} "
+                f"(below minimum threshold) - NO CHAMPION exists now"
+            )
+        
+        elif request.became_champion:
             # Dethrone any existing champion
             supabase.table("qualification_models").update({
                 "is_champion": False,
@@ -623,6 +640,7 @@ async def receive_champion_status(request: ChampionStatusRequest):
         
         elif request.is_rebenchmark:
             # Champion was re-evaluated - update their score (even if lower)
+            # Note: If score fell below minimum, was_dethroned should be True instead
             # Rebenchmark uses base_update which includes all fields
             supabase.table("qualification_models").update(base_update).eq("id", request.model_id).execute()
             
@@ -1636,10 +1654,20 @@ async def check_and_update_champion(
         # Get current champion
         current_champion = await get_current_champion()
         
-        # Case 1: No current champion - become champion if score > 0
+        # Case 1: No current champion - become champion if score >= MINIMUM_CHAMPION_SCORE
         if current_champion is None:
-            if new_score <= 0:
-                logger.info(f"❌ Model {model_id[:8]}... scored 0 - cannot become champion")
+            if new_score < MINIMUM_CHAMPION_SCORE:
+                logger.info(
+                    f"❌ Model {model_id[:8]}... scored {new_score:.2f} - below minimum "
+                    f"champion threshold ({MINIMUM_CHAMPION_SCORE}), cannot become champion"
+                )
+                print(f"\n{'='*60}")
+                print(f"❌ MODEL BELOW MINIMUM CHAMPION THRESHOLD")
+                print(f"   Model: {model_id[:8]}...")
+                print(f"   Score: {new_score:.2f}")
+                print(f"   Required: {MINIMUM_CHAMPION_SCORE}")
+                print(f"   (No champion exists - threshold not met)")
+                print(f"{'='*60}\n")
                 return False
             
             # Mark this model as champion
@@ -1691,6 +1719,20 @@ async def check_and_update_champion(
             print(f"   Score: {new_score:.2f} (improvement: +{improvement:.1f}%)")
             print(f"   Required: {required_score:.2f} (need +{CHAMPION_BEAT_THRESHOLD*100:.0f}%)")
             print(f"   Current Champion Score: {current_score:.2f}")
+            print(f"{'='*60}\n")
+            return False
+        
+        # Check minimum score threshold even if beating current champion
+        if new_score < MINIMUM_CHAMPION_SCORE:
+            logger.info(
+                f"❌ Model {model_id[:8]}... beat champion but score {new_score:.2f} is below "
+                f"minimum threshold ({MINIMUM_CHAMPION_SCORE}), cannot become champion"
+            )
+            print(f"\n{'='*60}")
+            print(f"❌ CHALLENGER BELOW MINIMUM THRESHOLD")
+            print(f"   Model: {model_id[:8]}...")
+            print(f"   Score: {new_score:.2f} (beat current but below minimum)")
+            print(f"   Minimum Required: {MINIMUM_CHAMPION_SCORE}")
             print(f"{'='*60}\n")
             return False
         

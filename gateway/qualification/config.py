@@ -54,7 +54,7 @@ class QualificationConfig:
     # =========================================================================
     # Champion Rules
     # =========================================================================
-    CHAMPION_DETHRONING_THRESHOLD_PCT: float = 0.10  # >10% better to dethrone champion
+    CHAMPION_DETHRONING_THRESHOLD_PCT: float = 0.50  # >50% better to dethrone champion
     MIN_CHAMPION_DURATION_EPOCHS: int = 1  # Minimum epochs as champion before can be dethroned
     MINIMUM_CHAMPION_SCORE: float = 10.0  # Minimum score to become/remain champion (out of 100)
     

@@ -686,6 +686,10 @@ class Validator(BaseValidatorNeuron):
         self.processing_broadcast = False
         self._processed_requests = set()
         
+        # Qualification system state (initialized here to avoid AttributeError)
+        self._qualification_session_id = None
+        self._qualification_validator = None
+        
         self.precision = 15.0 
         self.consistency = 1.0  
         self.collusion_flag = 1

@@ -756,13 +756,16 @@ async def get_current_bittensor_epoch() -> int:
     """
     Get the current Bittensor epoch (block // 360).
     
-    Uses dynamic network (testnet/mainnet) based on BITTENSOR_NETWORK env var.
+    Uses the cached epoch from the metagraph registry - no live chain query needed.
+    This is more resilient as it doesn't fail if the chain connection is stale.
     
     Returns:
         Current epoch number
     """
-    # Use real chain query
-    return await chain_get_current_bittensor_epoch()
+    # Use cached epoch from gateway's epoch utilities (same as metagraph uses)
+    # This avoids chain connection issues for operations that don't need live data
+    from gateway.utils.epoch import get_current_epoch_id_async
+    return await get_current_epoch_id_async()
 
 
 async def create_model_record(

@@ -283,7 +283,7 @@ _is_worker_mode = "--mode" in sys.argv and any(
 if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" and not _is_worker_mode:
     # Check if proxies are configured for containerization
     proxies_found = []
-    for i in range(1, 50):  # Check for up to 49 proxies (supports scaling)
+    for i in range(1, 100):  # Check for up to 99 proxies (supports scaling)
         proxy_var = f"WEBSHARE_PROXY_{i}"
         proxy_value = os.getenv(proxy_var)
         if proxy_value and proxy_value != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80":

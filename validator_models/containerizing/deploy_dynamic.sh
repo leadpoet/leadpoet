@@ -56,7 +56,7 @@ PROXIES=()
 PROXY_COUNT=0
 
 # Check for WEBSHARE_PROXY_1, WEBSHARE_PROXY_2, WEBSHARE_PROXY_3, etc.
-for i in {1..49}; do
+for i in {1..99}; do
     PROXY_VAR="WEBSHARE_PROXY_$i"
     PROXY_VALUE="${!PROXY_VAR}"
     

@@ -270,6 +270,7 @@ FRANCE_REGIONS = r"Île-de-France|Ile-de-France|Auvergne-Rhône-Alpes|Hauts-de-F
 CITY_EQUIVALENTS = {
     'bangalore': 'bengaluru', 'bombay': 'mumbai',
     'madras': 'chennai', 'calcutta': 'kolkata',
+    'new york city': 'new york',
 }
 
 # Consolidated country aliases - used for matching country names across all functions
@@ -1976,9 +1977,21 @@ def check_q3_location_fallback(
 
                 if not missing:  # All search terms found including city
                     city_lower = city.lower()
+                    city_equiv = CITY_EQUIVALENTS.get(city_lower, city_lower)
                     result_url = r.get('link', '')
 
-                    if not re.search(r'\b' + re.escape(city_lower) + r'\b', full_text.lower()):
+                    text_lower = full_text.lower()
+                    _saint_re = re.compile(r'^(?:saint|st\.?)\s+', re.IGNORECASE)
+                    city_saint_variants = []
+                    if _saint_re.match(city_lower):
+                        remainder = _saint_re.sub('', city_lower).strip()
+                        city_saint_variants = [f'saint {remainder}', f'st {remainder}', f'st. {remainder}']
+                    city_in_text = (
+                        re.search(r'\b' + re.escape(city_lower) + r'\b', text_lower) or
+                        (city_equiv != city_lower and re.search(r'\b' + re.escape(city_equiv) + r'\b', text_lower)) or
+                        any(re.search(r'\b' + re.escape(v) + r'\b', text_lower) for v in city_saint_variants)
+                    )
+                    if not city_in_text:
                         return {
                             'success': True,
                             'passed': False,

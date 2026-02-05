@@ -19,6 +19,7 @@ Usage in automated_checks.py:
         return False, result['rejection_reason']
 """
 
+import logging
 import os
 import re
 import time
@@ -56,6 +57,13 @@ def _saint_normalize(city: str) -> str:
 # API Keys from environment
 SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY", "")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
+
+# Warn at import time if keys are missing (they can still be passed as args)
+_logger = logging.getLogger(__name__)
+if not SCRAPINGDOG_API_KEY:
+    _logger.warning("SCRAPINGDOG_API_KEY not set - Stage 4 requires API key via env or function arg")
+if not OPENROUTER_KEY:
+    _logger.warning("OPENROUTER_KEY not set - LLM role verification will fail without API key")
 
 # Thread pool for running sync functions
 _executor = ThreadPoolExecutor(max_workers=4)
@@ -97,7 +105,7 @@ async def search_google_async(query: str, api_key: str, max_results: int = 10) -
                 return [], str(e)[:100]
         return [], "Max retries exhausted"
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, _search)
 
 
@@ -388,8 +396,11 @@ async def run_lead_validation_stage4(
             location_passed = True
             location_method = 'structured_city_match'
         elif not city_match:
+            # Check if extracted "city" is actually the company name (false positive)
             company_lower = company.lower().strip() if company else ''
-            if company_lower and (ext_city == company_lower):
+            if company_lower and ext_city == company_lower:
+                # Extracted location is company name, not a real city
+                # Fall through to other location checks (6b)
                 pass
             else:
                 # DIRECT FAIL - city mismatch, no Q3
@@ -441,7 +452,30 @@ async def run_lead_validation_stage4(
 
         # City fallback
         if not location_passed:
-            if re.search(r'\b' + re.escape(city_lower) + r'\b', full_text.lower()):
+            text_lower = full_text.lower()
+
+            # Build list of city variants to search for (bidirectional equivalents)
+            city_variants = {city_lower}
+            # Forward: city -> equivalent
+            city_equiv = CITY_EQUIVALENTS.get(city_lower)
+            if city_equiv and city_equiv != city_lower:
+                city_variants.add(city_equiv)
+            # Reverse: if city is a value, also match the key
+            for key, val in CITY_EQUIVALENTS.items():
+                if val == city_lower and key != city_lower:
+                    city_variants.add(key)
+            # Add Saint/St variants (saint paul <-> st paul <-> st. paul)
+            if _SAINT_PREFIX_RE.match(city_lower):
+                remainder = _SAINT_PREFIX_RE.sub('', city_lower).strip()
+                city_variants.add(f'saint {remainder}')
+                city_variants.add(f'st {remainder}')
+                city_variants.add(f'st. {remainder}')
+
+            city_found = any(
+                re.search(r'\b' + re.escape(v) + r'\b', text_lower)
+                for v in city_variants
+            )
+            if city_found:
                 # Get result URL for domain check
                 result_url = url_matched_result.get('link', '') if url_matched_result else linkedin_url
                 # Check for institution context, ambiguous cities, and URL domain
@@ -455,7 +489,7 @@ async def run_lead_validation_stage4(
         if not location_passed:
             # Normalize "St." to "St " (same length) so regex can match St. Paul, St. Louis etc.
             area_search_text = re.sub(r'\bSt\.\s', 'St  ', full_text)
-            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', area_search_text, re.IGNORECASE)
+            area_match = re.search(r'(Greater\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2}(?:\s+Bay)?|[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2}\s+(?:Metropolitan|Bay|Metro))\s*Area', area_search_text)
 
             if not area_match:
                 greater_match = re.search(r'(Greater\s+[A-Z][a-zA-Z.]+(?:\s+[A-Z][a-zA-Z.]+)*)', full_text)
@@ -493,8 +527,62 @@ async def run_lead_validation_stage4(
                         }
                         return result
 
-        # Non-LinkedIn fallback (structured location only)
+        # LinkedIn directory fallback - check /pub/dir/ pages for same person with location
+        if not location_passed:
+            name_lower = full_name.lower()
+            company_lower = company.lower() if company else ''
+            for r in all_results[:10]:
+                r_link = r.get('link', '').lower()
+                # Only check LinkedIn directory pages, not profile pages
+                if '/pub/dir/' not in r_link:
+                    continue
+                r_text = f"{r.get('title', '')} {r.get('snippet', '')}"
+                r_text_lower = r_text.lower()
+                # Must contain name and company to be same person
+                name_parts = name_lower.split()
+                if not all(part in r_text_lower for part in name_parts[:2]):
+                    continue
+                if company_lower and company_lower not in r_text_lower:
+                    continue
+                # Check for area mapping in directory page
+                dir_area_match = re.search(r'(Greater\s+[A-Z][a-zA-Z.]+(?:\s+[A-Z][a-zA-Z.]+)*(?:\s+Bay)?(?:\s+Area)?)', r_text)
+                if dir_area_match:
+                    dir_area = dir_area_match.group(1).strip()
+                    if is_city_in_area_approved(city, dir_area, state, country):
+                        location_passed = True
+                        location_method = 'linkedin_dir_area_approved'
+                        result['data']['extracted_location'] = dir_area
+                        print(f"   ✅ Location from directory page: {dir_area}")
+                        break
+                # Check for structured location in directory page
+                r_loc = extract_location_from_text(r_text)
+                if r_loc:
+                    loc_match, loc_method = check_locations_match(r_loc, gt_location, r_text)
+                    if loc_match:
+                        location_passed = True
+                        location_method = f'linkedin_dir_{loc_method}'
+                        result['data']['extracted_location'] = r_loc
+                        print(f"   ✅ Location from directory page: {r_loc}")
+                        break
+                # If first extraction didn't match, try finding location AFTER company mention
+                # (handles directory pages with multiple people where first location is wrong person)
+                if company_lower:
+                    company_pos = r_text_lower.find(company_lower)
+                    if company_pos >= 0:
+                        text_after_company = r_text[company_pos + len(company_lower):]
+                        # Look for "City, ST" pattern after company
+                        loc_after_match = re.search(r'\b((?:St\.?\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*([A-Z]{2})\b', text_after_company)
+                        if loc_after_match:
+                            found_loc = f"{loc_after_match.group(1).strip()}, {loc_after_match.group(2)}"
+                            loc_match, loc_method = check_locations_match(found_loc, gt_location, r_text)
+                            if loc_match:
+                                location_passed = True
+                                location_method = f'linkedin_dir_after_company_{loc_method}'
+                                result['data']['extracted_location'] = found_loc
+                                print(f"   ✅ Location after company in directory: {found_loc}")
+                                break
 
+        # Non-LinkedIn fallback (structured location only)
         if not location_passed:
             for r in all_results[:5]:
                 r_link = r.get('link', '').lower()
@@ -510,7 +598,89 @@ async def run_lead_validation_stage4(
                         result['data']['extracted_location'] = r_loc
                         break
 
-    # 6c. Q3 Location Fallback
+    # 6c. Q5 Location Fallback - runs for all location failures with city + state
+    # Q5 is more targeted (searches specific profile) so run before Q3
+    if not location_passed and city and linkedin_url and state:
+        state_abbr_map = GEO_LOOKUP.get('state_abbr', {})
+        state_lower = state.lower().strip()
+        # Build full state name and abbreviation
+        if state_lower in state_abbr_map:
+            state_full = state_abbr_map[state_lower].title()
+            state_ab = state.upper().strip()
+        else:
+            state_full = state.strip()
+            state_ab = ''
+            for ab, full in state_abbr_map.items():
+                if full.lower() == state_lower:
+                    state_ab = ab.upper()
+                    break
+
+        # Build Q5 search variants with city equivalents (bidirectional)
+        # e.g., "New York City" <-> "New York"
+        city_names = [city]
+        city_lower_q5 = city.lower().strip()
+        # Forward: city -> equivalent
+        city_equiv = CITY_EQUIVALENTS.get(city_lower_q5)
+        if city_equiv and city_equiv.lower() != city_lower_q5:
+            city_names.append(city_equiv.title())
+        # Reverse: if city is a value, also search the key
+        for key, val in CITY_EQUIVALENTS.items():
+            if val == city_lower_q5 and key != city_lower_q5:
+                city_names.append(key.title())
+
+        # Build Q5 variants: full state names first, then abbreviations
+        q5_variants = []
+        if state_full:
+            for c in city_names:
+                q5_variants.append(f'{c}, {state_full}')
+        if state_ab and state_ab != state_full:
+            for c in city_names:
+                q5_variants.append(f'{c}, {state_ab}')
+
+        for variant in q5_variants:
+            q5_query = f'site:linkedin.com/in/{expected_lid} "{variant}"'
+            print(f"   🔍 Q5: {q5_query}")
+            q5_results, q5_error = await search_google_async(q5_query, api_key)
+            queries_used.append('Q5')
+
+            for r in q5_results:
+                if get_linkedin_id(r.get('link', '')) == expected_lid:
+                    r_text = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
+                    # Build city variants including Saint/St and equivalents (bidirectional)
+                    q5_city_variants = {city.lower()}
+                    q5_city_equiv = CITY_EQUIVALENTS.get(city.lower().strip())
+                    if q5_city_equiv:
+                        q5_city_variants.add(q5_city_equiv)
+                    # Reverse: if city is a value, also match the key
+                    for key, val in CITY_EQUIVALENTS.items():
+                        if val == city.lower().strip():
+                            q5_city_variants.add(key)
+                    if _SAINT_PREFIX_RE.match(city.lower()):
+                        remainder = _SAINT_PREFIX_RE.sub('', city.lower()).strip()
+                        q5_city_variants.add(f'saint {remainder}')
+                        q5_city_variants.add(f'st {remainder}')
+                        q5_city_variants.add(f'st. {remainder}')
+                    city_in_text = any(re.search(r'\b' + re.escape(v) + r'\b', r_text) for v in q5_city_variants)
+                    state_in_text = (state_full.lower() in r_text) or \
+                        (bool(re.search(r'\b' + re.escape(state_ab.lower()) + r'\b', r_text)) if state_ab else False)
+                    if not state_in_text and len(state_full) >= 3:
+                        for plen in range(3, len(state_full)):
+                            prefix = state_full[:plen].lower()
+                            if re.search(r'\b' + re.escape(prefix), r_text):
+                                state_in_text = True
+                                break
+                    if city_in_text and state_in_text:
+                        location_passed = True
+                        location_method = 'q5_slug_city_state'
+                        print(f"   ✅ Q5 passed: found \"{variant}\" on profile")
+                        break
+            if location_passed:
+                break
+
+        if not location_passed:
+            print(f"   ❌ Q5 failed: \"{city}, {state}\" not found on profile")
+
+    # 6d. Q3 Location Fallback
     if not location_passed and city and linkedin_url:
         print(f"   🔍 Q3: Fallback \"{full_name}\" \"{company}\" \"{city}\" \"{linkedin_url}\"")
         result['data']['q3_called'] = True
@@ -527,59 +697,6 @@ async def run_lead_validation_stage4(
         else:
             result['data']['q3_result'] = 'fail'
             print(f"   ❌ Q3 failed: {q3_result.get('error', 'no match')}")
-
-    # 6d. Q5 Location Fallback
-    if not location_passed and city and linkedin_url and state:
-        city_lower = city.lower().strip()
-        is_ambiguous = is_ambiguous_city(city_lower)
-        is_english_word = is_english_word_city(city_lower)
-        if is_ambiguous or is_english_word:
-            state_abbr_map = GEO_LOOKUP.get('state_abbr', {})
-            state_lower = state.lower().strip()
-            # Build full state name and abbreviation
-            if state_lower in state_abbr_map:
-                state_full = state_abbr_map[state_lower].title()
-                state_ab = state.upper().strip()
-            else:
-                state_full = state.strip()
-                state_ab = ''
-                for ab, full in state_abbr_map.items():
-                    if full.lower() == state_lower:
-                        state_ab = ab.upper()
-                        break
-
-            q5_variants = [f'{city}, {state_full}'] if state_full else []
-            if state_ab and state_ab != state_full:
-                q5_variants.append(f'{city}, {state_ab}')
-
-            for variant in q5_variants:
-                q5_query = f'site:linkedin.com/in/{expected_lid} "{variant}"'
-                print(f"   🔍 Q5: {q5_query}")
-                q5_results, q5_error = await search_google_async(q5_query, api_key)
-                queries_used.append('Q5')
-
-                for r in q5_results:
-                    if get_linkedin_id(r.get('link', '')) == expected_lid:
-                        r_text = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
-                        city_in_text = bool(re.search(r'\b' + re.escape(city.lower()) + r'\b', r_text))
-                        state_in_text = (state_full.lower() in r_text) or \
-                            (bool(re.search(r'\b' + re.escape(state_ab.lower()) + r'\b', r_text)) if state_ab else False)
-                        if not state_in_text and len(state_full) >= 3:
-                            for plen in range(3, len(state_full)):
-                                prefix = state_full[:plen].lower()
-                                if re.search(r'\b' + re.escape(prefix), r_text):
-                                    state_in_text = True
-                                    break
-                        if city_in_text and state_in_text:
-                            location_passed = True
-                            location_method = 'q5_slug_city_state'
-                            print(f"   ✅ Q5 passed: found \"{variant}\" on profile")
-                            break
-                if location_passed:
-                    break
-
-            if not location_passed:
-                print(f"   ❌ Q5 failed: \"{city}, {state}\" not found on profile")
 
     result['data']['query_used'] = '+'.join(queries_used)
 
@@ -871,7 +988,25 @@ async def run_location_validation_only(
                     location_passed = True
                     location_method = loc_method
 
-        if not location_passed and re.search(r'\b' + re.escape(city_lower) + r'\b', full_text.lower()):
+        # City fallback with Saint/St variants (bidirectional equivalents)
+        if not location_passed:
+            city_variants = {city_lower}
+            # Forward: city -> equivalent
+            city_equiv = CITY_EQUIVALENTS.get(city_lower)
+            if city_equiv and city_equiv != city_lower:
+                city_variants.add(city_equiv)
+            # Reverse: if city is a value, also match the key
+            for key, val in CITY_EQUIVALENTS.items():
+                if val == city_lower and key != city_lower:
+                    city_variants.add(key)
+            if _SAINT_PREFIX_RE.match(city_lower):
+                remainder = _SAINT_PREFIX_RE.sub('', city_lower).strip()
+                city_variants.add(f'saint {remainder}')
+                city_variants.add(f'st {remainder}')
+                city_variants.add(f'st. {remainder}')
+            city_found = any(re.search(r'\b' + re.escape(v) + r'\b', full_text.lower()) for v in city_variants)
+
+        if not location_passed and city_found:
             # Get result URL for domain check
             result_url = url_matched_result.get('link', '') if url_matched_result else linkedin_url
             # Check for institution context, ambiguous cities, and URL domain
@@ -885,7 +1020,7 @@ async def run_location_validation_only(
         if not location_passed:
             # Normalize "St." to "St " (same length) so regex can match St. Paul, St. Louis etc.
             area_search_text = re.sub(r'\bSt\.\s', 'St  ', full_text)
-            area_match = re.search(r'(Greater\s+[\w\s\-]+|[\w\s\-]+\s+Metropolitan|[\w\s\-]+\s+Bay|[\w\s\-]+\s+Metro)\s*Area', area_search_text, re.IGNORECASE)
+            area_match = re.search(r'(Greater\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2}(?:\s+Bay)?|[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2}\s+(?:Metropolitan|Bay|Metro))\s*Area', area_search_text)
 
             if not area_match:
                 greater_match = re.search(r'(Greater\s+[A-Z][a-zA-Z.]+(?:\s+[A-Z][a-zA-Z.]+)*)', full_text)
@@ -942,6 +1077,82 @@ async def run_location_validation_only(
                         result['extracted_location'] = r_loc
                         break
 
+    # Q5 Fallback - runs for all location failures with city + state
+    # Q5 is more targeted (searches specific profile) so run before Q3
+    if not location_passed and city and linkedin_url and state and api_key:
+        expected_lid = get_linkedin_id(linkedin_url)
+        state_abbr_map = GEO_LOOKUP.get('state_abbr', {})
+        state_lower = state.lower().strip()
+        if state_lower in state_abbr_map:
+            state_full = state_abbr_map[state_lower].title()
+            state_ab = state.upper().strip()
+        else:
+            state_full = state.strip()
+            state_ab = ''
+            for ab, full in state_abbr_map.items():
+                if full.lower() == state_lower:
+                    state_ab = ab.upper()
+                    break
+
+        # Build Q5 search variants with city equivalents (bidirectional)
+        # e.g., "New York City" <-> "New York"
+        city_names = [city]
+        city_lower_q5 = city.lower().strip()
+        # Forward: city -> equivalent
+        city_equiv = CITY_EQUIVALENTS.get(city_lower_q5)
+        if city_equiv and city_equiv.lower() != city_lower_q5:
+            city_names.append(city_equiv.title())
+        # Reverse: if city is a value, also search the key
+        for key, val in CITY_EQUIVALENTS.items():
+            if val == city_lower_q5 and key != city_lower_q5:
+                city_names.append(key.title())
+
+        # Build Q5 variants: full state names first, then abbreviations
+        q5_variants = []
+        if state_full:
+            for c in city_names:
+                q5_variants.append(f'{c}, {state_full}')
+        if state_ab and state_ab != state_full:
+            for c in city_names:
+                q5_variants.append(f'{c}, {state_ab}')
+
+        for variant in q5_variants:
+            q5_query = f'site:linkedin.com/in/{expected_lid} "{variant}"'
+            q5_results, q5_error = await search_google_async(q5_query, api_key)
+
+            for r in q5_results:
+                if get_linkedin_id(r.get('link', '')) == expected_lid:
+                    r_text = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
+                    # Build city variants including Saint/St and equivalents (bidirectional)
+                    q5_city_variants = {city.lower()}
+                    q5_city_equiv = CITY_EQUIVALENTS.get(city.lower().strip())
+                    if q5_city_equiv:
+                        q5_city_variants.add(q5_city_equiv)
+                    # Reverse: if city is a value, also match the key
+                    for key, val in CITY_EQUIVALENTS.items():
+                        if val == city.lower().strip():
+                            q5_city_variants.add(key)
+                    if _SAINT_PREFIX_RE.match(city.lower()):
+                        remainder = _SAINT_PREFIX_RE.sub('', city.lower()).strip()
+                        q5_city_variants.add(f'saint {remainder}')
+                        q5_city_variants.add(f'st {remainder}')
+                        q5_city_variants.add(f'st. {remainder}')
+                    city_in_text = any(re.search(r'\b' + re.escape(v) + r'\b', r_text) for v in q5_city_variants)
+                    state_in_text = (state_full.lower() in r_text) or \
+                        (bool(re.search(r'\b' + re.escape(state_ab.lower()) + r'\b', r_text)) if state_ab else False)
+                    if not state_in_text and len(state_full) >= 3:
+                        for plen in range(3, len(state_full)):
+                            prefix = state_full[:plen].lower()
+                            if re.search(r'\b' + re.escape(prefix), r_text):
+                                state_in_text = True
+                                break
+                    if city_in_text and state_in_text:
+                        location_passed = True
+                        location_method = 'q5_slug_city_state'
+                        break
+            if location_passed:
+                break
+
     # Q3 Fallback (pass state/country for ambiguous city verification)
     if not location_passed and city and linkedin_url and api_key:
         result['q3_called'] = True
@@ -953,53 +1164,6 @@ async def run_location_validation_only(
             result['q3_result'] = 'pass'
         else:
             result['q3_result'] = 'fail'
-
-    # Q5 Fallback
-    if not location_passed and city and linkedin_url and state and api_key:
-        city_lower = city.lower().strip()
-        is_ambiguous = is_ambiguous_city(city_lower)
-        is_english_word = is_english_word_city(city_lower)
-        if is_ambiguous or is_english_word:
-            expected_lid = get_linkedin_id(linkedin_url)
-            state_abbr_map = GEO_LOOKUP.get('state_abbr', {})
-            state_lower = state.lower().strip()
-            if state_lower in state_abbr_map:
-                state_full = state_abbr_map[state_lower].title()
-                state_ab = state.upper().strip()
-            else:
-                state_full = state.strip()
-                state_ab = ''
-                for ab, full in state_abbr_map.items():
-                    if full.lower() == state_lower:
-                        state_ab = ab.upper()
-                        break
-
-            q5_variants = [f'{city}, {state_full}'] if state_full else []
-            if state_ab and state_ab != state_full:
-                q5_variants.append(f'{city}, {state_ab}')
-
-            for variant in q5_variants:
-                q5_query = f'site:linkedin.com/in/{expected_lid} "{variant}"'
-                q5_results, q5_error = await search_google_async(q5_query, api_key)
-
-                for r in q5_results:
-                    if get_linkedin_id(r.get('link', '')) == expected_lid:
-                        r_text = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
-                        city_in_text = bool(re.search(r'\b' + re.escape(city.lower()) + r'\b', r_text))
-                        state_in_text = (state_full.lower() in r_text) or \
-                            (bool(re.search(r'\b' + re.escape(state_ab.lower()) + r'\b', r_text)) if state_ab else False)
-                        if not state_in_text and len(state_full) >= 3:
-                            for plen in range(3, len(state_full)):
-                                prefix = state_full[:plen].lower()
-                                if re.search(r'\b' + re.escape(prefix), r_text):
-                                    state_in_text = True
-                                    break
-                        if city_in_text and state_in_text:
-                            location_passed = True
-                            location_method = 'q5_slug_city_state'
-                            break
-                if location_passed:
-                    break
 
     if location_passed:
         result['passed'] = True

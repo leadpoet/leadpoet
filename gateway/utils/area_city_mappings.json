@@ -816,6 +816,25 @@
         "Youngstown"
       ]
     },
+    "Greater Cleveland": {
+      "state": "Ohio",
+      "country": "United States",
+      "cities": [
+        "Akron",
+        "Canton",
+        "Cleveland",
+        "Cuyahoga Falls",
+        "Elyria",
+        "Euclid",
+        "Lakewood",
+        "Lorain",
+        "Medina",
+        "Mentor",
+        "Parma",
+        "Strongsville",
+        "Youngstown"
+      ]
+    },
     "Columbus Metropolitan Area": {
       "state": "Ohio",
       "country": "United States",
@@ -934,6 +953,30 @@
       ]
     },
     "Greater Atlanta Area": {
+      "state": "Georgia",
+      "country": "United States",
+      "cities": [
+        "Acworth",
+        "Alpharetta",
+        "Atlanta",
+        "Brookhaven",
+        "Cartersville",
+        "Decatur",
+        "Duluth",
+        "Dunwoody",
+        "Johns Creek",
+        "Kennesaw",
+        "Lawrenceville",
+        "Marietta",
+        "Peachtree City",
+        "Roswell",
+        "Sandy Springs",
+        "Smyrna",
+        "Suwanee",
+        "Woodstock"
+      ]
+    },
+    "Atlanta Metropolitan Area": {
       "state": "Georgia",
       "country": "United States",
       "cities": [

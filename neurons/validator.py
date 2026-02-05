@@ -5398,12 +5398,36 @@ class Validator(BaseValidatorNeuron):
                         "epoch": current_epoch
                     }
                 )
+                
+                # Handle 404 specially - session expired, need to re-register
+                if response.status_code == 404:
+                    print(f"   🔄 Session expired (404), re-registering with gateway...")
+                    self._qualification_session_id = None
+                    # Try to re-register immediately
+                    try:
+                        await self._qualification_register()
+                        # Retry the request with new session
+                        response = await client.post(
+                            f"{gateway_url}/qualification/validator/request-batch-evaluation",
+                            json={
+                                "session_id": self._qualification_session_id,
+                                "max_models": max_models,
+                                "epoch": current_epoch
+                            }
+                        )
+                    except Exception as re_register_err:
+                        print(f"   ❌ Re-registration failed: {re_register_err}")
+                        # Will continue with empty all_models
+                
                 response.raise_for_status()
                 batch_response = response.json()
                 all_models = batch_response.get("models", [])
                 
         except Exception as e:
             print(f"   ❌ Failed to fetch models from gateway: {e}")
+            # Clear session on any error to force re-registration next epoch
+            if "404" in str(e) or "Session not found" in str(e):
+                self._qualification_session_id = None
             # Continue with rebenchmark if we have it
         
         if not all_models and not rebenchmark_model:

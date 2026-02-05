@@ -32,62 +32,69 @@ from datetime import datetime, timedelta
 
 
 # ============================================================================
-# REALISTIC NAME GENERATION
+# ROLE_TYPE TO SENIORITY MAPPING
 # ============================================================================
+# The miner_test_leads table already has role_type. We need to map it to seniority.
 
-FIRST_NAMES = [
-    "James", "Michael", "David", "Christopher", "Matthew", "Andrew", "Daniel", "William",
-    "Jennifer", "Sarah", "Jessica", "Emily", "Amanda", "Elizabeth", "Rebecca", "Rachel",
-    "Robert", "John", "Richard", "Thomas", "Steven", "Brian", "Kevin", "Jason",
-    "Stephanie", "Michelle", "Nicole", "Melissa", "Laura", "Kimberly", "Angela", "Lisa",
-]
-
-LAST_NAMES = [
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Miller", "Davis", "Garcia",
-    "Rodriguez", "Wilson", "Martinez", "Anderson", "Taylor", "Thomas", "Hernandez", "Moore",
-    "Martin", "Jackson", "Thompson", "White", "Lopez", "Lee", "Gonzalez", "Harris",
-]
-
-
-def generate_realistic_name() -> tuple:
-    """Generate a realistic first and last name."""
-    return random.choice(FIRST_NAMES), random.choice(LAST_NAMES)
-
-
-def generate_professional_email(first_name: str, last_name: str, company: str) -> str:
-    """Generate a professional-looking email based on name and company."""
-    domain = company.lower().replace(" ", "").replace(",", "").replace(".", "")
-    domain = re.sub(r'[^a-z0-9]', '', domain)[:20]
-    
-    formats = [
-        f"{first_name.lower()}.{last_name.lower()}@{domain}.com",
-        f"{first_name.lower()[0]}{last_name.lower()}@{domain}.com",
-        f"{first_name.lower()}@{domain}.com",
-    ]
-    return random.choice(formats)
-
-
-# ============================================================================
-# SENIORITY MAPPING
-# ============================================================================
-
-SENIORITY_KEYWORDS = {
-    "C-Suite": ["ceo", "cto", "cfo", "cmo", "coo", "cro", "chief", "president", "founder", "co-founder"],
-    "VP": ["vp", "vice president", "svp", "evp", "senior vice president"],
-    "Director": ["director", "head of", "lead"],
-    "Manager": ["manager", "team lead", "supervisor"],
-    "Individual Contributor": ["engineer", "analyst", "specialist", "coordinator", "associate"],
+ROLE_TYPE_TO_SENIORITY = {
+    # C-Suite
+    "C-Level Executive": "C-Suite",
+    "Founder/Owner": "C-Suite",
+    # VP
+    "VP/SVP": "VP",
+    # Director
+    "Director": "Director",
+    # Manager
+    "Manager": "Manager",
+    "Team Lead": "Manager",
+    # Individual Contributor
+    "Engineer/Technical": "Individual Contributor",
+    "Sales": "Individual Contributor",
+    "Marketing": "Individual Contributor",
+    "Operations": "Individual Contributor",
+    "Finance/Accounting": "Individual Contributor",
+    "HR/People": "Individual Contributor",
+    "Legal": "Individual Contributor",
+    "Support/Service": "Individual Contributor",
+    "Product": "Individual Contributor",
+    "Design": "Individual Contributor",
+    "Data/Analytics": "Individual Contributor",
+    "Other": "Individual Contributor",
 }
 
 
-def infer_seniority(role: str) -> str:
-    """Infer seniority level from role title."""
-    role_lower = role.lower()
-    for seniority, keywords in SENIORITY_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword in role_lower:
-                return seniority
-    return "Manager"
+def get_seniority_from_role_type(role_type: str, role: str = "") -> str:
+    """
+    Get seniority from role_type (already in miner_test_leads table).
+    Falls back to inferring from role title if role_type not in mapping.
+    
+    MUST return one of: "C-Suite", "VP", "Director", "Manager", "Individual Contributor"
+    """
+    # First try direct mapping from role_type
+    if role_type in ROLE_TYPE_TO_SENIORITY:
+        return ROLE_TYPE_TO_SENIORITY[role_type]
+    
+    # Fallback: infer from role title
+    role_lower = role.lower() if role else ""
+    
+    # Check for C-Suite keywords
+    if any(kw in role_lower for kw in ["ceo", "cto", "cfo", "cmo", "coo", "cro", "chief", "president", "founder"]):
+        return "C-Suite"
+    
+    # Check for VP keywords  
+    if any(kw in role_lower for kw in ["vp", "vice president", "svp", "evp"]):
+        return "VP"
+    
+    # Check for Director keywords
+    if any(kw in role_lower for kw in ["director", "head of"]):
+        return "Director"
+    
+    # Check for Manager keywords
+    if any(kw in role_lower for kw in ["manager", "lead", "supervisor"]):
+        return "Manager"
+    
+    # Default to Individual Contributor
+    return "Individual Contributor"
 
 
 # ============================================================================
@@ -550,23 +557,41 @@ def format_lead_output(
     intent_url: str,
     intent_source: str
 ) -> Dict[str, Any]:
-    """Format lead for LeadOutput schema with VERIFIABLE intent."""
+    """
+    Format lead for LeadOutput schema with VERIFIABLE intent.
+    
+    IMPORTANT: Only return the 13 REQUIRED fields. 
+    Any extra fields (email, full_name, phone, etc.) will cause validation to FAIL!
+    
+    REQUIRED FIELDS (from miner_test_leads table):
+    - business, company_linkedin, company_website (mapped from 'website'), employee_count
+    - industry, sub_industry (from ICP)
+    - country, city, state
+    - role, role_type (already in table)
+    - seniority (inferred from role_type)
+    - intent_signal (generated)
+    """
+    # Company info from lead
     business = lead.get("business", "Unknown Company")
-    lead_role = lead.get("role", "Manager")
+    company_linkedin = lead.get("company_linkedin", "")
+    company_website = lead.get("website", "")  # Note: column is 'website' not 'company_website'
+    employee_count = lead.get("employee_count", "")
     
-    # Generate name and email
-    first_name, last_name = generate_realistic_name()
-    email = generate_professional_email(first_name, last_name, business)
-    
-    # Geography
+    # Location from lead
+    country = lead.get("country", icp.get("country", "United States"))
     city = lead.get("city", "")
     state = lead.get("state", "")
-    country = lead.get("country", icp.get("country", "United States"))
-    geography = ", ".join(filter(None, [city, state, country])) or "United States"
+    
+    # Role info from lead (role_type already exists in table!)
+    role = lead.get("role", "Manager")
+    role_type = lead.get("role_type", "Other")
+    
+    # Seniority - infer from role_type (which is already in the table)
+    seniority = get_seniority_from_role_type(role_type, role)
     
     # Use ICP's industry for scoring alignment
-    icp_industry = icp.get("industry", "")
-    icp_sub_industry = icp.get("sub_industry", "")
+    industry = icp.get("industry", lead.get("industry", ""))
+    sub_industry = icp.get("sub_industry", lead.get("sub_industry", ""))
     
     # Ensure URL has protocol
     if intent_url and not intent_url.startswith(("http://", "https://")):
@@ -576,31 +601,36 @@ def format_lead_output(
     days_ago = random.randint(7, 60)
     signal_date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
     
-    seniority = infer_seniority(lead_role)
-    
+    # Return ONLY the 13 required fields - NO extras!
     return {
-        "email": email,
-        "full_name": f"{first_name} {last_name}",
+        # Company info (4 fields)
         "business": business,
-        "role": lead_role,
-        "industry": icp_industry,
-        "sub_industry": icp_sub_industry,
+        "company_linkedin": company_linkedin,
+        "company_website": company_website,
+        "employee_count": employee_count,
+        
+        # Industry info (2 fields)
+        "industry": industry,
+        "sub_industry": sub_industry,
+        
+        # Location (3 fields - NOT geography!)
+        "country": country,
+        "city": city,
+        "state": state,
+        
+        # Role info (3 fields)
+        "role": role,
+        "role_type": role_type,
+        "seniority": seniority,
+        
+        # Intent signal (1 field)
         "intent_signal": {
-            "source": intent_source,  # linkedin, job_board, company_website, news, social_media, other
+            "source": intent_source,
             "description": intent_description[:300],
             "url": intent_url,
             "date": signal_date,
             "snippet": f"{business} - {intent_description[:100]}"
         },
-        "first_name": first_name,
-        "last_name": last_name,
-        "seniority": seniority,
-        "company_size": lead.get("employee_count", ""),
-        "geography": geography,
-        "linkedin_url": "",
-        "phone": "",
-        "company_website": lead.get("website", ""),
-        "company_linkedin": lead.get("company_linkedin", ""),
     }
 
 
@@ -641,13 +671,27 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     if result:
         print("✅ Lead found!")
-        print(f"   Name: {result['full_name']}")
-        print(f"   Email: {result['email']}")
         print(f"   Company: {result['business']}")
         print(f"   Role: {result['role']}")
+        print(f"   Role Type: {result['role_type']}")
+        print(f"   Seniority: {result['seniority']}")
+        print(f"   Location: {result['city']}, {result['state']}, {result['country']}")
+        print(f"   Employee Count: {result['employee_count']}")
         print(f"   Intent Source: {result['intent_signal']['source']}")
         print(f"   Intent URL: {result['intent_signal']['url']}")
         print(f"   Intent: {result['intent_signal']['description'][:80]}...")
+        print()
+        print("   ✅ Schema compliance check:")
+        required_fields = ['business', 'company_linkedin', 'company_website', 'employee_count',
+                          'industry', 'sub_industry', 'country', 'city', 'state',
+                          'role', 'role_type', 'seniority', 'intent_signal']
+        forbidden_fields = ['email', 'full_name', 'first_name', 'last_name', 'phone', 'linkedin_url', 'geography']
+        
+        for f in required_fields:
+            print(f"      {f}: {'✅' if f in result else '❌ MISSING'}")
+        for f in forbidden_fields:
+            if f in result:
+                print(f"      {f}: ❌ FORBIDDEN FIELD PRESENT!")
     else:
         print("❌ No lead found")
     print("=" * 70)

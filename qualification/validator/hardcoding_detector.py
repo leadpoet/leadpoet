@@ -39,8 +39,8 @@ def get_max_submission_size() -> int:
     """Get the max total submission size from config or use default (200KB)."""
     return _get_config_value("HARDCODING_MAX_SUBMISSION_SIZE_BYTES", 200_000)
 
-# LLM Model for hardcoding detection - o3-mini (200K context window)
-DETECTION_MODEL_ID = "openai/o3-mini"
+# LLM Model for hardcoding detection - Claude Sonnet 4.5 (1M context window)
+DETECTION_MODEL_ID = "anthropic/claude-sonnet-4.5"
 DETECTION_MODEL_COST_INPUT = 1.10   # $ per 1M tokens
 DETECTION_MODEL_COST_OUTPUT = 4.40  # $ per 1M tokens
 

@@ -951,21 +951,25 @@ async def is_validator_registered(hotkey: str) -> bool:
         # Import the shared gateway registry (same metagraph cache as sourcing)
         from gateway.utils.registry import is_registered_hotkey_async
         
+        print(f"🔍 QUALIFICATION: Checking validator registration for {hotkey[:20]}...")
         is_registered, role = await is_registered_hotkey_async(hotkey)
+        print(f"   Registry result: is_registered={is_registered}, role={role}")
         
         if not is_registered:
-            logger.warning(f"Hotkey {hotkey[:20]}... not registered on subnet")
+            print(f"   ❌ Hotkey {hotkey[:20]}... not registered on subnet")
             return False
         
         if role != "validator":
-            logger.warning(f"Hotkey {hotkey[:20]}... is registered as {role}, not validator")
+            print(f"   ❌ Hotkey {hotkey[:20]}... is registered as {role}, not validator")
             return False
         
-        logger.info(f"✅ Hotkey {hotkey[:20]}... verified as registered validator")
+        print(f"   ✅ Hotkey {hotkey[:20]}... verified as registered validator")
         return True
         
     except Exception as e:
-        logger.error(f"Error checking validator registration: {e}")
+        print(f"   ❌ Error checking validator registration: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 

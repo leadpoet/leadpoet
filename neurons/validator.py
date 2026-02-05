@@ -2557,9 +2557,9 @@ class Validator(BaseValidatorNeuron):
                         # Without this, workers see stale data and get stuck in "too late" loop
                         self._write_shared_block_file(current_block_check, current_epoch_check, blocks_into_epoch_check)
                         
-                        # FORCE PROCEED at block 320 (must submit before reveal deadline at block 328)
-                        if blocks_into_epoch_check >= 320:
-                            print(f"   ⏰ BLOCK 320+ REACHED: Force proceeding with available results")
+                        # FORCE PROCEED at block 315 (must submit before reveal deadline at block 328)
+                        if blocks_into_epoch_check >= 315:
+                            print(f"   ⏰ BLOCK 315+ REACHED: Force proceeding with available results")
                             print(f"      Block: {blocks_into_epoch_check}/360")
                             print(f"      Must submit hashes before reveal deadline (block 328)")
                             missing = [f"Container-{wf[0]}" for wf in worker_files if not os.path.exists(wf[1])]

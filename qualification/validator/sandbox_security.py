@@ -1140,7 +1140,8 @@ class SandboxSecurityContext:
         enable_import_restriction: bool = True,
         enable_network_interception: bool = True,
         enable_env_sanitization: bool = True,
-        enable_file_restriction: bool = True
+        enable_file_restriction: bool = True,
+        proxy_url: str = None
     ):
         self.evaluation_run_id = evaluation_run_id
         self.evaluation_id = evaluation_id
@@ -1148,6 +1149,7 @@ class SandboxSecurityContext:
         self.enable_network_interception = enable_network_interception
         self.enable_env_sanitization = enable_env_sanitization
         self.enable_file_restriction = enable_file_restriction
+        self.proxy_url = proxy_url or PROXY_BASE_URL
         
         self._restricted_importer = None
         self._network_interceptor = None
@@ -1219,11 +1221,12 @@ class SandboxSecurityContext:
         # 3. Intercept network
         if self.enable_network_interception:
             self._network_interceptor = NetworkInterceptor(
+                proxy_url=self.proxy_url,
                 evaluation_run_id=self.evaluation_run_id,
                 evaluation_id=self.evaluation_id
             )
             self._network_interceptor.install()
-            logger.info("  ✅ Network interception enabled")
+            logger.info(f"  ✅ Network interception enabled (proxy: {self.proxy_url})")
         
         # 4. Restrict imports via sys.meta_path
         if self.enable_import_restriction:

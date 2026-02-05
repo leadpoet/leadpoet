@@ -793,7 +793,8 @@ if __name__ == "__main__":
                 enable_import_restriction=True,
                 enable_network_interception=True,
                 enable_env_sanitization=True,
-                enable_file_restriction=True
+                enable_file_restriction=True,
+                proxy_url=local_proxy_url
             ):
                 # =============================================================
                 # STEP 3: Run model (os.environ sanitized, can only call proxy)

@@ -41,8 +41,8 @@ def get_max_submission_size() -> int:
 
 # LLM Model for hardcoding detection - Claude Sonnet 4.5 (1M context window)
 DETECTION_MODEL_ID = "anthropic/claude-sonnet-4.5"
-DETECTION_MODEL_COST_INPUT = 1.10   # $ per 1M tokens
-DETECTION_MODEL_COST_OUTPUT = 4.40  # $ per 1M tokens
+DETECTION_MODEL_COST_INPUT = 3.00   # $ per 1M tokens (Claude Sonnet 4.5)
+DETECTION_MODEL_COST_OUTPUT = 15.00  # $ per 1M tokens (Claude Sonnet 4.5)
 
 # Default confidence threshold (can be overridden by config)
 DEFAULT_REJECTION_THRESHOLD = 70  # 70% = likely hardcoded

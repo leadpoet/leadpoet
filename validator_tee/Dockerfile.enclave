@@ -38,6 +38,16 @@ COPY validator_tee/enclave/requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --no-cache-dir --no-compile -r /tmp/requirements.txt
 
 # =============================================================================
+# CRITICAL: Delete ALL .pyc files and __pycache__ directories
+# Even with --no-compile, pip may create .pyc files in some edge cases.
+# These files contain embedded timestamps that cause PCR0 mismatches.
+# This cleanup ensures reproducible builds across different machines/instances.
+# =============================================================================
+RUN find /usr -type f -name "*.pyc" -delete 2>/dev/null || true \
+    && find /usr -type f -name "*.pyo" -delete 2>/dev/null || true \
+    && find /usr -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
+# =============================================================================
 # Normalize timestamps on all installed Python packages
 # Even with SOURCE_DATE_EPOCH, some tools ignore it
 # =============================================================================

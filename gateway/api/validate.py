@@ -48,13 +48,29 @@ router = APIRouter(prefix="/validate", tags=["Validation"])
 # ============================================================================
 
 class ValidationItem(BaseModel):
-    """Single validation result within a batch"""
+    """
+    Single validation result within a batch.
+    
+    IMMEDIATE REVEAL MODE (Jan 2026):
+    - Validators now submit BOTH hashes AND actual values in one request
+    - No separate reveal phase needed
+    - Consensus runs at end of CURRENT epoch (not N+1)
+    
+    Hashes are still computed for:
+    - Transparency log integrity
+    - Backward compatibility
+    """
     lead_id: str
     decision_hash: str = Field(..., description="H(decision + salt)")
     rep_score_hash: str = Field(..., description="H(rep_score + salt)")
     rejection_reason_hash: str = Field(..., description="H(rejection_reason + salt)")
     evidence_hash: str = Field(..., description="H(evidence_blob)")
     evidence_blob: Dict = Field(..., description="Full evidence data (stored privately)")
+    # IMMEDIATE REVEAL FIELDS (no separate reveal phase)
+    decision: str = Field(..., description="Validation decision: 'approve' or 'deny'")
+    rep_score: int = Field(..., ge=0, le=48, description="Reputation score (0-48 as INTEGER)")
+    rejection_reason: Dict = Field(..., description="Rejection reason dict")
+    salt: str = Field(..., description="Hex-encoded salt used in commitment")
 
 
 class ValidationPayload(BaseModel):
@@ -345,16 +361,62 @@ async def submit_validation(event: ValidationEvent):
     stake, v_trust = await get_validator_weights_async(event.actor_hotkey)
     
     # ========================================
-    # Step 7: Store evidence blobs (private)
+    # Step 6.5: IMMEDIATE REVEAL - Verify hashes match submitted values
     # ========================================
-    # Store full evidence blobs in Supabase for reveal phase verification
-    # Evidence is stored privately (NOT logged to public Arweave)
-    # Only evidence_hash goes to Arweave (for tamper detection)
+    # IMMEDIATE REVEAL MODE (Jan 2026): Validators submit both hashes AND values
+    # We verify the hashes match to ensure integrity before storing
+    import hashlib
+    import json
+    
+    for idx, v in enumerate(event.payload.validations):
+        # Verify decision hash
+        computed_decision_hash = hashlib.sha256((v.decision + v.salt).encode()).hexdigest()
+        if computed_decision_hash != v.decision_hash:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Decision hash mismatch for lead {v.lead_id[:8]}... (validation #{idx+1})"
+            )
+        
+        # Verify rep_score hash
+        computed_rep_score_hash = hashlib.sha256((str(v.rep_score) + v.salt).encode()).hexdigest()
+        if computed_rep_score_hash != v.rep_score_hash:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rep score hash mismatch for lead {v.lead_id[:8]}... (validation #{idx+1})"
+            )
+        
+        # Verify rejection_reason hash (use json.dumps with default=str for consistency)
+        computed_rejection_reason_hash = hashlib.sha256((json.dumps(v.rejection_reason, default=str) + v.salt).encode()).hexdigest()
+        if computed_rejection_reason_hash != v.rejection_reason_hash:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rejection reason hash mismatch for lead {v.lead_id[:8]}... (validation #{idx+1})"
+            )
+        
+        # Validate rejection_reason logic (approve must have {"message": "pass"})
+        if v.decision == "approve":
+            if not isinstance(v.rejection_reason, dict) or v.rejection_reason.get("message") != "pass":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"If decision is 'approve', rejection_reason must be {{'message': 'pass'}} for lead {v.lead_id[:8]}..."
+                )
+    
+    print(f"✅ All {len(event.payload.validations)} hash verifications passed")
+    
+    # ========================================
+    # Step 7: Store evidence blobs WITH reveal values (private)
+    # ========================================
+    # IMMEDIATE REVEAL MODE: Store full evidence blobs WITH actual values
+    # No separate reveal phase - values are available for consensus immediately
+    # Hashes still logged to Arweave for tamper detection
     
     print(f"✅ Batch validation received: {len(event.payload.validations)} validations from {event.actor_hotkey[:20]}...")
     print(f"   Epoch: {event.payload.epoch_id}")
+    print(f"   Mode: IMMEDIATE REVEAL (no separate reveal phase)")
     
     # Store evidence blobs in validation_evidence_private table
+    revealed_ts = datetime.now(timezone.utc).isoformat()
+    
     try:
         from uuid import uuid4
         evidence_records = []
@@ -371,7 +433,13 @@ async def submit_validation(event: ValidationEvent):
                 "rejection_reason_hash": v.rejection_reason_hash,
                 "stake": stake,  # Snapshot validator stake at COMMIT time
                 "v_trust": v_trust,  # Snapshot validator trust score at COMMIT time
-                "created_ts": event.ts.isoformat()  # Use created_ts (matches Supabase schema)
+                "created_ts": event.ts.isoformat(),  # Use created_ts (matches Supabase schema)
+                # IMMEDIATE REVEAL FIELDS - stored directly, no separate reveal needed
+                "decision": v.decision,
+                "rep_score": v.rep_score,
+                "rejection_reason": json.dumps(v.rejection_reason, default=str),  # Serialize dict to JSON string
+                "salt": v.salt,
+                "revealed_ts": revealed_ts  # Mark as already revealed
             })
         
         # Insert all evidence records in batch (with timeout to prevent hanging)

@@ -423,10 +423,11 @@ class EpochMonitor:
                     self.closed_epochs.add(epoch_id)
                     return
                 
-                print(f"   📊 Found validation evidence - processing reveals and consensus...")
+                print(f"   📊 Found validation evidence - processing consensus...")
                 
                 # Import lifecycle functions
-                from gateway.tasks.epoch_lifecycle import trigger_reveal_phase, compute_epoch_consensus
+                # NOTE: trigger_reveal_phase REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
+                from gateway.tasks.epoch_lifecycle import compute_epoch_consensus
                 from gateway.utils.epoch import get_epoch_close_time_async
                 
                 epoch_close = await get_epoch_close_time_async(epoch_id)
@@ -435,11 +436,7 @@ class EpochMonitor:
                 print(f"   Closed at: {epoch_close.isoformat()}")
                 print(f"   Time since close: {time_since_close/60:.1f} minutes")
                 
-                # Trigger reveal phase notification
-                await trigger_reveal_phase(epoch_id)
-                
-                # NO WAIT: Consensus triggered at block 330, all reveals should be in already
-                # (Reveals accepted from block 0-327 only, enforced by reveal endpoint)
+                # IMMEDIATE REVEAL MODE (Jan 2026): Data submitted with hashes, no reveal phase
                 print(f"   📊 Running batch consensus for epoch {epoch_id}...")
                 print(f"   Closed {time_since_close/60:.1f} minutes ago")
                 await compute_epoch_consensus(epoch_id)

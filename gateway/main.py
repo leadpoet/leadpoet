@@ -39,13 +39,16 @@ from gateway.utils.storage import generate_presigned_put_urls
 from supabase import create_client, Client
 
 # Import API routers
-from gateway.api import epoch, validate, reveal, manifest, submit, attest, weights, attestation
+# NOTE: reveal router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means validators
+# submit hash+values in one request to /validate. No separate reveal phase needed.
+from gateway.api import epoch, validate, manifest, submit, attest, weights, attestation
 
 # Import qualification router (Lead Qualification Agent Competition - Phase 10)
 from gateway.qualification.api.router import qualification_router
 
 # Import background tasks
-from gateway.tasks.reveal_collector import reveal_collector_task
+# NOTE: reveal_collector_task REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means
+# validators submit hash+values in one request. No separate reveal phase to monitor.
 from gateway.tasks.checkpoints import checkpoint_task
 from gateway.tasks.anchor import daily_anchor_task
 from gateway.tasks.hourly_batch import start_hourly_batch_task
@@ -270,8 +273,7 @@ async def lifespan(app: FastAPI):
             print("✅ Epoch monitor started (polling mode)")
             
             # Start other background tasks
-            reveal_task = asyncio.create_task(reveal_collector_task())
-            print("✅ Reveal collector task started")
+            # NOTE: reveal_collector_task REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
             
             checkpoint_task_handle = asyncio.create_task(checkpoint_task())
             print("✅ Checkpoint task started")
@@ -421,8 +423,8 @@ app.add_middleware(
 # ============================================================
 
 app.include_router(epoch.router)
-app.include_router(validate.router)  # Individual + Batch validation
-app.include_router(reveal.router)
+app.include_router(validate.router)  # Individual + Batch validation (IMMEDIATE REVEAL MODE)
+# NOTE: reveal.router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
 app.include_router(manifest.router)
 app.include_router(submit.router)
 app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)

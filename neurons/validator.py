@@ -59,7 +59,7 @@ from Leadpoet.utils.cloud_db import (
     get_broadcast_status,
     gateway_get_epoch_leads,
     gateway_submit_validation,
-    gateway_submit_reveal,
+    # NOTE: gateway_submit_reveal REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
     submit_validation_assessment,
     fetch_miner_leads_for_request,
 )
@@ -1276,20 +1276,8 @@ class Validator(BaseValidatorNeuron):
             )
             bt.logging.info(f"✅ State saved to {state_path}")
             
-            # Save pending reveals separately (JSON-serializable) to validator_weights/
-            reveals_path = weights_dir / "pending_reveals.json"
-                
-            if hasattr(self, '_pending_reveals') and self._pending_reveals:
-                import json
-                with open(reveals_path, 'w') as f:
-                    json.dump(self._pending_reveals, f, indent=2)
-                bt.logging.info(f"Saved {len(self._pending_reveals)} pending reveal epoch(s) to {reveals_path}")
-            elif hasattr(self, '_pending_reveals'):
-                # Save empty dict if no pending reveals (clean slate)
-                import json
-                with open(reveals_path, 'w') as f:
-                    json.dump({}, f, indent=2)
-                bt.logging.debug(f"Saved empty pending reveals to {reveals_path}")
+            # NOTE: pending_reveals saving REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
+            # Validators now submit hash+values in one request, no separate reveal phase
         except Exception as e:
             bt.logging.error(f"Failed to save state: {e}")
             bt.logging.error(f"   Attempted path: {state_path if 'state_path' in locals() else 'unknown'}")
@@ -1321,22 +1309,8 @@ class Validator(BaseValidatorNeuron):
             bt.logging.info("No state file found. Initializing with defaults.")
             self._initialize_default_state()
         
-        # Load pending reveals separately from validator_weights/
-        reveals_path = weights_dir / "pending_reveals.json"
-        if reveals_path.exists():
-            try:
-                import json
-                with open(reveals_path, 'r') as f:
-                    self._pending_reveals = json.load(f)
-                # Convert string keys to integers (JSON converts int keys to strings)
-                self._pending_reveals = {int(k): v for k, v in self._pending_reveals.items()}
-                bt.logging.info(f"✅ Loaded {len(self._pending_reveals)} pending reveal epoch(s) from {reveals_path}")
-            except Exception as e:
-                bt.logging.warning(f"Failed to load pending reveals: {e}")
-                self._pending_reveals = {}
-        else:
-            bt.logging.info("No pending reveals file found. Starting fresh.")
-            self._pending_reveals = {}
+        # NOTE: pending_reveals loading REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
+        # Validators now submit hash+values in one request, no separate reveal phase
 
     def _initialize_default_state(self):
         self.step = 0
@@ -1350,26 +1324,7 @@ class Validator(BaseValidatorNeuron):
         self.registration_time = datetime.now()
         self.appeal_status = None
         self.trusted_validator = False
-        self._pending_reveals = {}
-    
-    def _save_pending_reveals(self):
-        """
-        Save pending reveals to disk immediately.
-        
-        This is called after cleanup operations to persist state changes
-        without waiting for the next full save_state() call.
-        """
-        try:
-            weights_dir = Path("validator_weights")
-            weights_dir.mkdir(exist_ok=True)
-            reveals_path = weights_dir / "pending_reveals.json"
-            
-            with open(reveals_path, 'w') as f:
-                json.dump(self._pending_reveals, f, indent=2)
-            
-            bt.logging.debug(f"💾 Saved pending reveals to {reveals_path}")
-        except Exception as e:
-            bt.logging.error(f"Failed to save pending reveals: {e}")
+        # NOTE: _pending_reveals REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
 
     async def handle_api_request(self, request):
         """
@@ -1968,7 +1923,8 @@ class Validator(BaseValidatorNeuron):
                         print(f"   Continuing with sourcing...")
             
             # Fetch assigned leads from gateway
-            # gateway_get_epoch_leads, gateway_submit_validation, gateway_submit_reveal imported at module level
+            # gateway_get_epoch_leads, gateway_submit_validation imported at module level
+            # NOTE: gateway_submit_reveal REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
             
             # ═══════════════════════════════════════════════════════════════════
             # OPTIMIZED LEAD FETCHING: Only coordinator calls gateway
@@ -2371,18 +2327,26 @@ class Validator(BaseValidatorNeuron):
                     rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason, default=str) + salt.hex()).encode()).hexdigest()  # Handle datetime
                     evidence_hash = hashlib.sha256(evidence_blob.encode()).hexdigest()
                     
-                    # Store hashed result for gateway submission
+                    # Store result for gateway submission (IMMEDIATE REVEAL MODE)
+                    # IMMEDIATE REVEAL MODE (Jan 2026): Include BOTH hashes AND actual values
+                    # No separate reveal phase - gateway verifies hashes and stores values immediately
                     # lead_id and miner_hotkey are at top level (not in lead_blob)
                     validation_results.append({
                         "lead_id": lead.get("lead_id"),  # Top level
+                        # Hash fields (for transparency log integrity)
                         "decision_hash": decision_hash,
                         "rep_score_hash": rep_score_hash,
                         "rejection_reason_hash": rejection_reason_hash,
                         "evidence_hash": evidence_hash,
-                        "evidence_blob": result  # Include full evidence for gateway storage
+                        "evidence_blob": result,  # Include full evidence for gateway storage
+                        # IMMEDIATE REVEAL FIELDS - no separate reveal phase
+                        "decision": decision,
+                        "rep_score": rep_score,
+                        "rejection_reason": rejection_reason,
+                        "salt": salt.hex()
                     })
                     
-                    # Store local data for weight calculation
+                    # Store local data for weight calculation (still needed for local weight accumulation)
                     local_validation_data.append({
                         "lead_id": lead.get("lead_id"),  # Top level
                         "miner_hotkey": lead.get("miner_hotkey"),  # Top level
@@ -2669,7 +2633,10 @@ class Validator(BaseValidatorNeuron):
                 print(f"   Proceeding with gateway submission...")
                 print(f"{'='*80}\n")
             
-            # Submit hashed validation results to gateway
+            # Submit validation results to gateway (IMMEDIATE REVEAL MODE)
+            # IMMEDIATE REVEAL MODE (Jan 2026): Submit both hashes AND actual values
+            # No separate reveal phase - gateway verifies hashes and stores values immediately
+            # Consensus runs at end of CURRENT epoch (not N+1)
             print(f"{'='*80}")
             
             # Check if epoch changed before attempting submission
@@ -2677,26 +2644,19 @@ class Validator(BaseValidatorNeuron):
             submit_epoch = submit_block // 360
             
             if submit_epoch > current_epoch:
-                print(f"⚠️  Epoch changed ({current_epoch} → {submit_epoch}) - skipping hash submission")
+                print(f"⚠️  Epoch changed ({current_epoch} → {submit_epoch}) - skipping validation submission")
                 print(f"   {len(validation_results)} validations for epoch {current_epoch} cannot be submitted")
                 print(f"   (Weights already submitted, epoch will be marked as processed)")
-                success = False  # Mark as failed to skip storing reveals
+                success = False
             elif validation_results:
-                print(f"📤 Submitting {len(validation_results)} hashed validations to gateway...")
+                print(f"📤 Submitting {len(validation_results)} validations to gateway (IMMEDIATE REVEAL MODE)...")
                 success = gateway_submit_validation(self.wallet, current_epoch, validation_results)
                 if success:
                     print(f"✅ Successfully submitted {len(validation_results)} validations for epoch {current_epoch}")
-                    print(f"   (Hashed: decision, rep_score, rejection_reason, evidence)")
+                    print(f"   Mode: IMMEDIATE REVEAL (hashes + actual values submitted together)")
                     print(f"   Gateway logged to TEE buffer → will be in next Arweave checkpoint")
-                    
-                    # Store local data for reveal later
-                    if not hasattr(self, '_pending_reveals'):
-                        self._pending_reveals = {}
-                    self._pending_reveals[current_epoch] = local_validation_data
-                    
-                    # 🚨 CRITICAL: Save reveals to disk immediately (crash protection)
-                    self._save_pending_reveals()
-                    print(f"   💾 Saved {len(local_validation_data)} pending reveals to disk for epoch {current_epoch}")
+                    print(f"   ✅ No separate reveal phase needed - consensus will run at block 330")
+                    # NOTE: No _pending_reveals storage needed - values already submitted
                 else:
                     print(f"❌ Failed to submit validations for epoch {current_epoch}")
                     print(f"   Epoch may have changed - skipping to avoid re-processing")
@@ -2719,8 +2679,9 @@ class Validator(BaseValidatorNeuron):
             print(f"✅ EPOCH {current_epoch}: Validation workflow complete")
             print(f"{'='*80}\n")
             
-            # Check for reveals from previous epochs
-            await self.process_pending_reveals()
+            # NOTE: process_pending_reveals() REMOVED - IMMEDIATE REVEAL MODE
+            # With immediate reveal, validators submit both hashes AND values in one request
+            # No separate reveal phase is needed - consensus runs at block 330 of CURRENT epoch
             
             # Check if we should submit weights (block 345+)
             await self.submit_weights_at_epoch_end()
@@ -2935,34 +2896,33 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
             EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # SOURCING EMISSIONS SYSTEM (Threshold-Based)
+            # ═══════════════════════════════════════════════════════════════════
+            # Allocation shares (must sum to 1.0)
             BASE_BURN_SHARE = 0.04         # 4% base burn to UID 0
             CHAMPION_SHARE = 0.01          # 1% to qualification model champion
-            MAX_CURRENT_EPOCH_SHARE = 0.0  # 0% max to miners (current epoch)
-            MAX_ROLLING_EPOCH_SHARE = 0.95 # 95% max to miners (rolling 30 epochs)
+            MAX_SOURCING_SHARE = 0.95      # 95% max to sourcing miners
+            
+            # CONFIGURABLE THRESHOLD: Approved leads needed in 30 epochs for full 95%
+            # If network produces >= this many leads, full 95% is distributed
+            # If below, proportional share distributed and rest burned
+            # This puts a floor at roughly current profitability level
+            SOURCING_FLOOR_THRESHOLD = 125_000  # EASILY ADJUSTABLE
+            
+            # Minimum total rep score to distribute (prevents tiny denominator instability)
+            # If total rep < this, sourcing share goes to burn
+            MIN_TOTAL_REP_FOR_DISTRIBUTION = 100
+            
+            # Rolling window for historical lead count and rep scores
+            ROLLING_WINDOW = 30
+            
             # Champion beat threshold is defined in qualification/config.py (CHAMPION_DETHRONING_THRESHOLD_PCT)
             # Currently set to 2% - challenger must beat champion by 2% to dethrone
             # Champion rebenchmark time is defined in qualification/config.py:
             #   CHAMPION_REBENCHMARK_HOUR_UTC, CHAMPION_REBENCHMARK_MINUTE_UTC
             # Default: 05:00 UTC (5:00 AM) - first full epoch after this time triggers rebenchmark
-            # Dynamic MAX_LEADS_PER_EPOCH from gateway (fetched during process_gateway_validation_workflow)
-            # If not in memory (e.g., after restart), try to recover from history file
-            MAX_LEADS_PER_EPOCH = getattr(self, '_max_leads_per_epoch', None)
-            if MAX_LEADS_PER_EPOCH is None:
-                # Try to recover from history file (survives restarts)
-                try:
-                    history_file = Path("validator_weights") / "validator_weights_history"
-                    if history_file.exists():
-                        with open(history_file, 'r') as f:
-                            history_data = json.load(f)
-                        epoch_data = history_data.get(str(current_epoch), {})
-                        MAX_LEADS_PER_EPOCH = epoch_data.get("max_leads_per_epoch", 3000)
-                        print(f"   ℹ️  Recovered max_leads_per_epoch={MAX_LEADS_PER_EPOCH} from history file")
-                    else:
-                        MAX_LEADS_PER_EPOCH = 3000
-                except Exception as e:
-                    print(f"   ⚠️  Could not recover max_leads_per_epoch from history: {e}")
-                    MAX_LEADS_PER_EPOCH = 3000
-            ROLLING_WINDOW = 30
             
             # ═══════════════════════════════════════════════════════════════════
             # Get rolling 30 epoch scores BEFORE checking if we should proceed
@@ -3008,29 +2968,16 @@ class Validator(BaseValidatorNeuron):
                     return False
             
             # Log what we have
-            has_current_epoch = bool(miner_scores)
             has_rolling_history = bool(rolling_scores)
             
-            if not has_current_epoch and has_rolling_history:
-                print(f"\n{'='*80}")
-                print(f"⚠️  GATEWAY DOWN FALLBACK: Epoch {current_epoch}")
-                print(f"{'='*80}")
-                print(f"   No leads received for current epoch (gateway was likely down)")
-                print(f"   But rolling history exists: {len(rolling_scores)} miners, {rolling_lead_count} leads")
-                print(f"   → Will distribute rolling 15% to historical miners")
-                print(f"   → Will burn current epoch 10% (no leads to distribute)")
-                print()
-            
-            # Normal case: we have current epoch data
-            if has_current_epoch:
-                print(f"\n{'='*80}")
-                print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
-                print(f"{'='*80}")
-                print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
-                print(f"   MAX_LEADS_PER_EPOCH: {MAX_LEADS_PER_EPOCH} (from gateway config)")
-                print(f"   Current epoch miners: {len(miner_scores)}")
-                print(f"   Current epoch points: {sum(miner_scores.values())}")
-                print()
+            print(f"\n{'='*80}")
+            print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
+            print(f"{'='*80}")
+            print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
+            print(f"   Rolling {ROLLING_WINDOW} epoch miners: {len(rolling_scores)}")
+            print(f"   Rolling {ROLLING_WINDOW} epoch leads: {rolling_lead_count:,}")
+            print(f"   Sourcing floor threshold: {SOURCING_FLOOR_THRESHOLD:,}")
+            print()
             
             # CRITICAL: Verify UID 0 is the expected LeadPoet hotkey (safety check)
             try:
@@ -3044,10 +2991,6 @@ class Validator(BaseValidatorNeuron):
             except Exception as e:
                 print(f"   ❌ Error verifying UID 0 ownership: {e}")
                 return False
-            # Log rolling epoch data
-            print(f"   Rolling {ROLLING_WINDOW} epoch miners: {len(rolling_scores)}")
-            print(f"   Rolling {ROLLING_WINDOW} epoch points: {sum(rolling_scores.values()) if rolling_scores else 0}")
-            print()
             
             # ═══════════════════════════════════════════════════════════════════
             # QUALIFICATION CHAMPION: Read from local JSON for 1% emission share
@@ -3086,44 +3029,14 @@ class Validator(BaseValidatorNeuron):
             print()
             
             # ═══════════════════════════════════════════════════════════════════
-            # LINEAR EMISSIONS: Calculate approval rates and effective shares
-            # Handle case where current epoch has no leads (gateway was down)
+            # THRESHOLD-BASED SOURCING EMISSIONS
+            # - If ≥SOURCING_FLOOR_THRESHOLD leads in 30 epochs: Full 95% distributed
+            # - If <SOURCING_FLOOR_THRESHOLD: Proportional share, rest burned
+            # - Within that share: split by rep score proportion
             # ═══════════════════════════════════════════════════════════════════
-            # Current epoch approval rate (0 if no leads received)
-            current_epoch_approval_rate = min(current_epoch_lead_count / MAX_LEADS_PER_EPOCH, 1.0) if current_epoch_lead_count > 0 else 0.0
             
-            # Rolling epochs approval rate (max possible = MAX_LEADS_PER_EPOCH * ROLLING_WINDOW)
-            max_rolling_leads = MAX_LEADS_PER_EPOCH * ROLLING_WINDOW
-            rolling_approval_rate = min(rolling_lead_count / max_rolling_leads, 1.0) if max_rolling_leads > 0 else 0
-            
-            # Calculate effective shares (scaled by approval rate)
-            effective_current_share = MAX_CURRENT_EPOCH_SHARE * current_epoch_approval_rate
-            effective_rolling_share = MAX_ROLLING_EPOCH_SHARE * rolling_approval_rate
-            
-            # Calculate additional burn from unapproved slots
-            unused_current_share = MAX_CURRENT_EPOCH_SHARE - effective_current_share
-            unused_rolling_share = MAX_ROLLING_EPOCH_SHARE - effective_rolling_share
-            # If no champion, their share goes to burn
-            unused_champion_share = CHAMPION_SHARE - effective_champion_share
-            total_burn_share = BASE_BURN_SHARE + unused_current_share + unused_rolling_share + unused_champion_share
-            
-            print(f"   📈 LINEAR EMISSIONS SCALING:")
-            print(f"      Current epoch: {current_epoch_lead_count}/{MAX_LEADS_PER_EPOCH} leads = {current_epoch_approval_rate*100:.1f}% approval")
-            print(f"         → {MAX_CURRENT_EPOCH_SHARE*100:.0f}% × {current_epoch_approval_rate*100:.1f}% = {effective_current_share*100:.2f}% to miners")
-            print(f"         → {unused_current_share*100:.2f}% burned (unused slots)")
-            print(f"      Rolling {ROLLING_WINDOW} epochs: {rolling_lead_count}/{max_rolling_leads} leads = {rolling_approval_rate*100:.1f}% approval")
-            print(f"         → {MAX_ROLLING_EPOCH_SHARE*100:.0f}% × {rolling_approval_rate*100:.1f}% = {effective_rolling_share*100:.2f}% to miners")
-            print(f"         → {unused_rolling_share*100:.2f}% burned (unused slots)")
-            print(f"      Champion: {effective_champion_share*100:.0f}% to champion, {unused_champion_share*100:.0f}% burned (no champion)")
-            print(f"      Total burn: {BASE_BURN_SHARE*100:.0f}% base + {unused_current_share*100:.2f}% + {unused_rolling_share*100:.2f}% + {unused_champion_share*100:.0f}% = {total_burn_share*100:.2f}%")
-            print()
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # Combine all miner scores (current epoch + rolling) for UID mapping
-            # ═══════════════════════════════════════════════════════════════════
-            all_miner_hotkeys = set(miner_scores.keys()) | set(rolling_scores.keys())
-            
-            # Convert miner hotkeys to UIDs
+            # Convert miner hotkeys to UIDs (needed for all paths)
+            all_miner_hotkeys = set(rolling_scores.keys())
             hotkey_to_uid = {}
             for hotkey in all_miner_hotkeys:
                 try:
@@ -3137,138 +3050,127 @@ class Validator(BaseValidatorNeuron):
                 # FALLBACK: No valid miner UIDs found - submit burn weights
                 print(f"   ⚠️  No valid miner UIDs found")
                 print(f"      Miners have left the subnet or are not registered")
-                print(f"   🔥 Submitting burn weights instead...")
+                print(f"   🔥 Submitting 100% burn weights...")
                 
-                try:
-                    # Get subnet owner's hotkey
-                    owner_hotkey = self.subtensor.query_subtensor(
-                        "SubnetOwnerHotkey",
-                        params=[self.config.netuid]
-                    )
-                    
-                    # Get owner's UID
-                    burn_uid = self.subtensor.get_uid_for_hotkey_on_subnet(
-                        hotkey_ss58=str(owner_hotkey),
-                        netuid=self.config.netuid
-                    )
-                    
-                    print(f"   🔥 Burn UID: {burn_uid} (subnet owner)")
-                    
-                    # Submit burn weights (100% to owner)
-                    result = self.subtensor.set_weights(
-                        netuid=self.config.netuid,
-                        wallet=self.wallet,
-                        uids=[burn_uid],
-                        weights=[1.0],
-                        wait_for_finalization=True
-                    )
-                    
-                    if result:
-                        print(f"   ✅ Burn weights submitted successfully")
-                        
-                        # Note: Don't clear weights immediately - keep until epoch transition
-                        # This prevents wrong resubmission if validator restarts
-                        self._last_weight_submission_epoch = current_epoch
-                        
-                        return True
-                    else:
-                        print(f"   ❌ Failed to submit burn weights")
-                        return False
+                result = self.subtensor.set_weights(
+                    netuid=self.config.netuid,
+                    wallet=self.wallet,
+                    uids=[UID_ZERO],
+                    weights=[1.0],
+                    wait_for_finalization=True
+                )
                 
-                except Exception as e:
-                    print(f"   ❌ Error submitting burn weights: {e}")
+                if result:
+                    print(f"   ✅ Burn weights submitted successfully")
+                    self._last_weight_submission_epoch = current_epoch
+                    return True
+                else:
+                    print(f"   ❌ Failed to submit burn weights")
                     return False
             
             # ═══════════════════════════════════════════════════════════════════
-            # Filter scores to only include REGISTERED miners
-            # Deregistered miners' shares go to BURN (UID 0), not redistributed
+            # Filter to REGISTERED miners only - deregistered miners' share → BURN
             # ═══════════════════════════════════════════════════════════════════
-            registered_current_scores = {h: p for h, p in miner_scores.items() if h in hotkey_to_uid}
             registered_rolling_scores = {h: p for h, p in rolling_scores.items() if h in hotkey_to_uid}
             
-            # Calculate totals - use ALL miners for denominator (deregistered share goes to burn)
-            all_current_total = sum(miner_scores.values()) if miner_scores else 0
+            # Calculate totals
             all_rolling_total = sum(rolling_scores.values()) if rolling_scores else 0
-            registered_current_total = sum(registered_current_scores.values()) if registered_current_scores else 0
             registered_rolling_total = sum(registered_rolling_scores.values()) if registered_rolling_scores else 0
-            
-            # Calculate how much goes to deregistered miners (this will be burned)
-            deregistered_current_points = all_current_total - registered_current_total
             deregistered_rolling_points = all_rolling_total - registered_rolling_total
             
-            # Calculate burn amounts for deregistered miners
-            current_dereg_burn = 0
-            rolling_dereg_burn = 0
-            if all_current_total > 0 and deregistered_current_points > 0:
-                current_dereg_burn = effective_current_share * (deregistered_current_points / all_current_total)
-            if all_rolling_total > 0 and deregistered_rolling_points > 0:
-                rolling_dereg_burn = effective_rolling_share * (deregistered_rolling_points / all_rolling_total)
-            
             # Log deregistered miners
-            if deregistered_current_points > 0 or deregistered_rolling_points > 0:
-                print(f"   ⚠️  Deregistered miners' shares → BURN:")
-                if deregistered_current_points > 0:
-                    print(f"      Current epoch: {deregistered_current_points} pts deregistered → {current_dereg_burn*100:.2f}% to burn")
-                if deregistered_rolling_points > 0:
-                    print(f"      Rolling epochs: {deregistered_rolling_points} pts deregistered → {rolling_dereg_burn*100:.2f}% to burn")
-                print()
+            if deregistered_rolling_points > 0:
+                print(f"   ⚠️  Deregistered miners: {deregistered_rolling_points:,} pts → share goes to BURN")
             
-            # Effective shares for registered miners only
-            effective_current_to_miners = effective_current_share - current_dereg_burn
-            effective_rolling_to_miners = effective_rolling_share - rolling_dereg_burn
+            # ═══════════════════════════════════════════════════════════════════
+            # THRESHOLD CALCULATION
+            # ═══════════════════════════════════════════════════════════════════
+            if rolling_lead_count >= SOURCING_FLOOR_THRESHOLD:
+                # ✅ Network healthy: ≥125k approved leads in 30 epochs
+                # Full 95% split among sourcing miners
+                effective_sourcing_share = MAX_SOURCING_SHARE
+                print(f"   ✅ NETWORK HEALTHY - Full {MAX_SOURCING_SHARE*100:.0f}% to miners")
+                print(f"      Approved leads ({ROLLING_WINDOW} epochs): {rolling_lead_count:,} ≥ {SOURCING_FLOOR_THRESHOLD:,}")
+            else:
+                # ⚠️ Below threshold: <125k approved leads
+                # Proportional share to miners, rest burned
+                effective_sourcing_share = (rolling_lead_count / SOURCING_FLOOR_THRESHOLD) * MAX_SOURCING_SHARE
+                print(f"   ⚠️  BELOW THRESHOLD - Proportional distribution")
+                print(f"      Approved leads ({ROLLING_WINDOW} epochs): {rolling_lead_count:,} < {SOURCING_FLOOR_THRESHOLD:,}")
+                print(f"      Rate: {rolling_lead_count:,} / {SOURCING_FLOOR_THRESHOLD:,} = {(rolling_lead_count/SOURCING_FLOOR_THRESHOLD)*100:.1f}%")
+                print(f"      → {effective_sourcing_share*100:.2f}% to miners")
+                print(f"      → {(MAX_SOURCING_SHARE - effective_sourcing_share)*100:.2f}% burned (underperformance)")
             
-            print(f"\n    Alpha Split (with linear emissions):")
-            print(f"      {(total_burn_share + current_dereg_burn + rolling_dereg_burn)*100:.2f}% → UID {UID_ZERO} (Burn)")
-            if effective_champion_share > 0 and champion_uid is not None:
-                print(f"      {effective_champion_share*100:.0f}% → UID {champion_uid} (Qualification Champion)")
-            print(f"      {effective_current_to_miners*100:.2f}% → Current epoch miners ({len(registered_current_scores)} registered)")
-            print(f"      {effective_rolling_to_miners*100:.2f}% → Rolling {ROLLING_WINDOW} epoch miners ({len(registered_rolling_scores)} registered)")
+            # Calculate burn for deregistered miners (proportional to their share of total)
+            dereg_burn = 0.0
+            if all_rolling_total > 0 and deregistered_rolling_points > 0:
+                dereg_burn = effective_sourcing_share * (deregistered_rolling_points / all_rolling_total)
+                print(f"      + {dereg_burn*100:.2f}% burned (deregistered miners)")
+            
+            # Effective sourcing share for registered miners only
+            effective_sourcing_to_miners = effective_sourcing_share - dereg_burn
+            
+            # Calculate total burn share
+            unused_sourcing_share = MAX_SOURCING_SHARE - effective_sourcing_share
+            unused_champion_share = CHAMPION_SHARE - effective_champion_share
+            total_burn_share = BASE_BURN_SHARE + unused_sourcing_share + unused_champion_share + dereg_burn
+            
+            print()
+            print(f"   📊 WEIGHT DISTRIBUTION:")
+            print(f"      Base burn:            {BASE_BURN_SHARE*100:.0f}%")
+            print(f"      Unused sourcing:      {unused_sourcing_share*100:.2f}%")
+            print(f"      Deregistered miners:  {dereg_burn*100:.2f}%")
+            print(f"      Unused champion:      {unused_champion_share*100:.0f}%")
+            print(f"      ─────────────────────────────")
+            print(f"      Total burn → UID 0:   {total_burn_share*100:.2f}%")
+            print(f"      Champion → UID {champion_uid if champion_uid else '?'}:     {effective_champion_share*100:.0f}%")
+            print(f"      Sourcing miners:      {effective_sourcing_to_miners*100:.2f}%")
             print()
             
-            # Build final UIDs and weights
+            # ═══════════════════════════════════════════════════════════════════
+            # BUILD FINAL WEIGHTS
+            # ═══════════════════════════════════════════════════════════════════
             uid_weights = {}
             
-            # UID 0 gets: base burn + unused slots + deregistered miners' shares
-            uid_weights[UID_ZERO] = total_burn_share + current_dereg_burn + rolling_dereg_burn
+            # UID 0 gets total burn share
+            uid_weights[UID_ZERO] = total_burn_share
             
             # Champion gets their share (if registered)
             if effective_champion_share > 0 and champion_uid is not None:
                 if champion_uid not in uid_weights:
                     uid_weights[champion_uid] = 0
                 uid_weights[champion_uid] += effective_champion_share
-                print(f"    👑 Champion (UID {champion_uid}): {effective_champion_share*100:.0f}%")
+                print(f"   👑 Champion (UID {champion_uid}): {effective_champion_share*100:.0f}%")
             
-            # Distribute to REGISTERED current epoch miners
-            print(f"    Current Epoch ({effective_current_to_miners*100:.2f}% to registered miners):")
-            if registered_current_total > 0 and effective_current_to_miners > 0:
-                for hotkey, points in registered_current_scores.items():
+            # ═══════════════════════════════════════════════════════════════════
+            # DISTRIBUTE SOURCING SHARE BY REP SCORE
+            # Formula: miner_weight = (miner_rep / total_rep) × effective_sourcing_to_miners
+            # ═══════════════════════════════════════════════════════════════════
+            print(f"   📈 Sourcing Miners ({effective_sourcing_to_miners*100:.2f}% split by rep score):")
+            print(f"      Total registered rep score: {registered_rolling_total:,}")
+            
+            # Edge case: If total rep is below minimum OR zero, burn the sourcing share
+            if registered_rolling_total < MIN_TOTAL_REP_FOR_DISTRIBUTION:
+                print(f"      ⚠️  Total rep ({registered_rolling_total:,}) below minimum ({MIN_TOTAL_REP_FOR_DISTRIBUTION})")
+                print(f"      → Burning sourcing share to prevent division instability")
+                uid_weights[UID_ZERO] += effective_sourcing_to_miners
+            else:
+                # Distribute to registered miners by rep score proportion
+                for hotkey, rep_score in registered_rolling_scores.items():
+                    if rep_score <= 0:
+                        continue  # Skip miners with 0 rep
+            
                     uid = hotkey_to_uid[hotkey]
-                    miner_proportion = points / registered_current_total
-                    miner_weight = effective_current_to_miners * miner_proportion
+                    
+                    # Core formula: proportion × effective share
+                    miner_proportion = rep_score / registered_rolling_total
+                    miner_weight = effective_sourcing_to_miners * miner_proportion
                     
                     if uid not in uid_weights:
                         uid_weights[uid] = 0
                     uid_weights[uid] += miner_weight
                     
-                    print(f"      UID {uid}: {points}/{registered_current_total} pts = {miner_weight*100:.2f}%")
-            else:
-                print(f"      (No registered miners)")
-            
-            # Distribute to REGISTERED rolling epoch miners
-            print(f"\n    Rolling {ROLLING_WINDOW} Epochs ({effective_rolling_to_miners*100:.2f}% to registered miners):")
-            if registered_rolling_total > 0 and effective_rolling_to_miners > 0:
-                for hotkey, points in registered_rolling_scores.items():
-                    uid = hotkey_to_uid[hotkey]
-                    miner_proportion = points / registered_rolling_total
-                    miner_weight = effective_rolling_to_miners * miner_proportion
-                    
-                    if uid not in uid_weights:
-                        uid_weights[uid] = 0
-                    uid_weights[uid] += miner_weight
-                    
-                    print(f"      UID {uid}: {points}/{registered_rolling_total} pts = {miner_weight*100:.2f}%")
-            else:
-                print(f"      (No registered miners)")
+                    print(f"      UID {uid}: {rep_score:,} / {registered_rolling_total:,} = {miner_proportion*100:.2f}% → {miner_weight*100:.4f}%")
             
             # Convert to final lists
             final_uids = list(uid_weights.keys())
@@ -3745,123 +3647,17 @@ class Validator(BaseValidatorNeuron):
                 decision=validation['decision']
             )
     
-    async def process_pending_reveals(self):
-        """
-        Check if previous epochs need reveal submission (after epoch closes).
-        
-        REVEAL WINDOW LOGIC:
-        - Epoch N: Submit hashes → Save reveals to pending_reveals.json
-        - Epoch N+1: Submit hashes for N+1 → Reveal epoch N → Remove N from pending_reveals.json
-        - Epoch N+2+: If epoch N wasn't revealed, DELETE as expired (too late)
-        
-        CRITICAL RULES:
-        1. Reveals can ONLY be submitted in epoch N+1 (not N+2, N+3, etc.)
-        2. If current_epoch > epoch_id + 1, the reveal window is EXPIRED → DELETE
-        3. pending_reveals.json should only contain current epoch and previous epoch at most
-        
-        ASYNC VERSION: Uses async subtensor for block queries.
-        """
-        if not hasattr(self, '_pending_reveals'):
-            print(f"[DEBUG] No _pending_reveals attribute - initializing empty dict")
-            self._pending_reveals = {}
-            return
-        
-        try:
-            current_block = await self.get_current_block_async()
-            epoch_length = 360
-            current_epoch = current_block // epoch_length
-            blocks_into_epoch = current_block % epoch_length
-            
-            if not self._pending_reveals:
-                print(f"[DEBUG] No pending reveals to process (current epoch: {current_epoch})")
-                return
-            
-            # CUTOFF: Don't submit reveals after block 328 (gateway deadline, consensus at 330)
-            if blocks_into_epoch > 328:
-                print(f"[DEBUG] Past reveal deadline (block {blocks_into_epoch}/360 > 328) - skipping reveal submission")
-                return
-            
-            print(f"\n{'='*80}")
-            print(f"🔍 CHECKING REVEALS: Current epoch {current_epoch}, Block {blocks_into_epoch}/328, Pending: {list(self._pending_reveals.keys())}")
-            print(f"{'='*80}")
-            
-            # gateway_submit_reveal imported at module level
-            
-            # CRITICAL: Clean up expired reveals BEFORE attempting submission
-            # Reveal window is N+1 only - anything older should be purged
-            epochs_to_remove = []
-            for epoch_id in list(self._pending_reveals.keys()):
-                # Check if reveal window has expired (current_epoch > epoch_id + 1)
-                if current_epoch > epoch_id + 1:
-                    print(f"   🗑️  Epoch {epoch_id} reveal window EXPIRED")
-                    print(f"      Should have revealed in epoch {epoch_id + 1}, current is {current_epoch}")
-                    print(f"      Removing from pending reveals (no longer valid)")
-                    epochs_to_remove.append(epoch_id)
-            
-            # Remove expired epochs
-            for epoch_id in epochs_to_remove:
-                del self._pending_reveals[epoch_id]
-            
-            # Save state after cleanup
-            if epochs_to_remove:
-                self._save_pending_reveals()
-                print(f"   ✅ Removed {len(epochs_to_remove)} expired epoch(s) from pending reveals")
-                print(f"      Remaining: {list(self._pending_reveals.keys())}")
-            
-            # Check each pending epoch (only those still valid)
-            epochs_to_reveal = list(self._pending_reveals.keys())
-            for epoch_id in epochs_to_reveal:
-                print(f"   📋 Epoch {epoch_id}: Current={current_epoch}, Ready={current_epoch > epoch_id}")
-                
-                # Reveal after epoch closes (current_epoch > epoch_id)
-                if current_epoch > epoch_id:
-                    reveal_data = self._pending_reveals[epoch_id]
-                    print(f"   🔓 Revealing {len(reveal_data)} validations for epoch {epoch_id}...")
-                    
-                    # Format reveals for gateway
-                    reveals = []
-                    for validation in reveal_data:
-                        # DEFENSE IN DEPTH: Provide fallback for any remaining null rejection_reasons
-                        # (Should not happen with current code, but handles old corrupted data in pending_reveals)
-                        rejection_reason = validation.get("rejection_reason")
-                        if rejection_reason is None:
-                            print(f"   ⚠️  Fixing null rejection_reason for lead {validation.get('lead_id', 'unknown')[:8]}...")
-                            rejection_reason = {
-                                "stage": "Unknown",
-                                "check_name": "data_corruption",
-                                "message": "Rejection reason was null (corrupted data from previous epoch)",
-                                "failed_fields": []
-                            }
-                        
-                        reveals.append({
-                            "lead_id": validation["lead_id"],
-                            "decision": validation["decision"],
-                            "rep_score": validation["rep_score"],
-                            "rejection_reason": rejection_reason,
-                            "salt": validation["salt"]
-                        })
-                    
-                    # Submit reveal
-                    print(f"   📤 Submitting {len(reveals)} reveals to gateway...")
-                    success = gateway_submit_reveal(self.wallet, epoch_id, reveals)
-                    if success:
-                        print(f"   ✅ Successfully revealed {len(reveals)} validations for epoch {epoch_id}")
-                        print(f"   🗑️  Removing epoch {epoch_id} from pending_reveals.json")
-                        bt.logging.info(f"✅ Revealed validation for epoch {epoch_id}")
-                        del self._pending_reveals[epoch_id]
-                        self._save_pending_reveals()  # Save immediately after successful reveal
-                        print(f"   💾 Updated pending_reveals.json (remaining epochs: {list(self._pending_reveals.keys())})")
-                    else:
-                        print(f"   ❌ Failed to reveal validation for epoch {epoch_id}")
-                        bt.logging.error(f"Failed to reveal validation for epoch {epoch_id}")
-                else:
-                    print(f"   ⏳ Epoch {epoch_id} not yet closed, waiting...")
-                        
-        except Exception as e:
-            print(f"[DEBUG] Exception in process_pending_reveals: {e}")
-            import traceback
-            print(f"[DEBUG] Traceback:\n{traceback.format_exc()}")
-            bt.logging.error(f"Error processing reveals: {e}")
+    # ═══════════════════════════════════════════════════════════════════
+    # NOTE (Jan 2026): process_pending_reveals() REMOVED - IMMEDIATE REVEAL MODE
+    # ═══════════════════════════════════════════════════════════════════
+    # Validators now submit both hashes AND actual values in one request to
+    # gateway_submit_validation(). No separate reveal phase needed.
+    # 
+    # Benefits:
+    # - Eliminates ~4500 UPDATE queries per epoch (reveals were updates)
+    # - Reduces latency - consensus runs same epoch instead of N+1
+    # - Simplifies workflow - one submission instead of two
+    # ═══════════════════════════════════════════════════════════════════
 
     def process_sourced_leads_continuous(self):
         """
@@ -4066,10 +3862,10 @@ class Validator(BaseValidatorNeuron):
                 return
             
             # ═══════════════════════════════════════════════════════════════════
-            # WAIT FOR SOURCING COMPLETE: Hash submission + Reveals attempted
-            # Only collect qualification results AFTER:
+            # WAIT FOR SOURCING COMPLETE: Hash+values submission done
+            # IMMEDIATE REVEAL MODE (Jan 2026): Only collect qualification results AFTER:
             # 1. Lead validation complete (_last_processed_epoch >= current_epoch)
-            # 2. Reveals have been ATTEMPTED (success OR failure OR none pending)
+            # 2. Hash+values submitted to gateway (no separate reveal phase)
             # ═══════════════════════════════════════════════════════════════════
             last_processed = getattr(self, '_last_processed_epoch', -1)
             
@@ -4078,8 +3874,8 @@ class Validator(BaseValidatorNeuron):
                 # Sourcing still in progress - don't collect yet
                 return
             
-            # Check if reveals have been processed (success, failure, or none pending)
             # Track which epochs have had their qualification results collected
+            # IMMEDIATE REVEAL MODE: No reveal checking needed - data submitted with hashes
             if not hasattr(self, '_qual_results_collected_epochs'):
                 self._qual_results_collected_epochs = set()
             
@@ -4089,40 +3885,17 @@ class Validator(BaseValidatorNeuron):
             
             # ═══════════════════════════════════════════════════════════════════
             # QUALIFICATION COLLECTION LOGIC:
-            # 1. WAIT for reveals of previous epochs to complete first
-            # 2. Once reveals are done, check if workers are done IMMEDIATELY
-            # 3. Block 335 is the CUTOFF - but ONLY if reveals have been processed
-            # 4. At block 335, submit whatever is done, clear incomplete workers
+            # IMMEDIATE REVEAL MODE (Jan 2026): No reveal waiting needed
+            # Validators submit hash+values in one request, so there's no separate reveal phase.
+            # 1. Check if workers are done IMMEDIATELY after sourcing completes
+            # 2. Block 335 is the CUTOFF - if workers aren't done by then, submit what's ready
             # ═══════════════════════════════════════════════════════════════════
             
-            # Check: are there reveals for PREVIOUS epochs that need to be submitted?
-            # Current epoch's reveals will be revealed NEXT epoch, so we DON'T wait for them.
-            has_pending_previous_reveals = False
-            try:
-                pending_reveals = getattr(self, '_pending_reveals', {})
-                for epoch_id in pending_reveals.keys():
-                    if epoch_id < current_epoch:
-                        # This is a PREVIOUS epoch that should be revealed NOW
-                        has_pending_previous_reveals = True
-                        break
-            except:
-                pass
+            # NOTE: Previous reveal waiting logic REMOVED - IMMEDIATE REVEAL MODE
+            # With immediate reveal, validators submit both hashes AND values in one request.
+            # No separate reveal phase - just proceed directly to qualification collection.
             
-            # If previous epoch reveals are still pending, ALWAYS wait (even past block 335)
-            # Reveals take priority over qualification submission
-            if has_pending_previous_reveals:
-                if not hasattr(self, '_qual_waiting_for_reveals_logged'):
-                    self._qual_waiting_for_reveals_logged = set()
-                if current_epoch not in self._qual_waiting_for_reveals_logged:
-                    pending_epochs = list(getattr(self, '_pending_reveals', {}).keys())
-                    previous_pending = [e for e in pending_epochs if e < current_epoch]
-                    print(f"🎯 QUALIFICATION: Waiting for reveals of previous epochs (block {blocks_into_epoch}/360)")
-                    print(f"   Previous epochs pending: {previous_pending}")
-                    print(f"   Current epoch in queue: {current_epoch} (will reveal next epoch)")
-                    self._qual_waiting_for_reveals_logged.add(current_epoch)
-                return
-            
-            # Reveals are done! Now check qualification workers.
+            # Proceed directly to qualification workers.
             # Block 335 is the CUTOFF - if workers aren't done by then, submit what's ready
             past_cutoff = blocks_into_epoch >= 335
             
@@ -7131,17 +6904,24 @@ def run_lightweight_worker(config):
                         rejection_reason_hash = hashlib.sha256((json.dumps(rejection_reason, default=str) + salt.hex()).encode()).hexdigest()  # Handle datetime
                         evidence_hash = hashlib.sha256(evidence_blob.encode()).hexdigest()
                         
-                        # Format for validation_results (for gateway hash submission) - EXACT format
+                        # Format for validation_results (IMMEDIATE REVEAL MODE)
+                        # Include BOTH hashes AND actual values - no separate reveal phase
                         validation_results.append({
                             'lead_id': lead['lead_id'],
+                            # Hash fields (for transparency log integrity)
                             'decision_hash': decision_hash,
                             'rep_score_hash': rep_score_hash,
                             'rejection_reason_hash': rejection_reason_hash,
                             'evidence_hash': evidence_hash,
-                            'evidence_blob': lead.get('automated_checks_data', {})
+                            'evidence_blob': lead.get('automated_checks_data', {}),
+                            # IMMEDIATE REVEAL FIELDS - no separate reveal phase
+                            'decision': decision,
+                            'rep_score': rep_score,
+                            'rejection_reason': rejection_reason,
+                            'salt': salt.hex()
                         })
                         
-                        # Format for local_validation_data (for gateway reveal submission) - EXACT format
+                        # Format for local_validation_data (for local weight calculation)
                         # CRITICAL FIX: Include is_icp_multiplier from automated_checks_data for proper weight calc
                         local_validation_data.append({
                             'lead_id': lead['lead_id'],

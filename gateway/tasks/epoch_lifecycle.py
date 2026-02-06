@@ -141,6 +141,7 @@ async def epoch_lifecycle_task():
     validation_ended_epochs = set()  # Track which epochs we've logged EPOCH_END for
     closed_epochs = set()  # Track which epochs we've processed consensus for
     prefetch_triggered_epochs = set()  # Track which epochs we've triggered prefetch for
+    consensus_computed_epochs = set()  # Track which epochs we've computed consensus for (IMMEDIATE REVEAL MODE)
     
     print("✅ Epoch lifecycle task initialized")
     print("   Will check for epoch transitions every 30 seconds")
@@ -236,6 +237,57 @@ async def epoch_lifecycle_task():
                 # Not critical - prefetch is optimization, workflow continues
             
             # ========================================================================
+            # IMMEDIATE REVEAL MODE (Jan 2026): Run consensus at block 330+ for CURRENT epoch
+            # ========================================================================
+            # With immediate reveal, validators submit hash+values together during epoch.
+            # Consensus can run at block 330+ (same epoch) instead of waiting for next epoch.
+            # This eliminates the reveal phase entirely and reduces latency.
+            try:
+                block_within_epoch = get_block_within_epoch()
+                
+                # Run consensus once when we reach block 330+ (but before epoch ends)
+                # This gives validators until block ~300-320 to submit their validations
+                if (330 <= block_within_epoch <= 358 and 
+                    current_epoch not in consensus_computed_epochs):
+                    
+                    print(f"\n{'='*80}")
+                    print(f"📊 BLOCK {block_within_epoch}: COMPUTING CONSENSUS FOR CURRENT EPOCH {current_epoch}")
+                    print(f"{'='*80}")
+                    print(f"   IMMEDIATE REVEAL MODE: Data submitted with hashes - no reveal wait needed")
+                    
+                    # Check if this epoch has validation evidence with decisions populated
+                    evidence_check = await asyncio.to_thread(
+                        lambda: supabase.table("validation_evidence_private")
+                            .select("lead_id", count="exact")
+                            .eq("epoch_id", current_epoch)
+                            .not_.is_("decision", "null")  # Only count rows with actual decisions
+                            .limit(1)
+                            .execute()
+                    )
+                    has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
+                    
+                    if has_evidence:
+                        print(f"   ✅ Found {evidence_check.count} validation records with decisions")
+                        print(f"   📊 Starting consensus computation...")
+                        
+                        try:
+                            await compute_epoch_consensus(current_epoch)
+                            consensus_computed_epochs.add(current_epoch)
+                            print(f"   ✅ Consensus computed for epoch {current_epoch}")
+                        except Exception as e:
+                            print(f"   ❌ Consensus failed for epoch {current_epoch}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            # Don't mark as computed - will retry next 30s cycle
+                    else:
+                        print(f"   ⚠️  No validation evidence with decisions yet for epoch {current_epoch}")
+                        print(f"   ⏳ Will check again next cycle (validators may still be submitting)")
+                        
+            except Exception as e:
+                print(f"   ⚠️  Could not check for current epoch consensus: {e}")
+                # Not critical - will retry next 30s cycle
+            
+            # ========================================================================
             # Check if validation phase just ended (t=67)
             # ========================================================================
             time_since_end = (now - epoch_end).total_seconds()
@@ -296,26 +348,30 @@ async def epoch_lifecycle_task():
                         has_evidence = False
                     
                     if has_evidence:
+                        # IMMEDIATE REVEAL MODE (Jan 2026): Check if consensus already computed
+                        # With immediate reveal, consensus typically runs at block 330+ of the same epoch.
+                        # This fallback handles epochs that missed the block 330+ window.
+                        if check_epoch in consensus_computed_epochs:
+                            print(f"   ✅ Epoch {check_epoch} consensus already computed (block 330+ trigger)")
+                            closed_epochs.add(check_epoch)
+                            continue
+                        
                         print(f"\n{'='*80}")
-                        print(f"🔓 EPOCH {check_epoch} CLOSED - STARTING REVEAL & CONSENSUS")
+                        print(f"📊 EPOCH {check_epoch} CLOSED - FALLBACK CONSENSUS")
                         print(f"{'='*80}")
                         print(f"   Closed at: {check_epoch_close.isoformat()}")
                         print(f"   Time since close: {time_since_close/60:.1f} minutes")
+                        print(f"   NOTE: This epoch missed the block 330+ consensus window")
                         
-                        # Trigger reveal phase (validators should reveal their commits)
-                        await trigger_reveal_phase(check_epoch)
-                        
-                        # Wait a bit for reveals to come in (only if epoch just closed)
-                        if time_since_close < 300:  # Within 5 minutes
-                            print(f"   ⏳ Waiting 2 minutes for reveals...")
-                            await asyncio.sleep(120)
-                        else:
-                            print(f"   ℹ️  Epoch closed {time_since_close/60:.1f} minutes ago - skipping reveal wait")
+                        # IMMEDIATE REVEAL MODE (Jan 2026): Data submitted with hashes
+                        # No separate reveal phase - data is already in database
+                        print(f"   ℹ️  IMMEDIATE REVEAL MODE: Data already submitted with hashes")
                         
                         # Compute consensus for all leads in this epoch
                         print(f"   📊 About to call compute_epoch_consensus({check_epoch})...")
                         try:
                             await compute_epoch_consensus(check_epoch)
+                            consensus_computed_epochs.add(check_epoch)
                             print(f"   ✅ Consensus computation complete for epoch {check_epoch}")
                         except Exception as e:
                             print(f"   ❌ ERROR: Consensus failed for epoch {check_epoch}: {e}")
@@ -342,6 +398,10 @@ async def epoch_lifecycle_task():
             if len(closed_epochs) > 100:
                 recent = sorted(list(closed_epochs))[-50:]
                 closed_epochs = set(recent)
+            
+            if len(consensus_computed_epochs) > 100:
+                recent = sorted(list(consensus_computed_epochs))[-50:]
+                consensus_computed_epochs = set(recent)
             
             # Sleep 30 seconds before next check
             # Print periodic heartbeat so we know the task is alive
@@ -570,39 +630,12 @@ async def compute_and_log_epoch_inputs(epoch_id: int):
         print(f"   ❌ Failed to compute EPOCH_INPUTS: {e}")
 
 
-async def trigger_reveal_phase(epoch_id: int):
-    """
-    Trigger reveal phase for epoch.
-    
-    After epoch closes, validators must reveal their committed decisions
-    and rep_scores (but NOT evidence, which stays private forever).
-    
-    This function logs a notification event. Validators listen for epoch
-    close and automatically call POST /reveal with their salt and values.
-    
-    Args:
-        epoch_id: Epoch ID
-    """
-    try:
-        print(f"   🔓 Validators can now reveal decisions for epoch {epoch_id}")
-        
-        # Query how many validators submitted commits - RUN IN THREAD
-        result = await asyncio.to_thread(
-            lambda: supabase.table("validation_evidence_private")
-                .select("evidence_id", count="exact")
-                .eq("epoch_id", epoch_id)
-                .execute()
-        )
-        
-        commit_count = result.count if result.count is not None else 0
-        
-        print(f"   📊 {commit_count} validation commits to reveal")
-        
-        # Validators will call POST /reveal independently
-        # This is just a monitoring/logging step
-    
-    except Exception as e:
-        print(f"   ❌ Failed to trigger reveal phase: {e}")
+# ═══════════════════════════════════════════════════════════════════
+# NOTE (Jan 2026): trigger_reveal_phase() REMOVED - IMMEDIATE REVEAL MODE
+# ═══════════════════════════════════════════════════════════════════
+# Validators now submit both hashes AND actual values in one request.
+# No separate reveal phase - consensus runs at block 330+ of same epoch.
+# ═══════════════════════════════════════════════════════════════════
 
 
 async def compute_epoch_consensus(epoch_id: int):

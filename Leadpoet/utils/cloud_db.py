@@ -2275,7 +2275,13 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
 
 def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_results: List[Dict]) -> bool:
     """
-    Submit hashed validation results for all leads in an epoch.
+    Submit validation results for all leads in an epoch (IMMEDIATE REVEAL MODE).
+    
+    IMMEDIATE REVEAL MODE (Jan 2026):
+    - Validators now submit BOTH hashes AND actual values in one request
+    - No separate reveal phase needed
+    - Gateway verifies hashes match submitted values
+    - Consensus runs at end of CURRENT epoch (not N+1)
     
     Efficient submission:
     - 1 HTTP request (not N individual requests)
@@ -2287,7 +2293,9 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
     Args:
         wallet: Validator's wallet
         epoch_id: Current epoch ID
-        validation_results: List of dicts with lead_id, decision_hash, rep_score_hash, rejection_reason_hash, evidence_hash, evidence_blob
+        validation_results: List of dicts with:
+            - Hash fields: lead_id, decision_hash, rep_score_hash, rejection_reason_hash, evidence_hash, evidence_blob
+            - Reveal fields: decision, rep_score, rejection_reason, salt
         
     Returns:
         bool: Success status
@@ -2299,6 +2307,8 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
     build_id = os.getenv("BUILD_ID", "validator-client")
     
     # Format validations for batch submission (constant for all attempts)
+    # IMMEDIATE REVEAL MODE (Jan 2026): Include both hashes AND actual values
+    # No separate reveal phase - gateway verifies hashes and stores values immediately
     validations = []
     for v in validation_results:
         validations.append({
@@ -2307,7 +2317,12 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
             "rep_score_hash": v["rep_score_hash"],
             "rejection_reason_hash": v["rejection_reason_hash"],
             "evidence_hash": v["evidence_hash"],
-            "evidence_blob": v.get("evidence_blob", {})
+            "evidence_blob": v.get("evidence_blob", {}),
+            # IMMEDIATE REVEAL FIELDS - no separate reveal phase
+            "decision": v["decision"],
+            "rep_score": v["rep_score"],
+            "rejection_reason": v["rejection_reason"],
+            "salt": v["salt"]
         })
     
     # Create payload (constant for all attempts)
@@ -2392,105 +2407,14 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
                 return False
 
 
-def gateway_submit_reveal(wallet: bt.wallet, epoch_id: int, reveal_results: List[Dict]) -> bool:
-    """
-    Submit revealed validation results after epoch closes (POST /reveal).
-    Batches large reveal sets to prevent gateway timeouts.
-    Retries up to 3 times with fresh nonce/signature on gateway timeout.
-    
-    Args:
-        wallet: Validator's wallet
-        epoch_id: Epoch ID to reveal
-        reveal_results: List of dicts with lead_id, decision, rep_score, rejection_reason, salt
-        
-    Returns:
-        bool: Success status
-    """
-    # BATCHING: Split large reveal sets to prevent gateway 500 errors
-    # Gateway struggles with 900+ reveals in one request (DB query/update bottleneck)
-    BATCH_SIZE = 300  # Optimal batch size based on testing
-    
-    total_reveals = len(reveal_results)
-    
-    if total_reveals <= BATCH_SIZE:
-        # Single batch - no splitting needed
-        return _submit_reveal_batch(wallet, epoch_id, reveal_results, 1, 1)
-    
-    # Multiple batches
-    num_batches = (total_reveals + BATCH_SIZE - 1) // BATCH_SIZE  # Ceiling division
-    bt.logging.info(f"📦 Splitting {total_reveals} reveals into {num_batches} batches of ~{BATCH_SIZE} each")
-    
-    all_success = True
-    for batch_num in range(num_batches):
-        start_idx = batch_num * BATCH_SIZE
-        end_idx = min(start_idx + BATCH_SIZE, total_reveals)
-        batch = reveal_results[start_idx:end_idx]
-        
-        bt.logging.info(f"📤 Batch {batch_num + 1}/{num_batches}: Submitting {len(batch)} reveals...")
-        
-        success = _submit_reveal_batch(wallet, epoch_id, batch, batch_num + 1, num_batches)
-        
-        if not success:
-            bt.logging.error(f"❌ Batch {batch_num + 1}/{num_batches} failed!")
-            all_success = False
-            # Continue with other batches - partial reveal is better than none
-        else:
-            bt.logging.info(f"✅ Batch {batch_num + 1}/{num_batches} succeeded")
-        
-        # Brief delay between batches to avoid overwhelming gateway
-        if batch_num < num_batches - 1:
-            time.sleep(2)
-    
-    if all_success:
-        bt.logging.info(f"✅ All {num_batches} batches submitted successfully ({total_reveals} total reveals)")
-    else:
-        bt.logging.warning(f"⚠️  Some batches failed - partial reveal submitted")
-    
-    return all_success
-
-
-def _submit_reveal_batch(wallet: bt.wallet, epoch_id: int, reveal_batch: List[Dict], batch_num: int, total_batches: int) -> bool:
-    """
-    Submit a single batch of reveals to the gateway.
-    Internal helper for gateway_submit_reveal.
-    """
-    # Retry loop: Up to 3 attempts with fresh nonce/signature
-    for attempt in range(1, 4):
-        try:
-            # Generate FRESH nonce and signature for each attempt
-            nonce = str(int(time.time() * 1000))  # Millisecond precision to ensure uniqueness
-            message = f"reveal:{wallet.hotkey.ss58_address}:{epoch_id}:{nonce}"
-            signature = wallet.hotkey.sign(message.encode()).hex()
-            
-            if attempt > 1:
-                bt.logging.warning(f"🔄 Retry {attempt}/3 for batch {batch_num}/{total_batches}...")
-            
-            # Submit reveal batch
-            # CRITICAL: Must serialize with default=str to handle datetime objects in rejection_reason
-            reveal_payload = {
-                    "validator_hotkey": wallet.hotkey.ss58_address,
-                    "epoch_id": epoch_id,
-                    "signature": signature,
-                    "nonce": nonce,
-                "reveals": reveal_batch
-            }
-            reveal_json = json.dumps(reveal_payload, default=str)
-            response = requests.post(
-                f"{GATEWAY_URL}/reveal/batch",
-                data=reveal_json,
-                headers={"Content-Type": "application/json"},
-                timeout=300  # 5 minutes timeout per batch
-            )
-            response.raise_for_status()
-            
-            return True
-            
-        except Exception as e:
-            if attempt < 3:
-                bt.logging.warning(f"⚠️  Batch {batch_num} attempt {attempt}/3 failed: {e}")
-                time.sleep(2)  # Brief delay before retry
-                continue  # Try again
-            else:
-                # All attempts exhausted
-                bt.logging.error(f"❌ Batch {batch_num} all 3 attempts failed. Last error: {e}")
-                return False
+# ═══════════════════════════════════════════════════════════════════
+# NOTE (Jan 2026): gateway_submit_reveal and _submit_reveal_batch REMOVED
+# ═══════════════════════════════════════════════════════════════════
+# IMMEDIATE REVEAL MODE: Validators now submit both hashes AND actual values
+# in one request to gateway_submit_validation(). No separate reveal phase.
+# 
+# Benefits:
+# - Eliminates ~4500 UPDATE queries per epoch (reveals were updates)
+# - Reduces latency - consensus runs same epoch instead of N+1
+# - Simplifies workflow - one submission instead of two
+# ═══════════════════════════════════════════════════════════════════

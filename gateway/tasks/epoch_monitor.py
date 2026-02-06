@@ -238,7 +238,9 @@ class EpochMonitor:
                     print(f"{'='*80}")
                     
                     # Trigger consensus (non-blocking)
-                    asyncio.create_task(self._check_for_reveals(consensus_epoch))
+                    # IMPORTANT: skip_closed_check=True because we're running consensus for the
+                    # CURRENT epoch at block 330+, which is not "closed" yet (closes at block 360)
+                    asyncio.create_task(self._check_for_reveals(consensus_epoch, skip_closed_check=True))
         
         except Exception as e:
             print(f"❌ Error in EpochMonitor._process_block: {e}")
@@ -366,7 +368,7 @@ class EpochMonitor:
             traceback.print_exc()
             # Don't crash - log and continue
     
-    async def _check_for_reveals(self, epoch_id: int):
+    async def _check_for_reveals(self, epoch_id: int, skip_closed_check: bool = False):
         """
         Check if epoch needs reveal/consensus processing.
         
@@ -381,6 +383,8 @@ class EpochMonitor:
         
         Args:
             epoch_id: Epoch to check for reveals
+            skip_closed_check: If True, skip the is_epoch_closed check (for IMMEDIATE REVEAL MODE
+                               where we run consensus for current epoch at block 330+)
         """
         MAX_RETRIES = 3
         RETRY_DELAY = 30  # seconds between retries
@@ -391,8 +395,9 @@ class EpochMonitor:
                 from gateway.utils.epoch import is_epoch_closed_async
                 import asyncio
                 
-                # Check if epoch is actually closed
-                if not await is_epoch_closed_async(epoch_id):
+                # Check if epoch is actually closed (skip for IMMEDIATE REVEAL MODE on current epoch)
+                if not skip_closed_check and not await is_epoch_closed_async(epoch_id):
+                    print(f"   ⚠️  Epoch {epoch_id} not closed yet - skipping consensus")
                     self.processing_epochs.discard(epoch_id)
                     return
                 

@@ -210,15 +210,16 @@ class EpochMonitor:
                     self._cleanup_epochs.add(current_epoch)
             
             # ════════════════════════════════════════════════════════════════
-            # Check 5: Batch consensus at blocks 328-330 (captures ALL reveals)
+            # Check 5: IMMEDIATE REVEAL MODE - Consensus for CURRENT epoch at block 330+
             # ════════════════════════════════════════════════════════════════
-            # Run consensus at blocks 328-330 of epoch N (for epoch N-1 reveals)
-            # Using a 3-block window to handle polling misses (poll every 12s, blocks ~12s)
-            # This ensures ALL reveals from blocks 0-327 are included
+            # With immediate reveal, validators submit hash+values together during epoch.
+            # Consensus can run at block 330+ (same epoch) instead of waiting for next epoch.
+            # This eliminates the reveal phase entirely and reduces latency.
             print(f"   🔍 Check 5: block_within_epoch={block_within_epoch}, current_epoch={current_epoch}")
-            if 328 <= block_within_epoch <= 330 and current_epoch > 0:
-                consensus_epoch = current_epoch - 1  # Calculate consensus for previous epoch
-                print(f"   ✅ BLOCK 330 DETECTED! Will check epoch {consensus_epoch}")
+            if 330 <= block_within_epoch <= 358 and current_epoch > 0:
+                # IMMEDIATE REVEAL: Compute consensus for CURRENT epoch (data already submitted)
+                consensus_epoch = current_epoch
+                print(f"   ✅ BLOCK {block_within_epoch} DETECTED! IMMEDIATE REVEAL - checking current epoch {consensus_epoch}")
                 
                 # Check if epoch is already being processed OR already completed
                 # This prevents the race condition where polling loop triggers
@@ -232,8 +233,8 @@ class EpochMonitor:
                     self.processing_epochs.add(consensus_epoch)
                     
                     print(f"\n{'='*80}")
-                    print(f"📊 BATCH CONSENSUS TRIGGER: Block 330 of epoch {current_epoch}")
-                    print(f"   Computing consensus for epoch {consensus_epoch} reveals...")
+                    print(f"📊 IMMEDIATE REVEAL CONSENSUS: Block {block_within_epoch} of epoch {current_epoch}")
+                    print(f"   Computing consensus for CURRENT epoch {consensus_epoch} (data already submitted with hashes)")
                     print(f"{'='*80}")
                     
                     # Trigger consensus (non-blocking)
@@ -396,20 +397,22 @@ class EpochMonitor:
                     return
                 
                 print(f"\n{'='*80}")
-                print(f"🔓 EPOCH {epoch_id} CLOSED - Checking for reveals... (attempt {attempt}/{MAX_RETRIES})")
+                print(f"🔓 EPOCH {epoch_id} - Computing consensus (IMMEDIATE REVEAL MODE) (attempt {attempt}/{MAX_RETRIES})")
                 print(f"{'='*80}")
                 
-                # Check if this epoch has validation evidence
+                # Check if this epoch has validation evidence with decisions populated
+                # IMMEDIATE REVEAL: decision is submitted WITH hashes, so check for non-null decisions
                 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
                 from supabase import create_client
                 
                 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
                 
-                # Query validation evidence (run in thread to avoid blocking)
+                # Query validation evidence with decisions (run in thread to avoid blocking)
                 evidence_check = await asyncio.to_thread(
                     lambda: supabase.table("validation_evidence_private")
                         .select("lead_id", count="exact")
                         .eq("epoch_id", epoch_id)
+                        .not_.is_("decision", "null")  # IMMEDIATE REVEAL: check for decision, not revealed_ts
                         .limit(1)
                         .execute()
                 )
@@ -417,28 +420,29 @@ class EpochMonitor:
                 has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
                 
                 if not has_evidence:
-                    print(f"   ℹ️  No validation evidence for epoch {epoch_id} - skipping")
+                    print(f"   ℹ️  No validation evidence with decisions for epoch {epoch_id} - skipping")
                     # Mark as closed so we don't check again (and remove from processing)
                     self.processing_epochs.discard(epoch_id)
                     self.closed_epochs.add(epoch_id)
                     return
                 
-                print(f"   📊 Found validation evidence - processing consensus...")
+                print(f"   📊 Found {evidence_check.count} validation records with decisions - processing consensus...")
                 
                 # Import lifecycle functions
-                # NOTE: trigger_reveal_phase REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
+                # NOTE: IMMEDIATE REVEAL MODE (Jan 2026) - no separate reveal phase
                 from gateway.tasks.epoch_lifecycle import compute_epoch_consensus
                 from gateway.utils.epoch import get_epoch_close_time_async
                 
                 epoch_close = await get_epoch_close_time_async(epoch_id)
                 time_since_close = (datetime.utcnow() - epoch_close).total_seconds()
                 
-                print(f"   Closed at: {epoch_close.isoformat()}")
-                print(f"   Time since close: {time_since_close/60:.1f} minutes")
+                if time_since_close >= 0:
+                    print(f"   Epoch closed at: {epoch_close.isoformat()} ({time_since_close/60:.1f} min ago)")
+                else:
+                    print(f"   Epoch closes at: {epoch_close.isoformat()} (in {-time_since_close/60:.1f} min)")
                 
-                # IMMEDIATE REVEAL MODE (Jan 2026): Data submitted with hashes, no reveal phase
-                print(f"   📊 Running batch consensus for epoch {epoch_id}...")
-                print(f"   Closed {time_since_close/60:.1f} minutes ago")
+                # IMMEDIATE REVEAL MODE: Data submitted with hashes, compute consensus now
+                print(f"   📊 Running consensus for epoch {epoch_id}...")
                 await compute_epoch_consensus(epoch_id)
                 
                 print(f"   ✅ Epoch {epoch_id} fully processed")

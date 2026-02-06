@@ -86,19 +86,19 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int, evidence_data:
             print(f"   ✅ Found {len(validations)} validations for lead {lead_id[:8]}... (from pre-fetched data)")
         else:
             # Fallback: Query database (for backwards compatibility)
-        print(f"   🔍 Fetching validations for lead {lead_id[:8]}... from validation_evidence_private")
-        result = await asyncio.to_thread(
-            lambda: supabase.table("validation_evidence_private")
-                .select("validator_hotkey, decision, rep_score, rejection_reason, v_trust, stake")
-                .eq("lead_id", lead_id)
-                .eq("epoch_id", epoch_id)
-                .not_.is_("decision", "null")
-                .not_.is_("rep_score", "null")
-                .execute()
-        )
-        
-        validations = result.data
-        print(f"   ✅ Found {len(validations)} validations for lead {lead_id[:8]}...")
+            print(f"   🔍 Fetching validations for lead {lead_id[:8]}... from validation_evidence_private")
+            result = await asyncio.to_thread(
+                lambda: supabase.table("validation_evidence_private")
+                    .select("validator_hotkey, decision, rep_score, rejection_reason, v_trust, stake")
+                    .eq("lead_id", lead_id)
+                    .eq("epoch_id", epoch_id)
+                    .not_.is_("decision", "null")
+                    .not_.is_("rep_score", "null")
+                    .execute()
+            )
+            
+            validations = result.data
+            print(f"   ✅ Found {len(validations)} validations for lead {lead_id[:8]}...")
     
     except Exception as e:
         print(f"❌ Error getting validations for lead {lead_id}: {e}")

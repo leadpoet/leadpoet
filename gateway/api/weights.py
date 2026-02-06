@@ -298,16 +298,16 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
         # TODO: REMOVE THIS BLOCK BEFORE PRODUCTION DEPLOYMENT
         # ════════════════════════════════════════════════════════════════════════
         if BITTENSOR_NETWORK != "test":
-        await log_event({
-            "event_type": "WEIGHT_SUBMISSION_REJECTED_DUPLICATE",
-            "actor_hotkey": submission.validator_hotkey,
-            "nonce": str(uuid.uuid4()),
-            "ts": datetime.utcnow().isoformat(),
-            "payload_hash": dup_payload_hash,
-            "build_id": BUILD_ID,
-            "signature": "validator",  # Validator-initiated event
-            "payload": dup_payload,
-        })
+            await log_event({
+                "event_type": "WEIGHT_SUBMISSION_REJECTED_DUPLICATE",
+                "actor_hotkey": submission.validator_hotkey,
+                "nonce": str(uuid.uuid4()),
+                "ts": datetime.utcnow().isoformat(),
+                "payload_hash": dup_payload_hash,
+                "build_id": BUILD_ID,
+                "signature": "validator",  # Validator-initiated event
+                "payload": dup_payload,
+            })
         else:
             print(f"   ⚠️  TESTNET MODE: Skipping WEIGHT_SUBMISSION_REJECTED_DUPLICATE log")
         raise HTTPException(status_code=409, detail="Duplicate submission for this epoch")
@@ -497,8 +497,8 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
         weight_submission_event_hash = f"TESTNET_MOCK_{submission.epoch_id}_{submission.netuid}"
     else:
         # MAINNET: Normal operation - log event to transparency_log
-    log_entry = await log_event("WEIGHT_SUBMISSION", submission_payload)
-    weight_submission_event_hash = log_entry.get("event_hash")
+        log_entry = await log_event("WEIGHT_SUBMISSION", submission_payload)
+        weight_submission_event_hash = log_entry.get("event_hash")
     
     # Store bundle (including PCR0 + commit hash for auditor verification)
     # The commit_hash is CRITICAL for auditability - auditors can verify:
@@ -534,36 +534,36 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
         print(f"   ✅ Bundle validation passed (but NOT stored - testnet mode)")
     else:
         # MAINNET: Normal operation - insert to published_weight_bundles
-    write_client = get_write_client()
-    try:
-        write_client.table("published_weight_bundles").insert(bundle_data).execute()
-    except Exception as e:
-        # Handle UNIQUE constraint violation (race condition)
-        if "duplicate" in str(e).lower() or "unique" in str(e).lower():
-            race_payload = {
-                "epoch_id": submission.epoch_id,
-                "netuid": submission.netuid,
-                "validator_hotkey": submission.validator_hotkey,
-                "reason": "UNIQUE constraint violation (concurrent submission)",
-            }
-            race_payload_hash = hashlib.sha256(
-                json.dumps(race_payload, sort_keys=True).encode()
-            ).hexdigest()
-            
-            await log_event({
-                "event_type": "WEIGHT_SUBMISSION_REJECTED_DUPLICATE",
-                "actor_hotkey": submission.validator_hotkey,
-                "nonce": str(uuid.uuid4()),
-                "ts": datetime.utcnow().isoformat(),
-                "payload_hash": race_payload_hash,
-                "build_id": BUILD_ID,
-                "signature": "validator",  # Validator-initiated event
-                "payload": race_payload,
-            })
-            raise HTTPException(status_code=409, detail="Duplicate submission (concurrent race)")
-        raise
-    
-    print(f"   ✅ Bundle stored successfully")
+        write_client = get_write_client()
+        try:
+            write_client.table("published_weight_bundles").insert(bundle_data).execute()
+        except Exception as e:
+            # Handle UNIQUE constraint violation (race condition)
+            if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+                race_payload = {
+                    "epoch_id": submission.epoch_id,
+                    "netuid": submission.netuid,
+                    "validator_hotkey": submission.validator_hotkey,
+                    "reason": "UNIQUE constraint violation (concurrent submission)",
+                }
+                race_payload_hash = hashlib.sha256(
+                    json.dumps(race_payload, sort_keys=True).encode()
+                ).hexdigest()
+                
+                await log_event({
+                    "event_type": "WEIGHT_SUBMISSION_REJECTED_DUPLICATE",
+                    "actor_hotkey": submission.validator_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.utcnow().isoformat(),
+                    "payload_hash": race_payload_hash,
+                    "build_id": BUILD_ID,
+                    "signature": "validator",  # Validator-initiated event
+                    "payload": race_payload,
+                })
+                raise HTTPException(status_code=409, detail="Duplicate submission (concurrent race)")
+            raise
+        
+        print(f"   ✅ Bundle stored successfully")
     print(f"   📝 Event hash: {weight_submission_event_hash}")
     print(f"{'='*60}\n")
     

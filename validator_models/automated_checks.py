@@ -4426,7 +4426,7 @@ async def run_batch_automated_checks(
             results[i] = (False, rejection_data)
     
     print(f"   📊 Categorization: {len(stage4_5_queue)} ready for Stage 4-5, {sum(1 for r in results if r and r[0] == False)} rejected, {len(needs_retry)} need retry")
-    
+
     # ========================================================================
     # Role Batch Validation
     # ========================================================================
@@ -4467,7 +4467,7 @@ async def run_batch_automated_checks(
             print(f"   📊 Role Batch Validation complete: {len(stage4_5_queue)} passed, {rejected_by_llm} rejected")
         else:
             print(f"   ℹ️ No roles to validate (all empty)")
-    
+
     # ========================================================================
     # Step 6: Start Stage 4-5 SEQUENTIALLY + Handle retries in parallel
     # ========================================================================
@@ -4650,7 +4650,7 @@ async def run_batch_automated_checks(
 async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> Tuple[List[dict], bool]:
     """
     Search LinkedIn using ScrapingDog Google Search API.
-    
+
     Uses 2-step approach:
     1. Q4: "{name}" "{company}" linkedin location (primary)
     2. Q1: site:linkedin.com/in/{profile_slug} (fallback if URL not found in Q4)
@@ -4667,16 +4667,16 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
     if not linkedin_url:
         print(f"   ⚠️ No LinkedIn URL provided")
         return [], False
-    
+
     if not SCRAPINGDOG_API_KEY:
         raise Exception("SCRAPINGDOG_API_KEY not set")
-    
+
     # Extract profile slug from LinkedIn URL
     profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0] if "/in/" in linkedin_url else None
-    
+
     # Track if URL matched exactly (strong identity proof)
     url_match_exact = False
-    
+
     # Build search queries: Q4 primary, Q1 fallback
     # Q4: Primary query - name + company + linkedin location
     q4_query = f'"{full_name}" "{company}" linkedin location'
@@ -4688,30 +4688,30 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
     
     def _search_linkedin_sync(query: str) -> List[dict]:
         """Synchronous ScrapingDog search helper for Stage 4 with one retry"""
-            url = "https://api.scrapingdog.com/google"
-            params = {
-                "api_key": SCRAPINGDOG_API_KEY,
-                "query": query,
-                "results": max_results
-            }
-            
+        url = "https://api.scrapingdog.com/google"
+        params = {
+            "api_key": SCRAPINGDOG_API_KEY,
+            "query": query,
+            "results": max_results
+        }
+
         for attempt in range(2):  # Max 2 attempts (1 original + 1 retry)
             try:
-            response = requests.get(url, params=params, timeout=30, proxies=PROXY_CONFIG)
-            
+                response = requests.get(url, params=params, timeout=30, proxies=PROXY_CONFIG)
+
                 if response.status_code == 200:
-            data = response.json()
-            items = []
-            
-            # Convert ScrapingDog format to standard format
-            for item in data.get("organic_results", []):
-                items.append({
+                    data = response.json()
+                    items = []
+
+                    # Convert ScrapingDog format to standard format
+                    for item in data.get("organic_results", []):
+                        items.append({
                             "title": item.get("title", ""),
                             "link": item.get("link", ""),
                             "snippet": item.get("snippet", "")
                         })
-                    
-            return items
+
+                    return items
 
                 # Retry once on 5xx server errors or rate limits (429)
                 if attempt == 0 and (response.status_code >= 500 or response.status_code == 429):
@@ -4730,46 +4730,46 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
                     continue
                 print(f"         ⚠️ Network error after retry: {str(e)[:50]}")
                 return []
-        except Exception as e:
-            print(f"         ⚠️ Request error: {str(e)}")
-            return []
-    
+            except Exception as e:
+                print(f"         ⚠️ Request error: {str(e)}")
+                return []
+
         return []
     
     def _check_url_match(items: List[dict], profile_slug: str) -> Tuple[List[dict], List[str], bool]:
         """Check if target profile URL is in results."""
-                    linkedin_results = []
-                    found_profile_urls = []
-                    
-                    for item in items:
-                        link = item.get("link", "")
-                        if "linkedin.com/in/" in link:
-                            result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
-                            found_profile_urls.append(result_slug)
-                            linkedin_results.append(item)
-                        elif "linkedin.com" in link:
-                            # Include other LinkedIn pages (company, posts) for context
-                            linkedin_results.append(item)
-                    
+        linkedin_results = []
+        found_profile_urls = []
+
+        for item in items:
+            link = item.get("link", "")
+            if "linkedin.com/in/" in link:
+                result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
+                found_profile_urls.append(result_slug)
+                linkedin_results.append(item)
+            elif "linkedin.com" in link:
+                # Include other LinkedIn pages (company, posts) for context
+                linkedin_results.append(item)
+
         url_match = False
         url_match_type = None
         if profile_slug and found_profile_urls:
-                            profile_slug_norm = profile_slug.lower().replace("-", "").replace("_", "")
+            profile_slug_norm = profile_slug.lower().replace("-", "").replace("_", "")
             # Check exact match
-                            exact_match = any(
+            exact_match = any(
                 profile_slug_norm == rs.lower().replace("-", "").replace("_", "")
                 for rs in found_profile_urls
-                            )
+            )
             # Check partial match
-                            partial_match = any(
+            partial_match = any(
                 profile_slug_norm in rs.lower().replace("-", "").replace("_", "") or
                 rs.lower().replace("-", "").replace("_", "") in profile_slug_norm
                 for rs in found_profile_urls
             )
-                            if exact_match:
+            if exact_match:
                 url_match = True
                 url_match_type = "exact"
-                            elif partial_match:
+            elif partial_match:
                 url_match = True
                 url_match_type = "partial"
 
@@ -4792,7 +4792,7 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
                 if url_match_type == "exact":
                     print(f"         ✅ URL MATCH (Q4): Profile '{profile_slug}' confirmed (exact)")
                     url_match_exact = True
-                            else:
+                else:
                     print(f"         ✅ URL MATCH (Q4): Profile '{profile_slug}' confirmed (partial)")
                     url_match_exact = "partial"
             else:
@@ -4837,101 +4837,101 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
             return [], False
 
         print(f"         ✅ Found {len(linkedin_results)} LinkedIn result(s)")
-                    
-                    # FILTER 1: Clean up concatenated titles and separate profile headlines from posts
-                    # ScrapingDog often concatenates multiple result titles together
-                    profile_headlines = []
-                    posts = []
-                    
-                    for item in linkedin_results:
-                        title = item.get("title", "")
-                        
-                        # ScrapingDog concatenates titles - extract only the FIRST profile
-                        # Pattern: "Name - Title | LinkedIn Name2 - Title2"
-                        if " | LinkedIn " in title:
-                            # Take only the first profile (before the concatenation)
-                            title = title.split(" | LinkedIn ")[0] + " | LinkedIn"
-                            item = dict(item)  # Copy to avoid modifying original
-                            item["title"] = title
-                        
-                        # Skip non-profile results (posts, intro requests, etc.)
-                        if " on LinkedIn:" in title or " on LinkedIn :" in title:
-                            posts.append(item)
-                            continue
-                        if title.lower().startswith("seeking intro"):
-                            posts.append(item)
-                            continue
-                        # Skip directory pages (but not profiles that just have this text concatenated)
-                        is_directory_title = ("profiles | LinkedIn" in title or 
-                                             "profiles - LinkedIn" in title or
-                                             "profiles on LinkedIn" in title)
-                        
-                        if is_directory_title:
-                            link = item.get("link", "")
-                            is_directory_link = "/pub/dir/" in link or "/directory/" in link
-                            starts_with_profiles = re.match(r'^\d+\+?\s+"?[^"]*"?\s+profiles', title.lower())
-                            
-                            if is_directory_link or starts_with_profiles:
-                                continue  # Skip directory pages
-                            
-                        profile_headlines.append(item)
-                    
-                    # FILTER 2: Only keep results for TARGET PERSON (filter out other people)
-                    name_parts = full_name.lower().split()
-                    first_name = name_parts[0] if name_parts else ""
-                    last_name = name_parts[-1] if len(name_parts) > 1 else ""
-                    
-                    # Normalize accents for matching (José -> Jose, François -> Francois)
-                    first_name_normalized = normalize_accents(first_name)
-                    last_name_normalized = normalize_accents(last_name)
-                    
-                    target_person_results = []
-                    other_person_results = []
-                    
-                    for item in profile_headlines:
-                        title_lower = item.get("title", "").lower()
-                        link = item.get("link", "")
-                        
-                        # Normalize the title too for accent-insensitive matching
-                        title_normalized = normalize_accents(title_lower)
-                        
-                        # PRIORITY: If this result's URL matches our target profile slug, it's THE profile!
-                        if profile_slug and "linkedin.com/in/" in link:
-                            result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
-                            if profile_slug.lower() == result_slug.lower():
-                                target_person_results.append(item)
-                                continue  # Skip name check - URL match is definitive
-                        
-                        # Check if target person's name is in the title (accent-insensitive)
-                        if first_name_normalized in title_normalized and last_name_normalized in title_normalized:
-                            target_person_results.append(item)
-                        else:
-                            other_person_results.append(item)
-                    
+
+        # FILTER 1: Clean up concatenated titles and separate profile headlines from posts
+        # ScrapingDog often concatenates multiple result titles together
+        profile_headlines = []
+        posts = []
+
+        for item in linkedin_results:
+            title = item.get("title", "")
+
+            # ScrapingDog concatenates titles - extract only the FIRST profile
+            # Pattern: "Name - Title | LinkedIn Name2 - Title2"
+            if " | LinkedIn " in title:
+                # Take only the first profile (before the concatenation)
+                title = title.split(" | LinkedIn ")[0] + " | LinkedIn"
+                item = dict(item)  # Copy to avoid modifying original
+                item["title"] = title
+
+            # Skip non-profile results (posts, intro requests, etc.)
+            if " on LinkedIn:" in title or " on LinkedIn :" in title:
+                posts.append(item)
+                continue
+            if title.lower().startswith("seeking intro"):
+                posts.append(item)
+                continue
+            # Skip directory pages (but not profiles that just have this text concatenated)
+            is_directory_title = ("profiles | LinkedIn" in title or
+                                 "profiles - LinkedIn" in title or
+                                 "profiles on LinkedIn" in title)
+
+            if is_directory_title:
+                link = item.get("link", "")
+                is_directory_link = "/pub/dir/" in link or "/directory/" in link
+                starts_with_profiles = re.match(r'^\d+\+?\s+"?[^"]*"?\s+profiles', title.lower())
+
+                if is_directory_link or starts_with_profiles:
+                    continue  # Skip directory pages
+
+            profile_headlines.append(item)
+
+        # FILTER 2: Only keep results for TARGET PERSON (filter out other people)
+        name_parts = full_name.lower().split()
+        first_name = name_parts[0] if name_parts else ""
+        last_name = name_parts[-1] if len(name_parts) > 1 else ""
+
+        # Normalize accents for matching (José -> Jose, François -> Francois)
+        first_name_normalized = normalize_accents(first_name)
+        last_name_normalized = normalize_accents(last_name)
+
+        target_person_results = []
+        other_person_results = []
+
+        for item in profile_headlines:
+            title_lower = item.get("title", "").lower()
+            link = item.get("link", "")
+
+            # Normalize the title too for accent-insensitive matching
+            title_normalized = normalize_accents(title_lower)
+
+            # PRIORITY: If this result's URL matches our target profile slug, it's THE profile!
+            if profile_slug and "linkedin.com/in/" in link:
+                result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
+                if profile_slug.lower() == result_slug.lower():
+                    target_person_results.append(item)
+                    continue  # Skip name check - URL match is definitive
+
+            # Check if target person's name is in the title (accent-insensitive)
+            if first_name_normalized in title_normalized and last_name_normalized in title_normalized:
+                target_person_results.append(item)
+            else:
+                other_person_results.append(item)
+
         # Return target person's profile headlines
-                    if target_person_results:
-                        print(f"      📊 GSE Profile Headlines for {full_name}:")
-                        for i, item in enumerate(target_person_results[:3], 1):
-                            print(f"         {i}. {item.get('title', '')[:70]}")
-                        if other_person_results:
-                            print(f"      📊 Other profiles filtered out: {len(other_person_results)}")
-                        if posts:
-                            print(f"      📊 Posts filtered out: {len(posts)}")
-                        return target_person_results[:max_results], url_match_exact
-                    elif profile_headlines:
+        if target_person_results:
+            print(f"      📊 GSE Profile Headlines for {full_name}:")
+            for i, item in enumerate(target_person_results[:3], 1):
+                print(f"         {i}. {item.get('title', '')[:70]}")
+            if other_person_results:
+                print(f"      📊 Other profiles filtered out: {len(other_person_results)}")
+            if posts:
+                print(f"      📊 Posts filtered out: {len(posts)}")
+            return target_person_results[:max_results], url_match_exact
+        elif profile_headlines:
             # No exact name match but have profile headlines - return them anyway since URL matched
             print(f"      ⚠️ Name not found in results but URL matched, returning results")
             return profile_headlines[:max_results], url_match_exact
-                    elif posts:
-                        # Only posts found (no profile headlines) - return posts
-                        print(f"      📊 ScrapingDog Posts only (no profile headlines found):")
-                        for i, item in enumerate(posts[:3], 1):
-                            print(f"         {i}. {item.get('title', '')[:70]}")
-                        return posts[:max_results], url_match_exact
-                    else:
+        elif posts:
+            # Only posts found (no profile headlines) - return posts
+            print(f"      📊 ScrapingDog Posts only (no profile headlines found):")
+            for i, item in enumerate(posts[:3], 1):
+                print(f"         {i}. {item.get('title', '')[:70]}")
+            return posts[:max_results], url_match_exact
+        else:
             print(f"   ❌ No usable results after filtering")
-        return [], False
-    
+            return [], False
+
     except Exception as e:
         print(f"   ⚠️ GSE API error: {str(e)}")
         return [], False
@@ -4961,7 +4961,7 @@ async def verify_linkedin_rule_based(full_name: str, company: str, linkedin_url:
     try:
         if not search_results:
             return False, "No LinkedIn search results found"
-        
+
         # ========================================================================
         # STEP 1: Find URL-matched result (authoritative source)
         # ========================================================================
@@ -5019,7 +5019,7 @@ async def verify_linkedin_rule_based(full_name: str, company: str, linkedin_url:
         company_lower = company_lower.replace("'", "'").replace("'", "'").replace("`", "'")
         company_lower = re.sub(r"\s*'\s*", "'", company_lower)
         company_lower = re.sub(r"\s*-\s*", "-", company_lower)
-        
+
         # Remove legal suffixes
         LEGAL_SUFFIXES = [
             " corporation", " corp.", " corp", " incorporated", " inc.", " inc",
@@ -5031,8 +5031,8 @@ async def verify_linkedin_rule_based(full_name: str, company: str, linkedin_url:
         for suffix in LEGAL_SUFFIXES:
             if company_normalized.endswith(suffix):
                 company_normalized = company_normalized[:-len(suffix)].strip()
-                        break
-        
+                break
+
         company_words = company_normalized.split()
 
         # Normalize title for company check
@@ -5041,18 +5041,18 @@ async def verify_linkedin_rule_based(full_name: str, company: str, linkedin_url:
         first_title = re.sub(r"\s*-\s*", "-", first_title)
         if "| linkedin" in first_title:
             first_title = first_title.split("| linkedin")[0].strip()
-        
+
         first_snippet = target_result.get("snippet", "").lower()
         first_snippet = re.sub(r"\s*-\s*", "-", first_snippet)
 
         # Method 1: Exact company name in title
         company_in_title = company_normalized in first_title
-        
+
         # Method 2: All significant words in title
         if not company_in_title and len(company_words) > 1:
             significant_words = [w for w in company_words if len(w) > 2]
             company_in_title = all(word in first_title for word in significant_words)
-        
+
         # Method 3: Extract company from title pattern "at Company" or "@ Company"
         if not company_in_title:
             title_company_match = re.search(r'(?:at|@)\s+([^|\-]+?)(?:\s*[\|\-]|$)', first_title, re.IGNORECASE)
@@ -5062,15 +5062,15 @@ async def verify_linkedin_rule_based(full_name: str, company: str, linkedin_url:
                 extracted_company = re.sub(r'\s*\([^)]*\).*$', '', extracted_company)
                 extracted_company = re.sub(r'\s*\|.*$', '', extracted_company)
                 extracted_company = extracted_company.strip()
-                
+
                 # Normalize extracted company
                 extracted_normalized = extracted_company
                 for suffix in LEGAL_SUFFIXES:
                     if extracted_normalized.endswith(suffix):
                         extracted_normalized = extracted_normalized[:-len(suffix)].strip()
                         break
-                
-                    # Bidirectional containment check
+
+                # Bidirectional containment check
                 if len(extracted_normalized) >= 4 and len(company_normalized) >= 4:
                     if (extracted_normalized in company_normalized or
                         company_normalized in extracted_normalized):
@@ -5082,16 +5082,16 @@ async def verify_linkedin_rule_based(full_name: str, company: str, linkedin_url:
                             shorter = min(extracted_normalized, company_normalized, key=len)
                             if len(shorter) / len(longer) >= 0.6:
                                 company_in_title = True
-        
+
         # Method 4: Company in snippet
         company_in_snippet = False
         if not company_in_title:
-                if company_normalized in first_snippet:
+            if company_normalized in first_snippet:
+                company_in_snippet = True
+            elif len(company_words) > 1:
+                significant_words = [w for w in company_words if len(w) > 2]
+                if all(word in first_snippet for word in significant_words):
                     company_in_snippet = True
-                elif len(company_words) > 1:
-                    significant_words = [w for w in company_words if len(w) > 2]
-                    if all(word in first_snippet for word in significant_words):
-                        company_in_snippet = True
 
         company_match = company_in_title or company_in_snippet
 
@@ -5112,13 +5112,13 @@ async def verify_linkedin_rule_based(full_name: str, company: str, linkedin_url:
             reasoning = f"Rule-based PASS: URL={'exact' if url_match_exact else 'partial'}, name_match={name_match}, company_match={company_match}"
             print(f"   ✅ RULE-BASED VERIFICATION: PASSED")
             print(f"      {reasoning}")
-                    return True, reasoning
-                else:
-                    failures = []
-                    if not name_match:
-                        failures.append("name mismatch")
-                    if not company_match:
-                        failures.append("company mismatch")
+            return True, reasoning
+        else:
+            failures = []
+            if not name_match:
+                failures.append("name mismatch")
+            if not company_match:
+                failures.append("company mismatch")
 
             failure_str = ", ".join(failures)
             reasoning = f"Rule-based FAIL: {failure_str}"
@@ -5133,14 +5133,14 @@ async def verify_linkedin_rule_based(full_name: str, company: str, linkedin_url:
 async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
     """
     Stage 4: LinkedIn/GSE validation (HARD check).
-    
+
     Verifies lead using the new lead_validation module:
     1. Role format validation (before any API calls)
     2. Q4 search + Q1 fallback
     3. URL match, Name check, Company check
     4. Location validation with Q3 fallback
     5. Company LinkedIn validation (existing)
-    
+
     This is a HARD check - instant rejection if fails.
 
     Args:
@@ -5153,7 +5153,7 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
         full_name = lead.get("full_name") or lead.get("Full_name") or lead.get("Full Name")
         company = get_company(lead)
         linkedin_url = get_linkedin(lead)
-        
+
         # ========================================================================
         # NEW: Run lead validation (role format, URL, name, company, location)
         # ========================================================================
@@ -5189,7 +5189,7 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
             print(f"   📍 Stage 4: Location verified: '{validation_data['extracted_location']}' (method: {validation_data.get('location_method', '')})")
 
         print(f"   ✅ Stage 4: Lead validation passed (queries: {validation_data.get('query_used', 'N/A')})")
-        
+
         # ========================================================================
         # STAGE 4: COMPANY LINKEDIN VALIDATION
         # ========================================================================
@@ -7666,11 +7666,11 @@ def rule_based_pre_verification_stage5(
                 elif is_city_in_area(claimed_city, extracted_region):
                     region_match = True
                     match_reason = f"City '{claimed_city}' is within metro area '{extracted_region}'"
-            
+
             result["region_extracted"] = extracted_region
             result["region_confidence"] = 0.95 if region_match else 0.3
             result["region_reason"] = match_reason if region_match else "City not found in extracted location"
-            
+
             if region_match:
                 result["region_verified"] = True
                 print(f"   ✅ RULE-BASED REGION MATCH: '{claimed_region}' ≈ '{extracted_region}'")
@@ -8173,7 +8173,7 @@ def _gse_search_stage5_sync(
             # These removals reduce false positives from 77 to 56 per 800 leads
             
             # Query 1 (was Q4): LinkedIn URL + claimed role (90.7% accuracy)
-        if role_simplified:
+            if role_simplified:
                 queries.append(f'"{linkedin_url}" "{role_simplified}"')
             
             # Query 2 (was Q5): Name + role + company (91.3% accuracy, highest extraction)
@@ -8304,12 +8304,12 @@ def _gse_search_stage5_sync(
                     all_results.extend(matching_results)
                     # Check if we found a role from matching results
                     for r in matching_results:
-                    title = r.get("title", "")
-                    snippet = r.get("body", "")
-                    extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
+                        title = r.get("title", "")
+                        snippet = r.get("body", "")
+                        extracted = extract_role_from_search_title(title, snippet, company_name=company, full_name=full_name)
                         if extracted and len(extracted) > 3:
-                        role_found = True
-                        break
+                            role_found = True
+                            break
             elif search_type == "person_location":
                 # For person_location: only return if we actually extracted a location
                 # Otherwise continue to next query (e.g., Query 2 or 3)
@@ -8349,10 +8349,10 @@ def _gse_search_stage5_sync(
         return all_results
     
     # Try fallback queries for non-role searches
-        for query in fallback_queries:
-            results = gse_search_with_fallback(query, max_results)
-            if results:
-                return results
+    for query in fallback_queries:
+        results = gse_search_with_fallback(query, max_results)
+        if results:
+            return results
     
     return []
 
@@ -9031,7 +9031,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     # NOTE: Gateway (submit.py) already validates industry/sub_industry taxonomy.
     # Here we just extract the matched values and definition for LLM verification.
     # ========================================================================
-    
+
     # Get matched values (gateway already validated these)
     matched_industry = claimed_industry
     matched_sub_industry = claimed_sub_industry
@@ -9046,7 +9046,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     lead["taxonomy_matched_sub_industry"] = matched_sub_industry
     lead["taxonomy_pairing_valid"] = True
     sub_industry_definition = taxonomy_entry.get("definition", "") if taxonomy_entry else ""
-    
+
     # ========================================================================
     # ROLE & LOCATION: Trust Stage 4 verification
     # ========================================================================
@@ -9055,7 +9055,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     # - Location verification (city match + Q3 fallback)
     # Stage 5 only handles: Industry, Employee Count, Description
     # ========================================================================
-    
+
     role_verified_by_stage4 = lead.get("role_verified", False)
     role_method = lead.get("role_method", "")
     location_verified_by_stage4 = lead.get("location_verified", False)
@@ -9090,7 +9090,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             "failed_fields": ["region"],
             "note": "Stage 4 should verify location before Stage 5"
         }
-    
+
     # ========================================================================
     # COMPANY LINKEDIN DATA (FROM STAGE 4 CACHE)
     # ========================================================================
@@ -9098,25 +9098,25 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     # and cached the data. We just retrieve it here and determine what
     # additional GSE queries (if any) are needed.
     # ========================================================================
-    
+
     # Get cached company LinkedIn data from Stage 4
     company_linkedin_data = lead.get("company_linkedin_data")
     company_linkedin_verified = lead.get("company_linkedin_verified", False)
     company_linkedin_from_cache = lead.get("company_linkedin_from_cache", False)
-    
+
     # Determine what data is available from company LinkedIn
     has_industry_description = False
     has_employee_count = False
     use_company_linkedin_for_verification = False
-    
+
     if company_linkedin_data:
         has_industry_description = bool(
-            company_linkedin_data.get("industry") or 
+            company_linkedin_data.get("industry") or
             company_linkedin_data.get("description")
         )
         has_employee_count = bool(company_linkedin_data.get("employee_count"))
         use_company_linkedin_for_verification = has_industry_description or has_employee_count
-        
+
         cache_status = "from global cache" if company_linkedin_from_cache else "freshly scraped"
         print(f"   📦 COMPANY LINKEDIN DATA ({cache_status}):")
         print(f"      Has industry/description: {has_industry_description}")
@@ -9132,14 +9132,14 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     # - Employee Count (via company LinkedIn or GSE fallback)
     # Role and Location are already verified in Stage 4.
     # ========================================================================
-    
+
     industry_results = []
     employee_count_results = []
-    
+
     # Determine which GSE queries to run
     need_industry_gse = not has_industry_description
     need_employee_count_gse = not has_employee_count
-    
+
     # Get company LinkedIn slug for targeted employee count search
     company_linkedin_slug = None
     company_linkedin = lead.get("company_linkedin", "") or ""
@@ -9147,7 +9147,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         match = re.search(r'linkedin\.com/company/([^/]+)', company_linkedin)
         if match:
             company_linkedin_slug = match.group(1)
-    
+
     print(f"   🔍 GSE: Starting conditional searches...")
     print(f"      Industry/description: {'SKIP (have from company LinkedIn)' if has_industry_description else 'RUN (need fallback)'}")
     print(f"      Employee count: {'SKIP (have from company LinkedIn)' if has_employee_count else f'RUN (targeting {company_linkedin_slug})'}")
@@ -9155,32 +9155,32 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     # Build task list
     tasks = []
     task_names = []
-    
+
     if need_industry_gse:
         industry_task = _gse_search_stage5("industry", company=company, region_hint=claimed_region)
         tasks.append(industry_task)
         task_names.append("industry")
-    
+
     if need_employee_count_gse and company_linkedin_slug:
         employee_count_task = _gse_search_employee_count(company=company, company_linkedin_slug=company_linkedin_slug)
         tasks.append(employee_count_task)
         task_names.append("employee_count")
-    
+
     # Run searches in parallel
     results = await asyncio.gather(*tasks) if tasks else []
-    
+
     # Parse results
     result_idx = 0
     if need_industry_gse:
         if result_idx < len(results):
             industry_results = results[result_idx]
             result_idx += 1
-    
+
     if need_employee_count_gse and company_linkedin_slug:
         if result_idx < len(results):
             employee_count_results = results[result_idx]
             result_idx += 1
-    
+
     # Store search results
     lead["_stage5_search_results"] = {
         "industry_results": industry_results,
@@ -9195,7 +9195,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             print(f"   ⚠️ No industry results found (fallback)")
     else:
         print(f"   📦 Using company LinkedIn data for industry/description")
-    
+
     if need_employee_count_gse:
         if employee_count_results:
             print(f"   ✅ Found {len(employee_count_results)} employee count results (from company LinkedIn GSE)")
@@ -9297,7 +9297,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     lead["stage5_employee_count_match"] = employee_count_match
     lead["stage5_claimed_employee_count"] = claimed_employee_count
     lead["stage5_extracted_employee_count"] = extracted_employee_count
-    
+
     # ========================================================================
     # LLM VERIFICATION for Industry/Sub-industry
     # ========================================================================
@@ -9322,7 +9322,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             company_linkedin_context += f"- Employee Count: {company_linkedin_data['employee_count']}\n"
         if company_linkedin_data.get("location"):
             company_linkedin_context += f"- Location: {company_linkedin_data['location']}\n"
-    
+
     industry_context = ""
     if industry_results:
         industry_context = "\nINDUSTRY SEARCH RESULTS:\n"
@@ -9330,9 +9330,9 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             title = result.get("title", "")
             snippet = result.get("snippet", result.get("body", ""))
             industry_context += f"{i}. {title}\n   {snippet[:150]}\n"
-    
+
     all_search_context = company_linkedin_context + industry_context
-    
+
     if not all_search_context.strip():
         print(f"   ❌ AUTO-FAIL: No data for industry verification")
         return False, {
@@ -9341,11 +9341,11 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             "message": "No company LinkedIn data or search results available for industry verification",
             "failed_fields": ["industry"]
         }
-    
+
     # Build LLM prompt (industry/sub-industry/description only)
     claims_to_verify = []
     verification_rules = []
-    
+
     # Role and region already verified by Stage 4
     claims_to_verify.append(f'1. ROLE: "{claimed_role}" ✅ (Verified in Stage 4)')
     claims_to_verify.append(f'2. REGION: "{claimed_region}" ✅ (Verified in Stage 4)')
@@ -9410,7 +9410,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     
     claims_section = "\n".join(claims_to_verify)
     rules_section = "\n".join(verification_rules)
-    
+
     # Response fields - only industry/sub-industry/description (role/region already verified)
     response_fields = []
     response_fields.append('"industry_match": true/false,\n    "extracted_industry": "industry from search"')
@@ -9486,7 +9486,7 @@ RESPOND WITH JSON ONLY:
                     llm_response = "\n".join(lines).strip()
                 
                 result = json.loads(llm_response)
-                
+
                 # Role and region already verified in Stage 4 - trust those results
                 role_match = True  # Already verified in Stage 4
                 region_match = True  # Already verified in Stage 4
@@ -9594,7 +9594,7 @@ RESPOND WITH JSON ONLY:
                 # All checks passed if industry, sub-industry, and description match
                 # (role and region already verified in Stage 4)
                 all_match = industry_match and sub_industry_match and description_match and description_coherent
-                
+
                 # Store results on lead
                 lead["stage5_role_match"] = True  # Already verified in Stage 4
                 lead["stage5_region_match"] = True  # Already verified in Stage 4
@@ -9602,12 +9602,12 @@ RESPOND WITH JSON ONLY:
                 lead["stage5_extracted_role"] = claimed_role  # From Stage 4 verification
                 lead["stage5_extracted_region"] = claimed_region  # From Stage 4 verification
                 lead["stage5_extracted_industry"] = extracted_industry
-                
+
                 # Use miner's original country/state/city fields (submitted via gateway)
-                    lead["region_country"] = lead.get("country", "")
-                    lead["region_state"] = lead.get("state", "")
-                    lead["region_city"] = lead.get("city", "")
-                
+                lead["region_country"] = lead.get("country", "")
+                lead["region_state"] = lead.get("state", "")
+                lead["region_city"] = lead.get("city", "")
+
                 if all_match:
                     return True, None
                 else:
@@ -9616,7 +9616,7 @@ RESPOND WITH JSON ONLY:
                         failed_fields.append("industry")
                     if not sub_industry_match:
                         failed_fields.append("sub_industry")
-                    
+
                     return False, {
                         "stage": "Stage 5: Industry/Sub-Industry",
                         "check_name": "check_stage5_unified",
@@ -9769,7 +9769,7 @@ def _get_icp_bonus(lead: dict) -> int:
         icp_sub_industries = icp.get("sub_industries", [])
         if icp_sub_industries != ["*"]:
             if not matches_any(sub_industry, icp_sub_industries):
-            continue
+                continue
         
         # Check regions if specified
         if "regions" in icp:
@@ -9827,7 +9827,7 @@ def is_enterprise_company(lead: dict) -> bool:
     """
     employee_count = lead.get("employee_count", "")
     if not employee_count:
-    return False
+        return False
     
     # Parse the employee count
     parsed = parse_employee_count(str(employee_count))

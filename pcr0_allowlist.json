@@ -1,6 +1,6 @@
 {
   "_comment": "PCR0 allowlist for LeadPoet TEE verification. Updated by CI/CD on each enclave build.",
-  "_updated": "2026-01-07T19:00:00Z",
+  "_updated": "2026-02-06T03:30:00Z",
   "_repo": "https://github.com/LeadPoet/Bittensor-subnet",
   
   "gateway_pcr0": [
@@ -24,6 +24,12 @@
       "version": "v1.0.1-temp",
       "deployed": "2026-01-21",
       "notes": "TEMPORARY - validator on commit 4014536, remove after enclave rebuild"
+    },
+    {
+      "pcr0": "9f7a630b6d05300e4be7d4afb25e923fced28bad741f9fc7b44cc0d2db1e13a041ff8a60a8db85f916226cae752703ae",
+      "version": "v1.1.0",
+      "deployed": "2026-02-06",
+      "notes": "IMMEDIATE REVEAL MODE - validator with weight calculation and reveal removal changes"
     }
   ]
 }

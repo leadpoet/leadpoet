@@ -2,8 +2,8 @@
 Trustless Rate Limiter for Gateway
 
 Prevents DoS attacks by rate-limiting miner submissions:
-- 600 submissions max per miner per day
-- 120 rejections max per miner per day
+- 1000 submissions max per miner per day
+- 200 rejections max per miner per day
 - Daily reset at midnight UTC (00:00 UTC)
 
 Design:
@@ -46,8 +46,8 @@ _cache_loaded = False  # Track if we've loaded from Supabase yet
 
 # Rate limit constants
 # Production limits to maintain lead quality and prevent spam
-MAX_SUBMISSIONS_PER_DAY = 600
-MAX_REJECTIONS_PER_DAY = 120
+MAX_SUBMISSIONS_PER_DAY = 1000
+MAX_REJECTIONS_PER_DAY = 200
 MIN_SECONDS_BETWEEN_SUBMISSIONS = 45  # Cooldown between submissions (anti-spam)
 
 def get_next_midnight_utc() -> datetime:

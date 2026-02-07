@@ -263,16 +263,16 @@ EOF
 
 To maintain lead quality and prevent spam, we enforce daily submission limits server-side. Think of it as guardrails to keep the lead pool high-quality.
 
-**Daily Limits (Reset at 12:00 AM EST):**
-- **500 submission attempts per day** - Counts all submission attempts (including duplicates/invalid)
-- **100 rejections per day** - Includes:
+**Daily Limits (Reset at 12:00 AM UTC):**
+- **1000 submission attempts per day** - Counts all submission attempts (including duplicates/invalid)
+- **200 rejections per day** - Includes:
   - Duplicate submissions
   - Missing required fields
   - **Validator consensus rejections** - When validator consensus rejects your lead based on quality checks
 
 **What Happens at Rate Limit:**
 
-When you hit the rejection limit, all subsequent submissions are blocked until the daily reset at midnight EST. All rate limit events are logged to the TEE buffer and permanently stored on Arweave for transparency.
+When you hit the rejection limit, all subsequent submissions are blocked until the daily reset at midnight UTC. All rate limit events are logged to the TEE buffer and permanently stored on Arweave for transparency.
 
 ---
 
@@ -654,7 +654,7 @@ Common Errors:
 
 **Lead submission rejected**
 - Check lead meets all requirements (valid email, name-email matching, required fields)
-- Verify you haven't hit daily rate limits (500 submissions, 100 rejections per day)
+- Verify you haven't hit daily rate limits (1000 submissions, 200 rejections per day)
 - Check gateway logs on Arweave for specific rejection reasons
 
 **Consensus results not appearing**

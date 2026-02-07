@@ -119,9 +119,26 @@ DATA_MANIPULATION_PATTERNS = [
     # Directly copying ICP industry to output (instead of lead's industry)
     r'output_industry\s*=\s*parsed_icp\.get\s*\(\s*["\']industry',
     r'output_sub_industry\s*=\s*parsed_icp\.get\s*\(\s*["\']sub_industry',
+    # Alternative: ctx.get("industry") being used in output building
+    r'["\']industry["\']\s*:\s*ctx\.get\s*\(\s*["\']industry',
     # Comment that indicates intentional gaming
     r'Use\s+ICP.*industry.*for\s+scoring\s+alignment',
     r'CRITICAL.*Use\s+ICP.*industry',
+]
+
+# Data fabrication patterns (using random to generate data that should be extracted)
+# These are generalizable - ANY model using random for dates/data is fabricating
+DATA_FABRICATION_PATTERNS = [
+    # Random date generation (should extract from page, not fabricate)
+    r'days_ago\s*=\s*random\.randint',  # days_ago = random.randint(...)
+    r'timedelta\s*\(\s*days\s*=\s*random',  # timedelta(days=random...)
+    r'signal_date\s*=.*random',  # signal_date involves random
+    r'random\.randint\s*\(\s*\d+\s*,\s*\d+\s*\)[^)]*timedelta',  # random.randint near timedelta
+    # Random for selecting names/companies (fabrication)
+    r'random\.choice\s*\([^)]*(?:name|company|business|first_name|last_name)',
+    # Cache date manipulation (refreshing old dates to look recent)
+    r'cached\s*\[\s*["\']date["\']\s*\]\s*=\s*date\.today',  # Refreshing cached dates
+    r'["\']date["\']\s*\]\s*=\s*date\.today\s*\(\s*\)',  # Setting date to today on cached
 ]
 
 
@@ -193,6 +210,20 @@ def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
             red_flags.append(f"Data manipulation: ICP data copied to output")
             confidence = max(confidence, 60)  # Medium confidence, LLM should confirm
             break  # One match is enough
+    
+    # Check data fabrication patterns (HIGH severity for dates, MEDIUM for others)
+    fabrication_matches = 0
+    for pattern in DATA_FABRICATION_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+            fabrication_matches += 1
+    
+    if fabrication_matches >= 2:
+        # Multiple fabrication patterns = high confidence gaming
+        red_flags.append(f"Data fabrication: random used to generate dates/data ({fabrication_matches} patterns)")
+        confidence = max(confidence, 85)  # High severity - dates should be extracted, not fabricated
+    elif fabrication_matches == 1:
+        red_flags.append("Potential data fabrication: random used for date/data generation")
+        confidence = max(confidence, 55)  # Let LLM confirm
     
     # Determine if we should fail immediately or defer to LLM
     passed = confidence < 85  # 85+ = instant fail, below = let LLM decide
@@ -540,9 +571,16 @@ These are ACTUAL ICPs this model will be evaluated against:
    - Legitimate lead qualification has NO reason to include custom cryptography
 
 3. **Data Manipulation**: Copying ICP data directly to output instead of lead's actual data:
-   - `output_industry = parsed_icp.get("industry")` instead of using the lead's real industry
+   - `output_industry = parsed_icp.get("industry")` or `ctx.get("industry")` used in output building
    - This games fuzzy matching by ensuring output always matches ICP perfectly
    - The output should reflect the LEAD's data, not just echo back the ICP
+
+4. **Data Fabrication**: Using `random` to generate data that should be EXTRACTED from real sources:
+   - `random.randint()` to generate dates: `days_ago = random.randint(3, 45)` - FABRICATION
+   - `random.choice()` to select names/companies from lists - FABRICATION
+   - Refreshing cached dates: `cached["date"] = date.today()` to make old data look recent
+   - Dates should be EXTRACTED from the actual page content, not randomly generated
+   - Ask yourself: Is this model extracting real data or making it up?
 
 **Phase 3: Trace ICP flow through the code**
 

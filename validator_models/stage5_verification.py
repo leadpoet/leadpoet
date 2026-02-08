@@ -81,7 +81,10 @@ CLASSIFY_LLM_MODEL = "google/gemini-2.5-flash-lite"
 TOP_K_CANDIDATES = 30
 
 # Prompts (same as tested in classify_pipeline.py)
-VALIDATE_REFINE_PROMPT = """Compare business activities only (ignore name/location). If same business type, output only a 50-80 word refined description focusing on products/services/target market with specific terminology. If different businesses, output only: INVALID
+VALIDATE_REFINE_PROMPT = """Do these describe the SAME TYPE of business? Ignore company name, location, and exact wording. Focus only on core business activities.
+
+If YES (same type of business): Output a 50-80 word refined description focusing on products/services/target market.
+If NO (completely different industries or business types): Output only: INVALID
 
 Miner: {miner_description}
 
@@ -222,8 +225,19 @@ def _find_top_candidates(query_embedding: np.ndarray, taxonomy_cache: dict, k: i
     return candidates
 
 
-def _format_candidates_for_prompt(candidates: List[dict]) -> Tuple[str, List[dict]]:
-    """Format candidates as numbered list with industry/sub_industry pairs."""
+def _format_candidates_for_prompt(
+    candidates: List[dict],
+    miner_industry: str = "",
+    miner_sub_industry: str = "",
+    valid_pairs: set = None
+) -> Tuple[str, List[dict]]:
+    """
+    Format candidates as numbered list with industry/sub_industry pairs.
+
+    If miner_industry and miner_sub_industry are provided and form a valid
+    taxonomy pair, they are added to the candidate list so the LLM can
+    consider them even if embeddings didn't rank them highly.
+    """
     pairs = []
     for c in candidates:
         sub = c['sub_industry']
@@ -240,6 +254,20 @@ def _format_candidates_for_prompt(candidates: List[dict]) -> Tuple[str, List[dic
             unique_pairs.append(p)
 
     unique_pairs = unique_pairs[:40]  # Limit to 40
+
+    # Add miner's claimed pair if valid and not already in list
+    if miner_industry and miner_sub_industry and valid_pairs:
+        # Check case-insensitively against valid_pairs
+        miner_pair_lower = (miner_industry.lower(), miner_sub_industry.lower())
+        valid_pairs_lower = {(ind.lower(), sub.lower()) for ind, sub in valid_pairs}
+
+        if miner_pair_lower in valid_pairs_lower:
+            # Check if already in list (case-insensitive)
+            existing_pairs = {(p['industry'].lower(), p['sub_industry'].lower()) for p in unique_pairs}
+            if miner_pair_lower not in existing_pairs:
+                unique_pairs.append({'industry': miner_industry, 'sub_industry': miner_sub_industry})
+                print(f"   ℹ️ Added miner's claimed pair to candidates: {miner_industry} / {miner_sub_industry}")
+
     prompt_str = '\n'.join([f"{i+1}. {p['industry']} / {p['sub_industry']}" for i, p in enumerate(unique_pairs)])
 
     return prompt_str, unique_pairs
@@ -256,8 +284,8 @@ def _clean_refined_description(response: str) -> Optional[str]:
     if text.upper() == 'INVALID' or text.upper().startswith('INVALID'):
         return None
 
-    # Remove SAME prefix
-    text = re.sub(r'^SAME\s*\n*', '', text, flags=re.I).strip()
+    # Remove YES/SAME prefix (LLM sometimes prefixes with "YES" or "SAME")
+    text = re.sub(r'^(YES|SAME)\s*\n*', '', text, flags=re.I).strip()
 
     # Check minimum quality (at least 30 chars, 5 words)
     if len(text) < 30 or len(text.split()) < 5:
@@ -295,7 +323,9 @@ async def classify_company_industry(
     miner_description: str,
     extracted_content: str,
     extracted_industry: str = "",
-    company_name: str = ""
+    company_name: str = "",
+    miner_industry: str = "",
+    miner_sub_industry: str = ""
 ) -> Tuple[List[dict], str, str]:
     """
     Classify company into top 3 industry/sub-industry pairs using embeddings.
@@ -305,11 +335,18 @@ async def classify_company_industry(
     2. Stage 2: Embed refined description
     3. Stage 3: Find top 30 candidates, LLM ranks top 3
 
+    If miner_industry and miner_sub_industry are provided, they are added to
+    the candidate list so the LLM can evaluate them even if embeddings didn't
+    rank them in top 30. This gives miners a fair chance when their claim is
+    valid but uses terminology that doesn't match embedding similarity.
+
     Args:
         miner_description: Miner's claimed company description
         extracted_content: Extracted content from LinkedIn/website
         extracted_industry: Extracted industry from LinkedIn (optional)
         company_name: Company name for context
+        miner_industry: Miner's claimed industry (optional)
+        miner_sub_industry: Miner's claimed sub_industry (optional)
 
     Returns:
         (classifications, refined_description, error_message)
@@ -374,7 +411,13 @@ async def classify_company_industry(
     # ========================================================================
     print(f"   🔍 CLASSIFY Stage 3: LLM ranking top 3...")
 
-    candidates_str, candidates_list = _format_candidates_for_prompt(candidates)
+    # Include miner's claimed pair in candidates so LLM can evaluate it
+    candidates_str, candidates_list = _format_candidates_for_prompt(
+        candidates,
+        miner_industry=miner_industry,
+        miner_sub_industry=miner_sub_industry,
+        valid_pairs=taxonomy.get('valid_pairs')
+    )
 
     prompt2 = CLASSIFY_PROMPT.format(
         refined_description=refined,
@@ -3378,7 +3421,9 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                 miner_description=claimed_description,
                 extracted_content=extracted_content,
                 extracted_industry=extracted_industry,
-                company_name=company
+                company_name=company,
+                miner_industry=claimed_industry,
+                miner_sub_industry=claimed_sub_industry
             )
 
             if classifications and len(classifications) >= 1:
@@ -3442,7 +3487,9 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                 miner_description=extracted_content,  # Use extracted as miner description
                 extracted_content=extracted_content,
                 extracted_industry=extracted_industry,
-                company_name=company
+                company_name=company,
+                miner_industry=claimed_industry,
+                miner_sub_industry=claimed_sub_industry
             )
             if classifications and len(classifications) >= 1:
                 for i, c in enumerate(classifications[:3], 1):

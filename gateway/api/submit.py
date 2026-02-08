@@ -791,8 +791,8 @@ def check_description_sanity(desc_raw: str) -> tuple:
 # ============================================================
 # Industry Taxonomy Check Function
 # ============================================================
-# Load industry taxonomy from validator_models (723 sub-industries)
-from validator_models.industry_taxonomy import INDUSTRY_TAXONOMY
+# Load industry taxonomy from gateway utils (723 sub-industries)
+from gateway.utils.industry_taxonomy import INDUSTRY_TAXONOMY
 
 # Build set of valid industries (parent categories)
 VALID_INDUSTRIES = set()

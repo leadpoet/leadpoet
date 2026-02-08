@@ -4117,7 +4117,7 @@ class Validator(BaseValidatorNeuron):
             evaluation_id = work.get("evaluation_id")
             model_code_b64 = work.get("agent_code", "")
             runs = work.get("evaluation_runs", [])
-            is_rebenchmark = work.get("is_rebenchmark", False)  # Skip hardcoding check for rebenchmarks
+            is_rebenchmark = work.get("is_rebenchmark", False)  # Whether this is a rebenchmark of existing champion
             model_name = work.get("model_name", "Unknown")
             
             # Decode model code
@@ -4129,13 +4129,15 @@ class Validator(BaseValidatorNeuron):
             print(f"   Model Name: {model_name}")
             print(f"   ICPs to test: {len(runs)}")
             print(f"   Model code size: {len(model_code)} bytes")
-            print(f"   Is Rebenchmark: {'Yes (skipping hardcoding check)' if is_rebenchmark else 'No'}")
+            print(f"   Is Rebenchmark: {'Yes' if is_rebenchmark else 'No'}")
             print(f"{'='*60}")
             
             # ═══════════════════════════════════════════════════════════════════════
-            # HARDCODING DETECTION: Analyze code BEFORE running (skip for rebenchmarks)
+            # HARDCODING DETECTION: Analyze code BEFORE running (ALL evaluations)
+            # Note: Run on rebenchmarks too - catches models that became champion
+            # before gaming detection was added
             # ═══════════════════════════════════════════════════════════════════════
-            if not is_rebenchmark and model_code:
+            if model_code:
                 try:
                     from qualification.validator.hardcoding_detector import (
                         analyze_model_for_hardcoding,
@@ -7185,9 +7187,10 @@ def run_dedicated_qualification_worker(config):
                             print(f"      ⚠️ Could not extract code content: {extract_err}")
                     
                     # ═══════════════════════════════════════════════════════════════
-                    # HARDCODING DETECTION: Skip for rebenchmarks
+                    # HARDCODING DETECTION: Run on ALL evaluations (including rebenchmarks)
+                    # Note: Catches models that became champion before detection was added
                     # ═══════════════════════════════════════════════════════════════
-                    if model_code and not is_rebenchmark:
+                    if model_code:
                         try:
                             from qualification.validator.hardcoding_detector import (
                                 analyze_model_for_hardcoding,

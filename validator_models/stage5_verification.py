@@ -3469,7 +3469,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         sub_industry_top3["sub_industry_match1"] = claimed_sub_industry
         refined_description = claimed_description if claimed_description else ""
 
-    # Store for gateway to insert
+    # Store for gateway to insert (automated_checks.py reads these keys)
     lead["_insert_new_company"] = True
     lead["_company_refined_description"] = refined_description
     lead["_company_industry_top3"] = industry_top3

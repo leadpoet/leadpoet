@@ -1243,8 +1243,13 @@ async def compute_epoch_consensus(epoch_id: int):
                                 if isinstance(evidence_blob, str):
                                     evidence_blob = json.loads(evidence_blob)
 
+                                # Company data is in rejection_reason (from stage5 return)
+                                rejection_reason = evidence_blob.get("rejection_reason", {})
+                                if isinstance(rejection_reason, str):
+                                    rejection_reason = json.loads(rejection_reason)
+
                                 # Check if rejection includes company data to store
-                                company_action = evidence_blob.get("company_table_action")
+                                company_action = rejection_reason.get("company_table_action")
                                 if company_action == "insert":
                                     print(f"         📝 Rejected lead but inserting company with correct classification: {company_linkedin[:50]}...")
                                     insert_result = await asyncio.to_thread(
@@ -1252,13 +1257,13 @@ async def compute_epoch_consensus(epoch_id: int):
                                         company_linkedin=company_linkedin,
                                         company_name=lead_blob.get("business", ""),
                                         company_website=lead_blob.get("website", ""),
-                                        company_description=evidence_blob.get("company_refined_description", ""),
+                                        company_description=rejection_reason.get("company_refined_description", ""),
                                         company_hq_country=lead_blob.get("hq_country", ""),
                                         company_hq_state=lead_blob.get("hq_state"),
                                         company_hq_city=lead_blob.get("hq_city"),
-                                        industry_top3=evidence_blob.get("company_industry_top3", {}),
-                                        sub_industry_top3=evidence_blob.get("company_sub_industry_top3", {}),
-                                        company_employee_count=evidence_blob.get("company_verified_employee_count", "")
+                                        industry_top3=rejection_reason.get("company_industry_top3", {}),
+                                        sub_industry_top3=rejection_reason.get("company_sub_industry_top3", {}),
+                                        company_employee_count=rejection_reason.get("company_verified_employee_count", "")
                                     )
                                     if insert_result:
                                         print(f"         ✅ Company inserted (lead rejected due to industry mismatch)")

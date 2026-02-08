@@ -3398,7 +3398,39 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                     industry_top3[f"industry_match{i}"] = c['industry']
                     sub_industry_top3[f"sub_industry_match{i}"] = c['sub_industry']
                 print(f"   ✅ CLASSIFY: Top 3 = {[(c['industry'], c['sub_industry']) for c in classifications[:3]]}")
+
+                # Validate miner's claimed pair is in top 3
+                if claimed_industry and claimed_sub_industry:
+                    claimed_pair = (claimed_industry.lower(), claimed_sub_industry.lower())
+                    top3_pairs = [(c['industry'].lower(), c['sub_industry'].lower()) for c in classifications[:3]]
+                    if claimed_pair not in top3_pairs:
+                        print(f"   ❌ CLASSIFY: Miner claimed pair {claimed_pair} not in top 3 - REJECT but store company")
+                        # Store company with correct top 3 for future validation
+                        return False, {
+                            "stage": "Stage 5: Industry",
+                            "check_name": "check_stage5_unified",
+                            "message": f"Claimed industry/sub-industry pair not in top 3 classifications",
+                            "failed_fields": ["industry", "sub_industry"],
+                            "claimed": f"{claimed_industry} / {claimed_sub_industry}",
+                            "top3": top3_pairs,
+                            # Include company data so gateway can still insert it
+                            "company_table_action": "insert",
+                            "company_refined_description": refined_description,
+                            "company_industry_top3": industry_top3,
+                            "company_sub_industry_top3": sub_industry_top3,
+                            "company_verified_employee_count": claimed_employee_count
+                        }
+                    print(f"   ✅ CLASSIFY: Miner claimed pair matches top 3")
             else:
+                # REJECT if miner description is invalid (doesn't match website)
+                if classify_error == "stage1_invalid_description":
+                    print(f"   ❌ CLASSIFY: Miner description does not match website content - REJECT")
+                    return False, {
+                        "stage": "Stage 5: Description",
+                        "check_name": "check_stage5_unified",
+                        "message": "Miner description does not match website content (INVALID)",
+                        "failed_fields": ["description"]
+                    }
                 print(f"   ⚠️ CLASSIFY: Failed ({classify_error}), using miner's claimed values")
                 industry_top3["industry_match1"] = claimed_industry
                 sub_industry_top3["sub_industry_match1"] = claimed_sub_industry

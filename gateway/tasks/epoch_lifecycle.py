@@ -1133,18 +1133,13 @@ async def compute_epoch_consensus(epoch_id: int):
                 
                 if outcome['final_decision'] == 'approve':
                     # ================================================================
-                    # Company Table Update (for approved leads only)
-                    # ================================================================
-                    # Check evidence_blob for company table action from Stage 5.
-                    # - insert: New company, add to company_information_table
-                    # - update_employee_count: Update existing company's employee count
+                    # Company Table Update (for approved leads)
                     # ================================================================
                     try:
                         lead_blob = all_lead_blobs.get(lead_id, {})
                         company_linkedin = lead_blob.get("company_linkedin", "")
 
                         if company_linkedin:
-                            # Get first approving validator's evidence for company data
                             lead_evidence = evidence_by_lead.get(lead_id, [])
                             approving_evidence = [
                                 ev for ev in lead_evidence
@@ -1161,7 +1156,6 @@ async def compute_epoch_consensus(epoch_id: int):
 
                                 if company_action == "insert":
                                     print(f"         📝 Inserting new company: {company_linkedin[:50]}...")
-                                    # Run sync DB function in thread to avoid blocking event loop
                                     insert_result = await asyncio.to_thread(
                                         insert_company,
                                         company_linkedin=company_linkedin,
@@ -1182,7 +1176,6 @@ async def compute_epoch_consensus(epoch_id: int):
 
                                 elif company_action == "update_employee_count":
                                     print(f"         📝 Updating employee count: {company_linkedin[:50]}...")
-                                    # Run sync DB function in thread to avoid blocking event loop
                                     update_result = await asyncio.to_thread(
                                         update_employee_count,
                                         company_linkedin=company_linkedin,
@@ -1227,7 +1220,55 @@ async def compute_epoch_consensus(epoch_id: int):
                             
                     except Exception as e:
                         print(f"         ⚠️  Failed to increment rejection count: {e}")
-                
+
+                    # ================================================================
+                    # Company Table Insert (for rejected leads with industry mismatch)
+                    # ================================================================
+                    # When miner's claimed industry/sub-industry doesn't match top 3,
+                    # we still insert the company with correct classification for future validation.
+                    try:
+                        lead_blob = all_lead_blobs.get(lead_id, {})
+                        company_linkedin = lead_blob.get("company_linkedin", "")
+
+                        if company_linkedin:
+                            lead_evidence = evidence_by_lead.get(lead_id, [])
+                            # Check rejection evidence for company_table_action
+                            rejecting_evidence = [
+                                ev for ev in lead_evidence
+                                if ev.get('decision') == 'reject' and ev.get('evidence_blob')
+                            ]
+
+                            for ev in rejecting_evidence:
+                                evidence_blob = ev.get("evidence_blob", {})
+                                if isinstance(evidence_blob, str):
+                                    evidence_blob = json.loads(evidence_blob)
+
+                                # Check if rejection includes company data to store
+                                company_action = evidence_blob.get("company_table_action")
+                                if company_action == "insert":
+                                    print(f"         📝 Rejected lead but inserting company with correct classification: {company_linkedin[:50]}...")
+                                    insert_result = await asyncio.to_thread(
+                                        insert_company,
+                                        company_linkedin=company_linkedin,
+                                        company_name=lead_blob.get("business", ""),
+                                        company_website=lead_blob.get("website", ""),
+                                        company_description=evidence_blob.get("company_refined_description", ""),
+                                        company_hq_country=lead_blob.get("hq_country", ""),
+                                        company_hq_state=lead_blob.get("hq_state"),
+                                        company_hq_city=lead_blob.get("hq_city"),
+                                        industry_top3=evidence_blob.get("company_industry_top3", {}),
+                                        sub_industry_top3=evidence_blob.get("company_sub_industry_top3", {}),
+                                        company_employee_count=evidence_blob.get("company_verified_employee_count", "")
+                                    )
+                                    if insert_result:
+                                        print(f"         ✅ Company inserted (lead rejected due to industry mismatch)")
+                                    else:
+                                        print(f"         ⚠️  Failed to insert company")
+                                    break  # Only insert once
+
+                    except Exception as e:
+                        print(f"         ⚠️  Company table insert (rejected lead) failed: {e}")
+
                     print(f"      ✅ Lead {lead_id[:8]}...: DENIED (rep: {final_rep_score if final_rep_score else 0:.2f}, validators: {len(validators_responded)})")
                     return ('denied', lead_id)
             

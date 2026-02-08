@@ -964,7 +964,7 @@ def normalize_lead_fields(lead_blob: dict) -> dict:
         "full_name",        # e.g., "john smith" → "John Smith"
         "first",            # e.g., "john" → "John"
         "last",             # e.g., "smith" → "Smith"
-        "business",         # e.g., "acme corporation" → "Acme Corporation"
+        # "business" removed - company name is case-sensitive for validation
     ]
     
     # Fields to lowercase (email should always be lowercase)

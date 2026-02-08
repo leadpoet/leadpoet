@@ -3431,15 +3431,21 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                         "message": "Miner description does not match website content (INVALID)",
                         "failed_fields": ["description"]
                     }
-                print(f"   ⚠️ CLASSIFY: Failed ({classify_error}), using miner's claimed values")
-                industry_top3["industry_match1"] = claimed_industry
-                sub_industry_top3["sub_industry_match1"] = claimed_sub_industry
-                refined_description = extracted_content if extracted_content else claimed_description
+                print(f"   ❌ CLASSIFY: Failed ({classify_error}) - REJECT")
+                return False, {
+                    "stage": "Stage 5: Classification",
+                    "check_name": "check_stage5_unified",
+                    "message": f"Classification failed: {classify_error}",
+                    "failed_fields": ["industry", "sub_industry"]
+                }
         except Exception as e:
-            print(f"   ⚠️ CLASSIFY: Exception - {e}, using miner's claimed values")
-            industry_top3["industry_match1"] = claimed_industry
-            sub_industry_top3["sub_industry_match1"] = claimed_sub_industry
-            refined_description = extracted_content if extracted_content else claimed_description
+            print(f"   ❌ CLASSIFY: Exception - {e} - REJECT")
+            return False, {
+                "stage": "Stage 5: Classification",
+                "check_name": "check_stage5_unified",
+                "message": f"Classification failed with exception: {e}",
+                "failed_fields": ["industry", "sub_industry"]
+            }
     elif extracted_content:
         # No miner description but have extracted content from website/GSE
         print(f"   ⚠️ No miner description, using extracted content for classification...")
@@ -3456,18 +3462,29 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                     sub_industry_top3[f"sub_industry_match{i}"] = c['sub_industry']
                 print(f"   ✅ CLASSIFY: Top 3 stored")
             else:
-                industry_top3["industry_match1"] = claimed_industry
-                sub_industry_top3["sub_industry_match1"] = claimed_sub_industry
-                refined_description = extracted_content
+                print(f"   ❌ CLASSIFY: No classifications returned - REJECT")
+                return False, {
+                    "stage": "Stage 5: Classification",
+                    "check_name": "check_stage5_unified",
+                    "message": "Classification failed: no results returned",
+                    "failed_fields": ["industry", "sub_industry"]
+                }
         except Exception as e:
-            industry_top3["industry_match1"] = claimed_industry
-            sub_industry_top3["sub_industry_match1"] = claimed_sub_industry
-            refined_description = extracted_content
+            print(f"   ❌ CLASSIFY: Exception - {e} - REJECT")
+            return False, {
+                "stage": "Stage 5: Classification",
+                "check_name": "check_stage5_unified",
+                "message": f"Classification failed with exception: {e}",
+                "failed_fields": ["industry", "sub_industry"]
+            }
     else:
-        print(f"   ⚠️ No descriptions available, using miner's claimed values")
-        industry_top3["industry_match1"] = claimed_industry
-        sub_industry_top3["sub_industry_match1"] = claimed_sub_industry
-        refined_description = claimed_description if claimed_description else ""
+        print(f"   ❌ No descriptions available - REJECT")
+        return False, {
+            "stage": "Stage 5: Classification",
+            "check_name": "check_stage5_unified",
+            "message": "No description available for classification (miner description and website content both empty)",
+            "failed_fields": ["description"]
+        }
 
     # Store for gateway to insert (automated_checks.py reads these keys)
     lead["_insert_new_company"] = True

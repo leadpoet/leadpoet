@@ -45,9 +45,9 @@ from Leadpoet.utils.utils_lead_extraction import (
 )
 from validator_models.industry_taxonomy import INDUSTRY_TAXONOMY
 
-# Load environment variables
-load_dotenv()
-OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
+# Load environment variables (explicit path to ensure .env is found regardless of working directory)
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
 # Proxy configuration for containerized validators
 HTTP_PROXY_URL = os.environ.get('HTTP_PROXY')
@@ -139,7 +139,7 @@ def _load_taxonomy_embeddings():
 def _get_embedding_sync(text: str) -> Optional[np.ndarray]:
     """Get embedding for text via OpenRouter (synchronous)."""
     if not OPENROUTER_KEY:
-        print("   ⚠️ OPENROUTER_API_KEY not set")
+        print("   ⚠️ OPENROUTER_KEY not set")
         return None
     try:
         resp = requests.post(
@@ -167,7 +167,7 @@ def _get_embedding_sync(text: str) -> Optional[np.ndarray]:
 def _call_llm_sync(prompt: str) -> Optional[str]:
     """Call Gemini 2.5 Flash Lite via OpenRouter (synchronous)."""
     if not OPENROUTER_KEY:
-        print("   ⚠️ OPENROUTER_API_KEY not set")
+        print("   ⚠️ OPENROUTER_KEY not set")
         return None
     try:
         resp = requests.post(
@@ -3262,34 +3262,22 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             print(f"   ✅ W5: Domain '{miner_domain}' confirmed")
 
     # ========================================================================
-    # W2: linkedin.com/company/{slug} "Website" (extract Website: url)
+    # W2: linkedin.com/company/{slug} (check if domain appears in snippet)
     # ========================================================================
     if not website_confirmed and miner_domain:
-        w2_query = f'linkedin.com/company/{slug} "Website"'
+        w2_query = f'linkedin.com/company/{slug}'
         print(f"   🔍 W2: {w2_query}")
         w2_result = await asyncio.to_thread(_gse_search_sync, w2_query, 10)
 
         for r in w2_result.get('results', []):
             if _check_exact_slug_match(r.get('link', ''), slug):
-                combined = f"{r.get('title', '')} {r.get('snippet', '')}"
-                extracted_website = _extract_website_from_snippet(combined)
-                if extracted_website:
-                    extracted_domain = _normalize_domain(extracted_website)
-                    if extracted_domain == miner_domain:
-                        website_confirmed = True
-                        website_source = 'w2'
-                        print(f"   ✅ W2: Domain '{miner_domain}' matches extracted '{extracted_domain}'")
-                        break
-                    else:
-                        print(f"   ❌ W2: Domain mismatch - claimed '{miner_domain}' vs extracted '{extracted_domain}'")
-                        return False, {
-                            "stage": "Stage 5: Website",
-                            "check_name": "check_stage5_unified",
-                            "message": f"Website mismatch: claimed '{miner_domain}' vs LinkedIn '{extracted_domain}'",
-                            "failed_fields": ["website"],
-                            "claimed": miner_domain,
-                            "extracted": extracted_domain
-                        }
+                combined = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
+                # Simply check if miner's domain appears in the snippet (works for any language)
+                if miner_domain in combined:
+                    website_confirmed = True
+                    website_source = 'w2'
+                    print(f"   ✅ W2: Domain '{miner_domain}' found in snippet")
+                    break
 
     if not website_confirmed and miner_domain:
         print(f"   ❌ Website '{miner_domain}' not confirmed after W4-W5-W2")

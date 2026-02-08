@@ -2901,8 +2901,8 @@ class Validator(BaseValidatorNeuron):
             # SOURCING EMISSIONS SYSTEM (Threshold-Based)
             # ═══════════════════════════════════════════════════════════════════
             # Allocation shares (must sum to 1.0)
-            BASE_BURN_SHARE = 0.04         # 4% base burn to UID 0
-            CHAMPION_SHARE = 0.01          # 1% to qualification model champion
+            BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
+            CHAMPION_SHARE = 0.05          # 5% to qualification model champion
             MAX_SOURCING_SHARE = 0.95      # 95% max to sourcing miners
             
             # CONFIGURABLE THRESHOLD: Approved leads needed in 30 epochs for full 95%

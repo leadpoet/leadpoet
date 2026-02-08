@@ -138,6 +138,9 @@ def _load_taxonomy_embeddings():
 
 def _get_embedding_sync(text: str) -> Optional[np.ndarray]:
     """Get embedding for text via OpenRouter (synchronous)."""
+    if not OPENROUTER_KEY:
+        print("   ⚠️ OPENROUTER_API_KEY not set")
+        return None
     try:
         resp = requests.post(
             'https://openrouter.ai/api/v1/embeddings',
@@ -154,7 +157,8 @@ def _get_embedding_sync(text: str) -> Optional[np.ndarray]:
         )
         if resp.status_code == 200:
             data = resp.json()
-            return np.array(data['data'][0]['embedding'])
+            if data.get('data') and len(data['data']) > 0:
+                return np.array(data['data'][0]['embedding'])
     except Exception as e:
         print(f"   ⚠️ Embedding API error: {e}")
     return None
@@ -162,6 +166,9 @@ def _get_embedding_sync(text: str) -> Optional[np.ndarray]:
 
 def _call_llm_sync(prompt: str) -> Optional[str]:
     """Call Gemini 2.5 Flash Lite via OpenRouter (synchronous)."""
+    if not OPENROUTER_KEY:
+        print("   ⚠️ OPENROUTER_API_KEY not set")
+        return None
     try:
         resp = requests.post(
             'https://openrouter.ai/api/v1/chat/completions',
@@ -180,7 +187,8 @@ def _call_llm_sync(prompt: str) -> Optional[str]:
         )
         if resp.status_code == 200:
             data = resp.json()
-            return data['choices'][0]['message']['content'].strip()
+            if data.get('choices') and len(data['choices']) > 0:
+                return data['choices'][0]['message']['content'].strip()
     except Exception as e:
         print(f"   ⚠️ LLM API error: {e}")
     return None

@@ -248,7 +248,10 @@ def insert_company(
             "company_last_updated": datetime.utcnow().isoformat()
         }
 
-        result = client.table(TABLE_NAME).insert(record).execute()
+        result = client.table(TABLE_NAME).upsert(
+            record,
+            on_conflict="company_linkedin"
+        ).execute()
 
         if result.data:
             logger.info(f"✅ Inserted new company: {company_linkedin}")

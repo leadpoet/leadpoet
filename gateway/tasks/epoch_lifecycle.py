@@ -40,6 +40,12 @@ from gateway.utils.leads_cache import (
     is_prefetch_in_progress
 )
 
+# Company information table operations (for caching validated company data)
+from gateway.db.company_info import (
+    insert_company,
+    update_employee_count,
+)
+
 # Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
@@ -1126,6 +1132,71 @@ async def compute_epoch_consensus(epoch_id: int):
                 await log_consensus_result(lead_id, epoch_id, outcome, lead_blob=prefetched_lead_blob, is_icp_value=is_icp_multiplier)
                 
                 if outcome['final_decision'] == 'approve':
+                    # ================================================================
+                    # Company Table Update (for approved leads only)
+                    # ================================================================
+                    # Check evidence_blob for company table action from Stage 5.
+                    # - insert: New company, add to company_information_table
+                    # - update_employee_count: Update existing company's employee count
+                    # ================================================================
+                    try:
+                        lead_blob = all_lead_blobs.get(lead_id, {})
+                        company_linkedin = lead_blob.get("company_linkedin", "")
+
+                        if company_linkedin:
+                            # Get first approving validator's evidence for company data
+                            lead_evidence = evidence_by_lead.get(lead_id, [])
+                            approving_evidence = [
+                                ev for ev in lead_evidence
+                                if ev.get('decision') == 'approve' and ev.get('evidence_blob')
+                            ]
+
+                            if approving_evidence:
+                                evidence_blob = approving_evidence[0].get("evidence_blob", {})
+                                if isinstance(evidence_blob, str):
+                                    evidence_blob = json.loads(evidence_blob)
+
+                                stage5_data = evidence_blob.get("stage_5_verification", {})
+                                company_action = stage5_data.get("company_table_action")
+
+                                if company_action == "insert":
+                                    print(f"         📝 Inserting new company: {company_linkedin[:50]}...")
+                                    # Run sync DB function in thread to avoid blocking event loop
+                                    insert_result = await asyncio.to_thread(
+                                        insert_company,
+                                        company_linkedin=company_linkedin,
+                                        company_name=lead_blob.get("business", ""),
+                                        company_website=lead_blob.get("website", ""),
+                                        company_description=stage5_data.get("company_refined_description", ""),
+                                        company_hq_country=lead_blob.get("hq_country", ""),
+                                        company_hq_state=lead_blob.get("hq_state"),
+                                        company_hq_city=lead_blob.get("hq_city"),
+                                        industry_top3=stage5_data.get("company_industry_top3", {}),
+                                        sub_industry_top3=stage5_data.get("company_sub_industry_top3", {}),
+                                        company_employee_count=stage5_data.get("company_verified_employee_count", "")
+                                    )
+                                    if insert_result:
+                                        print(f"         ✅ Company inserted into table")
+                                    else:
+                                        print(f"         ⚠️  Failed to insert company")
+
+                                elif company_action == "update_employee_count":
+                                    print(f"         📝 Updating employee count: {company_linkedin[:50]}...")
+                                    # Run sync DB function in thread to avoid blocking event loop
+                                    update_result = await asyncio.to_thread(
+                                        update_employee_count,
+                                        company_linkedin=company_linkedin,
+                                        new_employee_count=stage5_data.get("new_employee_count", ""),
+                                        prev_employee_count=stage5_data.get("prev_employee_count", "")
+                                    )
+                                    if update_result:
+                                        print(f"         ✅ Employee count updated in table")
+                                    else:
+                                        print(f"         ⚠️  Failed to update employee count")
+
+                    except Exception as e:
+                        print(f"         ⚠️  Company table update failed: {e}")
+
                     print(f"      ✅ Lead {lead_id[:8]}...: APPROVED (rep: {final_rep_score if final_rep_score else 0:.2f}, validators: {len(validators_responded)})")
                     return ('approved', lead_id)
                 else:

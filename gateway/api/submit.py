@@ -2425,14 +2425,14 @@ async def submit_lead(event: SubmitLeadEvent):
                 }
             )
         else:
-            # No HQ fields provided - REJECT
-            print(f"❌ Company HQ fields required but not provided")
+            # No HQ country provided (city/state are optional) - REJECT
+            print(f"❌ Company HQ country is required but not provided")
             updated_stats = mark_submission_failed(event.actor_hotkey)
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "missing_hq_location",
-                    "message": "Company HQ location is required. Accepted: Remote, United States, or Dubai/Abu Dhabi (United Arab Emirates).",
+                    "error": "missing_hq_country",
+                    "message": "Company HQ country is required (hq_city and hq_state are optional). Accepted countries: Remote, United States, or United Arab Emirates (Dubai/Abu Dhabi only).",
                     "stats": updated_stats
                 }
             )

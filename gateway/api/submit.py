@@ -31,7 +31,7 @@ from typing import Dict, List
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 # Import configuration
@@ -89,6 +89,18 @@ from gateway.utils.linkedin import normalize_linkedin_url, compute_linkedin_comb
 # Geographic Normalization (standardizes city/state/country)
 # ============================================================
 from gateway.utils.geo_normalize import normalize_location, validate_location, normalize_country
+
+# ============================================================
+# Company Information Table (cached company data)
+# ============================================================
+from gateway.db.company_info import (
+    get_company_by_linkedin,
+    validate_against_stored,
+    insert_company,
+    update_employee_count,
+    check_employee_count_changed,
+    is_company_data_fresh,
+)
 
 
 # ============================================================
@@ -779,8 +791,8 @@ def check_description_sanity(desc_raw: str) -> tuple:
 # ============================================================
 # Industry Taxonomy Check Function
 # ============================================================
-# Load industry taxonomy from gateway utils (723 sub-industries)
-from gateway.utils.industry_taxonomy import INDUSTRY_TAXONOMY
+# Load industry taxonomy from validator_models (723 sub-industries)
+from validator_models.industry_taxonomy import INDUSTRY_TAXONOMY
 
 # Build set of valid industries (parent categories)
 VALID_INDUSTRIES = set()
@@ -2275,7 +2287,238 @@ async def submit_lead(event: SubmitLeadEvent):
         state_display = state if state else "(empty)"
         city_display = city if city else "(empty)"
         print(f"   ✅ Region fields validated: country='{country}', state='{state_display}', city='{city_display}'")
-        
+
+        # ========================================
+        # Validate Company HQ Location (hq_city, hq_state, hq_country)
+        # ========================================
+        # ALLOWED COMPANY HQ REGIONS:
+        # 1. Remote: hq_city="Remote", hq_state blank, hq_country blank
+        # 2. United States: hq_city optional (geo_lookup), hq_state required (geo_lookup), hq_country="United States"
+        # 3. Dubai/Abu Dhabi: hq_city="Dubai" or "Abu Dhabi", hq_state blank, hq_country="United Arab Emirates"
+        # ========================================
+        hq_city = lead_blob.get("hq_city", "").strip()
+        hq_state = lead_blob.get("hq_state", "").strip()
+        hq_country_raw = lead_blob.get("hq_country", "").strip()
+
+        # Normalize HQ country
+        hq_country = normalize_country(hq_country_raw) if hq_country_raw else ""
+        if hq_country != hq_country_raw and hq_country_raw:
+            print(f"   📝 HQ Country normalized: '{hq_country_raw}' → '{hq_country}'")
+            lead_blob["hq_country"] = hq_country
+
+        hq_city_lower = hq_city.lower() if hq_city else ""
+        hq_country_lower = hq_country.lower() if hq_country else ""
+
+        # CASE 1: Remote - hq_city="Remote", hq_state and hq_country blank
+        if hq_city_lower == "remote":
+            if hq_state:
+                print(f"❌ Remote company HQ cannot have a state: hq_state='{hq_state}'")
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_hq_location",
+                        "message": "Remote company HQ cannot have a state field.",
+                        "hq_city": hq_city,
+                        "hq_state": hq_state,
+                        "stats": updated_stats
+                    }
+                )
+            if hq_country:
+                print(f"❌ Remote company HQ cannot have a country: hq_country='{hq_country}'")
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_hq_location",
+                        "message": "Remote company HQ cannot have a country field.",
+                        "hq_city": hq_city,
+                        "hq_country": hq_country,
+                        "stats": updated_stats
+                    }
+                )
+            print(f"   ✅ Company HQ: Remote")
+
+        # CASE 2: United Arab Emirates - Dubai or Abu Dhabi only, hq_state blank
+        elif hq_country_lower == "united arab emirates":
+            valid_uae_cities = {"dubai", "abu dhabi"}
+            if hq_city_lower not in valid_uae_cities:
+                print(f"❌ Invalid UAE HQ city: '{hq_city}' (only Dubai and Abu Dhabi allowed)")
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_hq_location",
+                        "message": "Only Dubai and Abu Dhabi are accepted for United Arab Emirates HQ.",
+                        "hq_city": hq_city,
+                        "hq_country": hq_country,
+                        "stats": updated_stats
+                    }
+                )
+            if hq_state:
+                print(f"❌ United Arab Emirates HQ cannot have a state: hq_state='{hq_state}'")
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_hq_location",
+                        "message": "United Arab Emirates HQ cannot have a state field.",
+                        "hq_city": hq_city,
+                        "hq_state": hq_state,
+                        "hq_country": hq_country,
+                        "stats": updated_stats
+                    }
+                )
+            print(f"   ✅ Company HQ: {hq_city}, United Arab Emirates")
+
+        # CASE 3: United States - hq_state required, hq_city optional (validated against geo_lookup)
+        elif hq_country_lower == "united states":
+            if not hq_state:
+                print(f"❌ United States HQ requires a state")
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_hq_location",
+                        "message": "United States company HQ requires a state field.",
+                        "hq_country": hq_country,
+                        "stats": updated_stats
+                    }
+                )
+
+            # Validate HQ state and city against geo_lookup
+            is_valid, rejection_reason = validate_location(hq_city if hq_city else "", hq_state, hq_country)
+            if not is_valid:
+                print(f"❌ US HQ location validation failed: {rejection_reason}")
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_hq_location",
+                        "message": f"Invalid US HQ location: {rejection_reason}",
+                        "hq_city": hq_city,
+                        "hq_state": hq_state,
+                        "hq_country": hq_country,
+                        "stats": updated_stats
+                    }
+                )
+
+            if hq_city:
+                print(f"   ✅ Company HQ: {hq_city}, {hq_state}, United States")
+            else:
+                print(f"   ✅ Company HQ: {hq_state}, United States")
+
+        # CASE 4: No HQ provided or other regions - BLOCKED
+        elif hq_city or hq_state or hq_country:
+            print(f"❌ Company HQ region blocked: {hq_city}/{hq_state}/{hq_country}")
+            print(f"   Allowed: Remote, United States, or Dubai/Abu Dhabi (United Arab Emirates)")
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_hq_location",
+                    "message": "Only Remote, United States, or Dubai/Abu Dhabi (United Arab Emirates) company HQ locations are accepted.",
+                    "hq_city": hq_city,
+                    "hq_state": hq_state,
+                    "hq_country": hq_country,
+                    "stats": updated_stats
+                }
+            )
+        else:
+            # No HQ fields provided - this might be optional, skip validation
+            print(f"   ⚠️ Company HQ fields not provided (hq_city, hq_state, hq_country)")
+
+        # ========================================
+        # Company Information Table Lookup
+        # ========================================
+        # If company_linkedin exists in table:
+        #   - Validate against stored: name (case-sensitive), HQ, website, industry top 3
+        #   - Stage 5 will only validate employee count
+        # If NOT in table:
+        #   - Full validation proceeds
+        #   - After Stage 5, company will be added to table
+        # ========================================
+        company_linkedin_url = lead_blob.get("company_linkedin", "").strip()
+        company_name = lead_blob.get("business", "").strip()
+        company_website = lead_blob.get("website", "").strip()
+        claimed_industry = lead_blob.get("industry", "").strip()
+        claimed_sub_industry = lead_blob.get("sub_industry", "").strip()
+
+        stored_company = None
+        company_exists_in_table = False
+
+        if company_linkedin_url:
+            print(f"   🔍 Looking up company in table: {company_linkedin_url}")
+            stored_company = get_company_by_linkedin(company_linkedin_url)
+
+            if stored_company:
+                company_exists_in_table = True
+                print(f"   ✅ Company found in table - validating against stored data")
+
+                # Validate against stored data
+                is_valid, rejection_reason = validate_against_stored(
+                    stored=stored_company,
+                    claimed_name=company_name,
+                    claimed_hq_city=hq_city,
+                    claimed_hq_state=hq_state,
+                    claimed_hq_country=hq_country,
+                    claimed_website=company_website,
+                    claimed_industry=claimed_industry,
+                    claimed_sub_industry=claimed_sub_industry
+                )
+
+                if not is_valid:
+                    print(f"❌ Company validation against stored data failed: {rejection_reason}")
+                    updated_stats = mark_submission_failed(event.actor_hotkey)
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": "company_validation_failed",
+                            "message": rejection_reason,
+                            "company_linkedin": company_linkedin_url,
+                            "stats": updated_stats
+                        }
+                    )
+
+                print(f"   ✅ Company validated against stored data")
+
+                # Check if company data is fresh (within 30 days)
+                is_fresh, last_updated = is_company_data_fresh(stored_company, days=30)
+
+                if is_fresh:
+                    # Data is fresh - skip ALL Stage 5 validation
+                    print(f"   ✅ Company data is fresh (last updated: {last_updated[:10] if last_updated else 'N/A'})")
+                    lead_blob["_company_exists"] = True
+                    lead_blob["_skip_stage5_validation"] = True
+                    lead_blob["_employee_count_changed"] = False
+                else:
+                    # Data is stale (>30 days) - Stage 5 validates employee count only
+                    print(f"   ⚠️ Company data is stale (last updated: {last_updated[:10] if last_updated else 'never'})")
+
+                    # Check if employee count changed
+                    employee_count_from_lead = lead_blob.get("employee_count", "").strip()
+                    count_changed, stored_count = check_employee_count_changed(stored_company, employee_count_from_lead)
+
+                    lead_blob["_company_exists"] = True
+                    lead_blob["_skip_stage5_validation"] = False
+                    lead_blob["_validate_employee_count_only"] = True
+
+                    if count_changed:
+                        print(f"   ⚠️ Employee count changed: {stored_count} → {employee_count_from_lead}")
+                        lead_blob["_employee_count_changed"] = True
+                        lead_blob["_prev_employee_count"] = stored_count
+                    else:
+                        print(f"   ℹ️ Employee count unchanged but will re-validate (data stale)")
+                        lead_blob["_employee_count_changed"] = False
+                        lead_blob["_prev_employee_count"] = stored_count
+
+                # Store company data for Stage 5
+                lead_blob["_stored_company"] = stored_company
+
+            else:
+                print(f"   ℹ️ Company not in table - full validation will proceed")
+                lead_blob["_company_exists"] = False
+
         # ========================================
         # Validate employee_count format
         # ========================================

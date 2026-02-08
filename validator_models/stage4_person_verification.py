@@ -687,7 +687,7 @@ async def run_lead_validation_stage4(
         queries_used.append('Q3')
 
         # Run Q3 search (pass state/country for ambiguous city verification)
-        q3_result = check_q3_location_fallback(full_name, company, city, linkedin_url, api_key, state, country)
+        q3_result = check_q3_location_fallback(full_name, company, city, linkedin_url, api_key, state, country, role)
 
         if q3_result.get('passed'):
             location_passed = True

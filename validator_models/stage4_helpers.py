@@ -760,6 +760,19 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
         if any(before_trimmed.endswith(ep) for ep in education_prefixes):
             continue
 
+        # Check for "[Education prefix] [School Name]. City" pattern
+        # e.g., "Education: Trinity College. Burlington" - city follows school name
+        # e.g., "Studied at UCLA. Los Angeles" - city follows school name
+        # e.g., "Alumni of Boston College. Boston" - city follows school name
+        edu_pattern = r'(education:|studied at|alumni of|alumnus of|graduated from)\s*[^·]+$'
+        education_match = re.search(edu_pattern, before_trimmed)
+        if education_match:
+            # Text between education prefix and city - check if it looks like a school name
+            edu_text = education_match.group(0)
+            # If ends with period, it's likely "[prefix] School Name." pattern
+            if edu_text.rstrip().endswith('.'):
+                continue  # Skip - city is part of education location
+
         if text_before.endswith(' of'):
             before_of = text_before[:-3].rstrip()
             words_before = before_of.split()

@@ -389,7 +389,7 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     """
     Score the quality and relevance of the intent signal.
     
-    First verifies the signal is real, then scores relevance.
+    First verifies the signal is real AND provides ICP evidence, then scores relevance.
     The final score is weighted by verification confidence AND source type quality.
     
     Args:
@@ -399,8 +399,24 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     Returns:
         Tuple of (score 0-50, verification_confidence 0-100)
     """
-    # First verify the signal is real
-    verified, confidence, reason = await verify_intent_signal(lead.intent_signal)
+    # Build ICP criteria string for verification
+    icp_criteria_parts = []
+    if icp.employee_count_min or icp.employee_count_max:
+        icp_criteria_parts.append(f"Company size: {icp.employee_count_min or 0}-{icp.employee_count_max or '∞'} employees")
+    if icp.geography:
+        icp_criteria_parts.append(f"Geography: {icp.geography}")
+    if icp.pain_points:
+        icp_criteria_parts.append(f"Pain points: {icp.pain_points}")
+    icp_criteria = "; ".join(icp_criteria_parts) if icp_criteria_parts else None
+    
+    # Verify the signal is real AND provides evidence of ICP fit
+    # This uses ScrapingDog to fetch the URL and verify the content
+    verified, confidence, reason = await verify_intent_signal(
+        lead.intent_signal,
+        icp_industry=icp.industry,
+        icp_criteria=icp_criteria,
+        company_name=lead.business
+    )
     
     if not verified:
         logger.info(f"Intent signal not verified: {reason}")

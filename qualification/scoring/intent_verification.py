@@ -290,20 +290,30 @@ def is_generic_intent_description(description: str) -> Tuple[bool, str]:
 # Main Verification Function
 # =============================================================================
 
-async def verify_intent_signal(intent_signal: IntentSignal) -> Tuple[bool, int, str]:
+async def verify_intent_signal(
+    intent_signal: IntentSignal,
+    icp_industry: Optional[str] = None,
+    icp_criteria: Optional[str] = None,
+    company_name: Optional[str] = None
+) -> Tuple[bool, int, str]:
     """
-    Verify an intent signal claim.
+    Verify an intent signal claim AND check for ICP evidence.
     
     This is the main entry point for intent verification. It:
     1. PRE-CHECK: Reject known generic/templated descriptions (saves LLM cost)
     2. Checks cache for existing result
-    3. Fetches content from the source URL
+    3. Fetches content from the source URL using ScrapingDog
     4. Extracts relevant text
-    5. Uses LLM to verify the claim matches the content
+    5. Uses LLM to verify:
+       a) The claim is supported by the URL content
+       b) The URL provides evidence the company matches ICP criteria
     6. Caches the result
     
     Args:
         intent_signal: The intent signal to verify
+        icp_industry: Target industry from ICP (e.g., "Healthcare")
+        icp_criteria: Additional ICP criteria (e.g., "PE-backed, 50-500 employees")
+        company_name: Name of the company for verification
     
     Returns:
         Tuple of (verified: bool, confidence: int 0-100, reason: str)
@@ -324,14 +334,15 @@ async def verify_intent_signal(intent_signal: IntentSignal) -> Tuple[bool, int, 
         logger.warning("Rejected: 'other' source with short description")
         return False, 10, "Low-value source type 'other' with insufficient description"
     
-    # Check cache first
-    cache_key = compute_cache_key(intent_signal.url, source_str, intent_signal.date)
+    # Check cache first (include ICP in cache key if provided)
+    icp_cache_suffix = f"|{icp_industry}|{icp_criteria}" if icp_industry else ""
+    cache_key = compute_cache_key(intent_signal.url + icp_cache_suffix, source_str, intent_signal.date)
     cached = await get_cached_verification(cache_key)
     if cached:
         logger.info(f"Using cached verification: verified={cached.verification_result}")
         return cached.verification_result, cached.verification_confidence, cached.verification_reason
     
-    # Fetch URL content
+    # Fetch URL content via ScrapingDog
     try:
         content = await fetch_url_content(intent_signal.url, source_str)
     except Exception as e:
@@ -349,13 +360,16 @@ async def verify_intent_signal(intent_signal: IntentSignal) -> Tuple[bool, int, 
         logger.warning(f"Insufficient content extracted from URL: {intent_signal.url}")
         return False, 0, "Insufficient content to verify claim"
     
-    # Verify claim with LLM
+    # Verify claim with LLM - now includes ICP context
     try:
-        verified, confidence, reason = await llm_verify_claim(
+        verified, confidence, reason = await llm_verify_claim_with_icp(
             claim=intent_signal.description,
             url=intent_signal.url,
             date=intent_signal.date,
-            content=text[:CONTENT_MAX_LENGTH]
+            content=text[:CONTENT_MAX_LENGTH],
+            icp_industry=icp_industry,
+            icp_criteria=icp_criteria,
+            company_name=company_name
         )
     except Exception as e:
         logger.error(f"LLM verification failed: {e}")
@@ -871,6 +885,121 @@ Examples of valid responses:
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM response: {e}")
         return False, 0, f"LLM response parsing error"
+    except Exception as e:
+        logger.error(f"LLM verification error: {e}")
+        raise
+
+
+async def llm_verify_claim_with_icp(
+    claim: str,
+    url: str,
+    date: str,
+    content: str,
+    icp_industry: Optional[str] = None,
+    icp_criteria: Optional[str] = None,
+    company_name: Optional[str] = None
+) -> Tuple[bool, int, str]:
+    """
+    Use LLM to verify an intent signal AND check for ICP evidence.
+    
+    This is the core verification that checks:
+    1. Is the claim supported by the URL content?
+    2. Does the URL provide evidence the company matches ICP criteria?
+    
+    Args:
+        claim: The intent signal description/claim
+        url: Source URL
+        date: Claimed date of the signal
+        content: Extracted text content from the source (via ScrapingDog)
+        icp_industry: Target industry from ICP (e.g., "Healthcare")
+        icp_criteria: Additional ICP criteria (e.g., "PE-backed, 50-500 employees")
+        company_name: Name of the company being verified
+    
+    Returns:
+        Tuple of (verified: bool, confidence: int 0-100, reason: str)
+    """
+    # Build ICP context section if provided
+    icp_context = ""
+    if icp_industry or icp_criteria:
+        icp_context = f"""
+ICP REQUIREMENTS (the URL content should provide evidence for these):
+- Target Industry: {icp_industry or 'Not specified'}
+- Additional Criteria: {icp_criteria or 'None'}
+- Company Being Verified: {company_name or 'Unknown'}
+
+CRITICAL: The URL content must provide EVIDENCE that:
+1. This company actually operates in the target industry ({icp_industry or 'any'})
+2. The company matches the additional criteria (if specified)
+3. The specific intent claim is supported by real content
+
+If the URL does NOT provide evidence of ICP fit, mark as NOT verified.
+A job posting for "Software Engineer" does NOT prove a company is in Healthcare.
+A company website existing does NOT prove they are PE-backed.
+"""
+
+    prompt = f"""You are verifying an intent signal for a B2B lead generation system.
+
+CLAIMED INTENT: {claim}
+SOURCE URL: {url}
+CLAIMED DATE: {date}
+{icp_context}
+URL CONTENT (scraped via ScrapingDog):
+{content}
+
+Your task: Determine if the URL content PROVES both:
+1. The intent claim is real and specific (not generic/templated)
+2. The company matches the ICP requirements (if specified)
+
+REJECT these GENERIC/TEMPLATED claims (gaming attempts):
+- "[Company] is actively operating in [industry]" - Too vague
+- "[Company] market activity and company updates" - No specific intent
+- "[Company] is expanding/growing" - Generic filler
+- Claims that would be true for ANY company
+
+VERIFICATION REQUIREMENTS:
+1. Claim must have SPECIFIC details (hiring X role, launched Y product, raised Z funding)
+2. Those specific details MUST appear in the scraped content
+3. If ICP specifies an industry, the content must PROVE that industry fit
+4. If ICP specifies criteria like "PE-backed", content must show evidence of that
+
+Respond with ONLY JSON (no markdown):
+{{"verified": true/false, "confidence": 0-100, "reason": "1-2 sentence explanation", "icp_evidence_found": true/false}}
+
+Examples:
+{{"verified": true, "confidence": 85, "reason": "Content shows hiring for DevOps roles at a healthcare company matching ICP.", "icp_evidence_found": true}}
+{{"verified": false, "confidence": 30, "reason": "Job posting exists but no evidence this is a healthcare company as ICP requires.", "icp_evidence_found": false}}
+{{"verified": false, "confidence": 10, "reason": "Claim is generic 'actively operating' - no specific intent shown.", "icp_evidence_found": false}}
+"""
+    
+    try:
+        response_text = await openrouter_chat(prompt, model="gpt-4o-mini")
+        
+        # Parse JSON response
+        response_text = response_text.strip()
+        if response_text.startswith("```"):
+            response_text = re.sub(r'^```(?:json)?\s*', '', response_text)
+            response_text = re.sub(r'\s*```$', '', response_text)
+        
+        result = json.loads(response_text)
+        
+        verified_raw = result.get("verified", False)
+        confidence = int(result.get("confidence", 0))
+        reason = result.get("reason", "No reason provided")
+        icp_evidence = result.get("icp_evidence_found", True)  # Default True if not checking ICP
+        
+        # If ICP was specified but no evidence found, reduce confidence significantly
+        if (icp_industry or icp_criteria) and not icp_evidence:
+            confidence = min(confidence, 30)
+            reason = f"No ICP evidence found. {reason}"
+        
+        # Apply confidence threshold
+        verified = verified_raw and confidence >= CONFIDENCE_THRESHOLD
+        
+        return verified, confidence, reason
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse LLM response: {e}")
+        return False, 0, "LLM response parsing error"
     except Exception as e:
         logger.error(f"LLM verification error: {e}")
         raise

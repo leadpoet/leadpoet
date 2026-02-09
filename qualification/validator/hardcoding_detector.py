@@ -128,17 +128,62 @@ DATA_MANIPULATION_PATTERNS = [
 
 # Data fabrication patterns (using random to generate data that should be extracted)
 # These are generalizable - ANY model using random for dates/data is fabricating
+#
+# MECHANISM DETECTION: We detect the combination of random + date generation,
+# not specific variable names. Gamers can rename variables but the mechanism
+# (random number → timedelta → fake date) remains constant.
+#
+# Legitimate random uses in ML models:
+#   - K-means initialization (random centroids)
+#   - Random seeds for reproducibility  
+#   - Shuffling/sampling training data
+#
+# Illegitimate random uses (fabrication):
+#   - Generating dates for intent signals
+#   - Creating fake timestamps
+#   - Randomizing output dates to game recency scoring
+
 DATA_FABRICATION_PATTERNS = [
-    # Random date generation (should extract from page, not fabricate)
-    r'days_ago\s*=\s*random\.randint',  # days_ago = random.randint(...)
-    r'timedelta\s*\(\s*days\s*=\s*random',  # timedelta(days=random...)
-    r'signal_date\s*=.*random',  # signal_date involves random
-    r'random\.randint\s*\(\s*\d+\s*,\s*\d+\s*\)[^)]*timedelta',  # random.randint near timedelta
+    # === SINGLE-LINE PATTERNS (original) ===
+    # Direct random in timedelta call
+    r'timedelta\s*\(\s*days\s*=\s*random\.(randint|uniform|choice)',
+    
     # Random for selecting names/companies (fabrication)
     r'random\.choice\s*\([^)]*(?:name|company|business|first_name|last_name)',
+    
     # Cache date manipulation (refreshing old dates to look recent)
-    r'cached\s*\[\s*["\']date["\']\s*\]\s*=\s*date\.today',  # Refreshing cached dates
-    r'["\']date["\']\s*\]\s*=\s*date\.today\s*\(\s*\)',  # Setting date to today on cached
+    r'cached\s*\[\s*["\']date["\']\s*\]\s*=\s*date\.today',
+    r'["\']date["\']\s*\]\s*=\s*date\.today\s*\(\s*\)',
+]
+
+# === MULTILINE DATE FABRICATION PATTERNS ===
+# These catch the split-line evasion where random is on one line
+# and date calculation is on another. Uses [\s\S] for cross-line matching.
+# Window of 300 chars is enough for 5-10 lines of code.
+MULTILINE_DATE_FABRICATION_PATTERNS = [
+    # Pattern: random.randint/uniform followed by timedelta(days=...) within 300 chars
+    # Catches: x = random.randint(1, 30) \n ... timedelta(days=x)
+    r'random\.(randint|uniform)\s*\(\s*\d+\s*,\s*\d+\s*\)[\s\S]{0,300}timedelta\s*\(\s*days\s*=',
+    
+    # Pattern: random.randint followed by .isoformat() within 300 chars
+    # Catches: the full pattern of generating fake ISO date strings
+    r'random\.(randint|uniform)\s*\(\s*\d+\s*,\s*\d+\s*\)[\s\S]{0,300}\.isoformat\s*\(',
+    
+    # Pattern: random.randint followed by date.today() within 300 chars
+    # Catches: x = random.randint(...) \n y = date.today() - timedelta(days=x)
+    r'random\.(randint|uniform)\s*\(\s*\d+\s*,\s*\d+\s*\)[\s\S]{0,300}date\.today\s*\(\s*\)\s*-\s*timedelta',
+    
+    # Pattern: Variable with day/offset/ago in name assigned from random
+    # Catches: days_offset = random.randint, time_ago = random.uniform, etc.
+    r'\w*(day|offset|ago|delta)\w*\s*=\s*random\.(randint|uniform)\s*\(',
+    
+    # Pattern: random followed by "date" key assignment in dict within 400 chars
+    # Catches: x = random... \n signal = {"date": ...}
+    r'random\.(randint|uniform)\s*\(\s*\d+\s*,\s*\d+\s*\)[\s\S]{0,400}["\']date["\']\s*:',
+    
+    # Pattern: random followed by signal_date or intent_date assignment
+    # Catches various naming conventions for date variables in intent/signal context
+    r'random\.(randint|uniform)\s*\(\s*\d+\s*,\s*\d+\s*\)[\s\S]{0,300}(signal|intent|event).*date\s*=',
 ]
 
 
@@ -213,17 +258,35 @@ def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
     
     # Check data fabrication patterns (HIGH severity for dates, MEDIUM for others)
     fabrication_matches = 0
+    fabrication_details = []
     for pattern in DATA_FABRICATION_PATTERNS:
         if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
             fabrication_matches += 1
+            fabrication_details.append(f"single-line: {pattern[:50]}...")
     
-    if fabrication_matches >= 2:
+    # Check MULTILINE date fabrication patterns (HIGH severity)
+    # These catch split-line evasion attempts where random and date ops are on different lines
+    multiline_fabrication_matches = 0
+    for pattern in MULTILINE_DATE_FABRICATION_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+            multiline_fabrication_matches += 1
+            fabrication_details.append(f"multiline: {pattern[:50]}...")
+    
+    total_fabrication = fabrication_matches + multiline_fabrication_matches
+    
+    if multiline_fabrication_matches >= 1:
+        # ANY multiline date fabrication pattern = HIGH confidence gaming
+        # These patterns specifically detect the mechanism of using random to generate dates
+        # which is ALWAYS fabrication (dates should come from real content)
+        red_flags.append(f"Date fabrication detected: random used to generate fake dates ({multiline_fabrication_matches} multiline pattern(s))")
+        confidence = max(confidence, 88)  # Very high - this is always gaming
+    elif total_fabrication >= 2:
         # Multiple fabrication patterns = high confidence gaming
-        red_flags.append(f"Data fabrication: random used to generate dates/data ({fabrication_matches} patterns)")
-        confidence = max(confidence, 85)  # High severity - dates should be extracted, not fabricated
-    elif fabrication_matches == 1:
+        red_flags.append(f"Data fabrication: random used to generate dates/data ({total_fabrication} patterns)")
+        confidence = max(confidence, 85)  # High severity
+    elif total_fabrication == 1:
         red_flags.append("Potential data fabrication: random used for date/data generation")
-        confidence = max(confidence, 55)  # Let LLM confirm
+        confidence = max(confidence, 60)  # Medium - let LLM confirm
     
     # Determine if we should fail immediately or defer to LLM
     passed = confidence < 85  # 85+ = instant fail, below = let LLM decide

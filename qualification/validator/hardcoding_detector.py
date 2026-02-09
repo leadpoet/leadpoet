@@ -642,8 +642,7 @@ These are ACTUAL ICPs this model will be evaluated against:
    - `random.randint()` to generate dates: `days_ago = random.randint(3, 45)` - FABRICATION
    - `random.choice()` to select names/companies from lists - FABRICATION
    - Refreshing cached dates: `cached["date"] = date.today()` to make old data look recent
-   - Dates should be EXTRACTED from the actual page content, not randomly generated
-   - Ask yourself: Is this model extracting real data or making it up?
+   - **KEY**: random for ML internals (k-means, sampling) is OK. Trace where random values GO - if they flow to output fields (dates, signals), it's fabrication even if split across lines.
 
 **Phase 3: Trace ICP flow through the code**
 

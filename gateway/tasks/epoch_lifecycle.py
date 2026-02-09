@@ -1023,7 +1023,12 @@ async def compute_epoch_consensus(epoch_id: int):
                             evidence_blob = record.get("evidence_blob", {})
                             if isinstance(evidence_blob, str):
                                 evidence_blob = json.loads(evidence_blob)
-                        
+
+                            # Handle wrapped evidence_blob from coordinator/single validators
+                            # Coordinator wraps as: {is_legitimate, enhanced_lead: <checks_data>, reason}
+                            if "enhanced_lead" in evidence_blob and isinstance(evidence_blob["enhanced_lead"], dict):
+                                evidence_blob = evidence_blob["enhanced_lead"]
+
                             # Extract is_icp_multiplier directly from evidence_blob (top-level key)
                             # Values: 1.0 (default), 20.0 (+20 ICP bonus), or negative for penalties
                             multiplier = evidence_blob.get("is_icp_multiplier", 1.0)
@@ -1151,6 +1156,12 @@ async def compute_epoch_consensus(epoch_id: int):
                                 if isinstance(evidence_blob, str):
                                     evidence_blob = json.loads(evidence_blob)
 
+                                # Handle wrapped evidence_blob from coordinator/single validators
+                                # Coordinator wraps as: {is_legitimate, enhanced_lead: <checks_data>, reason}
+                                # Worker sends raw: {passed, stage_5_verification, ...}
+                                if "enhanced_lead" in evidence_blob and isinstance(evidence_blob["enhanced_lead"], dict):
+                                    evidence_blob = evidence_blob["enhanced_lead"]
+
                                 stage5_data = evidence_blob.get("stage_5_verification", {})
                                 company_action = stage5_data.get("company_table_action")
 
@@ -1235,7 +1246,7 @@ async def compute_epoch_consensus(epoch_id: int):
                             # Check rejection evidence for company_table_action
                             rejecting_evidence = [
                                 ev for ev in lead_evidence
-                                if ev.get('decision') == 'reject' and ev.get('evidence_blob')
+                                if ev.get('decision') == 'deny' and ev.get('evidence_blob')
                             ]
 
                             for ev in rejecting_evidence:
@@ -1243,8 +1254,13 @@ async def compute_epoch_consensus(epoch_id: int):
                                 if isinstance(evidence_blob, str):
                                     evidence_blob = json.loads(evidence_blob)
 
-                                # Company data is in rejection_reason (from stage5 return)
-                                rejection_reason = evidence_blob.get("rejection_reason", {})
+                                # Handle wrapped evidence_blob from coordinator/single validators
+                                # Coordinator wraps as: {is_legitimate, enhanced_lead: {}, reason: <rejection>}
+                                # Worker sends raw: {passed, rejection_reason: <rejection>, ...}
+                                if "enhanced_lead" in evidence_blob:
+                                    rejection_reason = evidence_blob.get("reason", {})
+                                else:
+                                    rejection_reason = evidence_blob.get("rejection_reason", {})
                                 if isinstance(rejection_reason, str):
                                     rejection_reason = json.loads(rejection_reason)
 

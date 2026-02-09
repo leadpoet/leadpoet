@@ -2009,64 +2009,53 @@ def _scrape_company_linkedin_gse_sync(company_slug: str, company_name: str, max_
             for r in organic_results
         ]
         
-        # Extract data from the first result (main company page)
-        first_result = organic_results[0]
-        title = first_result.get("title", "")
-        snippet = first_result.get("snippet", "")
-        link = first_result.get("link", "")
-        
-        # CRITICAL: Verify the URL matches the exact slug provided by the miner
-        # This prevents accepting similar company names from different LinkedIn pages
-        link_lower = link.lower()
-        expected_url_patterns = [
-            f'/company/{company_slug}/',  # With trailing slash
-            f'/company/{company_slug}?',  # With query params
-            f'/company/{company_slug}#',  # With hash
-        ]
-        
-        url_matches = False
-        if f'/company/{company_slug}' in link_lower:
-            # Check if it's an exact match (not a longer slug that contains our slug)
-            for pattern in expected_url_patterns:
-                if pattern in link_lower:
-                    url_matches = True
-                    break
-            # Also accept if URL ends with the slug
-            if link_lower.endswith(f'/company/{company_slug}'):
-                url_matches = True
-        
-        if not url_matches:
-            result["error"] = f"Search result URL '{link}' does not match expected slug '/company/{company_slug}'"
-            result["company_name_match"] = False
-            print(f"   ❌ COMPANY LINKEDIN: URL mismatch - Expected /company/{company_slug}, got {link}")
-            return result
-        
-        print(f"   ✅ COMPANY LINKEDIN: URL verified - {link}")
-        
-        # Combine all text for extraction
-        all_text = f"{title} {snippet}"
-        for r in organic_results[1:]:
-            all_text += f" {r.get('snippet', '')}"
-        
-        # Extract company name from title
-        # Format: "Company Name | LinkedIn" or "Company Name - LinkedIn" or "Company Name: Overview | LinkedIn"
+        # Iterate through all results to find exact slug match and extract company name
+        # This handles cases where localized results (tw.linkedin.com, jp.linkedin.com)
+        # appear before the English result with a parseable title
+        url_verified = False
+        all_text = ""
         company_name_from_linkedin = None
-        
-        if "|" in title:
-            company_name_from_linkedin = title.split("|")[0].strip()
-        elif " - LinkedIn" in title:
-            # Handle "Company Name - LinkedIn" format
-            company_name_from_linkedin = title.replace(" - LinkedIn", "").strip()
-        elif " LinkedIn" in title and title.endswith("LinkedIn"):
-            # Handle "Company Name LinkedIn" format (no separator)
-            company_name_from_linkedin = title.replace(" LinkedIn", "").strip()
-        
-        if company_name_from_linkedin:
-            # Remove "Overview", "About", etc.
-            for suffix in [": Overview", " - Overview", ": About", " - About", ": Jobs", " - Jobs"]:
-                if suffix in company_name_from_linkedin:
-                    company_name_from_linkedin = company_name_from_linkedin.replace(suffix, "").strip()
-            result["company_name_from_linkedin"] = company_name_from_linkedin
+
+        for r in organic_results:
+            link = r.get("link", "")
+            title = r.get("title", "")
+            snippet = r.get("snippet", "")
+
+            if not _check_exact_slug_match(link, company_slug):
+                continue
+
+            if not url_verified:
+                url_verified = True
+                print(f"   ✅ COMPANY LINKEDIN: URL verified - {link}")
+
+            all_text += f" {title} {snippet}"
+
+            # Try to extract company name from this result's title (first successful extraction wins)
+            if not company_name_from_linkedin and title:
+                extracted_name = None
+                if "|" in title:
+                    extracted_name = title.split("|")[0].strip()
+                elif " - LinkedIn" in title:
+                    extracted_name = title.replace(" - LinkedIn", "").strip()
+                elif " LinkedIn" in title and title.endswith("LinkedIn"):
+                    extracted_name = title.replace(" LinkedIn", "").strip()
+
+                if extracted_name:
+                    # Remove "Overview", "About", etc.
+                    for suffix in [": Overview", " - Overview", ": About", " - About", ": Jobs", " - Jobs", ": Life", " - Life"]:
+                        if suffix in extracted_name:
+                            extracted_name = extracted_name.replace(suffix, "").strip()
+                    if extracted_name:
+                        company_name_from_linkedin = extracted_name
+                        result["company_name_from_linkedin"] = company_name_from_linkedin
+
+        if not url_verified:
+            result["error"] = f"No search results match expected slug '/company/{company_slug}'"
+            result["company_name_match"] = False
+            print(f"   ❌ COMPANY LINKEDIN: No exact slug match found for /company/{company_slug}")
+            return result
+
+        all_text = all_text.strip()
         
         # Verify company name matches
         if result["company_name_from_linkedin"] and company_name:
@@ -2248,9 +2237,14 @@ def _scrape_company_linkedin_gse_sync(company_slug: str, company_name: str, max_
                 best_score = score
                 best_description = candidate
         
-        # Fallback to first snippet if no good description found
-        if not best_description and snippet:
-            best_description = snippet
+        # Fallback to first exact-slug snippet if no good description found
+        if not best_description:
+            for r in organic_results:
+                if _check_exact_slug_match(r.get("link", ""), company_slug):
+                    fallback_snippet = r.get("snippet", "").strip()
+                    if fallback_snippet:
+                        best_description = fallback_snippet
+                        break
         
         if best_description:
             # Clean up the description
@@ -3274,6 +3268,72 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
 
     if not merged['headquarters']:
         print(f"   ⚠️ No HQ found after Q1-Q3 (continuing without HQ validation)")
+
+    # ========================================================================
+    # HQ VALIDATION: Compare miner's claimed HQ against LinkedIn-extracted HQ
+    # ========================================================================
+    # Miner submits hq_city, hq_state, hq_country via gateway.
+    # Q1-Q3 extracted real HQ into lead["extracted_hq_city/state/country"].
+    # Reject if miner claims "Remote" but LinkedIn shows real location (or vice versa).
+    # ========================================================================
+    claimed_hq_city = (lead.get("hq_city") or "").strip()
+    claimed_hq_state = (lead.get("hq_state") or "").strip()
+    claimed_hq_country = (lead.get("hq_country") or "").strip()
+    extracted_hq_city = (lead.get("extracted_hq_city") or "").strip()
+    extracted_hq_state = (lead.get("extracted_hq_state") or "").strip()
+    extracted_hq_country = (lead.get("extracted_hq_country") or "").strip()
+
+    miner_claims_remote = claimed_hq_city.lower() == "remote"
+    linkedin_shows_remote = extracted_hq_city == "Remote"
+
+    if extracted_hq_country or extracted_hq_city:
+        # We have extracted HQ data from LinkedIn — validate against miner's claim
+
+        if miner_claims_remote and not linkedin_shows_remote:
+            print(f"   ❌ HQ MISMATCH: Miner claimed Remote but LinkedIn shows {extracted_hq_city}, {extracted_hq_state}, {extracted_hq_country}")
+            return False, {
+                "stage": "Stage 5: HQ Location",
+                "check_name": "check_stage5_unified",
+                "message": f"HQ mismatch: Miner claimed Remote but LinkedIn shows {extracted_hq_city}, {extracted_hq_state}, {extracted_hq_country}",
+                "failed_fields": ["hq_city"],
+                "claimed": "Remote",
+                "extracted": f"{extracted_hq_city}, {extracted_hq_state}, {extracted_hq_country}"
+            }
+
+        if linkedin_shows_remote and not miner_claims_remote:
+            print(f"   ❌ HQ MISMATCH: LinkedIn shows Remote but miner claimed {claimed_hq_city}, {claimed_hq_state}, {claimed_hq_country}")
+            return False, {
+                "stage": "Stage 5: HQ Location",
+                "check_name": "check_stage5_unified",
+                "message": f"HQ mismatch: LinkedIn shows Remote but miner claimed {claimed_hq_city}, {claimed_hq_state}, {claimed_hq_country}",
+                "failed_fields": ["hq_city"],
+                "claimed": f"{claimed_hq_city}, {claimed_hq_state}, {claimed_hq_country}",
+                "extracted": "Remote"
+            }
+
+        if not miner_claims_remote and not linkedin_shows_remote:
+            # Both have real locations — validate country match
+            if claimed_hq_country and extracted_hq_country:
+                if claimed_hq_country.lower() != extracted_hq_country.lower():
+                    print(f"   ❌ HQ COUNTRY MISMATCH: claimed '{claimed_hq_country}' vs LinkedIn '{extracted_hq_country}'")
+                    return False, {
+                        "stage": "Stage 5: HQ Location",
+                        "check_name": "check_stage5_unified",
+                        "message": f"HQ country mismatch: claimed '{claimed_hq_country}' vs LinkedIn '{extracted_hq_country}'",
+                        "failed_fields": ["hq_country"],
+                        "claimed": claimed_hq_country,
+                        "extracted": extracted_hq_country
+                    }
+
+        print(f"   ✅ HQ validation passed: claimed=({claimed_hq_city}, {claimed_hq_state}, {claimed_hq_country}), extracted=({extracted_hq_city}, {extracted_hq_state}, {extracted_hq_country})")
+    else:
+        print(f"   ❌ No HQ data extracted from LinkedIn — cannot verify miner's claimed HQ")
+        return False, {
+            "stage": "Stage 5: HQ Location",
+            "check_name": "check_stage5_unified",
+            "message": f"Could not extract HQ from LinkedIn to verify miner's claim ({claimed_hq_city}, {claimed_hq_state}, {claimed_hq_country})",
+            "failed_fields": ["hq_city", "hq_country"]
+        }
 
     # ========================================================================
     # W4: site:linkedin.com/company/{slug} "{domain}" (website confirmation)

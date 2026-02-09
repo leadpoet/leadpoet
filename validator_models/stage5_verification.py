@@ -419,9 +419,11 @@ async def classify_company_industry(
         valid_pairs=taxonomy.get('valid_pairs')
     )
 
+    # Include LinkedIn industry in description for LLM context (not saved to company table)
+    desc_for_prompt = f"{refined}. LinkedIn Industry: {extracted_industry}" if extracted_industry else refined
     prompt2 = CLASSIFY_PROMPT.format(
-        refined_description=refined,
-        candidates_list=candidates_str
+        refined_description=desc_for_prompt,
+        candidates_list=candidates_str,
     )
 
     response2 = _call_llm_sync(prompt2)
@@ -586,6 +588,140 @@ _COMMON_STATE_ABBREVS = {
     'Fl': 'Florida', 'Tx': 'Texas', 'Il': 'Illinois', 'Oh': 'Ohio',
     'Nc': 'North Carolina', 'Nj': 'New Jersey', 'Ny': 'New York',
 }
+
+# ---- Robust HQ parsing constants (ported from Company_check/Company_industry/parse_hq_to_columns.py) ----
+
+# Primary state for ambiguous US cities (well-known business/metro association)
+_HQ_US_CITY_PRIMARY_STATE = {
+    'atlanta': 'georgia',
+    'ashland': 'kentucky',
+    'aurora': 'colorado',
+    'baltimore': 'maryland',
+    'boston': 'massachusetts',
+    'boulder': 'colorado',
+    'brooklyn': 'new york',
+    'burlingame': 'california',
+    'charlotte': 'north carolina',
+    'cincinnati': 'ohio',
+    'clearwater': 'florida',
+    'collierville': 'tennessee',
+    'columbus': 'ohio',
+    'crystal lake': 'illinois',
+    'dallas': 'texas',
+    'darien': 'connecticut',
+    'denver': 'colorado',
+    'franklin park': 'illinois',
+    'fredericksburg': 'virginia',
+    'frisco': 'texas',
+    'henderson': 'nevada',
+    'houston': 'texas',
+    'huntingdon': 'pennsylvania',
+    'huntsville': 'alabama',
+    'indianapolis': 'indiana',
+    'jacksonville': 'florida',
+    'knoxville': 'tennessee',
+    'lafayette': 'louisiana',
+    'las vegas': 'nevada',
+    'lexington': 'kentucky',
+    'littleton': 'colorado',
+    'louisville': 'kentucky',
+    'madison': 'wisconsin',
+    'medford': 'massachusetts',
+    'memphis': 'tennessee',
+    'miami': 'florida',
+    'midland': 'texas',
+    'minneapolis': 'minnesota',
+    'nashville': 'tennessee',
+    'new york city': 'new york',
+    'new haven': 'connecticut',
+    'newport': 'rhode island',
+    'orange': 'california',
+    'oregon': 'ohio',
+    'palo alto': 'california',
+    'park city': 'utah',
+    'philadelphia': 'pennsylvania',
+    'phoenix': 'arizona',
+    'pittsburgh': 'pennsylvania',
+    'pleasanton': 'california',
+    'portland': 'oregon',
+    'raleigh': 'north carolina',
+    'reading': 'pennsylvania',
+    'robinson': 'texas',
+    'rockville': 'maryland',
+    'san antonio': 'texas',
+    'san diego': 'california',
+    'santa fe': 'new mexico',
+    'santa rosa': 'california',
+    'spring lake': 'new jersey',
+    'spring valley': 'new york',
+    'tampa': 'florida',
+    'union city': 'new jersey',
+    'west springfield': 'massachusetts',
+    'wilmington': 'delaware',
+    'woodside': 'california',
+}
+
+_HQ_US_CITY_ALIASES = {
+    'new york': 'new york city',
+    'nyc': 'new york city',
+    'ny': 'new york city',
+    'sf': 'san francisco',
+    'san fransisco': 'san francisco',
+    'la': 'los angeles',
+    'dc': 'washington',
+    'washington dc': 'washington',
+    'washington d.c.': 'washington',
+    'st louis': 'st. louis',
+    'st. louis': 'st. louis',
+    'st paul': 'st. paul',
+    'st. paul': 'st. paul',
+    'ft worth': 'fort worth',
+    'ft. worth': 'fort worth',
+    'cranberry twp': 'cranberry township',
+    'o fallon': "o'fallon",
+    'gulf port': 'gulfport',
+    'sandy spring': 'ashton-sandy spring',
+    'winston salem': 'winston-salem',
+}
+
+_HQ_STATE_TYPOS = {
+    'new youk': 'new york',
+    'lousiana': 'louisiana',
+    'virgina': 'virginia',
+    'maharshtra': 'maharashtra',
+    'californa': 'california',
+}
+
+_HQ_INTL_STATE_TO_COUNTRY = {
+    'ontario': 'canada', 'british columbia': 'canada', 'alberta': 'canada',
+    'quebec': 'canada', 'manitoba': 'canada', 'saskatchewan': 'canada',
+    'nsw': 'australia', 'new south wales': 'australia', 'victoria': 'australia',
+    'queensland': 'australia', 'western australia': 'australia',
+    'south australia': 'australia', 'act': 'australia', 'tasmania': 'australia',
+    'maharashtra': 'india', 'haryana': 'india', 'karnataka': 'india',
+    'tamil nadu': 'india', 'delhi': 'india', 'maharshtra': 'india',
+    'telangana': 'india', 'uttar pradesh': 'india', 'west bengal': 'india',
+    'hampshire': 'united kingdom', 'west sussex': 'united kingdom',
+    'surrey': 'united kingdom', 'england': 'united kingdom',
+    'scotland': 'united kingdom', 'wales': 'united kingdom',
+    'lancashire': 'united kingdom', 'kent': 'united kingdom',
+    'selangor': 'malaysia',
+    'center': 'israel',
+    'abu dhabi emirate': 'united arab emirates',
+}
+
+_HQ_KNOWN_FOREIGN_SINGLE = {
+    'dubai': ('Dubai', '', 'United Arab Emirates'),
+    'abu dhabi': ('Abu Dhabi', '', 'United Arab Emirates'),
+    'tel': ('Tel Aviv', '', 'Israel'),
+    'tel aviv': ('Tel Aviv', '', 'Israel'),
+    'singapore': ('Singapore', '', 'Singapore'),
+    'hong kong': ('Hong Kong', '', 'Hong Kong'),
+    'london': ('London', '', 'United Kingdom'),
+    'toronto': ('Toronto', 'Ontario', 'Canada'),
+}
+
+# ---- End robust HQ parsing constants ----
 
 
 def _normalize_state(state_str: str) -> str:
@@ -2515,87 +2651,259 @@ def _check_domain_in_results(results: list, slug: str, domain: str) -> bool:
     return False
 
 
+def _clean_hq_part(s: str) -> str:
+    """Remove trailing junk like (Houston area), [CA], zip codes from HQ parts."""
+    s = re.sub(r'\s*\(.*?\)\s*$', '', s).strip()
+    s = re.sub(r'\s*\[.*?\]\s*$', '', s).strip()
+    s = re.sub(r'\s+\d{5}.*$', '', s).strip()
+    s = re.sub(r'\s+Year$', '', s).strip()
+    return s
+
+
+def _resolve_hq_us_city(city_raw: str, state_name: str) -> Tuple[str, bool]:
+    """Resolve a city name for a given US state, applying aliases."""
+    geo = _load_geo()
+    us_states_map = geo.get('us_states', {})
+    city_lower = city_raw.lower().strip()
+    city_lookup = _HQ_US_CITY_ALIASES.get(city_lower, city_lower)
+    city_lookup = re.sub(r'\s*(metro|bay area|area|region)$', '', city_lookup, flags=re.I).strip()
+
+    cities_in_state = us_states_map.get(state_name, [])
+    if city_lookup in cities_in_state:
+        return city_lookup.title(), True
+
+    # Try "St" -> "Saint" and "St." variants
+    if ' st ' in city_lookup or ' st. ' in city_lookup or city_lookup.startswith(('st ', 'st. ')):
+        for old, new in [('st ', 'saint '), ('st. ', 'saint '), ('st ', 'st. '), ('st. ', 'st. ')]:
+            candidate = city_lookup.replace(old, new) if (' ' + old) in (' ' + city_lookup) else city_lookup
+            if candidate != city_lookup and candidate in cities_in_state:
+                return candidate.title(), True
+
+    return city_raw.strip().title(), False
+
+
+def _resolve_hq_state(state_raw: str) -> Tuple[str, bool]:
+    """Try to resolve state_raw to a US state name. Returns (state_name, is_us)."""
+    geo = _load_geo()
+    us_state_names = set(geo.get('us_states', {}).keys())
+    state_abbr_map = {k.upper(): v for k, v in geo.get('state_abbr', {}).items()}
+
+    s = state_raw.strip()
+    s_upper = s.upper()
+    s_lower = s.lower()
+
+    # Fix typos first
+    s_lower = _HQ_STATE_TYPOS.get(s_lower, s_lower)
+
+    if s_upper in state_abbr_map:
+        return state_abbr_map[s_upper], True
+    if s_lower in us_state_names:
+        return s_lower, True
+    return s_lower, False
+
+
 def _parse_hq_to_location(hq_raw: str) -> Tuple[str, str, str, bool]:
     """
     Parse headquarters string to (city, state, country, is_foreign).
-    Simplified version of tested parse_hq logic.
+    Robust parser with US city-to-state mapping, aliases, international support.
+    Ported from Company_check/Company_industry/parse_hq_to_columns.py.
     """
     if not hq_raw:
         return '', '', '', False
 
-    hq_raw = hq_raw.strip()
+    raw = hq_raw.strip()
 
-    # Remote/global
-    if hq_raw.lower() in ('remote', 'global - remote - online', 'worldwide'):
+    # Remote
+    if raw.lower() in ('remote', 'global - remote - online'):
         return 'Remote', '', '', False
 
-    # Known foreign single-word cities
-    known_foreign = {
-        'dubai': ('Dubai', '', 'United Arab Emirates', True),
-        'abu dhabi': ('Abu Dhabi', '', 'United Arab Emirates', True),
-        'hong kong': ('Hong Kong', '', 'Hong Kong', True),
-        'singapore': ('Singapore', '', 'Singapore', True),
-        'london': ('London', '', 'United Kingdom', True),
-        'toronto': ('Toronto', 'Ontario', 'Canada', True),
-    }
+    # Junk
+    if raw.lower() in ('nationwide', 'worldwide', 'anywhere', 'officer', 'plaza'):
+        return '', '', '', False
+    if any(j in raw for j in ['Retail Operations', 'Services (WHS)', 'Facilities Services']):
+        return '', '', '', False
 
-    hq_lower = hq_raw.lower().strip()
-    if hq_lower in known_foreign:
-        return known_foreign[hq_lower]
+    # Strip trailing country suffix like "- USA", "- US", "- United States"
+    raw = re.sub(r'\s*-\s*(USA|US|United States|UK|India|Canada|Australia)\s*$', '', raw, flags=re.I).strip()
 
-    # Handle "Dubai, Dubai" or "Dubai, U"
-    if hq_lower in ('dubai, dubai', 'dubai, u'):
+    # Strip "Metro" / "Greater" prefix
+    raw = re.sub(r'^(Metro|Greater)\s+', '', raw, flags=re.I).strip()
+
+    # Slash separator: take first part (e.g., "Los Angeles / Orange" -> "Los Angeles")
+    if '/' in raw and ',' not in raw:
+        raw = raw.split('/')[0].strip()
+
+    # "Metro Area - City, ST" -> keep "City, ST"
+    m_metro = re.match(r'^.+\s+-\s+(.+,.+)$', raw)
+    if m_metro:
+        raw = m_metro.group(1).strip()
+
+    raw_lower = raw.lower().strip()
+
+    # Dubai, Dubai
+    if raw_lower in ('dubai, dubai', 'dubai, u'):
         return 'Dubai', '', 'United Arab Emirates', True
 
-    # Washington DC special case
-    if re.match(r'^washington\s*d\.?c\.?', hq_lower):
+    # Hong Kong
+    if 'hong kong' in raw_lower:
+        return 'Hong Kong', '', 'Hong Kong', True
+
+    # Dublin N (postal districts)
+    if re.match(r'^dublin\s+\d+$', raw_lower):
+        return 'Dublin', '', 'Ireland', True
+
+    # Known foreign single word
+    if raw_lower in _HQ_KNOWN_FOREIGN_SINGLE:
+        c, s, co = _HQ_KNOWN_FOREIGN_SINGLE[raw_lower]
+        return c, s, co, True
+
+    # Washington DC variants
+    if re.match(r'^washington\s*d\.?c\.?', raw_lower) or raw_lower == 'washington dc metro':
         return 'Washington', 'District Of Columbia', 'United States', False
 
     # Split by comma
-    parts = [p.strip() for p in hq_raw.split(',') if p.strip()]
+    parts = [_clean_hq_part(p) for p in raw.split(',') if p.strip()]
+    parts = [p for p in parts if p]
 
     if len(parts) == 0:
         return '', '', '', False
 
-    # Load geo data for US state validation
+    # Load geo data
     geo = _load_geo()
-    us_states = set(geo.get('us_states', {}).keys())
-    state_abbr = geo.get('state_abbr', {})
+    us_states_map = geo.get('us_states', {})
+    us_state_names = set(us_states_map.keys())
+    state_abbr_map = {k.upper(): v for k, v in geo.get('state_abbr', {}).items()}
+    countries_set = set(geo.get('countries', []))
+    intl_cities = geo.get('cities', {})
 
+    # Build city-to-states lookup
+    us_city_to_states = {}
+    for state, cities in us_states_map.items():
+        for city in cities:
+            us_city_to_states.setdefault(city, []).append(state)
+
+    # ---- 3+ parts: scan from right to find city + state ----
+    if len(parts) >= 3:
+        for i in range(len(parts) - 1, 0, -1):
+            candidate_state = parts[i].strip()
+            candidate_city = parts[i - 1].strip()
+            state_name, is_us = _resolve_hq_state(candidate_state)
+            if is_us:
+                city_display, _ = _resolve_hq_us_city(candidate_city, state_name)
+                return city_display, state_name.title(), 'United States', False
+            state_lower = _HQ_STATE_TYPOS.get(candidate_state.lower(), candidate_state.lower())
+            if state_lower in _HQ_INTL_STATE_TO_COUNTRY:
+                country = _HQ_INTL_STATE_TO_COUNTRY[state_lower]
+                return candidate_city.strip().title(), '', country.title(), True
+            if state_lower in countries_set:
+                return candidate_city.strip().title(), '', candidate_state.strip().title(), True
+
+    # ---- 2 parts: city, state/country ----
     if len(parts) >= 2:
         city_raw = parts[0]
-        state_raw = parts[-1].strip()
+        state_raw = parts[1]
 
-        # Check if state is a US state or abbreviation
-        state_lower = state_raw.lower()
-        state_upper = state_raw.upper()
+        # Fix "Washington, D" or "Washington, D.C."
+        if city_raw.lower().strip() == 'washington' and state_raw.strip().lower().startswith('d'):
+            return 'Washington', 'District Of Columbia', 'United States', False
 
-        # State abbreviation
-        if state_upper in state_abbr:
-            state_name = state_abbr[state_upper]
-            return city_raw.strip().title(), state_name.title(), 'United States', False
+        # Fix reversed: "MA, Boston" -> "Boston, MA"
+        if state_raw.strip().upper() not in state_abbr_map and city_raw.strip().upper() in state_abbr_map:
+            city_raw, state_raw = state_raw, city_raw
 
-        # Full state name
-        if state_lower in us_states:
-            return city_raw.strip().title(), state_raw.title(), 'United States', False
+        # Puerto Rico (US territory)
+        if state_raw.strip().upper() == 'PR':
+            return city_raw.strip().title(), 'Puerto Rico', 'United States', False
 
-        # Check if it's a country
-        countries = set(geo.get('countries', []))
-        if state_lower in countries:
-            return city_raw.strip().title(), '', state_raw.title(), True
+        # Try US state
+        state_name, is_us = _resolve_hq_state(state_raw)
+        if is_us:
+            city_display, _ = _resolve_hq_us_city(city_raw, state_name)
+            return city_display, state_name.title(), 'United States', False
 
-        # Default: assume US with city, state
+        # International state/province
+        state_lower = _HQ_STATE_TYPOS.get(state_raw.lower().strip(), state_raw.lower().strip())
+        if state_lower in _HQ_INTL_STATE_TO_COUNTRY:
+            country = _HQ_INTL_STATE_TO_COUNTRY[state_lower]
+            return city_raw.strip().title(), '', country.title(), True
+
+        # State is a country name
+        if state_lower in countries_set:
+            return city_raw.strip().title(), '', state_raw.strip().title(), True
+
+        # Truncated state like "New" (from "New York" cut off)
+        if state_raw.strip().lower() in ('new', 'north', 'south', 'west'):
+            city_lower = _HQ_US_CITY_ALIASES.get(city_raw.lower().strip(), city_raw.lower().strip())
+            if city_lower in _HQ_US_CITY_PRIMARY_STATE:
+                best_state = _HQ_US_CITY_PRIMARY_STATE[city_lower]
+                return city_lower.title(), best_state.title(), 'United States', False
+            if city_lower in us_city_to_states:
+                return city_lower.title(), us_city_to_states[city_lower][0].title(), 'United States', False
+            return city_raw.strip().title(), '', '', False
+
+        # Zip code as state (e.g., "Jupiter, 33458")
+        if re.match(r'^\d{4,5}$', state_raw.strip()):
+            city_lower = _HQ_US_CITY_ALIASES.get(city_raw.lower().strip(), city_raw.lower().strip())
+            for sn, cities in us_states_map.items():
+                if city_lower in cities:
+                    return city_lower.title(), sn.title(), 'United States', False
+            return city_raw.strip().title(), '', 'United States', False
+
+        # Try city in international cities DB
+        city_lower = city_raw.lower().strip()
+        for country_name, city_list in intl_cities.items():
+            if city_lower in city_list:
+                return city_raw.strip().title(), '', country_name.title(), True
+
+        # Repeated city name (e.g., "Alexandria, Alexandria")
+        if city_raw.lower().strip() == state_raw.lower().strip():
+            city_lower = city_raw.lower().strip()
+            for sn, cities in us_states_map.items():
+                if city_lower in cities:
+                    return city_lower.title(), sn.title(), 'United States', False
+
         return city_raw.strip().title(), state_raw.strip().title(), '', False
 
+    # ---- 1 part: single city/state name ----
     elif len(parts) == 1:
         val = parts[0].strip()
         val_lower = val.lower()
 
-        if val_lower in known_foreign:
-            return known_foreign[val_lower]
+        # Known foreign
+        if val_lower in _HQ_KNOWN_FOREIGN_SINGLE:
+            c, s, co = _HQ_KNOWN_FOREIGN_SINGLE[val_lower]
+            return c, s, co, True
 
-        # Could be a US city or state
-        return val.title(), '', '', False
+        # Apply alias (e.g., "New York" -> "new york city")
+        alias = _HQ_US_CITY_ALIASES.get(val_lower, val_lower)
+
+        # US state name only (like "Delaware", "Oregon", "Wisconsin")
+        # But NOT if alias mapped it to a city
+        if val_lower in us_state_names and alias == val_lower:
+            return '', val.title(), 'United States', False
+        alias = re.sub(r'\s*(metro|bay area|area|region)$', '', alias, flags=re.I).strip()
+
+        # Check if city exists in intl DB
+        has_intl = any(alias in city_list for co, city_list in intl_cities.items() if co != 'united states')
+
+        # Search US cities
+        if alias in us_city_to_states:
+            states = us_city_to_states[alias]
+            if alias in _HQ_US_CITY_PRIMARY_STATE:
+                best_state = _HQ_US_CITY_PRIMARY_STATE[alias]
+                return alias.title(), best_state.title(), 'United States', False
+            elif len(states) == 1 and not has_intl:
+                return alias.title(), states[0].title(), 'United States', False
+            else:
+                # Multi-state or intl duplicate without explicit mapping
+                return alias.title(), '', '', False
+
+        # Search international
+        for country_name, city_list in intl_cities.items():
+            if val_lower in city_list:
+                return val.strip().title(), '', country_name.title(), True
+
+        return val.strip().title(), '', '', False
 
     return '', '', '', False
 
@@ -3079,23 +3387,23 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
 
             # VALIDATE IMMEDIATELY: HQ location (if extracted)
             if merged['headquarters']:
-                hq_city, hq_state, hq_country, is_foreign = _parse_hq_to_location(merged['headquarters'])
-                if hq_country:
-                    # Check if miner's claimed location matches
-                    if country and hq_country.lower() != country.lower():
-                        print(f"   ❌ Q1 HQ COUNTRY MISMATCH: claimed '{country}' vs extracted '{hq_country}'")
-                        return False, {
-                            "stage": "Stage 5: HQ Location",
-                            "check_name": "check_stage5_unified",
-                            "message": f"HQ country mismatch: claimed '{country}' vs LinkedIn '{hq_country}'",
-                            "failed_fields": ["hq_country"],
-                            "claimed": country,
-                            "extracted": hq_country
-                        }
-                    print(f"   ✅ Q1 HQ: {hq_city}, {hq_state}, {hq_country}")
-                    lead["extracted_hq_city"] = hq_city
-                    lead["extracted_hq_state"] = hq_state
-                    lead["extracted_hq_country"] = hq_country
+                ext_city, ext_state, ext_country, is_foreign = _parse_hq_to_location(merged['headquarters'])
+                # Check if miner's claimed country matches (only when both have country)
+                if ext_country and country and ext_country.lower() != country.lower():
+                    print(f"   ❌ Q1 HQ COUNTRY MISMATCH: claimed '{country}' vs extracted '{ext_country}'")
+                    return False, {
+                        "stage": "Stage 5: HQ Location",
+                        "check_name": "check_stage5_unified",
+                        "message": f"HQ country mismatch: claimed '{country}' vs LinkedIn '{ext_country}'",
+                        "failed_fields": ["hq_country"],
+                        "claimed": country,
+                        "extracted": ext_country
+                    }
+                if ext_country or ext_city:
+                    print(f"   ✅ Q1 HQ: {ext_city}, {ext_state}, {ext_country}")
+                    lead["extracted_hq_city"] = ext_city
+                    lead["extracted_hq_state"] = ext_state
+                    lead["extracted_hq_country"] = ext_country
 
             print(f"   📊 Q1 extracted: name={bool(merged['title_company_name'])}, size={bool(merged['company_size'])}, hq={bool(merged['headquarters'])}, industry={bool(merged['industry'])}")
 
@@ -3146,20 +3454,20 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                     print(f"   ✅ Q2 SIZE: '{merged['company_size']}' matches")
 
                 if sources.get('headquarters') == 'q2' and merged['headquarters']:
-                    hq_city, hq_state, hq_country, is_foreign = _parse_hq_to_location(merged['headquarters'])
-                    if hq_country and country and hq_country.lower() != country.lower():
+                    ext_city, ext_state, ext_country, is_foreign = _parse_hq_to_location(merged['headquarters'])
+                    if ext_country and country and ext_country.lower() != country.lower():
                         print(f"   ❌ Q2 HQ COUNTRY MISMATCH")
                         return False, {
                             "stage": "Stage 5: HQ Location",
                             "check_name": "check_stage5_unified",
-                            "message": f"HQ country mismatch: claimed '{country}' vs LinkedIn '{hq_country}'",
+                            "message": f"HQ country mismatch: claimed '{country}' vs LinkedIn '{ext_country}'",
                             "failed_fields": ["hq_country"]
                         }
-                    if hq_country:
-                        print(f"   ✅ Q2 HQ: {hq_city}, {hq_state}, {hq_country}")
-                        lead["extracted_hq_city"] = hq_city
-                        lead["extracted_hq_state"] = hq_state
-                        lead["extracted_hq_country"] = hq_country
+                    if ext_country or ext_city:
+                        print(f"   ✅ Q2 HQ: {ext_city}, {ext_state}, {ext_country}")
+                        lead["extracted_hq_city"] = ext_city
+                        lead["extracted_hq_state"] = ext_state
+                        lead["extracted_hq_country"] = ext_country
 
                 print(f"   📊 Q2 filled gaps: {[k for k, v in sources.items() if v == 'q2']}")
 
@@ -3208,8 +3516,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                     print(f"   ✅ Q3 SIZE matches")
 
                 if sources.get('headquarters') == 'q3' and merged['headquarters']:
-                    hq_city, hq_state, hq_country, is_foreign = _parse_hq_to_location(merged['headquarters'])
-                    if hq_country and country and hq_country.lower() != country.lower():
+                    ext_city, ext_state, ext_country, is_foreign = _parse_hq_to_location(merged['headquarters'])
+                    if ext_country and country and ext_country.lower() != country.lower():
                         print(f"   ❌ Q3 HQ COUNTRY MISMATCH")
                         return False, {
                             "stage": "Stage 5: HQ Location",
@@ -3217,11 +3525,11 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                             "message": f"HQ country mismatch",
                             "failed_fields": ["hq_country"]
                         }
-                    if hq_country:
-                        print(f"   ✅ Q3 HQ: {hq_city}, {hq_state}, {hq_country}")
-                        lead["extracted_hq_city"] = hq_city
-                        lead["extracted_hq_state"] = hq_state
-                        lead["extracted_hq_country"] = hq_country
+                    if ext_country or ext_city:
+                        print(f"   ✅ Q3 HQ: {ext_city}, {ext_state}, {ext_country}")
+                        lead["extracted_hq_city"] = ext_city
+                        lead["extracted_hq_state"] = ext_state
+                        lead["extracted_hq_country"] = ext_country
 
                 print(f"   📊 Q3 filled gaps: {[k for k, v in sources.items() if v == 'q3']}")
 
@@ -3267,7 +3575,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         }
 
     if not merged['headquarters']:
-        print(f"   ⚠️ No HQ found after Q1-Q3 (continuing without HQ validation)")
+        print(f"   ⚠️ No HQ found after Q1-Q3 — HQ validation will reject")
 
     # ========================================================================
     # HQ VALIDATION: Compare miner's claimed HQ against LinkedIn-extracted HQ
@@ -3312,17 +3620,41 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             }
 
         if not miner_claims_remote and not linkedin_shows_remote:
-            # Both have real locations — validate country match
-            if claimed_hq_country and extracted_hq_country:
-                if claimed_hq_country.lower() != extracted_hq_country.lower():
+            # Both have real locations — extracted values are the source of truth
+            if extracted_hq_country:
+                if not claimed_hq_country or claimed_hq_country.lower() != extracted_hq_country.lower():
                     print(f"   ❌ HQ COUNTRY MISMATCH: claimed '{claimed_hq_country}' vs LinkedIn '{extracted_hq_country}'")
                     return False, {
                         "stage": "Stage 5: HQ Location",
                         "check_name": "check_stage5_unified",
                         "message": f"HQ country mismatch: claimed '{claimed_hq_country}' vs LinkedIn '{extracted_hq_country}'",
                         "failed_fields": ["hq_country"],
-                        "claimed": claimed_hq_country,
+                        "claimed": claimed_hq_country or "(not provided)",
                         "extracted": extracted_hq_country
+                    }
+
+            if extracted_hq_state:
+                if not claimed_hq_state or claimed_hq_state.lower() != extracted_hq_state.lower():
+                    print(f"   ❌ HQ STATE MISMATCH: claimed '{claimed_hq_state}' vs LinkedIn '{extracted_hq_state}'")
+                    return False, {
+                        "stage": "Stage 5: HQ Location",
+                        "check_name": "check_stage5_unified",
+                        "message": f"HQ state mismatch: claimed '{claimed_hq_state}' vs LinkedIn '{extracted_hq_state}'",
+                        "failed_fields": ["hq_state"],
+                        "claimed": claimed_hq_state or "(not provided)",
+                        "extracted": extracted_hq_state
+                    }
+
+            if extracted_hq_city:
+                if not claimed_hq_city or claimed_hq_city.lower() != extracted_hq_city.lower():
+                    print(f"   ❌ HQ CITY MISMATCH: claimed '{claimed_hq_city}' vs LinkedIn '{extracted_hq_city}'")
+                    return False, {
+                        "stage": "Stage 5: HQ Location",
+                        "check_name": "check_stage5_unified",
+                        "message": f"HQ city mismatch: claimed '{claimed_hq_city}' vs LinkedIn '{extracted_hq_city}'",
+                        "failed_fields": ["hq_city"],
+                        "claimed": claimed_hq_city or "(not provided)",
+                        "extracted": extracted_hq_city
                     }
 
         print(f"   ✅ HQ validation passed: claimed=({claimed_hq_city}, {claimed_hq_state}, {claimed_hq_country}), extracted=({extracted_hq_city}, {extracted_hq_state}, {extracted_hq_country})")

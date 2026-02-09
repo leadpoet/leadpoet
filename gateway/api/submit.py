@@ -2306,6 +2306,14 @@ async def submit_lead(event: SubmitLeadEvent):
             print(f"   📝 HQ Country normalized: '{hq_country_raw}' → '{hq_country}'")
             lead_blob["hq_country"] = hq_country
 
+        # Normalize HQ city/state case (fix all-lowercase lazy input, preserve mixed case like "McAllen")
+        if hq_city and hq_city == hq_city.lower():
+            hq_city = hq_city.title()
+            lead_blob["hq_city"] = hq_city
+        if hq_state and hq_state == hq_state.lower():
+            hq_state = hq_state.title()
+            lead_blob["hq_state"] = hq_state
+
         hq_city_lower = hq_city.lower() if hq_city else ""
         hq_country_lower = hq_country.lower() if hq_country else ""
 

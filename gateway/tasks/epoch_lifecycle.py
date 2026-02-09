@@ -1174,8 +1174,8 @@ async def compute_epoch_consensus(epoch_id: int):
                                         company_website=lead_blob.get("website", ""),
                                         company_description=stage5_data.get("company_refined_description", ""),
                                         company_hq_country=lead_blob.get("hq_country", ""),
-                                        company_hq_state=lead_blob.get("hq_state"),
-                                        company_hq_city=lead_blob.get("hq_city"),
+                                        company_hq_state=lead_blob.get("hq_state", ""),
+                                        company_hq_city=lead_blob.get("hq_city", ""),
                                         industry_top3=stage5_data.get("company_industry_top3", {}),
                                         sub_industry_top3=stage5_data.get("company_sub_industry_top3", {}),
                                         company_employee_count=stage5_data.get("company_verified_employee_count", "")
@@ -1275,8 +1275,8 @@ async def compute_epoch_consensus(epoch_id: int):
                                         company_website=lead_blob.get("website", ""),
                                         company_description=rejection_reason.get("company_refined_description", ""),
                                         company_hq_country=lead_blob.get("hq_country", ""),
-                                        company_hq_state=lead_blob.get("hq_state"),
-                                        company_hq_city=lead_blob.get("hq_city"),
+                                        company_hq_state=lead_blob.get("hq_state", ""),
+                                        company_hq_city=lead_blob.get("hq_city", ""),
                                         industry_top3=rejection_reason.get("company_industry_top3", {}),
                                         sub_industry_top3=rejection_reason.get("company_sub_industry_top3", {}),
                                         company_employee_count=rejection_reason.get("company_verified_employee_count", "")

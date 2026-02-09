@@ -46,7 +46,7 @@ class QualificationConfig:
     # Cost/Time Limits (per-lead base values - totals are computed dynamically)
     # =========================================================================
     MAX_COST_PER_LEAD_USD: float = 0.05  # $0.05 average per lead (total = leads × $0.05)
-    MAX_TIME_PER_LEAD_SECONDS: float = 8.0  # 8s average per lead (total = leads × 8s)
+    MAX_TIME_PER_LEAD_SECONDS: float = 15.0  # 15s average per lead (total = leads × 15s)
     RUNNING_MODEL_TIMEOUT_SECONDS: int = 30  # 30s HARD max per single lead - if exceeded, INSTANT FAIL
     TOTAL_EVALUATION_TIMEOUT_MINUTES: int = 60  # 1 hour absolute max (safety net)
     
@@ -131,7 +131,7 @@ class QualificationConfig:
     # NEW SYSTEM: No penalty if within budget, small penalty for high variability
     #
     # - NO penalty if cost ≤ MAX_COST_PER_LEAD_USD ($0.05)
-    # - NO penalty if time ≤ MAX_TIME_PER_LEAD_SECONDS (8s)
+    # - NO penalty if time ≤ MAX_TIME_PER_LEAD_SECONDS (15s)
     # - 5-point penalty if cost > 2× MAX_COST_PER_LEAD_USD ($0.10)
     # - 5-point penalty if time > 2× MAX_TIME_PER_LEAD_SECONDS (16s)
     #
@@ -426,9 +426,9 @@ class QualificationConfig:
         Formula: total_leads × MAX_TIME_PER_LEAD_SECONDS
         
         Examples:
-            100 leads × 8s = 800s
-            50 leads × 8s = 400s
-            200 leads × 8s = 1600s
+            100 leads × 15s = 1500s
+            50 leads × 15s = 750s
+            200 leads × 15s = 3000s
         """
         return self.get_total_leads() * self.MAX_TIME_PER_LEAD_SECONDS
     
@@ -461,7 +461,7 @@ class QualificationConfig:
         Formula: MAX_TIME_PER_LEAD_SECONDS × TIME_VARIABILITY_THRESHOLD_MULTIPLIER
         
         Examples:
-            8s × 2.0 = 16s (penalty if time > 16s per lead)
+            15s × 2.0 = 30s (penalty if time > 30s per lead)
             10s × 2.0 = 20s (penalty if time > 20s per lead)
         """
         return self.MAX_TIME_PER_LEAD_SECONDS * self.TIME_VARIABILITY_THRESHOLD_MULTIPLIER

@@ -186,6 +186,54 @@ MULTILINE_DATE_FABRICATION_PATTERNS = [
     r'random\.(randint|uniform)\s*\(\s*\d+\s*,\s*\d+\s*\)[\s\S]{0,300}(signal|intent|event).*date\s*=',
 ]
 
+# === GENERIC INTENT FALLBACK PATTERNS ===
+# These detect templated/generic intent descriptions that are designed to
+# always pass verification by being true for ANY company.
+# 
+# The problem: These descriptions are technically "verifiable" from any website
+# (if a company has a website, they're "actively operating"), but they provide
+# NO actual buying intent signal value.
+#
+# Examples of gaming fallback intents:
+#   f"{company} is actively operating in {industry}"
+#   f"{company} market activity and company updates."
+#   f"{company} is expanding operations..."
+#
+# These are NOT real intent signals - they're fallbacks that always "pass"
+GENERIC_INTENT_FALLBACK_PATTERNS = [
+    # Pattern: f-string with company + "is actively operating" (the exact cipher pattern)
+    r'f["\'][^"\']*\{[^}]*company[^}]*\}[^"\']*is\s+actively\s+operating',
+    
+    # Pattern: f-string with "visible market activity"
+    r'f["\'][^"\']*visible\s+market\s+activity',
+    
+    # Pattern: f-string with company + "market activity and company updates"
+    r'f["\'][^"\']*\{[^}]*company[^}]*\}[^"\']*market\s+activity',
+    
+    # Pattern: Generic hardcoded description strings that are templated
+    r'["\']description["\']\s*:\s*f["\'][^"\']*\{[^}]*(company|business)[^}]*\}[^"\']*(?:operating|active|activity|expanding)',
+    
+    # Pattern: Fallback intent with generic "operating in {industry}"
+    r'f["\'][^"\']*operating\s+in\s+\{[^}]*industry',
+    
+    # Pattern: Deterministic fallback comment followed by generic return
+    r'#.*(?:fallback|conservative|default|generic)[\s\S]{0,200}return\s*\{[^}]*description',
+    
+    # Pattern: date.today() - timedelta(days=N) with hardcoded N (not extracted from content)
+    # This is a fallback date pattern - real dates should be extracted from content
+    r'date\.today\s*\(\s*\)\s*-\s*timedelta\s*\(\s*days\s*=\s*\d{1,3}\s*\)',
+    
+    # Pattern: Generic snippet about "company updates" or "market activity"
+    r'["\']snippet["\']\s*:\s*f["\'][^"\']*(?:company\s+updates|market\s+activity|business\s+operations)',
+]
+
+# Low-value intent source types that should be penalized
+# "other" source means they couldn't categorize the source properly
+LOW_VALUE_INTENT_SOURCES = [
+    r'["\']source["\']\s*:\s*["\']other["\']',
+    r'source\s*=\s*["\']other["\']',
+]
+
 
 def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
     """
@@ -287,6 +335,39 @@ def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
     elif total_fabrication == 1:
         red_flags.append("Potential data fabrication: random used for date/data generation")
         confidence = max(confidence, 60)  # Medium - let LLM confirm
+    
+    # Check for generic intent fallback patterns (MEDIUM-HIGH severity)
+    # These detect models that use templated "always pass" fallback intents
+    generic_intent_matches = 0
+    generic_intent_details = []
+    for pattern in GENERIC_INTENT_FALLBACK_PATTERNS:
+        matches = re.findall(pattern, code_content, re.IGNORECASE | re.DOTALL)
+        if matches:
+            generic_intent_matches += 1
+            generic_intent_details.append(pattern[:40])
+    
+    if generic_intent_matches >= 3:
+        # Multiple generic intent patterns = gaming the fallback system
+        red_flags.append(f"Generic intent fallback: model uses templated 'always pass' intent descriptions ({generic_intent_matches} patterns)")
+        confidence = max(confidence, 75)  # High enough to flag, but let LLM confirm
+    elif generic_intent_matches >= 2:
+        red_flags.append(f"Suspicious intent fallback: templated descriptions detected ({generic_intent_matches} patterns)")
+        confidence = max(confidence, 55)  # Medium - needs LLM review
+    elif generic_intent_matches == 1:
+        # Single pattern might be legitimate fallback
+        red_flags.append("Potential generic intent pattern (needs LLM review)")
+        confidence = max(confidence, 35)  # Low - informational
+    
+    # Check for "other" source type usage (MEDIUM severity)
+    # Models that frequently use "other" as source are likely fabricating
+    other_source_matches = 0
+    for pattern in LOW_VALUE_INTENT_SOURCES:
+        if re.search(pattern, code_content, re.IGNORECASE):
+            other_source_matches += 1
+    
+    if other_source_matches >= 2:
+        red_flags.append(f"Low-value intent sources: model uses 'other' source type ({other_source_matches} occurrences)")
+        confidence = max(confidence, 45)  # Informational, let LLM and scoring handle
     
     # Determine if we should fail immediately or defer to LLM
     passed = confidence < 85  # 85+ = instant fail, below = let LLM decide

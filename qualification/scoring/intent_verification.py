@@ -219,6 +219,74 @@ def get_cache_stats() -> Dict[str, Any]:
 
 
 # =============================================================================
+# Generic Intent Detection (Pre-LLM Check)
+# =============================================================================
+
+# Patterns that indicate generic/templated intent descriptions
+# These are gaming attempts that produce "always pass" fallback intents
+GENERIC_INTENT_PATTERNS = [
+    # Exact patterns from the cipher model's fallback
+    r"is\s+actively\s+operating\s+in\s+\w+",
+    r"visible\s+market\s+activity",
+    r"market\s+activity\s+and\s+company\s+updates",
+    r"business\s+operations\s+and\s+updates",
+    # Generic patterns that apply to ANY company
+    r"^.{0,50}\s+is\s+(?:actively\s+)?(?:operating|expanding|growing)",
+    r"company\s+(?:updates|activities|operations)",
+    r"market\s+(?:activity|presence|operations)",
+]
+
+# Keywords that indicate specific (non-generic) intent
+SPECIFIC_INTENT_KEYWORDS = [
+    "hiring", "recruit", "job", "position", "opening",  # Hiring intent
+    "launch", "released", "announced", "introduced",    # Product launch
+    "raised", "funding", "series", "investment",        # Funding
+    "partnership", "partnered", "collaboration",        # Partnership
+    "acquired", "acquisition", "merger",                # M&A
+    "expansion", "opened", "new office", "new location", # Geographic expansion
+    "migrating", "adopting", "implementing",            # Technology adoption
+]
+
+
+def is_generic_intent_description(description: str) -> Tuple[bool, str]:
+    """
+    Check if an intent description is generic/templated (gaming attempt).
+    
+    This runs BEFORE the LLM call to save costs on obvious fallbacks.
+    
+    Args:
+        description: The intent signal description
+        
+    Returns:
+        Tuple of (is_generic: bool, reason: str)
+    """
+    desc_lower = description.lower().strip()
+    
+    # Check for known generic patterns
+    for pattern in GENERIC_INTENT_PATTERNS:
+        if re.search(pattern, desc_lower, re.IGNORECASE):
+            return True, f"Generic pattern detected: matches '{pattern[:30]}...'"
+    
+    # Check if description has ANY specific intent keywords
+    has_specific_keyword = False
+    for keyword in SPECIFIC_INTENT_KEYWORDS:
+        if keyword in desc_lower:
+            has_specific_keyword = True
+            break
+    
+    # Very short descriptions with no specific keywords are likely generic
+    if len(desc_lower) < 80 and not has_specific_keyword:
+        return True, "Description too short and lacks specific intent keywords"
+    
+    # Check for templated structure: "{company} is {verb}ing" with no specifics
+    templated_pattern = r"^\w+(?:\s+\w+){0,3}\s+is\s+\w+ing\s+(?:in\s+)?\w+\s*\.?$"
+    if re.match(templated_pattern, desc_lower) and not has_specific_keyword:
+        return True, "Templated structure with no specific details"
+    
+    return False, "Description appears specific"
+
+
+# =============================================================================
 # Main Verification Function
 # =============================================================================
 
@@ -227,11 +295,12 @@ async def verify_intent_signal(intent_signal: IntentSignal) -> Tuple[bool, int, 
     Verify an intent signal claim.
     
     This is the main entry point for intent verification. It:
-    1. Checks cache for existing result
-    2. Fetches content from the source URL
-    3. Extracts relevant text
-    4. Uses LLM to verify the claim matches the content
-    5. Caches the result
+    1. PRE-CHECK: Reject known generic/templated descriptions (saves LLM cost)
+    2. Checks cache for existing result
+    3. Fetches content from the source URL
+    4. Extracts relevant text
+    5. Uses LLM to verify the claim matches the content
+    6. Caches the result
     
     Args:
         intent_signal: The intent signal to verify
@@ -243,6 +312,17 @@ async def verify_intent_signal(intent_signal: IntentSignal) -> Tuple[bool, int, 
     
     # Get source as string for comparisons
     source_str = intent_signal.source.value if isinstance(intent_signal.source, IntentSignalSource) else str(intent_signal.source)
+    
+    # PRE-CHECK: Reject generic/templated descriptions before expensive LLM call
+    is_generic, generic_reason = is_generic_intent_description(intent_signal.description)
+    if is_generic:
+        logger.warning(f"Rejected generic intent: {generic_reason}")
+        return False, 5, f"Generic fallback intent rejected: {generic_reason}"
+    
+    # Additional pre-check: "other" source type with vague description is suspicious
+    if source_str.lower() == "other" and len(intent_signal.description) < 100:
+        logger.warning("Rejected: 'other' source with short description")
+        return False, 10, "Low-value source type 'other' with insufficient description"
     
     # Check cache first
     cache_key = compute_cache_key(intent_signal.url, source_str, intent_signal.date)
@@ -738,13 +818,25 @@ SOURCE URL: {url}
 CLAIMED DATE: {date}
 CONTENT EXCERPT: {content}
 
-Your task is to determine if the content SUPPORTS the intent signal claim.
+Your task is to determine if the content SUPPORTS the intent signal claim with SPECIFIC evidence.
+
+CRITICAL - Reject these GENERIC/TEMPLATED claims (they are gaming attempts):
+- "[Company] is actively operating in [industry]" - This is true for ANY company with a website
+- "[Company] market activity and company updates" - Too vague, no specific intent
+- "[Company] is expanding/growing/operating" - Generic statements without specifics
+- Claims that would be true for ANY company in that industry
 
 Verification criteria:
-1. The claim should be substantively supported by the content
-2. Minor paraphrasing or summarization is acceptable
-3. The date should be reasonably close to the claimed date (within a few weeks is OK)
-4. Look for specific mentions of the claimed activity/intent
+1. The claim must contain SPECIFIC details (hiring for X role, launched Y product, raised Z funding)
+2. Generic claims like "actively operating" or "visible market activity" should be REJECTED
+3. The specific details in the claim MUST appear in the content
+4. The date should be reasonably close to the claimed date (within a few weeks is OK)
+5. If the claim is too vague to verify (no specific action/event), mark as NOT verified
+
+RED FLAGS (automatic fail):
+- Claim contains no specific action, product, or event
+- Claim could apply to any company in the industry
+- Claim uses filler phrases like "market activity", "business operations", "company updates"
 
 Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
 {{"verified": true/false, "confidence": 0-100, "reason": "Brief 1-2 sentence explanation"}}
@@ -752,6 +844,7 @@ Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
 Examples of valid responses:
 {{"verified": true, "confidence": 85, "reason": "The content mentions hiring for DevOps roles which matches the claimed intent signal."}}
 {{"verified": false, "confidence": 20, "reason": "The content discusses unrelated topics and does not support the claimed signal."}}
+{{"verified": false, "confidence": 10, "reason": "Claim is too generic - 'actively operating' applies to any company with a website."}}
 """
     
     try:

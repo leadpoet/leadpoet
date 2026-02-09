@@ -371,12 +371,26 @@ Respond with ONLY a single number (0-30):"""
 # Intent Signal Scoring
 # =============================================================================
 
+# Source type quality multipliers - high-value sources get full credit
+# Low-value or vague sources get penalized
+SOURCE_TYPE_MULTIPLIERS = {
+    "linkedin": 1.0,           # High-value: professional network
+    "job_board": 1.0,          # High-value: explicit hiring intent
+    "github": 1.0,             # High-value: technical activity
+    "news": 0.9,               # Good: public announcements
+    "company_website": 0.85,   # Medium: could be generic content
+    "social_media": 0.8,       # Medium: less reliable intent signals
+    "review_site": 0.75,       # Medium-low: indirect signal
+    "other": 0.3,              # LOW: catch-all category indicates fallback
+}
+
+
 async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, int]:
     """
     Score the quality and relevance of the intent signal.
     
     First verifies the signal is real, then scores relevance.
-    The final score is weighted by verification confidence.
+    The final score is weighted by verification confidence AND source type quality.
     
     Args:
         lead: The lead to score
@@ -394,6 +408,9 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     
     # Get source as string
     source_str = lead.intent_signal.source.value if hasattr(lead.intent_signal.source, 'value') else str(lead.intent_signal.source)
+    
+    # Get source type multiplier (penalize low-value sources like "other")
+    source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_str.lower(), 0.5)
     
     # Score the relevance of the verified signal
     prompt = f"""Score how relevant this verified intent signal is for selling "{icp.product_service}" on a scale of 0-50.
@@ -413,18 +430,27 @@ SCORING GUIDELINES:
 - 10-19: Tangentially related signal, weak buying intent
 - 0-9: Signal exists but not relevant to this product
 
+IMPORTANT: Penalize generic descriptions. Examples of LOW scores:
+- "Company is actively operating in X industry" → 0-5 (too generic)
+- "Visible market activity" → 0-5 (no specific intent)
+- Vague descriptions without specific actions → max 10
+
 Consider:
 1. Does this signal indicate explicit buying intent for this type of product?
 2. How strong is the signal (job posting, public statement, hiring activity)?
 3. Is this actionable for a sales team?
+4. Is the description specific or generic/templated?
 
 Respond with ONLY a single number (0-50):"""
 
     response = await openrouter_chat(prompt, model="gpt-4o-mini")
     raw_score = extract_score(response, max_score=MAX_INTENT_SIGNAL_SCORE)
     
-    # Weight by verification confidence
-    weighted_score = raw_score * (confidence / 100)
+    # Weight by verification confidence AND source type quality
+    weighted_score = raw_score * (confidence / 100) * source_multiplier
+    
+    if source_multiplier < 1.0:
+        logger.info(f"Applied source type penalty: {source_str} -> {source_multiplier}x")
     
     return weighted_score, confidence
 

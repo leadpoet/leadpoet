@@ -15,7 +15,7 @@ from typing import Optional
 # =============================================================================
 # Default Constants (single source of truth)
 # =============================================================================
-_DEFAULT_CHAMPION_DETHRONING_THRESHOLD_PCT = 0.20  # 20% better to dethrone champion
+_DEFAULT_CHAMPION_DETHRONING_THRESHOLD_PCT = 0.10  # 10% better to dethrone champion
 
 
 @dataclass

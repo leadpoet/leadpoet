@@ -946,9 +946,10 @@ CLAIMED DATE: {date}
 URL CONTENT (scraped via ScrapingDog):
 {content}
 
-Your task: Determine if the URL content PROVES both:
+Your task: Determine if the URL content PROVES:
 1. The intent claim is real and specific (not generic/templated)
 2. The company matches the ICP requirements (if specified)
+3. The claimed DATE is reasonable (appears in content or is plausibly recent)
 
 REJECT these GENERIC/TEMPLATED claims (gaming attempts):
 - "[Company] is actively operating in [industry]" - Too vague
@@ -961,14 +962,23 @@ VERIFICATION REQUIREMENTS:
 2. Those specific details MUST appear in the scraped content
 3. If ICP specifies an industry, the content must PROVE that industry fit
 4. If ICP specifies criteria like "PE-backed", content must show evidence of that
+5. The DATE should be found in the content OR be reasonably verifiable. If the claimed date
+   looks fabricated (e.g., exactly 14 days ago with no date in content), flag it.
+
+DATE VERIFICATION:
+- Look for actual dates/timestamps in the scraped content
+- If content has a date (e.g., "Posted Jan 15, 2026"), it should roughly match claimed date
+- If NO date in content but claimed date is suspiciously convenient (7/14/21/30 days ago), 
+  reduce confidence as the date may be fabricated
 
 Respond with ONLY JSON (no markdown):
-{{"verified": true/false, "confidence": 0-100, "reason": "1-2 sentence explanation", "icp_evidence_found": true/false}}
+{{"verified": true/false, "confidence": 0-100, "reason": "1-2 sentence explanation", "icp_evidence_found": true/false, "date_verified": true/false}}
 
 Examples:
-{{"verified": true, "confidence": 85, "reason": "Content shows hiring for DevOps roles at a healthcare company matching ICP.", "icp_evidence_found": true}}
-{{"verified": false, "confidence": 30, "reason": "Job posting exists but no evidence this is a healthcare company as ICP requires.", "icp_evidence_found": false}}
-{{"verified": false, "confidence": 10, "reason": "Claim is generic 'actively operating' - no specific intent shown.", "icp_evidence_found": false}}
+{{"verified": true, "confidence": 85, "reason": "Content shows hiring for DevOps roles at a healthcare company. Job posted Jan 20, 2026 matches claimed date.", "icp_evidence_found": true, "date_verified": true}}
+{{"verified": false, "confidence": 30, "reason": "Job posting exists but no evidence this is a healthcare company as ICP requires.", "icp_evidence_found": false, "date_verified": true}}
+{{"verified": false, "confidence": 10, "reason": "Claim is generic 'actively operating' - no specific intent shown.", "icp_evidence_found": false, "date_verified": false}}
+{{"verified": false, "confidence": 20, "reason": "Content has no dates. Claimed date of exactly 14 days ago appears fabricated.", "icp_evidence_found": true, "date_verified": false}}
 """
     
     try:
@@ -986,11 +996,20 @@ Examples:
         confidence = int(result.get("confidence", 0))
         reason = result.get("reason", "No reason provided")
         icp_evidence = result.get("icp_evidence_found", True)  # Default True if not checking ICP
+        date_verified = result.get("date_verified", True)  # Default True if not checked
         
         # If ICP was specified but no evidence found, reduce confidence significantly
         if (icp_industry or icp_criteria) and not icp_evidence:
             confidence = min(confidence, 30)
             reason = f"No ICP evidence found. {reason}"
+        
+        # If date could not be verified (likely fabricated), reduce confidence
+        # This catches time decay gaming where models use hardcoded dates like "14 days ago"
+        if not date_verified:
+            confidence = min(confidence, 40)
+            if "date" not in reason.lower():
+                reason = f"Date appears fabricated. {reason}"
+            logger.warning(f"Date verification failed - possible time decay gaming")
         
         # Apply confidence threshold
         verified = verified_raw and confidence >= CONFIDENCE_THRESHOLD

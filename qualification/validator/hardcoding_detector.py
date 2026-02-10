@@ -681,7 +681,7 @@ def _build_analysis_prompt(
             "sub_industry": icp.get("sub_industry", ""),
             "target_roles": icp.get("target_roles", icp.get("target_role_titles", [])),
             "geography": icp.get("geography", icp.get("target_geography", "")),
-            "employee_count": icp.get("employee_count", icp.get("company_size", icp.get("company_size_range", ""))),
+            "employee_count": icp.get("employee_count", ""),
         }
         icp_json_samples += f"\n**ICP {i}:**\n```json\n{json.dumps(icp_display, indent=2)}\n```\n"
     

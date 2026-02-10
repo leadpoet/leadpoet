@@ -649,7 +649,7 @@ FINAL CHECK - Before outputting, verify:
                 "sub_industry": icp.get("sub_industry", SUB_INDUSTRIES.get(industry_normalized, ["General"])[0]),
                 "target_roles": target_roles,
                 "target_seniority": _get_seniority_from_role(target_roles[0]) if target_roles else "Director",
-                "employee_count": icp.get("employee_count", icp.get("company_size", "50-200")),
+                "employee_count": icp.get("employee_count", "50-200"),
                 "company_stage": icp.get("company_stage", "Series A"),
                 "geography": geography,
                 "country": country,
@@ -715,7 +715,7 @@ def generate_single_icp(
     # Randomly select parameters
     sub_industry = random.choice(sub_industries)
     target_roles = random.sample(roles, min(random.randint(1, 3), len(roles)))  # 1-3 roles
-    company_size = random.choice(COMPANY_SIZES)
+    employee_count_range = random.choice(COMPANY_SIZES)
     company_stage = random.choice(COMPANY_STAGES)
     geography = random.choice(GEOGRAPHIES)
     product = random.choice(products)
@@ -749,8 +749,8 @@ def generate_single_icp(
     # Format geography naturally
     country = geography.split(",")[0].strip()
     
-    # Format company size naturally
-    size_text = f"with {company_size} employees"
+    # Format employee count naturally
+    size_text = f"with {employee_count_range} employees"
     
     # Format intent signals naturally
     signals_text = " or ".join([s.lower() for s in intent_signals])
@@ -768,12 +768,12 @@ def generate_single_icp(
         
         # Template 3: Product-focused
         f"Who should we target for our {product}? Ideal buyer: {roles_text} "
-        f"at {sub_industry} companies ({company_stage}, {company_size} employees) in {country}. "
+        f"at {sub_industry} companies ({company_stage}, {employee_count_range} employees) in {country}. "
         f"Look for companies that are {signals_text}.",
         
         # Template 4: Concise
         f"{roles_text} at {company_stage} {sub_industry} companies in {country} "
-        f"({company_size} employees). Signals: {signals_text}.",
+        f"({employee_count_range} employees). Signals: {signals_text}.",
         
         # Template 5: Question format (like UI screenshot)
         f"Who should we find for you? {roles_text} at {stage_text} {sub_industry} "
@@ -792,7 +792,7 @@ def generate_single_icp(
         "sub_industry": sub_industry,
         "target_roles": target_roles,  # Now a list
         "target_seniority": _get_seniority_from_role(target_roles[0]),
-        "employee_count": company_size,  # Using company_size variable for employee_count field
+        "employee_count": employee_count_range,
         "company_stage": company_stage,
         "geography": geography,
         "country": country,  # Extracted for convenience

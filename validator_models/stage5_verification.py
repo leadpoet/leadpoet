@@ -516,6 +516,15 @@ def _extract_website_from_snippet(text: str) -> str:
 _GEO_LOOKUP_PATH = os.path.join(os.path.dirname(__file__), '..', 'gateway', 'utils', 'geo_lookup_fast.json')
 _GEO_CACHE = None
 
+# Load English word cities (cities that are also common English words — need strict validation)
+_ENGLISH_WORD_CITIES_PATH = os.path.join(os.path.dirname(__file__), '..', 'gateway', 'utils', 'english_word_cities.txt')
+_ENGLISH_WORD_CITIES = set()
+try:
+    with open(_ENGLISH_WORD_CITIES_PATH, 'r') as _f:
+        _ENGLISH_WORD_CITIES = {line.strip().lower() for line in _f if line.strip()}
+except Exception:
+    pass
+
 def _load_geo():
     """Load geo lookup data (cached)."""
     global _GEO_CACHE
@@ -2482,6 +2491,10 @@ def verify_company_linkedin_data(
 # Q2: {name} linkedin company size industry headquarters
 # Q3: linkedin.com/company/{slug} Industry Company size
 # S4: site:linkedin.com/company/{slug} "{miner_size}" (size confirmation)
+# H4: site:linkedin.com/company/{slug} "{city}" "{state}" (HQ confirmation)
+# H5: site:linkedin.com/company/{slug} "{city}" "{state_abbr}" (HQ fallback)
+# H7: {company_name} linkedin location (no site: restriction)
+# H6: site:linkedin.com/company/{slug} "{city}" (non-ambiguous city only)
 # W4: site:linkedin.com/company/{slug} "{domain}" (website confirmation)
 # W5: linkedin.com/company/{slug} "{domain}" (fallback)
 # W2: linkedin.com/company/{slug} "Website" (extract Website: url)
@@ -3180,7 +3193,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     Stage 5: Efficient Validate-As-You-Go Company Verification.
 
     Pipeline (from tested Company_check):
-    Q1 → Q2 → Q3 (merge with validate) → S4 → W4 → W5 → W2 → Classification
+    Q1 → Q2 → Q3 (merge with validate) → S4 → H4 → H5 → H7 → H6 → W4 → W5 → W2 → Classification
 
     Validates immediately after each query - fails fast on mismatch.
 
@@ -3575,7 +3588,115 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         }
 
     if not merged['headquarters']:
-        print(f"   ⚠️ No HQ found after Q1-Q3 — HQ validation will reject")
+        print(f"   ⚠️ No HQ found after Q1-Q3 — attempting H4/H5 confirmation")
+
+    # ========================================================================
+    # H4/H5/H7/H6: HQ extraction fallback (if HQ still missing after Q1-Q3)
+    # ========================================================================
+    # Same extraction pipeline as Q1-Q3 but with targeted queries.
+    # H4: site:linkedin.com/company/{slug} "{city}" "{state_full_name}"
+    # H5: site:linkedin.com/company/{slug} "{city}" "{state_abbreviation}"
+    # H7: {company_name}+linkedin+location (no site: restriction, verify slug)
+    # H6: site:linkedin.com/company/{slug} "{city}" (non-ambiguous, non-English-word only)
+    # Extracts HQ from snippet → parses → sets extracted values for downstream validation.
+    # Only for US leads with city and state.
+    # ========================================================================
+    if not lead.get("extracted_hq_city") and not lead.get("extracted_hq_state"):
+        _claimed_city = (lead.get("hq_city") or "").strip()
+        _claimed_state = (lead.get("hq_state") or "").strip()
+
+        if _claimed_city and _claimed_state and _claimed_city.lower() != "remote":
+            geo = _load_geo()
+            state_full_to_abbr = {v.lower(): k.upper() for k, v in geo.get('state_abbr', {}).items()}
+            state_abbr = state_full_to_abbr.get(_claimed_state.lower(), "")
+
+            def _try_extract_hq_from_results(results: list) -> bool:
+                """Try to extract HQ from search results. Returns True if extracted."""
+                for r in results:
+                    if not _check_exact_slug_match(r.get('link', ''), slug):
+                        continue
+                    combined = f"{r.get('title', '')} {r.get('snippet', '')}"
+
+                    # Try "Headquarters:" extraction first
+                    hq_str = _extract_headquarters_from_snippet(combined)
+                    if hq_str:
+                        ext_city, ext_state, ext_country, _ = _parse_hq_to_location(hq_str)
+                        if ext_city or ext_state:
+                            lead["extracted_hq_city"] = ext_city
+                            lead["extracted_hq_state"] = ext_state
+                            lead["extracted_hq_country"] = ext_country
+                            return True
+
+                    # Try broader City, State extraction
+                    city, state, valid = _extract_usa_location(combined)
+                    if valid and city and state:
+                        lead["extracted_hq_city"] = city
+                        lead["extracted_hq_state"] = state
+                        lead["extracted_hq_country"] = "United States"
+                        return True
+
+                return False
+
+            # H4: full state name
+            h4_query = f'site:linkedin.com/company/{slug} "{_claimed_city}" "{_claimed_state}"'
+            print(f"   🔍 H4: {h4_query}")
+            h4_result = await asyncio.to_thread(_gse_search_sync, h4_query, 10)
+            if _try_extract_hq_from_results(h4_result.get('results', [])):
+                print(f"   ✅ H4: Extracted HQ — {lead.get('extracted_hq_city')}, {lead.get('extracted_hq_state')}")
+            else:
+                # H5: state abbreviation fallback
+                if state_abbr:
+                    h5_query = f'site:linkedin.com/company/{slug} "{_claimed_city}" "{state_abbr}"'
+                    print(f"   🔍 H5: {h5_query}")
+                    h5_result = await asyncio.to_thread(_gse_search_sync, h5_query, 10)
+                    if _try_extract_hq_from_results(h5_result.get('results', [])):
+                        print(f"   ✅ H5: Extracted HQ — {lead.get('extracted_hq_city')}, {lead.get('extracted_hq_state')}")
+
+            # H7: company name + linkedin + location (no site: restriction)
+            if not lead.get("extracted_hq_city") and not lead.get("extracted_hq_state"):
+                h7_query = f'{company}+linkedin+location'
+                print(f"   🔍 H7: {h7_query}")
+                h7_result = await asyncio.to_thread(_gse_search_sync, h7_query, 10)
+                if _try_extract_hq_from_results(h7_result.get('results', [])):
+                    print(f"   ✅ H7: Extracted HQ — {lead.get('extracted_hq_city')}, {lead.get('extracted_hq_state')}")
+
+            # H6: city-only fallback (non-ambiguous, non-English-word cities)
+            if not lead.get("extracted_hq_city") and not lead.get("extracted_hq_state"):
+                city_lo_check = _claimed_city.lower().strip()
+                us_city_to_states = {}
+                for _st, _cities in geo.get('us_states', {}).items():
+                    for _c in _cities:
+                        us_city_to_states.setdefault(_c.lower(), []).append(_st)
+
+                is_ambiguous = len(us_city_to_states.get(city_lo_check, [])) > 1
+                is_english_word = city_lo_check in _ENGLISH_WORD_CITIES
+
+                if not is_ambiguous and not is_english_word and city_lo_check in us_city_to_states:
+                    h6_query = f'site:linkedin.com/company/{slug} "{_claimed_city}"'
+                    print(f"   🔍 H6: {h6_query}")
+                    h6_result = await asyncio.to_thread(_gse_search_sync, h6_query, 10)
+
+                    # Try standard extraction first
+                    if _try_extract_hq_from_results(h6_result.get('results', [])):
+                        print(f"   ✅ H6: Extracted HQ — {lead.get('extracted_hq_city')}, {lead.get('extracted_hq_state')}")
+                    else:
+                        # Fallback: find city in snippet, extract actual text, resolve state from geo_lookup
+                        city_boundary = re.compile(r'(?<![a-zA-Z])(' + re.escape(city_lo_check) + r')(?=\s*[,.\d]|\s*$)', re.I)
+                        for r in h6_result.get('results', []):
+                            if _check_exact_slug_match(r.get('link', ''), slug):
+                                combined = f"{r.get('title', '')} {r.get('snippet', '')}"
+                                m = city_boundary.search(combined)
+                                if m:
+                                    snippet_city = m.group(1).strip()
+                                    resolved_state = us_city_to_states[city_lo_check][0]
+                                    lead["extracted_hq_city"] = snippet_city.title()
+                                    lead["extracted_hq_state"] = resolved_state.title()
+                                    lead["extracted_hq_country"] = "United States"
+                                    print(f"   ✅ H6: City '{snippet_city}' extracted, resolved to {resolved_state} (non-ambiguous)")
+                                    break
+
+            if not lead.get("extracted_hq_city") and not lead.get("extracted_hq_state"):
+                print(f"   ❌ H4/H5/H7/H6: Could not extract HQ for '{_claimed_city}, {_claimed_state}'")
 
     # ========================================================================
     # HQ VALIDATION: Compare miner's claimed HQ against LinkedIn-extracted HQ

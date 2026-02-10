@@ -220,7 +220,7 @@ class ICPPrompt(BaseModel):
     sub_industry: str = Field(..., description="Target sub-industry")
     target_roles: List[str] = Field(default_factory=list, description="List of target job roles/titles")
     target_seniority: str = Field("", description="Target seniority level")
-    company_size: str = Field(..., description="Target company size range")
+    employee_count: str = Field(..., description="Target employee count range (e.g., '50-200')")
     company_stage: str = Field(..., description="Target company stage (Seed, Series A, etc.)")
     geography: str = Field(..., description="Target geography (full)")
     country: str = Field("", description="Target country (extracted)")

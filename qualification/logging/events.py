@@ -649,7 +649,7 @@ def redact_lead_pii(lead: Dict[str, Any]) -> Dict[str, Any]:
     - business (company name)
     - role
     - industry, sub_industry
-    - company_size, geography
+    - employee_count, geography
     - seniority
     - company_website, company_linkedin (company, not personal)
     - score fields (icp_fit, decision_maker, intent_signal, final_score)

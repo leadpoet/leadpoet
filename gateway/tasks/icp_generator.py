@@ -503,7 +503,7 @@ OUTPUT FORMAT - Return a JSON object with "icps" array containing exactly 100 ob
       "industry": "Software",
       "sub_industry": "SaaS",
       "target_roles": ["VP of Engineering"],
-      "company_size": "50-200",
+      "employee_count": "50-200",
       "company_stage": "Series B",
       "geography": "United States, California",
       "country": "United States",
@@ -649,7 +649,7 @@ FINAL CHECK - Before outputting, verify:
                 "sub_industry": icp.get("sub_industry", SUB_INDUSTRIES.get(industry_normalized, ["General"])[0]),
                 "target_roles": target_roles,
                 "target_seniority": _get_seniority_from_role(target_roles[0]) if target_roles else "Director",
-                "company_size": icp.get("company_size", "50-200"),
+                "employee_count": icp.get("employee_count", icp.get("company_size", "50-200")),
                 "company_stage": icp.get("company_stage", "Series A"),
                 "geography": geography,
                 "country": country,
@@ -792,7 +792,7 @@ def generate_single_icp(
         "sub_industry": sub_industry,
         "target_roles": target_roles,  # Now a list
         "target_seniority": _get_seniority_from_role(target_roles[0]),
-        "company_size": company_size,
+        "employee_count": company_size,  # Using company_size variable for employee_count field
         "company_stage": company_stage,
         "geography": geography,
         "country": country,  # Extracted for convenience

@@ -294,7 +294,7 @@ ICP CRITERIA:
 - Sub-industry: {icp.sub_industry}
 - Target roles: {', '.join(icp.target_roles) if icp.target_roles else 'Any'}
 - Target seniority: {icp.target_seniority}
-- Company size: {icp.company_size}
+- Employee count: {icp.employee_count}
 - Geography: {icp.geography}
 
 LEAD DATA:
@@ -401,8 +401,8 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     """
     # Build ICP criteria string for verification
     icp_criteria_parts = []
-    if getattr(icp, 'company_size', None):
-        icp_criteria_parts.append(f"Company size: {icp.company_size}")
+    if getattr(icp, 'employee_count', None):
+        icp_criteria_parts.append(f"Employee count: {icp.employee_count}")
     if getattr(icp, 'company_stage', None):
         icp_criteria_parts.append(f"Company stage: {icp.company_stage}")
     if getattr(icp, 'geography', None):

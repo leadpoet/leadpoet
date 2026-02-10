@@ -493,7 +493,7 @@ async def get_icp(icp_id: str) -> Optional[ICPPrompt]:
         sub_industry="SaaS",
         target_role="VP of Sales",
         target_seniority="VP",
-        company_size="50-200 employees",
+        employee_count="50-200 employees",
         company_stage="Series B",
         geography="United States",
         product_service="CRM software",

@@ -661,7 +661,7 @@ if __name__ == "__main__":
         "sub_industry": "Enterprise Software",
         "target_roles": ["VP of Sales", "Head of Revenue", "VP Sales"],
         "target_seniority": "VP",
-        "company_size": "50-200",
+        "employee_count": "50-200",
         "country": "United States",
         "product_service": "CRM software",
     }

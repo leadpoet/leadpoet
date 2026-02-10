@@ -7277,8 +7277,7 @@ def run_dedicated_qualification_worker(config):
                                 # Create ICP prompt
                                 icp = ICPPrompt(**icp_data)
                                 
-                                # Run model with timeout
-                                import asyncio
+                                # Run model with timeout (asyncio imported at top of file)
                                 start_time = time.time()
                                 result = await asyncio.wait_for(
                                     sandbox.run_model(icp),

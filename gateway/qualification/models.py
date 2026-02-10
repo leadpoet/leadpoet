@@ -222,6 +222,19 @@ class ICPPrompt(BaseModel):
     target_seniority: str = Field("", description="Target seniority level")
     employee_count: str = Field(..., description="Target employee count range (e.g., '50-200')")
     company_stage: str = Field(..., description="Target company stage (Seed, Series A, etc.)")
+    
+    @model_validator(mode='before')
+    @classmethod
+    def handle_legacy_company_size(cls, data: Any) -> Any:
+        """Map legacy 'company_size' field to 'employee_count' for backward compatibility."""
+        if isinstance(data, dict):
+            # If company_size exists but employee_count doesn't, use company_size
+            if 'company_size' in data and 'employee_count' not in data:
+                data['employee_count'] = data.pop('company_size')
+            elif 'company_size' in data and 'employee_count' in data:
+                # Both exist - prefer employee_count, remove company_size
+                data.pop('company_size')
+        return data
     geography: str = Field(..., description="Target geography (full)")
     country: str = Field("", description="Target country (extracted)")
     product_service: str = Field(..., description="Product/service being sold")

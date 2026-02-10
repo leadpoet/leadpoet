@@ -401,12 +401,12 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     """
     # Build ICP criteria string for verification
     icp_criteria_parts = []
-    if icp.employee_count_min or icp.employee_count_max:
-        icp_criteria_parts.append(f"Company size: {icp.employee_count_min or 0}-{icp.employee_count_max or '∞'} employees")
-    if icp.geography:
+    if getattr(icp, 'company_size', None):
+        icp_criteria_parts.append(f"Company size: {icp.company_size}")
+    if getattr(icp, 'company_stage', None):
+        icp_criteria_parts.append(f"Company stage: {icp.company_stage}")
+    if getattr(icp, 'geography', None):
         icp_criteria_parts.append(f"Geography: {icp.geography}")
-    if icp.pain_points:
-        icp_criteria_parts.append(f"Pain points: {icp.pain_points}")
     icp_criteria = "; ".join(icp_criteria_parts) if icp_criteria_parts else None
     
     # Verify the signal is real AND provides evidence of ICP fit

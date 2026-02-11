@@ -4299,7 +4299,7 @@ class Validator(BaseValidatorNeuron):
                         leads_scored += 1
                         
                         if lead:
-                            print(f"      ✅ Lead returned: {lead.email} @ {lead.business}")
+                            print(f"      ✅ Lead returned: {lead.role} @ {lead.business}")
                             print(f"      📊 Score: {scores.final_score:.2f} (ICP:{scores.icp_fit}, DM:{scores.decision_maker}, Intent:{scores.intent_signal_final:.2f})")
                         else:
                             print(f"      ❌ No lead returned: {scores.failure_reason}")
@@ -7329,7 +7329,7 @@ def run_dedicated_qualification_worker(config):
                                 })
                                 
                                 if lead:
-                                    print(f"         ✅ {lead.email} @ {lead.business} (Score: {score:.2f})")
+                                    print(f"         ✅ {lead.role} @ {lead.business} (Score: {score:.2f})")
                                 else:
                                     print(f"         ❌ {scores.failure_reason}")
                                 

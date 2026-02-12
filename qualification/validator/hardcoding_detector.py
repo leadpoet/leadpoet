@@ -464,12 +464,12 @@ async def analyze_model_for_hardcoding(
         # TODO: After beta release, change back to "OPENROUTER_API_KEY" (shared with sourcing)
         openrouter_key = api_key or os.environ.get("QUALIFICATION_OPENROUTER_API_KEY")
         if not openrouter_key:
-            logger.warning("No OpenRouter API key for hardcoding detection, skipping check")
+            logger.error("❌ CRITICAL: No OpenRouter API key for hardcoding detection - FAILING CLOSED")
             return {
-                "passed": True,  # Allow if we can't check
-                "confidence_hardcoded": 0,
-                "red_flags": [],
-                "evidence": "Skipped - no API key available",
+                "passed": False,  # SECURITY: Fail closed - don't allow unchecked models
+                "confidence_hardcoded": 100,
+                "red_flags": ["No API key available for hardcoding detection"],
+                "evidence": "BLOCKED - Cannot verify model integrity without API key",
                 "model_used": None,
                 "analysis_cost_usd": 0.0
             }

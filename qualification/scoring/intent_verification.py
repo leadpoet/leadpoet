@@ -1003,13 +1003,13 @@ Examples:
             confidence = min(confidence, 30)
             reason = f"No ICP evidence found. {reason}"
         
-        # If date could not be verified (likely fabricated), reduce confidence
+        # If date could not be verified (likely fabricated), zero out confidence
         # This catches time decay gaming where models use hardcoded dates like "14 days ago"
+        # STRICT: No credit for fabricated dates - this is a critical gaming vector
         if not date_verified:
-            confidence = min(confidence, 40)
-            if "date" not in reason.lower():
-                reason = f"Date appears fabricated. {reason}"
-            logger.warning(f"Date verification failed - possible time decay gaming")
+            confidence = 0  # No credit for fabricated dates
+            reason = f"Date fabrication detected. {reason}"
+            logger.warning(f"❌ Date verification failed - ZEROING confidence (time decay gaming)")
         
         # Apply confidence threshold
         verified = verified_raw and confidence >= CONFIDENCE_THRESHOLD

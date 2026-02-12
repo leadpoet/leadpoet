@@ -34,7 +34,8 @@ sourcing workflow.
 import re
 import logging
 from datetime import date, datetime
-from typing import Set, Optional, Tuple
+from typing import Set, Optional, Tuple, List
+from collections import Counter
 
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import LeadOutput, ICPPrompt, LeadScoreBreakdown
@@ -168,6 +169,24 @@ async def score_lead(
         # Score Intent Signal (0-50 pts) - includes verification
         intent_raw, verification_confidence = await score_intent_signal(lead, icp)
         logger.debug(f"Intent signal raw score: {intent_raw} (confidence: {verification_confidence})")
+        
+        # =====================================================================
+        # CRITICAL: Zero ENTIRE lead score if intent is clearly fabricated
+        # This catches gaming where models provide fake dates or generic claims
+        # =====================================================================
+        if verification_confidence == 0:
+            logger.warning(f"❌ FABRICATED INTENT DETECTED - zeroing entire lead score")
+            return LeadScoreBreakdown(
+                icp_fit=0,
+                decision_maker=0,
+                intent_signal_raw=0,
+                time_decay_multiplier=1.0,
+                intent_signal_final=0,
+                cost_penalty=0,
+                time_penalty=0,
+                final_score=0,
+                failure_reason="Intent fabrication detected (hardcoded date or generic claim)"
+            )
         
     except Exception as e:
         logger.error(f"LLM scoring failed: {e}")
@@ -559,6 +578,104 @@ def extract_score(response: str, max_score: int) -> float:
 
 
 # =============================================================================
+# Structural Similarity Detection
+# =============================================================================
+
+def _normalize_for_similarity(text: str) -> str:
+    """Normalize text for similarity comparison - remove company-specific details."""
+    if not text:
+        return ""
+    # Lowercase and remove extra whitespace
+    text = " ".join(text.lower().split())
+    # Remove common variable parts (company names, dates, numbers)
+    text = re.sub(r'\b\d{4}[-/]\d{2}[-/]\d{2}\b', '[DATE]', text)  # ISO dates
+    text = re.sub(r'\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b', '[DATE]', text)  # Other dates
+    text = re.sub(r'\b\d+\s*(employees?|people|staff|workers)\b', '[EMPLOYEE_COUNT]', text)
+    text = re.sub(r'\$\d+[\d,]*\.?\d*\s*(million|m|billion|b|k)?\b', '[MONEY]', text)
+    text = re.sub(r'\b\d{3,}\b', '[NUMBER]', text)  # Large numbers
+    return text
+
+
+def detect_structural_similarity(leads: List[LeadOutput], threshold: float = 0.7) -> List[int]:
+    """
+    Detect leads with structurally similar intent signals.
+    
+    This catches gaming where models use templated responses with minor variations.
+    Gaming typically occurs in intent_signal.description and intent_signal.snippet.
+    
+    Args:
+        leads: List of leads to analyze
+        threshold: Similarity ratio threshold (0.7 = 70% similar)
+    
+    Returns:
+        List of indices of leads flagged for structural similarity
+    """
+    if len(leads) < 3:
+        return []  # Need at least 3 leads to detect patterns
+    
+    flagged_indices = []
+    
+    # Extract normalized intent descriptions and snippets
+    # Gaming typically occurs here - models use templated intent signals
+    intent_descs = [
+        _normalize_for_similarity(lead.intent_signal.description if lead.intent_signal else "")
+        for lead in leads
+    ]
+    intent_snippets = [
+        _normalize_for_similarity(lead.intent_signal.snippet if lead.intent_signal and lead.intent_signal.snippet else "")
+        for lead in leads
+    ]
+    
+    # Count similar patterns in intent descriptions
+    intent_desc_patterns = Counter()
+    for intent in intent_descs:
+        if len(intent) > 20:  # Only count substantial descriptions
+            # Create a simplified pattern (first 50 chars)
+            pattern = intent[:50]
+            intent_desc_patterns[pattern] += 1
+    
+    # Count similar patterns in intent snippets
+    intent_snippet_patterns = Counter()
+    for snippet in intent_snippets:
+        if len(snippet) > 20:
+            pattern = snippet[:50]
+            intent_snippet_patterns[pattern] += 1
+    
+    # Flag leads that match repeated patterns
+    for i, lead in enumerate(leads):
+        intent_desc_normalized = _normalize_for_similarity(
+            lead.intent_signal.description if lead.intent_signal else ""
+        )
+        intent_snippet_normalized = _normalize_for_similarity(
+            lead.intent_signal.snippet if lead.intent_signal and lead.intent_signal.snippet else ""
+        )
+        
+        # Check if intent matches a repeated pattern
+        intent_desc_pattern = intent_desc_normalized[:50] if len(intent_desc_normalized) > 20 else ""
+        intent_snippet_pattern = intent_snippet_normalized[:50] if len(intent_snippet_normalized) > 20 else ""
+        
+        # If same pattern appears 3+ times, it's likely templated
+        intent_desc_repeated = intent_desc_patterns.get(intent_desc_pattern, 0) >= 3
+        intent_snippet_repeated = intent_snippet_patterns.get(intent_snippet_pattern, 0) >= 3
+        
+        if intent_desc_repeated or intent_snippet_repeated:
+            flagged_indices.append(i)
+            logger.warning(
+                f"Lead {i} flagged for structural similarity: "
+                f"intent_desc_repeated={intent_desc_repeated}, intent_snippet_repeated={intent_snippet_repeated}"
+            )
+    
+    # If more than 50% of leads are flagged, this is likely gaming
+    if len(flagged_indices) >= len(leads) * 0.5:
+        logger.error(
+            f"❌ STRUCTURAL GAMING DETECTED: {len(flagged_indices)}/{len(leads)} leads "
+            f"show templated patterns"
+        )
+    
+    return flagged_indices
+
+
+# =============================================================================
 # Batch Scoring
 # =============================================================================
 
@@ -566,18 +683,21 @@ async def score_leads_batch(
     leads: list[LeadOutput],
     icp: ICPPrompt,
     costs: list[float],
-    times: list[float]
+    times: list[float],
+    apply_similarity_detection: bool = True
 ) -> list[LeadScoreBreakdown]:
     """
     Score a batch of leads against the same ICP.
     
     Tracks seen companies across the batch to enforce first-wins rule.
+    Also detects structural similarity (templated responses) across leads.
     
     Args:
         leads: List of leads to score
         icp: The ICP prompt
         costs: List of API costs per lead
         times: List of processing times per lead
+        apply_similarity_detection: Whether to detect and penalize templated leads
     
     Returns:
         List of LeadScoreBreakdown objects
@@ -591,6 +711,27 @@ async def score_leads_batch(
         
         score = await score_lead(lead, icp, cost, time, seen_companies)
         results.append(score)
+    
+    # Apply structural similarity detection
+    if apply_similarity_detection and len(leads) >= 3:
+        flagged_indices = detect_structural_similarity(leads)
+        
+        # Zero out scores for flagged leads
+        if flagged_indices:
+            for idx in flagged_indices:
+                if idx < len(results) and results[idx].failure_reason is None:
+                    # Create new breakdown with zeroed score
+                    results[idx] = LeadScoreBreakdown(
+                        icp_fit=0,
+                        decision_maker=0,
+                        intent_signal_raw=0,
+                        time_decay_multiplier=1.0,
+                        intent_signal_final=0,
+                        cost_penalty=0,
+                        time_penalty=0,
+                        final_score=0,
+                        failure_reason="Structural similarity detected (templated response)"
+                    )
     
     return results
 

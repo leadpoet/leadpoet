@@ -34,6 +34,14 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
 
+# Allow nested event loops (for miner models that use asyncio.run())
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+    logging.getLogger(__name__).info("✅ nest_asyncio applied - models can use asyncio.run()")
+except ImportError:
+    logging.getLogger(__name__).warning("⚠️ nest_asyncio not installed - models using asyncio.run() will fail")
+
 from gateway.qualification.models import ICPPrompt
 
 # Security imports - CRITICAL for model isolation

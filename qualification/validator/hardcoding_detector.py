@@ -365,23 +365,42 @@ def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
     icp_echo_matches = 0
     gaming_comment_matches = 0
     
+    # ICP echo-back patterns (HIGH severity) - these guarantee 100% match
+    ICP_ECHO_PATTERNS = [
+        r'["\']industry["\']\s*:\s*(?:_norm\s*\()?\s*ctx\.get\s*\(\s*["\']industry["\']\s*\)',
+        r'["\']sub_industry["\']\s*:\s*(?:_norm\s*\()?\s*ctx\.get\s*\(\s*["\']sub_industry["\']\s*\)',
+        r'_norm\s*\(\s*ctx\.get\s*\([^)]+\)\s*\)\s*or\s*_norm\s*\(\s*lead\.get',
+    ]
+    
+    # Gaming admission comment patterns (VERY HIGH severity)
+    GAMING_COMMENT_PATTERNS = [
+        r'#.*[Aa]lign\s+with\s+ICP',
+        r'#.*maximize.*precheck.*compat',
+        r'#.*[Aa]lign.*ICP.*strings',
+        r'#.*deterministic\s+precheck\s+compat',
+    ]
+    
     for pattern in DATA_MANIPULATION_PATTERNS:
         if re.search(pattern, code_content, re.IGNORECASE):
             data_manip_matches += 1
-            # ICP echo-back with "or" fallback is HIGH severity (guarantees 100% match)
-            if 'or.*lead' in pattern or '_norm.*ctx.*or.*_norm.*lead' in pattern:
-                icp_echo_matches += 1
-            # Comments admitting gaming intent are VERY HIGH severity
-            elif 'Align' in pattern or 'maximize' in pattern or 'precheck' in pattern:
-                gaming_comment_matches += 1
+    
+    # Check specifically for ICP echo-back patterns
+    for pattern in ICP_ECHO_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE):
+            icp_echo_matches += 1
+    
+    # Check specifically for gaming admission comments
+    for pattern in GAMING_COMMENT_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE):
+            gaming_comment_matches += 1
     
     if gaming_comment_matches >= 1:
         red_flags.append(f"GAMING ADMISSION: Code contains comments admitting gaming intent (e.g., 'align with ICP', 'maximize precheck compatibility')")
         confidence = max(confidence, 90)  # Explicit admission = auto-fail
-    elif icp_echo_matches >= 1:
+    if icp_echo_matches >= 1:
         red_flags.append(f"ICP ECHO-BACK: Output uses ICP values as PRIMARY source with lead data as fallback - guarantees 100% fuzzy match ({icp_echo_matches} patterns)")
         confidence = max(confidence, 85)  # This is pure gaming
-    elif data_manip_matches >= 1:
+    elif data_manip_matches >= 1 and icp_echo_matches == 0:
         red_flags.append(f"Data manipulation: ICP data may be copied to output ({data_manip_matches} patterns)")
         confidence = max(confidence, 60)  # Medium confidence, LLM should confirm
     

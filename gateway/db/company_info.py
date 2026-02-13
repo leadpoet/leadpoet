@@ -25,6 +25,7 @@ Flow:
 
 import json
 import logging
+import re
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 
@@ -33,6 +34,7 @@ from gateway.db.client import get_read_client, get_write_client
 logger = logging.getLogger(__name__)
 
 TABLE_NAME = "company_information_table"
+_TRADEMARK_SYMBOLS_RE = re.compile(r'[®™©℠]+')
 
 
 def get_company_by_linkedin(company_linkedin: str) -> Optional[Dict[str, Any]]:
@@ -94,9 +96,11 @@ def validate_against_stored(
         (True, None) if valid
         (False, "rejection_reason") if invalid
     """
-    # 1. Company name - CASE SENSITIVE exact match
+    # 1. Company name - CASE SENSITIVE exact match (trademark symbols stripped from both sides)
     stored_name = stored.get("company_name", "")
-    if claimed_name != stored_name:
+    claimed_name_clean = ' '.join(_TRADEMARK_SYMBOLS_RE.sub('', claimed_name).split())
+    stored_name_clean = ' '.join(_TRADEMARK_SYMBOLS_RE.sub('', stored_name).split())
+    if claimed_name_clean != stored_name_clean:
         return False, f"company_name_mismatch: Claimed '{claimed_name}' but stored '{stored_name}' (case-sensitive)"
 
     # 2. HQ Location validation (EXACT FIELD MATCHING)
@@ -233,6 +237,9 @@ def insert_company(
     """
     try:
         client = get_write_client()
+
+        # Strip trademark symbols before storing (clean data in table)
+        company_name = ' '.join(_TRADEMARK_SYMBOLS_RE.sub('', company_name).split())
 
         record = {
             "company_linkedin": company_linkedin,

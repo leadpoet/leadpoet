@@ -2939,19 +2939,22 @@ def _validate_size_match(claimed: str, extracted: str) -> Tuple[bool, str]:
     return rule_based_match_employee_count(claimed, extracted)
 
 
+_TRADEMARK_SYMBOLS_RE = re.compile(r'[®™©℠]+')
+
+
 def _validate_name_match(claimed: str, extracted: str) -> Tuple[bool, str]:
-    """Validate if claimed company name matches extracted (case-sensitive)."""
+    """Validate if claimed company name matches extracted (case-sensitive).
+    Trademark symbols (®™©℠) are stripped from both sides before comparing."""
     if not claimed or not extracted:
         return False, "Missing name data"
 
-    claimed_clean = claimed.strip()
-    extracted_clean = extracted.strip()
+    claimed_clean = ' '.join(_TRADEMARK_SYMBOLS_RE.sub('', claimed.strip()).split())
+    extracted_clean = ' '.join(_TRADEMARK_SYMBOLS_RE.sub('', extracted.strip()).split())
 
-    # Case-sensitive exact match
     if claimed_clean == extracted_clean:
         return True, "Exact match"
 
-    return False, f"Name mismatch: claimed '{claimed_clean}' vs extracted '{extracted_clean}'"
+    return False, f"Name mismatch: claimed '{claimed.strip()}' vs extracted '{extracted.strip()}'"
 
 
 # ========================================================================

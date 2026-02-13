@@ -137,15 +137,78 @@ async def ban_hotkey(
         
         logger.warning(f"🚫 Hotkey banned: {hotkey[:16]}... (reason: {reason}, by: {banned_by})")
         
-        # Check if this hotkey is the current champion and revoke if so
-        # The champion check will happen automatically on next evaluation
-        # because banned hotkeys' models will be rejected
+        # Automatically dethrone if this hotkey is the current champion
+        try:
+            dethrone_result = supabase.table("qualification_models") \
+                .update({
+                    "is_champion": False,
+                    "dethroned_at": datetime.now(timezone.utc).isoformat(),
+                }) \
+                .eq("miner_hotkey", hotkey) \
+                .eq("is_champion", True) \
+                .execute()
+            
+            if dethrone_result.data and len(dethrone_result.data) > 0:
+                model_name = dethrone_result.data[0].get("model_name", "unknown")
+                logger.warning(f"👑➡️🚫 Champion dethroned due to ban: {model_name} (hotkey: {hotkey[:16]}...)")
+        except Exception as dethrone_error:
+            logger.error(f"Error dethroning banned champion: {dethrone_error}")
+            # Continue - ban is still recorded
         
         return True
         
     except Exception as e:
         logger.error(f"Error banning hotkey: {e}")
         return False
+
+
+async def dethrone_banned_champions() -> int:
+    """
+    Check all banned hotkeys and dethrone any that are still champions.
+    
+    This is a cleanup function that can be called periodically or manually
+    to ensure banned hotkeys don't remain as champions.
+    
+    Returns:
+        Number of champions dethroned
+    """
+    try:
+        from gateway.db.client import get_write_client
+        
+        supabase = get_write_client()
+        
+        # Get all banned hotkeys
+        banned_response = supabase.table("banned_hotkeys") \
+            .select("hotkey") \
+            .execute()
+        
+        if not banned_response.data:
+            return 0
+        
+        banned_hotkeys = [r["hotkey"] for r in banned_response.data]
+        
+        # Dethrone any champions with banned hotkeys
+        dethroned_count = 0
+        for hotkey in banned_hotkeys:
+            result = supabase.table("qualification_models") \
+                .update({
+                    "is_champion": False,
+                    "dethroned_at": datetime.now(timezone.utc).isoformat(),
+                }) \
+                .eq("miner_hotkey", hotkey) \
+                .eq("is_champion", True) \
+                .execute()
+            
+            if result.data and len(result.data) > 0:
+                dethroned_count += 1
+                model_name = result.data[0].get("model_name", "unknown")
+                logger.warning(f"👑➡️🚫 Dethroned banned champion: {model_name} (hotkey: {hotkey[:16]}...)")
+        
+        return dethroned_count
+        
+    except Exception as e:
+        logger.error(f"Error in dethrone_banned_champions: {e}")
+        return 0
 
 
 # Router for submission endpoints (no prefix - parent router adds /qualification)

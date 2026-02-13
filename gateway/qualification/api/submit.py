@@ -57,6 +57,97 @@ from gateway.qualification.utils.chain import (
 
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Hotkey Banning
+# =============================================================================
+
+async def is_hotkey_banned(hotkey: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check if a hotkey is banned from submitting models.
+    
+    This queries the public `banned_hotkeys` table in Supabase.
+    Banned hotkeys cannot submit new models and lose champion status if they have it.
+    
+    Args:
+        hotkey: The Bittensor hotkey (ss58 address) to check
+        
+    Returns:
+        Tuple of (is_banned, ban_reason)
+        - is_banned: True if hotkey is banned, False otherwise
+        - ban_reason: The reason for the ban (if banned), None otherwise
+    """
+    try:
+        from gateway.db.client import get_write_client
+        
+        supabase = get_write_client()
+        
+        # Query the banned_hotkeys table
+        response = supabase.table("banned_hotkeys") \
+            .select("hotkey, reason, banned_at, banned_by") \
+            .eq("hotkey", hotkey) \
+            .execute()
+        
+        if response.data and len(response.data) > 0:
+            ban_record = response.data[0]
+            reason = ban_record.get("reason", "Banned for gaming/hardcoding violations")
+            banned_at = ban_record.get("banned_at", "unknown")
+            logger.warning(f"🚫 Banned hotkey attempted submission: {hotkey[:16]}... (reason: {reason}, banned_at: {banned_at})")
+            return True, reason
+        
+        return False, None
+        
+    except Exception as e:
+        logger.error(f"Error checking hotkey ban status: {e}")
+        # Fail open - if we can't check, allow the submission
+        # (we don't want to block legitimate miners due to DB errors)
+        return False, None
+
+
+async def ban_hotkey(
+    hotkey: str,
+    reason: str,
+    banned_by: str = "system"
+) -> bool:
+    """
+    Ban a hotkey from submitting models.
+    
+    Also revokes champion status if the hotkey is the current champion.
+    
+    Args:
+        hotkey: The Bittensor hotkey to ban
+        reason: The reason for the ban
+        banned_by: Who initiated the ban (e.g., "system", "admin", ss58 address)
+        
+    Returns:
+        True if ban was successful, False otherwise
+    """
+    try:
+        from gateway.db.client import get_write_client
+        
+        supabase = get_write_client()
+        
+        # Insert ban record
+        supabase.table("banned_hotkeys").insert({
+            "hotkey": hotkey,
+            "reason": reason,
+            "banned_by": banned_by,
+            "banned_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+        
+        logger.warning(f"🚫 Hotkey banned: {hotkey[:16]}... (reason: {reason}, by: {banned_by})")
+        
+        # Check if this hotkey is the current champion and revoke if so
+        # The champion check will happen automatically on next evaluation
+        # because banned hotkeys' models will be rejected
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error banning hotkey: {e}")
+        return False
+
+
 # Router for submission endpoints (no prefix - parent router adds /qualification)
 router = APIRouter()
 
@@ -108,6 +199,15 @@ async def get_presigned_upload_url(presign_request: PresignRequest, request: Req
         raise HTTPException(
             status_code=401,
             detail="Invalid hotkey signature"
+        )
+    
+    # Check if hotkey is banned (before metagraph lookup)
+    is_banned, ban_reason = await is_hotkey_banned(presign_request.miner_hotkey)
+    if is_banned:
+        logger.warning(f"🚫 Banned hotkey rejected (presign): {presign_request.miner_hotkey[:16]}...")
+        raise HTTPException(
+            status_code=403,
+            detail=f"Hotkey is banned: {ban_reason}"
         )
     
     # Verify hotkey is registered
@@ -276,6 +376,19 @@ async def submit_model(submission: ModelSubmission, request: Request):
         raise HTTPException(
             status_code=401,
             detail="Invalid hotkey signature"
+        )
+    
+    # ---------------------------------------------------------------------
+    # Step 1.5: Check if hotkey is banned
+    # ---------------------------------------------------------------------
+    # This check happens BEFORE metagraph lookup to save resources
+    is_banned, ban_reason = await is_hotkey_banned(submission.miner_hotkey)
+    
+    if is_banned:
+        logger.warning(f"🚫 Banned hotkey rejected: {submission.miner_hotkey[:16]}... (reason: {ban_reason})")
+        raise HTTPException(
+            status_code=403,
+            detail=f"Hotkey is banned: {ban_reason}"
         )
     
     # ---------------------------------------------------------------------

@@ -2023,10 +2023,12 @@ class Validator(BaseValidatorNeuron):
                         await asyncio.sleep(10)
                         return
                     
-                    # Too late to start validation (block 275+ cutoff)
-                    if blocks_into_epoch >= 275:
+                    # Too late to start validation (coordinator aggregates at block 300)
+                    # Workers need ~8-10 min to process leads, so cutoff at block 260
+                    # gives them 40 blocks (8 min) before coordinator forces aggregation
+                    if blocks_into_epoch >= 260:
                         print(f"❌ Worker: Too late to start validation (block {blocks_into_epoch}/360)")
-                        print(f"   Cutoff is block 275 - not enough time to complete before epoch end")
+                        print(f"   Coordinator aggregates at block 300 - not enough time to finish")
                         print(f"   Skipping epoch {current_epoch}, will process next epoch")
                         await asyncio.sleep(10)
                         return
@@ -4727,18 +4729,31 @@ class Validator(BaseValidatorNeuron):
             return None
     
     def _is_champion_hotkey_banned(self, hotkey: str) -> bool:
-        """Check if hotkey is in Supabase banned_hotkeys table."""
+        """Check if hotkey is in Supabase banned_hotkeys table.
+        
+        Uses public ANON key for read-only access to banned_hotkeys table
+        (RLS policy allows public SELECT on this table).
+        """
         try:
-            if not self.supabase_client:
-                return False  # Can't check, assume not banned
+            from supabase import create_client
             
-            result = self.supabase_client.table("banned_hotkeys")\
+            # Public Supabase credentials (same as in cloud_db.py)
+            SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
+            SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDcwMDUsImV4cCI6MjA2MDQyMzAwNX0.5E0WjAthYDXaCWY6qjzXm2k20EhadWfigak9hleKZk8"
+            
+            # Create client with ANON key for public read access
+            supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+            
+            result = supabase.table("banned_hotkeys")\
                 .select("hotkey")\
                 .eq("hotkey", hotkey)\
                 .limit(1)\
                 .execute()
             
-            return bool(result.data and len(result.data) > 0)
+            is_banned = bool(result.data and len(result.data) > 0)
+            if is_banned:
+                bt.logging.info(f"🚨 Hotkey {hotkey[:20]}... found in banned_hotkeys table")
+            return is_banned
         except Exception as e:
             bt.logging.warning(f"Failed to check banned hotkeys: {e}")
             return False  # On error, don't clear champion

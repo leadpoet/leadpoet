@@ -2521,11 +2521,14 @@ class Validator(BaseValidatorNeuron):
                         # Without this, workers see stale data and get stuck in "too late" loop
                         self._write_shared_block_file(current_block_check, current_epoch_check, blocks_into_epoch_check)
                         
-                        # FORCE PROCEED at block 315 (must submit before reveal deadline at block 328)
-                        if blocks_into_epoch_check >= 315:
-                            print(f"   ⏰ BLOCK 315+ REACHED: Force proceeding with available results")
+                        # FORCE PROCEED at block 300 (provides ~12 min buffer for weight accum + gateway submit)
+                        # Block 300 = 60 min into epoch, leaves 12 min before epoch ends
+                        # Weight accumulation (~5 min) + gateway submit (~5 sec) = ~5 min total
+                        # Buffer: 12 - 5 = ~7 minutes spare
+                        if blocks_into_epoch_check >= 300:
+                            print(f"   ⏰ BLOCK 300+ REACHED: Force proceeding with available results")
                             print(f"      Block: {blocks_into_epoch_check}/360")
-                            print(f"      Must submit hashes before reveal deadline (block 328)")
+                            print(f"      ~12 minutes remaining for weight accumulation + gateway submission")
                             missing = [f"Container-{wf[0]}" for wf in worker_files if not os.path.exists(wf[1])]
                             print(f"      Missing workers: {missing}")
                             print(f"      Proceeding with partial results")
@@ -6799,9 +6802,12 @@ def run_lightweight_worker(config):
                             await asyncio.sleep(10)
                             break
                         
-                        # Too late to start validation
-                        if blocks_into_epoch >= 275:
+                        # Too late to start validation (coordinator aggregates at block 300)
+                        # Workers need ~8-10 min to process 50 leads, so cutoff at block 260
+                        # gives them 40 blocks (8 min) before coordinator forces aggregation
+                        if blocks_into_epoch >= 260:
                             print(f"❌ Worker: Too late to start validation (block {blocks_into_epoch}/360)")
+                            print(f"   Coordinator aggregates at block 300 - not enough time to finish")
                             await asyncio.sleep(10)
                             break
                         
@@ -6913,6 +6919,26 @@ def run_lightweight_worker(config):
                             })
                             for _ in lead_blobs
                         ]
+                    
+                    # ════════════════════════════════════════════════════════════════════
+                    # EPOCH BOUNDARY CHECK: Abort if epoch changed during validation
+                    # This prevents workers from writing stale results for old epochs
+                    # ════════════════════════════════════════════════════════════════════
+                    try:
+                        post_validation_block, post_validation_epoch, _ = self._read_shared_block_file()
+                        if post_validation_epoch > current_epoch:
+                            print(f"\n❌ Worker {container_id}: EPOCH CHANGED during validation!")
+                            print(f"   Started processing: epoch {current_epoch}")
+                            print(f"   Current epoch now: {post_validation_epoch}")
+                            print(f"   Aborting stale results - will start fresh on new epoch")
+                            print(f"   (This prevents cascading lag from old epoch processing)\n")
+                            # Don't write results, don't mark as completed
+                            # Worker will re-read leads file for new epoch on next iteration
+                            await asyncio.sleep(5)
+                            continue  # Skip to next iteration of main loop
+                    except Exception as e:
+                        print(f"   ⚠️ Worker {container_id}: Could not check epoch boundary: {e}")
+                        # Continue anyway - better to write potentially stale results than lose them
                     
                     # Map results back to validated_leads format (SAME ORDER guaranteed)
                     validated_leads = []

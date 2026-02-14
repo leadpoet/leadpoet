@@ -46,6 +46,9 @@ from gateway.db.company_info import (
     update_employee_count,
 )
 
+# Role normalization for approved leads
+from gateway.utils.role_normalize import normalize_role_format
+
 # Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
@@ -1066,6 +1069,24 @@ async def compute_epoch_consensus(epoch_id: int):
                 else:
                     print(f"            - icp_adjustment: {int(is_icp_multiplier):+d} points")
                 
+                # ========================================================================
+                # Normalize role formatting for approved leads
+                # ========================================================================
+                updated_lead_blob = None
+                if final_status == "approved":
+                    lead_blob = all_lead_blobs.get(lead_id, {})
+                    if lead_blob and isinstance(lead_blob, dict):
+                        original_role = lead_blob.get("role", "")
+                        if original_role and isinstance(original_role, str):
+                            try:
+                                normalized_role = normalize_role_format(original_role)
+                                if normalized_role != original_role:
+                                    lead_blob["role"] = normalized_role
+                                    updated_lead_blob = lead_blob
+                                    print(f"            - role normalized: '{original_role}' → '{normalized_role}'")
+                            except Exception as e:
+                                print(f"            ⚠️  Role normalization failed (keeping original): {e}")
+
                 # RETRY LOGIC: Handle transient connection errors
                 # - Errno 11: Resource temporarily unavailable (connection pool exhausted)
                 # - Errno 32: Broken pipe (connection closed by remote end)
@@ -1073,14 +1094,14 @@ async def compute_epoch_consensus(epoch_id: int):
                 # This occurs when connection pool is exhausted during high miner traffic
                 MAX_UPDATE_RETRIES = 5
                 update_success = False
-                
+
                 for update_attempt in range(1, MAX_UPDATE_RETRIES + 1):
                     try:
                         # CRITICAL: Capture all variables in lambda defaults to avoid closure issues
                         # TIMEOUT: 30s per update to prevent hanging under high load
                         update_result = await asyncio.wait_for(
                             asyncio.to_thread(
-                                lambda lid=lead_id, fs=final_status, vr=validators_responded, vrsp=validator_responses, cv=consensus_votes, frs=final_rep_score, icp=is_icp_multiplier, oc=outcome: consensus_supabase.table("leads_private")
+                                lambda lid=lead_id, fs=final_status, vr=validators_responded, vrsp=validator_responses, cv=consensus_votes, frs=final_rep_score, icp=is_icp_multiplier, oc=outcome, ulb=updated_lead_blob: consensus_supabase.table("leads_private")
                                     .update({
                                         "status": fs,
                                         "validators_responded": vr,
@@ -1089,7 +1110,8 @@ async def compute_epoch_consensus(epoch_id: int):
                                         "rep_score": frs,
                                         "is_icp_multiplier": icp,
                                         "rep_score_version": "v1/chksv2",  # Shortened to 9 chars (VARCHAR(10) limit)
-                                        "epoch_summary": oc  # Keep existing epoch_summary for backwards compatibility
+                                        "epoch_summary": oc,  # Keep existing epoch_summary for backwards compatibility
+                                        **({"lead_blob": ulb} if ulb is not None else {})
                                     })
                                     .eq("lead_id", lid)
                                     .execute()

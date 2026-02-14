@@ -3022,7 +3022,8 @@ def _extract_homepage_extra(html: str) -> str:
         return ''
 
     # Try extracting from first substantial paragraph
-    paragraphs = re.findall(r'<p[^>]*>([^<]+(?:<[^/p][^>]*>[^<]*</[^p][^>]*>)*[^<]*)</p>', html, re.I | re.S)
+    # NOTE: Previous regex had nested quantifiers causing catastrophic backtracking on some HTML
+    paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', html, re.I | re.S)
     for p in paragraphs[:10]:  # Check first 10 paragraphs
         text = re.sub(r'<[^>]+>', ' ', p)
         text = re.sub(r'\s+', ' ', text).strip()

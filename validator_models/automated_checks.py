@@ -4160,11 +4160,34 @@ async def run_centralized_truelist_batch(leads: List[dict]) -> Dict[str, dict]:
     return email_results
 
 
+def _check_epoch_from_block_file(current_epoch: int, container_id: int = 0) -> bool:
+    """Check if epoch has changed by reading the shared block file.
+    
+    Returns True if epoch has changed (should abort), False if same epoch.
+    """
+    try:
+        import json
+        from pathlib import Path
+        block_file = Path("validator_weights") / "current_block.json"
+        if not block_file.exists():
+            return False  # Can't check, assume same epoch
+        with open(block_file, 'r') as f:
+            data = json.load(f)
+        file_epoch = data.get("epoch", current_epoch)
+        if file_epoch > current_epoch:
+            print(f"   ⚠️ Container {container_id}: Epoch changed {current_epoch} → {file_epoch} during batch processing!")
+            return True
+        return False
+    except Exception:
+        return False  # On error, don't abort
+
+
 async def run_batch_automated_checks(
     leads: List[dict],
     container_id: int = 0,
     precomputed_email_results: Dict[str, dict] = None,
-    leads_file_path: str = None
+    leads_file_path: str = None,
+    current_epoch: int = None
 ) -> List[Tuple[bool, dict]]:
     """
     Batch validation with SEQUENTIAL Stage 0-2 and Stage 4-5.
@@ -4344,6 +4367,25 @@ async def run_batch_automated_checks(
         # 0.8-second delay between Stage 0-2 leads (rate limiting)
         if i < len(leads) - 1:
             await asyncio.sleep(0.8)
+        
+        # Epoch boundary check every 10 leads (avoid excessive file reads)
+        if current_epoch is not None and (i + 1) % 10 == 0:
+            if _check_epoch_from_block_file(current_epoch, container_id):
+                print(f"   ❌ ABORTING Stage 0-2 at lead {i+1}/{n} - epoch changed!")
+                # Fill remaining leads with rejection
+                for j in range(i + 1, n):
+                    if results[j] is None:  # Not already rejected
+                        stage0_2_results.append((False, {
+                            "passed": False,
+                            "rejection_reason": {
+                                "stage": "Stage 0-2",
+                                "check_name": "epoch_boundary_abort",
+                                "message": f"Aborted: epoch changed during processing"
+                            }
+                        }))
+                    else:
+                        stage0_2_results.append((False, results[j][1] if results[j] else {}))
+                break
     
     stage0_2_passed_count = sum(1 for passed, _ in stage0_2_results if passed)
     print(f"   ✅ Stage 0-2 complete: {stage0_2_passed_count}/{n} passed")
@@ -4394,6 +4436,13 @@ async def run_batch_automated_checks(
                 print(f"   ⚠️ Leads will fail email verification")
                 email_results = {}
                 break
+            
+            # Epoch boundary check every 30s during polling
+            if current_epoch is not None and poll_waited % 30 == 0:
+                if _check_epoch_from_block_file(current_epoch, container_id):
+                    print(f"   ❌ Epoch changed while waiting for TrueList - aborting poll")
+                    email_results = {}
+                    break
     else:
         # No source - all leads fail email verification
         print(f"   ⚠️ No TrueList results available - leads will fail email verification")
@@ -4528,8 +4577,35 @@ async def run_batch_automated_checks(
     # Process Stage 4-5 queue SEQUENTIALLY
     queue_idx = 0
     total_stage4_5 = len(stage4_5_queue)
+    epoch_aborted = False
     
     while queue_idx < len(stage4_5_queue) or retry_task is not None or inline_task is not None:
+        # Epoch boundary check every 10 leads in Stage 4-5
+        if current_epoch is not None and queue_idx > 0 and queue_idx % 10 == 0 and not epoch_aborted:
+            if _check_epoch_from_block_file(current_epoch, container_id):
+                print(f"   ❌ ABORTING Stage 4-5 at lead {queue_idx}/{len(stage4_5_queue)} - epoch changed!")
+                epoch_aborted = True
+                # Mark remaining queued leads as rejected
+                for remaining_idx in range(queue_idx, len(stage4_5_queue)):
+                    r_idx = stage4_5_queue[remaining_idx][0]
+                    if results[r_idx] is None:
+                        results[r_idx] = (False, {
+                            "passed": False,
+                            "rejection_reason": {
+                                "stage": "Stage 4-5",
+                                "check_name": "epoch_boundary_abort",
+                                "message": "Aborted: epoch changed during processing"
+                            }
+                        })
+                # Cancel retry/inline tasks if running
+                if retry_task is not None and not retry_task.done():
+                    retry_task.cancel()
+                    retry_task = None
+                if inline_task is not None and not inline_task.done():
+                    inline_task.cancel()
+                    inline_task = None
+                break
+        
         # Process next lead in Stage 4-5 queue (if available)
         if queue_idx < len(stage4_5_queue):
             idx, lead, email_result, stage0_2_data = stage4_5_queue[queue_idx]
@@ -4664,6 +4740,19 @@ async def run_batch_automated_checks(
     # ========================================================================
     # Summary
     # ========================================================================
+    
+    # Safety: Fill any remaining None slots (e.g. from epoch abort mid-processing)
+    for i in range(len(results)):
+        if results[i] is None:
+            results[i] = (False, {
+                "passed": False,
+                "rejection_reason": {
+                    "stage": "Batch",
+                    "check_name": "unprocessed",
+                    "message": "Lead was not processed (epoch boundary abort or unexpected skip)"
+                }
+            })
+    
     elapsed = time.time() - start_time
     passed_count = sum(1 for r in results if r and r[0] is True)
     failed_count = sum(1 for r in results if r and r[0] is False)

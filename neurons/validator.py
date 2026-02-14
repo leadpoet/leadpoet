@@ -2239,7 +2239,8 @@ class Validator(BaseValidatorNeuron):
                 batch_results = await run_batch_automated_checks(
                     lead_blobs, 
                     container_id=0 if container_mode == "coordinator" else int(os.environ.get('CONTAINER_ID', 0)),
-                    leads_file_path=leads_file_str  # Poll file for TrueList results after Stage 0-2
+                    leads_file_path=leads_file_str,  # Poll file for TrueList results after Stage 0-2
+                    current_epoch=current_epoch  # For epoch boundary detection mid-processing
                 )
             except Exception as e:
                 print(f"   ❌ Batch validation failed: {e}")
@@ -2522,6 +2523,17 @@ class Validator(BaseValidatorNeuron):
                         # CRITICAL: Update block file so workers get fresh epoch/block info
                         # Without this, workers see stale data and get stuck in "too late" loop
                         self._write_shared_block_file(current_block_check, current_epoch_check, blocks_into_epoch_check)
+                        
+                        # EPOCH CHANGE CHECK: If epoch changed, abort immediately
+                        # Without this, coordinator sits in wait loop for 60min doing nothing
+                        if current_epoch_check > current_epoch:
+                            print(f"\n{'='*60}")
+                            print(f"❌ COORDINATOR: EPOCH CHANGED while waiting for workers!")
+                            print(f"   Started: epoch {current_epoch}")
+                            print(f"   Current: epoch {current_epoch_check}")
+                            print(f"   Aborting - stale results cannot be submitted")
+                            print(f"{'='*60}\n")
+                            break
                         
                         # FORCE PROCEED at block 300 (provides ~12 min buffer for weight accum + gateway submit)
                         # Block 300 = 60 min into epoch, leaves 12 min before epoch ends
@@ -6916,7 +6928,8 @@ def run_lightweight_worker(config):
                         batch_results = await run_batch_automated_checks(
                             lead_blobs, 
                             container_id=container_id,
-                            leads_file_path=leads_file_str  # Poll file for TrueList results after Stage 0-2
+                            leads_file_path=leads_file_str,  # Poll file for TrueList results after Stage 0-2
+                            current_epoch=current_epoch  # For epoch boundary detection mid-processing
                         )
                     except Exception as e:
                         print(f"   ❌ Batch validation failed: {e}")

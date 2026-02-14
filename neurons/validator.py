@@ -4690,6 +4690,9 @@ class Validator(BaseValidatorNeuron):
         """
         Read qualification champion info from local JSON file.
         
+        Also checks Supabase banned_hotkeys table - if champion is banned,
+        clears local file and returns None (5% goes to burn instead).
+        
         Returns:
             Dict with current_champion info, or None if no champion
         """
@@ -4703,11 +4706,72 @@ class Validator(BaseValidatorNeuron):
             with open(champion_file, 'r') as f:
                 data = json.load(f)
             
-            return data.get("current_champion")
+            champion = data.get("current_champion")
+            if not champion:
+                return None
+            
+            # Check if champion's hotkey is banned in Supabase
+            champion_hotkey = champion.get("miner_hotkey")
+            if champion_hotkey and self._is_champion_hotkey_banned(champion_hotkey):
+                bt.logging.warning(f"🚨 Champion hotkey {champion_hotkey[:20]}... is BANNED - clearing local champion")
+                self._clear_qualification_champion_for_ban(champion_hotkey)
+                return None
+            
+            return champion
             
         except Exception as e:
             bt.logging.warning(f"Failed to read qualification champion: {e}")
             return None
+    
+    def _is_champion_hotkey_banned(self, hotkey: str) -> bool:
+        """Check if hotkey is in Supabase banned_hotkeys table."""
+        try:
+            if not self.supabase_client:
+                return False  # Can't check, assume not banned
+            
+            result = self.supabase_client.table("banned_hotkeys")\
+                .select("hotkey")\
+                .eq("hotkey", hotkey)\
+                .limit(1)\
+                .execute()
+            
+            return bool(result.data and len(result.data) > 0)
+        except Exception as e:
+            bt.logging.warning(f"Failed to check banned hotkeys: {e}")
+            return False  # On error, don't clear champion
+    
+    def _clear_qualification_champion_for_ban(self, banned_hotkey: str):
+        """Clear champion from local JSON due to hotkey ban."""
+        try:
+            champion_file = Path("validator_weights") / "qualification_champion.json"
+            if not champion_file.exists():
+                return
+            
+            with open(champion_file, 'r') as f:
+                data = json.load(f)
+            
+            old_champion = data.get("current_champion")
+            if old_champion:
+                # Track in dethronement history
+                if "dethronement_history" not in data:
+                    data["dethronement_history"] = []
+                old_champion["dethroned_at"] = datetime.utcnow().isoformat()
+                old_champion["dethrone_reason"] = "hotkey_banned"
+                data["dethronement_history"].append(old_champion)
+            
+            data["current_champion"] = None
+            
+            with open(champion_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            print(f"\n{'='*60}")
+            print(f"🚨 CHAMPION DETHRONED (HOTKEY BANNED)")
+            print(f"   Hotkey: {banned_hotkey[:20]}...")
+            print(f"   5% champion share → burn (UID 0)")
+            print(f"{'='*60}\n")
+            
+        except Exception as e:
+            bt.logging.error(f"Failed to clear banned champion: {e}")
     
     def _clear_qualification_champion(self):
         """

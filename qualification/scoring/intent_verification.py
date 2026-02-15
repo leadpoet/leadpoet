@@ -428,9 +428,39 @@ async def fetch_url_content(url: str, source: str) -> str:
         return await scrapingdog_generic(url)
     elif source_lower == "review_site":
         return await scrapingdog_generic(url)
+    elif source_lower == "wikipedia":
+        return await fetch_wikipedia(url)
     else:
         # Default to generic scraping
         return await scrapingdog_generic(url)
+
+
+# =============================================================================
+# Wikipedia Fetcher (free, no ScrapingDog needed)
+# =============================================================================
+
+async def fetch_wikipedia(url: str) -> str:
+    """
+    Fetch Wikipedia content directly via httpx.
+    
+    Wikipedia is a free public resource - no need to use ScrapingDog credits.
+    Already in ALLOWED_NETWORK_DESTINATIONS.
+    
+    Args:
+        url: Wikipedia article URL (e.g., https://en.wikipedia.org/wiki/Aria_Systems)
+    
+    Returns:
+        HTML content as string
+    """
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            url,
+            headers={"User-Agent": "LeadPoet-Qualification/1.0"},
+            timeout=DEFAULT_TIMEOUT,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        return response.text
 
 
 # =============================================================================
@@ -454,12 +484,17 @@ async def scrapingdog_linkedin(url: str) -> str:
         raise ValueError("SCRAPINGDOG_API_KEY not configured")
     
     # Determine URL type
+    # ScrapingDog LinkedIn API supports: profile, company, post
+    # Job posting URLs (/jobs/) are NOT supported by the LinkedIn API —
+    # they must be scraped via the generic scraper instead.
+    if "/jobs/" in url:
+        logger.info(f"LinkedIn job URL detected — routing to generic scraper: {url[:80]}")
+        return await scrapingdog_generic(url)
+    
     if "/in/" in url:
         url_type = "profile"
     elif "/company/" in url:
         url_type = "company"
-    elif "/jobs/" in url:
-        url_type = "job"
     else:
         url_type = "post"
     

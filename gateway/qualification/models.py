@@ -91,7 +91,7 @@ class IntentSignal(BaseModel):
     description: str = Field(..., max_length=500, description="Description of the intent signal")
     url: str = Field(..., description="URL to the source of the intent signal")
     date: str = Field(..., description="Date of the signal in ISO 8601 format (YYYY-MM-DD)")
-    snippet: Optional[str] = Field(None, max_length=1000, description="Relevant text snippet from source")
+    snippet: str = Field(..., max_length=1000, description="Relevant text snippet extracted from source URL")
     
     @field_validator('date')
     @classmethod
@@ -162,8 +162,8 @@ class LeadOutput(BaseModel):
     role_type: str = Field(..., description="Role category (e.g., 'Engineer/Technical', 'Sales', 'C-Level Executive')")
     seniority: Seniority = Field(..., description="Seniority level")
     
-    # Intent signal (evidence of buying intent)
-    intent_signal: IntentSignal = Field(..., description="Evidence of buying intent")
+    # Intent signals (evidence of buying intent — at least one required)
+    intent_signals: List[IntentSignal] = Field(..., min_length=1, description="Evidence of buying intent (one or more signals)")
     
     # =========================================================================
     # NOT ALLOWED - Any of these fields will cause instant validation failure
@@ -196,7 +196,7 @@ class LeadOutputRedacted(BaseModel):
     role: str
     role_type: str
     seniority: str
-    intent_signal: IntentSignal
+    intent_signals: List[IntentSignal]
 
 
 # =============================================================================

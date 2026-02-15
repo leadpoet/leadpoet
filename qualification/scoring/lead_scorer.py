@@ -167,8 +167,8 @@ async def score_lead(
         decision_maker = await score_decision_maker(lead, icp)
         logger.debug(f"Decision maker score: {decision_maker}")
         
-        # Score Intent Signal (0-50 pts) - includes verification
-        intent_raw, verification_confidence = await score_intent_signal(lead, icp)
+        # Score Intent Signals (0-50 pts) - verifies each signal, uses the best
+        intent_raw, verification_confidence, best_signal_date = await score_intent_signal(lead, icp)
         logger.debug(f"Intent signal raw score: {intent_raw} (confidence: {verification_confidence})")
         
         # =====================================================================
@@ -204,15 +204,15 @@ async def score_lead(
         )
     
     # =========================================================================
-    # STEP 4: Apply time decay to intent signal
+    # STEP 4: Apply time decay to intent signal (uses best signal's date)
     # =========================================================================
     try:
-        signal_date = date.fromisoformat(lead.intent_signal.date)
+        signal_date = date.fromisoformat(best_signal_date) if best_signal_date else None
     except (ValueError, AttributeError):
         # Invalid date - cannot verify recency, zero out intent score
         # This prevents gaming by submitting unparseable dates to avoid time decay
         signal_date = None
-        logger.warning(f"Invalid signal date '{getattr(lead.intent_signal, 'date', None)}' - zeroing intent score")
+        logger.warning(f"Invalid signal date '{best_signal_date}' - zeroing intent score")
     
     if signal_date is None:
         intent_final = 0
@@ -411,19 +411,19 @@ SOURCE_TYPE_MULTIPLIERS = {
 }
 
 
-async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, int]:
+async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, int, Optional[str]]:
     """
-    Score the quality and relevance of the intent signal.
+    Score the quality and relevance of the lead's intent signals.
     
-    First verifies the signal is real AND provides ICP evidence, then scores relevance.
-    The final score is weighted by verification confidence AND source type quality.
+    Models can provide multiple intent signals per lead. Each signal is
+    verified and scored independently, and the BEST signal is used.
     
     Args:
-        lead: The lead to score
+        lead: The lead to score (has intent_signals: List[IntentSignal])
         icp: The ICP prompt
     
     Returns:
-        Tuple of (score 0-50, verification_confidence 0-100)
+        Tuple of (best_score 0-50, best_confidence 0-100, best_signal_date)
     """
     # Build ICP criteria string for verification
     icp_criteria_parts = []
@@ -435,13 +435,47 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
         icp_criteria_parts.append(f"Geography: {icp.geography}")
     icp_criteria = "; ".join(icp_criteria_parts) if icp_criteria_parts else None
     
+    best_score = 0.0
+    best_confidence = 0
+    best_date: Optional[str] = None
+    
+    for signal in lead.intent_signals:
+        score, confidence = await _score_single_intent_signal(
+            signal, icp, icp_criteria, lead.business
+        )
+        if score > best_score:
+            best_score = score
+            best_confidence = confidence
+            best_date = signal.date
+    
+    # If no signal scored > 0, use the first signal's date for decay
+    if best_date is None and lead.intent_signals:
+        best_date = lead.intent_signals[0].date
+    
+    if len(lead.intent_signals) > 1:
+        logger.info(f"Scored {len(lead.intent_signals)} intent signals — best: {best_score:.1f} (confidence: {best_confidence})")
+    
+    return best_score, best_confidence, best_date
+
+
+async def _score_single_intent_signal(
+    signal: "IntentSignal",
+    icp: ICPPrompt,
+    icp_criteria: Optional[str],
+    company_name: str
+) -> Tuple[float, int]:
+    """
+    Verify and score a single intent signal.
+    
+    Returns:
+        Tuple of (score 0-50, verification_confidence 0-100)
+    """
     # Verify the signal is real AND provides evidence of ICP fit
-    # This uses ScrapingDog to fetch the URL and verify the content
     verified, confidence, reason = await verify_intent_signal(
-        lead.intent_signal,
+        signal,
         icp_industry=icp.industry,
         icp_criteria=icp_criteria,
-        company_name=lead.business
+        company_name=company_name
     )
     
     if not verified:
@@ -449,7 +483,7 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
         return 0.0, confidence
     
     # Get source as string
-    source_str = lead.intent_signal.source.value if hasattr(lead.intent_signal.source, 'value') else str(lead.intent_signal.source)
+    source_str = signal.source.value if hasattr(signal.source, 'value') else str(signal.source)
     
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_str.lower(), 0.5)
@@ -459,9 +493,9 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
 
 INTENT SIGNAL:
 - Source: {source_str}
-- Description: {lead.intent_signal.description}
-- Date: {lead.intent_signal.date}
-- Snippet: {lead.intent_signal.snippet or 'N/A'}
+- Description: {signal.description}
+- Date: {signal.date}
+- Snippet: {signal.snippet}
 
 TARGET PRODUCT/SERVICE: {icp.product_service}
 
@@ -622,14 +656,14 @@ def detect_structural_similarity(leads: List[LeadOutput], threshold: float = 0.7
     
     flagged_indices = []
     
-    # Extract normalized intent descriptions and snippets
+    # Extract normalized intent descriptions and snippets (from first/primary signal)
     # Gaming typically occurs here - models use templated intent signals
     intent_descs = [
-        _normalize_for_similarity(lead.intent_signal.description if lead.intent_signal else "")
+        _normalize_for_similarity(lead.intent_signals[0].description if lead.intent_signals else "")
         for lead in leads
     ]
     intent_snippets = [
-        _normalize_for_similarity(lead.intent_signal.snippet if lead.intent_signal and lead.intent_signal.snippet else "")
+        _normalize_for_similarity(lead.intent_signals[0].snippet if lead.intent_signals else "")
         for lead in leads
     ]
     
@@ -651,10 +685,10 @@ def detect_structural_similarity(leads: List[LeadOutput], threshold: float = 0.7
     # Flag leads that match repeated patterns
     for i, lead in enumerate(leads):
         intent_desc_normalized = _normalize_for_similarity(
-            lead.intent_signal.description if lead.intent_signal else ""
+            lead.intent_signals[0].description if lead.intent_signals else ""
         )
         intent_snippet_normalized = _normalize_for_similarity(
-            lead.intent_signal.snippet if lead.intent_signal and lead.intent_signal.snippet else ""
+            lead.intent_signals[0].snippet if lead.intent_signals else ""
         )
         
         # Check if intent matches a repeated pattern

@@ -655,7 +655,7 @@ class QualificationValidator:
         if not lead.role or not lead.industry or not lead.sub_industry:
             return False
         
-        if not lead.intent_signal:
+        if not lead.intent_signals:
             return False
         
         return True
@@ -766,7 +766,7 @@ class QualificationValidator:
         
         # Basic intent signal (check if present)
         intent_score = 0.0
-        if lead.intent_signal and lead.intent_signal.url:
+        if lead.intent_signals and lead.intent_signals[0].url:
             intent_score = 25.0  # Give partial credit for having a signal
         
         # Calculate penalties

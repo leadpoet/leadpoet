@@ -131,7 +131,15 @@ class LeadOutput(BaseModel):
     model_config = {"extra": "forbid"}
     
     # =========================================================================
-    # REQUIRED FIELDS - All 14 fields below must be provided
+    # LEAD ID - Used for DB verification (optional for backwards compat)
+    # =========================================================================
+    # If provided, the lead is verified against miner_test_leads by primary key.
+    # If not provided, verification falls back to business name matching.
+    # Will become REQUIRED in a future update.
+    lead_id: Optional[int] = Field(None, description="ID from miner_test_leads table (for DB verification)")
+    
+    # =========================================================================
+    # REQUIRED FIELDS - All fields below must be provided
     # =========================================================================
     
     # Company info (from miner_test_leads table)
@@ -175,6 +183,7 @@ class LeadOutputRedacted(BaseModel):
     Lead output for miner receipts.
     Same as LeadOutput since we no longer allow PII fields.
     """
+    lead_id: Optional[int] = None
     business: str
     company_linkedin: str
     company_website: str

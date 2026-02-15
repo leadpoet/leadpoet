@@ -40,6 +40,7 @@ from collections import Counter
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import LeadOutput, ICPPrompt, LeadScoreBreakdown
 from qualification.scoring.pre_checks import run_automatic_zero_checks
+from qualification.scoring.db_verification import verify_leads_batch
 from qualification.scoring.intent_verification import (
     verify_intent_signal,
     openrouter_chat,
@@ -698,6 +699,10 @@ async def score_leads_batch(
     Tracks seen companies across the batch to enforce first-wins rule.
     Also detects structural similarity (templated responses) across leads.
     
+    IMPORTANT: DB field verification runs FIRST as a batch query.
+    Leads with tampered fields get instant score=0 (no further checks).
+    This verification time is NOT counted against the model's execution time.
+    
     Args:
         leads: List of leads to score
         icp: The ICP prompt
@@ -708,10 +713,37 @@ async def score_leads_batch(
     Returns:
         List of LeadScoreBreakdown objects
     """
+    # =========================================================================
+    # STEP 0: DB field verification (ONE batch query, then local comparison)
+    # This catches gaming where models modify fields to better match the ICP.
+    # Time for this check is NOT counted against the model.
+    # =========================================================================
+    try:
+        db_failures = await verify_leads_batch(leads)
+    except Exception as e:
+        logger.error(f"DB verification failed with exception (proceeding without): {e}")
+        db_failures = {}
+    
     results = []
     seen_companies: Set[str] = set()
     
     for i, lead in enumerate(leads):
+        # If DB verification failed for this lead, instant zero — skip all other checks
+        if i in db_failures:
+            logger.info(f"Lead {i} ({lead.business}) failed DB verification — instant zero")
+            results.append(LeadScoreBreakdown(
+                icp_fit=0,
+                decision_maker=0,
+                intent_signal_raw=0,
+                time_decay_multiplier=1.0,
+                intent_signal_final=0,
+                cost_penalty=0,
+                time_penalty=0,
+                final_score=0,
+                failure_reason=db_failures[i]
+            ))
+            continue
+        
         cost = costs[i] if i < len(costs) else 0.0
         time = times[i] if i < len(times) else 0.0
         

@@ -458,6 +458,8 @@ async def scrapingdog_linkedin(url: str) -> str:
         url_type = "profile"
     elif "/company/" in url:
         url_type = "company"
+    elif "/jobs/" in url:
+        url_type = "job"
     else:
         url_type = "post"
     
@@ -607,6 +609,11 @@ def extract_linkedin_id(url: str) -> str:
     
     # Company URL: /company/companyname
     match = re.search(r'/company/([^/?]+)', url)
+    if match:
+        return match.group(1)
+    
+    # Job posting URL: /jobs/view/JOBID
+    match = re.search(r'/jobs/view/(\d+)', url)
     if match:
         return match.group(1)
     

@@ -65,6 +65,7 @@ class IntentSignalSource(str, Enum):
     GITHUB = "github"
     REVIEW_SITE = "review_site"
     COMPANY_WEBSITE = "company_website"
+    WIKIPEDIA = "wikipedia"
     OTHER = "other"
 
 

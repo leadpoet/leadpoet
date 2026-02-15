@@ -418,11 +418,17 @@ class TEESandbox:
             return model_dir
     
     def _generate_dockerfile(self) -> str:
-        """Generate Dockerfile for the enclave."""
-        return '''FROM python:3.11-slim
+        """Generate Dockerfile for the enclave.
+        
+        Installs all allowlisted third-party packages from SANDBOX_PIP_PACKAGES.
+        Miners cannot install their own requirements.txt - only our allowlist.
+        """
+        from qualification.validator.sandbox_security import SANDBOX_PIP_PACKAGES
+        packages = " ".join(SANDBOX_PIP_PACKAGES)
+        return f'''FROM python:3.11-slim
 
-# Install dependencies
-RUN pip install --no-cache-dir httpx pydantic
+# Install allowlisted dependencies (from SANDBOX_PIP_PACKAGES in sandbox_security.py)
+RUN pip install --no-cache-dir {packages}
 
 # Copy model code
 COPY model/ /app/model/

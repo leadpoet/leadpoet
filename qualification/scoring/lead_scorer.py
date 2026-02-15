@@ -208,15 +208,21 @@ async def score_lead(
     try:
         signal_date = date.fromisoformat(lead.intent_signal.date)
     except (ValueError, AttributeError):
-        # Invalid date - use current date (no decay)
-        signal_date = date.today()
-        logger.warning(f"Invalid signal date, using today: {lead.intent_signal.date}")
+        # Invalid date - cannot verify recency, zero out intent score
+        # This prevents gaming by submitting unparseable dates to avoid time decay
+        signal_date = None
+        logger.warning(f"Invalid signal date '{getattr(lead.intent_signal, 'date', None)}' - zeroing intent score")
     
-    age_months = calculate_age_months(signal_date)
-    decay_multiplier = calculate_time_decay_multiplier(age_months)
+    if signal_date is None:
+        intent_final = 0
+        decay_multiplier = 0
+        age_months = -1
+    else:
+        age_months = calculate_age_months(signal_date)
+        decay_multiplier = calculate_time_decay_multiplier(age_months)
+        intent_final = intent_raw * decay_multiplier
     
-    intent_final = intent_raw * decay_multiplier
-    logger.debug(f"Intent after decay: {intent_final} (age: {age_months:.1f} months, multiplier: {decay_multiplier})")
+    logger.debug(f"Intent after decay: {intent_final} (age: {age_months} months, multiplier: {decay_multiplier})")
     
     # =========================================================================
     # STEP 5: Calculate variability penalties

@@ -198,6 +198,8 @@ ALLOWED_LIBRARIES: Set[str] = {
     "thefuzz",          # Fuzzy matching - pure computation
     "Levenshtein",      # String distance - pure computation
     "dateutil",         # Date parsing - pure parsing
+    "bs4",              # BeautifulSoup HTML parsing - read-only, no I/O
+    "soupsieve",        # bs4 dependency - CSS selector engine
     "disposable_email_domains",  # Email blocklist - static set lookup
     
     # =========================================================================
@@ -225,6 +227,58 @@ ALLOWED_LIBRARIES: Set[str] = {
 # - importlib       → Cannot dynamically import blocked modules
 # - multiprocessing → Cannot spawn processes
 # =============================================================================
+
+
+# =============================================================================
+# SANDBOX PIP PACKAGES (installed in Docker sandbox for miner models)
+# =============================================================================
+# These are the pip package names for third-party libraries in ALLOWED_LIBRARIES.
+# The sandbox Dockerfile installs these automatically.
+# 
+# To add a new library for miners:
+# 1. Add the import name to ALLOWED_LIBRARIES above
+# 2. Add the pip package name to SANDBOX_PIP_PACKAGES below
+# The sandbox will automatically install it on next build.
+#
+# NOTE: Standard library modules (json, re, os, etc.) don't need pip install.
+# Only add THIRD-PARTY packages here.
+# =============================================================================
+
+SANDBOX_PIP_PACKAGES: list = [
+    # HTTP clients
+    "httpx",
+    "requests",
+    "aiohttp",
+    
+    # Data validation
+    "pydantic",
+    
+    # Database
+    "supabase",
+    
+    # Search & LLM
+    "duckduckgo_search",
+    "openai",
+    
+    # Data science
+    "pandas",
+    "numpy",
+    
+    # String matching
+    "rapidfuzz",
+    "thefuzz",
+    "python-Levenshtein",
+    
+    # Parsing & utilities
+    "python-dateutil",
+    "beautifulsoup4",
+    "disposable-email-domains",
+    
+    # SSL certificates
+    "certifi",
+    
+    # Add new packages here - sandbox will auto-install them
+]
 
 
 # =============================================================================
@@ -515,6 +569,10 @@ ALLOWED_NETWORK_DESTINATIONS: Set[str] = {
     "duckduckgo.com",
     "html.duckduckgo.com",
     "links.duckduckgo.com",
+    
+    # Wikipedia - public knowledge base (read-only)
+    "en.wikipedia.org",
+    "wikipedia.org",
     
     # ===========================================
     # Free APIs - Rep Score (from automated_checks.py)

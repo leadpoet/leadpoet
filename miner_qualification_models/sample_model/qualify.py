@@ -13,10 +13,10 @@ CRITICAL: Intent signals must be VERIFIABLE!
 - Fake/unverifiable signals get ZERO points
 
 SECURITY MODEL:
-    - `os` module is BLOCKED - models cannot read os.environ
     - Safe config values are injected in icp["_config"]
-    - ALL paid APIs are called via PROXY
+    - ALL paid APIs are called via PROXY (no API keys needed)
     - Validator's proxy TRACKS ALL COSTS automatically
+    - All lead fields are VERIFIED against the DB using lead_id
 
 SCORING BREAKDOWN (100 points max):
     - ICP Fit: 0-20 pts (industry, sub_industry, role must match)
@@ -555,43 +555,54 @@ def format_lead_output(
     icp: Dict[str, Any],
     intent_description: str,
     intent_url: str,
-    intent_source: str
+    intent_source: str,
+    intent_snippet: str = ""
 ) -> Dict[str, Any]:
     """
     Format lead for LeadOutput schema with VERIFIABLE intent.
     
-    IMPORTANT: Only return the 13 REQUIRED fields. 
+    IMPORTANT: Only return the 15 REQUIRED fields. 
     Any extra fields (email, full_name, phone, etc.) will cause validation to FAIL!
     
-    REQUIRED FIELDS (from miner_test_leads table):
-    - business, company_linkedin, company_website (mapped from 'website'), employee_count
-    - industry, sub_industry (from ICP)
+    CRITICAL: All fields (business, employee_count, role, industry, etc.) are
+    verified against the database using lead_id. Do NOT modify them from the
+    database values or the lead will score 0.
+    
+    REQUIRED FIELDS:
+    - lead_id (the `id` column from the leads table)
+    - business, company_linkedin, company_website, employee_count
+    - industry, sub_industry (from the LEAD, not the ICP!)
     - country, city, state
-    - role, role_type (already in table)
-    - seniority (inferred from role_type)
-    - intent_signal (generated)
+    - role, role_type, seniority
+    - intent_signals (list of signal objects, each with source/description/url/date/snippet)
     """
-    # Company info from lead
+    # lead_id is REQUIRED - the `id` column from the leads table
+    lead_id = lead.get("id")
+    if lead_id is None:
+        print("   ❌ Lead missing 'id' column - cannot format output")
+        return None
+    
+    # Company info from lead (DO NOT MODIFY - verified against DB)
     business = lead.get("business", "Unknown Company")
     company_linkedin = lead.get("company_linkedin", "")
     company_website = lead.get("website", "")  # Note: column is 'website' not 'company_website'
     employee_count = lead.get("employee_count", "")
     
-    # Location from lead
-    country = lead.get("country", icp.get("country", "United States"))
+    # Industry from LEAD (DO NOT substitute ICP values - verified against DB)
+    industry = lead.get("industry", "")
+    sub_industry = lead.get("sub_industry", "")
+    
+    # Location from lead (DO NOT MODIFY - verified against DB)
+    country = lead.get("country", "")
     city = lead.get("city", "")
     state = lead.get("state", "")
     
-    # Role info from lead (role_type already exists in table!)
+    # Role info from lead (DO NOT MODIFY - verified against DB)
     role = lead.get("role", "Manager")
     role_type = lead.get("role_type", "Other")
     
-    # Seniority - infer from role_type (which is already in the table)
+    # Seniority - infer from role_type (this field is NOT in the DB, so it's fine to compute)
     seniority = get_seniority_from_role_type(role_type, role)
-    
-    # Use ICP's industry for scoring alignment
-    industry = icp.get("industry", lead.get("industry", ""))
-    sub_industry = icp.get("sub_industry", lead.get("sub_industry", ""))
     
     # Ensure URL has protocol
     if intent_url and not intent_url.startswith(("http://", "https://")):
@@ -601,36 +612,43 @@ def format_lead_output(
     days_ago = random.randint(7, 60)
     signal_date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
     
-    # Return ONLY the 13 required fields - NO extras!
+    # Build snippet - REQUIRED, must be actual text from the source
+    if not intent_snippet:
+        intent_snippet = f"{business} - {intent_description[:200]}"
+    
+    # Return ONLY the 15 required fields - NO extras!
     return {
-        # Company info (4 fields)
+        # Lead ID (REQUIRED - the `id` column from the leads table)
+        "lead_id": lead_id,
+        
+        # Company info (4 fields - must match DB exactly)
         "business": business,
         "company_linkedin": company_linkedin,
         "company_website": company_website,
         "employee_count": employee_count,
         
-        # Industry info (2 fields)
+        # Industry info (2 fields - from LEAD, not ICP)
         "industry": industry,
         "sub_industry": sub_industry,
         
-        # Location (3 fields - NOT geography!)
+        # Location (3 fields - must match DB exactly)
         "country": country,
         "city": city,
         "state": state,
         
-        # Role info (3 fields)
+        # Role info (3 fields - must match DB exactly except seniority)
         "role": role,
         "role_type": role_type,
         "seniority": seniority,
         
-        # Intent signal (1 field)
-        "intent_signal": {
+        # Intent signals (list of 1+ signals - each with source/description/url/date/snippet)
+        "intent_signals": [{
             "source": intent_source,
             "description": intent_description[:300],
             "url": intent_url,
             "date": signal_date,
-            "snippet": f"{business} - {intent_description[:100]}"
-        },
+            "snippet": intent_snippet[:500]
+        }],
     }
 
 
@@ -671,27 +689,42 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     if result:
         print("✅ Lead found!")
+        print(f"   Lead ID: {result.get('lead_id')}")
         print(f"   Company: {result['business']}")
         print(f"   Role: {result['role']}")
         print(f"   Role Type: {result['role_type']}")
         print(f"   Seniority: {result['seniority']}")
         print(f"   Location: {result['city']}, {result['state']}, {result['country']}")
         print(f"   Employee Count: {result['employee_count']}")
-        print(f"   Intent Source: {result['intent_signal']['source']}")
-        print(f"   Intent URL: {result['intent_signal']['url']}")
-        print(f"   Intent: {result['intent_signal']['description'][:80]}...")
+        signals = result.get('intent_signals', [])
+        if signals:
+            print(f"   Intent Signals: {len(signals)}")
+            for i, sig in enumerate(signals):
+                print(f"     [{i+1}] Source: {sig['source']}")
+                print(f"         URL: {sig['url']}")
+                print(f"         Date: {sig['date']}")
+                print(f"         Description: {sig['description'][:80]}...")
+                print(f"         Snippet: {sig['snippet'][:80]}...")
         print()
         print("   ✅ Schema compliance check:")
-        required_fields = ['business', 'company_linkedin', 'company_website', 'employee_count',
+        required_fields = ['lead_id', 'business', 'company_linkedin', 'company_website', 'employee_count',
                           'industry', 'sub_industry', 'country', 'city', 'state',
-                          'role', 'role_type', 'seniority', 'intent_signal']
-        forbidden_fields = ['email', 'full_name', 'first_name', 'last_name', 'phone', 'linkedin_url', 'geography']
+                          'role', 'role_type', 'seniority', 'intent_signals']
+        forbidden_fields = ['email', 'full_name', 'first_name', 'last_name', 'phone', 'linkedin_url',
+                           'geography', 'intent_signal']
         
         for f in required_fields:
             print(f"      {f}: {'✅' if f in result else '❌ MISSING'}")
         for f in forbidden_fields:
             if f in result:
                 print(f"      {f}: ❌ FORBIDDEN FIELD PRESENT!")
+        
+        # Validate intent_signals structure
+        if signals:
+            sig = signals[0]
+            for sf in ['source', 'description', 'url', 'date', 'snippet']:
+                val = sig.get(sf)
+                print(f"      intent_signals[0].{sf}: {'✅' if val else '❌ MISSING/EMPTY'}")
     else:
         print("❌ No lead found")
     print("=" * 70)

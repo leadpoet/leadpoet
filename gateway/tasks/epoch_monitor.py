@@ -425,11 +425,15 @@ class EpochMonitor:
                 has_evidence = evidence_check.count > 0 if evidence_check.count is not None else len(evidence_check.data) > 0
                 
                 if not has_evidence:
-                    print(f"   ℹ️  No validation evidence with decisions for epoch {epoch_id} - skipping")
-                    # Mark as closed so we don't check again (and remove from processing)
-                    self.processing_epochs.discard(epoch_id)
-                    self.closed_epochs.add(epoch_id)
-                    return
+                    if attempt < MAX_RETRIES:
+                        print(f"   ⏳ No evidence yet for epoch {epoch_id} (attempt {attempt}/{MAX_RETRIES}), retrying in {RETRY_DELAY}s...")
+                        await asyncio.sleep(RETRY_DELAY)
+                        continue
+                    else:
+                        print(f"   ℹ️  No validation evidence after {MAX_RETRIES} attempts for epoch {epoch_id} - marking as closed")
+                        self.processing_epochs.discard(epoch_id)
+                        self.closed_epochs.add(epoch_id)
+                        return
                 
                 print(f"   📊 Found {evidence_check.count} validation records with decisions - processing consensus...")
                 

@@ -31,12 +31,12 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 ### For Miners
 
 ```bash
-# Required for Dynamic Lead Generation
+# Examples for Dynamic Lead Generation
 export FIRECRAWL_API_KEY="your_firecrawl_key"        # Web scraping
 export OPENROUTER_KEY="your_openrouter_key"          # AI classification
 export SCRAPINGDOG_API_KEY="your_scrapingdog_key"    # Google Search (via ScrapingDog)
 
-```
+For qualification models, paid API calls (LLM, ScrapingDog) go through the validator's proxy which injects keys server-side. Your model never needs API keys directly.
 
 ### For Validators
 
@@ -352,17 +352,22 @@ result = client.table(table_name).select("*").eq("industry", "Technology").execu
 
 #### 3. Return Schema (LeadOutput) - STRICT
 
-Your model must return a dict with **EXACTLY** these 14 fields - no more, no less:
+Your model must return a dict with **EXACTLY** these 15 fields - no more, no less:
 
 > ⚠️ **CRITICAL:** Any extra fields = instant score 0. Models cannot fabricate person-level data (email, name, phone, etc.)
+>
+> ⚠️ **DB VERIFICATION:** All lead fields (business, employee_count, role, industry, etc.) are verified against the database using `lead_id`. If any field has been modified from the database value, the lead scores 0 instantly.
 
 ```python
 {
-    # Company info (ALL REQUIRED)
+    # Lead ID (REQUIRED - the `id` column from the leads table)
+    "lead_id": 42,
+    
+    # Company info (ALL REQUIRED - must match database exactly)
     "business": "Stripe",
     "company_linkedin": "https://linkedin.com/company/stripe",
     "company_website": "https://stripe.com",
-    "employee_count": "1001-5000",  # Must match database format
+    "employee_count": "1001-5000",
     
     # Industry info (ALL REQUIRED)
     "industry": "Financial Services",
@@ -375,42 +380,50 @@ Your model must return a dict with **EXACTLY** these 14 fields - no more, no les
     
     # Role info (ALL REQUIRED)
     "role": "VP of Engineering",
-    "role_type": "Engineer/Technical",  # e.g., "C-Level Executive", "Sales", "Marketing"
+    "role_type": "Engineer/Technical",
     "seniority": "VP",  # Must be: "C-Suite", "VP", "Director", "Manager", "Individual Contributor"
     
-    # Intent signal (REQUIRED)
-    "intent_signal": {
-        "source": "linkedin",  # One of: linkedin, job_board, social_media, news, github, review_site, company_website, other
-        "description": "Hiring backend engineers for payments infrastructure",
-        "url": "https://linkedin.com/jobs/123456",
-        "date": "2026-01-15",  # ISO format YYYY-MM-DD
-        "snippet": "Looking for senior engineers..."  # Optional
-    }
+    # Intent signals (REQUIRED - list of one or more signals)
+    "intent_signals": [
+        {
+            "source": "linkedin",  # One of: linkedin, job_board, social_media, news, github, review_site, company_website, wikipedia, other
+            "description": "Hiring backend engineers for payments infrastructure",
+            "url": "https://linkedin.com/jobs/123456",
+            "date": "2026-01-15",  # ISO format YYYY-MM-DD
+            "snippet": "Looking for senior engineers to scale our payments platform..."  # REQUIRED
+        }
+    ]
 }
 ```
 
-**Required Fields Summary (14 total):**
+**Required Fields Summary (15 total):**
 
-| Field | Type | Example |
-|-------|------|---------|
-| `business` | str | "Stripe" |
-| `company_linkedin` | str | "https://linkedin.com/company/stripe" |
-| `company_website` | str | "https://stripe.com" |
-| `employee_count` | str | "1001-5000" |
-| `industry` | str | "Financial Services" |
-| `sub_industry` | str | "Payment Processing" |
-| `country` | str | "United States" |
-| `city` | str | "San Francisco" |
-| `state` | str | "California" |
-| `role` | str | "VP of Engineering" |
-| `role_type` | str | "Engineer/Technical" |
-| `seniority` | enum | "VP" |
-| `intent_signal` | object | See above |
+| # | Field | Type | Example |
+|---|-------|------|---------|
+| 1 | `lead_id` | int | 42 |
+| 2 | `business` | str | "Stripe" |
+| 3 | `company_linkedin` | str | "https://linkedin.com/company/stripe" |
+| 4 | `company_website` | str | "https://stripe.com" |
+| 5 | `employee_count` | str | "1001-5000" |
+| 6 | `industry` | str | "Financial Services" |
+| 7 | `sub_industry` | str | "Payment Processing" |
+| 8 | `country` | str | "United States" |
+| 9 | `city` | str | "San Francisco" |
+| 10 | `state` | str | "California" |
+| 11 | `role` | str | "VP of Engineering" |
+| 12 | `role_type` | str | "Engineer/Technical" |
+| 13 | `seniority` | enum | "VP" |
+| 14 | `intent_signals` | list[object] | See above |
+
+Each intent signal object has 5 **required** fields: `source`, `description`, `url`, `date`, `snippet`.
+
+You can provide multiple intent signals per lead — each is scored independently and the best one is used.
 
 **NOT ALLOWED (instant score 0 if included):**
 - `email`, `full_name`, `first_name`, `last_name`, `phone`, `linkedin_url` (person-level PII)
 - `geography` (use `country`/`city`/`state` instead)
 - `company_size` (use `employee_count` instead)
+- `intent_signal` (singular — use `intent_signals` list instead)
 - **ANY other field not listed above**
 
 #### 4. Time & Cost Limits
@@ -453,21 +466,54 @@ TABLE_NAME = "test_leads_for_miners"
 
 **Note:** Personal information (email, name, personal LinkedIn) is NOT available - models find company+role matches, and can enrich contacts using external APIs.
 
-### Sample Model
+### Quick-Start Model Template
 
-See `miner_qualification_models/sample_model/qualify.py` for a **foundation example** that demonstrates the basic patterns - miners should build upon this with more sophisticated ICP parsing, database querying, and intent signal discovery to achieve competitive scores.
+Here's a minimal working model to get you started. Create a `qualify.py` file:
 
-The sample model:
-1. **Parses the natural language prompt** to extract search criteria
-2. **Queries the test database** using injected credentials
-3. **Intelligently filters** by industry, sub-industry, and country
-4. **Scores candidates** based on role match and prompt keywords
-5. **Returns the best match** in LeadOutput format
+```python
+import os
+import httpx
+from supabase import create_client
 
-The sample model demonstrates:
-- How to parse prompts like "VP Sales at early-stage SaaS companies in the US"
-- How to map prompt keywords to database queries
-- How to score leads based on prompt relevance
+def find_leads(icp):
+    config = icp.get("_config", {})
+    client = create_client(config["SUPABASE_URL"], config["SUPABASE_ANON_KEY"])
+    table = config["QUALIFICATION_LEADS_TABLE"]
+    
+    # Query leads matching the ICP industry
+    results = client.table(table).select("*").eq("industry", icp.get("industry", "")).limit(50).execute()
+    
+    if not results.data:
+        return None
+    
+    # Pick the best lead (your model should be much smarter here)
+    lead = results.data[0]
+    
+    return {
+        "lead_id": lead["id"],  # REQUIRED: the `id` column from the table
+        "business": lead["business"],
+        "company_linkedin": lead["company_linkedin"],
+        "company_website": lead["website"],
+        "employee_count": lead["employee_count"],
+        "industry": lead["industry"],
+        "sub_industry": lead["sub_industry"],
+        "country": lead["country"],
+        "city": lead["city"],
+        "state": lead["state"],
+        "role": lead["role"],
+        "role_type": lead["role_type"],
+        "seniority": "Manager",  # Infer from role_type
+        "intent_signals": [{
+            "source": "company_website",
+            "description": f"{lead['business']} is actively operating in {lead['industry']}",
+            "url": lead["website"] or f"https://linkedin.com/company/{lead['business'].lower().replace(' ', '-')}",
+            "date": "2026-02-01",
+            "snippet": lead.get("description", "")[:500] or "Company profile from database"
+        }]
+    }
+```
+
+This is a **starting point** — competitive models should have sophisticated ICP parsing, multi-source intent discovery, and intelligent candidate ranking.
 
 ### Model Requirements (Quick Reference)
 
@@ -488,10 +534,10 @@ def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     
     Config is injected in icp["_config"]:
         - SUPABASE_URL, SUPABASE_ANON_KEY - Database credentials
-        - QUALIFICATION_LEADS_TABLE - Table name (use "test_leads_for_miners" for local testing)
+        - QUALIFICATION_LEADS_TABLE - Table name
         - PROXY_URL - For paid API calls (e.g., "http://localhost:8001")
     
-    Returns: Dict matching LeadOutput schema, or None
+    Returns: Dict with lead_id + 14 fields + intent_signals list, or None
     """
     config = icp.get("_config", {})
     supabase_url = config.get("SUPABASE_URL")
@@ -503,14 +549,14 @@ def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 **Paid API Calls (via Proxy):**
 ```python
 # DON'T call APIs directly - use the proxy (no API key needed)
-# proxy_url is already "http://localhost:8000/qualification/proxy"
+proxy_url = config.get("PROXY_URL", "http://localhost:8001")
 response = httpx.post(
-    f"{proxy_url}/openrouter/chat/completions",  # NOT /proxy/openrouter/
+    f"{proxy_url}/openrouter/chat/completions",
     json={"model": "openai/gpt-4o-mini", "messages": [...]}
 )  # Proxy injects API key server-side
 ```
 
-**Allowed Libraries:** `os`, `sys`, `json`, `re`, `datetime`, `time`, `math`, `random`, `collections`, `typing`, `pandas`, `numpy`, `pydantic`, `requests`, `httpx`, `aiohttp`, `supabase`, `postgrest`, `duckduckgo_search`, `openai`, `fuzzywuzzy`, `rapidfuzz`, `dateutil`
+**Allowed Libraries:** `os`, `sys`, `json`, `re`, `datetime`, `time`, `math`, `random`, `collections`, `typing`, `pandas`, `numpy`, `pydantic`, `requests`, `httpx`, `aiohttp`, `supabase`, `postgrest`, `duckduckgo_search`, `openai`, `fuzzywuzzy`, `rapidfuzz`, `Levenshtein`, `dateutil`, `bs4`, `soupsieve`, `certifi`, `disposable_email_domains`
 
 **Blocked Libraries:** `subprocess`, `ctypes`, `pickle`, `marshal`, `socket`, `multiprocessing`, `shutil`, `pathlib`, `glob`, `tempfile`
 
@@ -521,8 +567,8 @@ response = httpx.post(
 **Allowed APIs:**
 | Type | APIs |
 |------|------|
-| Free | GitHub, StackOverflow, DuckDuckGo, SEC EDGAR, Wayback Machine, GDELT, UK Companies House, Wikipedia, Wikidata |
-| Paid (via proxy) | OpenRouter, ScrapingDog, BuiltWith, Crunchbase, Desearch, NewsAPI, SimilarTech |
+| Free | DuckDuckGo, SEC EDGAR, Wayback Machine, GDELT, UK Companies House, Wikipedia, Wikidata |
+| Paid (via proxy) | OpenRouter, ScrapingDog, BuiltWith, Crunchbase, Desearch, Data Universe, NewsAPI, Jobs Data API |
 
 ### Submitting Your Model
 

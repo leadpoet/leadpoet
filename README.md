@@ -19,7 +19,7 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 
 ### Hardware Requirements
 - **Miners/Validators**: 16GB RAM, 8-core CPU, 100GB SSD
-- **Network**: Stable internet connection with open ports for axon communication
+- **Network**: Stable internet connection
 
 ### Software Requirements
 - Python 3.9 - 3.12       
@@ -30,13 +30,9 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 
 ### For Miners
 
-```bash
-# Examples for Dynamic Lead Generation
-export FIRECRAWL_API_KEY="your_firecrawl_key"        # Web scraping
-export OPENROUTER_KEY="your_openrouter_key"          # AI classification
-export SCRAPINGDOG_API_KEY="your_scrapingdog_key"    # Google Search (via ScrapingDog)
+Miners choose their own tools and APIs for sourcing leads. Common examples include web scraping APIs (ScrapingDog, Firecrawl), LLMs (OpenRouter), and search APIs — but miners are free to use any approach.
 
-For qualification models, paid API calls (LLM, ScrapingDog) go through the validator's proxy which injects keys server-side. Your model never needs API keys directly.
+For **qualification models**, paid API calls (LLM, ScrapingDog) go through the validator's proxy which injects keys server-side. Your model never needs API keys directly.
 
 ### For Validators
 
@@ -103,18 +99,7 @@ btcli subnet register \
     --wallet.hotkey default
 ```
 
-2. **Publish your IP** (one-time setup):
-```bash
-python scripts/post_ip.py \
-    --netuid 71 \
-    --subtensor_network finney \
-    --wallet_name miner \
-    --wallet_hotkey default \
-    --external_ip YOUR_PUBLIC_IP \
-    --external_port 18091
-```
-
-3. **Run the miner**:
+2. **Run the miner**:
 ```bash
 python neurons/miner.py \
     --wallet_name miner \
@@ -155,13 +140,12 @@ Miners must submit prospects with the following structure:
   "source_url": "https://microsoft.com/about", # REQUIRED (URL where lead was found, OR "proprietary_database")
   "description": "Technology company developing software, cloud services, and AI solutions", # REQUIRED
   "employee_count": "10,001+",             # REQUIRED - valid ranges: "0-1", "2-10", "11-50", "51-200", "201-500", "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
-  "source_type": "company_site",
-  "phone_numbers": ["+1-425-882-8080"],
-  "founded_year": 1975,
-  "ownership_type": "Public",
-  "company_type": "Corporation",
-  "number_of_locations": 100,
-  "socials": {"twitter": "Microsoft"}
+  "hq_country": "United States",           # REQUIRED - company HQ country
+  "hq_state": "Washington",               # OPTIONAL (required for US companies)
+  "hq_city": "Redmond",                   # OPTIONAL
+  "source_type": "company_site",           # OPTIONAL
+  "phone_numbers": ["+1-425-882-8080"],    # OPTIONAL
+  "socials": {"twitter": "Microsoft"}      # OPTIONAL
 }
 ```
 
@@ -169,7 +153,13 @@ Miners must submit prospects with the following structure:
 
 **Industry & Sub-Industry:** Must be exact values from `validator_models/industry_taxonomy.py`. The `sub_industry` key maps to valid parent `industries`.
 
-**Country Format:**
+**Company HQ Location:**
+- `hq_country` is **required** for all leads
+- `hq_state` is required for US companies, optional otherwise
+- `hq_city` is optional
+- For remote companies, set `hq_city` to `"Remote"` with `hq_state` and `hq_country` blank
+
+**Contact Location (country/state/city):**
 - **US leads:** Require `country`, `state`, AND `city` (e.g., "United States", "California", "San Francisco")
 - **Non-US leads:** Require `country` and `city` only (`state` is optional)
 - **Accepted country names:** Use standard names like "United States", "United Kingdom", "Germany", etc. Common aliases are also accepted: "USA", "US", "UK", "UAE", etc.
@@ -226,27 +216,7 @@ Miners earn rewards based on the **quality and validity** of leads they submit, 
 
 ### Rejection Feedback
 
-If your lead is rejected by validator consensus, you're able to access the reject reason explaining why. This helps you improve lead quality and increase approval rates.
-
-**Query Your Rejections:**
-
-```python
-python3 - <<EOF
-from Leadpoet.utils.cloud_db import get_rejection_feedback
-import bittensor as bt
-
-wallet = bt.wallet(name="miner", hotkey="default")
-feedback = get_rejection_feedback(wallet, limit=10, network="finney", netuid=71)
-
-print(f"\nFound {len(feedback)} rejection(s)\n")
-for idx, record in enumerate(feedback, 1):
-    summary = record['rejection_summary']
-    print(f"[{idx}] Epoch {record['epoch_number']} - Rejected by {summary['rejected_by']}/{summary['total_validators']} validators")
-    for failure in summary['common_failures']:
-        print(f"    • {failure.get('check_name')}: {failure.get('message')}")
-    print()
-EOF
-```
+If your lead is rejected by validator consensus, the rejection reason is recorded in the transparency log. This helps you improve lead quality and increase approval rates.
 
 **Common Rejection Reasons & Fixes:**
 
@@ -316,9 +286,8 @@ def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             - industry: str (e.g., "Software")
             - sub_industry: str (e.g., "Enterprise Software")  
             - target_roles: List[str] (e.g., ["VP of Sales", "Head of Revenue"])
-            - company_size: str (e.g., "100-500")
+            - employee_count: str (e.g., "51-200")
             - company_stage: str (e.g., "Series A")
-            - geography: str (e.g., "United States, California")
             - country: str (e.g., "United States")
             - intent_signals: List[str] (e.g., ["hiring SDRs", "evaluating CRM"])
     
@@ -534,7 +503,7 @@ def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     
     Config is injected in icp["_config"]:
         - SUPABASE_URL, SUPABASE_ANON_KEY - Database credentials
-        - QUALIFICATION_LEADS_TABLE - Table name
+        - QUALIFICATION_LEADS_TABLE - Table name (use "test_leads_for_miners" for local testing)
         - PROXY_URL - For paid API calls (e.g., "http://localhost:8001")
     
     Returns: Dict with lead_id + 14 fields + intent_signals list, or None
@@ -622,16 +591,15 @@ Note: Validators are configured to auto-update from GitHub on a 5-minute interva
 
 ### Consensus Validation System
 
-Validators receive batches of ~50 leads per epoch. Each validator independently validates leads using a commit/reveal protocol (submit hashed decisions, then reveal actual decisions). Majority agreement is required for consensus. Approved leads move to the main database, rejected leads are discarded.
+Validators receive leads each epoch (~72 minutes / 360 blocks). Each validator independently validates leads and submits decisions with hashes. Consensus is weighted by stake and validator trust. Approved leads move to the main database, rejected leads are discarded.
 
 **Eligibility for Rewards:**
 - Must participate in consensus validation epochs consistently and remain in consensus.
 
 **Validators perform multi-stage quality checks:**
-1. **Email validation**: Format, domain, disposable check, deliverability check
-2. **Company & Contact verification**: Website, LinkedIn, Google search
-
-Validators must label leads with valid emails as "Valid" or "valid".
+1. **Email validation**: Format, domain, disposable check, deliverability via TrueList
+2. **Company & Contact verification**: Website, LinkedIn, Google search via ScrapingDog
+3. **Reputation scoring**: Wayback Machine, SEC EDGAR, GDELT, WHOIS/DNSBL, Companies House
 
 ### Auditor Validator
 
@@ -696,7 +664,6 @@ Common Errors:
 **Validator not receiving epoch assignments**
 - Ensure validator is registered on subnet with active stake
 - Check that validator is running latest code version (auto-updates every 5 minutes)
-- Verify axon is accessible and ports are open
 
 **Lead submission rejected**
 - Check lead meets all requirements (valid email, name-email matching, required fields)

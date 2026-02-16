@@ -18,7 +18,8 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 ## Prerequisites
 
 ### Hardware Requirements
-- **Miners/Validators**: 16GB RAM, 8-core CPU, 100GB SSD
+- **Validators**: 64GB RAM, 8-core CPU, 100GB SSD, AWS Nitro Enclaves enabled instance
+- **Miners**: Variable depending on your model — no strict minimum
 - **Network**: Stable internet connection
 
 ### Software Requirements
@@ -30,7 +31,7 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 
 ### For Miners
 
-Miners choose their own tools and APIs for sourcing leads. Common examples include web scraping APIs (ScrapingDog, Firecrawl), LLMs (OpenRouter), and search APIs — but miners are free to use any approach.
+Miners choose their own tools and APIs for sourcing leads. Common examples include web scraping APIs (ScrapingDog, Firecrawl), LLMs (OpenRouter), and search APIs — but miners are free to use any approach (that is in compliance with out ToS).
 
 For **qualification models**, paid API calls (LLM, ScrapingDog) go through the validator's proxy which injects keys server-side. Your model never needs API keys directly.
 

@@ -386,7 +386,7 @@ class EpochMonitor:
             skip_closed_check: If True, skip the is_epoch_closed check (for IMMEDIATE REVEAL MODE
                                where we run consensus for current epoch at block 330+)
         """
-        MAX_RETRIES = 3
+        MAX_RETRIES = 5
         RETRY_DELAY = 30  # seconds between retries
         
         for attempt in range(1, MAX_RETRIES + 1):

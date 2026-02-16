@@ -745,6 +745,29 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
         'hospital', 'bank', 'church', 'museum', 'library', 'port'
     }
 
+    institution_words = {
+        'university', 'college', 'school', 'institute', 'academy',
+        'hospital', 'medical', 'clinic', 'health', 'healthcare',
+        'consulting', 'group', 'inc', 'corp', 'corporation', 'llc', 'ltd', 'company',
+        'bank', 'tribune', 'times', 'post', 'news', 'journal', 'gazette',
+        'dynamics', 'international', 'associates', 'partners', 'foundation',
+        'museum', 'library', 'church', 'symphony', 'philharmonic', 'orchestra',
+        'zoo', 'aquarium', 'garden', 'gardens', 'park', 'stadium', 'arena',
+        'exchange', 'authority', 'commission', 'board', 'council', 'committee'
+    }
+
+    # Compound US state names — if word before city + city = state name, skip
+    compound_state_prefixes = {
+        'hampshire': {'new'},
+        'jersey': {'new'},
+        'york': {'new'},
+        'mexico': {'new'},
+        'carolina': {'north', 'south'},
+        'dakota': {'north', 'south'},
+        'virginia': {'west'},
+        'island': {'rhode'},
+    }
+
     # Find all occurrences of city in text
     has_legitimate_location = False
 
@@ -760,18 +783,15 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
         if any(before_trimmed.endswith(ep) for ep in education_prefixes):
             continue
 
-        # Check for "[Education prefix] [School Name]. City" pattern
-        # e.g., "Education: Trinity College. Burlington" - city follows school name
-        # e.g., "Studied at UCLA. Los Angeles" - city follows school name
-        # e.g., "Alumni of Boston College. Boston" - city follows school name
+        # Check if city follows an education section (part of school name/location)
+        # Use text_before (preserves · separators) NOT before_trimmed (strips ·)
+        # so [^·]+$ naturally stops at section boundaries.
+        # "Education: Boston College · Boston, MA" → · prevents match → "Boston, MA" NOT skipped
+        # "Education: William Henry Harrison" → no · → matches → "Henry" IS skipped
         edu_pattern = r'(education:|studied at|alumni of|alumnus of|graduated from)\s*[^·]+$'
-        education_match = re.search(edu_pattern, before_trimmed)
+        education_match = re.search(edu_pattern, text_before)
         if education_match:
-            # Text between education prefix and city - check if it looks like a school name
-            edu_text = education_match.group(0)
-            # If ends with period, it's likely "[prefix] School Name." pattern
-            if edu_text.rstrip().endswith('.'):
-                continue  # Skip - city is part of education location
+            continue
 
         if text_before.endswith(' of'):
             before_of = text_before[:-3].rstrip()
@@ -785,6 +805,28 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
             before_comma = text_before[:-1].rstrip()
             if re.search(r'\b(' + '|'.join(institution_prefixes) + r')\s+of\s+[\w\s]+$', before_comma):
                 continue
+
+        # Check if city is part of a compound US state name
+        # e.g., "New Hampshire" → "Hampshire" is the state, not a city
+        state_prefixes = compound_state_prefixes.get(city_lower)
+        if state_prefixes:
+            words_bef = text_before.split()
+            if words_bef and words_bef[-1].rstrip('.,;:!?-').lower() in state_prefixes:
+                continue
+
+        # Check institution words BEFORE the city (within the same phrase)
+        # e.g., "Hohokus School-RETS Nutley" → "school" before city = institution
+        # Only check within same phrase (split by sentence boundaries) to avoid
+        # false positives like "Memorial Hospital. Springfield" (different phrases)
+        before_same_phrase = re.split(r'[.;·|!?\n]', text_before)[-1] if text_before else ''
+        words_in_phrase = before_same_phrase.split()
+        nearby_before = []
+        for w in words_in_phrase[-4:]:
+            # Split hyphenated words (e.g., "school-rets" → ["school", "rets"])
+            parts = re.split(r'[-/]', w)
+            nearby_before.extend(p.rstrip('.,;:!?').lower() for p in parts if p)
+        if any(w in institution_words for w in nearby_before):
+            continue
 
         # Get what comes immediately after the city
         text_after = text_lower[end_pos:]
@@ -862,16 +904,6 @@ def is_city_only_in_institution_context(city: str, text: str) -> bool:
             # Check if followed by institution word (specific pattern)
             # Look at first 4 words to catch patterns like "Pontiac Protestant High School"
             # where the institution word ("school") isn't the immediate next word
-            institution_words = {
-                'university', 'college', 'school', 'institute', 'academy',
-                'hospital', 'medical', 'clinic', 'health', 'healthcare',
-                'consulting', 'group', 'inc', 'corp', 'corporation', 'llc', 'ltd', 'company',
-                'bank', 'tribune', 'times', 'post', 'news', 'journal', 'gazette',
-                'dynamics', 'international', 'associates', 'partners', 'foundation',
-                'museum', 'library', 'church', 'symphony', 'philharmonic', 'orchestra',
-                'zoo', 'aquarium', 'garden', 'gardens', 'park', 'stadium', 'arena',
-                'exchange', 'authority', 'commission', 'board', 'council', 'committee'
-            }
             # Check first 4 words (handles "[City] [Adj] [Adj] School" patterns)
             nearby_words = [w.rstrip('.,;:!?').lower() for w in words_after[:4]]
             if any(w in institution_words for w in nearby_words):
@@ -2012,6 +2044,18 @@ def check_q3_location_fallback(
                             'results': formatted_results,
                             'error': f'City "{city}" not literally in text despite missing=[]'
                         }
+
+                    # Check if city only appears inside company name
+                    if company and city_lower in company.lower():
+                        text_without_company = text_lower.replace(company.lower(), '')
+                        if city_lower not in text_without_company:
+                            return {
+                                'success': True,
+                                'passed': False,
+                                'snippet': snippet[:200],
+                                'results': formatted_results,
+                                'error': 'City only found in company name'
+                            }
 
                     if _has_contradicting_state_or_province(city_lower, state, country, full_text, result_url):
                         return {

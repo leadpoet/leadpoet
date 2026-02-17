@@ -605,6 +605,18 @@ async def receive_champion_status(request: ChampionStatusRequest):
             base_update["evaluation_time_seconds"] = request.evaluation_time_seconds
         if request.code_content is not None:
             base_update["code_content"] = request.code_content
+        else:
+            # Validator didn't send code_content — extract from S3 ourselves
+            try:
+                model_row = supabase.table("qualification_models").select("s3_path").eq("id", request.model_id).limit(1).execute()
+                if model_row.data and model_row.data[0].get("s3_path"):
+                    code_content = await extract_code_content_from_s3(model_row.data[0]["s3_path"])
+                    if code_content:
+                        import json
+                        base_update["code_content"] = json.dumps(code_content)
+                        logger.info(f"📄 Extracted {len(code_content)} code files from S3 for model {request.model_id[:8]}...")
+            except Exception as e:
+                logger.warning(f"Could not extract code content from S3: {e}")
         
         if request.was_dethroned:
             # Champion was dethroned due to score falling below minimum threshold

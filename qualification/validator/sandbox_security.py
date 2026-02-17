@@ -87,6 +87,19 @@ ALLOWED_LIBRARIES: Set[str] = {
     "numbers",          # Number ABCs - type definitions only
     "textwrap",         # Text formatting - pure string manipulation
     "reprlib",          # Repr utilities - string formatting
+    "difflib",          # Text comparison/sequence matching - pure computation
+    "gc",               # Garbage collector - memory management, no I/O
+    "builtins",         # Built-in functions module - already accessible, needed by rapidfuzz
+    "hmac",             # HMAC hashing - used by auth/JWT, pure computation
+    "secrets",          # Crypto random - used by auth tokens, no I/O
+    "copyreg",          # Pickle registry - needed by copy/deepcopy
+    "stringprep",       # Unicode string preparation - needed by auth
+    "pathlib",          # Path handling - SAFE: RestrictedFileOpen blocks sensitive reads
+    "importlib",        # Dynamic imports - SAFE: __import__ patch blocks unauthorized modules
+    "tempfile",         # Temp files - needed by httpx internals
+    "pkgutil",          # Package utilities - needed by importlib
+    "configparser",     # Config parsing - no I/O alone
+    "fnmatch",          # Filename matching - pure string ops
     
     # =========================================================================
     # STANDARD LIBRARY - ASYNC & THREADING (NEEDED BY HTTP CLIENTS)
@@ -173,13 +186,31 @@ ALLOWED_LIBRARIES: Set[str] = {
     "charset_normalizer", # Character encoding detection
     "sniffio",          # Async library detection - no I/O
     "anyio",            # Async compatibility - no direct I/O
+    "exceptiongroup",   # Backport of ExceptionGroup - needed by anyio
+    "socksio",          # SOCKS proxy support - needed by httpx
+    "multidict",        # Multi-value dict - needed by aiohttp/yarl
+    "yarl",             # URL library - needed by aiohttp
+    "propcache",        # Property caching - needed by yarl
+    "async_timeout",    # Async timeout - needed by aiohttp
+    "strenum",          # String enum - needed by gotrue
+    "cryptography",     # Crypto library - needed by JWT/auth (no key access)
+    "jwt",              # JWT parsing - needed by gotrue auth
+    "cffi",             # C FFI - needed by cryptography
     
     # =========================================================================
     # DATABASE ACCESS (READ-ONLY leads table)
     # =========================================================================
     # Models query the leads database to find leads matching the ICP
-    "supabase",         # Supabase client - uses anon key (read-only)
-    "postgrest",        # Supabase dependency - REST client
+    "supabase",             # Supabase client - uses anon key (read-only)
+    "postgrest",            # Supabase dependency - REST client
+    "gotrue",               # Supabase auth dependency (legacy name)
+    "supabase_auth",        # Supabase auth dependency (new name)
+    "storage3",             # Supabase storage dependency
+    "realtime",             # Supabase realtime dependency
+    "supafunc",             # Supabase functions dependency (legacy name)
+    "supabase_functions",   # Supabase functions dependency (new name)
+    "deprecation",          # Deprecation warnings - used by supabase
+    "packaging",            # Version parsing - used by deprecation/supabase
     
     # =========================================================================
     # SEARCH & LLM CLIENTS
@@ -193,6 +224,8 @@ ALLOWED_LIBRARIES: Set[str] = {
     "pandas",           # DataFrames - in-memory data processing
     "numpy",            # Numerical arrays - pure computation
     "pydantic",         # Data validation - no I/O
+    "pydantic_core",    # Pydantic compiled core - no I/O
+    "annotated_types",  # Pydantic dependency - type annotations
     "fuzzywuzzy",       # Fuzzy string matching - pure computation
     "rapidfuzz",        # Fast fuzzy matching - pure computation
     "thefuzz",          # Fuzzy matching - pure computation
@@ -200,6 +233,9 @@ ALLOWED_LIBRARIES: Set[str] = {
     "dateutil",         # Date parsing - pure parsing
     "bs4",              # BeautifulSoup HTML parsing - read-only, no I/O
     "soupsieve",        # bs4 dependency - CSS selector engine
+    "lxml",             # XML/HTML parser - bs4 backend, read-only
+    "html5lib",         # HTML parser - bs4 backend, read-only
+    "chardet",          # Character encoding detection
     "disposable_email_domains",  # Email blocklist - static set lookup
     
     # =========================================================================
@@ -219,13 +255,12 @@ ALLOWED_LIBRARIES: Set[str] = {
 
 # =============================================================================
 # BLOCKED BY OMISSION (not in list = blocked):
-# - os              → Cannot read API keys from os.environ
 # - subprocess      → Cannot execute shell commands
 # - ctypes          → Cannot access memory or load libraries
 # - pickle/marshal  → Cannot deserialize arbitrary code
-# - pathlib/shutil  → Cannot access filesystem freely
-# - importlib       → Cannot dynamically import blocked modules
+# - shutil          → Cannot copy/delete files freely
 # - multiprocessing → Cannot spawn processes
+# - code/codeop     → Cannot execute arbitrary code strings
 # =============================================================================
 
 
@@ -1111,6 +1146,15 @@ def _create_restricted_builtins_import(original_import):
                 "All imports blocked."
             )
         
+        # CRITICAL: Relative imports (level > 0) are ALWAYS allowed.
+        # When a package like postgrest does "from ..base_client import X",
+        # Python calls __import__('base_client', level=2). The bare name
+        # 'base_client' is NOT in ALLOWED_LIBRARIES, but it's a relative
+        # import within the already-allowed 'postgrest' package. Blocking
+        # it would break all relative imports in allowed packages.
+        if level > 0:
+            return original_import(name, globals, locals, fromlist, level)
+        
         base_module = name.split('.')[0]
         
         # Allow internal Python modules (starting with _)
@@ -1155,6 +1199,10 @@ class RestrictedBuiltinsImport:
         self._original_import = original_import
     
     def __call__(self, name, globals=None, locals=None, fromlist=(), level=0):
+        # Relative imports are always allowed (within already-allowed packages)
+        if level > 0:
+            return self._original_import(name, globals, locals, fromlist, level)
+        
         base_module = name.split('.')[0]
         
         if base_module.startswith('_'):

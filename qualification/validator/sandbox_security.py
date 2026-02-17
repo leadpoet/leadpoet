@@ -193,9 +193,13 @@ ALLOWED_LIBRARIES: Set[str] = {
     "propcache",        # Property caching - needed by yarl
     "async_timeout",    # Async timeout - needed by aiohttp
     "strenum",          # String enum - needed by gotrue
-    "cryptography",     # Crypto library - needed by JWT/auth (no key access)
+    "cryptography",     # Crypto library - needed by JWT/auth (no key access, no C FFI escape)
     "jwt",              # JWT parsing - needed by gotrue auth
-    "cffi",             # C FFI - needed by cryptography
+    # SECURITY: cffi is INTENTIONALLY NOT ALLOWED.
+    # cffi provides C Foreign Function Interface which can bypass ALL Python sandbox
+    # protections (RestrictedFileOpen, RestrictedOsOpen, env sanitization).
+    # A malicious model could use cffi to call C's open()/read() to steal wallet keys.
+    # cryptography works without cffi on modern versions (uses Rust bindings).
     
     # =========================================================================
     # DATABASE ACCESS (READ-ONLY leads table)
@@ -1040,6 +1044,7 @@ BLOCKED_FILE_PATHS: Set[str] = {
     "~/.profile",              # User profile
     "~/.ssh",                  # SSH keys
     "~/.aws",                  # AWS credentials
+    "~/.bittensor",            # CRITICAL: Validator wallet private keys
 }
 
 # Patterns to block (prefix match)
@@ -1051,6 +1056,10 @@ BLOCKED_FILE_PATTERNS: List[str] = [
     "~/.ssh/",                 # SSH keys
     "~/.aws/",                 # AWS credentials
     "~/.config/",              # User config
+    "~/.bittensor/",           # CRITICAL: Validator wallet + coldkey/hotkey
+    ".bittensor/",             # Catch any relative path to wallets
+    "/home/ec2-user/.bittensor/",  # Absolute path to validator wallets
+    "/root/.bittensor/",       # Root user bittensor wallets
 ]
 
 

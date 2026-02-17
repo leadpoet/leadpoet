@@ -32,6 +32,7 @@ from typing import Dict, List
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Import configuration
@@ -961,9 +962,7 @@ def normalize_lead_fields(lead_blob: dict) -> dict:
         "industry",         # e.g., "financial services" → "Financial Services"
         "sub_industry",     # e.g., "investment banking" → "Investment Banking"
         "role",             # e.g., "vice president of sales" → "Vice President Of Sales"
-        "full_name",        # e.g., "john smith" → "John Smith"
-        "first",            # e.g., "john" → "John"
-        "last",             # e.g., "smith" → "Smith"
+        # "full_name", "first", "last" removed - miner must submit exact name from LinkedIn
         # "business" removed - company name is case-sensitive for validation
     ]
     
@@ -1935,6 +1934,90 @@ async def submit_lead(event: SubmitLeadEvent):
             )
         
         print(f"   ✅ All required fields present")
+
+        # ========================================
+        # EARLY EXIT: Name Sanity Check
+        # ========================================
+        # Miner must submit exact name from LinkedIn — no credentials, degrees, or titles
+        print(f"   🔍 Validating name fields...")
+        _first = lead_blob.get("first", "").strip()
+        _last = lead_blob.get("last", "").strip()
+        _full_name = lead_blob.get("full_name", "").strip()
+
+        name_error = None
+
+        # Rule 1: No commas, periods, parentheses, or digits in any name field
+        _bad_chars = re.compile(r'[,.\(\)\[\]\{\}0-9]')
+        for _field_name, _field_val in [("first", _first), ("last", _last), ("full_name", _full_name)]:
+            if _bad_chars.search(_field_val):
+                name_error = f"name_invalid_chars: '{_field_name}' contains invalid characters: '{_field_val}'"
+                break
+
+        # Rule 2: Reject all-caps words 3+ chars (credentials like MBA, PhD, CPA, SPHR, III)
+        if not name_error:
+            _allcaps_re = re.compile(r'\b[A-Z]{3,}\b')
+            for _field_name, _field_val in [("first", _first), ("last", _last), ("full_name", _full_name)]:
+                match = _allcaps_re.search(_field_val)
+                if match:
+                    name_error = f"name_credential: '{_field_name}' contains credential/suffix '{match.group()}': '{_field_val}'"
+                    break
+
+        # Rule 3: Blocklist common titles/suffixes (case-insensitive)
+        if not name_error:
+            _blocklist = {'ii', 'iv', 'jr', 'sr', 'dr', 'mr', 'mrs', 'ms', 'prof',
+                         'phd', 'mba', 'rn', 'cpa', 'esq', 'dds', 'np',
+                         'lcsw', 'pmp', 'cfa', 'cfp', 'cissp', 'sphr', 'scp'}
+            for _field_name, _field_val in [("first", _first), ("last", _last), ("full_name", _full_name)]:
+                _words = [w.rstrip(".'").lower() for w in _field_val.split()]
+                for w in _words:
+                    if w in _blocklist:
+                        name_error = f"name_title_suffix: '{_field_name}' contains title/suffix '{w}': '{_field_val}'"
+                        break
+                if name_error:
+                    break
+
+        # Rule 4: first and last must not be the same (case-insensitive)
+        if not name_error:
+            if _first.lower() == _last.lower():
+                name_error = f"name_duplicate: first '{_first}' and last '{_last}' are the same"
+
+        # Rule 4b: first and last must not be all lowercase (must copy exact case from LinkedIn)
+        if not name_error:
+            if _first == _first.lower():
+                name_error = f"name_lowercase: first '{_first}' is all lowercase"
+            elif _last == _last.lower():
+                name_error = f"name_lowercase: last '{_last}' is all lowercase"
+
+        # Rule 5: full_name must start with first and end with last (case-sensitive)
+        # Handles middle names ("John Michael Smith") and multi-word last names ("Maria Van der Berg")
+        if not name_error:
+            _starts_with_first = _full_name == _first or _full_name.startswith(_first + ' ')
+            _ends_with_last = _full_name == _last or _full_name.endswith(' ' + _last)
+            if not _starts_with_first:
+                name_error = f"name_mismatch: full_name '{_full_name}' does not start with first '{_first}'"
+            elif not _ends_with_last:
+                name_error = f"name_mismatch: full_name '{_full_name}' does not end with last '{_last}'"
+
+        if name_error:
+            print(f"❌ Name validation failed: {name_error}")
+
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            print(f"   📊 Rate limit updated: rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "name_validation_failed",
+                    "message": name_error,
+                    "rate_limit": {
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": updated_stats["reset_at"]
+                    }
+                }
+            )
+
+        print(f"   ✅ Name fields valid: {_first} {_last}")
 
         # ========================================
         # EARLY EXIT: Role Format Sanity Check
@@ -3043,6 +3126,7 @@ async def submit_lead(event: SubmitLeadEvent):
     # ========================================
     else:
         print(f"🔍 Step 9: FAILURE PATH - S3 verification failed")
+        failed_mirrors = ["s3"]
         
         # Log UPLOAD_FAILED event to Arweave FIRST
         upload_failed_payload = {

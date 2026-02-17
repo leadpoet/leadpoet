@@ -1,1306 +1,65 @@
 import aiohttp
 import asyncio
 import dns.resolver
-import pickle
 import os
 import re
-import requests
 import time
-import uuid
-import whois
 import json
-import unicodedata
-from datetime import datetime
 from urllib.parse import urlparse
 from typing import Dict, Any, Tuple, List, Optional
-from dotenv import load_dotenv
 from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
 from Leadpoet.utils.utils_lead_extraction import (
-    get_email,
-    get_website,
-    get_company,
-    get_first_name,
-    get_last_name,
-    get_location,
-    get_industry,
-    get_role,
-    get_linkedin,
-    get_field,
-    get_employee_count,
-    get_description
-)
-from validator_models.industry_taxonomy import INDUSTRY_TAXONOMY
-from validator_models.stage4_person_verification import run_lead_validation_stage4
-from validator_models.stage4_helpers import (
-    extract_location_from_text,
-    extract_person_location_from_linkedin_snippet,
+    get_email, get_website, get_company, get_first_name, get_last_name,
+    get_location, get_industry, get_role, get_linkedin, get_field,
+    get_employee_count, get_description
 )
 from validator_models.stage5_verification import (
-    check_stage5_unified,
-    parse_employee_count,
-    scrape_company_linkedin_gse,
-    verify_company_linkedin_data,
-    validate_company_linkedin_url,
+    check_stage5_unified, parse_employee_count,
 )
+
+# Sub-module imports
+from validator_models.checks_utils import (
+    EmailVerificationUnavailableError,
+    validation_cache, log_validation_metrics,
+    get_standardized_company_name, set_standardized_company_name,
+    TRUELIST_BATCH_MAX_RETRIES, EMAIL_CACHE_FILE,
+    HTTP_PROXY_URL, TRUELIST_API_KEY,
+)
+from validator_models.checks_icp import (
+    calculate_icp_adjustment, is_enterprise_company,
+    _matches_icp_definitions, batch_validate_roles_llm,
+)
+from validator_models.checks_email import (
+    check_domain_age, check_mx_record, check_spf_dmarc,
+    check_head_request, check_dnsbl,
+    submit_truelist_batch, poll_truelist_batch,
+    delete_truelist_batch, delete_all_truelist_batches,
+    retry_truelist_batch, verify_emails_inline,
+    run_centralized_truelist_batch,
+    is_disposable_email,
+)
+from validator_models.checks_linkedin import check_linkedin_gse
+from validator_models.checks_repscore import (
+    check_wayback_machine, check_sec_edgar,
+    check_whois_dnsbl_reputation, check_gdelt_mentions,
+    check_companies_house,
+    check_source_provenance, check_licensed_resale_proof,
+)
+
+# Re-exports for backward compatibility (other files import these from automated_checks)
+from validator_models.checks_email import run_centralized_truelist_batch, check_domain_age
+from validator_models.checks_utils import EmailVerificationUnavailableError
+# get_email is already imported from Leadpoet.utils.utils_lead_extraction
 
 MAX_REP_SCORE = 48  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) + Companies House (10) = 48
 
 # ========================================================================
-# ICP (Ideal Customer Profile) Definitions
-# ========================================================================
-# These are the target customer profiles we want to incentivize miners to find.
-# Leads matching these criteria receive a 1.5x multiplier on their rep_score during emissions.
-# Format: Each ICP is defined by Sub-Industry + Role Details
-# ========================================================================
-
-# ========================================================================
-# ICP (IDEAL CUSTOMER PROFILE) DEFINITIONS
-# ========================================================================
-# These definitions specify high-value lead profiles for ICP multiplier scoring.
-# IMPORTANT: sub_industries must use EXACT names from INDUSTRY_TAXONOMY keys
-# (case-sensitive, e.g., "FinTech" not "fintech", "E-Commerce" not "ecommerce")
-# ========================================================================
-
-ICP_DEFINITIONS = [
-    {
-        # Fuel/Energy - Operations & Technology Leaders
-        "sub_industries": ["Fuel", "Oil and Gas", "Fossil Fuels", "Energy"],
-        "role_details": [
-            # Operations
-            "coo", "chief operating officer", "director of operations", "vp of operations", 
-            "vp operations", "head of operations", "operations manager", "operations director",
-            # Technology
-            "cto", "chief technology officer", "director of technology", "vp of technology", 
-            "vp technology", "head of technology", "vp of engineering", "vp engineering",
-            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
-            "cio", "chief information officer"
-        ]
-    },
-    
-    {
-        # Agriculture/Farming - Operations & Technology Leaders
-        "sub_industries": ["Agriculture", "Farming", "AgTech", "Livestock", "Aquaculture"],
-        "role_details": [
-            # Operations
-            "coo", "chief operating officer", "director of operations", "vp of operations",
-            "vp operations", "head of operations", "operations manager", "operations director",
-            # Technology
-            "cto", "chief technology officer", "director of technology", "vp of technology",
-            "vp technology", "head of technology", "vp of engineering", "vp engineering",
-            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
-            "cio", "chief information officer"
-        ]
-    },
-    
-    {
-        # Renewable Energy - Operations, Technology & Asset Management
-        "sub_industries": ["Solar", "Wind Energy", "Renewable Energy", "Clean Energy", 
-                          "Biomass Energy", "Energy Storage", "Energy Efficiency"],
-        "role_details": [
-            # Operations
-            "coo", "chief operating officer", "director of operations", "vp of operations",
-            "vp operations", "head of operations", "operations manager", "operations director",
-            # Technology
-            "cto", "chief technology officer", "director of technology", "vp of technology",
-            "vp technology", "head of technology", "vp of engineering", "vp engineering",
-            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
-            "cio", "chief information officer",
-            # Asset Management & Site Operations 
-            "asset manager", "director of operation", "performance engineer", "site manager",
-            "plant manager", "facility manager", "solar farm manager", "wind farm manager"
-        ]
-    },
-    
-    {
-        # Winery/Horticulture - Farm & Operations Leaders
-        "sub_industries": ["Winery", "Wine And Spirits", "Horticulture", "Farming", 
-                          "Agriculture", "AgTech", "Hydroponics"],
-        "role_details": [
-            # Operations
-            "coo", "chief operating officer", "director of operations", "vp of operations",
-            "vp operations", "head of operations", "operations manager", "operations director",
-            # Technology
-            "cto", "chief technology officer", "director of technology", "vp of technology",
-            "vp technology", "head of technology", "vp of engineering", "vp engineering",
-            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
-            "cio", "chief information officer",
-            # Farm Management & Precision Agriculture 
-            "farm manager", "vineyard manager", "precision agriculture manager", 
-            "head grower", "chief agronomist", "viticulturist", "horticulturist",
-            "greenhouse manager", "crop manager", "production manager"
-        ]
-    },
-    
-    {
-        # E-Commerce/Retail - Marketing & Growth Leaders
-        "sub_industries": ["E-Commerce", "E-Commerce Platforms", "Retail", "Retail Technology"],
-        "role_details": [
-            # Marketing/Growth
-            "vp ecommerce", "vp e-commerce", "vp of ecommerce", "director of ecommerce",
-            "head of ecommerce", "ecommerce director", "head of growth", "director of growth",
-            "vp of growth", "vp growth", "chief growth officer", "cmo", "chief marketing officer",
-            "vp of marketing", "vp marketing", "director of marketing", "head of marketing",
-            "vp of digital marketing", "director of digital marketing",
-            # Leadership
-            "founder", "co-founder", "ceo", "chief executive officer"
-        ]
-    },
-    
-    {
-        # Digital Marketing/Advertising - Agency & Strategy Leaders
-        "sub_industries": ["Digital Marketing", "Email Marketing", "Marketing", 
-                          "Marketing Automation", "Advertising", "Advertising Platforms",
-                          "Affiliate Marketing", "Content Marketing"],
-        "role_details": [
-            # Leadership/Strategy
-            "founder", "co-founder", "ceo", "chief executive officer", 
-            "director of partnerships", "vp of partnerships", "vp partnerships",
-            "head of partnerships", "partnerships director",
-            "head of strategy", "director of strategy", "vp of strategy", "vp strategy",
-            "chief strategy officer", "cmo", "chief marketing officer",
-            "managing director", "president", "managing partner"
-        ]
-    },
-    
-    {
-        # AI/ML - Technical & Leadership Roles
-        "sub_industries": ["Artificial Intelligence", "Machine Learning", 
-                          "Natural Language Processing", "Predictive Analytics"],
-        "role_details": [
-            # Leadership
-            "ceo", "chief executive officer", "founder", "co-founder",
-            # Technology
-            "cto", "chief technology officer", "vp of engineering", "vp engineering",
-            "head of engineering", "engineering director", "vp of ai", "vp ai",
-            "head of ai", "director of ai", "vp of machine learning", "vp machine learning",
-            "head of machine learning", "director of machine learning", 
-            "chief ai officer", "chief data officer",
-            # Engineering
-            "software engineer", "swe", "senior software engineer", "sr swe", 
-            "staff software engineer", "principal software engineer", "lead software engineer",
-            "software developer", "senior software developer", "sr software developer"
-        ]
-    },
-    
-    {
-        # Real Estate Investment - Owners & Investment Leaders
-        "sub_industries": ["Real Estate", "Real Estate Investment", "Residential", 
-                          "Commercial Real Estate", "Property Development", "Property Management"],
-        "role_details": [
-            # Owner/Leadership
-            "ceo", "chief executive officer", "owner", "co-owner", "sole operator",
-            "founder", "co-founder", "managing partner", "managing director",
-            "principal", "president", "partner"
-        ]
-    },
-    
-    {
-        # Wealth Management/Family Office - Investment & Operations Leaders
-        # Note: No "Family Office" sub-industry in taxonomy, using closest matches
-        "sub_industries": ["Asset Management", "Venture Capital", "Hedge Funds", 
-                          "Financial Services", "Impact Investing"],
-        "role_details": [
-            # Leadership
-            "ceo", "chief executive officer", "president", "managing director", "managing partner",
-            "principal", "partner", "founder", "co-founder",
-            # Investment Leadership
-            "cio", "chief investment officer", "director of investments", "vp of investments",
-            "vp investments", "head of investments", "investment director", "investment manager",
-            "portfolio manager", "head of portfolio management", "director of portfolio management",
-            "senior portfolio manager", "lead portfolio manager",
-            # Private Markets
-            "head of private equity", "director of private equity", "vp private equity",
-            "vp of private equity", "head of venture capital", "director of venture capital",
-            "vp of venture capital", "vp venture capital", "head of vc", "director of vc",
-            "head of real estate", "director of real estate", "vp real estate", "vp of real estate",
-            "head of alternatives", "director of alternatives", "vp of alternatives", "vp alternatives",
-            "head of direct investments", "director of direct investments",
-            # Operations & Finance
-            "coo", "chief operating officer", "director of operations", "vp of operations",
-            "vp operations", "head of operations", "operations director",
-            "cfo", "chief financial officer", "director of finance", "vp of finance",
-            "vp finance", "head of finance", "finance director",
-            # Wealth & Asset Management
-            "family office manager", "wealth manager", "director of wealth management",
-            "head of family office", "family office director", "head of wealth management",
-            "asset manager", "head of asset management", "director of asset management"
-        ]
-    },
-    
-    {
-        # FinTech/Banking - Risk & Compliance Leaders
-        "sub_industries": ["FinTech", "Banking", "Payments", "Financial Services",
-                          "Credit Cards", "Mobile Payments", "Transaction Processing"],
-        "role_details": [
-            # Risk & Compliance Leadership
-            "cro", "chief risk officer", "vp of risk", "vp risk", "head of risk", 
-            "director of risk", "risk director", "vp of risk management", "vp risk management",
-            "director of risk management", "head of risk management",
-            "cco", "chief compliance officer", "vp of compliance", "vp compliance", 
-            "head of compliance", "director of compliance", "compliance director",
-            "vp of regulatory compliance", "director of regulatory compliance",
-            "head of regulatory affairs", "director of regulatory affairs",
-            # Compliance Operations
-            "compliance officer", "senior compliance officer", "compliance manager",
-            "bsa officer", "aml officer", "kyc manager", "director of aml",
-            "vp of bsa", "head of bsa", "anti-money laundering officer",
-            "financial crimes manager", "director of financial crimes",
-            # Risk Operations
-            "risk officer", "senior risk officer", "risk manager", "enterprise risk manager",
-            "operational risk manager", "credit risk manager", "director of operational risk"
-        ]
-    },
-    
-    {
-        # Clinical Research/Labs - Data & Research Leaders
-        "sub_industries": ["Clinical Trials", "Biotechnology", "Pharmaceutical", 
-                          "Biopharma", "Life Science"],
-        "role_details": [
-            # Data & Research
-            "data scientist", "senior data scientist", "lead data scientist", "principal data scientist",
-            "data manager", "clinical data manager", "data management lead", "head of data management",
-            "director of data management", "vp of data management", "vp data management",
-            "biostatistician", "senior biostatistician", "lead biostatistician",
-            "data analyst", "clinical data analyst", "research data analyst",
-            # Leadership
-            "ceo", "chief executive officer", "cto", "chief technology officer",
-            "coo", "chief operating officer", "cso", "chief scientific officer",
-            "vp of operations", "vp operations", "director of operations"
-        ]
-    },
-    
-    {
-        # Research/Academic - Principal Investigators & Researchers
-        "sub_industries": ["Higher Education", "Life Science", "Biotechnology", 
-                          "Neuroscience", "Genetics"],
-        "role_details": [
-            # Principal Investigators & Researchers
-            "principal investigator", "pi", "lead researcher", "senior researcher",
-            "research director", "director of research", "head of research",
-            "associate professor", "assistant professor", "professor",
-            "research scientist", "senior research scientist", "staff scientist",
-            "research fellow", "senior research fellow", "postdoctoral researcher",
-            "lab director", "laboratory director", "research group leader",
-            "department head", "department chair", "division chief"
-        ]
-    },
-    
-    {
-        # Biotech/Pharma - Business Development & Scientific Leadership
-        "sub_industries": ["Biotechnology", "Biopharma", "Pharmaceutical", 
-                          "Genetics", "Life Science", "Bioinformatics"],
-        "role_details": [
-            # Business Development & Leadership
-            "ceo", "chief executive officer", "founder", "co-founder",
-            "cto", "chief technology officer", "cso", "chief scientific officer",
-            "coo", "chief operating officer", "cmo", "chief medical officer",
-            "vp of business development", "vp business development", "head of business development",
-            "director of business development", "business development director",
-            "bd lead", "business development lead", "business development manager",
-            "vp of partnerships", "vp partnerships", "head of partnerships",
-            "director of partnerships", "partnerships director",
-            "vp of corporate development", "director of corporate development"
-        ]
-    },
-    
-    {
-        # Blockchain/Crypto/Web3 Companies - Investment & Leadership Roles
-        # HIGH VALUE: Targets investment roles at companies that ARE blockchain/crypto
-        # NOTE: Only matches companies with blockchain-specific sub_industries, NOT generic VCs
-        # A "Partner at Paradigm" only gets +100 if Paradigm's sub_industry is "Blockchain", "Cryptocurrency", or "Web3 Investor"
-        "sub_industries": ["Blockchain", "Cryptocurrency", "Bitcoin", "Ethereum", "Web3 Investor", "Web3 Fund"],
-        "role_details": [
-            # Investment Leadership / Partners
-            "partner", "general partner", "gp", "managing partner", "managing director",
-            "principal", "venture partner", "investment partner", "limited partner",
-            # Investment Operations
-            "cio", "chief investment officer", "director of investments", "vp of investments",
-            "vp investments", "head of investments", "investment director",
-            "portfolio manager", "fund manager", "investment manager", "asset manager",
-            # Founder/Leadership
-            "founder", "co-founder", "ceo", "chief executive officer",
-            # Investment Team Roles
-            "investor", "venture capitalist", "vc", "investment analyst", "research analyst",
-            "associate", "senior associate", "investment associate",
-            "vice president", "vp", "director", "head of",
-            # Crypto/Web3 Specific
-            "token fund manager", "crypto fund manager", "defi lead", "web3 investor"
-        ],
-        # HIGH VALUE: +100 bonus for blockchain/crypto investors (very rare, high value)
-        "bonus": 100
-    },
-    
-    {
-        # Hospitality/Hotels - Business Development, Owners & Operations (US)
-        # Sub-industries from taxonomy: Hospitality, Hotel, Resorts (all under 'Travel and Tourism')
-        "sub_industries": ["Hospitality", "Hotel", "Resorts", "Travel Accommodations", 
-                          "Vacation Rental", "Tourism"],
-        "role_details": [
-            # Business Development
-            "business development", "bd", "biz dev", "business dev", 
-            "vp of business development", "vp business development", "head of business development",
-            "director of business development", "business development manager", "business development director",
-            "vp of bd", "head of bd", "director of bd",
-            # Ownership/Leadership
-            "owner", "co-owner", "business owner", "hotel owner", "property owner",
-            "founder", "co-founder", "ceo", "chief executive officer",
-            "president", "managing director", "general manager", "gm",
-            "principal", "partner", "managing partner",
-            # Operations Management
-            "operations manager", "director of operations", "vp of operations", "vp operations",
-            "head of operations", "operations director", "coo", "chief operating officer",
-            # Hotel/Hospitality Specific
-            "hotel manager", "hotel general manager", "hotel gm", "property manager",
-            "resort manager", "resort general manager", "hospitality manager",
-            "front office manager", "rooms division manager", "director of rooms",
-            "director of hospitality", "vp of hospitality", "head of hospitality"
-        ],
-        # Region filter - US only
-        "regions": ["united states", "usa", "us", "america", "american",
-                    "california", "new york", "texas", "florida", "illinois", "pennsylvania",
-                    "ohio", "georgia", "north carolina", "michigan", "new jersey", "virginia",
-                    "washington", "arizona", "massachusetts", "tennessee", "indiana", "missouri",
-                    "maryland", "wisconsin", "colorado", "minnesota", "south carolina", "alabama",
-                    "louisiana", "kentucky", "oregon", "oklahoma", "connecticut", "utah", "iowa",
-                    "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
-                    "idaho", "west virginia", "hawaii", "maine", "montana", "rhode island",
-                    "delaware", "south dakota", "north dakota", "alaska", "vermont", "wyoming"]
-    },
-    
-    {
-        # Small/Local Businesses - Owners (US)
-        # Note: "Small Business" not in taxonomy, using "Local Business" which is closest match
-        # This ICP targets business owners across various industries in the US
-        "sub_industries": ["Local Business", "Local", "Retail", "Restaurants", "Food and Beverage",
-                          "Professional Services", "Home Services", "Real Estate", "Construction",
-                          "Automotive", "Health Care", "Fitness", "Beauty", "Consulting"],
-        "role_details": [
-            # Ownership
-            "owner", "co-owner", "business owner", "sole proprietor", "sole operator",
-            "franchise owner", "franchisee", "store owner", "shop owner",
-            # Founder/Leadership
-            "founder", "co-founder", "ceo", "chief executive officer",
-            "president", "managing director", "principal", "partner",
-            # Small Business Specific
-            "proprietor", "operator", "entrepreneur"
-        ],
-        # Region filter - US only
-        "regions": ["united states", "usa", "us", "america", "american",
-                    "california", "new york", "texas", "florida", "illinois", "pennsylvania",
-                    "ohio", "georgia", "north carolina", "michigan", "new jersey", "virginia",
-                    "washington", "arizona", "massachusetts", "tennessee", "indiana", "missouri",
-                    "maryland", "wisconsin", "colorado", "minnesota", "south carolina", "alabama",
-                    "louisiana", "kentucky", "oregon", "oklahoma", "connecticut", "utah", "iowa",
-                    "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
-                    "idaho", "west virginia", "hawaii", "maine", "montana", "rhode island",
-                    "delaware", "south dakota", "north dakota", "alaska", "vermont", "wyoming"]
-    },
-    
-    {
-        # Cyber Security / IT Management - Business Owners (Midwest US, 10-50 employees)
-        # Target: Small business owners/founders/executives in cybersecurity and IT management
-        # Company Size: 10-50 employees
-        # Geo: Midwest US states
-        # HIGH VALUE: +100 bonus for Midwest cybersecurity business owners
-        "sub_industries": ["Cyber Security", "IT Management"],
-        "role_details": [
-            # Business Owners
-            "owner", "co-owner", "business owner",
-            # Founders
-            "founder", "co-founder",
-            # Executive Leadership
-            "ceo", "chief executive officer", "president"
-        ],
-        "regions": ["illinois", "indiana", "michigan", "ohio", "wisconsin",
-                    "iowa", "kansas", "minnesota", "missouri", "nebraska",
-                    "north dakota", "south dakota"],
-        "employee_ranges": ["10-50"],
-        "bonus": 100
-    },
-    
-    {
-        # UAE/Dubai Investors - Investment & Fund Management Leaders
-        # Target: Investors, fund managers, and investment leaders in Dubai, UAE
-        # HIGH VALUE: +100 bonus for Dubai-based investors (strategic market)
-        # NOTE: Gateway only accepts UAE leads from Dubai city (submit.py line 2152)
-        "sub_industries": ["Angel Investment", "Asset Management", "Hedge Funds", 
-                          "Impact Investing", "Incubators", "Real Estate Investment", 
-                          "Venture Capital", "Web3 Investor", "Web3 Fund", "Wealth Management"],
-        "role_details": [
-            # Investment Leadership / Partners
-            "partner", "general partner", "gp", "managing partner", "managing director",
-            "principal", "venture partner", "investment partner", "limited partner",
-            # Investment Operations
-            "cio", "chief investment officer", "director of investments", "vp of investments",
-            "vp investments", "head of investments", "investment director",
-            "portfolio manager", "fund manager", "investment manager", "asset manager",
-            # Founder/Leadership
-            "founder", "co-founder", "ceo", "chief executive officer", "president",
-            # Investment Team Roles
-            "investor", "venture capitalist", "vc", "investment analyst", "research analyst",
-            "associate", "senior associate", "investment associate",
-            "vice president", "vp", "director", "head of",
-            # Wealth Management Specific
-            "wealth manager", "private banker", "relationship manager",
-            "family office manager", "head of family office", "family office director"
-        ],
-        # Region filter - UAE/Dubai only (city filter required since UAE = Dubai only)
-        "regions": ["united arab emirates", "uae", "dubai", "emirati"],
-        # HIGH VALUE: +100 bonus for Dubai investors
-        "bonus": 100
-    }
-]
-
-# ========================================================================
-# INDUSTRY TAXONOMY VALIDATION HELPERS
-# ========================================================================
-
-def get_all_valid_industries() -> set:
-    """
-    Get all valid industry names from industry taxonomy.
-    These are the unique industry_groups across all sub-industries.
-    
-    Returns:
-        Set of valid industry names (case-preserved)
-    """
-    industries = set()
-    for sub_industry, data in INDUSTRY_TAXONOMY.items():
-        for group in data.get("industries", []):
-            industries.add(group)
-    return industries
-
-
-def get_all_valid_sub_industries() -> set:
-    """
-    Get all valid sub-industry names from industry taxonomy.
-    These are the keys of the INDUSTRY_TAXONOMY dictionary.
-    
-    Returns:
-        Set of valid sub-industry names (case-preserved)
-    """
-    return set(INDUSTRY_TAXONOMY.keys())
-
-
-# NOTE: Industry taxonomy validation functions removed - validation now done at gateway (submit.py)
-
-
-# ========================================================================
-# SUB-INDUSTRY VERIFICATION HELPERS (Using Industry Taxonomy) - LEGACY
-# ========================================================================
-
-def fuzzy_match_sub_industry(claimed_sub_industry: str) -> Tuple[Optional[str], Optional[Dict], float]:
-    """
-    LEGACY: Fuzzy match the miner's claimed sub_industry against the industry taxonomy.
-    NOTE: Industry taxonomy validation is now done at gateway (submit.py).
-    
-    Returns:
-        (matched_key, taxonomy_entry, confidence) where:
-        - matched_key: The exact key in INDUSTRY_TAXONOMY (or None if no match)
-        - taxonomy_entry: Dict with 'industry_groups' and 'definition' (or None)
-        - confidence: 0.0 to 1.0
-    """
-    if not claimed_sub_industry:
-        return None, None, 0.0
-    
-    claimed_lower = claimed_sub_industry.strip().lower()
-    
-    # Try exact match first (case-insensitive)
-    for key in INDUSTRY_TAXONOMY:
-        if key.lower() == claimed_lower:
-            return key, INDUSTRY_TAXONOMY[key], 1.0
-    
-    # Try contains match (if claimed is substring of taxonomy entry or vice versa)
-    best_match = None
-    best_confidence = 0.0
-    
-    for key in INDUSTRY_TAXONOMY:
-        key_lower = key.lower()
-        
-        # Check if one contains the other
-        if claimed_lower in key_lower or key_lower in claimed_lower:
-            # Calculate similarity based on length ratio
-            longer = max(len(claimed_lower), len(key_lower))
-            shorter = min(len(claimed_lower), len(key_lower))
-            confidence = shorter / longer
-            
-            if confidence > best_confidence:
-                best_match = key
-                best_confidence = confidence
-        
-        # Check for word overlap
-        claimed_words = set(claimed_lower.replace('-', ' ').replace('/', ' ').split())
-        key_words = set(key_lower.replace('-', ' ').replace('/', ' ').split())
-        
-        if claimed_words and key_words:
-            overlap = len(claimed_words & key_words)
-            total = len(claimed_words | key_words)
-            word_confidence = overlap / total if total > 0 else 0
-            
-            if word_confidence > best_confidence:
-                best_match = key
-                best_confidence = word_confidence
-    
-    if best_match and best_confidence >= 0.5:
-        return best_match, INDUSTRY_TAXONOMY[best_match], best_confidence
-    
-    return None, None, 0.0
-
-
-def validate_industry_sub_industry_pairing(claimed_industry: str, matched_sub_industry: str) -> Tuple[bool, str]:
-    """
-    Validate that the miner's claimed industry is a valid industry_group for the sub_industry.
-    
-    Returns:
-        (is_valid, reason)
-    """
-    if not matched_sub_industry or matched_sub_industry not in INDUSTRY_TAXONOMY:
-        return False, f"Sub-industry '{matched_sub_industry}' not found in industry taxonomy"
-    
-    valid_groups = INDUSTRY_TAXONOMY[matched_sub_industry].get("industries", [])
-    
-    if not valid_groups:
-        # Some entries have empty industry_groups (like "Association", "Commercial")
-        return True, f"Sub-industry '{matched_sub_industry}' has no specific industry group requirements"
-    
-    # Normalize claimed industry for comparison
-    claimed_lower = claimed_industry.strip().lower()
-    
-    for group in valid_groups:
-        if group.lower() == claimed_lower:
-            return True, f"Industry '{claimed_industry}' is valid for sub-industry '{matched_sub_industry}'"
-        # Allow partial matches (e.g., "Technology" matches "Information Technology")
-        if claimed_lower in group.lower() or group.lower() in claimed_lower:
-            return True, f"Industry '{claimed_industry}' loosely matches valid group '{group}' for sub-industry '{matched_sub_industry}'"
-    
-    return False, f"Industry '{claimed_industry}' is NOT valid for sub-industry '{matched_sub_industry}'. Valid groups: {valid_groups}"
-
-
-async def verify_sub_industry_with_llm(
-    company: str,
-    claimed_sub_industry: str,
-    matched_sub_industry: str,
-    definition: str,
-    industry_search_results: List[Dict],
-    openrouter_key: str
-) -> Tuple[bool, str, float]:
-    """
-    Use LLM to verify that the company actually matches the claimed sub_industry,
-    using the industry definition as the ground truth.
-    
-    Args:
-        company: Company name
-        claimed_sub_industry: What the miner claimed
-        matched_sub_industry: The matched industry taxonomy key
-        definition: sub-industry definition of the sub_industry
-        industry_search_results: GSE search results about the company's industry
-        openrouter_key: API key for OpenRouter
-    
-    Returns:
-        (is_match, reasoning, confidence)
-    """
-    if not industry_search_results:
-        return False, "No industry search results to verify against", 0.0
-    
-    # Build context from search results
-    search_context = ""
-    for i, result in enumerate(industry_search_results[:5], 1):
-        title = result.get("title", "")
-        snippet = result.get("snippet", result.get("body", ""))
-        search_context += f"{i}. {title}\n   {snippet[:200]}\n"
-    
-    prompt = f"""You are verifying if a company matches a specific sub-industry classification.
-
-COMPANY: {company}
-
-CLAIMED SUB-INDUSTRY: {claimed_sub_industry}
-MATCHED SUB-INDUSTRY CATEGORY: {matched_sub_industry}
-
-SUB-INDUSTRY DEFINITION FOR THIS SUB-INDUSTRY:
-"{definition}"
-
-SEARCH RESULTS ABOUT THE COMPANY:
-{search_context}
-
-TASK: Based on the search results, does this company match the sub-industry definition above?
-
-RULES:
-1. The company's actual business must match the industry definition
-2. Be STRICT - the company must genuinely fit the sub-industry category
-3. If search results don't clearly show what the company does, return false
-4. If the company operates in a DIFFERENT industry than claimed, return false
-
-RESPOND WITH JSON ONLY:
-{{
-    "sub_industry_match": true/false,
-    "extracted_business_type": "what the company actually does based on search results",
-    "confidence": 0.0-1.0,
-    "reasoning": "Brief explanation"
-}}"""
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {openrouter_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "openai/gpt-4o-mini",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 300,
-                    "temperature": 0
-                },
-                timeout=20
-            ) as response:
-                if response.status != 200:
-                    return False, f"LLM API error: HTTP {response.status}", 0.0
-                
-                data = await response.json()
-                llm_response = data["choices"][0]["message"]["content"].strip()
-                
-                # Parse JSON response
-                if llm_response.startswith("```"):
-                    lines = llm_response.split("\n")
-                    if lines[0].startswith("```"):
-                        lines = lines[1:]
-                    if lines and lines[-1].strip() == "```":
-                        lines = lines[:-1]
-                    llm_response = "\n".join(lines).strip()
-                
-                result = json.loads(llm_response)
-                
-                is_match = result.get("sub_industry_match", False)
-                reasoning = result.get("reasoning", "No reasoning provided")
-                confidence = float(result.get("confidence", 0.0))
-                extracted_type = result.get("extracted_business_type", "Unknown")
-                
-                full_reasoning = f"{reasoning} (Detected: {extracted_type})"
-                
-                return is_match, full_reasoning, confidence
-                
-    except json.JSONDecodeError as e:
-        return False, f"Failed to parse LLM response: {str(e)}", 0.0
-    except Exception as e:
-        return False, f"LLM verification failed: {str(e)}", 0.0
-
-
-def normalize_accents(text: str) -> str:
-    """
-    Remove accents/diacritics from text for name matching.
-    e.g., "José" -> "Jose", "François" -> "Francois"
-    """
-    # Normalize to NFD form (decomposes accented chars into base + combining mark)
-    # Then remove combining marks (category 'Mn')
-    normalized = unicodedata.normalize('NFD', text)
-    return ''.join(char for char in normalized if unicodedata.category(char) != 'Mn')
-
-
-# ========================================================================
-# AREA-CITY MAPPINGS FOR LOCATION VERIFICATION
-# ========================================================================
-# Maps metropolitan areas to their constituent cities.
-# e.g., "San Francisco Bay Area" → ["Cupertino", "San Jose", "Palo Alto", ...]
-# ========================================================================
-
-AREA_CITY_MAPPINGS_PATH = os.path.join(os.path.dirname(__file__), '..', 'gateway', 'utils', 'area_city_mappings.json')
-_AREA_CITY_MAPPINGS_CACHE = None
-
-
-def load_area_city_mappings() -> dict:
-    """Load area-city mappings from JSON file (cached)."""
-    global _AREA_CITY_MAPPINGS_CACHE
-    if _AREA_CITY_MAPPINGS_CACHE is not None:
-        return _AREA_CITY_MAPPINGS_CACHE
-
-    try:
-        with open(AREA_CITY_MAPPINGS_PATH, 'r') as f:
-            data = json.load(f)
-            _AREA_CITY_MAPPINGS_CACHE = data.get('mappings', {})
-            return _AREA_CITY_MAPPINGS_CACHE
-    except Exception as e:
-        print(f"⚠️ Could not load area_city_mappings.json: {e}")
-        _AREA_CITY_MAPPINGS_CACHE = {}
-        return _AREA_CITY_MAPPINGS_CACHE
-
-
-def normalize_area_name(area: str) -> str:
-    """Normalize area name for matching.
-    e.g., "Greater Seattle Area" → "seattle"
-    """
-    area = area.lower().strip()
-    area = area.replace("greater ", "").replace(" metropolitan", "").replace(" metro", "").replace(" area", "")
-    return area.strip()
-
-
-def is_city_in_area(city: str, area: str) -> bool:
-    """
-    Check if city is within the metropolitan area.
-
-    Args:
-        city: Claimed city (e.g., "Cupertino")
-        area: LinkedIn location (e.g., "San Francisco Bay Area")
-
-    Returns:
-        True if city is in the area's city list
-    """
-    mappings = load_area_city_mappings()
-    if not mappings:
-        return False
-
-    city_lower = normalize_accents(city.lower().strip())
-    area_norm = normalize_area_name(area)
-
-    # Find matching area in mappings
-    for area_key, cities in mappings.items():
-        key_norm = normalize_area_name(area_key)
-        # Match if normalized names are equal or one contains the other
-        if key_norm == area_norm or area_norm in key_norm or key_norm in area_norm:
-            # Check if city is in the list (case-insensitive, accent-normalized)
-            cities_normalized = [normalize_accents(c.lower()) for c in cities]
-            if city_lower in cities_normalized:
-                return True
-
-    return False
-
-
-# Custom exception for API infrastructure failures (should skip lead, not submit)
-class EmailVerificationUnavailableError(Exception):
-    """Raised when email verification API is unavailable (no credits, bad key, network error, etc.)"""
-    pass
-
-load_dotenv()
-
-# ════════════════════════════════════════════════════════════════════
-# PROXY CONFIGURATION: Support for containerized validators with proxies
-# ════════════════════════════════════════════════════════════════════
-
-# Read proxy configuration from environment variables
-HTTP_PROXY_URL = os.environ.get('HTTP_PROXY')
-HTTPS_PROXY_URL = os.environ.get('HTTPS_PROXY', HTTP_PROXY_URL)
-
-# Global proxy configuration for all HTTP requests
-PROXY_CONFIG = None
-if HTTP_PROXY_URL:
-    PROXY_CONFIG = {
-        'http': HTTP_PROXY_URL,
-        'https': HTTPS_PROXY_URL or HTTP_PROXY_URL
-    }
-    print(f"🌐 Proxy enabled: {HTTP_PROXY_URL[:50]}... (all API requests will use this IP)")
-
-def get_aiohttp_connector():
-    """
-    Create aiohttp connector with proxy support if configured.
-    
-    Returns connector that should be passed to aiohttp.ClientSession()
-    """
-    if HTTP_PROXY_URL:
-        # aiohttp handles proxies via request parameters, not connector
-        return None
-    return None
-
-# ════════════════════════════════════════════════════════════════════
-
-# MEV removed - always use TrueList for email verification
-# Even if MYEMAILVERIFIER_API_KEY is set in environment, we ignore it
-MYEMAILVERIFIER_API_KEY = ""  # Hardcoded empty - TrueList is the only email verifier
-TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
-
-# TrueList Batch Email Validation Configuration
-# See: https://apidocs.truelist.io/#tag/Batch-email-validation
-TRUELIST_BATCH_POLL_INTERVAL = 10  # seconds between status polls
-TRUELIST_BATCH_TIMEOUT = 40 * 60   # 40 minutes in seconds
-TRUELIST_BATCH_MAX_RETRIES = 2     # Max retry attempts for errored emails
-TRUELIST_BATCH_STRATEGY = "fast"  # "fast" returns more complete results than "accurate"
-
-# Stage 4 & 5: ScrapingDog GSE API + OpenRouter LLM
-SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY", "")
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
-
-# Rep Score API keys (Companies House)
-COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY", "")
-
-EMAIL_CACHE_FILE = "email_verification_cache.pkl"
-VALIDATION_ARTIFACTS_DIR = "validation_artifacts"
-
-CACHE_TTLS = {
-    "dns_head": 24,
-    "whois": 90,
-    "myemailverifier": 90,  
-}
-
-API_SEMAPHORE = asyncio.Semaphore(10)
-
-os.makedirs(VALIDATION_ARTIFACTS_DIR, exist_ok=True)
-
-# Commit-Reveal Logic for Trustless Validation
-
-def compute_validation_hashes(decision: str, rep_score: float, evidence: dict, salt: bytes) -> dict:
-    """
-    Compute commit hashes for validation result.
-    
-    Args:
-        decision: "approve" or "reject"
-        rep_score: Reputation score (0-30)
-        evidence: Evidence blob (full automated_checks_data)
-        salt: Random salt for commitment
-    
-    Returns:
-        {
-            "decision_hash": "sha256-hex",
-            "rep_score_hash": "sha256-hex",
-            "evidence_hash": "sha256-hex"
-        }
-    """
-    import hashlib
-    
-    # Canonicalize evidence (sort keys for determinism)
-    evidence_json = json.dumps(evidence, sort_keys=True, default=str)  # Handle datetime objects
-    
-    # Compute hashes
-    decision_hash = hashlib.sha256(salt + decision.encode()).hexdigest()
-    rep_score_hash = hashlib.sha256(salt + str(rep_score).encode()).hexdigest()
-    evidence_hash = hashlib.sha256(salt + evidence_json.encode()).hexdigest()
-    
-    return {
-        "decision_hash": decision_hash,
-        "rep_score_hash": rep_score_hash,
-        "evidence_hash": evidence_hash
-    }
-
-class LRUCache:
-    """LRU Cache implementation with TTL support"""
-
-    def __init__(self, max_size: int = 1000):
-        self.max_size = max_size
-        self.cache: Dict[str, Any] = {}
-        self.timestamps: Dict[str, datetime] = {}
-        self.access_order: list = []
-
-    def __contains__(self, key: str) -> bool:
-        if key in self.cache:
-            # Update access order
-            if key in self.access_order:
-                self.access_order.remove(key)
-            self.access_order.append(key)
-            return True
-        return False
-
-    def __getitem__(self, key: str) -> Any:
-        if key in self.cache:
-            # Update access order
-            self.access_order.remove(key)
-            self.access_order.append(key)
-            return self.cache[key]
-        raise KeyError(key)
-
-    def __setitem__(self, key: str, value: Any):
-        if key in self.cache:
-            # Update existing
-            self.access_order.remove(key)
-        elif len(self.cache) >= self.max_size:
-            # Remove least recently used
-            lru_key = self.access_order.pop(0)
-            del self.cache[lru_key]
-            del self.timestamps[lru_key]
-
-        # Add new item
-        self.cache[key] = value
-        self.timestamps[key] = datetime.now()
-        self.access_order.append(key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-    def is_expired(self, key: str, ttl_hours: int) -> bool:
-        if key not in self.timestamps:
-            return True
-        age = datetime.now() - self.timestamps[key]
-        return age.total_seconds() > (ttl_hours * 3600)
-
-    def cleanup_expired(self, ttl_hours: int):
-        """Remove expired items from cache"""
-        expired_keys = [key for key in list(self.cache.keys()) if self.is_expired(key, ttl_hours)]
-        for key in expired_keys:
-            del self.cache[key]
-            del self.timestamps[key]
-            if key in self.access_order:
-                self.access_order.remove(key)
-
-# Global cache instance
-validation_cache = LRUCache(max_size=1000)
-
-# ========================================================================
-# GLOBAL COMPANY LINKEDIN CACHE
-# ========================================================================
-# Caches company LinkedIn data to avoid re-scraping the same company page.
-# Key: company_linkedin slug (e.g., "microsoft")
-# Value: Dict with company_name, industry, description, employee_count, location, timestamp
-# TTL: 24 hours (companies don't change frequently)
-# ========================================================================
-COMPANY_LINKEDIN_CACHE: Dict[str, Dict] = {}
-COMPANY_LINKEDIN_CACHE_TTL_HOURS = 24
-
-def get_company_linkedin_from_cache(company_slug: str) -> Optional[Dict]:
-    """
-    Get company LinkedIn data from global cache if not expired.
-    
-    Args:
-        company_slug: The company slug from LinkedIn URL (e.g., "microsoft")
-        
-    Returns:
-        Cached data dict or None if not cached/expired
-    """
-    if company_slug not in COMPANY_LINKEDIN_CACHE:
-        return None
-    
-    cached = COMPANY_LINKEDIN_CACHE[company_slug]
-    cached_time = cached.get("timestamp")
-    
-    if cached_time:
-        # Handle both string (new) and datetime (old/in-memory) formats
-        if isinstance(cached_time, str):
-            try:
-                cached_time = datetime.fromisoformat(cached_time)
-            except ValueError:
-                # Invalid timestamp, remove from cache
-                del COMPANY_LINKEDIN_CACHE[company_slug]
-                return None
-        
-        # Check if cache has expired
-        age_hours = (datetime.now() - cached_time).total_seconds() / 3600
-        if age_hours > COMPANY_LINKEDIN_CACHE_TTL_HOURS:
-            # Expired, remove from cache
-            del COMPANY_LINKEDIN_CACHE[company_slug]
-            return None
-    
-    return cached
-
-def set_company_linkedin_cache(company_slug: str, data: Dict):
-    """
-    Store company LinkedIn data in global cache.
-    
-    Args:
-        company_slug: The company slug from LinkedIn URL
-        data: Dict with company data to cache
-    """
-    # Add timestamp for TTL (use isoformat string, not datetime object, to avoid JSON serialization issues)
-    data["timestamp"] = datetime.now().isoformat()
-    COMPANY_LINKEDIN_CACHE[company_slug] = data
-    
-    # Limit cache size (simple LRU - remove oldest if over 500 entries)
-    if len(COMPANY_LINKEDIN_CACHE) > 500:
-        # Remove oldest entry
-        oldest_slug = None
-        oldest_time = datetime.now()
-        for slug, cached_data in COMPANY_LINKEDIN_CACHE.items():
-            # Parse ISO string timestamp back to datetime for comparison
-            timestamp_str = cached_data.get("timestamp")
-            if timestamp_str:
-                try:
-                    cached_time = datetime.fromisoformat(timestamp_str)
-                except (ValueError, TypeError):
-                    cached_time = datetime.now()
-            else:
-                cached_time = datetime.now()
-            if cached_time < oldest_time:
-                oldest_time = cached_time
-                oldest_slug = slug
-        if oldest_slug:
-            del COMPANY_LINKEDIN_CACHE[oldest_slug]
-
-# ========================================================================
-# COMPANY NAME STANDARDIZATION CACHE (JSON file)
-# ========================================================================
-# Maps company LinkedIn slug to standardized company name.
-# Key: slug (e.g., "23andme")
-# Value: Standardized company name from LinkedIn (e.g., "23andMe")
-# ========================================================================
-COMPANY_NAME_CACHE_FILE = os.path.join(os.path.dirname(__file__), "company_name_cache.json")
-
-def load_company_name_cache() -> Dict[str, str]:
-    """Load the company name cache from local JSON file."""
-    if os.path.exists(COMPANY_NAME_CACHE_FILE):
-        try:
-            with open(COMPANY_NAME_CACHE_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"⚠️ Error loading company name cache: {e}")
-    return {}
-
-def save_company_name_cache(cache: Dict[str, str]) -> bool:
-    """Save the company name cache to local JSON file."""
-    try:
-        with open(COMPANY_NAME_CACHE_FILE, "w") as f:
-            json.dump(cache, f, indent=2)
-        return True
-    except Exception as e:
-        print(f"⚠️ Error saving company name cache: {e}")
-        return False
-
-def get_standardized_company_name(company_slug: str) -> Optional[str]:
-    """
-    Get standardized company name from cache.
-
-    Args:
-        company_slug: The company slug from LinkedIn URL (e.g., "23andme")
-
-    Returns:
-        Standardized company name or None if not in cache
-    """
-    cache = load_company_name_cache()
-    # Normalize slug to lowercase
-    slug_normalized = company_slug.lower().strip()
-    return cache.get(slug_normalized)
-
-def set_standardized_company_name(company_slug: str, standardized_name: str) -> bool:
-    """
-    Save standardized company name to cache.
-
-    Args:
-        company_slug: The company slug from LinkedIn URL (e.g., "23andme")
-        standardized_name: The official company name from LinkedIn (e.g., "23andMe")
-
-    Returns:
-        True if saved successfully, False otherwise
-    """
-    cache = load_company_name_cache()
-    # Normalize slug to lowercase
-    slug_normalized = company_slug.lower().strip()
-    cache[slug_normalized] = standardized_name
-    success = save_company_name_cache(cache)
-    if success:
-        print(f"   💾 Cached company name: '{slug_normalized}' → '{standardized_name}'")
-    return success
-
-# ========================================================================
-# Role Batch Validation
-# ========================================================================
-
-ROLE_LLM_PROMPT = """You are a job title validator. Analyze each role and determine if it's a VALID professional job title.
-
-VALID roles:
-- Real job titles (CEO, Marketing Manager, Software Engineer, etc.)
-- Abbreviations (VP, SVP, CFO, CMO, etc.)
-- Seniority levels (Senior, Junior, Lead, Head of, etc.)
-- Academic titles (Professor, Dean, Researcher, etc.)
-- Government/Military titles (Colonel, Senator, Ambassador, etc.)
-
-INVALID roles:
-- Random words or gibberish (A Cargo, Hello World, Test User)
-- Personal descriptions (Coffee Lover, Tech Enthusiast)
-- Hobbies (Golfer, Traveler, Photographer as hobby)
-- Marketing slogans or taglines
-- Single letters or meaningless strings
-- Product/company names used as roles
-- Non-job descriptions (Looking for work, Open to opportunities)
-- Degrees alone (MBA, PhD - unless part of title like "PhD Student")
-
-For each role, respond with ONLY "VALID" or "INVALID".
-
-Roles to validate:
-{roles}
-
-Respond in this exact format (one per line, matching order):
-1. VALID or INVALID
-2. VALID or INVALID
-...
-
-Be strict - when in doubt, mark as INVALID."""
-
-ROLE_LLM_BATCH_SIZE = 20
-
-async def batch_validate_roles_llm(roles: List[str]) -> Dict[str, bool]:
-    """
-    Validate roles using Gemini LLM via OpenRouter.
-    Returns dict mapping role -> is_valid (True/False).
-    """
-    if not roles:
-        return {}
-
-    if not OPENROUTER_KEY:
-        print("   ⚠️ OPENROUTER_KEY not set, skipping LLM role validation")
-        return {role: True for role in roles}
-
-    results = {}
-
-    for batch_start in range(0, len(roles), ROLE_LLM_BATCH_SIZE):
-        batch = roles[batch_start:batch_start + ROLE_LLM_BATCH_SIZE]
-        batch_num = (batch_start // ROLE_LLM_BATCH_SIZE) + 1
-        total_batches = (len(roles) + ROLE_LLM_BATCH_SIZE - 1) // ROLE_LLM_BATCH_SIZE
-
-        print(f"   🤖 Role LLM batch {batch_num}/{total_batches}: Validating {len(batch)} roles...")
-
-        roles_text = "\n".join([f"{i+1}. {role}" for i, role in enumerate(batch)])
-        prompt = ROLE_LLM_PROMPT.format(roles=roles_text)
-
-        try:
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "google/gemini-2.5-flash-lite",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 500,
-                        "temperature": 0
-                    }
-                ) as response:
-                    if response.status != 200:
-                        print(f"   ⚠️ Role LLM API error: HTTP {response.status}, passing batch")
-                        for role in batch:
-                            results[role] = True
-                        continue
-
-                    data = await response.json()
-                    llm_response = data["choices"][0]["message"]["content"].strip()
-                    lines = llm_response.strip().split('\n')
-
-                    for i, role in enumerate(batch):
-                        if i < len(lines):
-                            line = lines[i].strip().upper()
-                            is_valid = "VALID" in line and "INVALID" not in line
-                            results[role] = is_valid
-                            if not is_valid:
-                                print(f"      ❌ LLM rejected: '{role}'")
-                        else:
-                            results[role] = True
-
-        except asyncio.TimeoutError:
-            print(f"   ⚠️ Role LLM timeout, passing batch")
-            for role in batch:
-                results[role] = True
-        except Exception as e:
-            print(f"   ⚠️ Role LLM error: {e}, passing batch")
-            for role in batch:
-                results[role] = True
-
-    valid_count = sum(1 for v in results.values() if v)
-    invalid_count = sum(1 for v in results.values() if not v)
-    print(f"   📊 Role LLM results: {valid_count} valid, {invalid_count} invalid")
-
-    return results
-
-def get_cache_key(prefix: str, identifier: str) -> str:
-    """Generate consistent cache key for validation results"""
-    return f"{prefix}_{identifier}"
-
-async def store_validation_artifact(lead_data: dict, validation_result: dict, stage: str):
-    """Store validation result as artifact for analysis"""
-    try:
-        timestamp = datetime.now().isoformat()
-        artifact_data = {
-            "timestamp": timestamp,
-            "stage": stage,
-            "lead_data": lead_data,
-            "validation_result": validation_result,
-        }
-
-        filename = f"validation_{stage}_{timestamp}_{uuid.uuid4().hex[:8]}.json"
-        filepath = os.path.join(VALIDATION_ARTIFACTS_DIR, filename)
-
-        with open(filepath, "w") as f:
-            json.dump(artifact_data, f, indent=2, default=str)
-
-        print(f"✅ Validation artifact stored: {filename}")
-    except Exception as e:
-        print(f"⚠️ Failed to store validation artifact: {e}")
-
-async def log_validation_metrics(lead_data: dict, validation_result: dict, stage: str):
-    """Log validation metrics for monitoring and analysis"""
-    try:
-        # Extract key metrics
-        email = get_email(lead_data)
-        company = get_company(lead_data)
-        passed = validation_result.get("passed", False)
-        reason = validation_result.get("reason", "Unknown")
-
-        # Log to console for now (can be extended to database/metrics service)
-        status_icon = "✅" if passed else "❌"
-        print(f"{status_icon} Stage {stage}: {email} @ {company} - {reason}")
-
-        # Store metrics in cache for aggregation
-        metrics_key = f"metrics_{stage}_{datetime.now().strftime('%Y%m%d')}"
-        current_metrics = validation_cache.get(metrics_key, {"total": 0, "passed": 0, "failed": 0})
-
-        current_metrics["total"] += 1
-        if passed:
-            current_metrics["passed"] += 1
-        else:
-            current_metrics["failed"] += 1
-
-        validation_cache[metrics_key] = current_metrics
-
-    except Exception as e:
-        print(f"⚠️ Failed to update metrics: {e}")
-
-    try:
-        # Log to file for persistence
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "stage": stage,
-            "email": get_email(lead_data),
-            "company": get_company(lead_data),
-            "passed": validation_result.get("passed", False),
-            "reason": validation_result.get("reason", "Unknown"),
-        }
-
-        log_file = os.path.join(VALIDATION_ARTIFACTS_DIR, "validation_log.jsonl")
-        with open(log_file, "a") as f:
-            f.write(json.dumps(log_entry, default=str) + "\n")  # Handle datetime objects
-
-    except Exception as e:
-        print(f"⚠️ Failed to log validation metrics: {e}")
-
-async def api_call_with_retry(session, url, params=None, max_retries=3, base_delay=1):
-    """Make API call with exponential backoff retry logic"""
-    for attempt in range(max_retries):
-        try:
-            # Pass proxy if configured (aiohttp accepts proxy as string URL)
-            async with session.get(url, params=params, timeout=10, proxy=HTTP_PROXY_URL) as response:
-                return response
-        except Exception as e:
-            if attempt == max_retries - 1:
-                # All retries exhausted, raise descriptive exception
-                context_info = f"URL: {url}"
-                if params:
-                    context_info += f", Params: {params}"
-                raise RuntimeError(
-                    f"API call to {url} failed after {max_retries} attempts. {context_info}"
-                ) from e
-            delay = base_delay * (2**attempt)  # Exponential backoff
-            await asyncio.sleep(delay)
-
-def extract_root_domain(website: str) -> str:
-    """Extract the root domain from a website URL, removing www. prefix"""
-    if not website:
-        return ""
-
-    # Parse the URL to get the domain
-    if website.startswith(("http://", "https://")):
-        domain = urlparse(website).netloc
-    else:
-        # Handle bare domains like "firecrawl.dev" or "www.firecrawl.dev"
-        domain = website.strip("/")
-
-    # Remove www. prefix if present
-    if domain.startswith("www."):
-        domain = domain[4:]  # Remove "www."
-
-    return domain
-
 # Stage 0: Basic Hardcoded Checks
+# ========================================================================
 
 async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
     """Check that all required fields are present and non-empty.
-    
+
     Region validation:
     - country and city are ALWAYS required
     - state is required ONLY for United States leads
@@ -1313,18 +72,18 @@ async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
         "country": ["country", "Country"],
         "city": ["city", "City"],
     }
-    
+
     missing_fields = []
-    
+
     # Check for name (either full_name OR both first + last)
     full_name = lead.get("full_name") or lead.get("Full_name") or lead.get("Full Name")
     first_name = lead.get("first") or lead.get("First") or lead.get("first_name")
     last_name = lead.get("last") or lead.get("Last") or lead.get("last_name")
-    
+
     has_name = bool(full_name) or (bool(first_name) and bool(last_name))
     if not has_name:
         missing_fields.append("contact_name")
-    
+
     # Check other required fields
     for field_name, possible_keys in required_fields.items():
         found = False
@@ -1333,20 +92,20 @@ async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
             if value and str(value).strip():  # Check for non-empty string
                 found = True
                 break
-        
+
         if not found:
             missing_fields.append(field_name)
-    
+
     # Special check: state is required for US leads
     country = lead.get("country") or lead.get("Country") or ""
     country_lower = country.lower().strip() if country else ""
     us_aliases = ["united states", "usa", "us", "u.s.", "u.s.a.", "america", "united states of america"]
-    
+
     if country_lower in us_aliases:
         state = lead.get("state") or lead.get("State") or ""
         if not state or not str(state).strip():
             missing_fields.append("state (required for US leads)")
-    
+
     # Return structured rejection if any fields are missing
     if missing_fields:
         return False, {
@@ -1355,7 +114,7 @@ async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
             "message": f"Missing required fields: {', '.join(missing_fields)}",
             "failed_fields": missing_fields
         }
-    
+
     return True, {}
 
 async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
@@ -1378,12 +137,12 @@ async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
         # RFC-5322 simplified regex (original ASCII validation)
         pattern_ascii = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         is_valid_ascii = bool(re.match(pattern_ascii, email))
-        
+
         # RFC-6531 - Internationalized Email (Unicode support for international characters)
         # Allows emails like: anna.kosińska@cdprojekt.com, müller@siemens.de
         pattern_unicode = r"^[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}$"
         is_valid_unicode = bool(re.match(pattern_unicode, email, re.UNICODE))
-        
+
         # Accept if EITHER pattern matches (ASCII OR Unicode)
         is_valid = is_valid_ascii or is_valid_unicode
 
@@ -1399,7 +158,7 @@ async def check_email_regex(lead: dict) -> Tuple[bool, dict]:
             validation_cache[cache_key] = (False, rejection_reason)
             await log_validation_metrics(lead, {"passed": False, "reason": rejection_reason["message"]}, "email_regex")
             return False, rejection_reason
-        
+
         # Reject emails with "+" sign (prevents duplicate submission exploit via email aliasing)
         # Example: jwest+alias1@domain.com and jwest+alias2@domain.com are the same email
         if "+" in email.split("@")[0]:
@@ -1435,7 +194,7 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
     """
     Check if first name or last name appears in the email address.
     This is a HARD check that prevents costly API calls for leads that will fail anyway.
-    
+
     Returns:
         (True, {}): If first OR last name found in email
         (False, rejection_reason): If NO name found in email
@@ -1444,7 +203,7 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
         email = get_email(lead)
         first_name = get_first_name(lead)
         last_name = get_last_name(lead)
-        
+
         if not email:
             rejection_reason = {
                 "stage": "Stage 0: Hardcoded Checks",
@@ -1453,7 +212,7 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
                 "failed_fields": ["email"]
             }
             return False, rejection_reason
-        
+
         if not first_name or not last_name:
             rejection_reason = {
                 "stage": "Stage 0: Hardcoded Checks",
@@ -1462,48 +221,48 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
                 "failed_fields": ["first_name", "last_name"]
             }
             return False, rejection_reason
-        
+
         # Extract local part of email (before @)
         local_part = email.split("@")[0].lower() if "@" in email else email.lower()
-        
+
         # Normalize names for comparison (lowercase, remove special chars)
         first_normalized = re.sub(r'[^a-z0-9]', '', first_name.lower())
         last_normalized = re.sub(r'[^a-z0-9]', '', last_name.lower())
         local_normalized = re.sub(r'[^a-z0-9]', '', local_part)
-        
+
         # Check if either first OR last name appears in email
         # Pattern matching: full name, first initial + last, last + first initial, etc.
         # Also handles shortened names by checking if email local part is a prefix of the name
         # Examples: "rich@" matches "Richard" (prefix check), "greg@" matches "Gregory" (prefix check)
         # Security: Requires minimum 3 characters and checks that local part matches BEGINNING of name (not substring)
-        
+
         # Minimum match length to prevent false positives (e.g., "an" in "daniel")
         MIN_NAME_MATCH_LENGTH = 3
-        
+
         name_match = False
-        
+
         # Strategy 1: Check if normalized name patterns appear in local part
         # This handles: john@example.com, johndoe@example.com, jdoe@example.com
         patterns = []
-        
+
         # Full normalized names
         if len(first_normalized) >= MIN_NAME_MATCH_LENGTH:
             patterns.append(first_normalized)  # john
         if len(last_normalized) >= MIN_NAME_MATCH_LENGTH:
             patterns.append(last_normalized)  # doe
-        
+
         # Full name combinations
         patterns.append(f"{first_normalized}{last_normalized}")  # johndoe
-        
+
         # Initial + last name combinations
         if len(first_normalized) > 0:
             patterns.append(f"{first_normalized[0]}{last_normalized}")  # jdoe
             patterns.append(f"{last_normalized}{first_normalized[0]}")  # doej
-        
+
         # Check if any pattern appears in the normalized local part
         patterns = [p for p in patterns if p and len(p) >= MIN_NAME_MATCH_LENGTH]
         name_match = any(pattern in local_normalized for pattern in patterns)
-        
+
         # Strategy 2: Check if local part matches shortened versions of the name
         # This handles: greg@example.com where first_name is "Gregory"
         # Check if local_part is a prefix of the normalized name (shortened form)
@@ -1513,12 +272,12 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
             if len(first_normalized) >= len(local_normalized):
                 if first_normalized.startswith(local_normalized):
                     name_match = True
-            
+
             # Check if local_part matches beginning of last name (shortened)
             if not name_match and len(last_normalized) >= len(local_normalized):
                 if last_normalized.startswith(local_normalized):
                     name_match = True
-            
+
             # Check if name prefixes appear in local part (reverse direction)
             # e.g., "gregory" prefix "greg" in local_part "greg"
             if not name_match:
@@ -1528,7 +287,7 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
                     if name_prefix == local_normalized or name_prefix in local_normalized:
                         name_match = True
                         break
-                
+
                 # Check last name prefixes if still no match
                 if not name_match:
                     for length in range(MIN_NAME_MATCH_LENGTH, min(len(last_normalized) + 1, 7)):
@@ -1536,7 +295,7 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
                         if name_prefix == local_normalized or name_prefix in local_normalized:
                             name_match = True
                             break
-        
+
         if not name_match:
             rejection_reason = {
                 "stage": "Stage 0: Hardcoded Checks",
@@ -1546,10 +305,10 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
             }
             print(f"   ❌ Stage 0: {email} @ {get_company(lead)} - Name not found in email")
             return False, rejection_reason
-        
+
         print(f"   ✅ Stage 0: {email} @ {get_company(lead)} - Name found in email")
         return True, {}
-        
+
     except Exception as e:
         rejection_reason = {
             "stage": "Stage 0: Hardcoded Checks",
@@ -1562,17 +321,17 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
 async def check_general_purpose_email(lead: dict) -> Tuple[bool, dict]:
     """
     Check if email is a general-purpose email address (instant fail).
-    
+
     General-purpose emails are not personal contacts and should be rejected immediately
     to save API costs and maintain lead quality.
-    
+
     Returns:
         (True, {}): If email is NOT general purpose (personal contact)
         (False, rejection_reason): If email IS general purpose (instant fail)
     """
     try:
         email = get_email(lead)
-        
+
         if not email:
             rejection_reason = {
                 "stage": "Stage 0: Hardcoded Checks",
@@ -1581,7 +340,7 @@ async def check_general_purpose_email(lead: dict) -> Tuple[bool, dict]:
                 "failed_fields": ["email"]
             }
             return False, rejection_reason
-        
+
         # Define general-purpose email prefixes (must match calculate-rep-score exactly)
         general_purpose_prefixes = [
             'info@', 'hello@', 'owner@', 'ceo@', 'founder@', 'contact@', 'support@',
@@ -1590,12 +349,12 @@ async def check_general_purpose_email(lead: dict) -> Tuple[bool, dict]:
             'communications@', 'crew@', 'staff@', 'community@', 'reachus@', 'talk@',
             'service@'
         ]
-        
+
         email_lower = email.lower()
-        
+
         # Check if email starts with any general-purpose prefix
         matched_prefix = next((prefix for prefix in general_purpose_prefixes if email_lower.startswith(prefix)), None)
-        
+
         if matched_prefix:
             rejection_reason = {
                 "stage": "Stage 0: Hardcoded Checks",
@@ -1605,11 +364,11 @@ async def check_general_purpose_email(lead: dict) -> Tuple[bool, dict]:
             }
             print(f"   ❌ Stage 0: {email} @ {get_company(lead)} - General purpose email detected: {matched_prefix}")
             return False, rejection_reason
-        
+
         # Not a general-purpose email - proceed
         print(f"   ✅ Stage 0: {email} @ {get_company(lead)} - Personal email (not general purpose)")
         return True, {}
-        
+
     except Exception as e:
         rejection_reason = {
             "stage": "Stage 0: Hardcoded Checks",
@@ -1622,17 +381,17 @@ async def check_general_purpose_email(lead: dict) -> Tuple[bool, dict]:
 async def check_free_email_domain(lead: dict) -> Tuple[bool, dict]:
     """
     Check if email uses a free/personal email domain (instant fail).
-    
+
     B2B leads should use corporate email domains, not free consumer services.
     This prevents low-quality leads from free email providers.
-    
+
     Returns:
         (True, {}): If email is corporate domain
         (False, rejection_reason): If email is free domain (gmail, yahoo, etc.)
     """
     try:
         email = get_email(lead)
-        
+
         if not email:
             rejection_reason = {
                 "stage": "Stage 0: Hardcoded Checks",
@@ -1641,13 +400,13 @@ async def check_free_email_domain(lead: dict) -> Tuple[bool, dict]:
                 "failed_fields": ["email"]
             }
             return False, rejection_reason
-        
+
         # Extract domain from email
         try:
             domain = email.split("@")[1].lower() if "@" in email else ""
         except IndexError:
             return True, {}  # Invalid format handled by other checks
-        
+
         # Common free email domains (comprehensive list)
         free_domains = {
             'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'yahoo.fr',
@@ -1656,7 +415,7 @@ async def check_free_email_domain(lead: dict) -> Tuple[bool, dict]:
             'icloud.com', 'me.com', 'mac.com',
             'zoho.com', 'yandex.com', 'gmx.com', 'mail.ru'
         }
-        
+
         if domain in free_domains:
             rejection_reason = {
                 "stage": "Stage 0: Hardcoded Checks",
@@ -1666,10 +425,10 @@ async def check_free_email_domain(lead: dict) -> Tuple[bool, dict]:
             }
             print(f"   ❌ Stage 0: {email} @ {get_company(lead)} - Free email domain rejected: {domain}")
             return False, rejection_reason
-        
+
         # Corporate domain - proceed
         return True, {}
-        
+
     except Exception as e:
         rejection_reason = {
             "stage": "Stage 0: Hardcoded Checks",
@@ -1678,417 +437,6 @@ async def check_free_email_domain(lead: dict) -> Tuple[bool, dict]:
             "failed_fields": ["email"]
         }
         return False, rejection_reason
-
-async def check_domain_age(lead: dict) -> Tuple[bool, dict]:
-    """
-    Check domain age using WHOIS lookup.
-    Appends WHOIS data to lead object for reputation scoring.
-    """
-    website = get_website(lead)
-    if not website:
-        # Append default WHOIS data
-        lead["whois_checked"] = False
-        lead["domain_age_days"] = None
-        lead["domain_creation_date"] = None
-        return False, {
-            "stage": "Stage 1: DNS Layer",
-            "check_name": "check_domain_age",
-            "message": "No website provided",
-            "failed_fields": ["website"]
-        }
-
-    domain = extract_root_domain(website)
-    if not domain:
-        lead["whois_checked"] = False
-        lead["domain_age_days"] = None
-        lead["domain_creation_date"] = None
-        return False, {
-            "stage": "Stage 1: DNS Layer",
-            "check_name": "check_domain_age",
-            "message": f"Invalid website format: {website}",
-            "failed_fields": ["website"]
-        }
-
-    cache_key = f"domain_age:{domain}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["whois"]):
-        cached_result = validation_cache[cache_key]
-        # Restore cached WHOIS data to lead
-        cached_data = validation_cache.get(f"{cache_key}_data")
-        if cached_data:
-            lead["whois_checked"] = cached_data.get("checked", True)
-            lead["domain_age_days"] = cached_data.get("age_days")
-            lead["domain_creation_date"] = cached_data.get("creation_date")
-            lead["domain_registrar"] = cached_data.get("registrar")
-            lead["domain_nameservers"] = cached_data.get("nameservers")
-            lead["whois_updated_date"] = cached_data.get("updated_date")
-            lead["whois_updated_days_ago"] = cached_data.get("whois_updated_days_ago")
-        return cached_result
-
-    try:
-        # Implement actual WHOIS lookup
-        def get_domain_age_sync(domain_name):
-            try:
-                w = whois.whois(domain_name)
-                
-                # Extract registrar, nameservers, and updated_date for reputation scoring
-                registrar = getattr(w, 'registrar', None)
-                nameservers = getattr(w, 'name_servers', None)
-                if isinstance(nameservers, list):
-                    nameservers = nameservers[:3]  # Limit to first 3 nameservers
-                
-                # Extract updated_date for WHOIS stability check
-                updated_date = getattr(w, 'updated_date', None)
-                if updated_date:
-                    if isinstance(updated_date, list):
-                        updated_date = updated_date[0]
-                    # Make timezone-naive if timezone-aware
-                    if hasattr(updated_date, 'tzinfo') and updated_date.tzinfo is not None:
-                        updated_date = updated_date.replace(tzinfo=None)
-                
-                if w.creation_date:
-                    if isinstance(w.creation_date, list):
-                        creation_date = w.creation_date[0]
-                    else:
-                        creation_date = w.creation_date
-                    
-                    # Make creation_date timezone-naive if it's timezone-aware
-                    if creation_date.tzinfo is not None:
-                        creation_date = creation_date.replace(tzinfo=None)
-
-                    age_days = (datetime.now() - creation_date).days
-                    min_age_days = 7  # 7 days minimum
-
-                    # Calculate whois_updated_days_ago
-                    whois_updated_days_ago = None
-                    if updated_date:
-                        whois_updated_days_ago = (datetime.now() - updated_date).days
-
-                    # Return WHOIS data along with result
-                    whois_data = {
-                        "age_days": age_days,
-                        "creation_date": creation_date.isoformat(),
-                        "registrar": registrar,
-                        "nameservers": nameservers,
-                        "updated_date": updated_date.isoformat() if updated_date else None,
-                        "whois_updated_days_ago": whois_updated_days_ago,
-                        "checked": True
-                    }
-
-                    if age_days >= min_age_days:
-                        return (True, {}, whois_data)
-                    else:
-                        return (False, {
-                            "stage": "Stage 1: DNS Layer",
-                            "check_name": "check_domain_age",
-                            "message": f"Domain too new: {age_days} days (minimum: {min_age_days})",
-                            "failed_fields": ["website"]
-                        }, whois_data)
-                else:
-                    # Calculate whois_updated_days_ago even if creation_date is missing
-                    whois_updated_days_ago = None
-                    if updated_date:
-                        whois_updated_days_ago = (datetime.now() - updated_date).days
-                    
-                    whois_data = {
-                        "age_days": None,
-                        "creation_date": None,
-                        "registrar": registrar,
-                        "nameservers": nameservers,
-                        "updated_date": updated_date.isoformat() if updated_date else None,
-                        "whois_updated_days_ago": whois_updated_days_ago,
-                        "checked": True
-                    }
-                    return False, {
-                        "stage": "Stage 1: DNS Layer",
-                        "check_name": "check_domain_age",
-                        "message": "Could not determine domain creation date",
-                        "failed_fields": ["website"]
-                    }, whois_data
-            except Exception as e:
-                whois_data = {
-                    "age_days": None,
-                    "creation_date": None,
-                    "registrar": None,
-                    "nameservers": None,
-                    "updated_date": None,
-                    "whois_updated_days_ago": None,
-                    "checked": False,
-                    "error": str(e)
-                }
-                return False, {
-                    "stage": "Stage 1: DNS Layer",
-                    "check_name": "check_domain_age",
-                    "message": f"WHOIS lookup failed: {str(e)}",
-                    "failed_fields": ["website"]
-                }, whois_data
-
-        # Run WHOIS lookup in executor to avoid blocking
-        loop = asyncio.get_event_loop()
-        passed, rejection_reason, whois_data = await loop.run_in_executor(None, get_domain_age_sync, domain)
-        
-        # Append WHOIS data to lead
-        lead["whois_checked"] = whois_data.get("checked", True)
-        lead["domain_age_days"] = whois_data.get("age_days")
-        lead["domain_creation_date"] = whois_data.get("creation_date")
-        lead["domain_registrar"] = whois_data.get("registrar")
-        lead["domain_nameservers"] = whois_data.get("nameservers")
-        lead["whois_updated_date"] = whois_data.get("updated_date")
-        lead["whois_updated_days_ago"] = whois_data.get("whois_updated_days_ago")
-        if "error" in whois_data:
-            lead["whois_error"] = whois_data["error"]
-        
-        # Cache both result and data
-        result = (passed, rejection_reason)
-        validation_cache[cache_key] = result
-        validation_cache[f"{cache_key}_data"] = whois_data
-        
-        return result
-
-    except Exception as e:
-        # Append error state
-        lead["whois_checked"] = False
-        lead["domain_age_days"] = None
-        lead["domain_creation_date"] = None
-        lead["whois_error"] = str(e)
-        
-        result = (False, {
-            "stage": "Stage 1: DNS Layer",
-            "check_name": "check_domain_age",
-            "message": f"Domain age check failed: {str(e)}",
-            "failed_fields": ["website"]
-        })
-        validation_cache[cache_key] = result
-        return result
-
-async def check_mx_record(lead: dict) -> Tuple[bool, dict]:
-    """Check if domain has MX records"""
-    website = get_website(lead)
-    if not website:
-        return False, {
-            "stage": "Stage 1: DNS Layer",
-            "check_name": "check_mx_record",
-            "message": "No website provided",
-            "failed_fields": ["website"]
-        }
-
-    domain = extract_root_domain(website)
-    if not domain:
-        return False, {
-            "stage": "Stage 1: DNS Layer",
-            "check_name": "check_mx_record",
-            "message": f"Invalid website format: {website}",
-            "failed_fields": ["website"]
-        }
-
-    cache_key = f"mx_record:{domain}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
-        return validation_cache[cache_key]
-
-    try:
-        passed, msg = await check_domain_existence(domain)
-        if passed:
-            result = (True, {})
-        else:
-            result = (False, {
-                "stage": "Stage 1: DNS Layer",
-                "check_name": "check_mx_record",
-                "message": msg,
-                "failed_fields": ["website"]
-            })
-        validation_cache[cache_key] = result
-        return result
-    except Exception as e:
-        result = (False, {
-            "stage": "Stage 1: DNS Layer",
-            "check_name": "check_mx_record",
-            "message": f"MX record check failed: {str(e)}",
-            "failed_fields": ["website"]
-        })
-        validation_cache[cache_key] = result
-        return result
-
-async def check_spf_dmarc(lead: dict) -> Tuple[bool, dict]:
-    """
-    Check SPF and DMARC DNS records (SOFT check - always passes, appends data to lead)
-
-    This is a SOFT check that:
-    - Checks DNS TXT record for v=spf1
-    - Checks DNS TXT record at _dmarc.{domain} for v=DMARC1
-    - Checks DMARC policy for p=quarantine or p=reject
-    - Appends results to lead but NEVER rejects
-
-    Args:
-        lead: Dict containing email/website
-
-    Returns:
-        (True, dict): Always passes with empty dict (SOFT check)
-    """
-    def fail_lead(lead):
-        lead["has_spf"] = False
-        lead["has_dmarc"] = False
-        lead["dmarc_policy_strict"] = False
-        return lead
-        
-    email = get_email(lead)
-    if not email:
-        # No email to check - append default values
-        lead = fail_lead(lead)
-        return True, {}
-
-    # Extract domain from email
-    try:
-        domain = email.split("@")[1].lower() if "@" in email else ""
-        if not domain:
-            lead = fail_lead(lead)
-            return True, {}
-    except (IndexError, AttributeError):
-        lead = fail_lead(lead)
-        return True, {}
-
-    cache_key = f"spf_dmarc:{domain}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
-        cached_data = validation_cache[cache_key]
-        # Apply cached values to lead
-        lead["has_spf"] = cached_data.get("has_spf", False)
-        lead["has_dmarc"] = cached_data.get("has_dmarc", False)
-        lead["dmarc_policy_strict"] = cached_data.get("dmarc_policy_strict", False)
-        return True, {}
-
-    try:
-        # Initialize results
-        has_spf = False
-        has_dmarc = False
-        dmarc_policy_strict = False
-
-        # Run DNS lookups in executor to avoid blocking
-        loop = asyncio.get_event_loop()
-
-        def check_spf_sync(domain_name):
-            """Check if domain has SPF record"""
-            try:
-                txt_records = dns.resolver.resolve(domain_name, "TXT")
-                for record in txt_records:
-                    txt_string = "".join([s.decode() if isinstance(s, bytes) else s for s in record.strings])
-                    if "v=spf1" in txt_string.lower():
-                        return True
-                return False
-            except Exception:
-                return False
-
-        def check_dmarc_sync(domain_name):
-            """Check if domain has DMARC record and return policy strictness"""
-            try:
-                dmarc_domain = f"_dmarc.{domain_name}"
-                txt_records = dns.resolver.resolve(dmarc_domain, "TXT")
-                for record in txt_records:
-                    txt_string = "".join([s.decode() if isinstance(s, bytes) else s for s in record.strings])
-                    txt_lower = txt_string.lower()
-
-                    if "v=dmarc1" in txt_lower:
-                        # Check if policy is strict (quarantine or reject)
-                        is_strict = "p=quarantine" in txt_lower or "p=reject" in txt_lower
-                        return True, is_strict
-                return False, False
-            except Exception:
-                return False, False
-
-        # Execute DNS checks
-        has_spf = await loop.run_in_executor(None, check_spf_sync, domain)
-        has_dmarc, dmarc_policy_strict = await loop.run_in_executor(None, check_dmarc_sync, domain)
-
-        # Append results to lead (SOFT check data)
-        lead["has_spf"] = has_spf
-        lead["has_dmarc"] = has_dmarc
-        lead["dmarc_policy_strict"] = dmarc_policy_strict
-
-        # Create informational message
-        spf_status = "✓" if has_spf else "✗"
-        dmarc_status = "✓" if has_dmarc else "✗"
-        policy_status = "✓ (strict)" if dmarc_policy_strict else ("✓ (permissive)" if has_dmarc else "✗")
-
-        message = f"SPF: {spf_status}, DMARC: {dmarc_status}, Policy: {policy_status}"
-
-        # Cache the results
-        cache_data = {
-            "has_spf": has_spf,
-            "has_dmarc": has_dmarc,
-            "dmarc_policy_strict": dmarc_policy_strict,
-            "message": message
-        }
-        validation_cache[cache_key] = cache_data
-
-        print(f"📧 SPF/DMARC Check (SOFT): {domain} - {message}")
-
-        # ALWAYS return True (SOFT check never fails)
-        return True, {}
-
-    except Exception as e:
-        # On any error, append False values and pass
-        lead["has_spf"] = False
-        lead["has_dmarc"] = False
-        lead["dmarc_policy_strict"] = False
-
-        message = f"SPF/DMARC check error (SOFT - passed): {str(e)}"
-        print(f"⚠️ {message}")
-
-        # Cache the error result
-        cache_data = {
-            "has_spf": False,
-            "has_dmarc": False,
-            "dmarc_policy_strict": False,
-            "message": message
-        }
-        validation_cache[cache_key] = cache_data
-
-        # ALWAYS return True (SOFT check never fails)
-        return True, {}
-
-async def check_head_request(lead: dict) -> Tuple[bool, dict]:
-    """Wrapper around existing verify_company function"""
-    website = get_website(lead)
-    if not website:
-        return False, {
-            "stage": "Stage 0: Hardcoded Checks",
-            "check_name": "check_head_request",
-            "message": "No website provided",
-            "failed_fields": ["website"]
-        }
-
-    domain = extract_root_domain(website)
-    if not domain:
-        return False, {
-            "stage": "Stage 0: Hardcoded Checks",
-            "check_name": "check_head_request",
-            "message": f"Invalid website format: {website}",
-            "failed_fields": ["website"]
-        }
-
-    cache_key = f"head_request:{domain}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
-        return validation_cache[cache_key]
-
-    try:
-        passed, msg = await verify_company(domain)
-        if passed:
-            result = (True, {})
-        else:
-            result = (False, {
-                "stage": "Stage 0: Hardcoded Checks",
-                "check_name": "check_head_request",
-                "message": f"Website not accessible: {msg}",
-                "failed_fields": ["website"]
-            })
-        validation_cache[cache_key] = result
-        return result
-    except Exception as e:
-        result = (False, {
-            "stage": "Stage 0: Hardcoded Checks",
-            "check_name": "check_head_request",
-            "message": f"HEAD request check failed: {str(e)}",
-            "failed_fields": ["website"]
-        })
-        validation_cache[cache_key] = result
-        return result
 
 async def check_disposable(lead: dict) -> Tuple[bool, dict]:
     """Check if email domain is disposable"""
@@ -2132,1127 +480,36 @@ async def check_disposable(lead: dict) -> Tuple[bool, dict]:
         validation_cache[cache_key] = (False, rejection_reason)
         return False, rejection_reason
 
-async def check_dnsbl(lead: dict) -> Tuple[bool, dict]:
-    """
-    Check if lead's email domain is listed in Spamhaus DBL.
-    Appends DNSBL data to lead object for reputation scoring.
-
-    Args:
-        lead: Dict containing email field
-
-    Returns:
-        (bool, dict): (is_valid, rejection_reason_dict)
-    """
-    email = get_email(lead)
-    if not email:
-        # Append default DNSBL data
-        lead["dnsbl_checked"] = False
-        lead["dnsbl_blacklisted"] = False
-        lead["dnsbl_list"] = None
-        return False, {
-            "stage": "Stage 2: Domain Reputation",
-            "check_name": "check_dnsbl",
-            "message": "No email provided",
-            "failed_fields": ["email"]
-        }
-
-    # Extract domain from email
-    try:
-        domain = email.split("@")[1].lower() if "@" in email else ""
-        if not domain:
-            lead["dnsbl_checked"] = False
-            lead["dnsbl_blacklisted"] = False
-            lead["dnsbl_list"] = None
-            return True, {}  # Invalid format handled by other checks
-    except (IndexError, AttributeError):
-        lead["dnsbl_checked"] = False
-        lead["dnsbl_blacklisted"] = False
-        lead["dnsbl_list"] = None
-        return True, {}  # Invalid format handled by other checks
-
-    # Use root domain extraction helper
-    root_domain = extract_root_domain(domain)
-    if not root_domain:
-        lead["dnsbl_checked"] = False
-        lead["dnsbl_blacklisted"] = False
-        lead["dnsbl_list"] = None
-        return True, {}  # Could not extract - handled by other checks
-
-    cache_key = f"dnsbl_{root_domain}"
-    if cache_key in validation_cache and not validation_cache.is_expired(cache_key, CACHE_TTLS["dns_head"]):
-        cached_result = validation_cache[cache_key]
-        # Restore cached DNSBL data to lead
-        cached_data = validation_cache.get(f"{cache_key}_data")
-        if cached_data:
-            lead["dnsbl_checked"] = cached_data.get("checked", True)
-            lead["dnsbl_blacklisted"] = cached_data.get("blacklisted", False)
-            lead["dnsbl_list"] = cached_data.get("list", "cloudflare_dbl")
-            lead["dnsbl_domain"] = cached_data.get("domain", root_domain)
-        return cached_result
-
-    try:
-        async with API_SEMAPHORE:
-            # Perform Cloudflare DNSBL lookup (more reliable than Spamhaus for free tier)
-            # Cloudflare has no rate limits and fewer false positives
-            query = f"{root_domain}.dbl.cloudflare.com"
-
-            # Run DNS lookup in executor to avoid blocking
-            loop = asyncio.get_event_loop()
-            def dns_lookup():
-                try:
-                    print(f"   🔍 DNSBL Query: {query}")
-                    answers = dns.resolver.resolve(query, "A")
-                    # If we get A records, domain IS blacklisted
-                    a_records = [str(rdata) for rdata in answers]
-                    
-                    # Check for actual blacklist codes (127.0.0.x where x < 128)
-                    for record in a_records:
-                        if record.startswith("127.0.0."):
-                            print(f"   ⚠️  DNSBL returned A records: {a_records} → BLACKLISTED")
-                            return True
-                    
-                    # Any other response is not a confirmed blacklist
-                    print(f"   ✅ DNSBL returned A records: {a_records} → CLEAN (not a blacklist code)")
-                    return False
-                    
-                except dns.resolver.NXDOMAIN:
-                    # NXDOMAIN = not in blacklist (expected for clean domains)
-                    print(f"   ✅ DNSBL returned NXDOMAIN → CLEAN")
-                    return False  # No record = domain is clean
-                except dns.resolver.NoAnswer:
-                    # No answer = not in blacklist
-                    print(f"   ✅ DNSBL returned NoAnswer → CLEAN")
-                    return False
-                except dns.resolver.Timeout:
-                    # Timeout = treat as clean (don't block on infrastructure issues)
-                    print(f"   ⚠️  DNSBL query timeout for {query} → treating as CLEAN")
-                    return False
-                except Exception as e:
-                    # On any DNS error, default to valid (don't block on infrastructure issues)
-                    print(f"   ⚠️  DNS lookup error for {query}: {type(e).__name__}: {e} → treating as CLEAN")
-                    return False
-
-            is_blacklisted = await loop.run_in_executor(None, dns_lookup)
-
-            # Append DNSBL data to lead
-            lead["dnsbl_checked"] = True
-            lead["dnsbl_blacklisted"] = is_blacklisted
-            lead["dnsbl_list"] = "cloudflare_dbl"
-            lead["dnsbl_domain"] = root_domain
-
-            # Cache the data separately for restoration
-            dnsbl_data = {
-                "checked": True,
-                "blacklisted": is_blacklisted,
-                "list": "cloudflare_dbl",
-                "domain": root_domain
-            }
-            validation_cache[f"{cache_key}_data"] = dnsbl_data
-
-            if is_blacklisted:
-                result = (False, {
-                    "stage": "Stage 2: Domain Reputation",
-                    "check_name": "check_dnsbl",
-                    "message": f"Domain {root_domain} blacklisted in Cloudflare DBL",
-                    "failed_fields": ["email"]
-                })
-                print(f"❌ DNSBL: Domain {root_domain} found in Cloudflare blacklist")
-            else:
-                result = (True, {})
-                print(f"✅ DNSBL: Domain {root_domain} clean")
-
-            validation_cache[cache_key] = result
-            return result
-
-    except Exception as e:
-        # On any unexpected error, append error state
-        lead["dnsbl_checked"] = True
-        lead["dnsbl_blacklisted"] = False
-        lead["dnsbl_list"] = "spamhaus_dbl"
-        lead["dnsbl_domain"] = root_domain
-        lead["dnsbl_error"] = str(e)
-        
-        result = (True, {})  # Don't block on infrastructure issues
-        validation_cache[cache_key] = result
-        print(f"⚠️ DNSBL check error for {root_domain}: {e}")
-        return result
-
-# Stage 3: Email Verification
-# NOTE: Single-email validation functions (check_truelist_email, check_myemailverifier_email)
-# have been REMOVED as of Dec 2024. All email validation now uses TrueList BATCH API
-# via run_batch_automated_checks() for efficiency.
-# See: submit_truelist_batch(), poll_truelist_batch(), parse_truelist_batch_csv()
-
-
-# ============================================================================
-# TrueList Batch Email Validation Functions
-# ============================================================================
-# These functions support batch email verification for improved throughput.
-# See tasks9.md for the full migration plan.
-# API Reference: https://apidocs.truelist.io/#tag/Batch-email-validation
-# ============================================================================
-
-async def submit_truelist_batch(emails: List[str]) -> str:
-    """
-    Submit a list of emails to TrueList batch API.
-    
-    This function submits emails for batch verification. The batch is processed
-    asynchronously by TrueList and must be polled for completion using
-    poll_truelist_batch().
-    
-    API Reference: https://apidocs.truelist.io/#tag/Batch-email-validation
-    
-    Args:
-        emails: List of email addresses to validate (max 5000 per batch)
-    
-    Returns:
-        batch_id: UUID of the created batch for polling
-    
-    Raises:
-        EmailVerificationUnavailableError: If batch submission fails
-        ValueError: If no emails provided or API key not configured
-    
-    Example:
-        batch_id = await submit_truelist_batch(["user1@example.com", "user2@example.com"])
-        # Then poll with: results = await poll_truelist_batch(batch_id)
-    """
-    if not emails:
-        raise ValueError("No emails provided for batch validation")
-    
-    if not TRUELIST_API_KEY:
-        raise EmailVerificationUnavailableError("TRUELIST_API_KEY not configured")
-    
-    # Log batch submission
-    print(f"\n📧 TrueList Batch: Submitting {len(emails)} emails for validation...")
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            # TrueList batch API endpoint
-            url = "https://api.truelist.io/api/v1/batches"
-            
-            # IMPORTANT: TrueList batch API requires multipart/form-data, NOT JSON body
-            # The 'data' parameter is a JSON string sent as a form field
-            headers = {
-                "Authorization": f"Bearer {TRUELIST_API_KEY}",
-                # Note: Do NOT set Content-Type header - aiohttp sets it automatically for FormData
-            }
-            
-            # CRITICAL: TrueList batch API rejects the ENTIRE batch if ANY email 
-            # doesn't have an @ sign. Pre-filter to avoid this.
-            # Emails without @ will be handled separately with immediate rejection.
-            valid_emails = [email for email in emails if '@' in email]
-            invalid_emails = [email for email in emails if '@' not in email]
-            
-            if invalid_emails:
-                print(f"   ⚠️  Filtered {len(invalid_emails)} invalid emails (no @ sign)")
-            
-            if not valid_emails:
-                print(f"   ❌ No valid emails to submit (all filtered)")
-                return None  # Return None to indicate no batch was created
-            
-            # IMPORTANT: TrueList file upload is currently broken (returns 500)
-            # Using JSON data format instead which works correctly
-            # JSON format: {"data": [["email1"], ["email2"]], "validation_strategy": "accurate"}
-            
-            # Convert emails to JSON array format: [["email1"], ["email2"], ...]
-            email_data = [[email] for email in valid_emails]
-            
-            # Generate unique batch name to avoid "Duplicate file upload" error
-            unique_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.csv"
-            
-            json_payload = {
-                "data": email_data,
-                "validation_strategy": TRUELIST_BATCH_STRATEGY,  # "accurate" or "fast"
-                "name": unique_name  # Unique name prevents duplicate detection
-            }
-            
-            print(f"   📤 POST {url} (JSON format)")
-            print(f"   📋 Batch name: {unique_name}")
-            print(f"   📋 Strategy: {TRUELIST_BATCH_STRATEGY}")
-            print(f"   📊 Email count: {len(valid_emails)}")
-            
-            async with session.post(
-                url, 
-                headers=headers, 
-                json=json_payload,  # Use JSON format (file upload returns 500)
-                timeout=60,  # 60s timeout for batch submission
-                proxy=HTTP_PROXY_URL
-            ) as response:
-                
-                # Handle error responses
-                if response.status == 401:
-                    raise EmailVerificationUnavailableError("TrueList API: Invalid or expired API key")
-                elif response.status == 402:
-                    raise EmailVerificationUnavailableError("TrueList API: Insufficient credits")
-                elif response.status == 429:
-                    raise EmailVerificationUnavailableError("TrueList API: Rate limited")
-                elif response.status >= 500:
-                    raise EmailVerificationUnavailableError(f"TrueList API server error: HTTP {response.status}")
-                elif response.status != 200:
-                    error_text = await response.text()
-                    raise EmailVerificationUnavailableError(f"TrueList API error: HTTP {response.status} - {error_text[:200]}")
-                
-                # Parse successful response
-                data = await response.json()
-                
-                batch_id = data.get("id")
-                batch_state = data.get("batch_state", "unknown")
-                email_count = data.get("email_count", 0)
-                
-                if not batch_id:
-                    raise EmailVerificationUnavailableError("TrueList API: No batch_id in response")
-                
-                print(f"   ✅ Batch created successfully!")
-                print(f"   🆔 Batch ID: {batch_id}")
-                print(f"   📊 State: {batch_state}")
-                print(f"   📧 Emails queued: {email_count}")
-                
-                return batch_id
-    
-    except aiohttp.ClientError as e:
-        raise EmailVerificationUnavailableError(f"TrueList batch submission network error: {str(e)}")
-    except asyncio.TimeoutError:
-        raise EmailVerificationUnavailableError("TrueList batch submission timed out (60s)")
-    except EmailVerificationUnavailableError:
-        raise
-    except Exception as e:
-        raise EmailVerificationUnavailableError(f"TrueList batch submission error: {str(e)}")
-
-
-async def poll_truelist_batch(batch_id: str) -> Dict[str, dict]:
-    """
-    Poll TrueList batch until completion or timeout.
-    
-    This function polls the batch status every TRUELIST_BATCH_POLL_INTERVAL seconds
-    until the batch is complete or TRUELIST_BATCH_TIMEOUT is reached. When complete,
-    it downloads and parses the annotated CSV to get per-email results.
-    
-    API Reference: https://apidocs.truelist.io/#tag/Batch-email-validation
-    
-    Args:
-        batch_id: UUID of the batch to poll (from submit_truelist_batch)
-    
-    Returns:
-        Dict mapping email -> result dict:
-        {
-            "email@domain.com": {
-                "status": "email_ok",      # TrueList email_sub_state
-                "passed": True,            # True if email_ok
-                "needs_retry": False,      # True if unknown/timeout/error
-                "rejection_reason": None   # Rejection reason if failed
-            },
-            ...
-        }
-    
-    Raises:
-        EmailVerificationUnavailableError: If polling times out or batch fails
-    
-    Example:
-        batch_id = await submit_truelist_batch(emails)
-        results = await poll_truelist_batch(batch_id)
-        for email, result in results.items():
-            if result["passed"]:
-                print(f"{email} is valid")
-    """
-    import time
-    import csv
-    from io import StringIO
-    
-    if not batch_id:
-        raise ValueError("No batch_id provided for polling")
-    
-    if not TRUELIST_API_KEY:
-        raise EmailVerificationUnavailableError("TRUELIST_API_KEY not configured")
-    
-    url = f"https://api.truelist.io/api/v1/batches/{batch_id}"
-    headers = {"Authorization": f"Bearer {TRUELIST_API_KEY}"}
-    
-    start_time = time.time()
-    poll_count = 0
-    
-    print(f"\n⏳ TrueList Batch: Polling for completion...")
-    print(f"   🆔 Batch ID: {batch_id}")
-    print(f"   ⏱️  Poll interval: {TRUELIST_BATCH_POLL_INTERVAL}s")
-    print(f"   ⏰ Timeout: {TRUELIST_BATCH_TIMEOUT // 60} minutes")
-    
-    while True:
-        elapsed = time.time() - start_time
-        
-        # Check timeout
-        if elapsed >= TRUELIST_BATCH_TIMEOUT:
-            raise EmailVerificationUnavailableError(
-                f"TrueList batch polling timed out after {TRUELIST_BATCH_TIMEOUT // 60} minutes"
-            )
-        
-        poll_count += 1
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, 
-                    headers=headers, 
-                    timeout=30,
-                    proxy=HTTP_PROXY_URL
-                ) as response:
-                    
-                    if response.status == 404:
-                        raise EmailVerificationUnavailableError(f"TrueList batch not found: {batch_id}")
-                    elif response.status == 401:
-                        raise EmailVerificationUnavailableError("TrueList API: Invalid or expired API key")
-                    elif response.status >= 500:
-                        # Server error - retry polling
-                        print(f"   ⚠️  Poll #{poll_count}: Server error (HTTP {response.status}), retrying...")
-                        await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
-                        continue
-                    elif response.status != 200:
-                        error_text = await response.text()
-                        raise EmailVerificationUnavailableError(
-                            f"TrueList API error: HTTP {response.status} - {error_text[:200]}"
-                        )
-                    
-                    # Success (HTTP 200) - parse JSON response
-                    data = await response.json()
-                    
-                    batch_state = data.get("batch_state", "unknown")
-                    email_count = data.get("email_count", 0)
-                    processed_count = data.get("processed_count", 0)
-                    ok_count = data.get("ok_count", 0)
-                    unknown_count = data.get("unknown_count", 0)
-                    
-                    # Progress update every 5 polls or when state changes
-                    if poll_count % 5 == 1 or batch_state == "completed":
-                        progress_pct = (processed_count / email_count * 100) if email_count > 0 else 0
-                        print(f"   📊 Poll #{poll_count} ({elapsed:.0f}s): {batch_state} - {processed_count}/{email_count} ({progress_pct:.0f}%)")
-                    
-                    # Check if batch is complete
-                    # CRITICAL: TrueList may say "completed" before all emails are processed!
-                    # We must check BOTH state AND processed_count
-                    if batch_state == "completed" and processed_count >= email_count:
-                        print(f"   ✅ Batch fully completed!")
-                        print(f"   📧 Total: {email_count}, OK: {ok_count}, Unknown: {unknown_count}")
-                    elif batch_state == "completed" and processed_count < email_count:
-                        # TrueList says completed but not all processed - keep polling!
-                        print(f"   ⚠️ Batch says 'completed' but only {processed_count}/{email_count} processed - continuing to poll...")
-                        await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
-                        continue
-                    
-                    if batch_state == "completed":
-                        
-                        # CRITICAL: Wait for CSV generation to finish
-                        # TrueList's "completed" state doesn't mean CSV is ready
-                        # CSV generation happens asynchronously after processing
-                        CSV_GENERATION_DELAY = 15  # seconds
-                        print(f"   ⏳ Waiting {CSV_GENERATION_DELAY}s for CSV generation...")
-                        await asyncio.sleep(CSV_GENERATION_DELAY)
-                        
-                        # Re-fetch batch data to get fresh CSV URLs
-                        print(f"   🔄 Re-fetching batch data for fresh CSV URLs...")
-                        async with session.get(url, headers=headers, timeout=30, proxy=HTTP_PROXY_URL) as refresh_response:
-                            if refresh_response.status == 200:
-                                data = await refresh_response.json()
-                        
-                        # ============================================================
-                        # FALLBACK: CSV downloads (the /emails endpoint returns 404)
-                        # ============================================================
-                        
-                        # Get the annotated CSV URL - try multiple possible fields
-                        annotated_csv_url = (
-                            data.get("annotated_csv_url") or 
-                            data.get("results_url") or 
-                            data.get("download_url") or
-                            data.get("csv_url")
-                        )
-                        
-                        if not annotated_csv_url:
-                            # CSV URL is null - TrueList may still be generating it
-                            # Wait and retry polling - TrueList CSV generation is ASYNC
-                            # and can take 30-60+ seconds after batch shows "completed"
-                            CSV_URL_RETRY_DELAY = 10  # seconds
-                            CSV_URL_MAX_RETRIES = 6   # Total: 60 seconds of waiting
-                            
-                            for csv_retry in range(CSV_URL_MAX_RETRIES):
-                                print(f"   ⚠️  No CSV URL in response, waiting {CSV_URL_RETRY_DELAY}s and retrying ({csv_retry + 1}/{CSV_URL_MAX_RETRIES})...")
-                                await asyncio.sleep(CSV_URL_RETRY_DELAY)
-                                
-                                # Re-poll the batch
-                                async with session.get(url, headers=headers, timeout=30, proxy=HTTP_PROXY_URL) as retry_response:
-                                    if retry_response.status == 200:
-                                        retry_data = await retry_response.json()
-                                        annotated_csv_url = retry_data.get("annotated_csv_url")
-                                        if annotated_csv_url:
-                                            print(f"   ✅ CSV URL now available after retry!")
-                                            data = retry_data  # Update data for later use
-                                            break
-                            
-                            if not annotated_csv_url:
-                                # ================================================================
-                                # FALLBACK: Combine multiple CSV files when annotated_csv_url is null
-                                # TrueList provides separate CSVs for different email categories:
-                                # - highest_reach_csv_url: email_ok + accept_all emails
-                                # - only_invalid_csv_url: failed emails (failed_mx, failed_no_mailbox, etc)
-                                # By combining these, we can reconstruct all email results!
-                                # ================================================================
-                                print(f"   ⚠️  annotated_csv_url is null - trying to combine alternative CSVs...")
-                                
-                                combined_results = {}
-                                
-                                # Try highest_reach_csv_url (contains ok + accept_all)
-                                highest_reach_url = data.get("highest_reach_csv_url")
-                                if highest_reach_url:
-                                    print(f"   📥 Downloading highest_reach CSV...")
-                                    try:
-                                        reach_results = await _download_and_parse_batch_csv(highest_reach_url, headers)
-                                        if reach_results:
-                                            print(f"   ✅ Got {len(reach_results)} emails from highest_reach CSV")
-                                            combined_results.update(reach_results)
-                                    except Exception as e:
-                                        print(f"   ⚠️  highest_reach CSV failed: {str(e)[:50]}")
-                                
-                                # Try only_invalid_csv_url (contains failed emails)
-                                invalid_url = data.get("only_invalid_csv_url")
-                                if invalid_url:
-                                    print(f"   📥 Downloading only_invalid CSV...")
-                                    try:
-                                        invalid_results = await _download_and_parse_batch_csv(invalid_url, headers)
-                                        if invalid_results:
-                                            print(f"   ✅ Got {len(invalid_results)} emails from only_invalid CSV")
-                                            combined_results.update(invalid_results)
-                                    except Exception as e:
-                                        print(f"   ⚠️  only_invalid CSV failed: {str(e)[:50]}")
-                                
-                                # Try safest_bet_csv_url as additional source (email_ok only)
-                                safest_url = data.get("safest_bet_csv_url")
-                                if safest_url and len(combined_results) < email_count:
-                                    print(f"   📥 Downloading safest_bet CSV...")
-                                    try:
-                                        safest_results = await _download_and_parse_batch_csv(safest_url, headers)
-                                        if safest_results:
-                                            # Only add emails we don't already have
-                                            new_count = 0
-                                            for email, result in safest_results.items():
-                                                if email not in combined_results:
-                                                    combined_results[email] = result
-                                                    new_count += 1
-                                            if new_count > 0:
-                                                print(f"   ✅ Got {new_count} additional emails from safest_bet CSV")
-                                    except Exception as e:
-                                        print(f"   ⚠️  safest_bet CSV failed: {str(e)[:50]}")
-                                
-                                if combined_results:
-                                    print(f"   🎉 Combined {len(combined_results)} total email results from alternative CSVs!")
-                                    return combined_results
-                                
-                                # If alternative CSVs also failed, try constructed URLs
-                                constructed_url = f"https://api.truelist.io/api/v1/batches/{batch_id}/download"
-                                print(f"   ⚠️  Alternative CSVs failed, trying constructed URL: {constructed_url}")
-                                
-                                try:
-                                    results = await _download_and_parse_batch_csv(constructed_url, headers)
-                                    if results:
-                                        print(f"   ✅ Constructed URL worked! Parsed {len(results)} email results")
-                                        return results
-                                except Exception as download_err:
-                                    print(f"   ⚠️  Constructed URL failed: {str(download_err)[:100]}")
-                                
-                                # Final fallback: Use batch stats (won't work for individual emails)
-                                print(f"   ❌ Could not download CSV results after all fallbacks. Full response:")
-                                print(f"   {json.dumps(data, default=str)[:500]}")
-                                return _parse_batch_status_from_response(data, batch_id)
-                        
-                        # Download and parse the CSV
-                        print(f"   📥 Downloading results from: {annotated_csv_url[:80]}...")
-                        results = await _download_and_parse_batch_csv(annotated_csv_url, headers)
-                        
-                        print(f"   ✅ Parsed {len(results)} email results")
-                        
-                        # CRITICAL FIX: If CSV has fewer results than expected, use fallback CSVs
-                        if len(results) < email_count:
-                            print(f"   ⚠️  CSV only had {len(results)}/{email_count} emails - using fallback CSVs...")
-                            
-                            combined_results = {}
-                            
-                            # Try highest_reach_csv_url (contains ok + accept_all)
-                            highest_reach_url = data.get("highest_reach_csv_url")
-                            if highest_reach_url:
-                                print(f"   📥 Fallback: Downloading highest_reach CSV...")
-                                try:
-                                    reach_results = await _download_and_parse_batch_csv(highest_reach_url, headers)
-                                    if reach_results:
-                                        print(f"   ✅ Got {len(reach_results)} emails from highest_reach CSV")
-                                        combined_results.update(reach_results)
-                                except Exception as e:
-                                    print(f"   ⚠️  highest_reach CSV failed: {str(e)[:50]}")
-                            
-                            # Try only_invalid_csv_url (contains failed emails)
-                            invalid_url = data.get("only_invalid_csv_url")
-                            if invalid_url:
-                                print(f"   📥 Fallback: Downloading only_invalid CSV...")
-                                try:
-                                    invalid_results = await _download_and_parse_batch_csv(invalid_url, headers)
-                                    if invalid_results:
-                                        print(f"   ✅ Got {len(invalid_results)} emails from only_invalid CSV")
-                                        combined_results.update(invalid_results)
-                                except Exception as e:
-                                    print(f"   ⚠️  only_invalid CSV failed: {str(e)[:50]}")
-                            
-                            # Try safest_bet_csv_url as additional source
-                            safest_url = data.get("safest_bet_csv_url")
-                            if safest_url and len(combined_results) < email_count:
-                                print(f"   📥 Fallback: Downloading safest_bet CSV...")
-                                try:
-                                    safest_results = await _download_and_parse_batch_csv(safest_url, headers)
-                                    if safest_results:
-                                        print(f"   ✅ Got {len(safest_results)} emails from safest_bet CSV")
-                                        for email, result in safest_results.items():
-                                            if email not in combined_results:
-                                                combined_results[email] = result
-                                except Exception as e:
-                                    print(f"   ⚠️  safest_bet CSV failed: {str(e)[:50]}")
-                            
-                            if combined_results:
-                                print(f"   ✅ Combined fallback CSVs: {len(combined_results)} total emails")
-                                return combined_results
-                            else:
-                                print(f"   ❌ All fallback CSVs failed or empty")
-                                # Return empty results - will trigger retry logic
-                        
-                        return results
-                    
-                    elif batch_state == "failed":
-                        raise EmailVerificationUnavailableError(
-                            f"TrueList batch failed: {data.get('error', 'Unknown error')}"
-                        )
-                    
-                    # Still processing - wait and poll again
-                    await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
-        
-        except EmailVerificationUnavailableError:
-            raise
-        except aiohttp.ClientError as e:
-            # Network error - retry polling
-            print(f"   ⚠️  Poll #{poll_count}: Network error ({str(e)[:50]}), retrying...")
-            await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
-        except asyncio.TimeoutError:
-            # Timeout on single request - retry polling
-            print(f"   ⚠️  Poll #{poll_count}: Request timeout, retrying...")
-            await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
-        except Exception as e:
-            print(f"   ⚠️  Poll #{poll_count}: Unexpected error ({str(e)[:50]}), retrying...")
-            await asyncio.sleep(TRUELIST_BATCH_POLL_INTERVAL)
-
-
-async def _download_and_parse_batch_csv(csv_url: str, headers: dict) -> Dict[str, dict]:
-    """
-    Download and parse TrueList annotated CSV results.
-    
-    IMPORTANT: CSV downloads are done WITHOUT proxy because TrueList's
-    S3 signed URLs may not work correctly through proxy servers.
-    The API calls (submit, poll) still use proxy for rate limit protection.
-    
-    Args:
-        csv_url: URL to the annotated CSV file
-        headers: Auth headers for the request
-    
-    Returns:
-        Dict mapping email -> result dict
-    """
-    import csv
-    from io import StringIO
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            # NOTE: NO PROXY for CSV downloads - S3 signed URLs don't work through proxies
-            async with session.get(
-                csv_url, 
-                headers=headers, 
-                timeout=60
-                # proxy removed - CSVs must be downloaded directly
-            ) as response:
-                
-                if response.status != 200:
-                    raise EmailVerificationUnavailableError(
-                        f"Failed to download batch CSV: HTTP {response.status}"
-                    )
-                
-                csv_content = await response.text()
-                
-                return parse_truelist_batch_csv(csv_content)
-    
-    except aiohttp.ClientError as e:
-        raise EmailVerificationUnavailableError(f"Failed to download batch CSV: {str(e)}")
-    except asyncio.TimeoutError:
-        raise EmailVerificationUnavailableError("Batch CSV download timed out")
-
-
-async def _fetch_batch_email_results(batch_id: str, headers: dict, email_count: int) -> Dict[str, dict]:
-    """
-    Fetch email results using TrueList's /emails endpoint with pagination.
-    
-    This is the CORRECT way to retrieve individual email results per the API docs:
-    GET /api/v1/batches/{batch_uuid}/emails
-    
-    Args:
-        batch_id: UUID of the completed batch
-        headers: Auth headers with Bearer token
-        email_count: Expected number of emails (for progress reporting)
-    
-    Returns:
-        Dict mapping email -> result dict with status, passed, needs_retry
-    """
-    # Define which statuses pass, fail, or need retry
-    PASS_STATUSES = {"email_ok"}
-    RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error"}
-    
-    results = {}
-    page = 1
-    per_page = 100  # Maximum allowed per the docs
-    
-    print(f"   📥 Fetching email results via /emails endpoint (paginated)...")
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            while True:
-                url = f"https://api.truelist.io/api/v1/batches/{batch_id}/emails?page={page}&per_page={per_page}"
-                
-                async with session.get(url, headers=headers, timeout=30, proxy=HTTP_PROXY_URL) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        print(f"   ⚠️ /emails endpoint returned HTTP {response.status}: {error_text[:100]}")
-                        break
-                    
-                    data = await response.json()
-                    email_addresses = data.get("email_addresses", [])
-                    
-                    if not email_addresses:
-                        # No more results
-                        break
-                    
-                    # Process each email result
-                    for email_data in email_addresses:
-                        # The email object structure from the API
-                        email = email_data.get("email_address", email_data.get("email", "")).lower()
-                        if not email:
-                            continue
-                        
-                        email_state = email_data.get("email_state", "unknown")
-                        email_sub_state = email_data.get("email_sub_state", email_state)
-                        
-                        # Determine pass/fail/retry
-                        if email_sub_state in PASS_STATUSES:
-                            results[email] = {
-                                "status": email_sub_state,
-                                "passed": True,
-                                "needs_retry": False,
-                                "rejection_reason": None
-                            }
-                        elif email_sub_state in RETRY_STATUSES:
-                            results[email] = {
-                                "status": email_sub_state,
-                                "passed": False,
-                                "needs_retry": True,
-                                "rejection_reason": None
-                            }
-                        else:
-                            # Failed status
-                            results[email] = {
-                                "status": email_sub_state,
-                                "passed": False,
-                                "needs_retry": False,
-                                "rejection_reason": {
-                                    "stage": "Stage 3",
-                                    "check_name": "truelist_email_verification",
-                                    "message": f"Email verification failed: {email_sub_state}",
-                                    "truelist_status": email_sub_state
-                                }
-                            }
-                    
-                    print(f"   📄 Page {page}: Got {len(email_addresses)} emails (total so far: {len(results)})")
-                    
-                    # Check if we got all expected emails
-                    if len(results) >= email_count:
-                        break
-                    
-                    # Check if this was the last page (fewer than per_page results)
-                    if len(email_addresses) < per_page:
-                        break
-                    
-                    page += 1
-                    
-                    # Small delay between pages to avoid rate limiting
-                    await asyncio.sleep(0.5)
-        
-        print(f"   ✅ Fetched {len(results)}/{email_count} email results via API")
-        return results
-        
-    except Exception as e:
-        print(f"   ⚠️ Error fetching email results: {str(e)[:100]}")
-        return results
-
-
-def parse_truelist_batch_csv(csv_content: str) -> Dict[str, dict]:
-    """
-    Parse TrueList annotated CSV into email -> result mapping.
-    
-    Maps TrueList statuses to our internal format:
-    - email_ok → passed=True
-    - accept_all, disposable, failed_* → passed=False  
-    - unknown, timeout, error → needs_retry=True
-    
-    Args:
-        csv_content: Raw CSV content from TrueList
-    
-    Returns:
-        Dict mapping email -> result dict with status, passed, needs_retry, rejection_reason
-    """
-    import csv
-    from io import StringIO
-    
-    results = {}
-    
-    # Define which statuses pass, fail, or need retry
-    PASS_STATUSES = {"email_ok"}
-    RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error"}
-    # All other statuses are considered failures
-    
-    try:
-        reader = csv.DictReader(StringIO(csv_content))
-        
-        # Debug: Print first few lines and column names
-        rows = list(reader)
-        if rows:
-            print(f"   📋 CSV columns: {list(rows[0].keys())}")
-            print(f"   📋 First row: {dict(list(rows[0].items())[:5])}")  # First 5 fields
-        else:
-            print(f"   ⚠️ CSV is empty! Content preview: {csv_content[:200]}")
-        
-        for row in rows:
-            # TrueList CSV has columns: Try multiple column name formats
-            # API may use different column names: "Email Address", "email", "Email", etc.
-            email = (row.get("Email Address") or row.get("email") or 
-                     row.get("Email") or row.get("email_address") or "").strip().lower()
-            
-            if not email:
-                continue
-            
-            # Get the detailed status - try multiple column name formats
-            # TrueList uses "Email Sub-State" or "Email State"
-            status = (row.get("Email Sub-State") or row.get("email_sub_state") or
-                      row.get("Email State") or row.get("email_state") or 
-                      row.get("sub_state") or row.get("state") or "unknown")
-            status = status.lower() if status else "unknown"
-            
-            # Determine pass/fail/retry
-            if status in PASS_STATUSES:
-                results[email] = {
-                    "status": status,
-                    "passed": True,
-                    "needs_retry": False,
-                    "rejection_reason": None
-                }
-            elif status in RETRY_STATUSES:
-                results[email] = {
-                    "status": status,
-                    "passed": False,
-                    "needs_retry": True,
-                    "rejection_reason": None  # Don't reject - will retry
-                }
-            else:
-                # Failed status - build rejection reason
-                rejection_reason = _build_email_rejection_reason(status)
-                results[email] = {
-                    "status": status,
-                    "passed": False,
-                    "needs_retry": False,
-                    "rejection_reason": rejection_reason
-                }
-        
-        return results
-    
-    except Exception as e:
-        raise EmailVerificationUnavailableError(f"Failed to parse batch CSV: {str(e)}")
-
-
-def _parse_batch_status_from_response(data: dict, batch_id: str) -> Dict[str, dict]:
-    """
-    Fallback: Parse batch results from API response when CSV URL is not available.
-    
-    This is used when annotated_csv_url is missing from the response.
-    Returns aggregate counts but may not have per-email details.
-    
-    Args:
-        data: Batch API response data
-        batch_id: Batch ID for logging
-    
-    Returns:
-        Dict with limited results (may need alternative approach)
-    """
-    print(f"   ⚠️  Using fallback batch parsing (no CSV URL)")
-    
-    # This is a fallback - in practice, TrueList should always provide the CSV URL
-    # Log a warning and return empty results to trigger retry logic
-    email_count = data.get("email_count", 0)
-    ok_count = data.get("ok_count", 0)
-    unknown_count = data.get("unknown_count", 0)
-    
-    print(f"   📊 Batch stats: {email_count} total, {ok_count} ok, {unknown_count} unknown")
-    print(f"   ⚠️  Cannot map to individual emails without CSV - returning empty results")
-    
-    # Return empty dict - the orchestrator should handle this case
-    return {}
-
-
-def _build_email_rejection_reason(status: str) -> dict:
-    """
-    Build a rejection reason dict for a failed email status.
-    
-    Maps TrueList statuses to user-friendly rejection messages.
-    
-    Args:
-        status: TrueList email_sub_state value
-    
-    Returns:
-        Rejection reason dict compatible with our validation format
-    """
-    # Map TrueList statuses to rejection messages
-    # Note: TrueList uses both "disposable" and "is_disposable" for different cases
-    status_messages = {
-        "accept_all": "Email is catch-all/accept-all (instant rejection)",
-        "disposable": "Email is from a disposable provider",
-        "is_disposable": "Email is from a disposable provider",
-        "failed_no_mailbox": "Mailbox does not exist",
-        "failed_syntax_check": "Invalid email syntax",
-        "failed_mx_check": "Domain has no MX records (cannot receive email)",
-        "role": "Email is a role-based address (e.g., info@, support@)",
-        "invalid": "Email is invalid",
-        "spam_trap": "Email is a known spam trap",
-        "complainer": "Email owner is a known complainer",
-        "ok_for_all": "Email domain accepts all emails (catch-all)",
-    }
-    
-    message = status_messages.get(status, f"Email status '{status}' (only 'email_ok' accepted)")
-    
-    return {
-        "stage": "Stage 3: TrueList Batch",
-        "check_name": "truelist_batch_validation",
-        "message": message,
-        "failed_fields": ["email"],
-        "truelist_status": status
-    }
-
-
-# ============================================================================
-# Batch Helper Functions
-# ============================================================================
-
-async def submit_and_poll_truelist(emails: List[str]) -> Tuple[str, Dict[str, dict]]:
-    """
-    Submit batch and poll for results (combined for background task).
-    
-    This wrapper combines submit_truelist_batch() and poll_truelist_batch()
-    for use with asyncio.create_task() in the batch orchestrator.
-    
-    Args:
-        emails: List of email addresses to validate
-    
-    Returns:
-        Tuple of (batch_id, results_dict) where results_dict maps email -> result
-        batch_id is returned so caller can delete the batch before retrying
-    """
-    batch_id = await submit_truelist_batch(emails)
-    results = await poll_truelist_batch(batch_id)
-    return batch_id, results
-
-
-async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
-    """
-    Verify emails using TrueList's INLINE verification API (not batch).
-    
-    This is a FALLBACK for emails that TrueList's batch API silently drops.
-    Some enterprise domains (spglobal.com, jacobs.com, etc.) work with inline
-    verification but not batch verification.
-    
-    Rate limit: 10 requests/second per TrueList docs.
-    Each request can verify up to 3 emails.
-    
-    Args:
-        emails: List of email addresses to verify
-    
-    Returns:
-        Dict mapping email -> result dict with status, passed, needs_retry
-    """
-    if not TRUELIST_API_KEY:
-        print("   ⚠️ TRUELIST_API_KEY not configured for inline verification")
-        return {email: {"needs_retry": True, "error": "No API key"} for email in emails}
-    
-    results = {}
-    headers = {"Authorization": f"Bearer {TRUELIST_API_KEY}"}
-    
-    # TrueList inline API accepts up to 3 emails per request (space-separated)
-    BATCH_SIZE = 3
-    PASS_STATUSES = {"email_ok"}  # Only email_ok passes - accept_all is rejected
-    RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error", "failed_greylisted"}
-    
-    print(f"   🔍 Inline verification for {len(emails)} emails (TrueList batch fallback)...")
-    import time as _time
-    _start = _time.time()
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            for i in range(0, len(emails), BATCH_SIZE):
-                batch = emails[i:i+BATCH_SIZE]
-                email_param = " ".join(batch)
-                
-                url = f"https://api.truelist.io/api/v1/verify_inline?email={email_param}"
-                
-                try:
-                    async with session.post(url, headers=headers, timeout=35, proxy=HTTP_PROXY_URL) as response:
-                        if response.status == 429:
-                            print(f"   ⚠️ Rate limited, waiting 2s...")
-                            await asyncio.sleep(2)
-                            continue
-                        
-                        if response.status != 200:
-                            error_text = await response.text()
-                            print(f"   ⚠️ Inline verify failed ({response.status}): {error_text[:50]}")
-                            for email in batch:
-                                results[email.lower()] = {"needs_retry": True, "error": f"HTTP {response.status}"}
-                            continue
-                        
-                        data = await response.json()
-                        email_results = data.get("emails", [])
-                        
-                        # DEBUG: Log first response to see actual structure
-                        if i == 0 and email_results:
-                            print(f"   📋 Inline API first response: {email_results[0]}")
-                        
-                        for email_data in email_results:
-                            # TrueList inline uses "address" not "email_address"
-                            email = email_data.get("address", email_data.get("email_address", email_data.get("email", ""))).lower()
-                            if not email:
-                                continue
-                            
-                            email_state = email_data.get("email_state", "unknown")
-                            email_sub_state = email_data.get("email_sub_state", email_state)
-                            
-                            # DEBUG: Log non-email_ok statuses
-                            if email_sub_state != "email_ok":
-                                print(f"   📋 Inline status: {email} -> {email_state}/{email_sub_state}")
-                            
-                            if email_sub_state in PASS_STATUSES:
-                                results[email] = {
-                                    "status": email_sub_state,
-                                    "passed": True,
-                                    "needs_retry": False,
-                                    "rejection_reason": None
-                                }
-                            elif email_sub_state in RETRY_STATUSES:
-                                results[email] = {
-                                    "status": email_sub_state,
-                                    "passed": False,
-                                    "needs_retry": True,
-                                    "rejection_reason": None
-                                }
-                            else:
-                                results[email] = {
-                                    "status": email_sub_state,
-                                    "passed": False,
-                                    "needs_retry": False,
-                                    "rejection_reason": {
-                                        "stage": "Stage 3",
-                                        "check_name": "truelist_inline_verification",
-                                        "message": f"Email verification failed: {email_sub_state}",
-                                        "truelist_status": email_sub_state
-                                    }
-                                }
-                                
-                except asyncio.TimeoutError:
-                    print(f"   ⚠️ Inline verify timeout for: {batch}")
-                    for email in batch:
-                        results[email.lower()] = {"needs_retry": True, "error": "timeout"}
-                except Exception as e:
-                    print(f"   ⚠️ Inline verify error: {e}")
-                    for email in batch:
-                        results[email.lower()] = {"needs_retry": True, "error": str(e)}
-                
-                # Rate limit: 10 req/sec = 100ms between requests
-                await asyncio.sleep(0.15)
-        
-        passed = sum(1 for r in results.values() if r.get("passed"))
-        elapsed = _time.time() - _start
-        print(f"   ✅ Inline verification: {passed}/{len(emails)} passed ({elapsed:.1f}s)")
-        return results
-        
-    except Exception as e:
-        print(f"   ⚠️ Inline verification error: {e}")
-        return {email.lower(): {"needs_retry": True, "error": str(e)} for email in emails}
-
-
-async def retry_truelist_batch(emails: List[str], prev_batch_id: str = None) -> Tuple[str, Dict[str, dict]]:
-    """
-    Submit a retry batch and poll for results.
-    
-    IMPORTANT: If prev_batch_id is provided, deletes it first to clear
-    TrueList's duplicate detection before submitting the retry.
-    
-    On exception, marks all emails as needs_retry=True so the orchestrator
-    can decide whether to retry again or skip.
-    
-    Args:
-        emails: List of email addresses to retry validation
-        prev_batch_id: Optional batch_id from previous retry to delete first
-    
-    Returns:
-        Tuple of (batch_id, results_dict)
-        On error, returns (None, {email: needs_retry=True})
-    """
-    try:
-        # Delete previous retry batch if provided (clears duplicate detection)
-        if prev_batch_id:
-            await delete_truelist_batch(prev_batch_id)
-        
-        batch_id = await submit_truelist_batch(emails)
-        results = await poll_truelist_batch(batch_id)
-        return batch_id, results
-    except Exception as e:
-        print(f"   ⚠️  Retry batch failed: {str(e)[:100]}")
-        # On error, mark all as needing retry (orchestrator will decide next step)
-        return None, {email: {"needs_retry": True, "error": str(e)} for email in emails}
-
-
-# ============================================================================
-# Stage 0-2 Extraction for Batch Processing
-# ============================================================================
-# This function extracts Stage 0, 1, and 2 from run_automated_checks() to
-# allow parallel execution with batch email verification.
-# See tasks9.md for the full migration plan.
-# ============================================================================
+# ========================================================================
+# Orchestrators
+# ========================================================================
 
 async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
     """
     Run Stage 0, 1, and 2 checks only (no email verification).
-    
+
     This function is extracted from run_automated_checks() to support
     batch email verification. It runs all checks BEFORE Stage 3 (email
     verification), which is handled separately by the batch process.
-    
+
     The actual check functions are IDENTICAL to run_automated_checks() -
     only the orchestration is different.
-    
+
     Stages included:
     - Pre-checks: Source provenance verification
-    - Stage 0: Required fields, email regex, name-email match, 
+    - Stage 0: Required fields, email regex, name-email match,
                general purpose email, free email, disposable, HEAD request
     - Stage 1: Domain age, MX record, SPF/DMARC (parallel)
     - Stage 2: DNSBL reputation check
-    
+
     Args:
         lead: Lead dict with all fields
-    
+
     Returns:
         Tuple[bool, dict]: (passed, partial_automated_checks_data)
             - If passed: (True, data with stage_0, stage_1, stage_2 populated)
             - If failed: (False, data with rejection_reason)
-    
+
     Note:
         This function does NOT run Stage 3 (email verification).
         Email verification is handled by the batch process (submit_truelist_batch
@@ -3260,7 +517,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
     """
     email = get_email(lead)
     company = get_company(lead)
-    
+
     # Initialize structured data collection (same structure as run_automated_checks)
     automated_checks_data = {
         "stage_0_hardcoded": {
@@ -3331,12 +588,12 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
     # Validates source_url, source_type, denylist, and licensed resale proof
     # ========================================================================
     print(f"🔍 Source Provenance Verification: Source validation for {email} @ {company}")
-    
+
     checks_stage0_5 = [
         check_source_provenance,       # Validate source URL, type, denylist
         check_licensed_resale_proof,   # Validate license hash if applicable
     ]
-    
+
     for check_func in checks_stage0_5:
         passed, rejection_reason = await check_func(lead)
         if not passed:
@@ -3345,7 +602,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
             automated_checks_data["passed"] = False
             automated_checks_data["rejection_reason"] = rejection_reason
             return False, automated_checks_data
-    
+
     print("   ✅ Source Provenance Verification passed")
 
     # ========================================================================
@@ -3353,7 +610,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
     # - Required Fields, Email Regex, Name-Email Match, General Purpose Email, Disposable, HEAD Request
     # ========================================================================
     print(f"🔍 Stage 0: Hardcoded checks for {email} @ {company}")
-    
+
     # OPTIMIZATION: Run instant checks first, then overlap HEAD request with Stage 1 DNS checks
     checks_stage0_instant = [
         check_required_fields,      # Required fields validation (HARD)
@@ -3378,7 +635,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
     automated_checks_data["stage_0_hardcoded"]["is_general_purpose_email"] = False
 
     print("   ✅ Stage 0 instant checks passed")
-    
+
     # OPTIMIZATION: Start HEAD request as background task (will check result after Stage 1)
     head_request_task = asyncio.create_task(check_head_request(lead))
 
@@ -3388,7 +645,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
     # - SPF/DMARC (SOFT - always passes, appends data)
     # ========================================================================
     print(f"🔍 Stage 1: DNS layer checks for {email} @ {company}")
-    
+
     # OPTIMIZATION: Run all Stage 1 DNS checks in parallel
     results = await asyncio.gather(
         check_domain_age(lead),
@@ -3396,7 +653,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
         check_spf_dmarc(lead),
         return_exceptions=True
     )
-    
+
     # Check results
     check_names = ["check_domain_age", "check_mx_record", "check_spf_dmarc"]
     for i, result in enumerate(results):
@@ -3419,7 +676,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
             automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
             automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
             return False, automated_checks_data
-        
+
         passed, rejection_reason = result
         if not passed:
             msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
@@ -3457,7 +714,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
         automated_checks_data["passed"] = False
         automated_checks_data["rejection_reason"] = rejection_reason
         return False, automated_checks_data
-    
+
     print("   ✅ Stage 0 (HEAD request) passed")
 
     # ========================================================================
@@ -3466,7 +723,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
     # ========================================================================
     print(f"🔍 Stage 2: Domain reputation checks for {email} @ {company}")
     passed, rejection_reason = await check_dnsbl(lead)
-    
+
     # Collect Stage 2 domain data (DNSBL + WHOIS from Stage 1)
     automated_checks_data["stage_2_domain"]["dnsbl_checked"] = lead.get("dnsbl_checked", False)
     automated_checks_data["stage_2_domain"]["dnsbl_blacklisted"] = lead.get("dnsbl_blacklisted", False)
@@ -3475,7 +732,7 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
     automated_checks_data["stage_2_domain"]["domain_registrar"] = lead.get("domain_registrar")
     automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
     automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
-    
+
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 2 failed: {msg}")
@@ -3491,10 +748,9 @@ async def run_stage0_2_checks(lead: dict) -> Tuple[bool, dict]:
     # Mark as passed up to Stage 2
     # The batch orchestrator will handle email verification separately
     automated_checks_data["passed"] = True  # Passed Stage 0-2
-    
+
     print(f"   ✅ Stage 0-2 complete for {email} @ {company}")
     return True, automated_checks_data
-
 
 async def run_stage4_5_repscore(
     lead: dict,
@@ -3503,32 +759,32 @@ async def run_stage4_5_repscore(
 ) -> Tuple[bool, dict]:
     """
     Run Stage 4, Stage 5, and Rep Score checks only.
-    
+
     This function is extracted from run_automated_checks() to support
     batch email verification. It runs AFTER the lead has passed both:
     1. TrueList batch email verification (email_result)
     2. Stage 0-2 checks (stage0_2_data from run_stage0_2_checks)
-    
+
     The actual check functions (check_linkedin_gse, check_stage5_unified,
     check_wayback_machine, etc.) are called EXACTLY as in run_automated_checks().
-    
+
     Args:
         lead: Lead dict with email, company, linkedin, etc.
         email_result: Result from TrueList batch for this email
                      {"status": "email_ok", "passed": True, "rejection_reason": None}
         stage0_2_data: Partial automated_checks_data from run_stage0_2_checks()
-    
+
     Returns:
         Tuple[bool, dict]: (passed, complete_automated_checks_data)
     """
     email = get_email(lead)
     company = get_company(lead)
-    
+
     # ========================================================================
     # MERGE: Start with stage0_2_data and extend with Stage 3-5 + Rep Score
     # ========================================================================
     automated_checks_data = stage0_2_data.copy()
-    
+
     # Ensure Stage 3-5 and rep_score sections exist
     if "stage_3_email" not in automated_checks_data:
         automated_checks_data["stage_3_email"] = {
@@ -3567,16 +823,16 @@ async def run_stage4_5_repscore(
                 "companies_house": 0
             }
         }
-    
+
     # ========================================================================
     # Stage 3: Populate from Batch Email Result (NO API CALL - already done)
     # ========================================================================
     print(f"🔍 Stage 3: Email verification (from batch) for {email} @ {company}")
-    
+
     # Map TrueList batch status to internal format for lead["email_verifier_status"]
     # This matches the mapping in run_automated_checks() Stage 3 data collection
     batch_status = email_result.get("status", "unknown")
-    
+
     if batch_status == "email_ok":
         lead["email_verifier_status"] = "Valid"
         email_status = "valid"
@@ -3594,19 +850,19 @@ async def run_stage4_5_repscore(
         lead["email_verifier_status"] = "Unknown"
         email_status = "unknown"
         email_passed = False
-    
+
     # Populate batch result flags on lead (for downstream compatibility)
     lead["email_verifier_disposable"] = email_result.get("is_disposable", False)
     lead["email_verifier_role_based"] = email_result.get("is_role_based", False)
     lead["email_verifier_free"] = email_result.get("is_free", False)
-    
+
     # Collect Stage 3 email data
     automated_checks_data["stage_3_email"]["email_status"] = email_status
     automated_checks_data["stage_3_email"]["email_score"] = 10 if email_passed else 0
     automated_checks_data["stage_3_email"]["is_disposable"] = lead.get("email_verifier_disposable", False)
     automated_checks_data["stage_3_email"]["is_role_based"] = lead.get("email_verifier_role_based", False)
     automated_checks_data["stage_3_email"]["is_free"] = lead.get("email_verifier_free", False)
-    
+
     if not email_passed:
         rejection_reason = email_result.get("rejection_reason") or {
             "stage": "Stage 3: Email Verification (Batch)",
@@ -3618,21 +874,21 @@ async def run_stage4_5_repscore(
         automated_checks_data["passed"] = False
         automated_checks_data["rejection_reason"] = rejection_reason
         return False, automated_checks_data
-    
+
     print("   ✅ Stage 3 passed (batch verified)")
-    
+
     # ========================================================================
     # Stage 4: LinkedIn/GSE Validation (HARD)
     # EXTRACTED VERBATIM from run_automated_checks()
     # ========================================================================
     print(f"🔍 Stage 4: LinkedIn/GSE validation for {email} @ {company}")
-    
+
     passed, rejection_reason = await check_linkedin_gse(lead)
-    
+
     # Collect Stage 4 data even on failure
     automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
     automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
-    
+
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 4 failed: {msg}")
@@ -3641,7 +897,7 @@ async def run_stage4_5_repscore(
         return False, automated_checks_data
 
     print("   ✅ Stage 4 passed")
-    
+
     # Collect Stage 4 data after successful check
     automated_checks_data["stage_4_linkedin"]["linkedin_verified"] = True
     automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
@@ -3656,7 +912,7 @@ async def run_stage4_5_repscore(
     # - Anti-gaming: rejects if miner puts multiple states in region
     # ========================================================================
     print(f"🔍 Stage 5: Role/Region/Industry verification for {email} @ {company}")
-    
+
     passed, rejection_reason = await check_stage5_unified(lead)
 
     # Collect Stage 5 data (company verification - role/location handled by Stage 4)
@@ -3668,7 +924,7 @@ async def run_stage4_5_repscore(
     automated_checks_data["stage_5_verification"]["extracted_size"] = lead.get("stage5_extracted_size")
     automated_checks_data["stage_5_verification"]["extracted_hq"] = lead.get("stage5_extracted_hq")
     automated_checks_data["stage_5_verification"]["extracted_industry"] = lead.get("stage5_extracted_industry")
-    
+
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 5 failed: {msg}")
@@ -3715,7 +971,7 @@ async def run_stage4_5_repscore(
     # - Total: 0-48 points
     # ========================================================================
     print(f"📊 Rep Score: Running soft checks for {email} @ {company} (parallel execution)")
-    
+
     # OPTIMIZATION: Run all rep score checks in parallel to save time
     # Old: Sequential execution = 6-12s total
     # New: Parallel execution = 3-4s total (time of slowest API)
@@ -3727,19 +983,19 @@ async def run_stage4_5_repscore(
         check_companies_house(lead),
         return_exceptions=True  # Don't fail entire batch if one check fails
     )
-    
+
     # Unpack results (handle exceptions gracefully)
     wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
     sec_score, sec_data = results[1] if not isinstance(results[1], Exception) else (0, {"error": str(results[1])})
     whois_dnsbl_score, whois_dnsbl_data = results[2] if not isinstance(results[2], Exception) else (0, {"error": str(results[2])})
     gdelt_score, gdelt_data = results[3] if not isinstance(results[3], Exception) else (0, {"error": str(results[3])})
     companies_house_score, companies_house_data = results[4] if not isinstance(results[4], Exception) else (0, {"error": str(results[4])})
-    
+
     total_rep_score = (
         wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
         companies_house_score
     )
-    
+
     # ========================================================================
     # ENTERPRISE COMPANY REP SCORE MULTIPLIER (10,001+ employees)
     # For enterprise companies, apply a multiplier that caps rep score:
@@ -3757,7 +1013,7 @@ async def run_stage4_5_repscore(
         print(f"   🏢 ENTERPRISE COMPANY (10,001+): Raw rep={total_rep_score:.1f}, target={target_score}, multiplier={enterprise_multiplier:.1f}, final={final_rep_score:.1f} ({'ICP match' if matches_icp else 'No ICP match'})")
     else:
         final_rep_score = total_rep_score
-    
+
     # Append to lead data
     lead["rep_score"] = final_rep_score
     lead["rep_score_details"] = {
@@ -3771,7 +1027,7 @@ async def run_stage4_5_repscore(
         lead["rep_score_details"]["enterprise_company"] = True
         lead["rep_score_details"]["enterprise_multiplier"] = enterprise_multiplier
         lead["rep_score_details"]["raw_rep_score"] = total_rep_score
-    
+
     # Append to automated_checks_data
     automated_checks_data["rep_score"] = {
         "total_score": final_rep_score,
@@ -3788,9 +1044,9 @@ async def run_stage4_5_repscore(
         automated_checks_data["rep_score"]["enterprise_company"] = True
         automated_checks_data["rep_score"]["enterprise_multiplier"] = enterprise_multiplier
         automated_checks_data["rep_score"]["raw_rep_score"] = total_rep_score
-    
+
     print(f"   📊 Rep Score: {final_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
-    
+
     # ========================================================================
     # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)
     # Replaces the old multiplier system with absolute point adjustments
@@ -3850,319 +1106,9 @@ async def run_stage4_5_repscore(
 
     return True, automated_checks_data
 
-
-async def submit_and_poll_truelist(emails: List[str]) -> Tuple[str, Dict[str, dict]]:
-    """
-    Submit batch and poll for results (combined for background task).
-    
-    This is a helper function that combines submit_truelist_batch() and
-    poll_truelist_batch() for use with asyncio.create_task().
-    
-    Args:
-        emails: List of email addresses to validate
-    
-    Returns:
-        Tuple of (batch_id, results_dict) where results_dict maps email -> result
-        batch_id is returned so caller can delete the batch before retrying
-    """
-    batch_id = await submit_truelist_batch(emails)
-    results = await poll_truelist_batch(batch_id)
-    return batch_id, results
-
-
-async def delete_truelist_batch(batch_id: str) -> bool:
-    """
-    Delete a TrueList batch.
-    
-    IMPORTANT: This must be called before retrying emails that were in the batch.
-    TrueList detects duplicate email content and rejects re-submissions.
-    Deleting the batch clears TrueList's duplicate detection for those emails.
-    
-    Args:
-        batch_id: The batch ID to delete
-    
-    Returns:
-        True if deleted successfully, False otherwise
-    """
-    if not batch_id:
-        return False
-    
-    url = f"https://api.truelist.io/api/v1/batches/{batch_id}"
-    headers = {"Authorization": f"Bearer {TRUELIST_API_KEY}"}
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.delete(url, headers=headers, timeout=30, proxy=HTTP_PROXY_URL) as response:
-                if response.status == 204:
-                    print(f"   🗑️ Deleted batch {batch_id[:8]}... (clearing duplicate detection)")
-                    return True
-                else:
-                    print(f"   ⚠️ Failed to delete batch {batch_id[:8]}... (status {response.status})")
-                    return False
-    except Exception as e:
-        print(f"   ⚠️ Error deleting batch: {str(e)[:50]}")
-        return False
-
-
-async def delete_all_truelist_batches() -> int:
-    """
-    Delete ALL TrueList batches to clear duplicate detection.
-    
-    CRITICAL: TrueList detects duplicate emails across ALL batches ever submitted.
-    Even if a batch is "completed", TrueList remembers the emails and may return
-    incomplete CSV results for subsequent batches containing the same emails.
-    
-    This function queries all batches and deletes them one by one.
-    Should be called before submitting a new batch in each epoch.
-    
-    Returns:
-        Number of batches deleted
-    """
-    url = "https://api.truelist.io/api/v1/batches"
-    headers = {"Authorization": f"Bearer {TRUELIST_API_KEY}"}
-    deleted_count = 0
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Get list of all batches
-            async with session.get(url, headers=headers, timeout=30, proxy=HTTP_PROXY_URL) as response:
-                if response.status != 200:
-                    print(f"   ⚠️ Failed to list batches (status {response.status})")
-                    return 0
-                
-                data = await response.json()
-                batches = data.get("batches", [])
-                
-                if not batches:
-                    print(f"   ✅ No old batches to delete")
-                    return 0
-                
-                print(f"   🗑️ Deleting {len(batches)} old TrueList batches to clear duplicate detection...")
-                
-                # Delete each batch
-                for batch in batches:
-                    batch_id = batch.get("id")
-                    if batch_id:
-                        delete_url = f"{url}/{batch_id}"
-                        try:
-                            async with session.delete(delete_url, headers=headers, timeout=10, proxy=HTTP_PROXY_URL) as del_response:
-                                if del_response.status == 204:
-                                    deleted_count += 1
-                        except Exception:
-                            pass  # Silently skip failed deletes
-                
-                print(f"   ✅ Deleted {deleted_count}/{len(batches)} batches")
-                return deleted_count
-                
-    except Exception as e:
-        print(f"   ⚠️ Error deleting batches: {str(e)[:50]}")
-        return deleted_count
-
-
-async def retry_truelist_batch(emails: List[str], prev_batch_id: str = None) -> Tuple[str, Dict[str, dict]]:
-    """
-    Submit a retry batch and poll for results.
-    
-    IMPORTANT: If prev_batch_id is provided, deletes it first to clear
-    TrueList's duplicate detection before submitting the retry.
-    
-    Args:
-        emails: List of email addresses to retry
-        prev_batch_id: Optional batch_id from previous retry to delete first
-    
-    Returns:
-        Tuple of (batch_id, results_dict)
-        On error, returns (None, {email: needs_retry=True})
-    """
-    try:
-        # Delete previous retry batch if provided (clears duplicate detection)
-        if prev_batch_id:
-            await delete_truelist_batch(prev_batch_id)
-        
-        batch_id = await submit_truelist_batch(emails)
-        results = await poll_truelist_batch(batch_id)
-        return batch_id, results
-    except Exception as e:
-        print(f"   ⚠️ Retry batch error: {e}")
-        # On error, mark all as needing retry
-        return None, {email: {"needs_retry": True, "error": str(e)} for email in emails}
-
-
-async def run_centralized_truelist_batch(leads: List[dict]) -> Dict[str, dict]:
-    """
-    COORDINATOR ONLY: Run TrueList batch on ALL leads at once.
-    
-    This function extracts all emails from leads, submits them to TrueList,
-    handles retries (up to 3 times), and falls back to inline verification.
-    
-    The coordinator calls this BEFORE distributing leads to workers.
-    Workers then receive the precomputed results with their leads.
-    
-    Flow:
-    1. Extract all valid emails from leads
-    2. Delete old TrueList batches (clean slate)
-    3. Submit batch with all emails
-    4. Poll for completion
-    5. Retry any emails with errors (up to 3 times total)
-    6. Fall back to inline verification for remaining errors
-    7. Return complete results dict
-    
-    Args:
-        leads: List of ALL lead dicts from gateway (e.g., 2700 leads)
-    
-    Returns:
-        Dict mapping email (lowercase) -> result dict with:
-        - passed: bool
-        - status: str (email_ok, failed_*, etc.)
-        - needs_retry: bool (if unresolved)
-        - rejection_reason: dict (if failed)
-    
-    NOTE: This function is ONLY called by the coordinator.
-    Workers should use precomputed_email_results parameter of run_batch_automated_checks.
-    """
-    print(f"\n{'='*60}")
-    print(f"📧 COORDINATOR: Centralized TrueList batch for {len(leads)} leads")
-    print(f"{'='*60}")
-    
-    start_time = time.time()
-    
-    # ========================================================================
-    # Step 1: Extract all valid emails
-    # ========================================================================
-    emails = []
-    email_to_lead_idx = {}  # Track which lead each email came from (for debugging)
-    
-    for i, lead in enumerate(leads):
-        # Handle both formats: {"lead_blob": {...}} wrapper OR flat lead dict
-        lead_blob = lead.get("lead_blob", lead) if isinstance(lead, dict) else lead
-        email = get_email(lead_blob)
-        if email and '@' in email:
-            email_lower = email.lower()
-            emails.append(email_lower)
-            email_to_lead_idx[email_lower] = i
-    
-    print(f"   📧 Extracted {len(emails)} valid emails from {len(leads)} leads")
-    
-    if not emails:
-        print(f"   ⚠️ No valid emails found - returning empty results")
-        return {}
-    
-    # ========================================================================
-    # Step 2: Clean up old TrueList batches
-    # ========================================================================
-    print(f"   🧹 Cleaning up old TrueList batches...")
-    await delete_all_truelist_batches()
-    
-    # ========================================================================
-    # Step 3: Submit batch and poll (with retries)
-    # ========================================================================
-    email_results = {}
-    batch_id = None
-    
-    # Try batch up to 3 times total
-    for batch_attempt in range(3):
-        try:
-            print(f"   🚀 Submitting TrueList batch (attempt {batch_attempt + 1}/3) for {len(emails)} emails...")
-            
-            batch_id = await submit_truelist_batch(emails)
-            results = await poll_truelist_batch(batch_id)
-            
-            # Merge results
-            email_results.update(results)
-            
-            # Check for emails that need retry
-            needs_retry = []
-            for email in emails:
-                result = email_results.get(email)
-                if result is None or result.get("needs_retry"):
-                    needs_retry.append(email)
-            
-            print(f"   ✅ Batch {batch_attempt + 1} complete: {len(results)} results, {len(needs_retry)} need retry")
-            
-            if not needs_retry:
-                # All emails resolved
-                break
-            
-            if batch_attempt < 2:
-                # More retries available
-                print(f"   🔄 Retrying {len(needs_retry)} emails in 10s...")
-                
-                # Delete batch before retry (clears duplicate detection)
-                if batch_id:
-                    await delete_truelist_batch(batch_id)
-                    batch_id = None
-                
-                await asyncio.sleep(10)
-                emails = needs_retry  # Only retry failed emails
-            
-        except Exception as e:
-            print(f"   ❌ TrueList batch attempt {batch_attempt + 1} failed: {e}")
-            
-            # Delete batch before retry
-            if batch_id:
-                try:
-                    await delete_truelist_batch(batch_id)
-                except:
-                    pass
-                batch_id = None
-            
-            if batch_attempt < 2:
-                await asyncio.sleep(10 * (batch_attempt + 1))
-    
-    # ========================================================================
-    # Step 4: Inline fallback for remaining errors
-    # ========================================================================
-    needs_inline = []
-    for email in emails:
-        result = email_results.get(email)
-        if result is None or result.get("needs_retry"):
-            needs_inline.append(email)
-    
-    if needs_inline:
-        print(f"   🔄 Falling back to inline verification for {len(needs_inline)} emails...")
-        
-        try:
-            inline_results = await verify_emails_inline(needs_inline)
-            email_results.update(inline_results)
-            print(f"   ✅ Inline verification complete: {len(inline_results)} results")
-        except Exception as e:
-            print(f"   ❌ Inline verification failed: {e}")
-            # Mark remaining as unresolved
-            for email in needs_inline:
-                if email not in email_results or email_results[email].get("needs_retry"):
-                    email_results[email] = {
-                        "needs_retry": True,
-                        "error": f"All verification methods failed: {str(e)}"
-                    }
-    
-    # ========================================================================
-    # Step 5: Summary
-    # ========================================================================
-    elapsed = time.time() - start_time
-    elapsed_mins = int(elapsed // 60)
-    elapsed_secs = int(elapsed % 60)
-    
-    passed = sum(1 for r in email_results.values() if r.get("passed"))
-    failed = sum(1 for r in email_results.values() if not r.get("passed") and not r.get("needs_retry"))
-    unresolved = sum(1 for r in email_results.values() if r.get("needs_retry"))
-    
-    print(f"\n{'='*60}")
-    print(f"📊 CENTRALIZED TRUELIST COMPLETE")
-    print(f"{'='*60}")
-    print(f"   📦 Total leads from gateway: {len(leads)}")
-    print(f"   📧 Total emails processed: {len(email_results)}")
-    print(f"   ✅ Passed (email_ok): {passed}")
-    print(f"   ❌ Failed: {failed}")
-    print(f"   ⚠️  Unresolved: {unresolved}")
-    print(f"   ⏱️  TIME: {elapsed_mins}m {elapsed_secs}s ({elapsed:.1f} seconds total)")
-    print(f"{'='*60}\n")
-    
-    return email_results
-
-
 def _check_epoch_from_block_file(current_epoch: int, container_id: int = 0) -> bool:
     """Check if epoch has changed by reading the shared block file.
-    
+
     Returns True if epoch has changed (should abort), False if same epoch.
     """
     try:
@@ -4192,20 +1138,20 @@ async def run_batch_automated_checks(
     """
     Batch validation with SEQUENTIAL Stage 0-2 and Stage 4-5.
     Stage 0-2 runs IN PARALLEL with coordinator's centralized TrueList batch.
-    
+
     This REPLACES calling run_automated_checks() individually for each lead.
     Orchestrates the full batch flow without modifying any actual validation checks.
-    
+
     Flow (when leads_file_path is provided - worker/coordinator polling mode):
     1. Run Stage 0-2 SEQUENTIALLY for all leads
     2. POLL leads_file_path for truelist_results (coordinator updates file when done)
     3. Use polled results for Stage 4-5
-    
+
     Flow (when precomputed_email_results is provided - already has results):
     1. Run Stage 0-2 SEQUENTIALLY for all leads
     2. Use precomputed email results directly
     3. Run Stage 4-5 SEQUENTIALLY
-    
+
     Args:
         leads: List of lead dicts (e.g., 110 leads per container)
         container_id: Container ID (0-29) for logging.
@@ -4213,32 +1159,32 @@ async def run_batch_automated_checks(
                                    If provided, skip polling and use these directly.
         leads_file_path: Path to shared leads file for polling truelist_results.
                          If provided, poll this file after Stage 0-2 until truelist_results is available.
-    
+
     Returns:
         List of (passed, automated_checks_data) tuples in SAME ORDER as input
         - passed: True (approved), False (rejected), or None (skipped)
-    
+
     CRITICAL: Results are returned in the SAME ORDER as input leads.
     """
     print(f"📦 Starting batch validation for {len(leads)} leads")
     start_time = time.time()
-    
+
     n = len(leads)
-    
+
     # Handle empty batch
     if n == 0:
         print("   ⚠️ Empty batch - nothing to validate")
         return []
-    
+
     # Initialize results array with None (will be filled in order)
     results = [None] * n  # Index-based for order preservation
-    
+
     # ========================================================================
     # Step 1: Extract emails and build lookup maps
     # ========================================================================
     emails = []
     email_to_idx = {}  # email (lowercase) -> index in leads list
-    
+
     for i, lead in enumerate(leads):
         email = get_email(lead)
         if email:
@@ -4256,24 +1202,24 @@ async def run_batch_automated_checks(
                                 "failed_fields": ["email"]
                 }
             })
-    
+
     print(f"   📧 Extracted {len(emails)} emails from {n} leads")
-    
+
     # Check if all leads rejected (no valid emails)
     if not emails:
         print("   ⚠️ No valid emails found - all leads rejected")
         return results
-    
+
     # ========================================================================
     # Step 1.5: FAST PRE-FILTER - Reject emails without @ sign
     # ========================================================================
     # This is a super low-latency check that:
     # 1. Prevents TrueList batch from failing (it rejects entire batch if ANY email lacks @)
     # 2. Saves Stage 0-2 processing time for obviously invalid emails
-    
+
     valid_emails = []
     invalid_syntax_count = 0
-    
+
     for email in emails:
         if '@' not in email:
             # Instant rejection - no @ sign
@@ -4290,35 +1236,35 @@ async def run_batch_automated_checks(
             invalid_syntax_count += 1
         else:
             valid_emails.append(email)
-    
+
     if invalid_syntax_count > 0:
         print(f"   ⚡ Pre-filter: Rejected {invalid_syntax_count} emails (missing @ sign)")
-    
+
     print(f"   ✅ {len(valid_emails)} valid emails ready for batch processing")
-    
+
     # Update email list and check if any remain
     emails = valid_emails
-    
+
     if not emails:
         print("   ⚠️ No valid emails after pre-filter - all leads rejected")
         return results
-    
+
     # ========================================================================
     # Step 2: Determine TrueList results source
     # ========================================================================
     # Centralized TrueList is handled EXTERNALLY by coordinator's background task.
     # This function just runs Stage 0-2, then polls file OR uses precomputed results.
-    
+
     has_precomputed = precomputed_email_results is not None and len(precomputed_email_results) > 0
     needs_polling = leads_file_path is not None and not has_precomputed
-    
+
     if has_precomputed:
         print(f"   📥 Using precomputed TrueList results ({len(precomputed_email_results)} emails)")
     elif needs_polling:
         print(f"   ⏳ Will poll {leads_file_path} for TrueList results after Stage 0-2")
     else:
         print(f"   ⚠️ No TrueList source - leads will fail email verification")
-    
+
     # ========================================================================
     # Step 2.5: STAGGER DELAY for Stage 0-2 (prevents WHOIS rate limiting)
     # ========================================================================
@@ -4327,28 +1273,28 @@ async def run_batch_automated_checks(
     # Add container-specific delay so WHOIS requests are staggered across containers.
     STAGE0_2_STAGGER_DELAY_SECONDS = 8  # 8s between containers
     stagger_delay = container_id * STAGE0_2_STAGGER_DELAY_SECONDS
-    
+
     if stagger_delay > 0:
         print(f"   ⏳ Container {container_id}: Waiting {stagger_delay}s before Stage 0-2 (staggered WHOIS)...")
         await asyncio.sleep(stagger_delay)
-    
+
     # ========================================================================
     # Step 3: Run Stage 0-2 SEQUENTIALLY (while TrueList batch processes)
     # ========================================================================
     print(f"   🔍 Running Stage 0-2 checks SEQUENTIALLY for {n} leads...")
-    
+
     stage0_2_results = []  # List of (passed, data) in order, indexed by lead position
-    
+
     for i, lead in enumerate(leads):
         email = get_email(lead)
-        
+
         # Skip leads without email (already rejected in Step 1)
         if not email:
             stage0_2_results.append((False, results[i][1] if results[i] else {}))
             continue
-        
+
         print(f"   Stage 0-2: Lead {i+1}/{n} ({email})")
-        
+
         try:
             passed, data = await run_stage0_2_checks(lead)
             stage0_2_results.append((passed, data))
@@ -4363,11 +1309,11 @@ async def run_batch_automated_checks(
                     "error": str(e)
                 }
             }))
-        
+
         # 0.8-second delay between Stage 0-2 leads (rate limiting)
         if i < len(leads) - 1:
             await asyncio.sleep(0.8)
-        
+
         # Epoch boundary check every 10 leads (avoid excessive file reads)
         if current_epoch is not None and (i + 1) % 10 == 0:
             if _check_epoch_from_block_file(current_epoch, container_id):
@@ -4386,16 +1332,16 @@ async def run_batch_automated_checks(
                     else:
                         stage0_2_results.append((False, results[j][1] if results[j] else {}))
                 break
-    
+
     stage0_2_passed_count = sum(1 for passed, _ in stage0_2_results if passed)
     print(f"   ✅ Stage 0-2 complete: {stage0_2_passed_count}/{n} passed")
-    
+
     # ========================================================================
     # Step 4: Get TrueList results (precomputed OR poll file)
     # ========================================================================
-    
+
     email_results = {}
-    
+
     if has_precomputed:
         # Use precomputed results directly
         email_results = precomputed_email_results
@@ -4403,19 +1349,19 @@ async def run_batch_automated_checks(
     elif needs_polling:
         # POLL the leads file until truelist_results is available (not None)
         print(f"   ⏳ Polling for TrueList results from coordinator...")
-        
+
         poll_interval = 5  # seconds
         max_poll_time = 1200  # 20 minutes max wait
         poll_start = time.time()
         poll_waited = 0
-        
+
         while True:
             try:
                 import json
                 with open(leads_file_path, 'r') as f:
                     file_data = json.load(f)
                     file_truelist = file_data.get("truelist_results")
-                    
+
                     if file_truelist is not None:
                         # Results available (dict, possibly empty if coordinator failed)
                         email_results = file_truelist
@@ -4427,16 +1373,16 @@ async def run_batch_automated_checks(
                             print(f"   ⏳ Still waiting for TrueList... ({poll_waited}s elapsed)")
             except Exception as e:
                 print(f"   ⚠️ Error reading leads file: {e}")
-            
+
             await asyncio.sleep(poll_interval)
             poll_waited += poll_interval
-            
+
             if poll_waited >= max_poll_time:
                 print(f"   ❌ Timeout waiting for TrueList results ({max_poll_time}s)")
                 print(f"   ⚠️ Leads will fail email verification")
                 email_results = {}
                 break
-            
+
             # Epoch boundary check every 30s during polling
             if current_epoch is not None and poll_waited % 30 == 0:
                 if _check_epoch_from_block_file(current_epoch, container_id):
@@ -4447,24 +1393,24 @@ async def run_batch_automated_checks(
         # No source - all leads fail email verification
         print(f"   ⚠️ No TrueList results available - leads will fail email verification")
         email_results = {}
-    
+
     # ========================================================================
     # Step 5: Categorize leads
     # ========================================================================
     stage4_5_queue = []  # List of (index, lead, email_result, stage0_2_data)
     needs_retry = []     # List of emails that errored
-    
+
     for i, lead in enumerate(leads):
         email = get_email(lead)
-        
+
         # Skip leads without email (already rejected)
         if not email:
             continue
-        
+
         email_lower = email.lower()  # Use lowercase for lookup (CSV results are lowercase)
         stage0_2_passed, stage0_2_data = stage0_2_results[i]
         email_result = email_results.get(email_lower, None)  # None if not in results
-        
+
         if not stage0_2_passed:
             # Failed Stage 0-2 → immediate reject
             results[i] = (False, stage0_2_data)
@@ -4508,7 +1454,7 @@ async def run_batch_automated_checks(
                                 "failed_fields": ["email"]
             }
             results[i] = (False, rejection_data)
-    
+
     print(f"   📊 Categorization: {len(stage4_5_queue)} ready for Stage 4-5, {sum(1 for r in results if r and r[0] == False)} rejected, {len(needs_retry)} need retry")
 
     # ========================================================================
@@ -4555,14 +1501,14 @@ async def run_batch_automated_checks(
     # ========================================================================
     # Step 6: Start Stage 4-5 SEQUENTIALLY + Handle retries in parallel
     # ========================================================================
-    
+
     # Start retry batch if needed (runs in background)
     # NOTE: When polling file, retries are handled by coordinator - workers don't retry
     retry_task = None
     inline_task = None  # Inline verification task (runs in background after retries exhaust)
     retry_attempt = 0
     last_retry_batch_id = None  # Track retry batch_id for deletion before next retry
-    
+
     if needs_retry and not has_precomputed and not needs_polling:
         # COORDINATOR MODE ONLY: Retry failed emails
         # CRITICAL: Delete the original batch BEFORE retrying
@@ -4570,15 +1516,15 @@ async def run_batch_automated_checks(
         # Deleting the batch clears their duplicate detection for those emails.
         if original_batch_id:
             await delete_truelist_batch(original_batch_id)
-        
+
         print(f"   🔄 Starting retry batch #1 for {len(needs_retry)} emails...")
         retry_task = asyncio.create_task(retry_truelist_batch(needs_retry, None))
-    
+
     # Process Stage 4-5 queue SEQUENTIALLY
     queue_idx = 0
     total_stage4_5 = len(stage4_5_queue)
     epoch_aborted = False
-    
+
     while queue_idx < len(stage4_5_queue) or retry_task is not None or inline_task is not None:
         # Epoch boundary check every 10 leads in Stage 4-5
         if current_epoch is not None and queue_idx > 0 and queue_idx % 10 == 0 and not epoch_aborted:
@@ -4605,13 +1551,13 @@ async def run_batch_automated_checks(
                     inline_task.cancel()
                     inline_task = None
                 break
-        
+
         # Process next lead in Stage 4-5 queue (if available)
         if queue_idx < len(stage4_5_queue):
             idx, lead, email_result, stage0_2_data = stage4_5_queue[queue_idx]
             email = get_email(lead)
             print(f"   Stage 4-5: Lead {queue_idx+1}/{len(stage4_5_queue)} ({email})")
-            
+
             try:
                 passed, data = await run_stage4_5_repscore(lead, email_result, stage0_2_data)
                 results[idx] = (passed, data)
@@ -4626,12 +1572,12 @@ async def run_batch_automated_checks(
                         "error": str(e)
                     }
                 })
-            
+
             queue_idx += 1
-            
+
             # No delay between Stage 4-5 leads - ScrapingDog/OpenRouter can handle it
             # (Stage 0-2 still has 0.8s delay for DNS/HEAD request rate limiting)
-        
+
         # Check if retry batch completed (non-blocking check)
         if retry_task is not None and retry_task.done():
             try:
@@ -4640,15 +1586,15 @@ async def run_batch_automated_checks(
                 print(f"   ⚠️ Retry batch failed: {e}")
                 last_retry_batch_id = None
                 retry_results = {email: {"needs_retry": True, "error": str(e)} for email in needs_retry}
-            
+
             retry_task = None
             still_needs_retry = []
-            
+
             for email in needs_retry:
                 result = retry_results.get(email, {"needs_retry": True})
                 idx = email_to_idx[email]
                 stage0_2_passed, stage0_2_data = stage0_2_results[idx]
-                
+
                 if result.get("needs_retry"):
                     still_needs_retry.append(email)
                 elif result.get("passed"):
@@ -4666,12 +1612,12 @@ async def run_batch_automated_checks(
                         "failed_fields": ["email"]
                     }
                     results[idx] = (False, rejection_data)
-            
+
             needs_retry = still_needs_retry
             retry_attempt += 1
-            
+
             print(f"   📊 After retry #{retry_attempt}: {len(still_needs_retry)} still pending, {len(stage4_5_queue) - queue_idx} added to queue")
-            
+
             # Start next retry if needed and haven't exceeded max
             if needs_retry and retry_attempt < TRUELIST_BATCH_MAX_RETRIES:
                 print(f"   🔄 Starting retry batch #{retry_attempt+1} for {len(needs_retry)} emails...")
@@ -4684,7 +1630,7 @@ async def run_batch_automated_checks(
                 # ================================================================
                 print(f"   🔍 Starting inline verification for {len(needs_retry)} emails (retries exhausted)...")
                 inline_task = asyncio.create_task(verify_emails_inline(needs_retry))
-        
+
         # Check if inline verification completed (non-blocking check)
         if inline_task is not None and inline_task.done():
             try:
@@ -4692,14 +1638,14 @@ async def run_batch_automated_checks(
             except Exception as e:
                 print(f"   ⚠️ Inline verification failed: {e}")
                 inline_results = {email: {"needs_retry": True, "error": str(e)} for email in needs_retry}
-            
+
             inline_task = None
-            
+
             for email in needs_retry:
                 idx = email_to_idx[email]
                 stage0_2_passed, stage0_2_data = stage0_2_results[idx]
                 result = inline_results.get(email.lower(), {"needs_retry": True})
-                
+
                 if result.get("passed"):
                     # Inline passed → add to Stage 4-5 queue
                     print(f"   ✅ Inline verified: {email}")
@@ -4723,24 +1669,24 @@ async def run_batch_automated_checks(
                         "failed_fields": ["email"]
                     }
                     results[idx] = (False, rejection_data)
-            
+
             # Clear needs_retry since we've handled them
             needs_retry = []
             print(f"   📊 After inline: {len(stage4_5_queue) - queue_idx} leads added to Stage 4-5 queue")
-        
+
         # If queue is empty but tasks pending, wait briefly before checking again
         if queue_idx >= len(stage4_5_queue) and (retry_task is not None or inline_task is not None):
             await asyncio.sleep(1)
-    
+
     # ========================================================================
     # Step 7: (Moved) Inline verification now happens inside the while loop
     # immediately after retries are exhausted, so leads get added to Stage 4-5 queue
     # ========================================================================
-    
+
     # ========================================================================
     # Summary
     # ========================================================================
-    
+
     # Safety: Fill any remaining None slots (e.g. from epoch abort mid-processing)
     for i in range(len(results)):
         if results[i] is None:
@@ -4752,2169 +1698,18 @@ async def run_batch_automated_checks(
                     "message": "Lead was not processed (epoch boundary abort or unexpected skip)"
                 }
             })
-    
+
     elapsed = time.time() - start_time
     passed_count = sum(1 for r in results if r and r[0] is True)
     failed_count = sum(1 for r in results if r and r[0] is False)
     skipped_count = sum(1 for r in results if r and r[0] is None)
-    
+
     print(f"📦 Batch validation complete in {elapsed:.1f}s")
     print(f"   ✅ Passed: {passed_count}")
     print(f"   ❌ Failed: {failed_count}")
     print(f"   ⏭️ Skipped: {skipped_count}")
-    
+
     return results
-
-
-# NOTE: check_myemailverifier_email() has been REMOVED as of Dec 2024.
-# All email validation now uses TrueList BATCH API via run_batch_automated_checks().
-
-# Stage 4: LinkedIn/GSE Validation
-
-async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> Tuple[List[dict], bool]:
-    """
-    Search LinkedIn using ScrapingDog Google Search API.
-
-    Uses 2-step approach:
-    1. Q4: "{name}" "{company}" linkedin location (primary)
-    2. Q1: site:linkedin.com/in/{profile_slug} (fallback if URL not found in Q4)
-
-    Args:
-        full_name: Person's full name
-        company: Company name
-        linkedin_url: LinkedIn URL provided by miner (required)
-        max_results: Max search results to return
-
-    Returns:
-        Tuple of (List of search results with title, link, snippet, url_match_exact: bool)
-    """
-    if not linkedin_url:
-        print(f"   ⚠️ No LinkedIn URL provided")
-        return [], False
-
-    if not SCRAPINGDOG_API_KEY:
-        raise Exception("SCRAPINGDOG_API_KEY not set")
-
-    # Extract profile slug from LinkedIn URL
-    profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0] if "/in/" in linkedin_url else None
-
-    # Track if URL matched exactly (strong identity proof)
-    url_match_exact = False
-
-    # Build search queries: Q4 primary, Q1 fallback
-    # Q4: Primary query - name + company + linkedin location
-    q4_query = f'"{full_name}" "{company}" linkedin location'
-
-    # Q1: Fallback query - direct profile search (only used if URL not found in Q4)
-    q1_query = f'site:linkedin.com/in/{profile_slug}' if profile_slug else None
-
-    print(f"   🔍 Q4 Query: {q4_query[:80]}...")
-    
-    def _search_linkedin_sync(query: str) -> List[dict]:
-        """Synchronous ScrapingDog search helper for Stage 4 with one retry"""
-        url = "https://api.scrapingdog.com/google"
-        params = {
-            "api_key": SCRAPINGDOG_API_KEY,
-            "query": query,
-            "results": max_results
-        }
-
-        for attempt in range(2):  # Max 2 attempts (1 original + 1 retry)
-            try:
-                response = requests.get(url, params=params, timeout=30, proxies=PROXY_CONFIG)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    items = []
-
-                    # Convert ScrapingDog format to standard format
-                    for item in data.get("organic_results", []):
-                        items.append({
-                            "title": item.get("title", ""),
-                            "link": item.get("link", ""),
-                            "snippet": item.get("snippet", "")
-                        })
-
-                    return items
-
-                # Retry once on 5xx server errors or rate limits (429)
-                if attempt == 0 and (response.status_code >= 500 or response.status_code == 429):
-                    print(f"         ⚠️ GSE API error: HTTP {response.status_code}, retrying in 2s...")
-                    time.sleep(2)
-                    continue
-
-                # Non-retryable error or retry exhausted
-                print(f"         ⚠️ GSE API error: HTTP {response.status_code}: {response.text[:100]}")
-                return []
-
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                if attempt == 0:
-                    print(f"         ⚠️ Network error: {str(e)[:50]}, retrying in 2s...")
-                    time.sleep(2)
-                    continue
-                print(f"         ⚠️ Network error after retry: {str(e)[:50]}")
-                return []
-            except Exception as e:
-                print(f"         ⚠️ Request error: {str(e)}")
-                return []
-
-        return []
-    
-    def _check_url_match(items: List[dict], profile_slug: str) -> Tuple[List[dict], List[str], bool]:
-        """Check if target profile URL is in results."""
-        linkedin_results = []
-        found_profile_urls = []
-
-        for item in items:
-            link = item.get("link", "")
-            if "linkedin.com/in/" in link:
-                result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
-                found_profile_urls.append(result_slug)
-                linkedin_results.append(item)
-            elif "linkedin.com" in link:
-                # Include other LinkedIn pages (company, posts) for context
-                linkedin_results.append(item)
-
-        url_match = False
-        url_match_type = None
-        if profile_slug and found_profile_urls:
-            profile_slug_norm = profile_slug.lower().replace("-", "").replace("_", "")
-            # Check exact match
-            exact_match = any(
-                profile_slug_norm == rs.lower().replace("-", "").replace("_", "")
-                for rs in found_profile_urls
-            )
-            # Check partial match
-            partial_match = any(
-                profile_slug_norm in rs.lower().replace("-", "").replace("_", "") or
-                rs.lower().replace("-", "").replace("_", "") in profile_slug_norm
-                for rs in found_profile_urls
-            )
-            if exact_match:
-                url_match = True
-                url_match_type = "exact"
-            elif partial_match:
-                url_match = True
-                url_match_type = "partial"
-
-        return linkedin_results, found_profile_urls, url_match, url_match_type
-
-    try:
-        # Step 1: Run Q4 query (primary)
-        print(f"      🔄 Running Q4 query...")
-        q4_items = await asyncio.to_thread(_search_linkedin_sync, q4_query)
-
-        url_found_in_q4 = False
-        linkedin_results = []
-        found_profile_urls = []
-
-        if q4_items:
-            print(f"         ✅ Q4 found {len(q4_items)} result(s)")
-            linkedin_results, found_profile_urls, url_found_in_q4, url_match_type = _check_url_match(q4_items, profile_slug)
-
-            if url_found_in_q4:
-                if url_match_type == "exact":
-                    print(f"         ✅ URL MATCH (Q4): Profile '{profile_slug}' confirmed (exact)")
-                    url_match_exact = True
-                else:
-                    print(f"         ✅ URL MATCH (Q4): Profile '{profile_slug}' confirmed (partial)")
-                    url_match_exact = "partial"
-            else:
-                print(f"         ⚠️ URL not found in Q4 results, expected: {profile_slug}")
-        else:
-            print(f"         ⚠️ Q4 returned no results")
-
-        # Step 2: Run Q1 fallback if URL not found in Q4
-        if not url_found_in_q4 and q1_query:
-            print(f"      🔄 Running Q1 fallback: {q1_query}")
-            q1_items = await asyncio.to_thread(_search_linkedin_sync, q1_query)
-
-            if q1_items:
-                print(f"         ✅ Q1 found {len(q1_items)} result(s)")
-                q1_linkedin_results, q1_found_urls, q1_url_found, q1_match_type = _check_url_match(q1_items, profile_slug)
-
-                if q1_url_found:
-                    # Merge Q1 results with Q4 results (Q1 results first since they have the URL)
-                    linkedin_results = q1_linkedin_results + linkedin_results
-                    found_profile_urls = q1_found_urls + found_profile_urls
-                    url_found_in_q4 = True  # Now we found the URL (in Q1)
-
-                    if q1_match_type == "exact":
-                        print(f"         ✅ URL MATCH (Q1): Profile '{profile_slug}' confirmed (exact)")
-                        url_match_exact = True
-                    else:
-                        print(f"         ✅ URL MATCH (Q1): Profile '{profile_slug}' confirmed (partial)")
-                        url_match_exact = "partial"
-                else:
-                    print(f"         ⚠️ URL not found in Q1 results either")
-            else:
-                print(f"         ⚠️ Q1 returned no results")
-
-        # If no URL match after Q4 + Q1, fail
-        if not url_found_in_q4:
-            print(f"   ❌ URL not found in Q4 or Q1 results")
-            return [], False
-
-        # Continue with filtering if we have results
-        if not linkedin_results:
-            print(f"   ❌ No LinkedIn URLs in results")
-            return [], False
-
-        print(f"         ✅ Found {len(linkedin_results)} LinkedIn result(s)")
-
-        # FILTER 1: Clean up concatenated titles and separate profile headlines from posts
-        # ScrapingDog often concatenates multiple result titles together
-        profile_headlines = []
-        posts = []
-
-        for item in linkedin_results:
-            title = item.get("title", "")
-
-            # ScrapingDog concatenates titles - extract only the FIRST profile
-            # Pattern: "Name - Title | LinkedIn Name2 - Title2"
-            if " | LinkedIn " in title:
-                # Take only the first profile (before the concatenation)
-                title = title.split(" | LinkedIn ")[0] + " | LinkedIn"
-                item = dict(item)  # Copy to avoid modifying original
-                item["title"] = title
-
-            # Skip non-profile results (posts, intro requests, etc.)
-            if " on LinkedIn:" in title or " on LinkedIn :" in title:
-                posts.append(item)
-                continue
-            if title.lower().startswith("seeking intro"):
-                posts.append(item)
-                continue
-            # Skip directory pages (but not profiles that just have this text concatenated)
-            is_directory_title = ("profiles | LinkedIn" in title or
-                                 "profiles - LinkedIn" in title or
-                                 "profiles on LinkedIn" in title)
-
-            if is_directory_title:
-                link = item.get("link", "")
-                is_directory_link = "/pub/dir/" in link or "/directory/" in link
-                starts_with_profiles = re.match(r'^\d+\+?\s+"?[^"]*"?\s+profiles', title.lower())
-
-                if is_directory_link or starts_with_profiles:
-                    continue  # Skip directory pages
-
-            profile_headlines.append(item)
-
-        # FILTER 2: Only keep results for TARGET PERSON (filter out other people)
-        name_parts = full_name.lower().split()
-        first_name = name_parts[0] if name_parts else ""
-        last_name = name_parts[-1] if len(name_parts) > 1 else ""
-
-        # Normalize accents for matching (José -> Jose, François -> Francois)
-        first_name_normalized = normalize_accents(first_name)
-        last_name_normalized = normalize_accents(last_name)
-
-        target_person_results = []
-        other_person_results = []
-
-        for item in profile_headlines:
-            title_lower = item.get("title", "").lower()
-            link = item.get("link", "")
-
-            # Normalize the title too for accent-insensitive matching
-            title_normalized = normalize_accents(title_lower)
-
-            # PRIORITY: If this result's URL matches our target profile slug, it's THE profile!
-            if profile_slug and "linkedin.com/in/" in link:
-                result_slug = link.split("/in/")[-1].strip("/").split("?")[0]
-                if profile_slug.lower() == result_slug.lower():
-                    target_person_results.append(item)
-                    continue  # Skip name check - URL match is definitive
-
-            # Check if target person's name is in the title (accent-insensitive)
-            if first_name_normalized in title_normalized and last_name_normalized in title_normalized:
-                target_person_results.append(item)
-            else:
-                other_person_results.append(item)
-
-        # Return target person's profile headlines
-        if target_person_results:
-            print(f"      📊 GSE Profile Headlines for {full_name}:")
-            for i, item in enumerate(target_person_results[:3], 1):
-                print(f"         {i}. {item.get('title', '')[:70]}")
-            if other_person_results:
-                print(f"      📊 Other profiles filtered out: {len(other_person_results)}")
-            if posts:
-                print(f"      📊 Posts filtered out: {len(posts)}")
-            return target_person_results[:max_results], url_match_exact
-        elif profile_headlines:
-            # No exact name match but have profile headlines - return them anyway since URL matched
-            print(f"      ⚠️ Name not found in results but URL matched, returning results")
-            return profile_headlines[:max_results], url_match_exact
-        elif posts:
-            # Only posts found (no profile headlines) - return posts
-            print(f"      📊 ScrapingDog Posts only (no profile headlines found):")
-            for i, item in enumerate(posts[:3], 1):
-                print(f"         {i}. {item.get('title', '')[:70]}")
-            return posts[:max_results], url_match_exact
-        else:
-            print(f"   ❌ No usable results after filtering")
-            return [], False
-
-    except Exception as e:
-        print(f"   ⚠️ GSE API error: {str(e)}")
-        return [], False
-
-async def verify_linkedin_rule_based(full_name: str, company: str, linkedin_url: str, search_results: List[dict], url_match_exact: bool = False) -> Tuple[bool, str]:
-    """
-    Rule-based verification of LinkedIn profile from search results.
-
-    NOTE: This function no longer uses LLM - it's purely rule-based for speed and consistency.
-    Name kept for backward compatibility with callers.
-
-    Verification logic:
-    1. URL match (exact or partial) = strong identity proof
-    2. Name match = first/last name found in title or URL slug
-    3. Company match = company name found in title/snippet
-
-    Args:
-        full_name: Person's full name
-        company: Company name
-        linkedin_url: Provided LinkedIn URL
-        search_results: Google search results
-        url_match_exact: If True, URL slug matched exactly (strong identity proof)
-
-    Returns:
-        (is_verified, reasoning)
-    """
-    try:
-        if not search_results:
-            return False, "No LinkedIn search results found"
-
-        # ========================================================================
-        # STEP 1: Find URL-matched result (authoritative source)
-        # ========================================================================
-        profile_slug = linkedin_url.split("/in/")[-1].strip("/").split("?")[0].lower() if linkedin_url and "/in/" in linkedin_url else None
-        target_result = search_results[0]  # Default to first
-
-        if profile_slug:
-            for result in search_results:
-                result_url = result.get("link", "").lower()
-                if f"/in/{profile_slug}" in result_url or (
-                    profile_slug.replace("-", "").replace("_", "") in
-                    result_url.replace("-", "").replace("_", "")
-                ):
-                    target_result = result
-                    print(f"   🎯 Using URL-matched result: {result_url[:60]}")
-                    break
-
-        # ========================================================================
-        # STEP 2: Rule-based NAME match
-        # ========================================================================
-        name_parts = full_name.lower().split()
-        first_name = name_parts[0] if name_parts else ""
-        last_name = name_parts[-1] if len(name_parts) > 1 else first_name
-
-        # Normalize accents
-        first_name_norm = normalize_accents(first_name)
-        last_name_norm = normalize_accents(last_name)
-
-        title = target_result.get("title", "").lower()
-        title_norm = normalize_accents(title)
-
-        # Method 1: Name in title
-        name_in_title = (first_name_norm in title_norm and last_name_norm in title_norm)
-
-        # Method 2: Name in URL slug (e.g., "john-smith" matches "John Smith")
-        name_in_url = False
-        if profile_slug:
-            slug_clean = profile_slug.replace("-", " ").replace("_", " ").replace("%20", " ")
-            slug_norm = normalize_accents(slug_clean)
-            name_in_url = (first_name_norm in slug_norm and last_name_norm in slug_norm)
-
-        name_match = name_in_title or name_in_url
-
-        # If URL matched exactly, trust it as identity proof
-        if url_match_exact and not name_match:
-            print(f"   ✅ URL EXACT MATCH: Trusting URL as identity proof even without name in title")
-            name_match = True
-
-        print(f"   🔍 NAME CHECK: first='{first_name}' last='{last_name}' → in_title={name_in_title}, in_url={name_in_url}")
-
-        # ========================================================================
-        # STEP 3: Rule-based COMPANY match
-        # ========================================================================
-        company_lower = company.lower().strip()
-        company_lower = company_lower.replace("'", "'").replace("'", "'").replace("`", "'")
-        company_lower = re.sub(r"\s*'\s*", "'", company_lower)
-        company_lower = re.sub(r"\s*-\s*", "-", company_lower)
-
-        # Remove legal suffixes
-        LEGAL_SUFFIXES = [
-            " corporation", " corp.", " corp", " incorporated", " inc.", " inc",
-            " llc", " l.l.c.", " ltd.", " ltd", " limited", " plc", " p.l.c.",
-            " co.", " co", " company", " gmbh", " ag", " sa", " nv", " bv",
-            " holdings", " holding", " group", " international", " intl"
-        ]
-        company_normalized = company_lower
-        for suffix in LEGAL_SUFFIXES:
-            if company_normalized.endswith(suffix):
-                company_normalized = company_normalized[:-len(suffix)].strip()
-                break
-
-        company_words = company_normalized.split()
-
-        # Normalize title for company check
-        first_title = title.replace("'", "'").replace("'", "'").replace("`", "'")
-        first_title = re.sub(r"\s*'\s*", "'", first_title)
-        first_title = re.sub(r"\s*-\s*", "-", first_title)
-        if "| linkedin" in first_title:
-            first_title = first_title.split("| linkedin")[0].strip()
-
-        first_snippet = target_result.get("snippet", "").lower()
-        first_snippet = re.sub(r"\s*-\s*", "-", first_snippet)
-
-        # Method 1: Exact company name in title
-        company_in_title = company_normalized in first_title
-
-        # Method 2: All significant words in title
-        if not company_in_title and len(company_words) > 1:
-            significant_words = [w for w in company_words if len(w) > 2]
-            company_in_title = all(word in first_title for word in significant_words)
-
-        # Method 3: Extract company from title pattern "at Company" or "@ Company"
-        if not company_in_title:
-            title_company_match = re.search(r'(?:at|@)\s+([^|\-]+?)(?:\s*[\|\-]|$)', first_title, re.IGNORECASE)
-            if title_company_match:
-                extracted_company = title_company_match.group(1).strip().lower()
-                extracted_company = re.sub(r'\s+(linkedin|profile|page).*$', '', extracted_company)
-                extracted_company = re.sub(r'\s*\([^)]*\).*$', '', extracted_company)
-                extracted_company = re.sub(r'\s*\|.*$', '', extracted_company)
-                extracted_company = extracted_company.strip()
-
-                # Normalize extracted company
-                extracted_normalized = extracted_company
-                for suffix in LEGAL_SUFFIXES:
-                    if extracted_normalized.endswith(suffix):
-                        extracted_normalized = extracted_normalized[:-len(suffix)].strip()
-                        break
-
-                # Bidirectional containment check
-                if len(extracted_normalized) >= 4 and len(company_normalized) >= 4:
-                    if (extracted_normalized in company_normalized or
-                        company_normalized in extracted_normalized):
-                        if ' ' in extracted_normalized or ' ' in company_normalized:
-                            company_in_title = True
-                            print(f"   ✅ RULE-BASED MATCH: '{extracted_normalized}' ≈ '{company_normalized}'")
-                        else:
-                            longer = max(extracted_normalized, company_normalized, key=len)
-                            shorter = min(extracted_normalized, company_normalized, key=len)
-                            if len(shorter) / len(longer) >= 0.6:
-                                company_in_title = True
-
-        # Method 4: Company in snippet
-        company_in_snippet = False
-        if not company_in_title:
-            if company_normalized in first_snippet:
-                company_in_snippet = True
-            elif len(company_words) > 1:
-                significant_words = [w for w in company_words if len(w) > 2]
-                if all(word in first_snippet for word in significant_words):
-                    company_in_snippet = True
-
-        company_match = company_in_title or company_in_snippet
-
-        # If URL matched but company not found (truncation), defer to Stage 5
-        if url_match_exact and name_match and not company_match:
-            print(f"   ⚠️ URL + Name match but company not found → deferring to Stage 5")
-            company_match = True  # Pass Stage 4, Stage 5 will verify
-
-        match_location = "title" if company_in_title else ("snippet" if company_in_snippet else "NOT FOUND")
-        print(f"   🔍 COMPANY CHECK: '{company}' in {match_location} = {company_match}")
-
-        # ========================================================================
-        # STEP 4: Make decision
-        # ========================================================================
-        profile_valid = True  # URL was found in search results
-
-        if name_match and company_match and profile_valid:
-            reasoning = f"Rule-based PASS: URL={'exact' if url_match_exact else 'partial'}, name_match={name_match}, company_match={company_match}"
-            print(f"   ✅ RULE-BASED VERIFICATION: PASSED")
-            print(f"      {reasoning}")
-            return True, reasoning
-        else:
-            failures = []
-            if not name_match:
-                failures.append("name mismatch")
-            if not company_match:
-                failures.append("company mismatch")
-
-            failure_str = ", ".join(failures)
-            reasoning = f"Rule-based FAIL: {failure_str}"
-            print(f"   ❌ RULE-BASED VERIFICATION: FAILED")
-            print(f"      {reasoning}")
-            return False, reasoning
-
-    except Exception as e:
-        return False, f"Verification error: {str(e)}"
-
-
-async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
-    """
-    Stage 4: LinkedIn/GSE validation (HARD check).
-
-    Verifies lead using the new lead_validation module:
-    1. Role format validation (before any API calls)
-    2. Q4 search + Q1 fallback
-    3. URL match, Name check, Company check
-    4. Location validation with Q3 fallback
-    5. Company LinkedIn validation (existing)
-
-    This is a HARD check - instant rejection if fails.
-
-    Args:
-        lead: Lead data with full_name, company, linkedin
-
-    Returns:
-        (passed, rejection_reason)
-    """
-    try:
-        full_name = lead.get("full_name") or lead.get("Full_name") or lead.get("Full Name")
-        company = get_company(lead)
-        linkedin_url = get_linkedin(lead)
-
-        # ========================================================================
-        # NEW: Run lead validation (role format, URL, name, company, location)
-        # ========================================================================
-        print(f"   🔍 Stage 4: Running lead validation for {full_name} at {company}")
-
-        validation_result = await run_lead_validation_stage4(lead)
-
-        if not validation_result['passed']:
-            # Store validation data on lead for debugging
-            lead["lead_validation_data"] = validation_result.get('data', {})
-            return False, validation_result['rejection_reason']
-
-        # Store validation data on lead
-        validation_data = validation_result.get('data', {})
-        lead["gse_search_count"] = len(validation_data.get('search_results', []))
-        lead["query_used"] = validation_data.get('query_used', '')
-        lead["q3_called"] = validation_data.get('q3_called', False)
-        lead["q3_result"] = validation_data.get('q3_result')
-
-        # Store role verification results for Stage 5
-        lead["role_verified"] = validation_data.get('role_verified', False)
-        lead["role_method"] = validation_data.get('role_method', '')
-        if validation_data.get('extracted_role'):
-            lead["stage4_extracted_role"] = validation_data['extracted_role']
-            print(f"   📝 Stage 4: Role verified: '{validation_data['extracted_role']}' (method: {validation_data.get('role_method', '')})")
-
-        # Store location verification results for Stage 5
-        lead["location_verified"] = validation_data.get('location_passed', False)
-        lead["location_method"] = validation_data.get('location_method', '')
-        lead["extracted_location"] = validation_data.get('extracted_location', '')
-        if validation_data.get('extracted_location'):
-            lead["stage4_extracted_location"] = validation_data['extracted_location']
-            print(f"   📍 Stage 4: Location verified: '{validation_data['extracted_location']}' (method: {validation_data.get('location_method', '')})")
-
-        print(f"   ✅ Stage 4: Lead validation passed (queries: {validation_data.get('query_used', 'N/A')})")
-
-        # ========================================================================
-        # STAGE 4: COMPANY LINKEDIN VALIDATION
-        # ========================================================================
-        # Validates company_linkedin URL, verifies company name matches, and caches
-        # company data (industry, description, employee_count) for Stage 5.
-        # FAIL HERE = Stage 5 never runs = saves all Stage 5 API costs
-        # ========================================================================
-        
-        company_linkedin = lead.get("company_linkedin", "") or ""
-        
-        if company_linkedin:
-            print(f"   🏢 Stage 4: Validating company LinkedIn URL...")
-            
-            # Step 1: Validate URL format (must be /company/, not /in/)
-            url_valid, url_reason, company_slug = validate_company_linkedin_url(company_linkedin)
-            
-            if not url_valid:
-                print(f"   ❌ Stage 4: Company LinkedIn URL INVALID: {url_reason}")
-                return False, {
-                    "stage": "Stage 4: Company LinkedIn Validation",
-                    "check_name": "check_linkedin_gse",
-                    "message": f"Company LinkedIn URL is invalid: {url_reason}",
-                    "failed_fields": ["company_linkedin"],
-                    "provided_url": company_linkedin,
-                    "expected_format": "https://linkedin.com/company/{company-name}"
-                }
-            
-            print(f"   ✅ Stage 4: Company LinkedIn URL format valid: /company/{company_slug}")
-            
-            # Step 2: Check global cache first
-            cached_data = get_company_linkedin_from_cache(company_slug)
-            
-            if cached_data:
-                print(f"   📦 Stage 4: Using CACHED company LinkedIn data for '{company_slug}'")
-                
-                # Verify company name still matches (cache might have different company)
-                cached_company_name = cached_data.get("company_name_from_linkedin", "")
-                if cached_company_name:
-                    # Check if cached company matches current company claim
-                    cached_lower = cached_company_name.lower().strip()
-                    claimed_lower = company.lower().strip()
-                    
-                    if cached_lower != claimed_lower and cached_lower not in claimed_lower and claimed_lower not in cached_lower:
-                        print(f"   ❌ Stage 4: Cached company name '{cached_company_name}' doesn't match claimed '{company}'")
-                        return False, {
-                            "stage": "Stage 4: Company LinkedIn Validation",
-                            "check_name": "check_linkedin_gse",
-                            "message": f"Company LinkedIn page shows '{cached_company_name}' but miner claimed '{company}'",
-                            "failed_fields": ["company_linkedin", "company"],
-                            "linkedin_company": cached_company_name,
-                            "claimed_company": company
-                        }
-                
-                # Store cached data on lead for Stage 5
-                lead["company_linkedin_verified"] = True
-                lead["company_linkedin_slug"] = company_slug
-                lead["company_linkedin_data"] = cached_data
-                lead["company_linkedin_from_cache"] = True
-                
-                # Log what data we have cached
-                if cached_data.get("employee_count"):
-                    print(f"   📊 Cached employee count: {cached_data['employee_count']}")
-                if cached_data.get("industry"):
-                    print(f"   🏭 Cached industry: {cached_data['industry']}")
-                if cached_data.get("description"):
-                    print(f"   📝 Cached description: {cached_data['description'][:80]}...")
-            else:
-                # Step 3: Not cached - scrape company LinkedIn page via GSE
-                print(f"   🔍 Stage 4: Scraping company LinkedIn page for '{company_slug}'...")
-                scraped_data = await scrape_company_linkedin_gse(company_slug, company)
-                
-                if scraped_data.get("success"):
-                    # Step 4: Verify company name matches
-                    if not scraped_data.get("company_name_match"):
-                        linkedin_company = scraped_data.get("company_name_from_linkedin", "Unknown")
-                        print(f"   ❌ Stage 4: Company name MISMATCH: LinkedIn shows '{linkedin_company}' but miner claimed '{company}'")
-                        return False, {
-                            "stage": "Stage 4: Company LinkedIn Validation",
-                            "check_name": "check_linkedin_gse",
-                            "message": f"Company LinkedIn page shows '{linkedin_company}' but miner claimed '{company}'",
-                            "failed_fields": ["company_linkedin", "company"],
-                            "linkedin_company": linkedin_company,
-                            "claimed_company": company
-                        }
-                    
-                    print(f"   ✅ Stage 4: Company name verified: '{company}'")
-                    
-                    # Step 5: Cache the data globally (only on success)
-                    set_company_linkedin_cache(company_slug, scraped_data)
-                    print(f"   💾 Stage 4: Cached company LinkedIn data for future leads")
-                    
-                    # Store on lead for Stage 5
-                    lead["company_linkedin_verified"] = True
-                    lead["company_linkedin_slug"] = company_slug
-                    lead["company_linkedin_data"] = scraped_data
-                    lead["company_linkedin_from_cache"] = False
-                    
-                    # Log what data we scraped
-                    if scraped_data.get("employee_count"):
-                        print(f"   📊 Scraped employee count: {scraped_data['employee_count']}")
-                    if scraped_data.get("industry"):
-                        print(f"   🏭 Scraped industry: {scraped_data['industry']}")
-                    if scraped_data.get("description"):
-                        print(f"   📝 Scraped description: {scraped_data['description'][:80]}...")
-                else:
-                    # Scraping failed - check if it's a URL mismatch (reject) or just scraping error (warn)
-                    error_msg = scraped_data.get('error', 'Unknown')
-                    
-                    # If URL doesn't match, this is a CRITICAL error - reject immediately
-                    if "does not match expected slug" in error_msg or "URL mismatch" in error_msg:
-                        print(f"   ❌ Stage 4: Company LinkedIn URL mismatch: {error_msg}")
-                        return False, {
-                            "stage": "Stage 4: Company LinkedIn Validation",
-                            "check_name": "check_linkedin_gse",
-                            "message": f"Company LinkedIn URL is incorrect or ambiguous: {error_msg}",
-                            "failed_fields": ["company_linkedin"],
-                            "provided_url": company_linkedin,
-                            "hint": "The URL provided returns a different company page. Ensure you're using the exact LinkedIn company slug."
-                        }
-                    
-                    # Other scraping errors (network, API, etc.) - warn but don't fail
-                    # Stage 5 will use fallback GSE searches
-                    print(f"   ⚠️ Stage 4: Could not scrape company LinkedIn: {error_msg}")
-                    print(f"   ⚠️ Stage 4: Stage 5 will use fallback GSE searches for industry/employee data")
-                    lead["company_linkedin_verified"] = True  # URL was valid format
-                    lead["company_linkedin_slug"] = company_slug
-                    lead["company_linkedin_data"] = None  # No data - Stage 5 will fallback
-                    lead["company_linkedin_from_cache"] = False
-        else:
-            # No company_linkedin provided - Stage 5 will use fallback GSE searches
-            print(f"   ⚠️ Stage 4: No company_linkedin URL provided")
-            lead["company_linkedin_verified"] = False
-            lead["company_linkedin_data"] = None
-        
-        print(f"   ✅ Stage 4: LinkedIn verified for {full_name} at {company}")
-        return True, {}
-    
-    except Exception as e:
-        return False, {
-            "stage": "Stage 4: LinkedIn/GSE Validation",
-            "check_name": "check_linkedin_gse",
-            "message": f"LinkedIn/GSE check failed: {str(e)}",
-            "failed_fields": ["linkedin"]
-        }
-
-# Rep Score: Soft Reputation Checks (SOFT - always passes, appends score)
-
-async def check_wayback_machine(lead: dict) -> Tuple[float, dict]:
-    """
-    Rep Score: Check domain history in Wayback Machine.
-    
-    Returns score (0-6) based on:
-    - Number of snapshots
-    - Age of domain in archive
-    - Consistency of snapshots
-    
-    This is a SOFT check - always passes, appends score.
-    
-    Args:
-        lead: Lead data with website
-    
-    Returns:
-        (score, metadata)
-    """
-    try:
-        website = get_website(lead)
-        if not website:
-            return 0, {"checked": False, "reason": "No website provided"}
-        
-        domain = extract_root_domain(website)
-        if not domain:
-            return 0, {"checked": False, "reason": "Invalid website format"}
-        
-        # Query Wayback Machine CDX API (with 3 retries for timeout)
-        url = f"https://web.archive.org/cdx/search/cdx"
-        params = {
-            "url": domain,
-            "output": "json",
-            "limit": 1000,
-            "fl": "timestamp"
-        }
-        
-        for attempt in range(3):
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, params=params, timeout=15, proxy=HTTP_PROXY_URL) as response:
-                        if response.status != 200:
-                            return 0, {"checked": False, "reason": f"Wayback API error: {response.status}"}
-                        
-                        data = await response.json()
-                        
-                        if len(data) <= 1:  # First row is header
-                            return 0, {"checked": True, "snapshots": 0, "reason": "No archive history"}
-                        
-                        snapshots = len(data) - 1  # Exclude header
-                        
-                        # Parse timestamps to calculate age
-                        timestamps = [row[0] for row in data[1:]]  # Skip header
-                        oldest = timestamps[0] if timestamps else None
-                        newest = timestamps[-1] if timestamps else None
-                        
-                        # Calculate age in years
-                        if oldest:
-                            oldest_year = int(oldest[:4])
-                            current_year = datetime.now().year
-                            age_years = current_year - oldest_year
-                        else:
-                            age_years = 0
-                        
-                        # Scoring logic (UPDATED: max 6 points for Wayback):
-                        if snapshots < 10:
-                            score = min(1.2, snapshots * 0.12)
-                        elif snapshots < 50:
-                            score = 1.8 + (snapshots - 10) * 0.03
-                        elif snapshots < 200:
-                            score = 3.6 + (snapshots - 50) * 0.008
-                        else:
-                            score = 5.4 + min(0.6, (snapshots - 200) * 0.0006)
-                        
-                        # Age bonus
-                        if age_years >= 5:
-                            score = min(6, score + 0.6)
-                        
-                        return score, {
-                            "checked": True,
-                            "snapshots": snapshots,
-                            "age_years": age_years,
-                            "oldest_snapshot": oldest,
-                            "newest_snapshot": newest,
-                            "score": score
-                        }
-            except asyncio.TimeoutError:
-                if attempt < 2:
-                    await asyncio.sleep(5)
-                    continue
-                return 0, {"checked": False, "reason": "Wayback API timeout (3 attempts)"}
-            except Exception as e:
-                return 0, {"checked": False, "reason": f"Wayback check error: {str(e)}"}
-        
-        # Fallback if loop completes without returning
-        return 0, {"checked": False, "reason": "Wayback check failed unexpectedly"}
-    except Exception as e:
-        return 0, {"checked": False, "reason": f"Wayback check error: {str(e)}"}
-
-async def check_sec_edgar(lead: dict) -> Tuple[float, dict]:
-    """
-    Rep Score: Check SEC EDGAR for company filings.
-    
-    Returns score (0-12) based on:
-    - Number of filings
-    - Recent filing activity
-    - Types of filings (10-K, 10-Q, 8-K)
-    
-    This is a SOFT check - always passes, appends score.
-    Uses official SEC.gov API (free, no API key needed - just User-Agent)
-    
-    Args:
-        lead: Lead data with company
-    
-    Returns:
-        (score, metadata)
-    """
-    try:
-        company = get_company(lead)
-        if not company:
-            return 0, {"checked": False, "reason": "No company provided"}
-        
-        print(f"   🔍 SEC: Searching for company: '{company}'")
-        
-        # SEC.gov requires User-Agent header with contact info (no API key needed)
-        headers = {
-            "User-Agent": "LeadPoet/1.0 (hello@leadpoet.com)"
-        }
-        
-        # Try multiple company name variations for better matching
-        # SEC often uses abbreviated forms (e.g., "Microsoft Corp" not "Microsoft Corporation")
-        company_variations = [
-            company,  # Original name
-            company.replace(" Company, Inc.", "").replace(" Corporation", " Corp").replace(", Inc.", ""),  # Abbreviated
-            company.split()[0] if len(company.split()) > 1 else company,  # First word only (e.g., "Microsoft")
-        ]
-        
-        # Remove duplicates while preserving order (e.g., if abbreviated = original)
-        company_variations = list(dict.fromkeys(company_variations))
-        
-        print(f"      🔍 Trying {len(company_variations)} name variations: {company_variations}")
-        
-        # Use SEC.gov company search endpoint to find CIK
-        # This searches the submissions index for company name matches
-        search_url = "https://www.sec.gov/cgi-bin/browse-edgar"
-        
-        # Try each variation until we find results
-        async with aiohttp.ClientSession() as session:
-            for idx, company_variation in enumerate(company_variations):
-                print(f"      🔄 Attempt {idx+1}/{len(company_variations)}: Searching for '{company_variation}'")
-                
-                # Request actual filings, not just company landing page
-                # type=&dateb=&owner=include&start=0
-                params = {
-                    "company": company_variation,
-                    "action": "getcompany",
-                    "type": "",  # All filing types
-                    "dateb": "",  # All dates
-                    "owner": "include",  # Include company filings
-                    "start": "0",  # Start from first filing
-                    "count": "100"  # Get up to 100 recent filings
-                }
-                
-                async with session.get(search_url, headers=headers, params=params, timeout=7, proxy=HTTP_PROXY_URL) as response:
-                    if response.status != 200:
-                        print(f"      ❌ SEC API returned HTTP {response.status}")
-                        continue  # Try next variation
-                    
-                    # Parse HTML response (SEC doesn't return JSON for this endpoint)
-                    html = await response.text()
-                    print(f"      📄 SEC response length: {len(html)} bytes")
-                    
-                    # Check if company was found (HTML contains "No matching" if not found)
-                    if "No matching" in html or "No results" in html:
-                        print(f"      ❌ SEC: 'No matching' found for '{company_variation}'")
-                        continue  # Try next variation
-                    
-                    # Found a result! Count filing indicators in HTML
-                    print(f"      ✅ SEC: Found match for '{company_variation}'")
-                    filing_types = ["10-K", "10-Q", "8-K", "S-1", "10-K/A", "10-Q/A", "4", "3", "SC 13", "DEF 14A"]
-                    total_filings = 0
-                    for filing_type in filing_types:
-                        # Look for the filing type in HTML context (e.g., ">10-K<" or " 10-K ")
-                        count = html.count(f">{filing_type}<") + html.count(f" {filing_type} ")
-                        if count > 0:
-                            print(f"      📊 Found {count}x {filing_type}")
-                        total_filings += count
-                    
-                    print(f"      📊 Total filings detected: {total_filings}")
-                    
-                    if total_filings == 0:
-                        # The HTML might be a landing page with a link to the actual filings
-                        # Try to extract CIK from the HTML and query directly
-                        cik_match = re.search(r'CIK=(\d{10})', html)
-                        if cik_match:
-                            cik = cik_match.group(1)
-                            print(f"      🔍 Found CIK: {cik}, fetching actual filings...")
-                            
-                            # Query the filings page directly using CIK
-                            cik_params = {
-                                "action": "getcompany",
-                                "CIK": cik,
-                                "type": "",
-                                "dateb": "",
-                                "owner": "include",
-                                "count": "100"
-                            }
-                            
-                            async with session.get(search_url, headers=headers, params=cik_params, timeout=7, proxy=HTTP_PROXY_URL) as cik_response:
-                                if cik_response.status == 200:
-                                    cik_html = await cik_response.text()
-                                    print(f"      📄 CIK response length: {len(cik_html)} bytes")
-                                    
-                                    # Count filings again (use HTML-aware matching)
-                                    total_filings = 0
-                                    for filing_type in filing_types:
-                                        count = cik_html.count(f">{filing_type}<") + cik_html.count(f" {filing_type} ")
-                                        if count > 0:
-                                            print(f"      📊 Found {count}x {filing_type}")
-                                        total_filings += count
-                                    
-                                    # DEBUG: Check if HTML contains filing table markers
-                                    has_filing_table = "filingTable" in cik_html or "Filing" in cik_html
-                                    print(f"      🔍 DEBUG: Has 'filingTable' or 'Filing': {has_filing_table}")
-                                    
-                                    # If we have a valid CIK and filing indicators but can't parse exact counts,
-                                    # give partial credit (company IS SEC-registered with filings)
-                                    if total_filings == 0 and has_filing_table:
-                                        print(f"      ⚠️  CIK {cik} has filings but HTML parsing failed")
-                                        print(f"      ✅ SEC: Giving partial credit (3.6/12) for SEC-registered company")
-                                        return 3.6, {
-                                            "checked": True,
-                                            "filings": "unknown (parsing failed)",
-                                            "score": 3.6,
-                                            "cik": cik,
-                                            "company_name_used": company_variation,
-                                            "reason": f"Company registered with SEC (CIK {cik}) but exact filing count unavailable"
-                                        }
-                                    
-                                    if total_filings > 0:
-                                        # Success! Calculate score
-                                        print(f"      📊 Total filings detected: {total_filings}")
-                                        
-                                        if total_filings <= 5:
-                                            score = min(3.6, total_filings * 0.72)
-                                        elif total_filings <= 20:
-                                            score = 7.2
-                                        elif total_filings <= 50:
-                                            score = 9.6
-                                        else:
-                                            score = 12
-                                        
-                                        print(f"      ✅ SEC: {score}/12 pts for CIK {cik}")
-                                        return score, {
-                                            "checked": True,
-                                            "filings": total_filings,
-                                            "score": score,
-                                            "cik": cik,
-                                            "company_name_used": company_variation,
-                                            "reason": f"Found {total_filings} SEC filing indicators for CIK {cik}"
-                                        }
-                        
-                        print(f"      ⚠️  Match found but no filing types detected (showing first 500 chars):")
-                        print(f"         {html[:500]}")
-                        continue  # Try next variation
-                    
-                    # Scoring logic (UPDATED: max 12 points for SEC):
-                    # - 1-5 filings: 3.6 points
-                    # - 6-20 filings: 7.2 points
-                    # - 21-50 filings: 9.6 points
-                    # - 50+ filings: 12 points
-                    
-                    if total_filings <= 5:
-                        score = min(3.6, total_filings * 0.72)
-                    elif total_filings <= 20:
-                        score = 7.2
-                    elif total_filings <= 50:
-                        score = 9.6
-                    else:
-                        score = 12
-                    
-                    print(f"      ✅ SEC: {score}/12 pts for '{company_variation}'")
-                    return score, {
-                        "checked": True,
-                        "filings": total_filings,
-                        "score": score,
-                        "company_name_used": company_variation,
-                        "reason": f"Found {total_filings} SEC filing indicators for {company_variation}"
-                    }
-            
-            # All variations failed
-            print(f"      ❌ SEC: No results found for any name variation")
-            return 0, {
-                "checked": True,
-                "filings": 0,
-                "variations_tried": company_variations,
-                "reason": f"No SEC filings found for {company} (tried {len(company_variations)} variations)"
-            }
-
-    except asyncio.TimeoutError:
-        return 0, {"checked": False, "reason": "SEC API timeout"}
-    except Exception as e:
-        return 0, {"checked": False, "reason": f"SEC check error: {str(e)}"}
-
-
-async def check_gdelt_mentions(lead: dict) -> Tuple[float, dict]:
-    """
-    Rep Score: Check GDELT for press mentions and trusted domain coverage.
-    
-    Returns score (0-10) based on:
-    - Press wire mentions (PRNewswire, BusinessWire, GlobeNewswire, ENPresswire)
-    - Trusted domain mentions (.edu, .gov, high-authority sites)
-    
-    This is a SOFT check - always passes, appends score.
-    Uses GDELT 2.0 DOC API (free, no API key needed)
-    
-    Scoring breakdown:
-    - 0-5 points: Press wire mentions (verified company PR)
-    - 0-5 points: Trusted domain mentions (.edu, .gov, DA>60)
-    
-    Args:
-        lead: Lead data with company
-    
-    Returns:
-        (score, metadata)
-    """
-    try:
-        company = get_company(lead)
-        if not company:
-            return 0, {"checked": False, "reason": "No company provided"}
-        
-        print(f"   🔍 GDELT: Searching for company: '{company}'")
-        
-        # GDELT 2.0 DOC API endpoint
-        # Uses free public API - no key required
-        gdelt_url = "https://api.gdeltproject.org/api/v2/doc/doc"
-        
-        # Query for company mentions in last 3 months
-        # Format: "company name" sourcelang:eng
-        # NOTE: GDELT requires minimum 5 characters in query, so append "company" for short names
-        search_term = company
-        if len(company) <= 4:
-            search_term = f"{company} company"
-            print(f"      ℹ️  Short name detected, searching: '{search_term}'")
-        query = f'"{search_term}" sourcelang:eng'
-        
-        async with aiohttp.ClientSession() as session:
-            params = {
-                "query": query,
-                "mode": "artlist",
-                "maxrecords": 250,  # Get up to 250 recent articles
-                "format": "json",
-                "sort": "datedesc"
-            }
-            
-            async with session.get(gdelt_url, params=params, timeout=15, proxy=HTTP_PROXY_URL) as response:
-                if response.status != 200:
-                    print(f"      ❌ GDELT API returned HTTP {response.status}")
-                    return 0, {
-                        "checked": False,
-                        "reason": f"GDELT API error: HTTP {response.status}"
-                    }
-                
-                # GDELT sometimes returns HTML instead of JSON for short/uncommon company names
-                # Check Content-Type before parsing to avoid json decode errors
-                content_type = response.headers.get("Content-Type", "")
-                if "text/html" in content_type:
-                    # GDELT returned HTML page - treat as no coverage (not an error)
-                    print(f"      ⚠️  GDELT returned HTML instead of JSON (no articles for '{company}')")
-                    return 0, {
-                        "checked": True,
-                        "press_mentions": 0,
-                        "trusted_mentions": 0,
-                        "reason": f"No GDELT coverage found for {company}"
-                    }
-                
-                data = await response.json()
-                articles = data.get("articles", [])
-                print(f"      📰 GDELT found {len(articles)} articles")
-                
-                if not articles:
-                    print(f"      ❌ No GDELT articles found for '{company}'")
-                    return 0, {
-                        "checked": True,
-                        "press_mentions": 0,
-                        "trusted_mentions": 0,
-                        "reason": f"No GDELT coverage found for {company}"
-                    }
-                
-                # Parse articles for press wires and trusted domains
-                press_wire_domains = {
-                    "prnewswire.com",
-                    "businesswire.com",
-                    "globenewswire.com",
-                    "enpresswire.com",
-                    "prweb.com",
-                    "marketwired.com"
-                }
-                
-                trusted_tlds = {".edu", ".gov", ".mil"}
-                
-                # High-authority domains (Fortune 500, major news outlets, financial news)
-                high_authority_domains = {
-                    # Major news outlets
-                    "forbes.com", "fortune.com", "bloomberg.com", "wsj.com",
-                    "nytimes.com", "reuters.com", "ft.com", "economist.com",
-                    "theguardian.com", "washingtonpost.com", "bbc.com", "cnbc.com",
-                    # Tech news
-                    "techcrunch.com", "wired.com", "theverge.com", "cnet.com",
-                    "arstechnica.com", "zdnet.com", "venturebeat.com",
-                    # Financial news
-                    "finance.yahoo.com", "yahoo.com", "marketwatch.com", "fool.com",
-                    "seekingalpha.com", "investing.com", "benzinga.com", "zacks.com",
-                    "morningstar.com", "barrons.com", "investopedia.com",
-                    # International business news
-                    "thehindubusinessline.com", "business-standard.com", "economictimes.indiatimes.com",
-                    "scmp.com", "japantimes.co.jp", "straitstimes.com"
-                }
-                
-                press_mentions = []
-                trusted_mentions = []
-                seen_domains = set()  # Track unique domains (no spam)
-                all_domains_found = []  # DEBUG: Track all domains for logging
-                
-                for article in articles:
-                    url = article.get("url", "")
-                    domain = article.get("domain", "")
-                    title = article.get("title", "")
-                    
-                    # DEBUG: Track all domains
-                    if domain:
-                        all_domains_found.append(domain)
-                    
-                    # Skip if we've seen this domain (cap at 3 mentions per domain)
-                    if domain in seen_domains:
-                        domain_count = sum(1 for m in trusted_mentions if m["domain"] == domain)
-                        if domain_count >= 3:
-                            continue
-                    
-                    seen_domains.add(domain)
-                    
-                    # Check if company name appears in title (stronger signal)
-                    company_in_title = company.lower() in title.lower()
-                    
-                    # Check for press wire mentions
-                    is_press_wire = any(wire in domain for wire in press_wire_domains)
-                    if is_press_wire:
-                        press_mentions.append({
-                            "domain": domain,
-                            "url": url[:100],
-                            "title": title[:100],
-                            "company_in_title": company_in_title
-                        })
-                    
-                    # Check for trusted domain mentions
-                    is_trusted_tld = any(domain.endswith(tld) for tld in trusted_tlds)
-                    is_high_authority = any(auth in domain for auth in high_authority_domains)
-                    
-                    if is_trusted_tld or is_high_authority:
-                        trusted_mentions.append({
-                            "domain": domain,
-                            "url": url[:100],
-                            "title": title[:100],
-                            "company_in_title": company_in_title,
-                            "type": "tld" if is_trusted_tld else "high_authority"
-                        })
-                
-                # DEBUG: Print domain analysis
-                unique_domains = set(all_domains_found)
-                print(f"      🌐 Unique domains in articles: {len(unique_domains)}")
-                print(f"      📰 Press wire matches: {len(press_mentions)}")
-                print(f"      🏛️  Trusted domain matches: {len(trusted_mentions)}")
-                
-                # Show sample of domains if we didn't find any matches
-                if len(press_mentions) == 0 and len(trusted_mentions) == 0 and len(unique_domains) > 0:
-                    sample_domains = list(unique_domains)[:10]
-                    print(f"      🔍 Sample domains (showing first 10):")
-                    for d in sample_domains:
-                        print(f"         - {d}")
-                
-                # Calculate score
-                # Press wire mentions: 0-5 points
-                # - 1+ mention: 2 points
-                # - 3+ mentions: 3 points
-                # - 5+ mentions: 4 points
-                # - 10+ mentions: 5 points
-                press_score = 0
-                if len(press_mentions) >= 10:
-                    press_score = 5.0
-                elif len(press_mentions) >= 5:
-                    press_score = 4.0
-                elif len(press_mentions) >= 3:
-                    press_score = 3.0
-                elif len(press_mentions) >= 1:
-                    press_score = 2.0
-                
-                # Trusted domain mentions: 0-5 points
-                # - 1+ mention: 2 points
-                # - 3+ mentions: 3 points
-                # - 5+ mentions: 4 points
-                # - 10+ mentions: 5 points
-                trusted_score = 0
-                if len(trusted_mentions) >= 10:
-                    trusted_score = 5.0
-                elif len(trusted_mentions) >= 5:
-                    trusted_score = 4.0
-                elif len(trusted_mentions) >= 3:
-                    trusted_score = 3.0
-                elif len(trusted_mentions) >= 1:
-                    trusted_score = 2.0
-                
-                total_score = press_score + trusted_score
-                
-                print(f"      ✅ GDELT: {total_score}/10 pts (Press: {press_score}/5, Trusted: {trusted_score}/5)")
-                print(f"         Press wires: {len(press_mentions)}, Trusted domains: {len(trusted_mentions)}")
-                
-                return total_score, {
-                    "checked": True,
-                    "score": total_score,
-                    "press_score": press_score,
-                    "trusted_score": trusted_score,
-                    "press_mentions_count": len(press_mentions),
-                    "trusted_mentions_count": len(trusted_mentions),
-                    "press_mentions": press_mentions[:5],  # Sample of top 5
-                    "trusted_mentions": trusted_mentions[:5],  # Sample of top 5
-                    "reason": f"GDELT coverage: {len(press_mentions)} press mentions, {len(trusted_mentions)} trusted domain mentions"
-                }
-
-    except asyncio.TimeoutError:
-        return 0, {"checked": False, "reason": "GDELT API timeout"}
-    except Exception as e:
-        return 0, {"checked": False, "reason": f"GDELT check error: {str(e)}"}
-
-
-async def check_companies_house(lead: dict) -> Tuple[float, dict]:
-    """
-    Rep Score: Check UK Companies House registry.
-    
-    Returns score (0-10) based on company found in UK Companies House.
-    This is a SOFT check - always passes, appends score.
-    Uses UK Companies House API (free, requires API key registration).
-    
-    API Key: Register at https://developer.company-information.service.gov.uk/
-    If API key not configured, returns 0 points and continues.
-    
-    Args:
-        lead: Lead data with company
-    
-    Returns:
-        (score, metadata)
-    """
-    try:
-        company = get_company(lead)
-        if not company:
-            return 0, {"checked": False, "reason": "No company provided"}
-        
-        if not COMPANIES_HOUSE_API_KEY or COMPANIES_HOUSE_API_KEY == "":
-            print(f"   ❌ Companies House: API key not configured - skipping check (0 points)")
-            return 0, {
-                "checked": True,
-                "score": 0,
-                "reason": "Companies House API key not configured (register at https://developer.company-information.service.gov.uk/)"
-            }
-        
-        print(f"   🔍 Companies House: Searching for '{company}'")
-        
-        import base64
-        auth_b64 = base64.b64encode(f"{COMPANIES_HOUSE_API_KEY}:".encode()).decode()
-        search_url = "https://api.company-information.service.gov.uk/search/companies"
-        
-        async with aiohttp.ClientSession() as session:
-            headers = {"Authorization": f"Basic {auth_b64}"}
-            
-            async with session.get(
-                search_url,
-                headers=headers,
-                params={"q": company, "items_per_page": 5},
-                timeout=10,
-                proxy=HTTP_PROXY_URL
-            ) as response:
-                if response.status != 200:
-                    return 0, {"checked": False, "reason": f"Companies House API error: HTTP {response.status}"}
-                
-                data = await response.json()
-                items = data.get("items", [])
-                
-                if not items:
-                    print(f"      ❌ Companies House: No results found")
-                    return 0, {"checked": True, "score": 0, "reason": "Company not found in UK Companies House"}
-                
-                company_upper = company.upper()
-                for item in items[:5]:
-                    ch_name = item.get("title", "").upper()
-                    status = item.get("company_status", "").lower()
-                    
-                    if company_upper == ch_name:
-                        score = 10.0 if status == "active" else 8.0
-                    elif company_upper in ch_name or ch_name in company_upper:
-                        score = 8.0 if status == "active" else 6.0
-                    else:
-                        continue
-                    
-                    print(f"      ✅ Companies House: Found - {item.get('title')} ({status})")
-                    return score, {
-                        "checked": True,
-                        "score": score,
-                        "matched_company": item.get("title"),
-                        "company_status": status
-                    }
-                
-                return 0, {"checked": True, "score": 0, "reason": "No close name match"}
-    
-    except asyncio.TimeoutError:
-        return 0, {"checked": False, "reason": "Companies House API timeout"}
-    except Exception as e:
-        return 0, {"checked": False, "reason": f"Companies House check error: {str(e)}"}
-
-
-async def check_whois_dnsbl_reputation(lead: dict) -> Tuple[float, dict]:
-    """
-    Rep Score: WHOIS + DNSBL reputation check using cached validator data.
-    
-    Returns score (0-10) based on:
-    - WHOIS Stability: 0-3 points (whois_updated_days_ago)
-    - Registrant Consistency: 0-3 points (corporate signals)
-    - Hosting Provider: 0-3 points (nameservers)
-    - DNSBL: 0-1 points (not blacklisted)
-    
-    This is a SOFT check - always passes, appends score.
-    Uses FREE data already collected in Stage 1 (WHOIS) and Stage 2 (DNSBL).
-    
-    Mirrors TypeScript calculate-rep-score/checks/operational.ts checks.
-    
-    Args:
-        lead: Lead data with WHOIS and DNSBL fields
-    
-    Returns:
-        (score, metadata)
-    """
-    try:
-        score = 0
-        details = {
-            "whois_stability": 0,
-            "registrant_consistency": 0,
-            "hosting_provider": 0,
-            "dnsbl": 0
-        }
-        
-        # ============================================================
-        # 1. WHOIS Stability (0-3 points)
-        # ============================================================
-        # TypeScript: checkWhoisStabilityDays() - 4 points
-        # Python: 3 points (scaled down for 10-point total)
-        #
-        # Checks if WHOIS record was updated recently (instability signal)
-        # Recent updates indicate potential domain instability, ownership changes, 
-        # or drop-catch scenarios
-        # ============================================================
-        
-        whois_updated_days = lead.get("whois_updated_days_ago")
-        if isinstance(whois_updated_days, (int, float)) and whois_updated_days >= 0:
-            # Scoring:
-            # >= 180 days (6 months): 3.0 points (very stable)
-            # >= 90 days (3 months): 2.0 points (stable)
-            # >= 30 days (1 month): 1.0 points (acceptable)
-            # < 30 days: 0 points (unstable)
-            if whois_updated_days >= 180:
-                details["whois_stability"] = 3.0
-            elif whois_updated_days >= 90:
-                details["whois_stability"] = 2.0
-            elif whois_updated_days >= 30:
-                details["whois_stability"] = 1.0
-            else:
-                details["whois_stability"] = 0
-            
-            score += details["whois_stability"]
-            details["whois_updated_days_ago"] = whois_updated_days
-        else:
-            # Fallback: Use domain age if WHOIS update date not available
-            domain_age = lead.get("domain_age_days")
-            if isinstance(domain_age, (int, float)) and domain_age > 30:
-                # Old domain, assume stable (weak signal)
-                details["whois_stability"] = 1.0
-                score += 1.0
-                details["whois_updated_days_ago"] = "unavailable (used domain_age fallback)"
-        
-        # ============================================================
-        # 2. Registrant Consistency (0-3 points)
-        # ============================================================
-        # TypeScript: checkRegistrantConsistency() - 3 points
-        # Python: 3 points
-        #
-        # Counts corporate signals:
-        # - Corporate registrar name (Inc, LLC, Corp, etc.)
-        # - Reputable hosting providers in nameservers
-        # - Established domain (> 1 year old)
-        # ============================================================
-        
-        corporate_signals = []
-        
-        # Check registrar for corporate keywords
-        registrar = lead.get("domain_registrar", "")
-        if registrar:
-            corporate_keywords = ["inc", "corp", "llc", "ltd", "company", "corporation", 
-                                 "enterprises", "group", "holdings"]
-            registrar_lower = registrar.lower()
-            if any(keyword in registrar_lower for keyword in corporate_keywords):
-                corporate_signals.append("corporate_registrant")
-        
-        # Check for reputable hosting providers in nameservers
-        nameservers = lead.get("domain_nameservers", [])
-        if isinstance(nameservers, list) and len(nameservers) > 0:
-            reputable_providers = ["aws", "google", "cloudflare", "azure", "amazon"]
-            for ns in nameservers:
-                ns_lower = str(ns).lower()
-                if any(provider in ns_lower for provider in reputable_providers):
-                    corporate_signals.append("reputable_hosting")
-                    break
-        
-        # Check domain age (> 1 year = established)
-        domain_age = lead.get("domain_age_days", 0)
-        if domain_age > 365:
-            corporate_signals.append("established_domain")
-        
-        # Score based on signals count
-        # 3+ signals: 3 points
-        # 2 signals: 2 points
-        # 1 signal: 1 point
-        # 0 signals: 0 points
-        if len(corporate_signals) >= 3:
-            details["registrant_consistency"] = 3.0
-        elif len(corporate_signals) == 2:
-            details["registrant_consistency"] = 2.0
-        elif len(corporate_signals) == 1:
-            details["registrant_consistency"] = 1.0
-        else:
-            details["registrant_consistency"] = 0
-        
-        score += details["registrant_consistency"]
-        details["corporate_signals"] = corporate_signals
-        
-        # ============================================================
-        # 3. Hosting Provider Reputation (0-3 points)
-        # ============================================================
-        # TypeScript: checkHostingProviderReputation() - 3 points
-        # Python: 3 points
-        #
-        # Checks if domain is hosted on reputable infrastructure:
-        # AWS, Google Cloud, Cloudflare, Azure, Amazon
-        # ============================================================
-        
-        if isinstance(nameservers, list) and len(nameservers) > 0:
-            reputable_providers = ["aws", "google", "cloudflare", "azure", "amazon"]
-            found_provider = None
-            
-            for ns in nameservers:
-                ns_lower = str(ns).lower()
-                for provider in reputable_providers:
-                    if provider in ns_lower:
-                        found_provider = provider
-                        break
-                if found_provider:
-                    break
-            
-            if found_provider:
-                details["hosting_provider"] = 3.0
-                details["hosting_provider_name"] = found_provider
-                score += 3.0
-        
-        # ============================================================
-        # 4. DNSBL Reputation (0-1 points)
-        # ============================================================
-        # TypeScript: checkDnsblReputation() - 1 point
-        # Python: 1 point
-        #
-        # Checks if domain is NOT blacklisted in Spamhaus DBL
-        # Uses FREE data already collected in Stage 2
-        # ============================================================
-        
-        dnsbl_checked = lead.get("dnsbl_checked")
-        dnsbl_blacklisted = lead.get("dnsbl_blacklisted")
-        
-        if dnsbl_checked:
-            if not dnsbl_blacklisted:
-                details["dnsbl"] = 1.0
-                score += 1.0
-                details["dnsbl_status"] = "clean"
-            else:
-                details["dnsbl"] = 0
-                details["dnsbl_status"] = "blacklisted"
-                details["dnsbl_list"] = lead.get("dnsbl_list", "unknown")
-        
-        # ============================================================
-        # Return final score and details
-        # ============================================================
-        
-        return score, {
-            "checked": True,
-            "score": score,
-            "max_score": 10,
-            "details": details,
-            "reason": f"WHOIS/DNSBL reputation: {score:.1f}/10 (Stability: {details['whois_stability']}, Consistency: {details['registrant_consistency']}, Hosting: {details['hosting_provider']}, DNSBL: {details['dnsbl']})"
-        }
-        
-    except Exception as e:
-        return 0, {
-            "checked": False,
-            "reason": f"WHOIS/DNSBL check error: {str(e)}"
-        }
-
-
-async def check_terms_attestation(lead: dict) -> Tuple[bool, dict]:
-    """
-    Verify miner's attestation metadata against Supabase database (SOURCE OF TRUTH).
-    
-    Security Checks:
-    1. Query contributor_attestations table for wallet's attestation record
-    2. Reject if no valid attestation exists (prevents local file manipulation)
-    3. Verify lead metadata matches Supabase attestation record
-    4. Validate terms version and boolean attestations
-    
-    This is Stage -1 (runs BEFORE all other checks) to ensure regulatory compliance.
-    """
-    from Leadpoet.utils.contributor_terms import TERMS_VERSION_HASH
-    from Leadpoet.utils.cloud_db import get_supabase_client
-    
-    # Check required attestation fields in lead
-    required_fields = ["wallet_ss58", "terms_version_hash", "lawful_collection", 
-                      "no_restricted_sources", "license_granted"]
-    
-    missing = [f for f in required_fields if f not in lead]
-    if missing:
-        return False, {
-            "stage": "Stage -1: Terms Attestation",
-            "check_name": "check_terms_attestation",
-            "message": f"Missing attestation fields: {', '.join(missing)}",
-            "failed_fields": missing
-        }
-    
-    wallet_ss58 = lead.get("wallet_ss58")
-    lead_terms_hash = lead.get("terms_version_hash")
-    
-    # SECURITY CHECK 1: Query Supabase for authoritative attestation record
-    try:
-        supabase = get_supabase_client()
-        if not supabase:
-            # If Supabase not available, log warning but don't fail validation
-            # This prevents breaking validators during network issues
-            print(f"   ⚠️  Supabase client not available - skipping attestation verification")
-            return True, {}
-        
-        result = supabase.table("contributor_attestations")\
-            .select("*")\
-            .eq("wallet_ss58", wallet_ss58)\
-            .eq("terms_version_hash", TERMS_VERSION_HASH)\
-            .eq("accepted", True)\
-            .execute()
-        
-        # SECURITY CHECK 2: Reject if no valid attestation in database
-        if not result.data or len(result.data) == 0:
-            return False, {
-                "stage": "Stage -1: Terms Attestation",
-                "check_name": "check_terms_attestation",
-                "message": f"No valid attestation found in database for wallet {wallet_ss58[:10]}...",
-                "failed_fields": ["wallet_ss58"]
-            }
-        
-        # Attestation exists in Supabase - miner has legitimately accepted terms
-        supabase_attestation = result.data[0]
-        
-    except Exception as e:
-        # Log error but don't fail validation - prevents breaking validators
-        print(f"   ⚠️  Failed to verify attestation in database: {str(e)}")
-        return True, {}
-    
-    # SECURITY CHECK 3: Verify lead metadata matches Supabase record
-    if lead_terms_hash != supabase_attestation.get("terms_version_hash"):
-        return False, {
-            "stage": "Stage -1: Terms Attestation",
-            "check_name": "check_terms_attestation",
-            "message": f"Lead attestation hash mismatch (lead: {lead_terms_hash[:8]}, db: {supabase_attestation.get('terms_version_hash', '')[:8]})",
-            "failed_fields": ["terms_version_hash"]
-        }
-    
-    # Check: Verify terms version is current
-    if lead_terms_hash != TERMS_VERSION_HASH:
-        return False, {
-            "stage": "Stage -1: Terms Attestation",
-            "check_name": "check_terms_attestation",
-            "message": f"Outdated terms version (lead: {lead_terms_hash[:8]}, current: {TERMS_VERSION_HASH[:8]})",
-            "failed_fields": ["terms_version_hash"]
-        }
-    
-    # Check: Verify boolean attestations in lead
-    if not all([lead.get("lawful_collection"), 
-                lead.get("no_restricted_sources"), 
-                lead.get("license_granted")]):
-        return False, {
-            "stage": "Stage -1: Terms Attestation",
-            "check_name": "check_terms_attestation",
-            "message": "Incomplete attestations",
-            "failed_fields": ["lawful_collection", "no_restricted_sources", "license_granted"]
-        }
-    
-    return True, {}
-
-
-async def check_source_provenance(lead: dict) -> Tuple[bool, dict]:
-    """
-    Verify source provenance metadata.
-    
-    Validates:
-    - source_url is present and valid
-    - source_type is in allowed list
-    - Domain not in restricted sources denylist
-    - Domain age ≥ 7 days (reuses existing check)
-    
-    This ensures miners are providing valid source information and not using
-    prohibited data brokers without proper authorization.
-    """
-    from Leadpoet.utils.source_provenance import (
-        validate_source_url,
-        is_restricted_source,
-        extract_domain_from_url
-    )
-    
-    # Check required fields
-    source_url = lead.get("source_url")
-    source_type = lead.get("source_type")
-    
-    if not source_url:
-        return False, {
-            "stage": "Stage 0.5: Source Provenance",
-            "check_name": "check_source_provenance",
-            "message": "Missing source_url",
-            "failed_fields": ["source_url"]
-        }
-    
-    if not source_type:
-        return False, {
-            "stage": "Stage 0.5: Source Provenance",
-            "check_name": "check_source_provenance",
-            "message": "Missing source_type",
-            "failed_fields": ["source_type"]
-        }
-    
-    # Validate source_type against allowed list
-    valid_types = ["public_registry", "company_site", "first_party_form", 
-                   "licensed_resale", "proprietary_database"]
-    if source_type not in valid_types:
-        return False, {
-            "stage": "Stage 0.5: Source Provenance",
-            "check_name": "check_source_provenance",
-            "message": f"Invalid source_type: {source_type}",
-            "failed_fields": ["source_type"]
-        }
-    
-    # Validate source URL (checks denylist, domain age, reachability)
-    # SECURITY: Pass source_type to prevent spoofing proprietary_database
-    try:
-        is_valid, reason = await validate_source_url(source_url, source_type)
-        if not is_valid:
-            return False, {
-                "stage": "Stage 0.5: Source Provenance",
-                "check_name": "check_source_provenance",
-                "message": f"Source URL validation failed: {reason}",
-                "failed_fields": ["source_url"]
-            }
-    except Exception as e:
-        return False, {
-            "stage": "Stage 0.5: Source Provenance",
-            "check_name": "check_source_provenance",
-            "message": f"Error validating source URL: {str(e)}",
-            "failed_fields": ["source_url"]
-        }
-    
-    # Additional check: Extract domain and verify not restricted
-    # (This is redundant with validate_source_url but provides explicit feedback)
-    domain = extract_domain_from_url(source_url)
-    if domain and is_restricted_source(domain):
-        # Only fail if NOT a licensed resale (those are handled in next check)
-        if source_type != "licensed_resale":
-            return False, {
-                "stage": "Stage 0.5: Source Provenance",
-                "check_name": "check_source_provenance",
-                "message": f"Source domain {domain} is in restricted denylist",
-                "failed_fields": ["source_url"]
-            }
-    
-    return True, {}
-
-
-async def check_licensed_resale_proof(lead: dict) -> Tuple[bool, dict]:
-    """
-    Validate license document proof for licensed resale submissions.
-    
-    If source_type = "licensed_resale", validates that:
-    - license_doc_hash is present
-    - license_doc_hash is valid SHA-256 format
-    
-    This allows miners to use restricted data brokers (ZoomInfo, Apollo, etc.)
-    IF they have a valid resale agreement and provide cryptographic proof.
-    """
-    from Leadpoet.utils.source_provenance import validate_licensed_resale
-    
-    source_type = lead.get("source_type")
-    
-    # Only validate if this is a licensed resale submission
-    if source_type != "licensed_resale":
-        return True, {}
-    
-    # Validate license proof
-    is_valid, reason = validate_licensed_resale(lead)
-    
-    if not is_valid:
-        return False, {
-            "stage": "Stage 0.5: Source Provenance",
-            "check_name": "check_licensed_resale_proof",
-            "message": reason,
-            "failed_fields": ["license_doc_hash"]
-        }
-    
-    # Log for audit trail
-    license_hash = lead.get("license_doc_hash", "")
-    print(f"   📄 Licensed resale detected: hash={license_hash[:16]}...")
-    
-    return True, {}
-
-
-# ========================================================================
-# ICP (Ideal Customer Profile) Multiplier Determination
-# ========================================================================
-
-def determine_icp_multiplier(lead: dict) -> float:
-    """
-    LEGACY FUNCTION - Kept for backwards compatibility.
-    
-    Determine if a lead matches our ICP (Ideal Customer Profile) criteria.
-    
-    Uses the ICP_DEFINITIONS table (defined at top of file) to check if a lead matches
-    any target customer profile based on:
-    - Sub-Industry (e.g., "Gas Stations", "AI Startups")
-    - Role Type (e.g., "Operations", "Technology", "Leadership")
-    - Role Details (specific titles like "CEO", "CTO", "VP of Operations")
-    - Region (optional - e.g., "Africa" for streaming/broadcast ICP)
-    
-    Returns:
-        Custom multiplier if defined in ICP (e.g., 5.0 for Africa)
-        1.5 if lead matches ICP criteria (default)
-        1.0 if lead is standard (non-ICP)
-        
-    NOTE: This function is deprecated. Use calculate_icp_adjustment() instead.
-    """
-    # Extract lead fields (case-insensitive)
-    sub_industry = lead.get("sub_industry", "").strip().lower()
-    role = lead.get("role", "").strip().lower()
-    region = lead.get("region", "").strip().lower()
-    
-    # Helper function to check if any keyword matches in text
-    def matches_any(text: str, keywords: list) -> bool:
-        """Check if any keyword from the list is found in the text (case-insensitive)"""
-        text_lower = text.lower()
-        return any(keyword.lower() in text_lower for keyword in keywords)
-    
-    # Iterate through all ICP definitions
-    for icp in ICP_DEFINITIONS:
-        # Step 1: Check if sub_industry matches
-        if not matches_any(sub_industry, icp["sub_industries"]):
-            continue  # No match, try next ICP
-        
-        # Step 2: Check region if specified in ICP definition
-        # If "regions" is defined, lead must be from one of those regions
-        if "regions" in icp:
-            if not matches_any(region, icp["regions"]):
-                continue  # Region doesn't match, try next ICP
-        
-        # Step 3: Check if role contains role_details (specific titles)
-        # Role details are the most specific check (e.g., "CEO", "CTO", "VP of Operations")
-        if matches_any(role, icp["role_details"]):
-            # Return custom multiplier if defined, otherwise default 1.5x
-            return icp.get("multiplier", 1.5)
-    
-    # No ICP match found
-    return 1.0
-
-
-def _matches_icp_definitions(lead: dict) -> bool:
-    """
-    Check if a lead matches any ICP definition (without returning multiplier value).
-    
-    Returns:
-        True if lead matches any ICP definition
-        False otherwise
-    """
-    return _get_icp_bonus(lead) > 0
-
-
-def _get_icp_bonus(lead: dict) -> int:
-    """
-    Get the ICP bonus points for a lead.
-    
-    Returns:
-        - 0 if no ICP match
-        - 50 (default) if ICP match but no custom "bonus" field
-        - Custom "bonus" value if specified in matching ICP definition
-        
-    Some ICPs have higher bonuses for rare, high-value profiles:
-        - Blockchain/Crypto Investors: +100
-        - UAE/Dubai Investors: +100
-        - Cyber Security/IT Management (Midwest US): +100
-    """
-    # Null-safe extraction - handles None values gracefully
-    sub_industry = (lead.get("sub_industry") or "").strip().lower()
-    role = (lead.get("role") or "").strip().lower()
-    
-    # SECURITY FIX: Use VALIDATED location fields, not miner-submitted 'region'
-    # 'country', 'state', and 'city' are verified against LinkedIn data in Stage 4
-    # 'region' is unvalidated and was being gamed by miners
-    country = (lead.get("country") or "").strip().lower()
-    state = (lead.get("state") or "").strip().lower()
-    city = (lead.get("city") or "").strip().lower()
-    
-    def matches_any(text: str, keywords: list) -> bool:
-        text_lower = text.lower()
-        return any(keyword.lower() in text_lower for keyword in keywords)
-    
-    def matches_regional_filter(icp_regions: list) -> bool:
-        """
-        Check if lead's VALIDATED location matches ICP regional filter.
-        
-        Uses country (primary), state (secondary), and city (tertiary) - all validated in Stage 4.
-        Does NOT use miner-submitted 'region' field which is unvalidated.
-        """
-        # Check country first (e.g., "united arab emirates", "united states")
-        if matches_any(country, icp_regions):
-            return True
-        
-        # Check state for US-specific ICPs (e.g., "california", "new york")
-        # Only applies when country is US and ICP has US state names
-        if country in ["united states", "usa", "us", "america"]:
-            if matches_any(state, icp_regions):
-                return True
-        
-        # Check city for city-specific ICPs (e.g., "dubai" for UAE)
-        # This is needed since UAE leads are only accepted from Dubai
-        if matches_any(city, icp_regions):
-                return True
-        
-        return False
-    
-    # Track highest bonus (in case lead matches multiple ICPs)
-    highest_bonus = 0
-    
-    # Get employee count for ICPs that filter by company size
-    employee_count = (lead.get("employee_count") or "").strip()
-    lead_emp_range = parse_employee_count(employee_count) if employee_count else None
-    
-    for icp in ICP_DEFINITIONS:
-        # Check sub_industry: "*" means all industries (skip check)
-        icp_sub_industries = icp.get("sub_industries", [])
-        if icp_sub_industries != ["*"]:
-            if not matches_any(sub_industry, icp_sub_industries):
-                continue
-        
-        # Check regions if specified
-        if "regions" in icp:
-            # SECURITY: Use validated country/state, NOT unvalidated region
-            if not matches_regional_filter(icp["regions"]):
-                continue
-        
-        # Check employee_ranges if specified (e.g., ["201-500", "501-1000"])
-        if "employee_ranges" in icp:
-            if not lead_emp_range:
-                continue  # No employee count in lead, skip this ICP
-            
-            lead_min, lead_max = lead_emp_range
-            range_matched = False
-            
-            for emp_range in icp["employee_ranges"]:
-                icp_range = parse_employee_count(emp_range)
-                if icp_range:
-                    icp_min, icp_max = icp_range
-                    # Check if lead's range overlaps with ICP's range
-                    # Lead range [lead_min, lead_max] overlaps [icp_min, icp_max]
-                    # if lead_min <= icp_max AND lead_max >= icp_min
-                    if lead_min <= icp_max and lead_max >= icp_min:
-                        range_matched = True
-                        break
-            
-            if not range_matched:
-                continue
-        
-        # Check role match
-        if matches_any(role, icp["role_details"]):
-            # Get bonus: use custom "bonus" field, or default to 50
-            icp_bonus = icp.get("bonus", 50)
-            highest_bonus = max(highest_bonus, icp_bonus)
-    
-    return highest_bonus
-
-
-def is_enterprise_company(lead: dict) -> bool:
-    """
-    Check if a lead is from an enterprise company (10,001+ employees).
-    
-    Enterprise companies get a rep score multiplier that caps their final score:
-    - ICP match: target = 10, multiplier = min(0, 10 - raw_rep_score)
-    - No ICP match: target = 5, multiplier = min(0, 5 - raw_rep_score)
-    - Final rep = raw_rep_score + multiplier
-    
-    This means:
-    - If raw rep score is <= target, no change (multiplier = 0)
-    - If raw rep score > target, it gets capped at target
-    
-    Returns:
-        True if employee_count indicates 10,001+ employees
-        False otherwise
-    """
-    employee_count = lead.get("employee_count", "")
-    if not employee_count:
-        return False
-    
-    # Parse the employee count
-    parsed = parse_employee_count(str(employee_count))
-    if not parsed:
-        return False
-    
-    emp_min, emp_max = parsed
-    
-    # Enterprise = 10,001+ employees (minimum 10001)
-    return emp_min >= 10001
-
-
-def calculate_icp_adjustment(lead: dict) -> int:
-    """
-    Calculate ICP adjustment points (NEW SYSTEM - replaces multiplier).
-    
-    This function calculates an absolute point adjustment based on:
-    1. ICP Definition Match: +50 points (default), or custom bonus for high-value ICPs:
-       - Africa Broadcasting/Media: +100 points
-       - Blockchain/Crypto/Web3 Investors: +100 points
-    2. Small Company in Major Hub Bonus: +50 points
-       - ≤10 employees AND in major hub (NYC, SF, LA, Austin, Chicago, etc.)
-    3. Small Company Bonus:
-       - ≤50 employees: +20 points
-    4. Large Company Penalty:
-       - >1,000 employees: -10 points
-       - >5,000 or >10,000 employees: -15 points
-    
-    DYNAMIC CAP: Cap is +50 for normal leads, or ICP bonus for high-value ICPs
-    PENALTIES STACK: Penalties are applied AFTER capping the bonus
-    
-    Args:
-        lead: Lead dictionary with employee_count, city, and ICP-relevant fields
-        
-    Returns:
-        Integer adjustment (bonus capped, then penalties applied)
-        
-    Examples:
-        - ICP match only = +50
-        - High-value ICP (Africa/Crypto) = +100
-        - ICP + ≤50 employees = +70 → capped to +50
-        - High-value ICP + >1k employees = +100 - 10 = +90
-        - Small hub (≤10 + NYC) = +50
-        - Non-ICP + ≤50 employees = +20
-        - Non-ICP + >5k employees = -15
-    """
-    bonus = 0
-    penalty = 0
-    breakdown = {"icp_match": 0, "major_hub_bonus": 0, "employee_bonus": 0, "employee_penalty": 0}
-    
-    # ========================================================================
-    # MAJOR HUBS BY COUNTRY (city + country must BOTH match)
-    # ========================================================================
-    # Uses CANONICAL city names from geo_lookup_fast.json (post-gateway normalization)
-    # Gateway normalizes: "NYC" -> "New York City", "SF" -> "San Francisco", etc.
-    # So we only need the canonical names here - no aliases needed!
-    # 
-    # Country names MUST match gateway/api/submit.py VALID_COUNTRIES (lowercase)
-    MAJOR_HUBS_BY_COUNTRY = {
-        # ----------------------------------------------------------------
-        # NORTH AMERICA (canonical names from geo_lookup_fast.json)
-        # ----------------------------------------------------------------
-        "united states": {
-            # NYC area (manhattan/brooklyn are separate cities in JSON)
-            "new york city", "manhattan", "brooklyn",
-            # West Coast
-            "san francisco", "los angeles", "san diego", "san jose", "seattle", "portland",
-            # Texas
-            "austin", "dallas", "houston",
-            # Other major hubs
-            "chicago", "boston", "denver", "miami", "washington", "atlanta", "phoenix",
-        },
-        "canada": {
-            "toronto", "vancouver", "montréal",  # Note: "montréal" is canonical (not "montreal")
-        },
-        # ----------------------------------------------------------------
-        # EUROPE (canonical names from geo_lookup_fast.json)
-        # ----------------------------------------------------------------
-        "united kingdom": {
-            "london", "manchester", "edinburgh", "cambridge", "oxford",
-        },
-        "germany": {
-            "berlin", "münchen", "frankfurt am main", "hamburg",  # "münchen" is canonical
-        },
-        "france": {
-            "paris",
-        },
-        "netherlands": {
-            "amsterdam", "rotterdam",
-        },
-        "switzerland": {
-            "zürich", "genève",  # Canonical names with accents
-        },
-        "ireland": {
-            "dublin",
-        },
-        "sweden": {
-            "stockholm",
-        },
-        "spain": {
-            "barcelona", "madrid",
-        },
-        # ----------------------------------------------------------------
-        # ASIA-PACIFIC (canonical names from geo_lookup_fast.json)
-        # ----------------------------------------------------------------
-        "hong kong": {
-            "hong kong",
-        },
-        "singapore": {
-            "singapore",
-        },
-        "japan": {
-            "tokyo", "osaka",
-        },
-        "south korea": {
-            "seoul",
-        },
-        "china": {
-            "shanghai", "beijing", "shenzhen",
-        },
-        "india": {
-            "bengaluru", "mumbai", "new delhi", "hyderabad", "pune",  # "bengaluru" is canonical
-        },
-        "australia": {
-            "sydney", "melbourne",
-        },
-        "new zealand": {
-            "auckland",
-        },
-        # ----------------------------------------------------------------
-        # MIDDLE EAST (canonical names from geo_lookup_fast.json)
-        # ----------------------------------------------------------------
-        "israel": {
-            "tel aviv",
-        },
-        "united arab emirates": {
-            "dubai", "abu dhabi",
-        },
-        # ----------------------------------------------------------------
-        # SOUTH AMERICA (canonical names from geo_lookup_fast.json)
-        # ----------------------------------------------------------------
-        "brazil": {
-            "são paulo",  # Canonical name with accent
-        },
-    }
-    
-    # Get city and country for major hub check
-    city = lead.get("city", "").strip().lower()
-    country = lead.get("country", "").strip().lower()
-    
-    # Check if BOTH country AND city match a major hub
-    # Simple exact matching - gateway already normalized cities to canonical form
-    is_major_hub = False
-    matched_hub = None
-    
-    if country in MAJOR_HUBS_BY_COUNTRY:
-        hub_cities = MAJOR_HUBS_BY_COUNTRY[country]  # This is now a set
-        if city in hub_cities:
-            is_major_hub = True
-            matched_hub = f"{city} ({country})"
-    
-    # ========================================================================
-    # STEP 1: ICP Definition Match (+50 default, or custom bonus)
-    # High-value ICPs (Africa Broadcasting, Blockchain/Crypto Investors) get +100
-    # ========================================================================
-    icp_bonus = _get_icp_bonus(lead)
-    if icp_bonus > 0:
-        bonus += icp_bonus
-        breakdown["icp_match"] = icp_bonus
-        if icp_bonus > 50:
-            print(f"   🎯 HIGH-VALUE ICP MATCH: +{icp_bonus} points")
-        else:
-            print(f"   🎯 ICP MATCH: +{icp_bonus} points")
-    
-    # ========================================================================
-    # STEP 2: Employee Count Bonuses and Penalties
-    # ========================================================================
-    employee_count_str = get_employee_count(lead) or ""
-    
-    if employee_count_str:
-        parsed = parse_employee_count(employee_count_str)
-        
-        if parsed:
-            emp_min, emp_max = parsed
-            
-            # Small company in major hub bonus (+50 points)
-            if emp_max <= 10 and is_major_hub:
-                bonus += 50
-                breakdown["major_hub_bonus"] = 50
-                print(f"   🌆 SMALL COMPANY IN MAJOR HUB (≤10 + {matched_hub}): +50 points")
-            # Small company bonus (+20 points for ≤50 employees)
-            elif emp_max <= 50:
-                bonus += 20
-                breakdown["employee_bonus"] = 20
-                print(f"   🏢 SMALL COMPANY (≤50): +20 points")
-            
-            # Large company penalty (stacks with capped bonus)
-            # Note: Uses emp_min to determine the MINIMUM company size
-            # Note: 10,001+ (enterprise) companies already have hardcoded rep scores, no ICP penalty
-            if 5000 < emp_min < 10001:
-                # 5,001-10,000 employees only (enterprise 10,001+ handled separately)
-                penalty = 15
-                breakdown["employee_penalty"] = -15
-                print(f"   🏭 LARGE COMPANY (5k-10k): -15 points")
-            elif 1000 < emp_min <= 5000:
-                # 1,001-5,000 employees (NOT 10,001+ which is enterprise)
-                penalty = 10
-                breakdown["employee_penalty"] = -10
-                print(f"   🏭 LARGE COMPANY (1k-5k): -10 points")
-            # Note: 10,001+ employees (enterprise) get NO ICP penalty - they have hardcoded rep scores
-    else:
-        print(f"   📋 No employee count available - no size adjustment")
-    
-    # ========================================================================
-    # STEP 3: Cap bonus, then apply penalties
-    # Cap is dynamic: +50 for normal ICPs, or ICP bonus value for high-value ICPs
-    # ========================================================================
-    # Determine cap: use ICP bonus if > 50 (high-value ICP), otherwise 50
-    bonus_cap = max(50, icp_bonus) if icp_bonus > 0 else 50
-    
-    if bonus > bonus_cap:
-        print(f"   ⚠️  Bonus {bonus} exceeds cap, capping at +{bonus_cap}")
-        bonus = bonus_cap
-    
-    # Penalties stack with capped bonus
-    adjustment = bonus - penalty
-    
-    print(f"   📊 FINAL ICP ADJUSTMENT: {adjustment:+d} points")
-    print(f"      Bonus (capped at {bonus_cap}): {min(bonus, bonus_cap):+d} = ICP:{breakdown['icp_match']:+d} + Hub:{breakdown['major_hub_bonus']:+d} + Size:{breakdown['employee_bonus']:+d}")
-    print(f"      Penalty: {-penalty:+d}")
-    
-    return adjustment
-
-
-# Main validation pipeline
 
 async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     """
@@ -6924,7 +1719,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         Tuple[bool, dict]: (passed, structured_automated_checks_data)
             - If passed: (True, structured_data with stage_1_dns, stage_2_domain, stage_3_email)
             - If failed: (False, structured_data with rejection_reason and partial check data)
-            
+
     Structured data format (tasks2.md Phase 1):
     {
         "stage_1_dns": {
@@ -6956,7 +1751,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
 
     email = get_email(lead)
     company = get_company(lead)
-    
+
     # Initialize structured data collection
     automated_checks_data = {
         "stage_0_hardcoded": {
@@ -7020,12 +1815,12 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # ========================================================================
     # NOTE: Attestation verification removed from validators.
     # Validators don't have Supabase credentials and shouldn't verify attestations.
-    # 
+    #
     # SECURITY: Gateway verifies attestations during POST /submit:
     # - If lead is in validator queue → gateway already verified attestation
     # - Validators trust gateway's verification (gateway is TEE-protected)
     # - This prevents security bypass where validator skips check due to 401 errors
-    # 
+    #
     # If you need attestation verification, implement it in gateway/api/submit.py
     print(f"🔍 Pre-Attestation Check: Skipped (gateway verifies during submission)")
 
@@ -7034,12 +1829,12 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # Validates source_url, source_type, denylist, and licensed resale proof
     # ========================================================================
     print(f"🔍 Source Provenance Verification: Source validation for {email} @ {company}")
-    
+
     checks_stage0_5 = [
         check_source_provenance,       # Validate source URL, type, denylist
         check_licensed_resale_proof,   # Validate license hash if applicable
     ]
-    
+
     for check_func in checks_stage0_5:
         passed, rejection_reason = await check_func(lead)
         if not passed:
@@ -7048,7 +1843,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
             automated_checks_data["passed"] = False
             automated_checks_data["rejection_reason"] = rejection_reason
             return False, automated_checks_data
-    
+
     print("   ✅ Source Provenance Verification passed")
 
     # ========================================================================
@@ -7057,7 +1852,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # - Deduplication (handled in validate_lead_list)
     # ========================================================================
     print(f"🔍 Stage 0: Hardcoded checks for {email} @ {company}")
-    
+
     # OPTIMIZATION: Run instant checks first, then overlap HEAD request with Stage 1 DNS checks
     # Instant checks (run sequentially - they're <0.01s each anyway)
     checks_stage0_instant = [
@@ -7083,7 +1878,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     automated_checks_data["stage_0_hardcoded"]["is_general_purpose_email"] = False  # Not general purpose
 
     print("   ✅ Stage 0 instant checks passed")
-    
+
     # OPTIMIZATION: Start HEAD request as background task (will check result after Stage 1)
     # This overlaps the 5-10s HEAD request with 1-3s Stage 1 DNS checks
     head_request_task = asyncio.create_task(check_head_request(lead))
@@ -7094,7 +1889,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # - SPF/DMARC (SOFT - always passes, appends data)
     # ========================================================================
     print(f"🔍 Stage 1: DNS layer checks for {email} @ {company}")
-    
+
     # OPTIMIZATION: Run all Stage 1 DNS checks in parallel to save time
     # Old: Sequential execution = 2-5s total
     # New: Parallel execution = 1-3s (time of slowest check)
@@ -7104,7 +1899,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         check_spf_dmarc(lead),
         return_exceptions=True  # Don't fail entire batch if one check fails
     )
-    
+
     # Check results
     check_names = ["check_domain_age", "check_mx_record", "check_spf_dmarc"]
     for i, result in enumerate(results):
@@ -7129,7 +1924,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
             automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
             automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
             return False, automated_checks_data
-        
+
         passed, rejection_reason = result
         if not passed:
             msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
@@ -7168,7 +1963,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         automated_checks_data["passed"] = False
         automated_checks_data["rejection_reason"] = rejection_reason
         return False, automated_checks_data
-    
+
     print("   ✅ Stage 0 (HEAD request) passed")
 
     # ========================================================================
@@ -7177,7 +1972,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # ========================================================================
     print(f"🔍 Stage 2: Domain reputation checks for {email} @ {company}")
     passed, rejection_reason = await check_dnsbl(lead)
-    
+
     # Collect Stage 2 domain data (DNSBL + WHOIS from Stage 1)
     automated_checks_data["stage_2_domain"]["dnsbl_checked"] = lead.get("dnsbl_checked", False)
     automated_checks_data["stage_2_domain"]["dnsbl_blacklisted"] = lead.get("dnsbl_blacklisted", False)
@@ -7186,7 +1981,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     automated_checks_data["stage_2_domain"]["domain_registrar"] = lead.get("domain_registrar")
     automated_checks_data["stage_2_domain"]["domain_nameservers"] = lead.get("domain_nameservers")
     automated_checks_data["stage_2_domain"]["whois_updated_days_ago"] = lead.get("whois_updated_days_ago")
-    
+
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 2 failed: {msg}")
@@ -7204,27 +1999,27 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # This function is kept for backwards compatibility but should not be used.
     print(f"⚠️  Stage 3: DEPRECATED - use run_batch_automated_checks() for email validation")
     print(f"   Skipping single-email validation for {email}")
-    
+
     # Mark Stage 3 as skipped (not verified)
     automated_checks_data["stage_3_email"]["email_status"] = "skipped"
     automated_checks_data["stage_3_email"]["email_score"] = 0
     automated_checks_data["stage_3_email"]["is_disposable"] = False
     automated_checks_data["stage_3_email"]["is_role_based"] = False
     automated_checks_data["stage_3_email"]["is_free"] = False
-    
+
     print("   ⏭️  Stage 3 skipped (use batch validation)")
 
     # ========================================================================
     # Stage 4: LinkedIn/GSE Validation (HARD)
     # ========================================================================
     print(f"🔍 Stage 4: LinkedIn/GSE validation for {email} @ {company}")
-    
+
     passed, rejection_reason = await check_linkedin_gse(lead)
-    
+
     # Collect Stage 4 data even on failure
     automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
     automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
-    
+
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 4 failed: {msg}")
@@ -7233,7 +2028,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         return False, automated_checks_data
 
     print("   ✅ Stage 4 passed")
-    
+
     # Collect Stage 4 data after successful check
     automated_checks_data["stage_4_linkedin"]["linkedin_verified"] = True
     automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
@@ -7247,7 +2042,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # - Anti-gaming: rejects if miner puts multiple states in region
     # ========================================================================
     print(f"🔍 Stage 5: Role/Region/Industry verification for {email} @ {company}")
-    
+
     passed, rejection_reason = await check_stage5_unified(lead)
 
     # Collect Stage 5 data (company verification - role/location handled by Stage 4)
@@ -7259,7 +2054,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     automated_checks_data["stage_5_verification"]["extracted_size"] = lead.get("stage5_extracted_size")
     automated_checks_data["stage_5_verification"]["extracted_hq"] = lead.get("stage5_extracted_hq")
     automated_checks_data["stage_5_verification"]["extracted_industry"] = lead.get("stage5_extracted_industry")
-    
+
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 5 failed: {msg}")
@@ -7329,7 +2124,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         wayback_score + sec_score + whois_dnsbl_score + gdelt_score +
         companies_house_score
     )
-    
+
     # ========================================================================
     # ENTERPRISE COMPANY REP SCORE MULTIPLIER (10,001+ employees)
     # For enterprise companies, apply a multiplier that caps rep score:
@@ -7347,7 +2142,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         print(f"   🏢 ENTERPRISE COMPANY (10,001+): Raw rep={total_rep_score:.1f}, target={target_score}, multiplier={enterprise_multiplier:.1f}, final={final_rep_score:.1f} ({'ICP match' if matches_icp else 'No ICP match'})")
     else:
         final_rep_score = total_rep_score
-    
+
     # Append to lead data
     lead["rep_score"] = final_rep_score
     lead["rep_score_details"] = {
@@ -7361,7 +2156,7 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         lead["rep_score_details"]["enterprise_company"] = True
         lead["rep_score_details"]["enterprise_multiplier"] = enterprise_multiplier
         lead["rep_score_details"]["raw_rep_score"] = total_rep_score
-    
+
     # Append to automated_checks_data
     automated_checks_data["rep_score"] = {
         "total_score": final_rep_score,
@@ -7378,9 +2173,9 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
         automated_checks_data["rep_score"]["enterprise_company"] = True
         automated_checks_data["rep_score"]["enterprise_multiplier"] = enterprise_multiplier
         automated_checks_data["rep_score"]["raw_rep_score"] = total_rep_score
-    
+
     print(f"   📊 Rep Score: {final_rep_score:.1f}/{MAX_REP_SCORE} (Wayback: {wayback_score:.1f}/6, SEC: {sec_score:.1f}/12, WHOIS/DNSBL: {whois_dnsbl_score:.1f}/10, GDELT: {gdelt_score:.1f}/10, Companies House: {companies_house_score:.1f}/10)")
-    
+
     # ========================================================================
     # ICP Adjustment Calculation (NEW SYSTEM - Absolute Points)
     # Replaces the old multiplier system with absolute point adjustments
@@ -7440,120 +2235,9 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
 
     return True, automated_checks_data
 
-# Existing functions - DO NOT TOUCH (maintained for backward compatibility)
-
-async def load_email_cache():
-    if os.path.exists(EMAIL_CACHE_FILE):
-        try:
-            with open(EMAIL_CACHE_FILE, "rb") as f:
-                return pickle.load(f)
-        except Exception:
-            return {}
-    return {}
-
-async def save_email_cache(cache):
-    try:
-        with open(EMAIL_CACHE_FILE, "wb") as f:
-            pickle.dump(cache, f)
-    except Exception:
-        pass
-
-# EMAIL_CACHE = asyncio.run(load_email_cache())  # Disabled to avoid event loop issues
-EMAIL_CACHE = {}
-
-async def is_disposable_email(email: str) -> Tuple[bool, str]:
-    domain = email.split("@")[1].lower() if "@" in email else ""
-    # Return True if email IS disposable, False if NOT disposable
-    is_disposable = domain in DISPOSABLE_DOMAINS
-    return is_disposable, "Disposable domain" if is_disposable else "Not disposable"
-
-async def check_domain_existence(domain: str) -> Tuple[bool, str]:
-    try:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: dns.resolver.resolve(domain, "MX"))
-        return True, "Domain has MX records"
-    except Exception as e:
-        return False, f"Domain check failed: {str(e)}"
-
-async def verify_company(company_domain: str) -> Tuple[bool, str]:
-    """
-    Verify company website is accessible.
-    
-    Strategy: Try HEAD first (lightweight), fall back to GET if HEAD fails.
-    Many enterprise sites (Intuit, 3M, etc.) block HEAD requests but work with GET.
-    Uses browser User-Agent to avoid anti-bot blocking.
-    Uses custom SSL context with broader cipher support for enterprise sites (Hartford, etc.)
-    """
-    import ssl
-    
-    if not company_domain:
-        return False, "No domain provided"
-    if not company_domain.startswith(("http://", "https://")):
-        company_domain = f"https://{company_domain}"
-    
-    # Status codes that indicate website exists (pass immediately)
-    # 429 = Too Many Requests (rate limiting/bot protection) - proves site exists, just blocking automated requests
-    PASS_STATUS_CODES = {200, 301, 302, 307, 308, 401, 403, 405, 429, 500, 502, 503}
-    
-    # Browser User-Agent to avoid anti-bot blocking (3M, etc.)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
-    # Create custom SSL context with broader cipher support
-    # Some enterprise sites (Hartford, etc.) have strict SSL configs that reject default ciphers
-    ssl_context = ssl.create_default_context()
-    # Allow older TLS versions for compatibility with enterprise sites
-    ssl_context.set_ciphers('DEFAULT:@SECLEVEL=1')
-    # Add additional options for maximum compatibility
-    ssl_context.check_hostname = True
-    ssl_context.verify_mode = ssl.CERT_REQUIRED
-    
-    # Create connector with custom SSL context
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-    
-    try:
-        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
-            # Try HEAD request first (lightweight)
-            head_status = None
-            head_error = None
-            try:
-                async with session.head(company_domain, timeout=10, allow_redirects=True) as response:
-                    head_status = response.status
-                    if head_status in PASS_STATUS_CODES:
-                        return True, f"Website accessible (HEAD: {head_status})"
-            except aiohttp.ClientError as e:
-                head_error = str(e) or "connection_error"
-                # Handle large enterprise headers - pass immediately
-                if "Header value is too long" in head_error or "Got more than" in head_error:
-                    return True, "Website accessible (large enterprise headers detected)"
-            except asyncio.TimeoutError:
-                head_error = "timeout"
-            except Exception as e:
-                head_error = str(e) or type(e).__name__
-            
-            # HEAD failed or returned non-pass status - try GET as fallback
-            # Many enterprise sites (Intuit, 3M) block HEAD but allow GET
-            try:
-                async with session.get(company_domain, timeout=10, allow_redirects=True) as response:
-                    get_status = response.status
-                    if get_status in PASS_STATUS_CODES:
-                        return True, f"Website accessible (GET fallback: {get_status})"
-                    else:
-                        # Both HEAD and GET returned non-pass status
-                        return False, f"Website not accessible (HEAD: {head_status}, GET: {get_status})"
-            except aiohttp.ClientError as e:
-                get_error = str(e) or "connection_error"
-                # Handle large enterprise headers on GET too
-                if "Header value is too long" in get_error or "Got more than" in get_error:
-                    return True, "Website accessible (large enterprise headers detected)"
-                # Both HEAD and GET failed
-                return False, f"Website inaccessible (HEAD: {head_error or head_status}, GET: {get_error})"
-            except asyncio.TimeoutError:
-                return False, f"Website inaccessible (HEAD: {head_error or head_status}, GET: timeout)"
-            except Exception as e:
-                return False, f"Website inaccessible (HEAD: {head_error or head_status}, GET: {str(e) or type(e).__name__})"
-    except Exception as e:
-        return False, f"Website inaccessible: {str(e)}"
+# ========================================================================
+# Legacy functions - maintained for backward compatibility
+# ========================================================================
 
 async def check_duplicates(leads: list) -> Tuple[bool, dict]:
     """Check for duplicate emails and return which leads are duplicates (not first occurrence)"""

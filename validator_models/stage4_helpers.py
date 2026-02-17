@@ -1394,27 +1394,18 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
 # ============================================================================
 
 def check_name_in_result(full_name: str, result: Dict, linkedin_url: Optional[str] = None) -> bool:
-    """Check if name appears in search result."""
+    """Check if full name appears in the result title (case-sensitive)."""
     if not full_name:
         return False
     title = result.get('title', '')
-    snippet = result.get('snippet', '')
-    combined = f"{title} {snippet}"
-    combined_norm = normalize_accents(combined.lower())
-    name_norm = normalize_accents(str(full_name).lower())
-    name_parts = name_norm.split()
-    if not name_parts:
+    if not title:
         return False
-    first = name_parts[0]
-    last = name_parts[-1] if len(name_parts) > 1 else first
-    if first in combined_norm or last in combined_norm:
+    # Case-sensitive exact substring check
+    if full_name in title:
         return True
-    if linkedin_url:
-        lid = get_linkedin_id(linkedin_url)
-        if lid:
-            lid_clean = normalize_accents(lid.replace('-', ' ').replace('%', ' '))
-            if first in lid_clean or last in lid_clean:
-                return True
+    # Accent fallback: Google may strip accents from titles
+    if normalize_accents(full_name) in normalize_accents(title):
+        return True
     return False
 
 

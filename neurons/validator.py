@@ -4403,7 +4403,7 @@ class Validator(BaseValidatorNeuron):
                             ext = '.' + filename.split('.')[-1].lower() if '.' in filename else ''
                             if ext not in {'.py', '.txt', '.md', '.json', '.yaml', '.yml', '.toml'}:
                                 continue
-                            if filename.startswith('.') or '/__' in filename or member.size > 100 * 1024:
+                            if filename.startswith('.') or '/__' in filename:
                                 continue
                             try:
                                 f = tar.extractfile(member)
@@ -7294,10 +7294,6 @@ def run_dedicated_qualification_worker(config):
                             
                             code_files = {}
                             allowed_extensions = {'.py', '.txt', '.md', '.json', '.yaml', '.yml', '.toml'}
-                            max_file_size = 100 * 1024  # 100KB per file
-                            max_total_size = 500 * 1024  # 500KB total
-                            total_size = 0
-                            
                             with tarfile.open(fileobj=io.BytesIO(model_code), mode='r:gz') as tar:
                                 for member in tar.getmembers():
                                     if not member.isfile():
@@ -7313,12 +7309,6 @@ def run_dedicated_qualification_worker(config):
                                     
                                     if filename.startswith('.') or '/__' in filename:
                                         continue
-                                    
-                                    if member.size > max_file_size:
-                                        continue
-                                    
-                                    if total_size + member.size > max_total_size:
-                                        break
                                     
                                     try:
                                         f = tar.extractfile(member)

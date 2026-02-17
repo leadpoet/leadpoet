@@ -4387,16 +4387,47 @@ class Validator(BaseValidatorNeuron):
                 num_leads=leads_scored
             )
             
+            # Extract code content from tarball for leaderboard display
+            code_content = None
+            if model_code:
+                try:
+                    import tarfile, io
+                    code_files = {}
+                    with tarfile.open(fileobj=io.BytesIO(model_code), mode='r:gz') as tar:
+                        for member in tar.getmembers():
+                            if not member.isfile():
+                                continue
+                            filename = member.name
+                            if '/' in filename:
+                                filename = filename.split('/', 1)[1] if filename.count('/') == 1 else filename
+                            ext = '.' + filename.split('.')[-1].lower() if '.' in filename else ''
+                            if ext not in {'.py', '.txt', '.md', '.json', '.yaml', '.yml', '.toml'}:
+                                continue
+                            if filename.startswith('.') or '/__' in filename or member.size > 100 * 1024:
+                                continue
+                            try:
+                                f = tar.extractfile(member)
+                                if f:
+                                    code_files[filename] = f.read().decode('utf-8', errors='replace')
+                            except Exception:
+                                continue
+                    if code_files:
+                        code_content = json.dumps(code_files)
+                        print(f"      📄 Extracted {len(code_files)} code files for display")
+                except Exception as e:
+                    print(f"      ⚠️ Could not extract code content: {e}")
+            
             # Send champion status to gateway for Supabase storage (one-way, for auditing)
             # For rebenchmarks, this updates the champion's score (even if lower)
-            # Include cost/time for full DB update
+            # Include cost/time + code content for full DB update
             await self._notify_gateway_champion_status(
                 model_id=work.get("model_id", "unknown"),
                 became_champion=became_champion,
                 score=avg_score,
                 is_rebenchmark=is_rebenchmark,
                 evaluation_cost_usd=total_evaluation_cost,
-                evaluation_time_seconds=int(total_time)
+                evaluation_time_seconds=int(total_time),
+                code_content=code_content
             )
                         
         except Exception as e:

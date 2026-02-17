@@ -957,6 +957,25 @@ SENSITIVE_ENV_VARS: Set[str] = {
     # ===========================================
     "TRUELIST_API_KEY",           # Internal email verification
     "MYEMAILVERIFIER_API_KEY",    # Internal email verification
+    
+    # ===========================================
+    # BLOCKED - HTTP Proxies (CRITICAL)
+    # ===========================================
+    # The qualification worker sets HTTP_PROXY/HTTPS_PROXY to Webshare proxies
+    # for free API routing. If these leak into the sandbox, httpx routes ALL
+    # model requests through the external proxy, including localhost calls to
+    # the local API proxy. The Webshare proxy can't reach localhost, breaking
+    # all API calls. Models must call the local proxy directly.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "SOCKS_PROXY",
+    "FTP_PROXY",
 }
 
 
@@ -993,6 +1012,20 @@ def sanitize_environment() -> Dict[str, str]:
         
         # Skip AWS credentials
         if key_upper.startswith('AWS_'):
+            continue
+        
+        # CRITICAL: Skip HTTP/HTTPS proxy env vars.
+        # The qualification worker sets HTTP_PROXY/HTTPS_PROXY to a Webshare proxy.
+        # If these survive into the sandbox, httpx routes ALL requests (including
+        # calls to the local proxy at http://localhost:PORT) through the Webshare
+        # proxy. The Webshare proxy can't reach localhost, so ALL API calls fail:
+        # - Models using local proxy: connection fails (returns None)
+        # - Models calling paid APIs directly: 403 (no API key via proxy)
+        # Models must use the local proxy directly (no external HTTP proxy).
+        if key_upper in (
+            'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY',
+            'SOCKS_PROXY', 'FTP_PROXY',
+        ):
             continue
         
         safe_env[key] = value

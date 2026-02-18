@@ -704,6 +704,16 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning(f"Could not list model directory: {e}")
         
+        # Purge any previously cached model modules so Python loads
+        # fresh code from this model's directory (not a stale module from
+        # a prior evaluation in the same worker process).
+        _MODEL_MODULE_NAMES = [
+            "qualify", "model", "model.model", "model.main", "main",
+        ]
+        for mod_name in list(sys.modules.keys()):
+            if mod_name in _MODEL_MODULE_NAMES or mod_name.startswith("model."):
+                del sys.modules[mod_name]
+        
         # Add model to path
         model_subdir = os.path.join(model_dir, "model")
         sys.path.insert(0, model_dir)

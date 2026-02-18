@@ -1169,42 +1169,52 @@ async def icp_rotation_task():
     """
     Background task that rotates ICPs daily at 12:00 AM UTC (midnight UTC).
     
-    Uses polling approach (checks every minute) instead of long sleeps.
-    This is more robust against event loop issues and silent failures.
+    Polls every 60s and checks whether today's ICP set (by YYYYMMDD set_id)
+    is active. If not, generates and activates a new one. This is robust
+    against restarts, missed midnight windows, and transient failures.
     """
     logger.info("Starting ICP rotation task (polling every 60s)")
     
-    # Track the last date we generated for (to avoid duplicate generation)
+    # In-memory guard: skip DB queries once today's set is confirmed active
     last_generated_date: Optional[str] = None
     
     while True:
         try:
             now = datetime.now(timezone.utc)
             current_date = now.strftime("%Y-%m-%d")
+            today_set_id = get_set_id_for_date(now)
             
-            # Check if we're within the first 5 minutes after midnight UTC
-            # AND we haven't already generated for today
-            is_rotation_window = now.hour == 0 and now.minute < 5
+            # Fast path: already confirmed today's set is active
+            if last_generated_date == current_date:
+                if now.minute == 0:
+                    next_reset = get_next_reset_time()
+                    hours_until = (next_reset - now).total_seconds() / 3600
+                    logger.info(f"ICP rotation: Set {today_set_id} active. Next reset at {next_reset} ({hours_until:.1f}h)")
+                await asyncio.sleep(60)
+                continue
             
-            if is_rotation_window and last_generated_date != current_date:
-                logger.info(f"ICP rotation: Midnight UTC detected ({now}), starting generation...")
-                
-                # Generate and activate new ICP set
-                set_id = await generate_and_activate_icp_set()
-                
-                if set_id:
-                    logger.info(f"ICP rotation: Successfully activated set {set_id}")
-                    last_generated_date = current_date
-                else:
-                    logger.error("ICP rotation: Failed to generate/activate set, will retry next minute")
+            # Check DB: is today's set already active?
+            active_set = await get_active_icp_set()
+            if active_set and active_set.get('set_id') == today_set_id:
+                logger.info(f"ICP rotation: Today's set {today_set_id} already active")
+                last_generated_date = current_date
+                await asyncio.sleep(60)
+                continue
             
-            # Log status every hour (at minute 0)
-            if now.minute == 0:
-                next_reset = get_next_reset_time()
-                hours_until = (next_reset - now).total_seconds() / 3600
-                logger.info(f"ICP rotation: Next reset at {next_reset} ({hours_until:.1f} hours)")
+            # Today's set is missing or a stale set is active — generate
+            stale_id = active_set.get('set_id') if active_set else None
+            logger.info(f"ICP rotation: Need set {today_set_id} (current active: {stale_id}), generating...")
             
-            # Sleep for 60 seconds then check again
+            set_id = await generate_and_activate_icp_set()
+            
+            if set_id:
+                logger.info(f"ICP rotation: Successfully activated set {set_id}")
+                last_generated_date = current_date
+            else:
+                logger.error("ICP rotation: Failed to generate/activate set, will retry in 5 minutes")
+                await asyncio.sleep(300)
+                continue
+            
             await asyncio.sleep(60)
             
         except asyncio.CancelledError:
@@ -1214,7 +1224,6 @@ async def icp_rotation_task():
             logger.error(f"ICP rotation error: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            # Sleep briefly and retry
             await asyncio.sleep(60)
 
 

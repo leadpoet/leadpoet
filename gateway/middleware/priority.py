@@ -14,10 +14,14 @@ Validator Priority Paths (time-sensitive, can fail if delayed):
 - POST /validate (validators submitting decision hashes)
 - POST /reveal/ and /reveal/batch (validators revealing decisions)
 - POST /weights/submit (auditor validators submitting weights)
+- /qualification/validator/* (register, request-evaluation, report-results, etc.)
+- /qualification/proxy (API proxy for model evaluation)
 
 Miner Throttled Paths:
-- POST /presign (miners requesting presigned URLs)
+- POST /presign (miners requesting lead presigned URLs)
 - POST /submit (miners submitting leads)
+- Note: /qualification/model/presign and /qualification/model/submit are also
+  throttled because they contain "/presign" and "/submit"
 """
 
 from fastapi import Request
@@ -59,10 +63,13 @@ class PriorityMiddleware(BaseHTTPMiddleware):
         # Validator paths get priority - these are time-sensitive operations
         # that can fail if delayed by miner traffic
         validator_paths = [
-            "/epoch/",      # GET /epoch/{id}/leads - validators fetching leads
-            "/validate",    # POST /validate - validators submitting decision hashes
-            "/reveal",      # POST /reveal/ and /reveal/batch - validators revealing decisions
-            "/weights",     # POST /weights/submit - auditor validators submitting weights
+            "/epoch/",                      # GET /epoch/{id}/leads - validators fetching leads
+            "/validate",                    # POST /validate - validators submitting decision hashes
+            "/reveal",                      # POST /reveal/ and /reveal/batch - validators revealing decisions
+            "/weights",                     # POST /weights/submit - auditor validators submitting weights
+            "/qualification/validator/",    # All qualification validator endpoints (register, request-evaluation,
+                                            # report-results, request-rebenchmark, report-error, champion-status)
+            "/qualification/proxy",         # API proxy for model evaluation (validator-side)
         ]
         return any(vpath in path for vpath in validator_paths)
     

@@ -164,16 +164,28 @@ async def run_automatic_zero_checks(
         logger.info(f"Lead failed role check: {result.reason}")
         return False, result.reason
     
-    # NOTE: Email validation REMOVED - models are not allowed to submit email/name fields
-    # Any model submitting PII fields will fail Pydantic validation with extra='forbid'
+    # Check 5: Country match — ICP says "United States", lead must be in US
+    result = check_country_match(lead.country, icp.country)
+    if not result.passed:
+        logger.info(f"Lead failed country check: {result.reason}")
+        return False, result.reason
     
-    # Check 5: Data quality (placeholder text, suspicious chars, case issues)
+    # Check 6: Seniority level — lead must be within 1 level of ICP target
+    result = check_seniority_match(
+        lead.seniority.value if hasattr(lead.seniority, 'value') else str(lead.seniority),
+        icp.target_seniority
+    )
+    if not result.passed:
+        logger.info(f"Lead failed seniority check: {result.reason}")
+        return False, result.reason
+    
+    # Check 7: Data quality (placeholder text, suspicious chars, case issues)
     quality_valid, quality_reason = check_data_quality(lead)
     if not quality_valid:
         logger.info(f"Lead failed data quality check: {quality_reason}")
         return False, f"Data quality issue: {quality_reason}"
     
-    # Check 6: Duplicate company handling (first lead per company wins)
+    # Check 8: Duplicate company handling (first lead per company wins)
     result = check_duplicate_company(lead.business, seen_companies)
     if not result.passed:
         logger.info(f"Lead failed duplicate check: {result.reason}")
@@ -337,6 +349,79 @@ def check_role_match(lead_role: str, icp_target_roles: list) -> ValidationResult
         passed=False,
         reason=f"Role mismatch: '{lead_role}' vs {icp_target_roles} (best: {best_score:.0f}%, threshold: {ROLE_MATCH_THRESHOLD}%)"
     )
+
+
+def check_country_match(lead_country: str, icp_country: str) -> ValidationResult:
+    """
+    Verify lead's country matches ICP requirement.
+    
+    Uses case-insensitive exact match. Both must be non-empty.
+    If the ICP doesn't specify a country, any country is accepted.
+    """
+    if not icp_country or not icp_country.strip():
+        return ValidationResult(passed=True)
+    
+    if not lead_country or not lead_country.strip():
+        return ValidationResult(
+            passed=False,
+            reason=f"Missing country (ICP requires '{icp_country}')"
+        )
+    
+    if lead_country.strip().lower() != icp_country.strip().lower():
+        return ValidationResult(
+            passed=False,
+            reason=f"Country mismatch: '{lead_country}' vs ICP '{icp_country}'"
+        )
+    return ValidationResult(passed=True)
+
+
+# Seniority hierarchy — index 0 is highest
+_SENIORITY_LEVELS = ["C-Suite", "VP", "Director", "Manager", "Individual Contributor"]
+
+def check_seniority_match(lead_seniority: str, icp_seniority: str) -> ValidationResult:
+    """
+    Verify lead's seniority is within 1 level of ICP target.
+    
+    Hierarchy: C-Suite > VP > Director > Manager > Individual Contributor
+    
+    Tolerance of 1 level below the target:
+      ICP=C-Suite → accept C-Suite, VP
+      ICP=VP      → accept C-Suite, VP, Director
+      ICP=Director→ accept C-Suite, VP, Director, Manager
+      ICP=Manager → accept C-Suite through Manager
+      ICP=IC      → accept all
+    
+    Leads ABOVE the target always pass (a CEO is fine for a VP ICP).
+    """
+    if not icp_seniority or not icp_seniority.strip():
+        return ValidationResult(passed=True)
+    
+    if not lead_seniority or not lead_seniority.strip():
+        return ValidationResult(passed=True)
+    
+    lead_s = lead_seniority.strip()
+    icp_s = icp_seniority.strip()
+    
+    try:
+        lead_idx = _SENIORITY_LEVELS.index(lead_s)
+    except ValueError:
+        return ValidationResult(passed=True)
+    
+    try:
+        icp_idx = _SENIORITY_LEVELS.index(icp_s)
+    except ValueError:
+        return ValidationResult(passed=True)
+    
+    # lead_idx <= icp_idx means lead is at or above target (always OK)
+    # lead_idx == icp_idx + 1 means 1 level below (tolerated)
+    # lead_idx > icp_idx + 1 means too junior
+    if lead_idx > icp_idx + 1:
+        return ValidationResult(
+            passed=False,
+            reason=f"Seniority too low: '{lead_s}' for ICP target '{icp_s}' (min: {_SENIORITY_LEVELS[min(icp_idx + 1, len(_SENIORITY_LEVELS) - 1)]})"
+        )
+    
+    return ValidationResult(passed=True)
 
 
 def check_duplicate_company(company_name: str, seen_companies: Set[str]) -> ValidationResult:

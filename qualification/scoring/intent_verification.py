@@ -963,23 +963,28 @@ async def llm_verify_claim_with_icp(
         Tuple of (verified: bool, confidence: int 0-100, reason: str, date_status: str)
         date_status is one of: "verified", "no_date", "fabricated"
     """
-    # Build ICP context section if provided
+    # Build ICP context section — only verify INDUSTRY fit from the URL content.
+    # Structural fields (employee_count, geography, company_stage) are verified
+    # separately by db_verification.py against the leads database.
     icp_context = ""
-    if icp_industry or icp_criteria:
+    if icp_industry:
         icp_context = f"""
-ICP REQUIREMENTS (the URL content should provide evidence for these):
-- Target Industry: {icp_industry or 'Not specified'}
-- Additional Criteria: {icp_criteria or 'None'}
+ICP INDUSTRY REQUIREMENT:
+- Target Industry: {icp_industry}
 - Company Being Verified: {company_name or 'Unknown'}
 
-CRITICAL: The URL content must provide EVIDENCE that:
-1. This company actually operates in the target industry ({icp_industry or 'any'})
-2. The company matches the additional criteria (if specified)
-3. The specific intent claim is supported by real content
+The URL content should provide EVIDENCE that this company operates in or serves
+the {icp_industry} industry. Look for:
+- Products/services relevant to {icp_industry}
+- Industry-specific terminology, clients, or use cases
+- Company description mentioning {icp_industry} or closely related fields
 
-If the URL does NOT provide evidence of ICP fit, mark as NOT verified.
+If the URL does NOT provide evidence of industry fit, set icp_evidence_found=false.
 A job posting for "Software Engineer" does NOT prove a company is in Healthcare.
-A company website existing does NOT prove they are PE-backed.
+A generic company page with no industry context is insufficient.
+
+NOTE: Do NOT penalize for missing employee count, geography, or company stage —
+those are verified separately from the database.
 """
 
     prompt = f"""You are verifying an intent signal for a B2B lead generation system.
@@ -1005,10 +1010,10 @@ REJECT these GENERIC/TEMPLATED claims (gaming attempts):
 VERIFICATION REQUIREMENTS:
 1. Claim must have SPECIFIC details (hiring X role, launched Y product, raised Z funding)
 2. Those specific details MUST appear in the scraped content
-3. If ICP specifies an industry, the content must PROVE that industry fit
-4. If ICP specifies criteria like "PE-backed", content must show evidence of that
-5. The DATE should be found in the content OR be reasonably verifiable. If the claimed date
+3. If an ICP industry is specified, the content must PROVE that industry fit
+4. The DATE should be found in the content OR be reasonably verifiable. If the claimed date
    looks fabricated (e.g., exactly 14 days ago with no date in content), flag it.
+NOTE: Do NOT check for employee count, geography, or company stage — those are verified separately.
 
 DATE VERIFICATION (THREE possible outcomes):
 - "verified": Content has a date/timestamp that roughly matches the claimed date
@@ -1061,10 +1066,10 @@ Examples:
         if date_status not in ("verified", "no_date", "fabricated"):
             date_status = "verified"
         
-        # If ICP was specified but no evidence found, reduce confidence significantly
-        if (icp_industry or icp_criteria) and not icp_evidence:
+        # If industry was specified but no evidence found, reduce confidence
+        if icp_industry and not icp_evidence:
             confidence = min(confidence, 30)
-            reason = f"No ICP evidence found. {reason}"
+            reason = f"No industry evidence found. {reason}"
         
         if date_status == "fabricated":
             # Actively fabricated date (contradicts content or suspiciously convenient)

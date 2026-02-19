@@ -414,6 +414,7 @@ SOURCE_TYPE_MULTIPLIERS = {
     "company_website": 0.85,   # Medium: could be generic content
     "social_media": 0.8,       # Medium: less reliable intent signals
     "review_site": 0.75,       # Medium-low: indirect signal
+    "wikipedia": 0.6,          # Low-medium: reliable company info but indirect intent
     "other": 0.3,              # LOW: catch-all category indicates fallback
 }
 
@@ -432,15 +433,13 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     Returns:
         Tuple of (best_score 0-50, best_confidence 0-100, best_signal_date)
     """
-    # Build ICP criteria string for verification
-    icp_criteria_parts = []
-    if getattr(icp, 'employee_count', None):
-        icp_criteria_parts.append(f"Employee count: {icp.employee_count}")
-    if getattr(icp, 'company_stage', None):
-        icp_criteria_parts.append(f"Company stage: {icp.company_stage}")
-    if getattr(icp, 'geography', None):
-        icp_criteria_parts.append(f"Geography: {icp.geography}")
-    icp_criteria = "; ".join(icp_criteria_parts) if icp_criteria_parts else None
+    # Build ICP criteria for intent verification.
+    # ONLY include criteria that the intent URL content can reasonably prove.
+    # employee_count, geography, company_stage are structural fields already
+    # verified by db_verification.py against the leads database — asking the
+    # LLM to also find them in a news article or job posting is unreasonable
+    # and causes false negatives.
+    icp_criteria = None
     
     best_score = 0.0
     best_confidence = 0

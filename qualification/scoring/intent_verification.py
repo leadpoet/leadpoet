@@ -1007,20 +1007,30 @@ VERIFICATION REQUIREMENTS:
 5. The DATE should be found in the content OR be reasonably verifiable. If the claimed date
    looks fabricated (e.g., exactly 14 days ago with no date in content), flag it.
 
-DATE VERIFICATION:
-- Look for actual dates/timestamps in the scraped content
-- If content has a date (e.g., "Posted Jan 15, 2026"), it should roughly match claimed date
-- If NO date in content but claimed date is suspiciously convenient (7/14/21/30 days ago), 
-  reduce confidence as the date may be fabricated
+DATE VERIFICATION (THREE possible outcomes):
+- "verified": Content has a date/timestamp that roughly matches the claimed date
+- "no_date": Content genuinely has NO dates/timestamps at all — you simply cannot verify
+- "fabricated": Content has dates that CONTRADICT the claimed date, OR the claimed date is
+  suspiciously convenient (exactly 7/14/21/30 days ago) with no dates in content to support it
+
+Examples of FABRICATED dates (date_status = "fabricated"):
+- Claimed "2026-02-04" but content shows article dated "2025-11-15"
+- Claimed exactly 14 days ago and page has zero dates (suspiciously convenient)
+- Claimed a specific recent date but URL is clearly an old/static page with a visible older date
+
+Examples of NO DATE (date_status = "no_date"):
+- Company homepage with no timestamps anywhere — impossible to verify any date
+- Product page or About page with no publication dates
+- Content is real and specific but simply undated
 
 Respond with ONLY JSON (no markdown):
-{{"verified": true/false, "confidence": 0-100, "reason": "1-2 sentence explanation", "icp_evidence_found": true/false, "date_verified": true/false}}
+{{"verified": true/false, "confidence": 0-100, "reason": "1-2 sentence explanation", "icp_evidence_found": true/false, "date_status": "verified" | "no_date" | "fabricated"}}
 
 Examples:
-{{"verified": true, "confidence": 85, "reason": "Content shows hiring for DevOps roles at a healthcare company. Job posted Jan 20, 2026 matches claimed date.", "icp_evidence_found": true, "date_verified": true}}
-{{"verified": false, "confidence": 30, "reason": "Job posting exists but no evidence this is a healthcare company as ICP requires.", "icp_evidence_found": false, "date_verified": true}}
-{{"verified": false, "confidence": 10, "reason": "Claim is generic 'actively operating' - no specific intent shown.", "icp_evidence_found": false, "date_verified": false}}
-{{"verified": false, "confidence": 20, "reason": "Content has no dates. Claimed date of exactly 14 days ago appears fabricated.", "icp_evidence_found": true, "date_verified": false}}
+{{"verified": true, "confidence": 85, "reason": "Content shows hiring for DevOps roles at a healthcare company. Job posted Jan 20, 2026 matches claimed date.", "icp_evidence_found": true, "date_status": "verified"}}
+{{"verified": false, "confidence": 30, "reason": "Job posting exists but no evidence this is a healthcare company as ICP requires.", "icp_evidence_found": false, "date_status": "verified"}}
+{{"verified": false, "confidence": 10, "reason": "Claim is generic 'actively operating' - no specific intent shown.", "icp_evidence_found": false, "date_status": "no_date"}}
+{{"verified": false, "confidence": 20, "reason": "Content dated Nov 2025 but claimed date is Feb 2026. Date appears fabricated.", "icp_evidence_found": true, "date_status": "fabricated"}}
 """
     
     try:
@@ -1038,20 +1048,31 @@ Examples:
         confidence = int(result.get("confidence", 0))
         reason = result.get("reason", "No reason provided")
         icp_evidence = result.get("icp_evidence_found", True)  # Default True if not checking ICP
-        date_verified = result.get("date_verified", True)  # Default True if not checked
+        
+        # Parse date_status (new 3-way field) with fallback to legacy date_verified
+        date_status = result.get("date_status")
+        if date_status is None:
+            legacy = result.get("date_verified", True)
+            date_status = "verified" if legacy else "fabricated"
         
         # If ICP was specified but no evidence found, reduce confidence significantly
         if (icp_industry or icp_criteria) and not icp_evidence:
             confidence = min(confidence, 30)
             reason = f"No ICP evidence found. {reason}"
         
-        # If date could not be verified (likely fabricated), zero out confidence
-        # This catches time decay gaming where models use hardcoded dates like "14 days ago"
-        # STRICT: No credit for fabricated dates - this is a critical gaming vector
-        if not date_verified:
-            confidence = 0  # No credit for fabricated dates
+        if date_status == "fabricated":
+            # Actively fabricated date (contradicts content or suspiciously convenient)
+            # Zero confidence → lead_scorer will zero the ENTIRE lead
+            confidence = 0
             reason = f"Date fabrication detected. {reason}"
-            logger.warning(f"❌ Date verification failed - ZEROING confidence (time decay gaming)")
+            logger.warning(f"❌ Date FABRICATED - ZEROING confidence (time decay gaming)")
+        elif date_status == "no_date":
+            # Content genuinely has no dates — not fabrication, just unverifiable
+            # Mark as unverified (intent score = 0) but preserve confidence so
+            # lead_scorer keeps ICP fit + decision maker scores
+            verified_raw = False
+            reason = f"No date in content (intent unverifiable). {reason}"
+            logger.info(f"⚠️ No date in content - intent unverifiable but not fabricated")
         
         # Apply confidence threshold
         verified = verified_raw and confidence >= CONFIDENCE_THRESHOLD

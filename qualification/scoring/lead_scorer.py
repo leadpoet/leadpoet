@@ -447,6 +447,12 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
             best_score = score
             best_confidence = confidence
             best_date = signal.date
+        elif confidence > best_confidence:
+            # Track highest confidence even when score is 0.
+            # This matters for the "no date in content" case: verified=False
+            # gives score=0 but confidence stays non-zero, which tells
+            # lead_scorer this is NOT fabrication (don't zero entire lead).
+            best_confidence = confidence
     
     # If no signal scored > 0, use the first signal's date for decay
     if best_date is None and lead.intent_signals:

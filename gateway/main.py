@@ -374,6 +374,7 @@ app = FastAPI(
     description="Open-source, reproducible gateway for lead validation",
     version="1.0.0",
     lifespan=lifespan,  # Use lifespan context manager
+    redirect_slashes=False,  # Prevent 307 redirects from consuming semaphore slots
 )
 
 # ============================================================

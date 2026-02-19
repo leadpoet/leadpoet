@@ -168,8 +168,8 @@ async def score_lead(
         logger.debug(f"Decision maker score: {decision_maker}")
         
         # Score Intent Signals (0-50 pts) - verifies each signal, uses the best
-        intent_raw, verification_confidence, best_signal_date = await score_intent_signal(lead, icp)
-        logger.debug(f"Intent signal raw score: {intent_raw} (confidence: {verification_confidence})")
+        intent_raw, verification_confidence, best_signal_date, best_date_status = await score_intent_signal(lead, icp)
+        logger.debug(f"Intent signal raw score: {intent_raw} (confidence: {verification_confidence}, date_status: {best_date_status})")
         
         # =====================================================================
         # CRITICAL: Zero ENTIRE lead score if intent is clearly fabricated
@@ -206,22 +206,29 @@ async def score_lead(
     # =========================================================================
     # STEP 4: Apply time decay to intent signal (uses best signal's date)
     # =========================================================================
-    try:
-        signal_date = date.fromisoformat(best_signal_date) if best_signal_date else None
-    except (ValueError, AttributeError):
-        # Invalid date - cannot verify recency, zero out intent score
-        # This prevents gaming by submitting unparseable dates to avoid time decay
-        signal_date = None
-        logger.warning(f"Invalid signal date '{best_signal_date}' - zeroing intent score")
+    NO_DATE_DECAY_MULTIPLIER = 0.5  # Neutral multiplier when date is unverifiable
     
-    if signal_date is None:
-        intent_final = 0
-        decay_multiplier = 0
-        age_months = -1
-    else:
-        age_months = calculate_age_months(signal_date)
-        decay_multiplier = calculate_time_decay_multiplier(age_months)
+    if best_date_status == "no_date":
+        # Content had no dates — use a fixed neutral decay (not gameable)
+        decay_multiplier = NO_DATE_DECAY_MULTIPLIER
         intent_final = intent_raw * decay_multiplier
+        age_months = -1
+        logger.info(f"Undated signal — using fixed decay {NO_DATE_DECAY_MULTIPLIER}x")
+    else:
+        try:
+            signal_date = date.fromisoformat(best_signal_date) if best_signal_date else None
+        except (ValueError, AttributeError):
+            signal_date = None
+            logger.warning(f"Invalid signal date '{best_signal_date}' - zeroing intent score")
+        
+        if signal_date is None:
+            intent_final = 0
+            decay_multiplier = 0
+            age_months = -1
+        else:
+            age_months = calculate_age_months(signal_date)
+            decay_multiplier = calculate_time_decay_multiplier(age_months)
+            intent_final = intent_raw * decay_multiplier
     
     logger.debug(f"Intent after decay: {intent_final} (age: {age_months} months, multiplier: {decay_multiplier})")
     
@@ -438,46 +445,50 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     best_score = 0.0
     best_confidence = 0
     best_date: Optional[str] = None
+    best_date_status = "fabricated"
     
     for signal in lead.intent_signals:
-        score, confidence = await _score_single_intent_signal(
+        score, confidence, date_status = await _score_single_intent_signal(
             signal, icp, icp_criteria, lead.business
         )
         if score > best_score:
             best_score = score
             best_confidence = confidence
             best_date = signal.date
+            best_date_status = date_status
         elif confidence > best_confidence:
             # Track highest confidence even when score is 0.
-            # This matters for the "no date in content" case: verified=False
-            # gives score=0 but confidence stays non-zero, which tells
-            # lead_scorer this is NOT fabrication (don't zero entire lead).
+            # This matters for distinguishing "fabricated" (confidence=0)
+            # from "no_date" or "not verified" (confidence>0).
             best_confidence = confidence
+            best_date_status = date_status
     
     # If no signal scored > 0, use the first signal's date for decay
     if best_date is None and lead.intent_signals:
         best_date = lead.intent_signals[0].date
     
     if len(lead.intent_signals) > 1:
-        logger.info(f"Scored {len(lead.intent_signals)} intent signals — best: {best_score:.1f} (confidence: {best_confidence})")
+        logger.info(f"Scored {len(lead.intent_signals)} intent signals — best: {best_score:.1f} (confidence: {best_confidence}, date: {best_date_status})")
     
-    return best_score, best_confidence, best_date
+    return best_score, best_confidence, best_date, best_date_status
 
+
+MAX_INTENT_NO_DATE = 20  # Cap for undated but verified signals (vs 50 for dated)
 
 async def _score_single_intent_signal(
     signal: "IntentSignal",
     icp: ICPPrompt,
     icp_criteria: Optional[str],
     company_name: str
-) -> Tuple[float, int]:
+) -> Tuple[float, int, str]:
     """
     Verify and score a single intent signal.
     
     Returns:
-        Tuple of (score 0-50, verification_confidence 0-100)
+        Tuple of (score 0-50, verification_confidence 0-100, date_status)
     """
     # Verify the signal is real AND provides evidence of ICP fit
-    verified, confidence, reason = await verify_intent_signal(
+    verified, confidence, reason, date_status = await verify_intent_signal(
         signal,
         icp_industry=icp.industry,
         icp_criteria=icp_criteria,
@@ -486,7 +497,7 @@ async def _score_single_intent_signal(
     
     if not verified:
         logger.info(f"Intent signal not verified: {reason}")
-        return 0.0, confidence
+        return 0.0, confidence, date_status
     
     # Get source as string
     source_str = signal.source.value if hasattr(signal.source, 'value') else str(signal.source)
@@ -528,13 +539,18 @@ Respond with ONLY a single number (0-50):"""
     response = await openrouter_chat(prompt, model="gpt-4o-mini")
     raw_score = extract_score(response, max_score=MAX_INTENT_SIGNAL_SCORE)
     
+    # Cap score for undated signals (real intent but less actionable without date)
+    if date_status == "no_date":
+        raw_score = min(raw_score, MAX_INTENT_NO_DATE)
+        logger.info(f"Undated signal — capped raw score at {MAX_INTENT_NO_DATE}")
+    
     # Weight by verification confidence AND source type quality
     weighted_score = raw_score * (confidence / 100) * source_multiplier
     
     if source_multiplier < 1.0:
         logger.info(f"Applied source type penalty: {source_str} -> {source_multiplier}x")
     
-    return weighted_score, confidence
+    return weighted_score, confidence, date_status
 
 
 # =============================================================================

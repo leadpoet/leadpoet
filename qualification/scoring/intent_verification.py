@@ -295,7 +295,7 @@ async def verify_intent_signal(
     icp_industry: Optional[str] = None,
     icp_criteria: Optional[str] = None,
     company_name: Optional[str] = None
-) -> Tuple[bool, int, str]:
+) -> Tuple[bool, int, str, str]:
     """
     Verify an intent signal claim AND check for ICP evidence.
     
@@ -316,7 +316,8 @@ async def verify_intent_signal(
         company_name: Name of the company for verification
     
     Returns:
-        Tuple of (verified: bool, confidence: int 0-100, reason: str)
+        Tuple of (verified: bool, confidence: int 0-100, reason: str, date_status: str)
+        date_status is one of: "verified", "no_date", "fabricated"
     """
     logger.info(f"Verifying intent signal: {intent_signal.source} - {intent_signal.url[:50]}...")
     
@@ -327,12 +328,12 @@ async def verify_intent_signal(
     is_generic, generic_reason = is_generic_intent_description(intent_signal.description)
     if is_generic:
         logger.warning(f"Rejected generic intent: {generic_reason}")
-        return False, 5, f"Generic fallback intent rejected: {generic_reason}"
+        return False, 5, f"Generic fallback intent rejected: {generic_reason}", "fabricated"
     
     # Additional pre-check: "other" source type with vague description is suspicious
     if source_str.lower() == "other" and len(intent_signal.description) < 100:
         logger.warning("Rejected: 'other' source with short description")
-        return False, 10, "Low-value source type 'other' with insufficient description"
+        return False, 10, "Low-value source type 'other' with insufficient description", "fabricated"
     
     # Check cache first (include ICP in cache key if provided)
     icp_cache_suffix = f"|{icp_industry}|{icp_criteria}" if icp_industry else ""
@@ -340,29 +341,30 @@ async def verify_intent_signal(
     cached = await get_cached_verification(cache_key)
     if cached:
         logger.info(f"Using cached verification: verified={cached.verification_result}")
-        return cached.verification_result, cached.verification_confidence, cached.verification_reason
+        # Legacy cache entries don't have date_status — default to "verified"
+        return cached.verification_result, cached.verification_confidence, cached.verification_reason, "verified"
     
     # Fetch URL content via ScrapingDog
     try:
         content = await fetch_url_content(intent_signal.url, source_str)
     except Exception as e:
         logger.warning(f"Failed to fetch URL {intent_signal.url}: {e}")
-        return False, 0, f"Failed to fetch URL: {str(e)[:100]}"
+        return False, 0, f"Failed to fetch URL: {str(e)[:100]}", "fabricated"
     
     if not content:
         logger.warning(f"URL returned no content: {intent_signal.url}")
-        return False, 0, "URL returned no content"
+        return False, 0, "URL returned no content", "fabricated"
     
     # Extract relevant text from content
     text = extract_verification_content(content, source_str)
     
     if not text or len(text.strip()) < 50:
         logger.warning(f"Insufficient content extracted from URL: {intent_signal.url}")
-        return False, 0, "Insufficient content to verify claim"
+        return False, 0, "Insufficient content to verify claim", "fabricated"
     
     # Verify claim with LLM - now includes ICP context
     try:
-        verified, confidence, reason = await llm_verify_claim_with_icp(
+        verified, confidence, reason, date_status = await llm_verify_claim_with_icp(
             claim=intent_signal.description,
             url=intent_signal.url,
             date=intent_signal.date,
@@ -373,7 +375,7 @@ async def verify_intent_signal(
         )
     except Exception as e:
         logger.error(f"LLM verification failed: {e}")
-        return False, 0, f"LLM verification error: {str(e)[:100]}"
+        return False, 0, f"LLM verification error: {str(e)[:100]}", "fabricated"
     
     # Cache result
     await cache_verification(
@@ -387,8 +389,8 @@ async def verify_intent_signal(
         ttl_days=DEFAULT_CACHE_TTL_DAYS
     )
     
-    logger.info(f"Verification complete: verified={verified}, confidence={confidence}")
-    return verified, confidence, reason
+    logger.info(f"Verification complete: verified={verified}, confidence={confidence}, date_status={date_status}")
+    return verified, confidence, reason, date_status
 
 
 # =============================================================================
@@ -940,7 +942,7 @@ async def llm_verify_claim_with_icp(
     icp_industry: Optional[str] = None,
     icp_criteria: Optional[str] = None,
     company_name: Optional[str] = None
-) -> Tuple[bool, int, str]:
+) -> Tuple[bool, int, str, str]:
     """
     Use LLM to verify an intent signal AND check for ICP evidence.
     
@@ -958,7 +960,8 @@ async def llm_verify_claim_with_icp(
         company_name: Name of the company being verified
     
     Returns:
-        Tuple of (verified: bool, confidence: int 0-100, reason: str)
+        Tuple of (verified: bool, confidence: int 0-100, reason: str, date_status: str)
+        date_status is one of: "verified", "no_date", "fabricated"
     """
     # Build ICP context section if provided
     icp_context = ""
@@ -1054,6 +1057,9 @@ Examples:
         if date_status is None:
             legacy = result.get("date_verified", True)
             date_status = "verified" if legacy else "fabricated"
+        # Normalize to known values
+        if date_status not in ("verified", "no_date", "fabricated"):
+            date_status = "verified"
         
         # If ICP was specified but no evidence found, reduce confidence significantly
         if (icp_industry or icp_criteria) and not icp_evidence:
@@ -1067,21 +1073,19 @@ Examples:
             reason = f"Date fabrication detected. {reason}"
             logger.warning(f"❌ Date FABRICATED - ZEROING confidence (time decay gaming)")
         elif date_status == "no_date":
-            # Content genuinely has no dates — not fabrication, just unverifiable
-            # Mark as unverified (intent score = 0) but preserve confidence so
-            # lead_scorer keeps ICP fit + decision maker scores
-            verified_raw = False
-            reason = f"No date in content (intent unverifiable). {reason}"
-            logger.info(f"⚠️ No date in content - intent unverifiable but not fabricated")
+            # Content genuinely has no dates — not fabrication, just unverifiable.
+            # The CLAIM may still be real (verified_raw stays as LLM reported).
+            # Intent will be scored but capped by _score_single_intent_signal.
+            logger.info(f"⚠️ No date in content - intent capped but not zeroed")
         
         # Apply confidence threshold
         verified = verified_raw and confidence >= CONFIDENCE_THRESHOLD
         
-        return verified, confidence, reason
+        return verified, confidence, reason, date_status
         
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM response: {e}")
-        return False, 0, "LLM response parsing error"
+        return False, 0, "LLM response parsing error", "fabricated"
     except Exception as e:
         logger.error(f"LLM verification error: {e}")
         raise
@@ -1129,7 +1133,7 @@ async def openrouter_chat(prompt: str, model: str = "gpt-4o-mini") -> str:
 
 async def verify_intent_signals_batch(
     signals: list[IntentSignal]
-) -> list[Tuple[bool, int, str]]:
+) -> list[Tuple[bool, int, str, str]]:
     """
     Verify multiple intent signals (with caching).
     
@@ -1137,7 +1141,7 @@ async def verify_intent_signals_batch(
         signals: List of intent signals to verify
     
     Returns:
-        List of (verified, confidence, reason) tuples
+        List of (verified, confidence, reason, date_status) tuples
     """
     results = []
     for signal in signals:
@@ -1146,7 +1150,7 @@ async def verify_intent_signals_batch(
             results.append(result)
         except Exception as e:
             logger.error(f"Failed to verify signal {signal.url}: {e}")
-            results.append((False, 0, f"Verification error: {str(e)[:50]}"))
+            results.append((False, 0, f"Verification error: {str(e)[:50]}", "fabricated"))
     
     return results
 

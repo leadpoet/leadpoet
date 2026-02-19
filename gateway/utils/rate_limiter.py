@@ -47,8 +47,8 @@ _cache_loaded = False  # Track if we've loaded from Supabase yet
 # Rate limit constants
 # Production limits to maintain lead quality and prevent spam
 MAX_SUBMISSIONS_PER_DAY = 1000
-MAX_REJECTIONS_PER_DAY = 200
-MIN_SECONDS_BETWEEN_SUBMISSIONS = 30  # Cooldown between submissions (anti-spam)
+MAX_REJECTIONS_PER_DAY = 250
+MIN_SECONDS_BETWEEN_SUBMISSIONS = 10  # Cooldown between submissions (anti-spam)
 
 def get_next_midnight_utc() -> datetime:
     """

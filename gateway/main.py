@@ -374,7 +374,6 @@ app = FastAPI(
     description="Open-source, reproducible gateway for lead validation",
     version="1.0.0",
     lifespan=lifespan,  # Use lifespan context manager
-    redirect_slashes=False,  # Don't 307 redirect /presign/ → /presign (saves a full round trip)
 )
 
 # ============================================================

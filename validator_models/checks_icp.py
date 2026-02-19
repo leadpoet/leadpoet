@@ -25,148 +25,212 @@ from Leadpoet.utils.utils_lead_extraction import get_employee_count
 # ========================================================================
 
 ICP_DEFINITIONS = [
+    # ==================================================================
+    # 1. AI/ML/NLP + Robotics/Aerospace/Defence — Decision Makers (+100)
+    # ==================================================================
     {
-        # Fuel/Energy - Operations & Technology Leaders
-        "sub_industries": ["Fuel", "Oil and Gas", "Fossil Fuels", "Energy"],
+        "sub_industries": [
+            "Artificial Intelligence", "Machine Learning", "Natural Language Processing",
+            "Predictive Analytics", "Robotics", "Autonomous Vehicles",
+            "Aerospace", "Defense and Space", "Drones",
+        ],
         "role_details": [
-            # Operations
-            "coo", "chief operating officer", "director of operations", "vp of operations",
-            "vp operations", "head of operations", "operations manager", "operations director",
-            # Technology
-            "cto", "chief technology officer", "director of technology", "vp of technology",
-            "vp technology", "head of technology", "vp of engineering", "vp engineering",
-            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
-            "cio", "chief information officer"
-        ]
-    },
-
-    {
-        # Agriculture/Farming - Operations & Technology Leaders
-        "sub_industries": ["Agriculture", "Farming", "AgTech", "Livestock", "Aquaculture"],
-        "role_details": [
-            # Operations
-            "coo", "chief operating officer", "director of operations", "vp of operations",
-            "vp operations", "head of operations", "operations manager", "operations director",
-            # Technology
-            "cto", "chief technology officer", "director of technology", "vp of technology",
-            "vp technology", "head of technology", "vp of engineering", "vp engineering",
-            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
-            "cio", "chief information officer"
-        ]
-    },
-
-    {
-        # Renewable Energy - Operations, Technology & Asset Management
-        "sub_industries": ["Solar", "Wind Energy", "Renewable Energy", "Clean Energy",
-                          "Biomass Energy", "Energy Storage", "Energy Efficiency"],
-        "role_details": [
-            # Operations
-            "coo", "chief operating officer", "director of operations", "vp of operations",
-            "vp operations", "head of operations", "operations manager", "operations director",
-            # Technology
-            "cto", "chief technology officer", "director of technology", "vp of technology",
-            "vp technology", "head of technology", "vp of engineering", "vp engineering",
-            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
-            "cio", "chief information officer",
-            # Asset Management & Site Operations
-            "asset manager", "director of operation", "performance engineer", "site manager",
-            "plant manager", "facility manager", "solar farm manager", "wind farm manager"
-        ]
-    },
-
-    {
-        # Winery/Horticulture - Farm & Operations Leaders
-        "sub_industries": ["Winery", "Wine And Spirits", "Horticulture", "Farming",
-                          "Agriculture", "AgTech", "Hydroponics"],
-        "role_details": [
-            # Operations
-            "coo", "chief operating officer", "director of operations", "vp of operations",
-            "vp operations", "head of operations", "operations manager", "operations director",
-            # Technology
-            "cto", "chief technology officer", "director of technology", "vp of technology",
-            "vp technology", "head of technology", "vp of engineering", "vp engineering",
-            "engineering director", "head of engineering", "vp of it", "vp it", "it director",
-            "cio", "chief information officer",
-            # Farm Management & Precision Agriculture
-            "farm manager", "vineyard manager", "precision agriculture manager",
-            "head grower", "chief agronomist", "viticulturist", "horticulturist",
-            "greenhouse manager", "crop manager", "production manager"
-        ]
-    },
-
-    {
-        # E-Commerce/Retail - Marketing & Growth Leaders
-        "sub_industries": ["E-Commerce", "E-Commerce Platforms", "Retail", "Retail Technology"],
-        "role_details": [
-            # Marketing/Growth
-            "vp ecommerce", "vp e-commerce", "vp of ecommerce", "director of ecommerce",
-            "head of ecommerce", "ecommerce director", "head of growth", "director of growth",
-            "vp of growth", "vp growth", "chief growth officer", "cmo", "chief marketing officer",
-            "vp of marketing", "vp marketing", "director of marketing", "head of marketing",
-            "vp of digital marketing", "director of digital marketing",
-            # Leadership
-            "founder", "co-founder", "ceo", "chief executive officer"
-        ]
-    },
-
-    {
-        # Digital Marketing/Advertising - Agency & Strategy Leaders
-        "sub_industries": ["Digital Marketing", "Email Marketing", "Marketing",
-                          "Marketing Automation", "Advertising", "Advertising Platforms",
-                          "Affiliate Marketing", "Content Marketing"],
-        "role_details": [
-            # Leadership/Strategy
-            "founder", "co-founder", "ceo", "chief executive officer",
-            "director of partnerships", "vp of partnerships", "vp partnerships",
-            "head of partnerships", "partnerships director",
-            "head of strategy", "director of strategy", "vp of strategy", "vp strategy",
-            "chief strategy officer", "cmo", "chief marketing officer",
-            "managing director", "president", "managing partner"
-        ]
-    },
-
-    {
-        # AI/ML - Technical & Leadership Roles
-        "sub_industries": ["Artificial Intelligence", "Machine Learning",
-                          "Natural Language Processing", "Predictive Analytics"],
-        "role_details": [
-            # Leadership
-            "ceo", "chief executive officer", "founder", "co-founder",
-            # Technology
-            "cto", "chief technology officer", "vp of engineering", "vp engineering",
-            "head of engineering", "engineering director", "vp of ai", "vp ai",
-            "head of ai", "director of ai", "vp of machine learning", "vp machine learning",
-            "head of machine learning", "director of machine learning",
-            "chief ai officer", "chief data officer",
+            # C-Suite / Founders
+            "ceo", "chief executive officer", "founder", "co-founder", "president",
+            "cto", "chief technology officer", "coo", "chief operating officer",
+            "cfo", "chief financial officer", "cmo", "chief marketing officer",
+            "chief ai officer", "chief data officer", "chief product officer",
+            # VP / Director
+            "vp of engineering", "vp engineering", "vp of ai", "vp ai",
+            "vp of machine learning", "vp machine learning", "vp of product",
+            "vp of technology", "vp technology", "vp of research", "vp research",
+            "head of engineering", "head of ai", "head of machine learning",
+            "head of product", "head of research", "head of data",
+            "engineering director", "director of engineering", "director of ai",
+            "director of machine learning", "director of product", "director of research",
             # Engineering
             "software engineer", "swe", "senior software engineer", "sr swe",
             "staff software engineer", "principal software engineer", "lead software engineer",
-            "software developer", "senior software developer", "sr software developer"
-        ]
+            "software developer", "senior software developer",
+        ],
+        "bonus": 100,
     },
 
+    # ==================================================================
+    # 2. Cyber Security / IT Mgmt — Midwest US, 10-50 employees (+100)
+    # ==================================================================
     {
-        # Real Estate Investment - Owners & Investment Leaders
-        "sub_industries": ["Real Estate", "Real Estate Investment", "Residential",
-                          "Commercial Real Estate", "Property Development", "Property Management"],
+        "sub_industries": ["Cyber Security", "IT Management"],
         "role_details": [
-            # Owner/Leadership
-            "ceo", "chief executive officer", "owner", "co-owner", "sole operator",
-            "founder", "co-founder", "managing partner", "managing director",
-            "principal", "president", "partner"
-        ]
+            "owner", "co-owner", "business owner",
+            "founder", "co-founder",
+            "ceo", "chief executive officer", "president",
+        ],
+        "regions": [
+            "illinois", "indiana", "michigan", "ohio", "wisconsin",
+            "iowa", "kansas", "minnesota", "missouri", "nebraska",
+            "north dakota", "south dakota",
+        ],
+        "employee_ranges": ["10-50"],
+        "bonus": 100,
     },
 
+    # ==================================================================
+    # 3. Cyber Security — Decision Makers, all US (+50)
+    # ==================================================================
     {
-        # Wealth Management/Family Office - Investment & Operations Leaders
-        # Note: No "Family Office" sub-industry in taxonomy, using closest matches
-        "sub_industries": ["Asset Management", "Venture Capital", "Hedge Funds",
-                          "Financial Services", "Impact Investing"],
+        "sub_industries": ["Cyber Security", "Network Security", "IT Management",
+                          "Information Services"],
+        "role_details": [
+            # C-Suite / Founders
+            "ceo", "chief executive officer", "founder", "co-founder", "president",
+            "cto", "chief technology officer", "coo", "chief operating officer",
+            "ciso", "chief information security officer", "cio", "chief information officer",
+            # VP / Director
+            "vp of engineering", "vp engineering", "vp of security", "vp security",
+            "vp of it", "vp it", "vp of technology", "vp technology",
+            "head of security", "head of it", "head of engineering",
+            "director of security", "director of it", "director of engineering",
+            "it director", "security director",
+            # Owners
+            "owner", "co-owner", "business owner",
+        ],
+        "regions": [
+            "united states", "usa", "us", "america",
+            "california", "new york", "texas", "florida", "illinois", "pennsylvania",
+            "ohio", "georgia", "north carolina", "michigan", "new jersey", "virginia",
+            "washington", "arizona", "massachusetts", "tennessee", "indiana", "missouri",
+            "maryland", "wisconsin", "colorado", "minnesota", "south carolina", "alabama",
+            "louisiana", "kentucky", "oregon", "oklahoma", "connecticut", "utah", "iowa",
+            "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
+            "idaho", "west virginia", "hawaii", "maine", "montana", "rhode island",
+            "delaware", "south dakota", "north dakota", "alaska", "vermont", "wyoming",
+        ],
+    },
+
+    # ==================================================================
+    # 4. UAE/Dubai Investors (+100)
+    # ==================================================================
+    {
+        "sub_industries": [
+            "Angel Investment", "Asset Management", "Hedge Funds",
+            "Impact Investing", "Incubators", "Real Estate Investment",
+            "Venture Capital", "Web3 Investor", "Web3 Fund", "Wealth Management",
+        ],
+        "role_details": [
+            "partner", "general partner", "gp", "managing partner", "managing director",
+            "principal", "venture partner", "investment partner", "limited partner",
+            "cio", "chief investment officer", "director of investments", "vp of investments",
+            "vp investments", "head of investments", "investment director",
+            "portfolio manager", "fund manager", "investment manager", "asset manager",
+            "founder", "co-founder", "ceo", "chief executive officer", "president",
+            "investor", "venture capitalist", "vc", "investment analyst", "research analyst",
+            "associate", "senior associate", "investment associate",
+            "vice president", "vp", "director", "head of",
+            "wealth manager", "private banker", "relationship manager",
+            "family office manager", "head of family office", "family office director",
+        ],
+        "regions": ["united arab emirates", "uae", "dubai", "emirati"],
+        "bonus": 100,
+    },
+
+    # ==================================================================
+    # 5. Small/Local Businesses — Owners, US only (+50)
+    # ==================================================================
+    {
+        "sub_industries": [
+            "Local Business", "Local", "Retail", "Restaurants", "Food and Beverage",
+            "Professional Services", "Home Services", "Real Estate", "Construction",
+            "Automotive", "Health Care", "Fitness", "Beauty", "Consulting",
+        ],
+        "role_details": [
+            "owner", "co-owner", "business owner", "sole proprietor", "sole operator",
+            "franchise owner", "franchisee", "store owner", "shop owner",
+            "founder", "co-founder", "ceo", "chief executive officer",
+            "president", "managing director", "principal", "partner",
+            "proprietor", "operator", "entrepreneur",
+        ],
+        "regions": [
+            "united states", "usa", "us", "america",
+            "california", "new york", "texas", "florida", "illinois", "pennsylvania",
+            "ohio", "georgia", "north carolina", "michigan", "new jersey", "virginia",
+            "washington", "arizona", "massachusetts", "tennessee", "indiana", "missouri",
+            "maryland", "wisconsin", "colorado", "minnesota", "south carolina", "alabama",
+            "louisiana", "kentucky", "oregon", "oklahoma", "connecticut", "utah", "iowa",
+            "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
+            "idaho", "west virginia", "hawaii", "maine", "montana", "rhode island",
+            "delaware", "south dakota", "north dakota", "alaska", "vermont", "wyoming",
+        ],
+    },
+
+    # ==================================================================
+    # 6. Blockchain/Crypto/Web3 — Investors & Leaders (+100)
+    # ==================================================================
+    {
+        "sub_industries": [
+            "Blockchain", "Cryptocurrency", "Bitcoin", "Ethereum",
+            "Web3 Investor", "Web3 Fund",
+        ],
+        "role_details": [
+            "partner", "general partner", "gp", "managing partner", "managing director",
+            "principal", "venture partner", "investment partner", "limited partner",
+            "cio", "chief investment officer", "director of investments", "vp of investments",
+            "vp investments", "head of investments", "investment director",
+            "portfolio manager", "fund manager", "investment manager", "asset manager",
+            "founder", "co-founder", "ceo", "chief executive officer",
+            "investor", "venture capitalist", "vc", "investment analyst", "research analyst",
+            "associate", "senior associate", "investment associate",
+            "vice president", "vp", "director", "head of",
+            "token fund manager", "crypto fund manager", "defi lead", "web3 investor",
+        ],
+        "bonus": 100,
+    },
+
+    # ==================================================================
+    # 7. Biotech/Pharma — Decision Makers (+50)
+    # ==================================================================
+    {
+        "sub_industries": [
+            "Biotechnology", "Biopharma", "Pharmaceutical",
+            "Genetics", "Life Science", "Bioinformatics",
+            "Clinical Trials",
+        ],
+        "role_details": [
+            # C-Suite / Founders
+            "ceo", "chief executive officer", "founder", "co-founder", "president",
+            "cto", "chief technology officer", "coo", "chief operating officer",
+            "cfo", "chief financial officer", "cso", "chief scientific officer",
+            "cmo", "chief medical officer", "chief commercial officer",
+            # VP / Director
+            "vp of business development", "vp business development", "head of business development",
+            "director of business development", "business development director",
+            "vp of partnerships", "vp partnerships", "head of partnerships",
+            "director of partnerships", "vp of corporate development",
+            "director of corporate development",
+            "vp of operations", "vp operations", "director of operations",
+            "vp of research", "vp research", "director of research", "head of research",
+            "vp of commercial", "director of commercial", "head of commercial",
+            "vp of regulatory", "director of regulatory", "head of regulatory",
+            "vp of clinical", "director of clinical", "head of clinical",
+            # BD & Strategy
+            "bd lead", "business development lead", "business development manager",
+            "managing director", "managing partner",
+        ],
+    },
+
+    # ==================================================================
+    # 8. Wealth Mgmt / VC / Hedge Funds (+100)
+    # ==================================================================
+    {
+        "sub_industries": [
+            "Asset Management", "Venture Capital", "Hedge Funds",
+            "Financial Services", "Impact Investing",
+        ],
         "role_details": [
             # Leadership
             "ceo", "chief executive officer", "president", "managing director", "managing partner",
             "principal", "partner", "founder", "co-founder",
-            # Investment Leadership
+            # Investment
             "cio", "chief investment officer", "director of investments", "vp of investments",
             "vp investments", "head of investments", "investment director", "investment manager",
             "portfolio manager", "head of portfolio management", "director of portfolio management",
@@ -176,242 +240,80 @@ ICP_DEFINITIONS = [
             "vp of private equity", "head of venture capital", "director of venture capital",
             "vp of venture capital", "vp venture capital", "head of vc", "director of vc",
             "head of real estate", "director of real estate", "vp real estate", "vp of real estate",
-            "head of alternatives", "director of alternatives", "vp of alternatives", "vp alternatives",
+            "head of alternatives", "director of alternatives", "vp of alternatives",
             "head of direct investments", "director of direct investments",
             # Operations & Finance
             "coo", "chief operating officer", "director of operations", "vp of operations",
-            "vp operations", "head of operations", "operations director",
+            "vp operations", "head of operations",
             "cfo", "chief financial officer", "director of finance", "vp of finance",
-            "vp finance", "head of finance", "finance director",
+            "vp finance", "head of finance",
             # Wealth & Asset Management
             "family office manager", "wealth manager", "director of wealth management",
             "head of family office", "family office director", "head of wealth management",
-            "asset manager", "head of asset management", "director of asset management"
-        ]
+            "asset manager", "head of asset management", "director of asset management",
+        ],
+        "bonus": 100,
     },
 
+    # ==================================================================
+    # 9. FinTech/Banking/Payments — Decision Makers (+50)
+    # ==================================================================
     {
-        # FinTech/Banking - Risk & Compliance Leaders
-        "sub_industries": ["FinTech", "Banking", "Payments", "Financial Services",
-                          "Credit Cards", "Mobile Payments", "Transaction Processing"],
+        "sub_industries": [
+            "FinTech", "Banking", "Payments", "Financial Services",
+            "Credit Cards", "Mobile Payments", "Transaction Processing",
+        ],
         "role_details": [
+            # C-Suite / Founders
+            "ceo", "chief executive officer", "founder", "co-founder", "president",
+            "cto", "chief technology officer", "coo", "chief operating officer",
+            "cfo", "chief financial officer",
             # Risk & Compliance Leadership
             "cro", "chief risk officer", "vp of risk", "vp risk", "head of risk",
-            "director of risk", "risk director", "vp of risk management", "vp risk management",
-            "director of risk management", "head of risk management",
+            "director of risk", "risk director",
             "cco", "chief compliance officer", "vp of compliance", "vp compliance",
             "head of compliance", "director of compliance", "compliance director",
-            "vp of regulatory compliance", "director of regulatory compliance",
-            "head of regulatory affairs", "director of regulatory affairs",
+            # VP / Director
+            "vp of engineering", "vp engineering", "head of engineering",
+            "director of engineering", "vp of product", "head of product",
+            "director of product", "vp of technology", "head of technology",
+            "managing director", "managing partner",
             # Compliance Operations
             "compliance officer", "senior compliance officer", "compliance manager",
             "bsa officer", "aml officer", "kyc manager", "director of aml",
             "vp of bsa", "head of bsa", "anti-money laundering officer",
             "financial crimes manager", "director of financial crimes",
             # Risk Operations
-            "risk officer", "senior risk officer", "risk manager", "enterprise risk manager",
-            "operational risk manager", "credit risk manager", "director of operational risk"
-        ]
-    },
-
-    {
-        # Clinical Research/Labs - Data & Research Leaders
-        "sub_industries": ["Clinical Trials", "Biotechnology", "Pharmaceutical",
-                          "Biopharma", "Life Science"],
-        "role_details": [
-            # Data & Research
-            "data scientist", "senior data scientist", "lead data scientist", "principal data scientist",
-            "data manager", "clinical data manager", "data management lead", "head of data management",
-            "director of data management", "vp of data management", "vp data management",
-            "biostatistician", "senior biostatistician", "lead biostatistician",
-            "data analyst", "clinical data analyst", "research data analyst",
-            # Leadership
-            "ceo", "chief executive officer", "cto", "chief technology officer",
-            "coo", "chief operating officer", "cso", "chief scientific officer",
-            "vp of operations", "vp operations", "director of operations"
-        ]
-    },
-
-    {
-        # Research/Academic - Principal Investigators & Researchers
-        "sub_industries": ["Higher Education", "Life Science", "Biotechnology",
-                          "Neuroscience", "Genetics"],
-        "role_details": [
-            # Principal Investigators & Researchers
-            "principal investigator", "pi", "lead researcher", "senior researcher",
-            "research director", "director of research", "head of research",
-            "associate professor", "assistant professor", "professor",
-            "research scientist", "senior research scientist", "staff scientist",
-            "research fellow", "senior research fellow", "postdoctoral researcher",
-            "lab director", "laboratory director", "research group leader",
-            "department head", "department chair", "division chief"
-        ]
-    },
-
-    {
-        # Biotech/Pharma - Business Development & Scientific Leadership
-        "sub_industries": ["Biotechnology", "Biopharma", "Pharmaceutical",
-                          "Genetics", "Life Science", "Bioinformatics"],
-        "role_details": [
-            # Business Development & Leadership
-            "ceo", "chief executive officer", "founder", "co-founder",
-            "cto", "chief technology officer", "cso", "chief scientific officer",
-            "coo", "chief operating officer", "cmo", "chief medical officer",
-            "vp of business development", "vp business development", "head of business development",
-            "director of business development", "business development director",
-            "bd lead", "business development lead", "business development manager",
-            "vp of partnerships", "vp partnerships", "head of partnerships",
-            "director of partnerships", "partnerships director",
-            "vp of corporate development", "director of corporate development"
-        ]
-    },
-
-    {
-        # Blockchain/Crypto/Web3 Companies - Investment & Leadership Roles
-        # HIGH VALUE: Targets investment roles at companies that ARE blockchain/crypto
-        # NOTE: Only matches companies with blockchain-specific sub_industries, NOT generic VCs
-        # A "Partner at Paradigm" only gets +100 if Paradigm's sub_industry is "Blockchain", "Cryptocurrency", or "Web3 Investor"
-        "sub_industries": ["Blockchain", "Cryptocurrency", "Bitcoin", "Ethereum", "Web3 Investor", "Web3 Fund"],
-        "role_details": [
-            # Investment Leadership / Partners
-            "partner", "general partner", "gp", "managing partner", "managing director",
-            "principal", "venture partner", "investment partner", "limited partner",
-            # Investment Operations
-            "cio", "chief investment officer", "director of investments", "vp of investments",
-            "vp investments", "head of investments", "investment director",
-            "portfolio manager", "fund manager", "investment manager", "asset manager",
-            # Founder/Leadership
-            "founder", "co-founder", "ceo", "chief executive officer",
-            # Investment Team Roles
-            "investor", "venture capitalist", "vc", "investment analyst", "research analyst",
-            "associate", "senior associate", "investment associate",
-            "vice president", "vp", "director", "head of",
-            # Crypto/Web3 Specific
-            "token fund manager", "crypto fund manager", "defi lead", "web3 investor"
+            "risk officer", "senior risk officer", "risk manager",
+            "enterprise risk manager", "operational risk manager",
         ],
-        # HIGH VALUE: +100 bonus for blockchain/crypto investors (very rare, high value)
-        "bonus": 100
     },
 
+    # ==================================================================
+    # 10. Robotics / Aerospace / Defence — Technical & Leadership (+50)
+    # ==================================================================
     {
-        # Hospitality/Hotels - Business Development, Owners & Operations (US)
-        # Sub-industries from taxonomy: Hospitality, Hotel, Resorts (all under 'Travel and Tourism')
-        "sub_industries": ["Hospitality", "Hotel", "Resorts", "Travel Accommodations",
-                          "Vacation Rental", "Tourism"],
-        "role_details": [
-            # Business Development
-            "business development", "bd", "biz dev", "business dev",
-            "vp of business development", "vp business development", "head of business development",
-            "director of business development", "business development manager", "business development director",
-            "vp of bd", "head of bd", "director of bd",
-            # Ownership/Leadership
-            "owner", "co-owner", "business owner", "hotel owner", "property owner",
-            "founder", "co-founder", "ceo", "chief executive officer",
-            "president", "managing director", "general manager", "gm",
-            "principal", "partner", "managing partner",
-            # Operations Management
-            "operations manager", "director of operations", "vp of operations", "vp operations",
-            "head of operations", "operations director", "coo", "chief operating officer",
-            # Hotel/Hospitality Specific
-            "hotel manager", "hotel general manager", "hotel gm", "property manager",
-            "resort manager", "resort general manager", "hospitality manager",
-            "front office manager", "rooms division manager", "director of rooms",
-            "director of hospitality", "vp of hospitality", "head of hospitality"
+        "sub_industries": [
+            "Robotics", "Autonomous Vehicles", "Aerospace",
+            "Defense and Space", "Drones", "3D Printing",
         ],
-        # Region filter - US only
-        "regions": ["united states", "usa", "us", "america", "american",
-                    "california", "new york", "texas", "florida", "illinois", "pennsylvania",
-                    "ohio", "georgia", "north carolina", "michigan", "new jersey", "virginia",
-                    "washington", "arizona", "massachusetts", "tennessee", "indiana", "missouri",
-                    "maryland", "wisconsin", "colorado", "minnesota", "south carolina", "alabama",
-                    "louisiana", "kentucky", "oregon", "oklahoma", "connecticut", "utah", "iowa",
-                    "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
-                    "idaho", "west virginia", "hawaii", "maine", "montana", "rhode island",
-                    "delaware", "south dakota", "north dakota", "alaska", "vermont", "wyoming"]
+        "role_details": [
+            # C-Suite / Founders
+            "ceo", "chief executive officer", "founder", "co-founder", "president",
+            "cto", "chief technology officer", "coo", "chief operating officer",
+            # VP / Director
+            "vp of engineering", "vp engineering", "head of engineering",
+            "engineering director", "director of engineering",
+            "vp of technology", "vp technology", "head of technology",
+            "vp of product", "head of product", "director of product",
+            "vp of research", "vp research", "director of research", "head of research",
+            # Engineering
+            "software engineer", "senior software engineer", "staff software engineer",
+            "principal software engineer", "lead software engineer",
+            "mechanical engineer", "systems engineer", "robotics engineer",
+            "aerospace engineer", "controls engineer",
+        ],
     },
-
-    {
-        # Small/Local Businesses - Owners (US)
-        # Note: "Small Business" not in taxonomy, using "Local Business" which is closest match
-        # This ICP targets business owners across various industries in the US
-        "sub_industries": ["Local Business", "Local", "Retail", "Restaurants", "Food and Beverage",
-                          "Professional Services", "Home Services", "Real Estate", "Construction",
-                          "Automotive", "Health Care", "Fitness", "Beauty", "Consulting"],
-        "role_details": [
-            # Ownership
-            "owner", "co-owner", "business owner", "sole proprietor", "sole operator",
-            "franchise owner", "franchisee", "store owner", "shop owner",
-            # Founder/Leadership
-            "founder", "co-founder", "ceo", "chief executive officer",
-            "president", "managing director", "principal", "partner",
-            # Small Business Specific
-            "proprietor", "operator", "entrepreneur"
-        ],
-        # Region filter - US only
-        "regions": ["united states", "usa", "us", "america", "american",
-                    "california", "new york", "texas", "florida", "illinois", "pennsylvania",
-                    "ohio", "georgia", "north carolina", "michigan", "new jersey", "virginia",
-                    "washington", "arizona", "massachusetts", "tennessee", "indiana", "missouri",
-                    "maryland", "wisconsin", "colorado", "minnesota", "south carolina", "alabama",
-                    "louisiana", "kentucky", "oregon", "oklahoma", "connecticut", "utah", "iowa",
-                    "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
-                    "idaho", "west virginia", "hawaii", "maine", "montana", "rhode island",
-                    "delaware", "south dakota", "north dakota", "alaska", "vermont", "wyoming"]
-    },
-
-    {
-        # Cyber Security / IT Management - Business Owners (Midwest US, 10-50 employees)
-        # Target: Small business owners/founders/executives in cybersecurity and IT management
-        # Company Size: 10-50 employees
-        # Geo: Midwest US states
-        # HIGH VALUE: +100 bonus for Midwest cybersecurity business owners
-        "sub_industries": ["Cyber Security", "IT Management"],
-        "role_details": [
-            # Business Owners
-            "owner", "co-owner", "business owner",
-            # Founders
-            "founder", "co-founder",
-            # Executive Leadership
-            "ceo", "chief executive officer", "president"
-        ],
-        "regions": ["illinois", "indiana", "michigan", "ohio", "wisconsin",
-                    "iowa", "kansas", "minnesota", "missouri", "nebraska",
-                    "north dakota", "south dakota"],
-        "employee_ranges": ["10-50"],
-        "bonus": 100
-    },
-
-    {
-        # UAE/Dubai Investors - Investment & Fund Management Leaders
-        # Target: Investors, fund managers, and investment leaders in Dubai, UAE
-        # HIGH VALUE: +100 bonus for Dubai-based investors (strategic market)
-        # NOTE: Gateway only accepts UAE leads from Dubai city (submit.py line 2152)
-        "sub_industries": ["Angel Investment", "Asset Management", "Hedge Funds",
-                          "Impact Investing", "Incubators", "Real Estate Investment",
-                          "Venture Capital", "Web3 Investor", "Web3 Fund", "Wealth Management"],
-        "role_details": [
-            # Investment Leadership / Partners
-            "partner", "general partner", "gp", "managing partner", "managing director",
-            "principal", "venture partner", "investment partner", "limited partner",
-            # Investment Operations
-            "cio", "chief investment officer", "director of investments", "vp of investments",
-            "vp investments", "head of investments", "investment director",
-            "portfolio manager", "fund manager", "investment manager", "asset manager",
-            # Founder/Leadership
-            "founder", "co-founder", "ceo", "chief executive officer", "president",
-            # Investment Team Roles
-            "investor", "venture capitalist", "vc", "investment analyst", "research analyst",
-            "associate", "senior associate", "investment associate",
-            "vice president", "vp", "director", "head of",
-            # Wealth Management Specific
-            "wealth manager", "private banker", "relationship manager",
-            "family office manager", "head of family office", "family office director"
-        ],
-        # Region filter - UAE/Dubai only (city filter required since UAE = Dubai only)
-        "regions": ["united arab emirates", "uae", "dubai", "emirati"],
-        # HIGH VALUE: +100 bonus for Dubai investors
-        "bonus": 100
-    }
 ]
 
 # ========================================================================

@@ -6,7 +6,8 @@ Handles read/write operations for company_information_table in Supabase.
 
 Table Schema:
 - company_name (Non Nullable) - Case-sensitive
-- company_linkedin (Non Nullable) - Primary lookup key
+- company_linkedin (Non Nullable) - Original URL from miner
+- company_slug (Non Nullable, Unique) - Primary lookup key (extracted from URL)
 - company_website (Non Nullable)
 - company_description (Non Nullable) - Refined version, not miner claimed
 - company_hq_country (Non Nullable)
@@ -18,7 +19,7 @@ Table Schema:
 - company_last_updated (Non Nullable)
 
 Flow:
-1. If company_linkedin exists in table → Gateway validates against stored data
+1. If company_slug exists in table → Gateway validates against stored data
 2. If NOT exists → Full validation, then add to table with refined description
 3. Employee count changes → Update table with new count + last_updated
 """
@@ -35,31 +36,47 @@ logger = logging.getLogger(__name__)
 
 TABLE_NAME = "company_information_table"
 _TRADEMARK_SYMBOLS_RE = re.compile(r'[®™©℠]+')
+_SLUG_RE = re.compile(r'^(?:https?://)?(?:www\.)?(?:[a-z]{1,2}\.)?linkedin\.com/company/([^/?#]+)')
+
+
+def _extract_slug(company_linkedin: str) -> str:
+    """Extract company slug from any LinkedIn company URL format.
+
+    Examples:
+        https://www.linkedin.com/company/small-batch-standard → small-batch-standard
+        linkedin.com/company/small-batch-standard/about → small-batch-standard
+        https://tw.linkedin.com/company/small-batch-standard → small-batch-standard
+    """
+    if not company_linkedin:
+        return ""
+    m = _SLUG_RE.match(company_linkedin.strip().lower())
+    return m.group(1).rstrip('.-') if m else ""
 
 
 def get_company_by_linkedin(company_linkedin: str) -> Optional[Dict[str, Any]]:
     """
-    Look up company by company_linkedin URL.
+    Look up company by slug extracted from company_linkedin URL.
 
     Args:
-        company_linkedin: Company LinkedIn URL (e.g., "https://linkedin.com/company/example")
+        company_linkedin: Company LinkedIn URL (any format)
 
     Returns:
         Company record dict if found, None if not found
     """
-    if not company_linkedin:
+    slug = _extract_slug(company_linkedin)
+    if not slug:
         return None
 
     try:
         client = get_read_client()
         result = client.table(TABLE_NAME) \
             .select("*") \
-            .eq("company_linkedin", company_linkedin) \
+            .eq("company_slug", slug) \
             .limit(1) \
             .execute()
 
         if result.data and len(result.data) > 0:
-            logger.info(f"✅ Found company in table: {company_linkedin}")
+            logger.info(f"✅ Found company in table: {slug}")
             return result.data[0]
 
         return None
@@ -235,6 +252,11 @@ def insert_company(
     Returns:
         True if inserted successfully, False otherwise
     """
+    slug = _extract_slug(company_linkedin)
+    if not slug:
+        logger.error(f"❌ Cannot extract slug from: {company_linkedin}")
+        return False
+
     try:
         client = get_write_client()
 
@@ -242,7 +264,8 @@ def insert_company(
         company_name = ' '.join(_TRADEMARK_SYMBOLS_RE.sub('', company_name).split())
 
         record = {
-            "company_linkedin": company_linkedin,
+            "company_slug": slug,
+            "company_linkedin": f"https://www.linkedin.com/company/{slug}",
             "company_name": company_name,
             "company_website": company_website,
             "company_description": company_description,
@@ -257,7 +280,7 @@ def insert_company(
 
         result = client.table(TABLE_NAME).upsert(
             record,
-            on_conflict="company_linkedin"
+            on_conflict="company_slug"
         ).execute()
 
         if result.data:
@@ -287,6 +310,10 @@ def update_employee_count(
     Returns:
         True if updated successfully, False otherwise
     """
+    slug = _extract_slug(company_linkedin)
+    if not slug:
+        return False
+
     try:
         client = get_write_client()
 
@@ -295,11 +322,11 @@ def update_employee_count(
                 "company_employee_count": new_employee_count,
                 "company_last_updated": datetime.utcnow().isoformat()
             }) \
-            .eq("company_linkedin", company_linkedin) \
+            .eq("company_slug", slug) \
             .execute()
 
         if result.data:
-            logger.info(f"✅ Updated employee count: {company_linkedin} ({prev_employee_count} → {new_employee_count})")
+            logger.info(f"✅ Updated employee count: {slug} ({prev_employee_count} → {new_employee_count})")
             return True
 
         return False

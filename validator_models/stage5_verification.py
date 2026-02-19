@@ -2181,8 +2181,8 @@ def _scrape_company_linkedin_gse_sync(company_slug: str, company_name: str, max_
                 extracted_name = None
                 if "|" in title:
                     extracted_name = title.split("|")[0].strip()
-                elif " - LinkedIn" in title:
-                    extracted_name = title.replace(" - LinkedIn", "").strip()
+                elif re.search(r'\s+[-–—]\s+LinkedIn', title):
+                    extracted_name = re.split(r'\s+[-–—]\s+LinkedIn', title)[0].strip()
                 elif " LinkedIn" in title and title.endswith("LinkedIn"):
                     extracted_name = title.replace(" LinkedIn", "").strip()
 
@@ -2583,7 +2583,7 @@ def _extract_title_company_name(title: str) -> str:
     """Extract company name from LinkedIn title like 'Name | LinkedIn'."""
     if not title:
         return ''
-    name = re.sub(r'\s*[\|–—-]\s*LinkedIn\s*$', '', title).strip()
+    name = re.sub(r'\s*[\|–—-]\s*LinkedIn.*$', '', title).strip()
     name = re.sub(r'\s*[\|–—-]\s*领英\s*$', '', name).strip()
     parts = name.split(' - ')
     if len(parts) > 1 and len(parts[0]) > 2:

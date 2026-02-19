@@ -444,7 +444,7 @@ def increment_daily_only(miner_hotkey: str) -> Dict:
 
 
 def get_model_rate_limit_stats(miner_hotkey: str) -> Dict:
-    """Get current rate limit stats for a miner (read-only)."""
+    """Get current rate limit stats for a miner."""
     with _cache_lock:
         if not _cache_loaded:
             _load_cache_from_supabase()
@@ -460,6 +460,13 @@ def get_model_rate_limit_stats(miner_hotkey: str) -> Dict:
             }
         
         entry = _rate_limit_cache[miner_hotkey]
+        
+        # Reset expired daily counters (same logic as check_model_rate_limit)
+        now_utc = datetime.now(timezone.utc)
+        if entry["reset_at"] and now_utc >= entry["reset_at"]:
+            entry["daily_submissions"] = 0
+            entry["reset_at"] = get_next_midnight_utc()
+        
         return _build_stats(entry)
 
 

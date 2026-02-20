@@ -806,9 +806,10 @@ class NetworkInterceptor:
         return headers
     
     # Maximum blocked network attempts before terminating model execution.
-    # Models that spam blocked endpoints (e.g., retrying api.github.com in a loop)
-    # waste worker time and hold up the evaluation queue.
-    MAX_BLOCKED_ATTEMPTS = 50
+    # A well-written model might try 2-3 unsupported APIs before falling back
+    # to the proxy. 10 attempts means clear misuse (retry loops or systematic
+    # probing of blocked endpoints).
+    MAX_BLOCKED_ATTEMPTS = 10
     
     def intercept_request(self, method: str, url: str, **kwargs) -> Any:
         """

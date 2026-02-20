@@ -805,11 +805,10 @@ class NetworkInterceptor:
             headers["X-Evaluation-ID"] = self.evaluation_id
         return headers
     
-    # Maximum blocked network attempts before terminating model execution.
-    # A well-written model might try 2-3 unsupported APIs before falling back
-    # to the proxy. 10 attempts means clear misuse (retry loops or systematic
-    # probing of blocked endpoints).
-    MAX_BLOCKED_ATTEMPTS = 10
+    # Terminate model on first blocked network attempt.
+    # Legitimate models only call allowed APIs. Any blocked request means
+    # the model is calling something it shouldn't.
+    MAX_BLOCKED_ATTEMPTS = 1
     
     def intercept_request(self, method: str, url: str, **kwargs) -> Any:
         """
@@ -834,8 +833,8 @@ class NetworkInterceptor:
                 
                 if self._blocked_attempts >= self.MAX_BLOCKED_ATTEMPTS:
                     raise RuntimeError(
-                        f"Model terminated: exceeded {self.MAX_BLOCKED_ATTEMPTS} blocked network "
-                        f"requests. Latest: '{url[:80]}'. Models must use approved APIs only."
+                        f"Model terminated: called blocked endpoint '{url[:80]}'. "
+                        f"Models must only use approved APIs (see README allowlist)."
                     )
                 
                 raise PermissionError(

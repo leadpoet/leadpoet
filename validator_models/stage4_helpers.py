@@ -1865,25 +1865,28 @@ def validate_role_with_llm(
     """
     other_text = "\n".join([f"{i+1}. {r}" for i, r in enumerate(other_results[:5])]) if other_results else "None"
 
-    prompt = f'''"{name}" at "{company}" - Role: "{claimed_role}"
+    prompt = f'''You are a strict job title verifier. You can ONLY verify a role if you see evidence of it in the search results below. NEVER assume or guess.
 
-[LINKEDIN - PRIORITY]
+Person: "{name}" at "{company}"
+Claimed role: "{claimed_role}"
+
+[LINKEDIN RESULT]
 {exact_url_result or "Not found"}
 
-[OTHER - fallback]
+[OTHER RESULTS]
 {other_text}
 
-RULES:
+RULES (follow in order):
 1. FAIL if "{claimed_role}" contains company name
-2. FAIL if "{claimed_role}" is invalid (e.g., "Job Title", "N/A", "Title", "Employee")
+2. FAIL if "{claimed_role}" is generic (e.g., "Job Title", "N/A", "Title", "Employee")
 3. FAIL if LinkedIn shows different company than "{company}"
 4. FAIL if different function (Sales≠Product, Engineer≠Marketing)
-5. PASS if semantically same function:
+5. FAIL if NO job title or role text appears in any result above. Do NOT assume "Chief Executive Officer", "CEO", "Manager", or any title unless you can quote it from the results. If the results only show a name and company with no role, return role_pass=false.
+6. PASS only if a matching role is explicitly written in the results above:
    - Ignore seniority (Manager≈Sr.Manager, Engineer≈Senior Engineer)
    - Match synonyms (Developer≈Engineer, VP≈Vice President)
    - Match abbreviations (Dev≈Developer, Mgr≈Manager, Dir≈Director)
-6. Use OTHER only if role not found in LinkedIn
-7. NOT FOUND: role_pass=false, role_found=""
+7. Use OTHER RESULTS only if role not found in LINKEDIN RESULT
 
 JSON only: {{"role_pass": bool, "role_found": ""}}'''
 

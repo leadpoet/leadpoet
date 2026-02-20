@@ -34,6 +34,7 @@ from .stage4_helpers import (
     extract_role_from_result,
     check_locations_match,
     check_q3_location_fallback,
+    check_role_matches,
     validate_role_rule_based,
     validate_role_with_llm,
     get_linkedin_id,
@@ -736,77 +737,105 @@ async def run_lead_validation_stage4(
             print(f"   ✅ Role verified (rule-based): {role_method}")
         else:
             # =========================================================================
-            # STEP 8: Role LLM Fallback
+            # STEP 8: Role Query + LLM Fallback
             # =========================================================================
-            print("   🤖 Role rule-based failed, trying LLM verification")
-            result['data']['llm_used'] = True
+            # Try a targeted role query before LLM
+            role_query_result = None
+            rq_query = f'linkedin.com/in/{expected_lid}+role'
+            print(f"   🔍 RQ: Role query: {rq_query}")
+            rq_results, rq_error = await search_google_async(rq_query, api_key)
 
-            # Prepare LLM input
-            exact_url_text = None
-            if url_matched_result:
-                exact_url_text = f"Title: {url_matched_result.get('title', '')}\nSnippet: {url_matched_result.get('snippet', '')}"
+            if rq_results:
+                for r in rq_results:
+                    if get_linkedin_id(r.get('link', '')) == expected_lid:
+                        role_query_result = r
+                        break
 
-            other_results_text = []
-            for r in all_results[:10]:
-                if 'linkedin.com' not in r.get('link', '').lower():
-                    other_results_text.append(f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}")
-
-            # Get OpenRouter API key
-            openrouter_key = openrouter_api_key or OPENROUTER_KEY
-
-            if openrouter_key:
-                llm_result = validate_role_with_llm(
-                    full_name, company, role,
-                    exact_url_text, other_results_text[:5],
-                    openrouter_key
-                )
-
-                if llm_result.get('success') and llm_result.get('role_pass'):
+            if role_query_result:
+                # Check rule-based match on role query result first
+                rq_combined = f"{role_query_result.get('title', '')} {role_query_result.get('snippet', '')}"
+                if check_role_matches(role, rq_combined):
                     result['data']['role_verified'] = True
-                    result['data']['role_method'] = 'llm'
-                    result['data']['llm_result'] = 'pass'
-                    print("   ✅ Role verified (LLM)")
-                elif llm_result.get('success'):
+                    result['data']['role_method'] = 'role_query'
+                    print(f"   ✅ Role verified (role query rule-based)")
+                else:
+                    # Pass role query result to LLM instead
+                    print("   🤖 Role query found profile but no rule-based match, trying LLM")
+            else:
+                print("   ⚠️ Role query: no exact slug match found")
+
+            if not result['data']['role_verified']:
+                print("   🤖 Trying LLM verification")
+                result['data']['llm_used'] = True
+
+                # Prepare LLM input - use role query result if available, else Q4 result
+                exact_url_text = None
+                if role_query_result:
+                    exact_url_text = f"Title: {role_query_result.get('title', '')}\nSnippet: {role_query_result.get('snippet', '')}"
+                elif url_matched_result:
+                    exact_url_text = f"Title: {url_matched_result.get('title', '')}\nSnippet: {url_matched_result.get('snippet', '')}"
+
+                other_results_text = []
+                for r in all_results[:10]:
+                    if 'linkedin.com' not in r.get('link', '').lower():
+                        other_results_text.append(f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}")
+
+                # Get OpenRouter API key
+                openrouter_key = openrouter_api_key or OPENROUTER_KEY
+
+                if openrouter_key:
+                    llm_result = validate_role_with_llm(
+                        full_name, company, role,
+                        exact_url_text, other_results_text[:5],
+                        openrouter_key
+                    )
+
+                    if llm_result.get('success') and llm_result.get('role_pass'):
+                        result['data']['role_verified'] = True
+                        result['data']['role_method'] = 'llm'
+                        result['data']['llm_result'] = 'pass'
+                        print("   ✅ Role verified (LLM)")
+                    elif llm_result.get('success'):
+                        result['data']['role_verified'] = False
+                        result['data']['role_method'] = 'llm'
+                        result['data']['llm_result'] = 'fail'
+                        result['rejection_reason'] = {
+                            "stage": "Stage 4: Lead Validation",
+                            "check_name": "lead_validation_stage4",
+                            "message": f"Role '{role}' not verified by LLM",
+                            "failed_fields": ["role"],
+                            "claimed_role": role
+                        }
+                        print("   ❌ Role rejected (LLM)")
+                        return result
+                    else:
+                        # LLM error - fail safe
+                        result['data']['role_verified'] = False
+                        result['data']['role_method'] = 'llm_error'
+                        result['data']['llm_result'] = llm_result.get('error', 'unknown')
+                        result['rejection_reason'] = {
+                            "stage": "Stage 4: Lead Validation",
+                            "check_name": "lead_validation_stage4",
+                            "message": f"Role verification LLM error: {llm_result.get('error', 'unknown')}",
+                            "failed_fields": ["role"],
+                            "claimed_role": role,
+                            "llm_error": llm_result.get('error', 'unknown')
+                        }
+                        print(f"   ❌ Role LLM error: {llm_result.get('error', 'unknown')}")
+                        return result
+                else:
+                    # No API key - fail
                     result['data']['role_verified'] = False
-                    result['data']['role_method'] = 'llm'
-                    result['data']['llm_result'] = 'fail'
+                    result['data']['role_method'] = 'no_api_key'
                     result['rejection_reason'] = {
                         "stage": "Stage 4: Lead Validation",
                         "check_name": "lead_validation_stage4",
-                        "message": f"Role '{role}' not verified by LLM",
+                        "message": "Role verification failed: no OpenRouter API key for LLM fallback",
                         "failed_fields": ["role"],
                         "claimed_role": role
                     }
-                    print("   ❌ Role rejected (LLM)")
+                    print("   ❌ Role verification failed: no OpenRouter API key")
                     return result
-                else:
-                    # LLM error - fail safe
-                    result['data']['role_verified'] = False
-                    result['data']['role_method'] = 'llm_error'
-                    result['data']['llm_result'] = llm_result.get('error', 'unknown')
-                    result['rejection_reason'] = {
-                        "stage": "Stage 4: Lead Validation",
-                        "check_name": "lead_validation_stage4",
-                        "message": f"Role verification LLM error: {llm_result.get('error', 'unknown')}",
-                        "failed_fields": ["role"],
-                        "claimed_role": role,
-                        "llm_error": llm_result.get('error', 'unknown')
-                    }
-                    print(f"   ❌ Role LLM error: {llm_result.get('error', 'unknown')}")
-                    return result
-            else:
-                # No API key - fail
-                result['data']['role_verified'] = False
-                result['data']['role_method'] = 'no_api_key'
-                result['rejection_reason'] = {
-                    "stage": "Stage 4: Lead Validation",
-                    "check_name": "lead_validation_stage4",
-                    "message": "Role verification failed: no OpenRouter API key for LLM fallback",
-                    "failed_fields": ["role"],
-                    "claimed_role": role
-                }
-                print("   ❌ Role verification failed: no OpenRouter API key")
-                return result
     else:
         # No role provided - skip verification
         result['data']['role_verified'] = False

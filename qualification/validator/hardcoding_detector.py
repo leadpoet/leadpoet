@@ -971,15 +971,25 @@ These are ACTUAL ICPs this model will be evaluated against:
 
 A model with MULTIPLE of these patterns (e.g., date fabrication + ICP echo-back + seniority stamping) is 95-100% confidence gaming.
 
-## Response
+## Response Format
 
+CRITICAL: Your response MUST start with EXACTLY this line (just the number, nothing else):
+SCORE: <0-100>
+
+Then provide the full JSON analysis:
 ```json
 {{
-    "confidence_hardcoded": <0-100>,
+    "confidence_hardcoded": <same number as SCORE above>,
     "red_flags": ["specific issue found", ...],
     "evidence": "How ICP flows (or doesn't flow) through the code, plus any gaming patterns found",
     "verdict": "LEGITIMATE|SUSPICIOUS|HARDCODED|GAMING"
 }}
+```
+
+Example response:
+SCORE: 85
+```json
+{{"confidence_hardcoded": 85, "red_flags": ["ICP echo-back"], "evidence": "...", "verdict": "GAMING"}}
 ```"""
     
     return prompt
@@ -1046,13 +1056,24 @@ async def _call_reasoning_llm(
 
 def _parse_llm_response(response: str) -> Dict[str, Any]:
     """
-    Parse the LLM's JSON response with multiple fallback strategies.
+    Parse the LLM's hardcoding detection response.
     
-    CRITICAL: Must reliably extract confidence_hardcoded from any LLM
-    output format. A parsing failure must NOT allow a hardcoded model
-    to slip through.
+    The LLM is instructed to start with `SCORE: <number>` on the first
+    line, followed by JSON details. This makes the critical number
+    trivially parsable regardless of JSON formatting issues.
     """
-    # Strategy 1: Extract JSON from markdown code block
+    confidence = None
+    red_flags = []
+    evidence = ""
+    verdict = "UNKNOWN"
+    
+    # ── PRIMARY: Extract SCORE from first line ──
+    score_match = re.search(r'SCORE:\s*(\d+)', response)
+    if score_match:
+        confidence = int(score_match.group(1))
+        confidence = max(0, min(100, confidence))
+    
+    # ── Extract JSON details (best-effort, not critical) ──
     json_str = response
     if "```json" in response:
         start = response.find("```json") + 7
@@ -1065,72 +1086,43 @@ def _parse_llm_response(response: str) -> Dict[str, Any]:
         if end > start:
             json_str = response[start:end].strip()
     
-    # Strategy 2: Try direct JSON parse
     try:
         parsed = json.loads(json_str)
-        confidence = int(parsed.get("confidence_hardcoded", 50))
-        return {
-            "confidence_hardcoded": max(0, min(100, confidence)),
-            "red_flags": parsed.get("red_flags", []),
-            "evidence": parsed.get("evidence", "No explanation provided"),
-            "verdict": parsed.get("verdict", "UNKNOWN")
-        }
+        red_flags = parsed.get("red_flags", [])
+        evidence = parsed.get("evidence", "")
+        verdict = parsed.get("verdict", "UNKNOWN")
+        # If SCORE line was missing, fall back to JSON field
+        if confidence is None:
+            confidence = int(parsed.get("confidence_hardcoded", -1))
     except json.JSONDecodeError:
-        pass
-    
-    # Strategy 3: Fix common JSON issues (unescaped newlines in strings)
-    try:
-        fixed = re.sub(r'(?<!\\)\n', '\\n', json_str)
-        parsed = json.loads(fixed)
-        confidence = int(parsed.get("confidence_hardcoded", 50))
-        logger.info("Parsed LLM response after fixing unescaped newlines")
-        return {
-            "confidence_hardcoded": max(0, min(100, confidence)),
-            "red_flags": parsed.get("red_flags", []),
-            "evidence": parsed.get("evidence", "No explanation provided"),
-            "verdict": parsed.get("verdict", "UNKNOWN")
-        }
-    except (json.JSONDecodeError, Exception):
-        pass
-    
-    # Strategy 4: Regex extraction of confidence_hardcoded from raw text
-    # This handles cases where the JSON is malformed but the number is visible
-    confidence_match = re.search(
-        r'"confidence_hardcoded"\s*:\s*(\d+)', response
-    )
-    if confidence_match:
-        confidence = int(confidence_match.group(1))
-        confidence = max(0, min(100, confidence))
-        
-        # Also try to extract red_flags
-        red_flags = []
+        # JSON broken — try regex for red_flags from raw text
         flags_match = re.search(r'"red_flags"\s*:\s*\[(.*?)\]', response, re.DOTALL)
         if flags_match:
             red_flags = re.findall(r'"([^"]+)"', flags_match.group(1))
-        
-        logger.warning(
-            f"JSON parse failed — extracted confidence={confidence} via regex. "
-            f"Raw response: {response[:300]}..."
-        )
-        return {
-            "confidence_hardcoded": confidence,
-            "red_flags": red_flags or ["Parsed via regex fallback"],
-            "evidence": response[:1000],
-            "verdict": "UNKNOWN"
-        }
+        evidence = response[:1000]
     
-    # Strategy 5: Complete parse failure — default to REJECT (fail-safe)
-    # If we can't parse the response AT ALL, we can't trust the model.
-    # Defaulting to pass would let hardcoded models through.
-    logger.error(
-        f"COMPLETE PARSE FAILURE — could not extract confidence from LLM response. "
-        f"Defaulting to REJECT (fail-safe). Raw: {response[:300]}..."
-    )
+    # ── FALLBACK: Regex for confidence_hardcoded in JSON body ──
+    if confidence is None or confidence < 0:
+        conf_match = re.search(r'"confidence_hardcoded"\s*:\s*(\d+)', response)
+        if conf_match:
+            confidence = int(conf_match.group(1))
+            confidence = max(0, min(100, confidence))
+            logger.warning(f"SCORE line missing — extracted confidence={confidence} from JSON field")
+    
+    # ── FAIL-SAFE: Could not extract ANY number → REJECT ──
+    if confidence is None or confidence < 0:
+        logger.error(
+            f"COMPLETE PARSE FAILURE — no SCORE line or confidence field found. "
+            f"Defaulting to REJECT. Raw: {response[:300]}..."
+        )
+        confidence = 100
+        red_flags = ["Complete parse failure — fail-safe rejection"]
+    
     return {
-        "confidence_hardcoded": 100,
-        "red_flags": ["Complete LLM response parse failure — fail-safe rejection"],
-        "evidence": response[:1000],
-        "verdict": "REJECT"
+        "confidence_hardcoded": confidence,
+        "red_flags": red_flags,
+        "evidence": evidence or response[:1000],
+        "verdict": verdict
     }
 
 

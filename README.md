@@ -526,19 +526,21 @@ response = httpx.post(
 )  # Proxy injects API key server-side
 ```
 
-**Allowed Libraries:** `os`, `sys`, `json`, `re`, `datetime`, `time`, `math`, `random`, `collections`, `typing`, `pandas`, `numpy`, `pydantic`, `requests`, `httpx`, `aiohttp`, `supabase`, `postgrest`, `duckduckgo_search`, `openai`, `fuzzywuzzy`, `rapidfuzz`, `Levenshtein`, `dateutil`, `bs4`, `soupsieve`, `certifi`, `disposable_email_domains`
+**Allowed Libraries (key ones):** `os`, `sys`, `json`, `re`, `datetime`, `time`, `math`, `random`, `string`, `collections`, `itertools`, `functools`, `typing`, `dataclasses`, `enum`, `uuid`, `hashlib`, `base64`, `copy`, `csv`, `io`, `logging`, `difflib`, `pathlib`, `asyncio`, `threading`, `concurrent`, `urllib`, `ssl`, `http`, `html`, `requests`, `httpx`, `aiohttp`, `supabase`, `postgrest`, `duckduckgo_search`, `openai`, `pandas`, `numpy`, `pydantic`, `fuzzywuzzy`, `rapidfuzz`, `thefuzz`, `Levenshtein`, `dateutil`, `bs4`, `lxml`, `html5lib`, `soupsieve`, `certifi`, `cryptography`, `jwt`
 
-**Blocked Libraries:** `subprocess`, `ctypes`, `pickle`, `marshal`, `socket`, `multiprocessing`, `shutil`, `pathlib`, `glob`, `tempfile`
+Full allowlist: [`qualification/validator/sandbox_security.py`](qualification/validator/sandbox_security.py) `ALLOWED_LIBRARIES`
+
+**Blocked Libraries:** `subprocess`, `ctypes`, `cffi`, `pickle`, `marshal`, `multiprocessing`, `shutil`, `glob`, `importlib.machinery`
 
 **Blocked Patterns:** `eval()`, `exec()`, `__import__()`, `os.system()`, `os.popen()`, accessing `.bittensor`, `.ssh`, `/proc/self/environ`
 
-> **Security:** Models are scanned on upload (gateway) AND at runtime (validator sandbox). Obfuscation attempts are caught by the runtime sandbox.
+> **Security:** Models are scanned on upload (gateway) AND at runtime (validator sandbox). Models that call APIs not on the allowlist are terminated after 10 blocked attempts. Obfuscation attempts are caught by the runtime sandbox. Hardcoded/gaming models are detected by LLM analysis before execution.
 
 **Allowed APIs:**
 | Type | APIs |
 |------|------|
-| Free | DuckDuckGo, SEC EDGAR, Wayback Machine, GDELT, UK Companies House, Wikipedia, Wikidata |
-| Paid (via proxy) | OpenRouter, ScrapingDog, BuiltWith, Crunchbase, Desearch, Data Universe, NewsAPI, Jobs Data API |
+| Free (direct) | DuckDuckGo, SEC EDGAR, Wayback Machine, GDELT, UK Companies House, Wikipedia, Wikidata |
+| Paid (via proxy) | OpenRouter, ScrapingDog, BuiltWith, Crunchbase, Desearch, Data Universe (Macrocosmos), NewsAPI, Jobs Data API (TheirStack) |
 
 ### Submitting Your Model
 

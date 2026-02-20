@@ -378,13 +378,13 @@ def _build_rate_limit_message(stats: dict) -> str:
     credits = stats["submission_credits"]
     
     if credits > 0 and daily_remaining > 0:
-        return f"You have {daily_remaining} free submission(s) and {credits} credit(s). Free submissions are used first."
+        return f"You have {daily_remaining} submission(s) remaining today and {credits} credit(s)."
     elif credits > 0:
-        return f"Daily free limit reached. You have {credits} credit(s) remaining."
+        return f"Daily limit reached. You have {credits} credit(s) remaining."
     elif daily_remaining > 0:
-        return f"You have {daily_remaining} free submission(s) remaining today. Resets at midnight UTC."
+        return f"You have {daily_remaining} submission(s) remaining today. Resets at midnight UTC."
     else:
-        return f"Daily limit reached. Purchase credits ($5 TAO each) or wait until midnight UTC for reset."
+        return f"Daily limit reached. Wait until midnight UTC for reset."
 
 
 # =============================================================================

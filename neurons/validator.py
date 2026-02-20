@@ -4182,20 +4182,9 @@ class Validator(BaseValidatorNeuron):
                             print(f"\n❌ HARDCODING DETECTED: Model appears to be hardcoded!")
                             print(f"   Red flags: {detection_result.get('red_flags', [])}")
                             print(f"   Evidence: {detection_result.get('evidence', 'N/A')[:200]}...")
+                            print(f"   Skipping model execution — score = 0")
                             
-                            # Try to report to gateway (but rejection happens regardless)
-                            try:
-                                for run in runs:
-                                    await self._qualification_report_error(
-                                        evaluation_run_id=run.get("evaluation_run_id"),
-                                        error_code=1010,
-                                        error_message=f"Model rejected: Hardcoding detected ({detection_result.get('confidence_hardcoded', 0)}% confidence). "
-                                                      f"Red flags: {', '.join(detection_result.get('red_flags', []))}"
-                                    )
-                            except Exception as report_err:
-                                print(f"   ⚠️ Could not report to gateway (model still rejected): {report_err}")
-                            
-                            return  # Don't run the model — ALWAYS reached
+                            return  # Don't run the model
                         
                         print(f"   ✅ Hardcoding check PASSED")
                     else:

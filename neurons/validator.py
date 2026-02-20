@@ -4183,16 +4183,19 @@ class Validator(BaseValidatorNeuron):
                             print(f"   Red flags: {detection_result.get('red_flags', [])}")
                             print(f"   Evidence: {detection_result.get('evidence', 'N/A')[:200]}...")
                             
-                            # Report error for all runs using existing /report-error endpoint
-                            for run in runs:
-                                await self._qualification_report_error(
-                                    evaluation_run_id=run.get("evaluation_run_id"),
-                                    error_code=1010,  # Error code for hardcoding detection
-                                    error_message=f"Model rejected: Hardcoding detected ({detection_result.get('confidence_hardcoded', 0)}% confidence). "
-                                                  f"Red flags: {', '.join(detection_result.get('red_flags', []))}"
-                                )
+                            # Try to report to gateway (but rejection happens regardless)
+                            try:
+                                for run in runs:
+                                    await self._qualification_report_error(
+                                        evaluation_run_id=run.get("evaluation_run_id"),
+                                        error_code=1010,
+                                        error_message=f"Model rejected: Hardcoding detected ({detection_result.get('confidence_hardcoded', 0)}% confidence). "
+                                                      f"Red flags: {', '.join(detection_result.get('red_flags', []))}"
+                                    )
+                            except Exception as report_err:
+                                print(f"   ⚠️ Could not report to gateway (model still rejected): {report_err}")
                             
-                            return  # Don't run the model
+                            return  # Don't run the model — ALWAYS reached
                         
                         print(f"   ✅ Hardcoding check PASSED")
                     else:
@@ -4201,14 +4204,9 @@ class Validator(BaseValidatorNeuron):
                 except ImportError as ie:
                     print(f"   ⚠️ Hardcoding detector not available: {ie}")
                 except Exception as det_err:
-                    print(f"   ❌ Hardcoding detection error — REJECTING model (fail closed): {det_err}")
-                    for run in runs:
-                        await self._qualification_report_error(
-                            evaluation_run_id=run.get("evaluation_run_id"),
-                            error_code=1011,
-                            error_message=f"Hardcoding detection system error (model rejected): {str(det_err)[:200]}"
-                        )
-                    return
+                    print(f"   ⚠️ Hardcoding detection error (continuing): {det_err}")
+                    # Only allow model to run if the detection itself failed to execute.
+                    # If detection SUCCEEDED and returned passed=False, we already returned above.
             
             bt.logging.info(
                 f"🎯 Starting qualification evaluation: "

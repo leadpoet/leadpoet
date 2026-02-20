@@ -2757,6 +2757,13 @@ def _parse_hq_to_location(hq_raw: str) -> Tuple[str, str, str, bool]:
     # Dubai, Dubai
     if raw_lower in ('dubai, dubai', 'dubai, u'):
         return 'Dubai', '', 'United Arab Emirates', True
+    # Any "X, Dubai" → normalize to Dubai (districts like Business Bay, DIFC, JLT, Marina)
+    parts_check = [p.strip().lower() for p in raw.split(',')]
+    if len(parts_check) >= 2 and parts_check[-1] == 'dubai':
+        return 'Dubai', '', 'United Arab Emirates', True
+    # Any "X, Abu Dhabi" → normalize to Abu Dhabi
+    if len(parts_check) >= 2 and parts_check[-1] == 'abu dhabi':
+        return 'Abu Dhabi', '', 'United Arab Emirates', True
 
     # Hong Kong
     if 'hong kong' in raw_lower:
@@ -3212,6 +3219,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     country = lead.get("country", "").strip()
     state = lead.get("state", "").strip()
     city = lead.get("city", "").strip()
+    claimed_hq_country = (lead.get("hq_country") or "").strip()
     claimed_industry = get_industry(lead) or ""
     claimed_sub_industry = lead.get("sub_industry", "") or lead.get("Sub_industry", "") or ""
     claimed_employee_count = get_employee_count(lead) or ""
@@ -3407,14 +3415,14 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
             if merged['headquarters']:
                 ext_city, ext_state, ext_country, is_foreign = _parse_hq_to_location(merged['headquarters'])
                 # Check if miner's claimed country matches (only when both have country)
-                if ext_country and country and ext_country.lower() != country.lower():
-                    print(f"   ❌ Q1 HQ COUNTRY MISMATCH: claimed '{country}' vs extracted '{ext_country}'")
+                if ext_country and claimed_hq_country and ext_country.lower() != claimed_hq_country.lower():
+                    print(f"   ❌ Q1 HQ COUNTRY MISMATCH: claimed '{claimed_hq_country}' vs extracted '{ext_country}'")
                     return False, {
                         "stage": "Stage 5: HQ Location",
                         "check_name": "check_stage5_unified",
-                        "message": f"HQ country mismatch: claimed '{country}' vs LinkedIn '{ext_country}'",
+                        "message": f"HQ country mismatch: claimed '{claimed_hq_country}' vs LinkedIn '{ext_country}'",
                         "failed_fields": ["hq_country"],
-                        "claimed": country,
+                        "claimed": claimed_hq_country,
                         "extracted": ext_country
                     }
                 if ext_country or ext_city:
@@ -3473,12 +3481,12 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
 
                 if sources.get('headquarters') == 'q2' and merged['headquarters']:
                     ext_city, ext_state, ext_country, is_foreign = _parse_hq_to_location(merged['headquarters'])
-                    if ext_country and country and ext_country.lower() != country.lower():
-                        print(f"   ❌ Q2 HQ COUNTRY MISMATCH")
+                    if ext_country and claimed_hq_country and ext_country.lower() != claimed_hq_country.lower():
+                        print(f"   ❌ Q2 HQ COUNTRY MISMATCH: claimed '{claimed_hq_country}' vs extracted '{ext_country}'")
                         return False, {
                             "stage": "Stage 5: HQ Location",
                             "check_name": "check_stage5_unified",
-                            "message": f"HQ country mismatch: claimed '{country}' vs LinkedIn '{ext_country}'",
+                            "message": f"HQ country mismatch: claimed '{claimed_hq_country}' vs LinkedIn '{ext_country}'",
                             "failed_fields": ["hq_country"]
                         }
                     if ext_country or ext_city:
@@ -3535,12 +3543,12 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
 
                 if sources.get('headquarters') == 'q3' and merged['headquarters']:
                     ext_city, ext_state, ext_country, is_foreign = _parse_hq_to_location(merged['headquarters'])
-                    if ext_country and country and ext_country.lower() != country.lower():
-                        print(f"   ❌ Q3 HQ COUNTRY MISMATCH")
+                    if ext_country and claimed_hq_country and ext_country.lower() != claimed_hq_country.lower():
+                        print(f"   ❌ Q3 HQ COUNTRY MISMATCH: claimed '{claimed_hq_country}' vs extracted '{ext_country}'")
                         return False, {
                             "stage": "Stage 5: HQ Location",
                             "check_name": "check_stage5_unified",
-                            "message": f"HQ country mismatch",
+                            "message": f"HQ country mismatch: claimed '{claimed_hq_country}' vs LinkedIn '{ext_country}'",
                             "failed_fields": ["hq_country"]
                         }
                     if ext_country or ext_city:

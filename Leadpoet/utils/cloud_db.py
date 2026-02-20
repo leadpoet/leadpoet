@@ -2121,7 +2121,7 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
         
         # Request verification
         response = requests.post(
-            f"{GATEWAY_URL}/submit",
+            f"{GATEWAY_URL}/submit/",
             json=event,
             timeout=300  # 5 minutes timeout (allows for international network latency + gateway verification steps: S3, MinIO, DB, TEE)
         )
@@ -2370,7 +2370,7 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
             # requests.post(json=...) doesn't support custom serializers, so we serialize manually
             event_json = json.dumps(event, default=str)
             response = requests.post(
-                f"{GATEWAY_URL}/validate",
+                f"{GATEWAY_URL}/validate/",
                 data=event_json,
                 headers={"Content-Type": "application/json"},
                 timeout=600  # 10 minutes timeout (gateway needs time for validation evidence storage + consensus + database operations)

@@ -34,7 +34,7 @@ from datetime import datetime, timedelta
 # ============================================================================
 # ROLE_TYPE TO SENIORITY MAPPING
 # ============================================================================
-# The miner_test_leads table already has role_type. We need to map it to seniority.
+# The test_leads_for_miners table already has role_type. We need to map it to seniority.
 
 ROLE_TYPE_TO_SENIORITY = {
     # C-Suite
@@ -65,7 +65,7 @@ ROLE_TYPE_TO_SENIORITY = {
 
 def get_seniority_from_role_type(role_type: str, role: str = "") -> str:
     """
-    Get seniority from role_type (already in miner_test_leads table).
+    Get seniority from role_type (already in test_leads_for_miners table).
     Falls back to inferring from role title if role_type not in mapping.
     
     MUST return one of: "C-Suite", "VP", "Director", "Manager", "Individual Contributor"

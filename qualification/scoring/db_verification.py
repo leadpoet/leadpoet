@@ -2,11 +2,11 @@
 Qualification System: Lead Database Verification
 
 Verifies that leads returned by qualification models match the actual data
-in the miner_test_leads table. This prevents gaming where models modify
+in the leads table. This prevents gaming where models modify
 fields (employee_count, role, industry, etc.) to better match the ICP.
 
 Design:
-- lead_id (the `id` column in miner_test_leads) is REQUIRED on every lead
+- lead_id (the `id` column in the leads table) is REQUIRED on every lead
 - ONE batch query at the start of scoring (low latency)
 - Local dict lookups per lead (O(1) per lead)
 
@@ -32,7 +32,7 @@ SUPABASE_ANON_KEY = os.getenv(
 )
 
 # Fields to verify (model field → DB column name)
-# These MUST match between what the model returns and what's in miner_test_leads.
+# These MUST match between what the model returns and what's in the leads table.
 FIELDS_TO_VERIFY: Dict[str, str] = {
     "business": "business",
     "employee_count": "employee_count",
@@ -75,7 +75,7 @@ def verify_lead_fields(lead: LeadOutput, db_row: dict) -> Tuple[bool, Optional[s
     
     Args:
         lead: Model's output lead
-        db_row: Row from miner_test_leads
+        db_row: Row from the leads table
     
     Returns:
         (passed, failure_reason) — if passed=False, the lead was tampered with
@@ -113,10 +113,10 @@ def verify_lead_fields(lead: LeadOutput, db_row: dict) -> Tuple[bool, Optional[s
 
 async def batch_fetch_db_leads_by_ids(lead_ids: List[int]) -> Dict[int, dict]:
     """
-    Fetch leads from miner_test_leads by the `id` primary key in one query.
+    Fetch leads from the leads table by the `id` primary key in one query.
     
     Args:
-        lead_ids: List of `id` values from miner_test_leads
+        lead_ids: List of `id` values from the leads table
     
     Returns:
         Dict mapping id → row data
@@ -126,7 +126,8 @@ async def batch_fetch_db_leads_by_ids(lead_ids: List[int]) -> Dict[int, dict]:
     
     # Supabase REST API: select by IDs using `id=in.(1,2,3)`
     ids_str = ",".join(str(i) for i in lead_ids)
-    url = f"{SUPABASE_URL}/rest/v1/miner_test_leads"
+    table_name = os.getenv("QUALIFICATION_LEADS_TABLE", "test_leads_for_miners")
+    url = f"{SUPABASE_URL}/rest/v1/{table_name}"
     params = {
         "select": "id,business,website,employee_count,role,role_type,industry,sub_industry,city,state,country,company_linkedin",
         "id": f"in.({ids_str})",
@@ -149,9 +150,9 @@ async def batch_fetch_db_leads_by_ids(lead_ids: List[int]) -> Dict[int, dict]:
 
 async def verify_leads_batch(leads: List[LeadOutput]) -> Dict[int, str]:
     """
-    Verify a batch of leads against the miner_test_leads DB.
+    Verify a batch of leads against the leads DB.
     
-    Every lead MUST have a lead_id (the `id` column from miner_test_leads).
+    Every lead MUST have a lead_id (the `id` column from the leads table).
     Makes ONE query to the DB, then verifies each lead locally.
     
     Args:
@@ -173,7 +174,7 @@ async def verify_leads_batch(leads: List[LeadOutput]) -> Dict[int, str]:
     for idx, lead in enumerate(leads):
         db_row = db_rows_by_id.get(lead.lead_id)
         if db_row is None:
-            failures[idx] = f"DB verification failed — lead_id={lead.lead_id} not found in miner_test_leads"
+            failures[idx] = f"DB verification failed — lead_id={lead.lead_id} not found in leads table"
             continue
         
         passed, reason = verify_lead_fields(lead, db_row)

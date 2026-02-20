@@ -133,16 +133,16 @@ class LeadOutput(BaseModel):
     # =========================================================================
     # LEAD ID - REQUIRED for DB field verification
     # =========================================================================
-    # The `id` column from the miner_test_leads table. Used to verify that
+    # The `id` column from the leads table. Used to verify that
     # the model hasn't tampered with lead fields (employee_count, role, etc.).
     # Models must include this for every lead they return.
-    lead_id: int = Field(..., description="ID from miner_test_leads table (the 'id' column)")
+    lead_id: int = Field(..., description="ID from the leads table (the 'id' column)")
     
     # =========================================================================
     # REQUIRED FIELDS - All fields below must be provided
     # =========================================================================
     
-    # Company info (from miner_test_leads table)
+    # Company info (from the leads table)
     business: str = Field(..., description="Company name")
     company_linkedin: str = Field(..., description="Company LinkedIn URL")
     company_website: str = Field(..., description="Company website URL")

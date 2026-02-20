@@ -805,12 +805,18 @@ class NetworkInterceptor:
             headers["X-Evaluation-ID"] = self.evaluation_id
         return headers
     
+    # Maximum blocked network attempts before terminating model execution.
+    # Models that spam blocked endpoints (e.g., retrying api.github.com in a loop)
+    # waste worker time and hold up the evaluation queue.
+    MAX_BLOCKED_ATTEMPTS = 50
+    
     def intercept_request(self, method: str, url: str, **kwargs) -> Any:
         """
         Intercept and validate/transform an HTTP request.
         
         Raises:
             PermissionError: If destination is not allowed
+            RuntimeError: If model exceeds MAX_BLOCKED_ATTEMPTS (unrecoverable)
         """
         # Check if destination is allowed
         if not self.is_allowed_destination(url):
@@ -820,6 +826,17 @@ class NetworkInterceptor:
                 logger.info(f"📡 Routing paid API call through proxy: {url[:50]}...")
                 url = proxy_url
             else:
+                # Track blocked attempts — kill model if it keeps spamming
+                if not hasattr(self, '_blocked_attempts'):
+                    self._blocked_attempts = 0
+                self._blocked_attempts += 1
+                
+                if self._blocked_attempts >= self.MAX_BLOCKED_ATTEMPTS:
+                    raise RuntimeError(
+                        f"Model terminated: exceeded {self.MAX_BLOCKED_ATTEMPTS} blocked network "
+                        f"requests. Latest: '{url[:80]}'. Models must use approved APIs only."
+                    )
+                
                 raise PermissionError(
                     f"Network request to '{url}' is not allowed. "
                     f"Models can only access approved APIs. "

@@ -737,12 +737,13 @@ async def analyze_model_for_hardcoding(
         
     except Exception as e:
         logger.error(f"Hardcoding detection error: {e}")
-        # Allow the model to run on error (don't block legitimate submissions)
+        # FAIL CLOSED — if we can't verify model integrity, reject it.
+        # A legitimate miner can resubmit and the detection will succeed next time.
         return {
-            "passed": True,
-            "confidence_hardcoded": 0,
-            "red_flags": [],
-            "evidence": f"Detection error: {str(e)}",
+            "passed": False,
+            "confidence_hardcoded": 100,
+            "red_flags": [f"Detection system error: {str(e)[:200]}"],
+            "evidence": f"BLOCKED — Cannot verify model integrity due to error: {str(e)}. Resubmit to retry.",
             "model_used": None,
             "analysis_cost_usd": 0.0
         }
@@ -1082,18 +1083,30 @@ def _parse_llm_response(response: str) -> Dict[str, Any]:
         logger.warning(f"Failed to parse LLM response as JSON: {e}")
         logger.warning(f"Raw response: {response[:500]}...")
         
-        # Try to extract confidence from response text
-        confidence = 50  # Default to uncertain
-        if "hardcoded" in response.lower():
-            confidence = 75
-        elif "legitimate" in response.lower():
-            confidence = 25
+        # Try to extract confidence number directly from the raw text
+        # Look for "confidence_hardcoded": N pattern even in malformed JSON
+        import re as _re
+        conf_match = _re.search(r'"confidence_hardcoded"\s*:\s*(\d+)', response)
+        if conf_match:
+            confidence = int(conf_match.group(1))
+            confidence = max(0, min(100, confidence))
+            logger.info(f"Extracted confidence {confidence}% from malformed JSON")
+        else:
+            # Cannot determine confidence at all — fail CLOSED (reject)
+            confidence = 100
+            logger.warning("Cannot extract confidence from LLM response — failing closed (rejecting model)")
+        
+        # Try to extract verdict
+        verdict = "UNKNOWN"
+        verdict_match = _re.search(r'"verdict"\s*:\s*"(\w+)"', response)
+        if verdict_match:
+            verdict = verdict_match.group(1)
         
         return {
             "confidence_hardcoded": confidence,
-            "red_flags": ["Could not parse LLM response"],
+            "red_flags": ["LLM response JSON malformed — confidence extracted from raw text" if conf_match else "LLM response unparseable — failing closed"],
             "evidence": response[:1000],
-            "verdict": "UNKNOWN"
+            "verdict": verdict
         }
 
 

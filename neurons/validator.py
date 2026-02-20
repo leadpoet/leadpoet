@@ -2987,14 +2987,14 @@ class Validator(BaseValidatorNeuron):
             # Log what we have
             has_rolling_history = bool(rolling_scores)
             
-                print(f"\n{'='*80}")
-                print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
-                print(f"{'='*80}")
-                print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
+            print(f"\n{'='*80}")
+            print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
+            print(f"{'='*80}")
+            print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
             print(f"   Rolling {ROLLING_WINDOW} epoch miners: {len(rolling_scores)}")
             print(f"   Rolling {ROLLING_WINDOW} epoch leads: {rolling_lead_count:,}")
             print(f"   Sourcing floor threshold: {SOURCING_FLOOR_THRESHOLD:,}")
-                print()
+            print()
             
             # CRITICAL: Verify UID 0 is the expected LeadPoet hotkey (safety check)
             try:
@@ -3069,20 +3069,20 @@ class Validator(BaseValidatorNeuron):
                 print(f"      Miners have left the subnet or are not registered")
                 print(f"   🔥 Submitting 100% burn weights...")
                 
-                    result = self.subtensor.set_weights(
-                        netuid=self.config.netuid,
-                        wallet=self.wallet,
+                result = self.subtensor.set_weights(
+                    netuid=self.config.netuid,
+                    wallet=self.wallet,
                     uids=[UID_ZERO],
-                        weights=[1.0],
-                        wait_for_finalization=True
-                    )
-                    
-                    if result:
-                        print(f"   ✅ Burn weights submitted successfully")
-                        self._last_weight_submission_epoch = current_epoch
-                        return True
-                    else:
-                        print(f"   ❌ Failed to submit burn weights")
+                    weights=[1.0],
+                    wait_for_finalization=True
+                )
+                
+                if result:
+                    print(f"   ✅ Burn weights submitted successfully")
+                    self._last_weight_submission_epoch = current_epoch
+                    return True
+                else:
+                    print(f"   ❌ Failed to submit burn weights")
                     return False
             
             # ═══════════════════════════════════════════════════════════════════
@@ -3096,7 +3096,7 @@ class Validator(BaseValidatorNeuron):
             deregistered_rolling_points = all_rolling_total - registered_rolling_total
             
             # Log deregistered miners
-                if deregistered_rolling_points > 0:
+            if deregistered_rolling_points > 0:
                 print(f"   ⚠️  Deregistered miners: {deregistered_rolling_points:,} pts → share goes to BURN")
             
             # ═══════════════════════════════════════════════════════════════════

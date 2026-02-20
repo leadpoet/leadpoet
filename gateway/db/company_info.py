@@ -50,7 +50,7 @@ def _extract_slug(company_linkedin: str) -> str:
     if not company_linkedin:
         return ""
     m = _SLUG_RE.match(company_linkedin.strip().lower())
-    return m.group(1).rstrip('.-') if m else ""
+    return m.group(1) if m else ""
 
 
 def get_company_by_linkedin(company_linkedin: str) -> Optional[Dict[str, Any]]:

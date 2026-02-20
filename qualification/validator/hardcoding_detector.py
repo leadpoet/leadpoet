@@ -297,6 +297,9 @@ LOW_VALUE_INTENT_SOURCES = [
 ]
 
 
+STATIC_CHECK_TIMEOUT_SECONDS = 30
+
+
 def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
     """
     Run fast static checks for gaming patterns.
@@ -307,6 +310,9 @@ def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
     IMPORTANT: We detect MECHANISMS (how gaming is done), not specific content.
     This makes detection robust against variations in payload text.
     
+    Includes a process-level timeout to prevent regex catastrophic backtracking
+    from freezing the qualification worker indefinitely.
+    
     Args:
         code_content: Combined Python code from submission
         
@@ -316,6 +322,25 @@ def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
         - red_flags: List of specific patterns found
         - confidence_score: 0-100 (higher = more likely gaming)
     """
+    import signal
+    
+    def _timeout_handler(signum, frame):
+        raise TimeoutError("Static gaming checks exceeded time limit")
+    
+    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(STATIC_CHECK_TIMEOUT_SECONDS)
+    try:
+        return _run_static_gaming_checks_inner(code_content)
+    except TimeoutError:
+        logger.warning(f"Static gaming checks timed out after {STATIC_CHECK_TIMEOUT_SECONDS}s — flagging for LLM review")
+        return True, ["Static analysis timed out (possible obfuscation)"], 40
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+def _run_static_gaming_checks_inner(code_content: str) -> Tuple[bool, List[str], int]:
+    """Inner implementation of static gaming checks (called with signal timeout)."""
     red_flags = []
     confidence = 0
     
@@ -452,17 +477,17 @@ def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
     hardcoded_date_patterns = [
         # Fallback date with `or` (the cipher pattern)
         r'\bor\s*\(\s*date\.today\s*\(\s*\)\s*-\s*timedelta\s*\(\s*days\s*=\s*\d+',
-        # Fallback date assigned to variable
-        r'fallback.*date.*=.*date\.today\s*\(\s*\)\s*-\s*timedelta\s*\(\s*days\s*=\s*\d+',
-        # Date field with hardcoded fallback
-        r'["\']date["\']\s*:.*\bor\b.*date\.today\s*\(\s*\)\s*-\s*timedelta',
+        # Fallback date assigned to variable (bounded per-line to avoid backtracking)
+        r'fallback[^\n]*date[^\n]*=[^\n]*date\.today\s*\(\s*\)\s*-\s*timedelta\s*\(\s*days\s*=\s*\d+',
+        # Date field with hardcoded fallback (bounded per-line to avoid backtracking)
+        r'["\']date["\']\s*:[^\n]*\bor\b[^\n]*date\.today\s*\(\s*\)\s*-\s*timedelta',
         # Any date.today() - timedelta(days=N) where N is 7-30 (typical gaming range)
         r'date\.today\s*\(\s*\)\s*-\s*timedelta\s*\(\s*days\s*=\s*(7|14|21|28|30)\s*\)',
     ]
     
     hardcoded_date_matches = 0
     for pattern in hardcoded_date_patterns:
-        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+        if re.search(pattern, code_content, re.IGNORECASE):
             hardcoded_date_matches += 1
     
     if hardcoded_date_matches >= 2:

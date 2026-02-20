@@ -30,7 +30,7 @@ import re
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 
-from gateway.db.client import get_read_client, get_write_client
+from gateway.db.client import get_write_client
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ def get_company_by_linkedin(company_linkedin: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        client = get_read_client()
+        client = get_write_client()
         result = client.table(TABLE_NAME) \
             .select("*") \
             .eq("company_slug", slug) \

@@ -476,6 +476,7 @@ class ChampionStatusRequest(BaseModel):
     evaluation_cost_usd: Optional[float] = None
     evaluation_time_seconds: Optional[int] = None
     code_content: Optional[str] = None  # JSON string of code files
+    score_breakdown: Optional[Dict[str, Any]] = None  # JSONB: top 5 / bottom 5 leads + rejection info
 
 
 class RebenchmarkRequest(BaseModel):
@@ -605,6 +606,8 @@ async def receive_champion_status(request: ChampionStatusRequest):
             base_update["evaluation_time_seconds"] = request.evaluation_time_seconds
         if request.code_content is not None:
             base_update["code_content"] = request.code_content
+        if request.score_breakdown is not None:
+            base_update["score_breakdown"] = request.score_breakdown
         
         if request.was_dethroned:
             # Champion was dethroned due to score falling below minimum threshold

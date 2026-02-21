@@ -4184,7 +4184,37 @@ class Validator(BaseValidatorNeuron):
                             print(f"   Evidence: {detection_result.get('evidence', 'N/A')[:200]}...")
                             print(f"   Skipping model execution — score = 0")
                             
-                            return  # Don't run the model
+                            rejection_breakdown = {
+                                "version": 1,
+                                "status": "rejected",
+                                "evaluation_summary": {
+                                    "total_icps": len(runs),
+                                    "icps_scored": 0,
+                                    "icps_failed": 0,
+                                    "avg_score": 0.0,
+                                    "total_cost_usd": detection_result.get("analysis_cost_usd", 0),
+                                    "total_time_seconds": 0,
+                                    "stopped_early": True,
+                                    "stopped_reason": "hardcoding_detected"
+                                },
+                                "rejection": {
+                                    "type": "hardcoding_detected",
+                                    "confidence": detection_result.get("confidence_hardcoded", 0),
+                                    "red_flags": detection_result.get("red_flags", []),
+                                    "evidence_summary": (detection_result.get("evidence", "") or "")[:500]
+                                },
+                                "top_5_leads": [],
+                                "bottom_5_leads": []
+                            }
+                            
+                            await self._notify_gateway_champion_status(
+                                model_id=work.get("model_id", "unknown"),
+                                became_champion=False,
+                                score=0.0,
+                                is_rebenchmark=is_rebenchmark,
+                                score_breakdown=rejection_breakdown
+                            )
+                            return
                         
                         print(f"   ✅ Hardcoding check PASSED")
                     else:
@@ -4215,6 +4245,9 @@ class Validator(BaseValidatorNeuron):
             total_score = 0.0
             total_time = 0.0
             leads_scored = 0
+            
+            # Collect per-run data for score_breakdown (top 5 / bottom 5)
+            run_details = []
             
             # Initialize sandbox
             sandbox = None
@@ -4307,6 +4340,58 @@ class Validator(BaseValidatorNeuron):
                         total_score += scores.final_score
                         total_time += run_time
                         leads_scored += 1
+                        
+                        # Collect run detail for score_breakdown
+                        run_detail = {
+                            "final_score": scores.final_score,
+                            "icp_industry": icp_data.get("industry", ""),
+                            "icp_sub_industry": icp_data.get("sub_industry", ""),
+                            "icp_geography": icp_data.get("geography", ""),
+                            "icp_target_roles": icp_data.get("target_roles", []),
+                            "icp_employee_count": icp_data.get("employee_count", ""),
+                            "icp_prompt": icp_data.get("prompt", ""),
+                            "score_components": {
+                                "icp_fit": scores.icp_fit,
+                                "decision_maker": scores.decision_maker,
+                                "intent_signal_raw": scores.intent_signal_raw,
+                                "time_decay_multiplier": scores.time_decay_multiplier,
+                                "intent_signal_final": scores.intent_signal_final,
+                                "cost_penalty": scores.cost_penalty,
+                                "time_penalty": scores.time_penalty,
+                            },
+                            "failure_reason": scores.failure_reason,
+                            "run_time_seconds": round(run_time, 2),
+                            "run_cost_usd": round(run_cost, 6),
+                        }
+                        if lead:
+                            lead_dict = lead.model_dump()
+                            run_detail["lead"] = {
+                                "business": lead_dict.get("business", ""),
+                                "role": lead_dict.get("role", ""),
+                                "industry": lead_dict.get("industry", ""),
+                                "sub_industry": lead_dict.get("sub_industry", ""),
+                                "employee_count": lead_dict.get("employee_count", ""),
+                                "country": lead_dict.get("country", ""),
+                                "city": lead_dict.get("city", ""),
+                                "state": lead_dict.get("state", ""),
+                                "company_linkedin": lead_dict.get("company_linkedin", ""),
+                                "company_website": lead_dict.get("company_website", ""),
+                            }
+                            intent_signals = lead_dict.get("intent_signals", [])
+                            run_detail["intent_signals"] = [
+                                {
+                                    "source": sig.get("source", ""),
+                                    "description": sig.get("description", "")[:200],
+                                    "url": sig.get("url", ""),
+                                    "date": sig.get("date", ""),
+                                    "snippet": sig.get("snippet", "")[:300],
+                                }
+                                for sig in (intent_signals if isinstance(intent_signals, list) else [])
+                            ]
+                        else:
+                            run_detail["lead"] = None
+                            run_detail["intent_signals"] = []
+                        run_details.append(run_detail)
                         
                         if lead:
                             print(f"      ✅ Lead returned: {lead.role} @ {lead.business}")
@@ -4410,9 +4495,52 @@ class Validator(BaseValidatorNeuron):
                 except Exception as e:
                     print(f"      ⚠️ Could not extract code content: {e}")
             
+            # ═══════════════════════════════════════════════════════════════════
+            # BUILD SCORE BREAKDOWN: Top 5 / Bottom 5 leads for transparency
+            # Only reveals 10 of N ICPs — keeps the rest private
+            # ═══════════════════════════════════════════════════════════════════
+            scored_runs = [r for r in run_details if r["final_score"] > 0]
+            zero_runs = [r for r in run_details if r["final_score"] == 0]
+            scored_runs.sort(key=lambda r: r["final_score"], reverse=True)
+            zero_runs.sort(key=lambda r: r.get("failure_reason") or "")
+            
+            top_5 = []
+            for i, r in enumerate(scored_runs[:5], 1):
+                entry = {"rank": i, **r}
+                top_5.append(entry)
+            
+            bottom_5 = []
+            bottom_candidates = scored_runs[-5:] if len(scored_runs) > 5 else []
+            if len(bottom_candidates) < 5:
+                bottom_candidates = zero_runs[:5 - len(bottom_candidates)] + bottom_candidates
+            bottom_candidates.sort(key=lambda r: r["final_score"])
+            for i, r in enumerate(bottom_candidates[:5], 1):
+                entry = {"rank": i, **r}
+                bottom_5.append(entry)
+            
+            score_breakdown = {
+                "version": 1,
+                "status": "evaluated",
+                "evaluation_summary": {
+                    "total_icps": len(runs),
+                    "icps_scored": leads_scored,
+                    "icps_failed": len(runs) - leads_scored,
+                    "avg_score": round(avg_score, 2),
+                    "total_cost_usd": round(total_evaluation_cost, 4),
+                    "total_time_seconds": round(total_time, 1),
+                    "stopped_early": evaluation_stopped_early,
+                    "stopped_reason": "cost_limit" if evaluation_stopped_early else None,
+                },
+                "rejection": None,
+                "top_5_leads": top_5,
+                "bottom_5_leads": bottom_5,
+            }
+            
+            print(f"   📋 Score breakdown: top_5={len(top_5)} leads, bottom_5={len(bottom_5)} leads")
+            
             # Send champion status to gateway for Supabase storage (one-way, for auditing)
             # For rebenchmarks, this updates the champion's score (even if lower)
-            # Include cost/time + code content for full DB update
+            # Include cost/time + code content + score_breakdown for full DB update
             await self._notify_gateway_champion_status(
                 model_id=work.get("model_id", "unknown"),
                 became_champion=became_champion,
@@ -4420,7 +4548,8 @@ class Validator(BaseValidatorNeuron):
                 is_rebenchmark=is_rebenchmark,
                 evaluation_cost_usd=total_evaluation_cost,
                 evaluation_time_seconds=int(total_time),
-                code_content=code_content
+                code_content=code_content,
+                score_breakdown=score_breakdown
             )
                         
         except Exception as e:
@@ -5079,7 +5208,8 @@ class Validator(BaseValidatorNeuron):
         was_dethroned: bool = False,
         evaluation_cost_usd: float = None,
         evaluation_time_seconds: int = None,
-        code_content: str = None
+        code_content: str = None,
+        score_breakdown: dict = None
     ):
         """
         Notify gateway about champion status (one-way, for Supabase storage).
@@ -5099,6 +5229,7 @@ class Validator(BaseValidatorNeuron):
             evaluation_cost_usd: Total cost of the evaluation (optional)
             evaluation_time_seconds: Total time of the evaluation in seconds (optional)
             code_content: JSON string of code files for display (optional)
+            score_breakdown: Detailed evaluation breakdown with top/bottom leads (mandatory for new evals)
         """
         try:
             import httpx
@@ -5109,9 +5240,9 @@ class Validator(BaseValidatorNeuron):
                 "model_id": model_id,
                 "became_champion": became_champion,
                 "score": score,
-                "is_rebenchmark": is_rebenchmark,  # Tell gateway this is a rebenchmark
-                "was_dethroned": was_dethroned,  # Tell gateway champion was dethroned (no replacement)
-                "determined_by": "validator"  # Indicates validator made the decision
+                "is_rebenchmark": is_rebenchmark,
+                "was_dethroned": was_dethroned,
+                "determined_by": "validator"
             }
             
             # Add optional fields if provided (for full DB update)
@@ -5121,6 +5252,8 @@ class Validator(BaseValidatorNeuron):
                 payload["evaluation_time_seconds"] = evaluation_time_seconds
             if code_content is not None:
                 payload["code_content"] = code_content
+            if score_breakdown is not None:
+                payload["score_breakdown"] = score_breakdown
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(

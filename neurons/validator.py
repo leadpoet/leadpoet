@@ -4536,6 +4536,7 @@ class Validator(BaseValidatorNeuron):
                     "stopped_reason": "cost_limit" if evaluation_stopped_early else None,
                 },
                 "rejection": None,
+                "zero_score_count": len(zero_runs),
                 "top_5_leads": top_5,
                 "bottom_5_leads": bottom_5,
             }
@@ -7764,6 +7765,7 @@ def run_dedicated_qualification_worker(config):
                             "stopped_reason": "cost_limit" if evaluation_stopped_early else None,
                         },
                         "rejection": None,
+                        "zero_score_count": len(zero_rds),
                         "top_5_leads": top_5,
                         "bottom_5_leads": bottom_5,
                     }

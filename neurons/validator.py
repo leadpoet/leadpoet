@@ -4344,12 +4344,16 @@ class Validator(BaseValidatorNeuron):
                         # Collect run detail for score_breakdown
                         run_detail = {
                             "final_score": scores.final_score,
+                            "icp_prompt": icp_data.get("prompt", ""),
                             "icp_industry": icp_data.get("industry", ""),
                             "icp_sub_industry": icp_data.get("sub_industry", ""),
                             "icp_geography": icp_data.get("geography", ""),
                             "icp_target_roles": icp_data.get("target_roles", []),
+                            "icp_target_seniority": icp_data.get("target_seniority", ""),
                             "icp_employee_count": icp_data.get("employee_count", ""),
-                            "icp_prompt": icp_data.get("prompt", ""),
+                            "icp_company_stage": icp_data.get("company_stage", ""),
+                            "icp_product_service": icp_data.get("product_service", ""),
+                            "icp_intent_signals": icp_data.get("intent_signals", []),
                             "score_components": {
                                 "icp_fit": scores.icp_fit,
                                 "decision_maker": scores.decision_maker,
@@ -7667,12 +7671,16 @@ def run_dedicated_qualification_worker(config):
                         pir_icp = pir_run.get("icp_data", {})
                         rd = {
                             "final_score": pir_scores.get("final_score", 0),
+                            "icp_prompt": pir_icp.get("prompt", ""),
                             "icp_industry": pir_icp.get("industry", ""),
                             "icp_sub_industry": pir_icp.get("sub_industry", ""),
                             "icp_geography": pir_icp.get("geography", ""),
                             "icp_target_roles": pir_icp.get("target_roles", []),
+                            "icp_target_seniority": pir_icp.get("target_seniority", ""),
                             "icp_employee_count": pir_icp.get("employee_count", ""),
-                            "icp_prompt": pir_icp.get("prompt", ""),
+                            "icp_company_stage": pir_icp.get("company_stage", ""),
+                            "icp_product_service": pir_icp.get("product_service", ""),
+                            "icp_intent_signals": pir_icp.get("intent_signals", []),
                             "score_components": {
                                 "icp_fit": pir_scores.get("icp_fit", 0),
                                 "decision_maker": pir_scores.get("decision_maker", 0),

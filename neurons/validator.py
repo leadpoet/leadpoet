@@ -5721,8 +5721,8 @@ class Validator(BaseValidatorNeuron):
             
             # Notify gateway
             try:
-                # Get code_content if available (for displaying model code in leaderboard)
                 code_content = result.get("code_content")
+                score_breakdown = result.get("score_breakdown")
                 
                 await self._notify_gateway_champion_status(
                     model_id=model_id,
@@ -5732,7 +5732,8 @@ class Validator(BaseValidatorNeuron):
                     was_dethroned=was_dethroned,
                     evaluation_cost_usd=total_cost,
                     evaluation_time_seconds=int(total_time),
-                    code_content=code_content
+                    code_content=code_content,
+                    score_breakdown=score_breakdown
                 )
             except Exception as e:
                 print(f"      ⚠️ Failed to notify gateway: {e}")
@@ -7491,7 +7492,29 @@ def run_dedicated_qualification_worker(config):
                                         "avg_score": 0.0,
                                         "total_cost_usd": 0.0,
                                         "total_time_seconds": 0.0,
-                                        "is_rebenchmark": is_rebenchmark
+                                        "is_rebenchmark": is_rebenchmark,
+                                        "score_breakdown": {
+                                            "version": 1,
+                                            "status": "rejected",
+                                            "evaluation_summary": {
+                                                "total_icps": len(runs),
+                                                "icps_scored": 0,
+                                                "icps_failed": 0,
+                                                "avg_score": 0.0,
+                                                "total_cost_usd": detection_result.get("analysis_cost_usd", 0),
+                                                "total_time_seconds": 0,
+                                                "stopped_early": True,
+                                                "stopped_reason": "hardcoding_detected"
+                                            },
+                                            "rejection": {
+                                                "type": "hardcoding_detected",
+                                                "confidence": confidence,
+                                                "red_flags": detection_result.get("red_flags", []),
+                                                "evidence_summary": (detection_result.get("evidence", "") or "")[:500]
+                                            },
+                                            "top_5_leads": [],
+                                            "bottom_5_leads": []
+                                        }
                                     })
                                     continue  # Skip to next model
                         except Exception as hc_err:
@@ -7635,6 +7658,94 @@ def run_dedicated_qualification_worker(config):
                     print(f"         Total Time: {total_time:.1f}s")
                     print(f"         Total Cost: ${total_cost:.4f}")
                     
+                    # Build score_breakdown: top 5 / bottom 5 leads for transparency
+                    run_details_for_breakdown = []
+                    for pir_idx, pir in enumerate(per_icp_results):
+                        pir_scores = pir.get("scores") or {}
+                        pir_lead = pir.get("lead_returned")
+                        pir_run = runs[pir_idx] if pir_idx < len(runs) else {}
+                        pir_icp = pir_run.get("icp_data", {})
+                        rd = {
+                            "final_score": pir_scores.get("final_score", 0),
+                            "icp_industry": pir_icp.get("industry", ""),
+                            "icp_sub_industry": pir_icp.get("sub_industry", ""),
+                            "icp_geography": pir_icp.get("geography", ""),
+                            "icp_target_roles": pir_icp.get("target_roles", []),
+                            "icp_employee_count": pir_icp.get("employee_count", ""),
+                            "icp_prompt": pir_icp.get("prompt", ""),
+                            "score_components": {
+                                "icp_fit": pir_scores.get("icp_fit", 0),
+                                "decision_maker": pir_scores.get("decision_maker", 0),
+                                "intent_signal_raw": pir_scores.get("intent_signal_raw", 0),
+                                "time_decay_multiplier": pir_scores.get("time_decay_multiplier", 1.0),
+                                "intent_signal_final": pir_scores.get("intent_signal_final", 0),
+                                "cost_penalty": pir_scores.get("cost_penalty", 0),
+                                "time_penalty": pir_scores.get("time_penalty", 0),
+                            },
+                            "failure_reason": pir_scores.get("failure_reason"),
+                            "run_time_seconds": round(pir.get("run_time_seconds", 0), 2),
+                            "run_cost_usd": round(pir.get("run_cost_usd", 0), 6),
+                        }
+                        if pir_lead:
+                            rd["lead"] = {
+                                "business": pir_lead.get("business", ""),
+                                "role": pir_lead.get("role", ""),
+                                "industry": pir_lead.get("industry", ""),
+                                "sub_industry": pir_lead.get("sub_industry", ""),
+                                "employee_count": pir_lead.get("employee_count", ""),
+                                "country": pir_lead.get("country", ""),
+                                "city": pir_lead.get("city", ""),
+                                "state": pir_lead.get("state", ""),
+                                "company_linkedin": pir_lead.get("company_linkedin", ""),
+                                "company_website": pir_lead.get("company_website", ""),
+                            }
+                            intent_signals = pir_lead.get("intent_signals", [])
+                            rd["intent_signals"] = [
+                                {
+                                    "source": sig.get("source", ""),
+                                    "description": (sig.get("description", "") or "")[:200],
+                                    "url": sig.get("url", ""),
+                                    "date": sig.get("date", ""),
+                                    "snippet": (sig.get("snippet", "") or "")[:300],
+                                }
+                                for sig in (intent_signals if isinstance(intent_signals, list) else [])
+                            ]
+                        else:
+                            rd["lead"] = None
+                            rd["intent_signals"] = []
+                        run_details_for_breakdown.append(rd)
+                    
+                    scored_rds = [r for r in run_details_for_breakdown if r["final_score"] > 0]
+                    zero_rds = [r for r in run_details_for_breakdown if r["final_score"] == 0]
+                    scored_rds.sort(key=lambda r: r["final_score"], reverse=True)
+                    zero_rds.sort(key=lambda r: r.get("failure_reason") or "")
+                    
+                    top_5 = [{"rank": i, **r} for i, r in enumerate(scored_rds[:5], 1)]
+                    bottom_candidates = scored_rds[-5:] if len(scored_rds) > 5 else []
+                    if len(bottom_candidates) < 5:
+                        bottom_candidates = zero_rds[:5 - len(bottom_candidates)] + bottom_candidates
+                    bottom_candidates.sort(key=lambda r: r["final_score"])
+                    bottom_5 = [{"rank": i, **r} for i, r in enumerate(bottom_candidates[:5], 1)]
+                    
+                    worker_score_breakdown = {
+                        "version": 1,
+                        "status": "evaluated",
+                        "evaluation_summary": {
+                            "total_icps": len(runs),
+                            "icps_scored": leads_scored,
+                            "icps_failed": len(runs) - leads_scored,
+                            "avg_score": round(avg_score, 2),
+                            "total_cost_usd": round(total_cost, 4),
+                            "total_time_seconds": round(total_time, 1),
+                            "stopped_early": evaluation_stopped_early,
+                            "stopped_reason": "cost_limit" if evaluation_stopped_early else None,
+                        },
+                        "rejection": None,
+                        "top_5_leads": top_5,
+                        "bottom_5_leads": bottom_5,
+                    }
+                    print(f"         📋 Score breakdown: top_5={len(top_5)}, bottom_5={len(bottom_5)}")
+                    
                     model_results.append({
                         "model_id": model_id,
                         "model_name": model_name,
@@ -7646,7 +7757,8 @@ def run_dedicated_qualification_worker(config):
                         "total_time_seconds": total_time,
                         "is_rebenchmark": is_rebenchmark,
                         "per_icp_results": per_icp_results,
-                        "code_content": code_content  # For displaying model code in leaderboard
+                        "code_content": code_content,
+                        "score_breakdown": worker_score_breakdown
                     })
                 
                 # Write all results

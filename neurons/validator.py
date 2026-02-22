@@ -4240,11 +4240,16 @@ class Validator(BaseValidatorNeuron):
             total_evaluation_cost = 0.0
             MAX_TOTAL_COST = QUALIFICATION_CONFIG.MAX_COST_PER_EVALUATION_USD  # $5.00
             evaluation_stopped_early = False
+            early_stop_reason = None
             
             # Track total scores and time for summary
             total_score = 0.0
             total_time = 0.0
             leads_scored = 0
+            
+            # Track consecutive fabrication detections for early-exit
+            FABRICATION_EARLY_EXIT_THRESHOLD = 40
+            fabrication_count = 0
             
             # Collect per-run data for score_breakdown (top 5 / bottom 5)
             run_details = []
@@ -4271,6 +4276,7 @@ class Validator(BaseValidatorNeuron):
                         print(f"\n   🛑 $5 HARD STOP: Total cost ${total_evaluation_cost:.2f} >= ${MAX_TOTAL_COST:.2f}")
                         print(f"   🛑 Stopping evaluation at ICP {run_idx}/{len(runs)} to protect costs")
                         evaluation_stopped_early = True
+                        early_stop_reason = "cost_limit"
                         # Report remaining runs as cost-stopped
                         for remaining_run in runs[run_idx-1:]:
                             await self._qualification_report_error(
@@ -4409,6 +4415,57 @@ class Validator(BaseValidatorNeuron):
                             f"time={run_time:.2f}s"
                         )
                         
+                        # ═════════════════════════════════════════════════════
+                        # FABRICATION EARLY-EXIT: Track intent fabrication
+                        # If a model's outputs consistently have fabricated
+                        # dates, abort early to save API credits.
+                        # ═════════════════════════════════════════════════════
+                        fr = scores.failure_reason or ""
+                        if "fabrication" in fr.lower() or "fabricated" in fr.lower():
+                            fabrication_count += 1
+                        
+                        if fabrication_count >= FABRICATION_EARLY_EXIT_THRESHOLD:
+                            early_stop_reason = "fabrication_detected"
+                            evaluation_stopped_early = True
+                            fab_msg = (
+                                f"Evaluation stopped: {fabrication_count}/{leads_scored} leads "
+                                f"had fabricated intent dates — model is gaming date scoring"
+                            )
+                            print(f"\n   🛑 FABRICATION EARLY-EXIT: {fab_msg}")
+                            for remaining_run in runs[run_idx:]:
+                                remaining_eid = remaining_run.get("evaluation_run_id")
+                                remaining_icp = remaining_run.get("icp_data", {})
+                                await self._qualification_report_error(
+                                    evaluation_run_id=remaining_eid,
+                                    error_code=1006,
+                                    error_message=fab_msg
+                                )
+                                run_details.append({
+                                    "final_score": 0,
+                                    "icp_prompt": remaining_icp.get("prompt", ""),
+                                    "icp_industry": remaining_icp.get("industry", ""),
+                                    "icp_sub_industry": remaining_icp.get("sub_industry", ""),
+                                    "icp_geography": remaining_icp.get("geography", ""),
+                                    "icp_target_roles": remaining_icp.get("target_roles", []),
+                                    "icp_target_seniority": remaining_icp.get("target_seniority", ""),
+                                    "icp_employee_count": remaining_icp.get("employee_count", ""),
+                                    "icp_company_stage": remaining_icp.get("company_stage", ""),
+                                    "icp_product_service": remaining_icp.get("product_service", ""),
+                                    "icp_intent_signals": remaining_icp.get("intent_signals", []),
+                                    "score_components": {
+                                        "icp_fit": 0, "decision_maker": 0,
+                                        "intent_signal_raw": 0, "time_decay_multiplier": 1.0,
+                                        "intent_signal_final": 0, "cost_penalty": 0,
+                                        "time_penalty": 0,
+                                    },
+                                    "failure_reason": fab_msg,
+                                    "run_time_seconds": 0,
+                                    "run_cost_usd": 0,
+                                    "lead": None,
+                                    "intent_signals": [],
+                                })
+                            break
+                        
                     except asyncio.TimeoutError:
                         print(f"      ⚠️  TIMEOUT: Model took too long")
                         # Still count time for timeouts (use timeout value)
@@ -4441,7 +4498,10 @@ class Validator(BaseValidatorNeuron):
             avg_score = total_score / leads_scored if leads_scored > 0 else 0.0
             
             print(f"\n{'='*60}")
-            if evaluation_stopped_early:
+            if early_stop_reason == "fabrication_detected":
+                print(f"🛑 QUALIFICATION EVALUATION STOPPED - DATE FABRICATION DETECTED")
+                print(f"   {fabrication_count} of {leads_scored} leads had fabricated intent dates")
+            elif evaluation_stopped_early:
                 print(f"🛑 QUALIFICATION EVALUATION STOPPED - $5 COST LIMIT")
             else:
                 print(f"🎯 QUALIFICATION EVALUATION COMPLETE")
@@ -4452,7 +4512,10 @@ class Validator(BaseValidatorNeuron):
             print(f"   ⏱️  Total Time: {total_time:.2f}s ({total_time/60:.1f} min)")
             print(f"   💰 Total cost: ${total_evaluation_cost:.4f}")
             if evaluation_stopped_early:
-                print(f"   ⚠️  Remaining {len(runs) - run_idx + 1} ICPs skipped due to cost limit")
+                icps_remaining = len(runs) - (run_idx if 'run_idx' in dir() else len(runs))
+                if icps_remaining > 0:
+                    reason_label = "fabrication detection" if early_stop_reason == "fabrication_detected" else "cost limit"
+                    print(f"   ⚠️  Remaining {icps_remaining} ICPs skipped due to {reason_label}")
             print(f"{'='*60}\n")
             
             # ═══════════════════════════════════════════════════════════════════
@@ -4533,7 +4596,8 @@ class Validator(BaseValidatorNeuron):
                     "total_cost_usd": round(total_evaluation_cost, 4),
                     "total_time_seconds": round(total_time, 1),
                     "stopped_early": evaluation_stopped_early,
-                    "stopped_reason": "cost_limit" if evaluation_stopped_early else None,
+                    "stopped_reason": early_stop_reason if evaluation_stopped_early else None,
+                    "fabrication_count": fabrication_count,
                 },
                 "rejection": None,
                 "zero_score_count": len(zero_runs),

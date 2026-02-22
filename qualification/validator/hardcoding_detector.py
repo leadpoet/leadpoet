@@ -98,9 +98,8 @@ PAYLOAD_INJECTION_PATTERNS = [
 
 # Patterns indicating hidden crypto for obfuscation
 HIDDEN_CRYPTO_PATTERNS = [
-    # Custom decode with hardcoded keys
-    r'decode\s*\(\s*[a-z_]+\s*,\s*["\']test_key["\']\s*\)',
-    r'decode\s*\(\s*[a-z_]+\s*,\s*["\']test_code["\']\s*\)',
+    # Custom decode with ANY hardcoded string key (not just specific key names)
+    r'decode\s*\(\s*[a-z_]+\s*,\s*["\'][^"\']+["\']\s*\)',
     # Custom crypto functions
     r'def\s+derive_key\s*\([^)]*secret',
     r'def\s+keystream\s*\(',
@@ -274,16 +273,16 @@ GENERIC_INTENT_FALLBACK_PATTERNS = [
     
     # === ROLE/SENIORITY ECHO-BACK PATTERNS ===
     # Role fallback to ICP's target_roles[0] - stamps ICP's desired role onto lead
-    r'ctx\.get\s*\(\s*["\']target_roles["\']\s*\)\s*\[\s*0\s*\]',
-    r'ctx\.get\s*\(\s*["\']target_roles["\']\s*,\s*\[\s*\]\s*\)\s*\[\s*0\s*\]',
+    # Generalized: any variable (ctx, icp, params, context, etc.) accessing target_roles
+    r'\w+(?:\.\w+)*\.get\s*\(\s*["\']target_roles["\']\s*[^)]*\)\s*\[\s*0\s*\]',
     
     # Seniority fallback to ICP's target_seniority - stamps ICP's desired seniority
-    r'_norm\s*\(\s*ctx\.get\s*\(\s*["\']target_seniority["\']\s*\)\s*\)',
-    r'target_seniority\s*=\s*ctx\.get\s*\(\s*["\']target_seniority["\']\s*\)',
+    # Generalized: any variable accessing target_seniority
+    r'target_seniority\s*=\s*\w+(?:\.\w+)*\.get\s*\(\s*["\']target_seniority["\']\s*\)',
+    r'\w+(?:\.\w+)*\[\s*["\']target_seniority["\']\s*\]',
     
-    # Pattern: role = lead.get("role") or ctx.get("target_roles")[0]
-    # Role defaulting to ICP when lead has no role
-    r'role\s*=\s*[^=]*\bor\b[^=]*ctx\.get\s*\(\s*["\']target_roles["\']\s*\)',
+    # Role defaulting to ICP when lead has no role (any context variable)
+    r'role\s*=\s*[^=]*\bor\b[^=]*\.get\s*\(\s*["\']target_roles["\']\s*\)',
     
     # Hardcoded "Manager" or "Individual Contributor" fallback
     r'return\s*["\'](?:Manager|Individual Contributor)["\']',
@@ -519,8 +518,8 @@ def _run_static_gaming_checks_inner(code_content: str) -> Tuple[bool, List[str],
         r'fallback[^\n]*date[^\n]*=[^\n]*date\.today\s*\(\s*\)\s*-\s*timedelta\s*\(\s*days\s*=\s*\d+',
         # Date field with hardcoded fallback (bounded per-line to avoid backtracking)
         r'["\']date["\']\s*:[^\n]*\bor\b[^\n]*date\.today\s*\(\s*\)\s*-\s*timedelta',
-        # Any date.today() - timedelta(days=N) where N is 7-30 (typical gaming range)
-        r'date\.today\s*\(\s*\)\s*-\s*timedelta\s*\(\s*days\s*=\s*(7|14|21|28|30)\s*\)',
+        # Any date.today() - timedelta(days=N) where N is a fixed integer literal
+        r'date\.today\s*\(\s*\)\s*-\s*timedelta\s*\(\s*days\s*=\s*\d{1,3}\s*\)',
     ]
     
     hardcoded_date_matches = 0
@@ -575,13 +574,13 @@ def _run_static_gaming_checks_inner(code_content: str) -> Tuple[bool, List[str],
     # Models that stamp ICP's desired role/seniority onto leads with missing data
     # instead of inferring from the lead's actual data
     role_seniority_patterns = [
-        # Role fallback to ICP's target_roles[0]
-        r'ctx\.get\s*\(\s*["\']target_roles["\']\s*\)\s*\[\s*0\s*\]',
-        # Seniority fallback to ICP's target_seniority
-        r'_norm\s*\(\s*ctx\.get\s*\(\s*["\']target_seniority["\']\s*\)\s*\)',
-        r'target_seniority\s*=\s*ctx\.get\s*\(\s*["\']target_seniority["\']\s*\)',
-        # Role defaulting to ICP
-        r'role\s*=\s*[^=]*\bor\b[^=]*ctx\.get\s*\(\s*["\']target_roles["\']\s*\)',
+        # Role fallback to ICP's target_roles[0] (any context variable, not just "ctx")
+        r'\w+(?:\.\w+)*\.get\s*\(\s*["\']target_roles["\']\s*[^)]*\)\s*\[\s*0\s*\]',
+        # Seniority fallback to ICP's target_seniority (any context variable)
+        r'target_seniority\s*=\s*\w+(?:\.\w+)*\.get\s*\(\s*["\']target_seniority["\']\s*\)',
+        r'\w+(?:\.\w+)*\[\s*["\']target_seniority["\']\s*\]',
+        # Role defaulting to ICP (any context variable)
+        r'role\s*=\s*[^=]*\bor\b[^=]*\.get\s*\(\s*["\']target_roles["\']\s*\)',
     ]
     
     role_seniority_matches = 0

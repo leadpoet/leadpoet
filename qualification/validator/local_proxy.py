@@ -25,11 +25,12 @@ This is IDENTICAL security to the gateway proxy approach.
 """
 
 import os
+import re
 import json
 import logging
 import threading
 import socket
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from contextlib import contextmanager
@@ -377,6 +378,47 @@ ALL_PROVIDERS: Dict[str, str] = {**PAID_PROVIDERS, **FREE_PROVIDERS}
 
 PROXY_TIMEOUT_SECONDS = 30.0
 
+# =============================================================================
+# GitHub API Endpoint Allowlist (Security)
+# =============================================================================
+# STRICT ALLOWLIST: Only these read-only endpoints are permitted.
+# Everything else is blocked with 403. This prevents:
+#   - Data exfiltration (POST /gists)
+#   - Code download + exec (GET /repos/.../contents/, /repos/.../git/)
+#   - Account info leakage (GET /user)
+#   - Any write operations (POST/PUT/PATCH/DELETE)
+#
+# Patterns match the endpoint path AFTER the provider prefix is stripped.
+# e.g. proxy_url/github/search/repositories -> endpoint = "search/repositories"
+# =============================================================================
+
+GITHUB_ALLOWED_ENDPOINTS: List[str] = [
+    # Search APIs (high value for lead qualification)
+    r"^search/repositories$",
+    r"^search/users$",
+    r"^search/code$",
+    r"^search/issues$",
+    # Organization endpoints
+    r"^orgs/[^/]+$",
+    r"^orgs/[^/]+/repos$",
+    # User public profiles (NOT /user which is the authenticated user)
+    r"^users/[^/]+$",
+    r"^users/[^/]+/repos$",
+    r"^users/[^/]+/orgs$",
+    # Repository metadata (read-only, explicitly excludes /contents/ and /git/)
+    r"^repos/[^/]+/[^/]+$",
+    r"^repos/[^/]+/[^/]+/topics$",
+    r"^repos/[^/]+/[^/]+/languages$",
+    r"^repos/[^/]+/[^/]+/contributors$",
+    r"^repos/[^/]+/[^/]+/commits$",
+    r"^repos/[^/]+/[^/]+/releases$",
+    r"^repos/[^/]+/[^/]+/issues$",
+    r"^repos/[^/]+/[^/]+/pulls$",
+    r"^repos/[^/]+/[^/]+/events$",
+]
+
+_GITHUB_COMPILED_PATTERNS = [re.compile(p) for p in GITHUB_ALLOWED_ENDPOINTS]
+
 
 # =============================================================================
 # Request Handler (runs in proxy thread)
@@ -406,6 +448,18 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """Handle POST requests."""
         self._handle_request("POST")
+    
+    def do_PUT(self) -> None:
+        """Handle PUT requests (blocked for restricted providers)."""
+        self._handle_request("PUT")
+    
+    def do_PATCH(self) -> None:
+        """Handle PATCH requests (blocked for restricted providers)."""
+        self._handle_request("PATCH")
+    
+    def do_DELETE(self) -> None:
+        """Handle DELETE requests (blocked for restricted providers)."""
+        self._handle_request("DELETE")
     
     def _handle_request(self, method: str) -> None:
         """
@@ -455,6 +509,30 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
                     f"Allowed: {list(ALL_PROVIDERS.keys())}"
                 )
                 return
+            
+            # ================================================================
+            # SECURITY: GitHub endpoint allowlist (GET-only, strict list)
+            # ================================================================
+            if provider == "github":
+                if method != "GET":
+                    # Drain request body to avoid connection reset
+                    try:
+                        cl = int(self.headers.get("Content-Length", 0))
+                        if cl > 0:
+                            self.rfile.read(cl)
+                    except Exception:
+                        pass
+                    self._send_error(
+                        403,
+                        f"GitHub: only GET requests allowed (got {method})"
+                    )
+                    return
+                if not self._is_github_endpoint_allowed(endpoint):
+                    self._send_error(
+                        403,
+                        f"GitHub endpoint not in allowlist: /{endpoint}"
+                    )
+                    return
             
             # Get API key for provider (stored in proxy thread's closure)
             api_key = self.api_keys.get(provider)
@@ -632,6 +710,11 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
                 if cost >= 0:
                     self.cost_tracker.add_cost(provider="builtwith", cost_usd=cost)
                     logger.info(f"💰 BuiltWith [{description}]: ${cost:.6f}")
+            
+            elif provider == "github":
+                # GitHub free tier: $0 per call, but track call count
+                self.cost_tracker.add_cost(provider="github", cost_usd=0.0)
+                logger.info(f"💰 GitHub [{endpoint.split('/')[0]}]: $0 (free)")
             
             else:
                 # For other paid providers, use fixed per-call cost
@@ -820,6 +903,18 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
             return (cost, f"builtwith/{prefix} (paid)")
 
         return (0.0, f"builtwith/{prefix} (unknown)")
+
+    @staticmethod
+    def _is_github_endpoint_allowed(endpoint: str) -> bool:
+        """
+        Check if a GitHub API endpoint is on the strict allowlist.
+
+        Only read-only metadata/search endpoints are permitted.
+        Blocks: gists, contents, git objects, user account, all writes.
+        """
+        # Strip query string if present (patterns match path only)
+        clean = endpoint.split("?")[0].rstrip("/")
+        return any(p.match(clean) for p in _GITHUB_COMPILED_PATTERNS)
 
     def _send_json(self, data: Dict[str, Any]) -> None:
         """Send JSON response."""

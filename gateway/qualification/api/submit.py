@@ -104,6 +104,92 @@ async def is_hotkey_banned(hotkey: str) -> Tuple[bool, Optional[str]]:
         return False, None
 
 
+async def promote_next_champion() -> Optional[Dict[str, Any]]:
+    """
+    After a champion is dethroned (e.g. due to ban), find and promote the next
+    highest-scoring eligible model from today.
+
+    Eligibility rules:
+    - Model was submitted after 12:00 AM UTC today
+    - Score > 10.0
+    - Status = 'evaluated'
+    - Miner hotkey is NOT in banned_hotkeys table
+
+    Returns:
+        Dict with promoted champion info, or None if no eligible model found
+    """
+    try:
+        from gateway.db.client import get_write_client
+        supabase = get_write_client()
+
+        today_midnight = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+
+        banned_response = supabase.table("banned_hotkeys") \
+            .select("hotkey") \
+            .execute()
+        banned_hotkeys = {r["hotkey"] for r in (banned_response.data or [])}
+
+        candidates_response = supabase.table("qualification_models") \
+            .select("id, model_name, miner_hotkey, score, champion_at, "
+                    "evaluation_cost_usd, evaluation_time_seconds, code_content") \
+            .eq("status", "evaluated") \
+            .eq("is_champion", False) \
+            .gt("score", 10.0) \
+            .gte("created_at", today_midnight) \
+            .order("score", desc=True) \
+            .limit(50) \
+            .execute()
+
+        if not candidates_response.data:
+            logger.info("📭 No eligible models found today for auto-promotion")
+            return None
+
+        promoted = None
+        for candidate in candidates_response.data:
+            if candidate["miner_hotkey"] in banned_hotkeys:
+                continue
+            promoted = candidate
+            break
+
+        if not promoted:
+            logger.info("📭 All today's models belong to banned hotkeys - no promotion")
+            return None
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        supabase.table("qualification_models").update({
+            "is_champion": True,
+            "champion_at": now_iso,
+        }).eq("id", promoted["id"]).execute()
+
+        logger.warning(
+            f"👑 AUTO-PROMOTED new champion after ban: {promoted['model_name']} "
+            f"(hotkey: {promoted['miner_hotkey'][:16]}..., score: {promoted['score']:.2f})"
+        )
+        print(f"\n{'='*60}")
+        print(f"👑 AUTO-PROMOTED NEW CHAMPION (after ban dethronement)")
+        print(f"   Model:  {promoted['model_name']}")
+        print(f"   Miner:  {promoted['miner_hotkey'][:20]}...")
+        print(f"   Score:  {promoted['score']:.2f}")
+        print(f"   Source: Highest eligible model submitted today (score > 10)")
+        print(f"{'='*60}\n")
+
+        return {
+            "model_id": promoted["id"],
+            "model_name": promoted["model_name"],
+            "miner_hotkey": promoted["miner_hotkey"],
+            "score": promoted["score"],
+            "champion_at": now_iso,
+        }
+
+    except Exception as e:
+        logger.error(f"Error in promote_next_champion: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
+
 async def ban_hotkey(
     hotkey: str,
     reason: str,
@@ -112,7 +198,8 @@ async def ban_hotkey(
     """
     Ban a hotkey from submitting models.
     
-    Also revokes champion status if the hotkey is the current champion.
+    Also revokes champion status if the hotkey is the current champion,
+    then auto-promotes the next eligible model from today.
     
     Args:
         hotkey: The Bittensor hotkey to ban
@@ -127,7 +214,7 @@ async def ban_hotkey(
         
         supabase = get_write_client()
         
-        # Insert ban record
+        # Insert ban record (Supabase trigger nukes all models from this hotkey)
         supabase.table("banned_hotkeys").insert({
             "hotkey": hotkey,
             "reason": reason,
@@ -138,6 +225,7 @@ async def ban_hotkey(
         logger.warning(f"🚫 Hotkey banned: {hotkey[:16]}... (reason: {reason}, by: {banned_by})")
         
         # Automatically dethrone if this hotkey is the current champion
+        was_champion = False
         try:
             dethrone_result = supabase.table("qualification_models") \
                 .update({
@@ -149,11 +237,15 @@ async def ban_hotkey(
                 .execute()
             
             if dethrone_result.data and len(dethrone_result.data) > 0:
+                was_champion = True
                 model_name = dethrone_result.data[0].get("model_name", "unknown")
                 logger.warning(f"👑➡️🚫 Champion dethroned due to ban: {model_name} (hotkey: {hotkey[:16]}...)")
         except Exception as dethrone_error:
             logger.error(f"Error dethroning banned champion: {dethrone_error}")
-            # Continue - ban is still recorded
+        
+        # Auto-promote next eligible champion if we just dethroned one
+        if was_champion:
+            await promote_next_champion()
         
         return True
         
@@ -167,7 +259,8 @@ async def dethrone_banned_champions() -> int:
     Check all banned hotkeys and dethrone any that are still champions.
     
     This is a cleanup function that can be called periodically or manually
-    to ensure banned hotkeys don't remain as champions.
+    to ensure banned hotkeys don't remain as champions. After dethroning,
+    auto-promotes the next eligible model from today.
     
     Returns:
         Number of champions dethroned
@@ -203,6 +296,10 @@ async def dethrone_banned_champions() -> int:
                 dethroned_count += 1
                 model_name = result.data[0].get("model_name", "unknown")
                 logger.warning(f"👑➡️🚫 Dethroned banned champion: {model_name} (hotkey: {hotkey[:16]}...)")
+        
+        # Auto-promote next eligible champion if we dethroned anyone
+        if dethroned_count > 0:
+            await promote_next_champion()
         
         return dethroned_count
         

@@ -4993,7 +4993,8 @@ class Validator(BaseValidatorNeuron):
             return False  # On error, don't clear champion
     
     def _clear_qualification_champion_for_ban(self, banned_hotkey: str):
-        """Clear champion from local JSON due to hotkey ban."""
+        """Clear champion from local JSON due to hotkey ban, then check
+        Supabase for a new champion that the gateway may have auto-promoted."""
         try:
             champion_file = Path("validator_weights") / "qualification_champion.json"
             if not champion_file.exists():
@@ -5004,7 +5005,6 @@ class Validator(BaseValidatorNeuron):
             
             old_champion = data.get("current_champion")
             if old_champion:
-                # Track in dethronement history
                 if "dethronement_history" not in data:
                     data["dethronement_history"] = []
                 old_champion["dethroned_at"] = datetime.utcnow().isoformat()
@@ -5013,17 +5013,69 @@ class Validator(BaseValidatorNeuron):
             
             data["current_champion"] = None
             
-            with open(champion_file, 'w') as f:
-                json.dump(data, f, indent=2)
-            
             print(f"\n{'='*60}")
             print(f"🚨 CHAMPION DETHRONED (HOTKEY BANNED)")
             print(f"   Hotkey: {banned_hotkey[:20]}...")
-            print(f"   5% champion share → burn (UID 0)")
+            print(f"   Checking Supabase for auto-promoted replacement...")
+            print(f"{'='*60}")
+            
+            new_champion = self._fetch_current_champion_from_gateway()
+            if new_champion:
+                data["current_champion"] = new_champion
+                print(f"   👑 Found auto-promoted champion!")
+                print(f"      Model:  {new_champion.get('model_name', 'unknown')}")
+                print(f"      Miner:  {new_champion.get('miner_hotkey', 'unknown')[:20]}...")
+                print(f"      Score:  {new_champion.get('score', 0):.2f}")
+                print(f"      5% champion share → new champion")
+            else:
+                print(f"   📭 No replacement champion found")
+                print(f"   5% champion share → burn (UID 0)")
             print(f"{'='*60}\n")
+            
+            with open(champion_file, 'w') as f:
+                json.dump(data, f, indent=2)
             
         except Exception as e:
             bt.logging.error(f"Failed to clear banned champion: {e}")
+    
+    def _fetch_current_champion_from_gateway(self) -> Optional[Dict[str, Any]]:
+        """Query the gateway's /qualification/champion endpoint for the current
+        champion. Used to pick up a champion that the gateway auto-promoted
+        after a ban. Falls back gracefully if the gateway is unreachable."""
+        try:
+            import requests
+            
+            gateway_url = os.getenv("GATEWAY_URL", "http://52.91.135.79:8000")
+            response = requests.get(
+                f"{gateway_url}/qualification/champion",
+                timeout=15
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            champion = data.get("champion")
+            if not champion:
+                return None
+            
+            total_cost = champion.get("total_cost_usd") or 0
+            total_time = champion.get("total_time_seconds") or 0
+            num_leads = 100
+            
+            return {
+                "model_id": champion.get("model_id"),
+                "model_name": champion.get("model_name"),
+                "miner_hotkey": champion.get("miner_hotkey"),
+                "score": champion.get("score", 0),
+                "became_champion_at": champion.get("became_champion_at"),
+                "total_cost_usd": total_cost,
+                "total_time_seconds": total_time,
+                "avg_cost_per_lead_usd": champion.get("avg_cost_per_lead_usd", 0),
+                "avg_time_per_lead_seconds": champion.get("avg_time_per_lead_seconds", 0),
+                "num_leads_evaluated": num_leads,
+            }
+        except Exception as e:
+            bt.logging.warning(f"Failed to fetch champion from gateway: {e}")
+            return None
     
     def _clear_qualification_champion(self):
         """

@@ -471,11 +471,15 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
                 upstream_url = f"{upstream_url}?{parsed.query}"
             
             # ================================================================
-            # SPECIAL: ScrapingDog uses api_key as query parameter, not header
+            # SPECIAL: Providers that use query-parameter auth, not headers
             # ================================================================
             if provider == "scrapingdog" and api_key:
                 separator = "&" if "?" in upstream_url else "?"
                 upstream_url = f"{upstream_url}{separator}api_key={api_key}"
+            
+            elif provider == "builtwith" and api_key:
+                separator = "&" if "?" in upstream_url else "?"
+                upstream_url = f"{upstream_url}{separator}KEY={api_key}"
             
             # Get request body for POST (also extract model for cost calculation)
             body = None
@@ -623,10 +627,15 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
                     self.cost_tracker.add_cost(provider="desearch", cost_usd=cost)
                     logger.info(f"💰 Desearch [{description}]: ${cost:.6f}")
             
+            elif provider == "builtwith":
+                cost, description = self._calculate_builtwith_cost(endpoint, response)
+                if cost >= 0:
+                    self.cost_tracker.add_cost(provider="builtwith", cost_usd=cost)
+                    logger.info(f"💰 BuiltWith [{description}]: ${cost:.6f}")
+            
             else:
                 # For other paid providers, use fixed per-call cost
                 per_call_costs = {
-                    "builtwith": 0.05,       # $0.05 per call
                     "crunchbase": 0.01,      # $0.01 per call
                     "datauniverse": 0.00005, # $0.00005 per call
                     "googlenews": 0.001,     # $0.001 per call
@@ -768,6 +777,50 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
             # Default to web search cost
             return (0.0025, "unknown")
     
+    # BuiltWith free-plan endpoints and their cost structure
+    BUILTWITH_FREE_ENDPOINTS = {
+        "free1":  0.0,    # Free API - technology groups/categories
+        "lists12": 0.0,   # Lists API - sites using a technology
+        "trends": 0.0,    # Trends API - technology trend data
+    }
+    BUILTWITH_PAID_ENDPOINTS = {
+        "v22":        0.05,  # Domain API
+        "rv4":        0.05,  # Relationships API
+        "ctu3":       0.05,  # Company to URL API
+        "tag1":       0.05,  # Tags API
+        "rec1":       0.05,  # Recommendations API
+        "redirect1":  0.05,  # Redirects API
+        "kw2":        0.05,  # Keywords API
+        "productv1":  0.05,  # Product API
+        "trustv1":    0.05,  # Trust API
+        "social1":    0.05,  # Social API
+        "financial1": 0.05,  # Financial API
+    }
+
+    def _calculate_builtwith_cost(
+        self,
+        endpoint: str,
+        response: httpx.Response
+    ) -> Tuple[float, str]:
+        """
+        Calculate cost for a BuiltWith API call.
+
+        Free plan endpoints (free1, lists12, trends) cost $0.
+        Paid endpoints cost ~$0.05 per call (but will return errors on free plan).
+        """
+        # Extract the API prefix from the endpoint path
+        # e.g. "free1/api.json" -> "free1", "trends/v6/api.json" -> "trends"
+        prefix = endpoint.split("/")[0] if endpoint else ""
+
+        if prefix in self.BUILTWITH_FREE_ENDPOINTS:
+            return (0.0, f"builtwith/{prefix} (free)")
+
+        if prefix in self.BUILTWITH_PAID_ENDPOINTS:
+            cost = self.BUILTWITH_PAID_ENDPOINTS[prefix]
+            return (cost, f"builtwith/{prefix} (paid)")
+
+        return (0.0, f"builtwith/{prefix} (unknown)")
+
     def _send_json(self, data: Dict[str, Any]) -> None:
         """Send JSON response."""
         self.send_response(200)
@@ -800,7 +853,8 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
             pass
         
         elif provider == "builtwith":
-            headers["Authorization"] = f"Bearer {api_key}"
+            # BuiltWith uses KEY= query parameter, handled in do_GET/do_POST
+            pass
         
         elif provider == "crunchbase":
             headers["X-Cb-User-Key"] = api_key

@@ -287,6 +287,159 @@ def is_generic_intent_description(description: str) -> Tuple[bool, str]:
 
 
 # =============================================================================
+# Date Precision Verification (Mechanism-Based Gaming Detection)
+# =============================================================================
+
+# Month name/abbreviation mappings for date matching
+_MONTH_NAMES = {
+    1: ("january", "jan"),
+    2: ("february", "feb"),
+    3: ("march", "mar"),
+    4: ("april", "apr"),
+    5: ("may", "may"),
+    6: ("june", "jun"),
+    7: ("july", "jul"),
+    8: ("august", "aug"),
+    9: ("september", "sep"),
+    10: ("october", "oct"),
+    11: ("november", "nov"),
+    12: ("december", "dec"),
+}
+
+
+def strip_copyright_founded_years(content: str) -> str:
+    """
+    Remove copyright notices and founding year phrases from content so they
+    cannot serve as false date evidence.
+
+    Strips patterns like:
+        © 2024, Copyright 2024, (c) 2024
+        Founded 2015, Established 2010, Since 2008, Est. 2012
+
+    The year digits are replaced with "XXXX" so word boundaries remain intact
+    but the year can no longer match date searches.
+    """
+    # Copyright: © YYYY, (c) YYYY, Copyright YYYY (with optional surrounding text)
+    content = re.sub(
+        r'(?:©|\(c\)|copyright)\s*(?:©|\(c\))?\s*(?:19|20)\d{2}(?:\s*[-–]\s*(?:19|20)\d{2})?',
+        'XXXX',
+        content,
+        flags=re.IGNORECASE,
+    )
+    # Founded/Established/Since/Est.: "Founded in 2015", "Established 2010", "Since 2008"
+    content = re.sub(
+        r'(?:founded|established|since|est\.?)\s+(?:in\s+)?(?:19|20)\d{2}\b',
+        'XXXX',
+        content,
+        flags=re.IGNORECASE,
+    )
+    return content
+
+
+def check_date_precision(claimed_date: str, content: str) -> str:
+    """
+    Verify how precisely a claimed date appears in the source content.
+
+    This is the primary mechanism-based defense against date fabrication.
+    Instead of pattern-matching model code, it checks the OUTPUT: does the
+    claimed date actually appear in the scraped web content with sufficient
+    precision?
+
+    Args:
+        claimed_date: ISO-format date string (YYYY-MM-DD) from the model output
+        content: Scraped web content (already stripped of copyright/founded years)
+
+    Returns one of:
+        "verified"   – exact date (YYYY-MM-DD or "Month Day, Year") found in content
+        "approximate"– month+year found but not the exact day
+        "year_only"  – only the year is present (manufactured precision)
+        "no_match"   – the claimed year doesn't appear at all
+    """
+    try:
+        dt = datetime.strptime(claimed_date.strip()[:10], "%Y-%m-%d")
+    except (ValueError, AttributeError):
+        return "no_match"
+
+    year = dt.year
+    month = dt.month
+    day = dt.day
+    year_str = str(year)
+    month_names = _MONTH_NAMES.get(month, ())
+    content_lower = content.lower()
+
+    # ------------------------------------------------------------------
+    # Tier 1: Exact date match in any common format
+    # ------------------------------------------------------------------
+    # ISO: 2025-01-15
+    iso_date = f"{year:04d}-{month:02d}-{day:02d}"
+    if iso_date in content:
+        return "verified"
+
+    # "January 15, 2025" / "January 15 2025" / "15 January 2025"
+    for full_name, abbrev in [month_names] if month_names else []:
+        day_str = str(day)
+        day_padded = f"{day:02d}"
+        for m in (full_name, abbrev):
+            # Month Day, Year
+            if re.search(rf'\b{m}\s+{day_str}\b[,]?\s*{year_str}', content_lower):
+                return "verified"
+            if day_padded != day_str and re.search(rf'\b{m}\s+{day_padded}\b[,]?\s*{year_str}', content_lower):
+                return "verified"
+            # Day Month Year
+            if re.search(rf'\b{day_str}\s+{m}\b[,]?\s*{year_str}', content_lower):
+                return "verified"
+            if day_padded != day_str and re.search(rf'\b{day_padded}\s+{m}\b[,]?\s*{year_str}', content_lower):
+                return "verified"
+
+    # JSON-LD / schema.org: "datePosted":"2025-01-15", "datePublished":"2025-01-15"
+    if re.search(rf'date\w*["\']?\s*[:=]\s*["\']?{re.escape(iso_date)}', content_lower):
+        return "verified"
+
+    # MM/DD/YYYY or DD/MM/YYYY — check both orderings
+    slash_mdy = f"{month:02d}/{day:02d}/{year}"
+    slash_dmy = f"{day:02d}/{month:02d}/{year}"
+    if slash_mdy in content or slash_dmy in content:
+        return "verified"
+
+    # ------------------------------------------------------------------
+    # Tier 2: Month + Year match (approximate)
+    # ------------------------------------------------------------------
+    month_year_found = False
+
+    # "January 2025" / "Jan 2025"
+    for m in month_names:
+        if re.search(rf'\b{m}\s+{year_str}\b', content_lower):
+            month_year_found = True
+            break
+
+    # YYYY-MM (ISO prefix)
+    iso_month = f"{year:04d}-{month:02d}"
+    if iso_month in content:
+        month_year_found = True
+
+    # MM/YYYY
+    slash_my = f"{month:02d}/{year}"
+    if slash_my in content:
+        month_year_found = True
+
+    if month_year_found:
+        if day == 1:
+            return "approximate"
+        return "verified"
+
+    # ------------------------------------------------------------------
+    # Tier 3: Year-only match (manufactured precision)
+    # ------------------------------------------------------------------
+    if re.search(rf'\b{year_str}\b', content_lower):
+        return "year_only"
+
+    # ------------------------------------------------------------------
+    # Tier 4: No match at all
+    # ------------------------------------------------------------------
+    return "no_match"
+
+
+# =============================================================================
 # Main Verification Function
 # =============================================================================
 
@@ -377,6 +530,48 @@ async def verify_intent_signal(
         logger.error(f"LLM verification failed: {e}")
         return False, 0, f"LLM verification error: {str(e)[:100]}", "fabricated"
     
+    # ── Programmatic date precision override ──
+    # The LLM sometimes accepts "2025-01-01" as "roughly matching" content
+    # that merely mentions "2025". This programmatic check catches that.
+    if intent_signal.date and date_status != "fabricated":
+        stripped_content = strip_copyright_founded_years(text[:CONTENT_MAX_LENGTH])
+        precision = check_date_precision(intent_signal.date, stripped_content)
+
+        if precision == "year_only" and date_status == "verified":
+            date_status = "no_date"
+            confidence = min(confidence, 50)
+            reason = (
+                f"Date precision override: only the year appears in content, "
+                f"month/day were manufactured. {reason}"
+            )
+            logger.warning(
+                f"⚠️ Date precision downgrade: {intent_signal.date} → year_only "
+                f"(treating as no_date)"
+            )
+        elif precision == "no_match" and date_status == "verified":
+            date_status = "fabricated"
+            confidence = 0
+            reason = (
+                f"Date precision override: claimed year not found in content at all. "
+                f"{reason}"
+            )
+            logger.warning(
+                f"❌ Date precision rejection: {intent_signal.date} → no_match "
+                f"(treating as fabricated)"
+            )
+
+        if precision in ("verified", "approximate"):
+            logger.info(
+                f"✓ Date precision confirmed: {intent_signal.date} → {precision}"
+            )
+    
+    # Re-apply threshold after potential override
+    if date_status == "fabricated":
+        confidence = 0
+        verified = False
+    else:
+        verified = verified and confidence >= CONFIDENCE_THRESHOLD
+
     # Cache result
     await cache_verification(
         cache_key=cache_key,
@@ -1016,15 +1211,39 @@ VERIFICATION REQUIREMENTS:
 NOTE: Do NOT check for employee count, geography, or company stage — those are verified separately.
 
 DATE VERIFICATION (THREE possible outcomes):
-- "verified": Content has a date/timestamp that roughly matches the claimed date
-- "no_date": Content genuinely has NO dates/timestamps at all — you simply cannot verify
-- "fabricated": Content has dates that CONTRADICT the claimed date, OR the claimed date is
-  suspiciously convenient (exactly 7/14/21/30 days ago) with no dates in content to support it
+- "verified": Content has a SPECIFIC date/timestamp (with month and day) that matches the claimed date.
+  The date must appear with at least month+year precision — a bare year is NOT enough.
+- "no_date": Content genuinely has NO dates/timestamps at all, or only has bare years with no
+  month/day context. You simply cannot verify the specific date.
+- "fabricated": Content has dates that CONTRADICT the claimed date, OR the claimed date shows
+  MANUFACTURED PRECISION (see below).
+
+CRITICAL — MANUFACTURED DATE PRECISION (common gaming technique):
+A model may find the string "2025" on a page and claim the date "2025-01-01". The year IS on the
+page, but the month and day were INVENTED. This is fabrication. Specific rules:
+- If content only mentions a YEAR (e.g., "2025", "in 2024") but the claimed date is a specific
+  day like "2025-01-01" or "2024-06-15", the month and day were manufactured → "fabricated"
+- COPYRIGHT DATES are NOT signal dates. "© 2024" or "Copyright 2025" in a page footer is a
+  website attribute, not an intent event. If the ONLY year reference is a copyright notice,
+  the date is "fabricated"
+- FOUNDING DATES are NOT signal dates. "Founded in 2015" or "Established 2010" is company
+  metadata, not a temporal intent signal. If the date derives from a founding year, it is "fabricated"
+- First-of-month dates (YYYY-01-01, YYYY-MM-01) are suspicious — real events rarely happen on
+  exactly the 1st. If there is no explicit "January 1" or "1st of January" in the content,
+  this is likely manufactured precision → "fabricated"
 
 Examples of FABRICATED dates (date_status = "fabricated"):
-- Claimed "2026-02-04" but content shows article dated "2025-11-15"
-- Claimed exactly 14 days ago and page has zero dates (suspiciously convenient)
+- Claimed "2025-01-01" but content only mentions "2025" as a year — month/day were invented
+- Claimed "2024-06-01" but content has "© 2024" in footer — copyright is not an intent date
+- Claimed "2015-01-01" and content says "Founded in 2015" — founding year is not intent
+- Claimed "2026-02-04" but content shows article dated "2025-11-15" — dates contradict
+- Claimed exactly 14 days ago and page has zero dates — suspiciously convenient timedelta
 - Claimed a specific recent date but URL is clearly an old/static page with a visible older date
+
+Examples of VERIFIED dates (date_status = "verified"):
+- Content says "Posted January 15, 2026" and claimed date is "2026-01-15" — exact match
+- Content says "Published Feb 2026" and claimed date is "2026-02-01" — month matches
+- Job posting with datePosted: "2026-01-20" matching claimed "2026-01-20"
 
 Examples of NO DATE (date_status = "no_date"):
 - Company homepage with no timestamps anywhere — impossible to verify any date
@@ -1039,6 +1258,8 @@ Examples:
 {{"verified": false, "confidence": 30, "reason": "Job posting exists but no evidence this is a healthcare company as ICP requires.", "icp_evidence_found": false, "date_status": "verified"}}
 {{"verified": false, "confidence": 10, "reason": "Claim is generic 'actively operating' - no specific intent shown.", "icp_evidence_found": false, "date_status": "no_date"}}
 {{"verified": false, "confidence": 20, "reason": "Content dated Nov 2025 but claimed date is Feb 2026. Date appears fabricated.", "icp_evidence_found": true, "date_status": "fabricated"}}
+{{"verified": false, "confidence": 15, "reason": "Claimed 2025-01-01 but content only mentions '2025' as a year. Month and day were manufactured.", "icp_evidence_found": true, "date_status": "fabricated"}}
+{{"verified": false, "confidence": 10, "reason": "Date derives from copyright footer '© 2024', not an intent event.", "icp_evidence_found": false, "date_status": "fabricated"}}
 """
     
     try:

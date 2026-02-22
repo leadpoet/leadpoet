@@ -255,7 +255,8 @@ GENERIC_INTENT_FALLBACK_PATTERNS = [
     r'f["\'][^"\']*operating\s+in\s+\{[^}]*industry',
     
     # Pattern: Deterministic fallback comment followed by generic return
-    r'#.*(?:fallback|conservative|default|generic)[\s\S]{0,200}return\s*\{[^}]*description',
+    # Use [^\n]* instead of .* to stay on the comment line (avoids O(n²) with DOTALL)
+    r'#[^\n]*(?:fallback|conservative|default|generic)[\s\S]{0,200}return\s*\{[^}]*description',
     
     # Pattern: date.today() - timedelta(days=N) with hardcoded N (not extracted from content)
     # This is a fallback date pattern - real dates should be extracted from content
@@ -296,6 +297,80 @@ LOW_VALUE_INTENT_SOURCES = [
     r'source\s*=\s*["\']other["\']',
 ]
 
+# === BARE-YEAR DATE MANUFACTURING PATTERNS (HIGH SEVERITY) ===
+# These detect the mechanism of extracting a bare year from text (e.g., "2025")
+# and appending "-01-01" to manufacture a complete ISO date. This is synthetic --
+# finding the string "2025" somewhere on a page does NOT mean anything happened
+# on 2025-01-01. Real dates have month and day extracted from structured data.
+#
+# Pattern chain: re.findall(r'\b(20\d{2})\b', text) → f"{max(yrs)}-01-01"
+BARE_YEAR_DATE_FABRICATION_PATTERNS = [
+    # f-string or format with year var + "-01-01"
+    r'f["\'][^"\']*\{[^}]*\}-01-01["\']',
+    # Assignment: sig_date = f"{...}-01-01"  or sig_date = f"{max(...)}-01-01"
+    r'sig_date\s*=\s*f["\'][^"\']*-01-01["\']',
+    # Any variable = f"{something}-01-01"
+    r'\w+\s*=\s*f["\'][^"\']*\{[^}]*\}-01-01["\']',
+    # Regex extracting bare years (\b20\d{2}\b) followed by -01-01 within 200 chars
+    # Use [^"']* instead of .* to avoid catastrophic backtracking with re.DOTALL
+    r'findall\s*\(\s*r?["\'][^"\']*20\\d\{2\}[^"\']*["\']\s*,[\s\S]{0,200}-01-01',
+    # date.today().year used to construct a date string
+    r'date\.today\s*\(\s*\)\.year[\s\S]{0,100}-01-01',
+    r'date\.today\s*\(\s*\)\.year[\s\S]{0,100}-\{[^}]*month',
+    # Hardcoded date strings like "2025-06-01" assigned to sig_date/signal date
+    r'sig_date\s*=\s*["\']20\d{2}-\d{2}-01["\']',
+]
+
+# === COPYRIGHT / FOUNDED YEAR AS INTENT DATE PATTERNS (HIGH SEVERITY) ===
+# Copyright notices ("© 2024") and founding years ("founded in 2015") are
+# NOT intent signals. Treating them as intent dates is fabrication because:
+# - "© 2024" means the page footer was updated, not that a buying signal occurred
+# - "Founded 2015" is a company attribute, not an event indicating purchase intent
+# These are structural truths about the company, not temporal intent signals.
+COPYRIGHT_FOUNDED_DATE_PATTERNS = [
+    # Copyright regex extracting year → date construction
+    r'(?:©|copyright)\s*\(?\s*20\\d',
+    r're\.finditer\s*\([^)]*(?:©|copyright)[^)]*20\\d',
+    # Founded/established regex extracting year
+    r're\.finditer\s*\([^)]*(?:founded|established|since|est)\b',
+    # founded_year → date string construction (within 300 chars)
+    r'founded_year[\s\S]{0,300}f["\'][^"\']*\{founded_year\}',
+    r'founded_year[\s\S]{0,100}-01-01',
+]
+
+# === FABRICATED VERIFICATION / SCORING BYPASS PATTERNS (CRITICAL SEVERITY) ===
+# These detect dict literals with hardcoded numeric confidence/score values
+# that bypass the real LLM verification pipeline. When a model creates a
+# "stub verification" with invented numbers, it circumvents the scoring system.
+FABRICATED_VERIFICATION_PATTERNS = [
+    # Dict with "confidence" and hardcoded integer
+    r'stub_verification\s*=\s*\{',
+    # Hardcoded confidence/intent/score values in a dict literal
+    r'["\']confidence["\']\s*:\s*\d+\s*,\s*["\']intent_final["\']\s*:\s*[\d.]+',
+    r'["\']raw_llm_score["\']\s*:\s*\d+',
+    r'["\']intent_final["\']\s*:\s*[\d.]+\s*,\s*["\']raw_llm_score["\']\s*:\s*\d+',
+    # Any dict literal with 3+ hardcoded numeric scoring fields
+    r'\{\s*["\']confidence["\']\s*:\s*\d+[\s\S]{0,200}["\'](?:intent|score|llm)',
+]
+
+# === FABRICATED EVIDENCE DESCRIPTION TEMPLATES (HIGH SEVERITY) ===
+# These detect f-string templates that claim evidence-based statements
+# ("hiring signals", "funding news", "growth indicators") without any
+# variable containing actual scraped evidence. The description is a template
+# that would be "true" for any company, providing zero real signal value.
+FABRICATED_DESCRIPTION_PATTERNS = [
+    # Templates claiming specific signals without evidence
+    r'f["\'][^"\']*\{[^}]*business[^}]*\}[^"\']*(?:hiring signals|funding news)',
+    r'f["\'][^"\']*hiring signals[^"\']*funding news',
+    r'f["\'][^"\']*team growth signals',
+    r'f["\'][^"\']*sector developments[^"\']*growth indicators',
+    # "Profile showing" template pattern (specific to fabricated evidence)
+    r'["\'].*Profile showing[^"\']*(?:hiring|funding)',
+    # Generic fallback descriptions that are true for any company
+    r'f["\'][^"\']*\{[^}]*\}[^"\']*job postings and growth',
+    r'f["\'][^"\']*Linked source includes',
+]
+
 
 STATIC_CHECK_TIMEOUT_SECONDS = 30
 
@@ -322,21 +397,59 @@ def _run_static_gaming_checks(code_content: str) -> Tuple[bool, List[str], int]:
         - red_flags: List of specific patterns found
         - confidence_score: 0-100 (higher = more likely gaming)
     """
+    import threading
     import signal
-    
-    def _timeout_handler(signum, frame):
-        raise TimeoutError("Static gaming checks exceeded time limit")
-    
-    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(STATIC_CHECK_TIMEOUT_SECONDS)
-    try:
-        return _run_static_gaming_checks_inner(code_content)
-    except TimeoutError:
-        logger.warning(f"Static gaming checks timed out after {STATIC_CHECK_TIMEOUT_SECONDS}s — flagging for LLM review")
-        return True, ["Static analysis timed out (possible obfuscation)"], 40
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+
+    # Try signal-based timeout first (works on main thread only).
+    # Fall back to thread-based timeout for worker threads / Docker workers
+    # where signal.SIGALRM silently does nothing.
+    is_main_thread = threading.current_thread() is threading.main_thread()
+
+    if is_main_thread:
+        def _timeout_handler(signum, frame):
+            raise TimeoutError("Static gaming checks exceeded time limit")
+
+        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(STATIC_CHECK_TIMEOUT_SECONDS)
+        try:
+            return _run_static_gaming_checks_inner(code_content)
+        except TimeoutError:
+            logger.warning(f"Static gaming checks timed out after {STATIC_CHECK_TIMEOUT_SECONDS}s — flagging for LLM review")
+            return True, ["Static analysis timed out (possible obfuscation)"], 40
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
+        # Thread-safe fallback: run in a daemon thread with a hard deadline
+        result_box: list = []
+        error_box: list = []
+
+        def _worker():
+            try:
+                result_box.append(_run_static_gaming_checks_inner(code_content))
+            except Exception as exc:
+                error_box.append(exc)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=STATIC_CHECK_TIMEOUT_SECONDS)
+
+        if t.is_alive():
+            logger.warning(
+                f"Static gaming checks timed out after {STATIC_CHECK_TIMEOUT_SECONDS}s "
+                f"(thread-based timeout) — flagging for LLM review"
+            )
+            return True, ["Static analysis timed out (possible obfuscation)"], 40
+
+        if error_box:
+            logger.error(f"Static gaming checks error: {error_box[0]}")
+            return True, [f"Static analysis error: {error_box[0]}"], 30
+
+        if result_box:
+            return result_box[0]
+
+        logger.error("Static gaming checks returned no result")
+        return True, ["Static analysis returned no result"], 30
 
 
 def _run_static_gaming_checks_inner(code_content: str) -> Tuple[bool, List[str], int]:
@@ -558,6 +671,74 @@ def _run_static_gaming_checks_inner(code_content: str) -> Tuple[bool, List[str],
         red_flags.append("Suspicious role/seniority fallback to ICP values (needs LLM review)")
         confidence = max(confidence, 55)
     
+    # ==========================================================================
+    # BARE-YEAR DATE MANUFACTURING DETECTION (HIGH SEVERITY)
+    # ==========================================================================
+    # Extracting a bare year ("2025") from text and appending "-01-01" to
+    # manufacture a complete date. Finding "2025" on a page doesn't mean
+    # anything happened on 2025-01-01. Also catches date.today().year fabrication.
+    bare_year_matches = 0
+    for pattern in BARE_YEAR_DATE_FABRICATION_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+            bare_year_matches += 1
+
+    if bare_year_matches >= 2:
+        red_flags.append(f"BARE-YEAR DATE FABRICATION: Extracts bare years from text and manufactures dates with '-01-01' ({bare_year_matches} patterns) - dates must have real month/day from structured data")
+        confidence = max(confidence, 80)
+    elif bare_year_matches == 1:
+        red_flags.append("Suspicious bare-year date construction (year + '-01-01') - needs LLM review")
+        confidence = max(confidence, 55)
+
+    # ==========================================================================
+    # COPYRIGHT / FOUNDED YEAR AS INTENT DATE DETECTION (HIGH SEVERITY)
+    # ==========================================================================
+    # Copyright notices and founding years are company metadata, not intent signals.
+    copyright_founded_matches = 0
+    for pattern in COPYRIGHT_FOUNDED_DATE_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+            copyright_founded_matches += 1
+
+    if copyright_founded_matches >= 2:
+        red_flags.append(f"COPYRIGHT/FOUNDED YEAR AS INTENT DATE: Treats copyright notices or founding years as intent signal dates ({copyright_founded_matches} patterns) - these are company metadata, not buying signals")
+        confidence = max(confidence, 75)
+    elif copyright_founded_matches == 1:
+        red_flags.append("Suspicious copyright/founded year date extraction (needs LLM review)")
+        confidence = max(confidence, 45)
+
+    # ==========================================================================
+    # FABRICATED VERIFICATION / SCORING BYPASS DETECTION (CRITICAL SEVERITY)
+    # ==========================================================================
+    # Dict literals with hardcoded confidence/score values that bypass
+    # the real LLM verification pipeline.
+    fabricated_verif_matches = 0
+    for pattern in FABRICATED_VERIFICATION_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+            fabricated_verif_matches += 1
+
+    if fabricated_verif_matches >= 2:
+        red_flags.append(f"FABRICATED VERIFICATION: Hardcoded confidence/score values bypass LLM verification ({fabricated_verif_matches} patterns) - stub_verification with invented metrics")
+        confidence = max(confidence, 88)
+    elif fabricated_verif_matches == 1:
+        red_flags.append("Suspicious hardcoded verification/scoring values (needs LLM review)")
+        confidence = max(confidence, 60)
+
+    # ==========================================================================
+    # FABRICATED EVIDENCE DESCRIPTION TEMPLATES (HIGH SEVERITY)
+    # ==========================================================================
+    # F-string descriptions that claim evidence ("hiring signals", "funding news")
+    # without any actual scraped evidence. True for any company = zero signal.
+    fabricated_desc_matches = 0
+    for pattern in FABRICATED_DESCRIPTION_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+            fabricated_desc_matches += 1
+
+    if fabricated_desc_matches >= 2:
+        red_flags.append(f"FABRICATED DESCRIPTIONS: Template descriptions claim evidence (hiring signals, funding news, growth indicators) without real scraped data ({fabricated_desc_matches} patterns)")
+        confidence = max(confidence, 82)
+    elif fabricated_desc_matches == 1:
+        red_flags.append("Suspicious template description claiming evidence without scraped data (needs LLM review)")
+        confidence = max(confidence, 55)
+
     # ==========================================================================
     # SOURCE TYPE INFLATION DETECTION (MEDIUM-HIGH SEVERITY)
     # ==========================================================================
@@ -968,6 +1149,35 @@ These are ACTUAL ICPs this model will be evaluated against:
    - The model appears legitimate on a quick read because the real code exists - but in production, the fallbacks fire frequently (pages fail to load, dates aren't found)
    - **KEY QUESTION**: What percentage of outputs would use real vs fabricated data? If every failure path fabricates, the model is gaming with plausible deniability
 
+10. **Bare-Year Date Manufacturing**: Extracting a bare year (`\b20\d{{2}}\b` or `\b19\d{{2}}\b`) from page text and appending `-01-01` to manufacture a complete ISO date:
+   - `re.findall(r'\b(20\d{{2}})\b', text)` → `f"{{max(yrs)}}-01-01"` — finding "2025" somewhere on a page does NOT mean anything happened on 2025-01-01
+   - `f"{{date.today().year}}-01-01"` — the current year is NOT an intent date
+   - `sig_date = "2025-06-01"` — hardcoded date strings with month=first-of-month are fabricated
+   - Real dates must have day AND month extracted from structured data (JSON-LD datePosted, meta tags, explicit date formats like "January 15, 2026")
+   - If no real date is found, the model should return None, NOT manufacture one from a bare year
+
+11. **Copyright/Founded Year as Intent Date**: Copyright notices and founding years are company metadata, NOT intent signals:
+    - `(?:©|copyright)\s*(20\d{{2}})` → `date(yr, 1, 1)` — a copyright footer does NOT indicate buying intent
+    - `(?:founded|established|since)\s+(?:in\s+)?((?:19|20)\d{{2}})` → `date(yr, 1, 1)` — when a company was founded is NOT an intent signal
+    - `founded_year` → `f"{{founded_year}}-01-01"` — the founding year from LinkedIn is company metadata
+    - These dates will always be "recent enough" to avoid time decay penalties, which is exactly the gaming incentive
+    - **KEY**: If you see copyright/founded regex extraction followed by date construction, this is fabrication even though the year itself is real — the manufactured DATE is synthetic
+
+12. **Fabricated Verification / Scoring Bypass**: Creating a `stub_verification` dict with hardcoded numeric values that bypass the real LLM verification pipeline:
+    - `stub_verification = {{"confidence": 15, "intent_final": 0.6, "raw_llm_score": 8, ...}}` — ALL numbers are invented
+    - The real pipeline calls an LLM to evaluate confidence, intent score, etc. — this skips that entirely
+    - Look for dict literals where `confidence`, `intent_final`, `raw_llm_score` (or similar scoring field names) are assigned hardcoded numeric constants
+    - The URL and text may be real (scraped from a page), but the SCORING is fabricated — the LLM never evaluated this evidence
+    - This is HIGH severity because it bypasses the most important quality gate
+
+13. **Fabricated Evidence Description Templates**: F-string descriptions that claim evidence-based statements without any actual scraped evidence:
+    - `f"{{business}} — Profile showing hiring signals, funding news, and {{industry}} sector developments."` — NONE of these claims come from real data
+    - `"Linked source includes job postings and growth indicators"` — never verified
+    - `"See profile for digital transformation and team growth signals"` — completely made up
+    - These are designed to contain keywords that score well with the LLM intent verifier, but they describe a FANTASY
+    - **KEY**: Trace where the description STRING comes from. If it's an f-string template with generic claims rather than extracted text from a real URL, it's fabricated
+    - A real description would be extracted text from a scraped page, NOT a template filled with the company name
+
 **Phase 3: Trace ICP flow through the code**
 
 - Is `icp["industry"]` used in database queries?
@@ -993,8 +1203,14 @@ These are ACTUAL ICPs this model will be evaluated against:
 - Seniority/role stamping from ICP values (item 7)
 - Source type inflation (/careers as job_board) (item 8)
 - Defensive fallback pattern with fabrication on every failure path (item 9)
+- Bare-year date manufacturing (item 10) — appending "-01-01" to a bare year
+- Copyright/founded year as intent date (item 11) — company metadata ≠ intent
+- Fabricated verification/scoring bypass (item 12) — hardcoded confidence/score values
+- Fabricated evidence description templates (item 13) — template descriptions claiming evidence
 
-A model with MULTIPLE of these patterns (e.g., date fabrication + ICP echo-back + seniority stamping) is 95-100% confidence gaming.
+A model with MULTIPLE of these patterns (e.g., date fabrication + fabricated verification + template descriptions) is 95-100% confidence gaming.
+
+**BE SKEPTICAL**: A model that appears to have a real scraping pipeline but manufactures dates, descriptions, or verification scores on EVERY fallback path is gaming. The existence of legitimate code paths does NOT excuse fabrication on failure paths.
 
 ## Response Format
 

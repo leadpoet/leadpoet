@@ -5398,41 +5398,55 @@ class Validator(BaseValidatorNeuron):
             code_content: JSON string of code files for display (optional)
             score_breakdown: Detailed evaluation breakdown with top/bottom leads (mandatory for new evals)
         """
-        try:
-            import httpx
-            
-            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
-            
-            payload = {
-                "model_id": model_id,
-                "became_champion": became_champion,
-                "score": score,
-                "is_rebenchmark": is_rebenchmark,
-                "was_dethroned": was_dethroned,
-                "determined_by": "validator"
-            }
-            
-            # Add optional fields if provided (for full DB update)
-            if evaluation_cost_usd is not None:
-                payload["evaluation_cost_usd"] = evaluation_cost_usd
-            if evaluation_time_seconds is not None:
-                payload["evaluation_time_seconds"] = evaluation_time_seconds
-            if code_content is not None:
-                payload["code_content"] = code_content
-            if score_breakdown is not None:
-                payload["score_breakdown"] = score_breakdown
-            
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{gateway_url}/qualification/validator/champion-status",
-                    json=payload
+        import httpx
+        
+        gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+        url = f"{gateway_url}/qualification/validator/champion-status"
+        
+        payload = {
+            "model_id": model_id,
+            "became_champion": became_champion,
+            "score": score,
+            "is_rebenchmark": is_rebenchmark,
+            "was_dethroned": was_dethroned,
+            "determined_by": "validator"
+        }
+        
+        # Add optional fields if provided (for full DB update)
+        if evaluation_cost_usd is not None:
+            payload["evaluation_cost_usd"] = evaluation_cost_usd
+        if evaluation_time_seconds is not None:
+            payload["evaluation_time_seconds"] = evaluation_time_seconds
+        if code_content is not None:
+            payload["code_content"] = code_content
+        if score_breakdown is not None:
+            payload["score_breakdown"] = score_breakdown
+        
+        MAX_RETRIES = 5
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(url, json=payload)
+                    response.raise_for_status()
+                    bt.logging.info(f"✅ Notified gateway of champion status: model={model_id[:8]}..., became_champion={became_champion}, was_dethroned={was_dethroned}")
+                    return  # Success
+                    
+            except Exception as e:
+                bt.logging.warning(
+                    f"Gateway champion notification attempt {attempt}/{MAX_RETRIES} failed: "
+                    f"{type(e).__name__}: {e}"
                 )
-                response.raise_for_status()
-                bt.logging.info(f"✅ Notified gateway of champion status: model={model_id[:8]}..., became_champion={became_champion}, was_dethroned={was_dethroned}")
-                
-        except Exception as e:
-            # Non-critical - local JSON is source of truth
-            bt.logging.warning(f"Failed to notify gateway of champion status: {e}")
+                if attempt < MAX_RETRIES:
+                    wait = 2 ** attempt  # 2, 4, 8, 16s
+                    bt.logging.info(f"   Retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+        
+        # All retries exhausted — log a loud error (this should never happen)
+        bt.logging.error(
+            f"🚨 CRITICAL: Gateway champion notification FAILED after {MAX_RETRIES} attempts! "
+            f"model={model_id}, became_champion={became_champion}, was_dethroned={was_dethroned}, "
+            f"score={score}. Supabase may be out of sync."
+        )
 
     # ═══════════════════════════════════════════════════════════════════════════
     # DEDICATED QUALIFICATION WORKERS: Assignment at Epoch Start
@@ -5856,8 +5870,11 @@ class Validator(BaseValidatorNeuron):
                     print(f"      👎 CHAMPION DETHRONED! Score {avg_score:.2f} < minimum {MINIMUM_CHAMPION_SCORE}")
                     print(f"         There is now NO CHAMPION until a model scores >= {MINIMUM_CHAMPION_SCORE}")
                     
-                    # Clear local champion
+                    # Clear local champion AND update loop state so subsequent
+                    # models in this batch are compared correctly (not against stale score)
                     self._clear_qualification_champion()
+                    current_champion_score = 0.0
+                    current_champion_id = None
                     was_dethroned = True
                     became_champion = False
                 else:
@@ -5873,6 +5890,7 @@ class Validator(BaseValidatorNeuron):
                         total_time_seconds=total_time,
                         num_leads=num_leads
                     )
+                    current_champion_score = avg_score
                     became_champion = True  # Still champion after rebenchmark
             else:
                 # New challenger - check if beats champion AND meets minimum threshold
@@ -5901,24 +5919,21 @@ class Validator(BaseValidatorNeuron):
                 else:
                     print(f"      ❌ Did not beat champion ({avg_score:.2f} <= {threshold_score:.2f})")
             
-            # Notify gateway
-            try:
-                code_content = result.get("code_content")
-                score_breakdown = result.get("score_breakdown")
-                
-                await self._notify_gateway_champion_status(
-                    model_id=model_id,
-                    became_champion=became_champion,
-                    score=avg_score,
-                    is_rebenchmark=is_rebenchmark,
-                    was_dethroned=was_dethroned,
-                    evaluation_cost_usd=total_cost,
-                    evaluation_time_seconds=int(total_time),
-                    code_content=code_content,
-                    score_breakdown=score_breakdown
-                )
-            except Exception as e:
-                print(f"      ⚠️ Failed to notify gateway: {e}")
+            # Notify gateway (retries internally, never raises)
+            code_content = result.get("code_content")
+            score_breakdown = result.get("score_breakdown")
+            
+            await self._notify_gateway_champion_status(
+                model_id=model_id,
+                became_champion=became_champion,
+                score=avg_score,
+                is_rebenchmark=is_rebenchmark,
+                was_dethroned=was_dethroned,
+                evaluation_cost_usd=total_cost,
+                evaluation_time_seconds=int(total_time),
+                code_content=code_content,
+                score_breakdown=score_breakdown
+            )
         
         print(f"\n{'='*70}")
         print(f"✅ QUALIFICATION PROCESSING COMPLETE")

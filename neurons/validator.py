@@ -4954,7 +4954,11 @@ class Validator(BaseValidatorNeuron):
             if champion_hotkey and self._is_champion_hotkey_banned(champion_hotkey):
                 bt.logging.warning(f"🚨 Champion hotkey {champion_hotkey[:20]}... is BANNED - clearing local champion")
                 self._clear_qualification_champion_for_ban(champion_hotkey)
-                return None
+                # Re-read: _clear_qualification_champion_for_ban may have written
+                # an auto-promoted replacement from the gateway
+                with open(champion_file, 'r') as f:
+                    refreshed = json.load(f)
+                return refreshed.get("current_champion")
             
             return champion
             

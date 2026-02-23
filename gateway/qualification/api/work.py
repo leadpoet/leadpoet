@@ -1596,7 +1596,7 @@ async def get_current_champion() -> Optional[Dict[str, Any]]:
         # Query qualification_models for the current champion
         # Include evaluation_cost_usd and evaluation_time_seconds for avg calculations
         result = supabase.table("qualification_models").select(
-            "id, miner_hotkey, score, model_name, champion_at, evaluation_cost_usd, evaluation_time_seconds"
+            "id, miner_hotkey, score, model_name, champion_at, evaluation_cost_usd, evaluation_time_seconds, evaluated_at"
         ).eq("is_champion", True).limit(1).execute()
         
         if result.data:
@@ -1619,7 +1619,8 @@ async def get_current_champion() -> Optional[Dict[str, Any]]:
                 "total_cost_usd": total_cost,
                 "total_time_seconds": total_time,
                 "avg_cost_per_lead_usd": total_cost / num_leads if num_leads > 0 else 0,
-                "avg_time_per_lead_seconds": total_time / num_leads if num_leads > 0 else 0
+                "avg_time_per_lead_seconds": total_time / num_leads if num_leads > 0 else 0,
+                "evaluated_at": champion.get("evaluated_at")
             }
         
         logger.info("📭 No current champion - first valid model will become champion")

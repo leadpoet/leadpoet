@@ -2987,14 +2987,14 @@ class Validator(BaseValidatorNeuron):
             # Log what we have
             has_rolling_history = bool(rolling_scores)
             
-            print(f"\n{'='*80}")
-            print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
-            print(f"{'='*80}")
-            print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
+                print(f"\n{'='*80}")
+                print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
+                print(f"{'='*80}")
+                print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
             print(f"   Rolling {ROLLING_WINDOW} epoch miners: {len(rolling_scores)}")
             print(f"   Rolling {ROLLING_WINDOW} epoch leads: {rolling_lead_count:,}")
             print(f"   Sourcing floor threshold: {SOURCING_FLOOR_THRESHOLD:,}")
-            print()
+                print()
             
             # CRITICAL: Verify UID 0 is the expected LeadPoet hotkey (safety check)
             try:
@@ -3069,20 +3069,20 @@ class Validator(BaseValidatorNeuron):
                 print(f"      Miners have left the subnet or are not registered")
                 print(f"   🔥 Submitting 100% burn weights...")
                 
-                result = self.subtensor.set_weights(
-                    netuid=self.config.netuid,
-                    wallet=self.wallet,
+                    result = self.subtensor.set_weights(
+                        netuid=self.config.netuid,
+                        wallet=self.wallet,
                     uids=[UID_ZERO],
-                    weights=[1.0],
-                    wait_for_finalization=True
-                )
-                
-                if result:
-                    print(f"   ✅ Burn weights submitted successfully")
-                    self._last_weight_submission_epoch = current_epoch
-                    return True
-                else:
-                    print(f"   ❌ Failed to submit burn weights")
+                        weights=[1.0],
+                        wait_for_finalization=True
+                    )
+                    
+                    if result:
+                        print(f"   ✅ Burn weights submitted successfully")
+                        self._last_weight_submission_epoch = current_epoch
+                        return True
+                    else:
+                        print(f"   ❌ Failed to submit burn weights")
                     return False
             
             # ═══════════════════════════════════════════════════════════════════
@@ -3096,7 +3096,7 @@ class Validator(BaseValidatorNeuron):
             deregistered_rolling_points = all_rolling_total - registered_rolling_total
             
             # Log deregistered miners
-            if deregistered_rolling_points > 0:
+                if deregistered_rolling_points > 0:
                 print(f"   ⚠️  Deregistered miners: {deregistered_rolling_points:,} pts → share goes to BURN")
             
             # ═══════════════════════════════════════════════════════════════════
@@ -4495,7 +4495,33 @@ class Validator(BaseValidatorNeuron):
                         bt.logging.warning(f"Sandbox cleanup error: {e}")
             
             # Calculate final average score
-            avg_score = total_score / leads_scored if leads_scored > 0 else 0.0
+            raw_avg_score = total_score / leads_scored if leads_scored > 0 else 0.0
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # FABRICATION INTEGRITY PENALTY
+            # A model that fabricates dates on X% of leads is fundamentally
+            # untrustworthy. A paying client would receive fake data on X% of
+            # their leads — that's not a champion model.
+            #
+            # Penalty kicks in above 5% fabrication (buffer for false positives).
+            # Above 5%, each percentage point of fabrication costs 3% of the
+            # score. This means:
+            #   10% fabrication → 0.85x  (15% penalty)
+            #   20% fabrication → 0.55x  (45% penalty)
+            #   30% fabrication → 0.25x  (75% penalty)
+            #   35%+ fabrication → 0      (disqualified)
+            # ═══════════════════════════════════════════════════════════════════
+            FABRICATION_TOLERANCE = 0.05  # 5% false-positive buffer
+            FABRICATION_PENALTY_STEEPNESS = 3.0  # How aggressively to penalize
+            
+            fabrication_rate = fabrication_count / leads_scored if leads_scored > 0 else 0.0
+            integrity_multiplier = 1.0
+            
+            if fabrication_rate > FABRICATION_TOLERANCE:
+                excess = fabrication_rate - FABRICATION_TOLERANCE
+                integrity_multiplier = max(0.0, 1.0 - (excess * FABRICATION_PENALTY_STEEPNESS))
+            
+            avg_score = raw_avg_score * integrity_multiplier
             
             print(f"\n{'='*60}")
             if early_stop_reason == "fabrication_detected":
@@ -4508,7 +4534,12 @@ class Validator(BaseValidatorNeuron):
             print(f"   Model: {work.get('model_name', 'Unknown')}")
             print(f"   Miner: {work.get('miner_hotkey', 'Unknown')[:16]}...")
             print(f"   ICPs evaluated: {run_idx if 'run_idx' in dir() else len(runs)}/{len(runs)}")
-            print(f"   📊 Final Score: {avg_score:.2f} / 100 (avg per ICP)")
+            if integrity_multiplier < 1.0:
+                print(f"   📊 Raw Score: {raw_avg_score:.2f} / 100")
+                print(f"   🚨 Fabrication: {fabrication_count}/{leads_scored} leads ({fabrication_rate:.0%}) → integrity penalty {integrity_multiplier:.2f}x")
+                print(f"   📊 Final Score: {avg_score:.2f} / 100 (after integrity penalty)")
+            else:
+                print(f"   📊 Final Score: {avg_score:.2f} / 100 (avg per ICP)")
             print(f"   ⏱️  Total Time: {total_time:.2f}s ({total_time/60:.1f} min)")
             print(f"   💰 Total cost: ${total_evaluation_cost:.4f}")
             if evaluation_stopped_early:
@@ -4592,12 +4623,15 @@ class Validator(BaseValidatorNeuron):
                     "total_icps": len(runs),
                     "icps_scored": leads_scored,
                     "icps_failed": len(runs) - leads_scored,
-                    "avg_score": round(avg_score, 2),
+                    "raw_avg_score": round(raw_avg_score, 2),
+                    "fabrication_count": fabrication_count,
+                    "fabrication_rate": round(fabrication_rate, 3),
+                    "integrity_multiplier": round(integrity_multiplier, 3),
+                    "final_score": round(avg_score, 2),
                     "total_cost_usd": round(total_evaluation_cost, 4),
                     "total_time_seconds": round(total_time, 1),
                     "stopped_early": evaluation_stopped_early,
                     "stopped_reason": early_stop_reason if evaluation_stopped_early else None,
-                    "fabrication_count": fabrication_count,
                 },
                 "rejection": None,
                 "zero_score_count": len(zero_runs),
@@ -7679,6 +7713,7 @@ def run_dedicated_qualification_worker(config):
                     seen_companies = set()
                     MAX_TOTAL_COST = QUAL_CONFIG.MAX_COST_PER_EVALUATION_USD
                     evaluation_stopped_early = False
+                    worker_fabrication_count = 0
                     
                     # Get gateway URL and create proxy URL (CRITICAL for cost tracking!)
                     gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
@@ -7755,6 +7790,11 @@ def run_dedicated_qualification_worker(config):
                                 total_time += run_time
                                 leads_scored += 1
                                 
+                                # Track fabrication
+                                w_fr = scores.failure_reason or ""
+                                if "fabrication" in w_fr.lower() or "fabricated" in w_fr.lower():
+                                    worker_fabrication_count += 1
+                                
                                 # Store per-ICP result
                                 per_icp_results.append({
                                     "evaluation_run_id": evaluation_run_id,
@@ -7799,10 +7839,25 @@ def run_dedicated_qualification_worker(config):
                             except Exception:
                                 pass
                     
-                    avg_score = total_score / leads_scored if leads_scored > 0 else 0.0
+                    raw_avg_score_w = total_score / leads_scored if leads_scored > 0 else 0.0
+                    
+                    # Apply fabrication integrity penalty (same logic as main eval path)
+                    FABRICATION_TOLERANCE_W = 0.05
+                    FABRICATION_PENALTY_STEEPNESS_W = 3.0
+                    fabrication_rate_w = worker_fabrication_count / leads_scored if leads_scored > 0 else 0.0
+                    integrity_mult_w = 1.0
+                    if fabrication_rate_w > FABRICATION_TOLERANCE_W:
+                        excess_w = fabrication_rate_w - FABRICATION_TOLERANCE_W
+                        integrity_mult_w = max(0.0, 1.0 - (excess_w * FABRICATION_PENALTY_STEEPNESS_W))
+                    avg_score = raw_avg_score_w * integrity_mult_w
                     
                     print(f"\n      ✅ Model complete!")
-                    print(f"         Avg Score: {avg_score:.2f}")
+                    if integrity_mult_w < 1.0:
+                        print(f"         Raw Score: {raw_avg_score_w:.2f}")
+                        print(f"         🚨 Fabrication: {worker_fabrication_count}/{leads_scored} ({fabrication_rate_w:.0%}) → {integrity_mult_w:.2f}x penalty")
+                        print(f"         Final Score: {avg_score:.2f}")
+                    else:
+                        print(f"         Avg Score: {avg_score:.2f}")
                     print(f"         Total Time: {total_time:.1f}s")
                     print(f"         Total Cost: ${total_cost:.4f}")
                     
@@ -7886,7 +7941,11 @@ def run_dedicated_qualification_worker(config):
                             "total_icps": len(runs),
                             "icps_scored": leads_scored,
                             "icps_failed": len(runs) - leads_scored,
-                            "avg_score": round(avg_score, 2),
+                            "raw_avg_score": round(raw_avg_score_w, 2),
+                            "fabrication_count": worker_fabrication_count,
+                            "fabrication_rate": round(fabrication_rate_w, 3),
+                            "integrity_multiplier": round(integrity_mult_w, 3),
+                            "final_score": round(avg_score, 2),
                             "total_cost_usd": round(total_cost, 4),
                             "total_time_seconds": round(total_time, 1),
                             "stopped_early": evaluation_stopped_early,

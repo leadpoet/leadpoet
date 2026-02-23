@@ -5061,6 +5061,9 @@ class Validator(BaseValidatorNeuron):
             total_time = champion.get("total_time_seconds") or 0
             num_leads = 100
             
+            from datetime import datetime as dt_datetime, timezone as dt_timezone
+            today_utc = dt_datetime.now(dt_timezone.utc).date().isoformat()
+            
             return {
                 "model_id": champion.get("model_id"),
                 "model_name": champion.get("model_name"),
@@ -5072,6 +5075,7 @@ class Validator(BaseValidatorNeuron):
                 "avg_cost_per_lead_usd": champion.get("avg_cost_per_lead_usd", 0),
                 "avg_time_per_lead_seconds": champion.get("avg_time_per_lead_seconds", 0),
                 "num_leads_evaluated": num_leads,
+                "last_evaluated_utc_date": today_utc,
             }
         except Exception as e:
             bt.logging.warning(f"Failed to fetch champion from gateway: {e}")

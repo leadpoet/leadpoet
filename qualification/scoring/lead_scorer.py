@@ -168,7 +168,7 @@ async def score_lead(
         logger.debug(f"Decision maker score: {decision_maker}")
         
         # Score Intent Signals (0-50 pts) - verifies each signal, uses the best
-        intent_raw, verification_confidence, best_signal_date, best_date_status = await score_intent_signal(lead, icp)
+        intent_raw, verification_confidence, best_signal_date, best_date_status, best_source = await score_intent_signal(lead, icp)
         logger.debug(f"Intent signal raw score: {intent_raw} (confidence: {verification_confidence}, date_status: {best_date_status})")
         
         # =====================================================================
@@ -206,14 +206,20 @@ async def score_lead(
     # =========================================================================
     # STEP 4: Apply time decay to intent signal (uses best signal's date)
     # =========================================================================
-    NO_DATE_DECAY_MULTIPLIER = 0.5  # Neutral multiplier when date is unverifiable
+    NO_DATE_DECAY_MULTIPLIER = 0.5  # Multiplier for undated signals where date IS required
     
     if best_date_status == "no_date":
-        # Content had no dates — use a fixed neutral decay (not gameable)
-        decay_multiplier = NO_DATE_DECAY_MULTIPLIER
-        intent_final = intent_raw * decay_multiplier
-        age_months = -1
-        logger.info(f"Undated signal — using fixed decay {NO_DATE_DECAY_MULTIPLIER}x")
+        best_source_lower = (best_source or "").lower().strip()
+        if best_source_lower in SOURCES_DATE_NOT_REQUIRED:
+            decay_multiplier = 1.0
+            intent_final = intent_raw
+            age_months = -1
+            logger.info(f"Undated {best_source_lower} signal — date not required, full score (1.0x)")
+        else:
+            decay_multiplier = NO_DATE_DECAY_MULTIPLIER
+            intent_final = intent_raw * decay_multiplier
+            age_months = -1
+            logger.info(f"Undated {best_source_lower} signal — date required, decay {NO_DATE_DECAY_MULTIPLIER}x")
     else:
         try:
             signal_date = date.fromisoformat(best_signal_date) if best_signal_date else None
@@ -445,6 +451,7 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     best_confidence = 0
     best_date: Optional[str] = None
     best_date_status = "fabricated"
+    best_source: Optional[str] = None
     
     for signal in lead.intent_signals:
         score, confidence, date_status = await _score_single_intent_signal(
@@ -455,6 +462,7 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
             best_confidence = confidence
             best_date = signal.date
             best_date_status = date_status
+            best_source = (signal.source or "").lower().strip()
         elif confidence > best_confidence:
             # Track highest confidence even when score is 0.
             # This matters for distinguishing "fabricated" (confidence=0)
@@ -465,11 +473,13 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     # If no signal scored > 0, use the first signal's date for decay
     if best_date is None and lead.intent_signals:
         best_date = lead.intent_signals[0].date
+    if best_source is None and lead.intent_signals:
+        best_source = (lead.intent_signals[0].source or "").lower().strip()
     
     if len(lead.intent_signals) > 1:
         logger.info(f"Scored {len(lead.intent_signals)} intent signals — best: {best_score:.1f} (confidence: {best_confidence}, date: {best_date_status})")
     
-    return best_score, best_confidence, best_date, best_date_status
+    return best_score, best_confidence, best_date, best_date_status, best_source
 
 
 # Source-dependent date requirements:

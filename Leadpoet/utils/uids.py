@@ -64,4 +64,5 @@ def get_random_uids(self, k: int, exclude: List[int] = []) -> np.ndarray:
     k = min(k, len(candidate_uids))
     selected_uids = random.sample(candidate_uids, k) if k > 0 else []
     print(f"✅ Selected {len(selected_uids)} random UIDs: {selected_uids}")
+    # NumPy 2.x: np.int64 dtype is unchanged; explicit dtype ensures consistent behaviour
     return np.array(selected_uids, dtype=np.int64)

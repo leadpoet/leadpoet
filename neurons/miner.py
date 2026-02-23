@@ -1305,7 +1305,7 @@ def get_presigned_upload_url(wallet) -> dict:
         response = requests.post(
             f"{QUALIFICATION_GATEWAY_URL}/qualification/model/presign",
             json=presign_data,
-            timeout=30
+            timeout=120
         )
         
         if response.status_code == 200:
@@ -1454,7 +1454,7 @@ def submit_qualification_model(wallet, s3_key: str, code_hash: str,
         response = requests.post(
             f"{QUALIFICATION_GATEWAY_URL}/qualification/model/submit",
             json=submission_data,
-            timeout=300  # 5 minutes - payment verification + block propagation + event loop contention
+            timeout=600  # 10 minutes - payment verification + block propagation + event loop contention
         )
         
         if response.status_code == 200:

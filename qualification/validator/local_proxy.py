@@ -1081,8 +1081,7 @@ class LocalProxyServer:
             "datauniverse": "DATAUNIVERSE_API_KEY",
             "googlenews": "NEWS_API_KEY",
             "jobdata": "JOBDATA_API_KEY",
-            # SECURITY: GitHub removed from proxy - models could use gists to exfiltrate data
-            # Validator's intent_verification.py still uses GITHUB_TOKEN for READ-only verification
+            "github": "GITHUB_TOKEN",
         }
         
         for provider, env_var in env_var_map.items():

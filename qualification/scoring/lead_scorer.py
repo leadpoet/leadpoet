@@ -523,13 +523,20 @@ async def _score_single_intent_signal(
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)
     
-    # Score relevance against the FULL ICP prompt, not just product_service
-    buyer_prompt = icp.prompt or icp.product_service
+    # Build intent context from the ICP's desired signals if available
+    desired_signals = ""
+    if hasattr(icp, 'intent_signals') and icp.intent_signals:
+        desired_signals = f"\nDESIRED INTENT SIGNALS: {', '.join(icp.intent_signals)}"
     
-    prompt = f"""Score how relevant this verified intent signal is to the buyer's request on a scale of 0-50.
+    # Extract the intent/context part of the prompt (what the buyer WANTS to see)
+    # while keeping product_service as the clean anchor for what's being sold
+    buyer_context = ""
+    if icp.prompt and icp.prompt != icp.product_service:
+        buyer_context = f"\nBUYER CONTEXT: \"{icp.prompt}\""
+    
+    prompt = f"""Score how relevant this verified intent signal is for selling "{icp.product_service}" on a scale of 0-50.
 
-BUYER'S REQUEST (this is what they asked for):
-"{buyer_prompt}"
+PRODUCT/SERVICE BEING SOLD: {icp.product_service}{buyer_context}{desired_signals}
 
 INTENT SIGNAL FOUND:
 - Source: {source_str}
@@ -537,22 +544,30 @@ INTENT SIGNAL FOUND:
 - Date: {signal.date}
 - Snippet: {signal.snippet}
 
-SCORING GUIDELINES:
-- 40-50: Signal directly proves the company matches the buyer's request (e.g., buyer wants "companies ramping up managed IT" and signal shows new IT partnerships)
-- 30-39: Signal strongly suggests the company fits (e.g., hiring for roles related to what buyer is selling)
-- 20-29: Signal is somewhat relevant but indirect
-- 10-19: Tangentially related, weak connection to what the buyer wants
-- 0-9: Signal exists but has no meaningful connection to the buyer's request
+YOUR JOB: Score ONLY whether this signal indicates buying intent for "{icp.product_service}".
 
-IMPORTANT: Penalize generic descriptions. Examples of LOW scores:
-- "Company is actively operating in X industry" → 0-5 (too generic)
-- "Visible market activity" → 0-5 (no specific intent)
+DO NOT penalize for geography, company size, company stage, or job title mismatches —
+those are scored by separate components. Focus ONLY on: does this signal suggest the
+company needs or is actively seeking "{icp.product_service}"?
+
+SCORING GUIDELINES:
+- 40-50: Signal directly shows buying intent for this product (e.g., buyer context mentions
+  "ramping up managed IT" and signal shows the company launching new IT initiatives)
+- 30-39: Signal strongly suggests need for this product (e.g., hiring roles that would use it)
+- 20-29: Signal is somewhat relevant but indirect connection to the product
+- 10-19: Tangentially related, weak connection to product need
+- 0-9: Signal exists but has no meaningful connection to the product
+
+IMPORTANT — penalize generic/templated descriptions:
+- "Company is actively operating in X industry" → 0-5 (too vague, no buying intent)
+- "Visible market activity" → 0-5 (means nothing)
 - Vague descriptions without specific actions → max 10
 
 Consider:
-1. Does this signal match what the buyer specifically asked for?
-2. Does it show evidence of the SPECIFIC intent the buyer described (e.g., "ramping up offerings", "expanding dev teams", "undergoing digital transformation")?
-3. Is this actionable — would a salesperson use this signal to make a pitch?
+1. Does this signal show the company NEEDS this specific product/service?
+2. If buyer context mentions a specific intent (e.g., "expanding dev teams", "ramping up offerings"),
+   does the signal show evidence of THAT specific activity?
+3. Is this actionable — would a salesperson use this to pitch "{icp.product_service}"?
 4. Is the description specific or generic/templated?
 
 Respond with ONLY a single number (0-50):"""

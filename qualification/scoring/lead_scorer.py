@@ -472,7 +472,25 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     return best_score, best_confidence, best_date, best_date_status
 
 
-MAX_INTENT_NO_DATE = 20  # Cap for undated but verified signals (vs 50 for dated)
+# Source-dependent date requirements:
+# - Some sources (tech stack, company info) don't need dates — they're ongoing signals
+# - Other sources (job postings, news, announcements) NEED dates — recency matters
+SOURCES_DATE_NOT_REQUIRED = frozenset({
+    "github",           # Tech stack is ongoing — no date needed
+    "company_website",  # About pages, tech stack pages — ongoing
+    "wikipedia",        # Company info is ongoing — no date needed
+    "review_site",      # Reviews are ongoing signals
+})
+
+SOURCES_DATE_REQUIRED = frozenset({
+    "linkedin",         # Posts/updates need dates — recency matters
+    "job_board",        # Job postings need dates — could be stale
+    "news",             # News articles need dates — recency is everything
+    "social_media",     # Social posts need dates — could be old
+})
+
+MAX_INTENT_NO_DATE_REQUIRED = 15   # Cap for undated signals where date IS required
+MAX_INTENT_NO_DATE_OPTIONAL = 50  # Full score for undated signals where date is NOT required
 
 async def _score_single_intent_signal(
     signal: "IntentSignal",
@@ -500,9 +518,10 @@ async def _score_single_intent_signal(
     
     # Get source as string
     source_str = signal.source.value if hasattr(signal.source, 'value') else str(signal.source)
+    source_lower = source_str.lower()
     
     # Get source type multiplier (penalize low-value sources like "other")
-    source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_str.lower(), 0.5)
+    source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)
     
     # Score the relevance of the verified signal
     prompt = f"""Score how relevant this verified intent signal is for selling "{icp.product_service}" on a scale of 0-50.
@@ -538,10 +557,19 @@ Respond with ONLY a single number (0-50):"""
     response = await openrouter_chat(prompt, model="gpt-4o-mini")
     raw_score = extract_score(response, max_score=MAX_INTENT_SIGNAL_SCORE)
     
-    # Cap score for undated signals (real intent but less actionable without date)
+    # Apply source-dependent date requirements
     if date_status == "no_date":
-        raw_score = min(raw_score, MAX_INTENT_NO_DATE)
-        logger.info(f"Undated signal — capped raw score at {MAX_INTENT_NO_DATE}")
+        if source_lower in SOURCES_DATE_NOT_REQUIRED:
+            # Tech stack, company info, etc. — date not needed, full score allowed
+            logger.info(f"Undated {source_str} signal — date not required for this source type")
+        elif source_lower in SOURCES_DATE_REQUIRED:
+            # Job postings, news, etc. — date IS required, cap the score
+            raw_score = min(raw_score, MAX_INTENT_NO_DATE_REQUIRED)
+            logger.info(f"Undated {source_str} signal — date required, capped at {MAX_INTENT_NO_DATE_REQUIRED}")
+        else:
+            # Unknown source type — be conservative, cap the score
+            raw_score = min(raw_score, MAX_INTENT_NO_DATE_REQUIRED)
+            logger.info(f"Undated {source_str} signal (unknown source) — capped at {MAX_INTENT_NO_DATE_REQUIRED}")
     
     # Weight by verification confidence AND source type quality
     weighted_score = raw_score * (confidence / 100) * source_multiplier

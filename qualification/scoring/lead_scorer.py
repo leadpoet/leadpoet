@@ -523,23 +523,26 @@ async def _score_single_intent_signal(
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)
     
-    # Score the relevance of the verified signal
-    prompt = f"""Score how relevant this verified intent signal is for selling "{icp.product_service}" on a scale of 0-50.
+    # Score relevance against the FULL ICP prompt, not just product_service
+    buyer_prompt = icp.prompt or icp.product_service
+    
+    prompt = f"""Score how relevant this verified intent signal is to the buyer's request on a scale of 0-50.
 
-INTENT SIGNAL:
+BUYER'S REQUEST (this is what they asked for):
+"{buyer_prompt}"
+
+INTENT SIGNAL FOUND:
 - Source: {source_str}
 - Description: {signal.description}
 - Date: {signal.date}
 - Snippet: {signal.snippet}
 
-TARGET PRODUCT/SERVICE: {icp.product_service}
-
 SCORING GUIDELINES:
-- 40-50: Strong buying intent directly related to this product category
-- 30-39: Clear interest in the problem this product solves
-- 20-29: Relevant activity that suggests potential need
-- 10-19: Tangentially related signal, weak buying intent
-- 0-9: Signal exists but not relevant to this product
+- 40-50: Signal directly proves the company matches the buyer's request (e.g., buyer wants "companies ramping up managed IT" and signal shows new IT partnerships)
+- 30-39: Signal strongly suggests the company fits (e.g., hiring for roles related to what buyer is selling)
+- 20-29: Signal is somewhat relevant but indirect
+- 10-19: Tangentially related, weak connection to what the buyer wants
+- 0-9: Signal exists but has no meaningful connection to the buyer's request
 
 IMPORTANT: Penalize generic descriptions. Examples of LOW scores:
 - "Company is actively operating in X industry" → 0-5 (too generic)
@@ -547,9 +550,9 @@ IMPORTANT: Penalize generic descriptions. Examples of LOW scores:
 - Vague descriptions without specific actions → max 10
 
 Consider:
-1. Does this signal indicate explicit buying intent for this type of product?
-2. How strong is the signal (job posting, public statement, hiring activity)?
-3. Is this actionable for a sales team?
+1. Does this signal match what the buyer specifically asked for?
+2. Does it show evidence of the SPECIFIC intent the buyer described (e.g., "ramping up offerings", "expanding dev teams", "undergoing digital transformation")?
+3. Is this actionable — would a salesperson use this signal to make a pitch?
 4. Is the description specific or generic/templated?
 
 Respond with ONLY a single number (0-50):"""

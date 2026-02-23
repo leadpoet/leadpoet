@@ -523,13 +523,15 @@ async def _score_single_intent_signal(
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)
     
-    # Score relevance against the FULL ICP prompt, not just product_service
-    buyer_prompt = icp.prompt or icp.product_service
+    # Use both: full prompt for complete buyer context, product_service for what's being sold
+    buyer_request = icp.prompt or icp.product_service
     
-    prompt = f"""Score how relevant this verified intent signal is to the buyer's request on a scale of 0-50.
+    prompt = f"""Score how relevant this intent signal is to the buyer's request on a scale of 0-50.
 
-BUYER'S REQUEST (this is what they asked for):
-"{buyer_prompt}"
+BUYER IS SELLING: "{icp.product_service}"
+
+BUYER'S FULL REQUEST:
+"{buyer_request}"
 
 INTENT SIGNAL FOUND:
 - Source: {source_str}
@@ -552,7 +554,7 @@ IMPORTANT: Penalize generic descriptions. Examples of LOW scores:
 Consider:
 1. Does this signal match what the buyer specifically asked for?
 2. Does it show evidence of the SPECIFIC intent the buyer described (e.g., "ramping up offerings", "expanding dev teams", "undergoing digital transformation")?
-3. Is this actionable — would a salesperson use this signal to make a pitch?
+3. Would a salesperson use this signal to pitch "{icp.product_service}" to this company?
 4. Is the description specific or generic/templated?
 
 Respond with ONLY a single number (0-50):"""

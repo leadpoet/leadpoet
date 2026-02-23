@@ -1118,9 +1118,9 @@ def _check_exact_slug_match(link: str, slug: str) -> bool:
     m = re.search(r'linkedin\.com/company/([^/?#]+)', link_lower)
     if not m:
         return False
-    link_slug = m.group(1).rstrip('.')
-    # Exact match or near-match (trailing dot/dash)
-    return link_slug == slug_lower or link_slug.rstrip('-') == slug_lower
+    link_slug = m.group(1)
+    # Exact match only (trailing dash is part of real slug)
+    return link_slug == slug_lower
 
 
 def _gse_company_location_q1_sync(slug: str) -> dict:
@@ -3161,7 +3161,7 @@ async def _gse_linkedin_fallback(slug: str, company_name: str, domain: str = "")
 
     # Collect and merge snippets from all matching results
     snippets = []
-    slug_lower = slug.lower().rstrip('.-')
+    slug_lower = slug.lower()
     domain_lower = domain.lower() if domain else ""
 
     for item in result.get('results', []):
@@ -3287,7 +3287,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     if company_linkedin:
         slug_match = re.search(r'linkedin\.com/company/([^/?#]+)', company_linkedin.lower())
         if slug_match:
-            slug = slug_match.group(1).rstrip('.-')
+            slug = slug_match.group(1)
 
     if not slug:
         return False, {

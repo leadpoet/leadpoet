@@ -277,16 +277,6 @@ async def score_lead(
     # =========================================================================
     # STEP 6: Calculate final score (floor at 0)
     # =========================================================================
-    # If the model failed to find a meaningful intent signal, the lead is
-    # worthless to a client regardless of ICP fit or decision maker match.
-    # A model's job IS finding intent — no intent means no value.
-    MINIMUM_INTENT_FOR_FULL_CREDIT = 5.0
-    if intent_final < MINIMUM_INTENT_FOR_FULL_CREDIT:
-        # Scale down ICP + DM contribution proportionally to intent quality
-        intent_ratio = intent_final / MINIMUM_INTENT_FOR_FULL_CREDIT
-        icp_fit = icp_fit * intent_ratio
-        decision_maker = decision_maker * intent_ratio
-    
     total_raw = icp_fit + decision_maker + intent_final
     final_score = max(0.0, total_raw - cost_penalty - time_penalty)
     

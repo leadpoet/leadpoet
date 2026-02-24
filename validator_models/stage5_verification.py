@@ -3362,6 +3362,9 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     }
     sources = {}
 
+    # Build city-to-states lookup for ambiguous city detection
+    _us_city_to_states = _build_us_city_to_states()
+
     # ========================================================================
     # Q1: site:linkedin.com/company/{slug} "Industry" "Company size" "Headquarters"
     # ========================================================================
@@ -3431,6 +3434,14 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                     lead["extracted_hq_state"] = ext_state
                     lead["extracted_hq_country"] = ext_country
 
+                    # If city is ambiguous (exists in multiple US states) and state wasn't extracted,
+                    # don't mark headquarters as filled — let Q2/Q3 try for fuller data
+                    if ext_city and not ext_state and ext_country and ext_country.lower() == 'united states':
+                        if len(_us_city_to_states.get(ext_city.lower(), [])) > 1:
+                            print(f"   ⚠️ Q1 HQ: '{ext_city}' is ambiguous (multiple US states) — clearing so Q2/Q3 can fill state")
+                            merged['headquarters'] = ''
+                            sources.pop('headquarters', None)
+
             print(f"   📊 Q1 extracted: name={bool(merged['title_company_name'])}, size={bool(merged['company_size'])}, hq={bool(merged['headquarters'])}, industry={bool(merged['industry'])}")
 
     # Check if we have all required fields after Q1
@@ -3494,6 +3505,13 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                         lead["extracted_hq_city"] = ext_city
                         lead["extracted_hq_state"] = ext_state
                         lead["extracted_hq_country"] = ext_country
+
+                        # Same ambiguous city check — if still no state, let Q3 try
+                        if ext_city and not ext_state and ext_country and ext_country.lower() == 'united states':
+                            if len(_us_city_to_states.get(ext_city.lower(), [])) > 1:
+                                print(f"   ⚠️ Q2 HQ: '{ext_city}' is ambiguous (multiple US states) — clearing so Q3 can fill state")
+                                merged['headquarters'] = ''
+                                sources.pop('headquarters', None)
 
                 print(f"   📊 Q2 filled gaps: {[k for k, v in sources.items() if v == 'q2']}")
 
@@ -3614,7 +3632,15 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     # Extracts HQ from snippet → parses → sets extracted values for downstream validation.
     # Only for US leads with city and state.
     # ========================================================================
-    if not lead.get("extracted_hq_city") and not lead.get("extracted_hq_state"):
+    # Run H-series when: (1) no HQ extracted at all, or (2) city is ambiguous and state is missing
+    _need_h_series = not lead.get("extracted_hq_city") and not lead.get("extracted_hq_state")
+    if not _need_h_series and lead.get("extracted_hq_city") and not lead.get("extracted_hq_state"):
+        _ext_city_check = (lead.get("extracted_hq_city") or "").strip().lower()
+        if _ext_city_check and len(_us_city_to_states.get(_ext_city_check, [])) > 1:
+            _need_h_series = True
+            print(f"   ⚠️ H-series triggered: '{lead.get('extracted_hq_city')}' is ambiguous and state missing after Q1-Q3")
+
+    if _need_h_series:
         _claimed_city = (lead.get("hq_city") or "").strip()
         _claimed_state = (lead.get("hq_state") or "").strip()
 
@@ -3777,6 +3803,18 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                         "failed_fields": ["hq_state"],
                         "claimed": claimed_hq_state or "(not provided)",
                         "extracted": extracted_hq_state
+                    }
+            elif extracted_hq_city and extracted_hq_country and extracted_hq_country.lower() == 'united states':
+                # State not extracted — reject if city is ambiguous (exists in multiple US states)
+                if len(_us_city_to_states.get(extracted_hq_city.lower(), [])) > 1:
+                    print(f"   ❌ HQ STATE REQUIRED: '{extracted_hq_city}' exists in multiple US states but could not extract state from LinkedIn")
+                    return False, {
+                        "stage": "Stage 5: HQ Location",
+                        "check_name": "check_stage5_unified",
+                        "message": f"Cannot verify HQ state: '{extracted_hq_city}' exists in multiple US states and LinkedIn did not provide state",
+                        "failed_fields": ["hq_state"],
+                        "claimed": f"{claimed_hq_city}, {claimed_hq_state}, {claimed_hq_country}",
+                        "extracted": f"{extracted_hq_city}, (no state), {extracted_hq_country}"
                     }
 
             if extracted_hq_city:

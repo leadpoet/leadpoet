@@ -891,8 +891,12 @@ def check_linkedin_url_format(linkedin_url: str, company_linkedin_url: str) -> t
                     f"LinkedIn URL '{linkedin_url}' must be a personal profile URL (contain '/in/').")
 
     # ========================================
-    # Check 2: Company LinkedIn URL format
+    # Check 2: Company LinkedIn URL format (REQUIRED)
     # ========================================
+    if not company_linkedin_url:
+        return ("missing_company_linkedin",
+                "Company LinkedIn URL is required. Must be a company page URL (e.g., https://www.linkedin.com/company/company-name).")
+
     if company_linkedin_url:
         # Must be a LinkedIn URL
         if "linkedin.com" not in company_linkedin_url:

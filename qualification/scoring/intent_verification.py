@@ -336,6 +336,58 @@ def strip_copyright_founded_years(content: str) -> str:
     return content
 
 
+def strip_dynamic_boilerplate_dates(content: str) -> str:
+    """
+    Remove dynamic/boilerplate date patterns that pages generate automatically.
+
+    These are NOT intent event dates — they're page rendering artifacts that
+    models exploit by using date.today() and finding pages where that date
+    appears as a dynamic element.
+
+    Strips patterns like:
+        Last updated: February 23, 2026
+        As of 02/23/2026
+        Modified on 2026-02-23
+        Updated: Jan 15, 2026
+        Retrieved on February 23, 2026
+        Accessed 2026-02-23
+        Generated on 2/23/2026
+
+    The date portion is replaced with "XXXX" so the date can no longer
+    match in check_date_precision.
+    """
+    # ISO dates: 2026-02-23
+    _iso = r'(?:19|20)\d{2}-\d{2}-\d{2}'
+    # Slash dates: 02/23/2026 or 2/23/2026
+    _slash = r'\d{1,2}/\d{1,2}/(?:19|20)\d{2}'
+    # Named dates: February 23, 2026 / Feb 23 2026 / 23 February 2026
+    _month = (
+        r'(?:january|february|march|april|may|june|july|august|september|'
+        r'october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)'
+    )
+    _named = rf'{_month}\s+\d{{1,2}}[,]?\s*(?:19|20)\d{{2}}'
+    _named_dmy = rf'\d{{1,2}}\s+{_month}[,]?\s*(?:19|20)\d{{2}}'
+
+    _any_date = rf'(?:{_iso}|{_slash}|{_named}|{_named_dmy})'
+
+    # Boilerplate prefixes that indicate dynamic/meta dates (not content dates)
+    _prefixes = (
+        r'(?:last\s+)?(?:updated|modified|refreshed|generated|retrieved|accessed|fetched)'
+        r'|as\s+of'
+        r'|current\s+(?:as\s+of|date)'
+        r'|page\s+(?:updated|generated|modified)'
+        r'|date\s*:'
+    )
+
+    content = re.sub(
+        rf'(?:{_prefixes})\s*(?:on\s+)?:?\s*{_any_date}',
+        'XXXX',
+        content,
+        flags=re.IGNORECASE,
+    )
+    return content
+
+
 def check_date_precision(claimed_date: str, content: str) -> str:
     """
     Verify how precisely a claimed date appears in the source content.
@@ -517,7 +569,7 @@ async def verify_intent_signal(
     
     # Verify claim with LLM - now includes ICP context
     try:
-        verified, confidence, reason, date_status = await llm_verify_claim_with_icp(
+        verified, confidence, reason, date_status, claim_supported = await llm_verify_claim_with_icp(
             claim=intent_signal.description,
             url=intent_signal.url,
             date=intent_signal.date,
@@ -534,7 +586,9 @@ async def verify_intent_signal(
     # The LLM sometimes accepts "2025-01-01" as "roughly matching" content
     # that merely mentions "2025". This programmatic check catches that.
     if intent_signal.date and date_status != "fabricated":
-        stripped_content = strip_copyright_founded_years(text[:CONTENT_MAX_LENGTH])
+        stripped_content = strip_dynamic_boilerplate_dates(
+            strip_copyright_founded_years(text[:CONTENT_MAX_LENGTH])
+        )
         precision = check_date_precision(intent_signal.date, stripped_content)
 
         if precision == "year_only" and date_status == "verified":
@@ -565,6 +619,36 @@ async def verify_intent_signal(
                 f"✓ Date precision confirmed: {intent_signal.date} → {precision}"
             )
     
+    # ── Claim-date coherence check ──
+    # If the LLM says the claim is NOT supported by the content, the model
+    # fabricated a signal about this page. Two sub-cases:
+    #   a) Date appears on page (verified/approximate): the date is incidental —
+    #      the model found a page with a date and fabricated a claim about it.
+    #   b) Date does NOT appear on page (no_date): the model fabricated both
+    #      the claim AND the date — nothing about this signal is real.
+    # In either case, the signal is fabricated.
+    if not claim_supported and date_status != "fabricated":
+        if date_status in ("verified", "approximate"):
+            date_status = "fabricated"
+            confidence = 0
+            reason = (
+                f"Claim-date coherence failure: date found on page but "
+                f"claim not supported by content. {reason}"
+            )
+            logger.warning(
+                f"❌ Claim-date coherence: unsupported claim + incidental date → fabricated"
+            )
+        elif date_status == "no_date" and intent_signal.date:
+            date_status = "fabricated"
+            confidence = 0
+            reason = (
+                f"Claim-date coherence failure: claim not supported by content "
+                f"and claimed date not found on page. {reason}"
+            )
+            logger.warning(
+                f"❌ Claim-date coherence: unsupported claim + missing date → fabricated"
+            )
+
     # Re-apply threshold after potential override
     if date_status == "fabricated":
         confidence = 0
@@ -1137,7 +1221,7 @@ async def llm_verify_claim_with_icp(
     icp_industry: Optional[str] = None,
     icp_criteria: Optional[str] = None,
     company_name: Optional[str] = None
-) -> Tuple[bool, int, str, str]:
+) -> Tuple[bool, int, str, str, bool]:
     """
     Use LLM to verify an intent signal AND check for ICP evidence.
     
@@ -1155,8 +1239,9 @@ async def llm_verify_claim_with_icp(
         company_name: Name of the company being verified
     
     Returns:
-        Tuple of (verified: bool, confidence: int 0-100, reason: str, date_status: str)
+        Tuple of (verified: bool, confidence: int 0-100, reason: str, date_status: str, claim_supported: bool)
         date_status is one of: "verified", "no_date", "fabricated"
+        claim_supported is the LLM's raw boolean before threshold/ICP adjustments
     """
     # Build ICP context section — only verify INDUSTRY fit from the URL content.
     # Structural fields (employee_count, geography, company_stage) are verified
@@ -1307,11 +1392,11 @@ Examples:
         # Apply confidence threshold
         verified = verified_raw and confidence >= CONFIDENCE_THRESHOLD
         
-        return verified, confidence, reason, date_status
+        return verified, confidence, reason, date_status, verified_raw
         
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM response: {e}")
-        return False, 0, "LLM response parsing error", "fabricated"
+        return False, 0, "LLM response parsing error", "fabricated", False
     except Exception as e:
         logger.error(f"LLM verification error: {e}")
         raise

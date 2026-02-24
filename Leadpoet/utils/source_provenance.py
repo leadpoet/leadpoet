@@ -167,13 +167,25 @@ async def validate_source_url(url: str, source_type: str) -> Tuple[bool, str]:
         pass
     
     # Check 3: URL reachability
+    _BROWSER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    _OK_STATUSES = {200, 301, 302, 303, 307, 308}
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=_BROWSER_HEADERS) as session:
             async with session.head(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as response:
-                if response.status in [200, 301, 302, 303, 307, 308]:
+                if response.status in _OK_STATUSES:
                     return True, "Source URL validated"
-                else:
-                    return False, f"Source URL returned status {response.status}"
+                # Some servers block HEAD or bare requests — fall back to GET
+                if response.status in (403, 405):
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as fallback:
+                        if fallback.status in _OK_STATUSES:
+                            return True, "Source URL validated"
+                        return False, f"Source URL returned status {fallback.status}"
+                return False, f"Source URL returned status {response.status}"
     except aiohttp.ClientError as e:
         return False, f"Source URL unreachable: {str(e)}"
     except Exception as e:

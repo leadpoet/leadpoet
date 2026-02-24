@@ -23,6 +23,7 @@ import os
 import re
 import json
 import gzip
+import time
 import unicodedata
 import numpy as np
 from typing import Dict, Any, Tuple, List, Optional
@@ -139,61 +140,73 @@ def _load_taxonomy_embeddings():
         return None
 
 
-def _get_embedding_sync(text: str) -> Optional[np.ndarray]:
-    """Get embedding for text via OpenRouter (synchronous)."""
+def _get_embedding_sync(text: str, max_retries: int = 3) -> Optional[np.ndarray]:
+    """Get embedding for text via OpenRouter (synchronous, with retry)."""
     if not OPENROUTER_KEY:
         print("   ⚠️ OPENROUTER_KEY not set")
         return None
-    try:
-        resp = requests.post(
-            'https://openrouter.ai/api/v1/embeddings',
-            headers={
-                'Authorization': f'Bearer {OPENROUTER_KEY}',
-                'Content-Type': 'application/json',
-            },
-            json={
-                'model': EMBED_MODEL,
-                'input': [text],
-            },
-            timeout=60,
-            proxies=PROXY_CONFIG if PROXY_CONFIG else None
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('data') and len(data['data']) > 0:
-                return np.array(data['data'][0]['embedding'])
-    except Exception as e:
-        print(f"   ⚠️ Embedding API error: {e}")
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(
+                'https://openrouter.ai/api/v1/embeddings',
+                headers={
+                    'Authorization': f'Bearer {OPENROUTER_KEY}',
+                    'Content-Type': 'application/json',
+                },
+                json={
+                    'model': EMBED_MODEL,
+                    'input': [text],
+                },
+                timeout=30,
+                proxies=PROXY_CONFIG if PROXY_CONFIG else None
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('data') and len(data['data']) > 0:
+                    return np.array(data['data'][0]['embedding'])
+                print(f"   ⚠️ Embedding API: 200 but no data (attempt {attempt}/{max_retries})")
+            else:
+                print(f"   ⚠️ Embedding API: HTTP {resp.status_code} (attempt {attempt}/{max_retries}): {resp.text[:200]}")
+        except Exception as e:
+            print(f"   ⚠️ Embedding API error (attempt {attempt}/{max_retries}): {e}")
+        if attempt < max_retries:
+            time.sleep(2 ** attempt)
     return None
 
 
-def _call_llm_sync(prompt: str) -> Optional[str]:
-    """Call Gemini 2.5 Flash Lite via OpenRouter (synchronous)."""
+def _call_llm_sync(prompt: str, max_retries: int = 3) -> Optional[str]:
+    """Call Gemini 2.5 Flash Lite via OpenRouter (synchronous, with retry)."""
     if not OPENROUTER_KEY:
         print("   ⚠️ OPENROUTER_KEY not set")
         return None
-    try:
-        resp = requests.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Authorization': f'Bearer {OPENROUTER_KEY}',
-                'Content-Type': 'application/json',
-            },
-            json={
-                'model': CLASSIFY_LLM_MODEL,
-                'messages': [{'role': 'user', 'content': prompt}],
-                'temperature': 0,
-                'max_tokens': 500,
-            },
-            timeout=60,
-            proxies=PROXY_CONFIG if PROXY_CONFIG else None
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('choices') and len(data['choices']) > 0:
-                return data['choices'][0]['message']['content'].strip()
-    except Exception as e:
-        print(f"   ⚠️ LLM API error: {e}")
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {OPENROUTER_KEY}',
+                    'Content-Type': 'application/json',
+                },
+                json={
+                    'model': CLASSIFY_LLM_MODEL,
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0,
+                    'max_tokens': 500,
+                },
+                timeout=30,
+                proxies=PROXY_CONFIG if PROXY_CONFIG else None
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('choices') and len(data['choices']) > 0:
+                    return data['choices'][0]['message']['content'].strip()
+                print(f"   ⚠️ LLM API: 200 but no choices (attempt {attempt}/{max_retries})")
+            else:
+                print(f"   ⚠️ LLM API: HTTP {resp.status_code} (attempt {attempt}/{max_retries}): {resp.text[:200]}")
+        except Exception as e:
+            print(f"   ⚠️ LLM API error (attempt {attempt}/{max_retries}): {e}")
+        if attempt < max_retries:
+            time.sleep(2 ** attempt)
     return None
 
 
@@ -2549,10 +2562,10 @@ def _extract_company_size_from_snippet(text: str) -> str:
     if not text:
         return ''
     patterns = [
-        re.compile(r'Company\s*size[:\s;]+(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*employees?', re.I),
-        re.compile(r'Company\s*size\s+(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)\s*employees?', re.I),
-        re.compile(r'Company\s*size[:\s;]+(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–]\s*\d{1,3}(?:,\d{3})*)?)(?:\s|$|\.)', re.I),
-        re.compile(r'(\d{1,3}(?:,\d{3})*\s*[-–]\s*\d{1,3}(?:,\d{3})*)\s*employees?', re.I),
+        re.compile(r'Company\s*size[:\s;]+(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–—]\s*\d{1,3}(?:,\d{3})*)?)\s*employees?', re.I),
+        re.compile(r'Company\s*size\s+(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–—]\s*\d{1,3}(?:,\d{3})*)?)\s*employees?', re.I),
+        re.compile(r'Company\s*size[:\s;]+(\d{1,3}(?:,\d{3})*(?:\+|\s*[-–—]\s*\d{1,3}(?:,\d{3})*)?)(?:\s|$|\.)', re.I),
+        re.compile(r'(\d{1,3}(?:,\d{3})*\s*[-–—]\s*\d{1,3}(?:,\d{3})*)\s*employees?', re.I),
         re.compile(r'(\d{1,3}(?:,\d{3})*\+)\s*employees?', re.I),
     ]
     for p in patterns:
@@ -3324,17 +3337,20 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         if s4_result.get('error'):
             print(f"   ⚠️ S4 error: {s4_result['error']}")
 
-        # Check if miner's size appears in exact slug match
+        # Extract size from snippet and validate using same logic as Q1/Q2/Q3
         size_confirmed = False
         for r in s4_result.get('results', []):
             if _check_exact_slug_match(r.get('link', ''), slug):
-                combined = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
-                if claimed_employee_count.lower().replace(',', '') in combined.replace(',', ''):
-                    size_confirmed = True
-                    break
+                combined = f"{r.get('title', '')} {r.get('snippet', '')}"
+                extracted_size = _extract_company_size_from_snippet(combined)
+                if extracted_size:
+                    match, reason = _validate_size_match(claimed_employee_count, extracted_size)
+                    if match:
+                        size_confirmed = True
+                        break
 
         if size_confirmed:
-            print(f"   ✅ S4: Employee count '{claimed_employee_count}' confirmed")
+            print(f"   ✅ S4: Employee count '{claimed_employee_count}' confirmed (extracted: '{extracted_size}')")
             lead["_update_employee_count"] = True
             lead["_new_employee_count"] = claimed_employee_count
             return True, None
@@ -3588,15 +3604,18 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         size_confirmed = False
         for r in s4_result.get('results', []):
             if _check_exact_slug_match(r.get('link', ''), slug):
-                combined = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
-                if claimed_employee_count.lower().replace(',', '') in combined.replace(',', ''):
-                    size_confirmed = True
-                    merged['company_size'] = claimed_employee_count
-                    sources['company_size'] = 's4'
-                    break
+                combined = f"{r.get('title', '')} {r.get('snippet', '')}"
+                extracted_size = _extract_company_size_from_snippet(combined)
+                if extracted_size:
+                    match, reason = _validate_size_match(claimed_employee_count, extracted_size)
+                    if match:
+                        size_confirmed = True
+                        merged['company_size'] = claimed_employee_count
+                        sources['company_size'] = 's4'
+                        break
 
         if size_confirmed:
-            print(f"   ✅ S4: Size '{claimed_employee_count}' confirmed")
+            print(f"   ✅ S4: Size '{claimed_employee_count}' confirmed (extracted: '{extracted_size}')")
         else:
             print(f"   ❌ S4: Size '{claimed_employee_count}' not found - FAIL")
             return False, {

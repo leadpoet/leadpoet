@@ -3316,7 +3316,7 @@ class Validator(BaseValidatorNeuron):
             return None
         
         # Check if gateway submission is enabled
-        gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
         if os.environ.get("DISABLE_GATEWAY_WEIGHT_SUBMISSION", "").lower() == "true":
             bt.logging.info("ℹ️ Gateway weight submission disabled via env var")
             return None
@@ -4015,7 +4015,7 @@ class Validator(BaseValidatorNeuron):
             import httpx
             import hashlib
             
-            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
             hotkey = self.wallet.hotkey.ss58_address
             timestamp = int(time.time())
             
@@ -4030,7 +4030,7 @@ class Validator(BaseValidatorNeuron):
                 "commit_hash": os.environ.get("VALIDATOR_CODE_VERSION", "unknown")
             }
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
                     f"{gateway_url}/qualification/validator/register",
                     json=payload
@@ -4042,7 +4042,7 @@ class Validator(BaseValidatorNeuron):
                 bt.logging.info(f"🎯 Qualification registered: session={self._qualification_session_id[:8]}...")
                 
         except Exception as e:
-            bt.logging.warning(f"Qualification registration failed: {e}")
+            bt.logging.warning(f"Qualification registration failed: {type(e).__name__}: {e}")
             raise
     
     async def _qualification_request_work(self) -> Optional[Dict]:
@@ -4053,7 +4053,7 @@ class Validator(BaseValidatorNeuron):
         try:
             import httpx
             
-            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
@@ -4096,7 +4096,7 @@ class Validator(BaseValidatorNeuron):
         try:
             import httpx
             
-            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
             
             async with httpx.AsyncClient(timeout=60.0) as client:  # Longer timeout for batch
                 response = await client.post(
@@ -4130,7 +4130,7 @@ class Validator(BaseValidatorNeuron):
             from qualification.scoring.lead_scorer import score_lead
             from qualification.scoring.pre_checks import run_automatic_zero_checks
             
-            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
             evaluation_id = work.get("evaluation_id")
             model_code_b64 = work.get("agent_code", "")
             runs = work.get("evaluation_runs", [])
@@ -4682,7 +4682,7 @@ class Validator(BaseValidatorNeuron):
         try:
             import httpx
             
-            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
             
             # Handle both object and dict formats (coordinator vs worker-forwarded data)
             if hasattr(lead, 'model_dump'):
@@ -5302,7 +5302,7 @@ class Validator(BaseValidatorNeuron):
         try:
             import httpx
             
-            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
             model_id = champion.get("model_id")
             
             if not model_id:
@@ -5347,7 +5347,7 @@ class Validator(BaseValidatorNeuron):
         try:
             import httpx
             
-            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
             
             payload = {
                 "evaluation_run_id": evaluation_run_id,
@@ -5400,7 +5400,7 @@ class Validator(BaseValidatorNeuron):
         """
         import httpx
         
-        gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
         url = f"{gateway_url}/qualification/validator/champion-status"
         
         payload = {
@@ -5425,7 +5425,7 @@ class Validator(BaseValidatorNeuron):
         MAX_RETRIES = 5
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                async with httpx.AsyncClient(timeout=120.0) as client:
                     response = await client.post(url, json=payload)
                     response.raise_for_status()
                     bt.logging.info(f"✅ Notified gateway of champion status: model={model_id[:8]}..., became_champion={became_champion}, was_dethroned={was_dethroned}")
@@ -5434,7 +5434,7 @@ class Validator(BaseValidatorNeuron):
             except Exception as e:
                 bt.logging.warning(
                     f"Gateway champion notification attempt {attempt}/{MAX_RETRIES} failed: "
-                    f"{type(e).__name__}: {e}"
+                    f"{type(e).__name__}: {e or '(empty - likely timeout)'}"
                 )
                 if attempt < MAX_RETRIES:
                     wait = 2 ** attempt  # 2, 4, 8, 16s
@@ -5510,7 +5510,7 @@ class Validator(BaseValidatorNeuron):
         
         if not hasattr(self, '_qualification_validator') or not self._qualification_session_id:
             try:
-                gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+                gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
                 
                 self._qualification_validator = QualificationValidator(
                     hotkey=self.wallet.hotkey.ss58_address,
@@ -5522,7 +5522,7 @@ class Validator(BaseValidatorNeuron):
                 await self._qualification_register()
                 
             except Exception as e:
-                print(f"   ❌ Failed to initialize qualification: {e}")
+                print(f"   ❌ Failed to initialize qualification: {type(e).__name__}: {e or '(empty - likely timeout)'}")
                 return
         
         # Check if rebenchmark is needed
@@ -5546,7 +5546,7 @@ class Validator(BaseValidatorNeuron):
                     champion_model_id = champion_data.get("model_id")
                     print(f"   📥 Requesting rebenchmark for champion: {champion_data.get('model_name', 'Unknown')}")
                     
-                    gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+                    gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
                     
                     # Step 1: Queue the rebenchmark (adds to in-memory queue on gateway)
                     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -5594,7 +5594,7 @@ class Validator(BaseValidatorNeuron):
         # Fetch batch of NEW models from gateway (DB query - excludes rebenchmark)
         all_models = []
         try:
-            gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+            gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
             
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -7731,7 +7731,7 @@ def run_dedicated_qualification_worker(config):
                     worker_fabrication_count = 0
                     
                     # Get gateway URL and create proxy URL (CRITICAL for cost tracking!)
-                    gateway_url = os.environ.get("GATEWAY_URL", "http://54.226.209.164:8000")
+                    gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
                     api_proxy_url = f"{gateway_url}/qualification/proxy"
                     
                     # Initialize ONE sandbox per model (NOT per ICP!)

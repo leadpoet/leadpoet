@@ -161,9 +161,12 @@ else
 fi
 echo ""
 
-# Stop and remove existing containers
+# Stop and remove existing containers (sourcing + qualification)
 echo "🛑 Stopping existing containers (if any)..."
 docker ps -a --filter "name=leadpoet-validator" --format "{{.Names}}" | while read container; do
+    docker rm -f "$container" 2>/dev/null || true
+done
+docker ps -a --filter "name=leadpoet-qual-worker" --format "{{.Names}}" | while read container; do
     docker rm -f "$container" 2>/dev/null || true
 done
 echo "✅ Old containers removed"
@@ -281,39 +284,75 @@ for i in $(seq 1 $PROXY_COUNT); do
 done
 
 # ════════════════════════════════════════════════════════════════════════════════
-# SPAWN QUALIFICATION WORKERS (as background processes, NOT Docker containers)
+# SPAWN QUALIFICATION WORKERS (Docker containers with --restart unless-stopped)
 # ════════════════════════════════════════════════════════════════════════════════
 # Qualification workers evaluate miner models in parallel to sourcing.
 # They use their own proxies (QUALIFICATION_WEBSHARE_PROXY_*) for ddgs/free APIs.
+# Runs as Docker containers (same image as sourcing) for automatic restart on crash.
 # ════════════════════════════════════════════════════════════════════════════════
 
 if [ $QUAL_PROXY_COUNT -gt 0 ]; then
     echo ""
     echo "============================================================"
-    echo "🎯 SPAWNING QUALIFICATION WORKERS"
+    echo "🎯 DEPLOYING QUALIFICATION WORKER CONTAINERS"
     echo "============================================================"
     echo ""
     
-    # Kill any existing qualification workers (use -9 to force kill suspended processes)
+    # Stop and remove any existing qualification containers + bare processes
     pkill -9 -f "qualification_worker" 2>/dev/null || true
+    for i in $(seq 1 $QUAL_PROXY_COUNT); do
+        docker rm -f "leadpoet-qual-worker-$i" 2>/dev/null || true
+    done
     sleep 1
     
     for i in $(seq 1 $QUAL_PROXY_COUNT); do
         QUAL_PROXY_VAR="QUALIFICATION_WEBSHARE_PROXY_$i"
         QUAL_PROXY_VALUE="${!QUAL_PROXY_VAR}"
         
-        echo "🚀 Starting Qualification Worker $i..."
-        echo "   Proxy: ${QUAL_PROXY_VALUE:0:30}..."
+        echo "🚀 Starting Qualification Worker $i (Docker container)..."
+        if [ -n "$QUAL_PROXY_VALUE" ]; then
+            echo "   Proxy: ${QUAL_PROXY_VALUE:0:30}..."
+        fi
         
-        # Spawn as background process with its proxy
-        cd "$REPO_ROOT"
-        nohup python3 neurons/validator.py --mode qualification_worker --container-id $i > "$REPO_ROOT/qual_worker_$i.log" 2>&1 &
+        QUAL_PROXY_ARGS=""
+        if [ -n "$QUAL_PROXY_VALUE" ]; then
+            QUAL_PROXY_ARGS="-e HTTP_PROXY=$QUAL_PROXY_VALUE -e HTTPS_PROXY=$QUAL_PROXY_VALUE"
+        fi
         
-        echo "   ✅ Started (PID: $!)"
+        docker run -d \
+          --name "leadpoet-qual-worker-$i" \
+          --network host \
+          --restart unless-stopped \
+          --log-driver=awslogs \
+          --log-opt awslogs-region=us-east-1 \
+          --log-opt awslogs-group=/leadpoet/validator/qualification \
+          --log-opt awslogs-stream=qual-worker-$i \
+          --log-opt awslogs-create-group=true \
+          -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
+          -e LEADPOET_CONTAINER_MODE=1 \
+          -e LEADPOET_WRAPPER_ACTIVE=1 \
+          -e GATEWAY_URL="${GATEWAY_URL:-http://52.91.135.79:8000}" \
+          -e QUALIFICATION_WEBSHARE_PROXY_1="${QUALIFICATION_WEBSHARE_PROXY_1:-}" \
+          -e QUALIFICATION_WEBSHARE_PROXY_2="${QUALIFICATION_WEBSHARE_PROXY_2:-}" \
+          -e QUALIFICATION_WEBSHARE_PROXY_3="${QUALIFICATION_WEBSHARE_PROXY_3:-}" \
+          -e QUALIFICATION_WEBSHARE_PROXY_4="${QUALIFICATION_WEBSHARE_PROXY_4:-}" \
+          -e QUALIFICATION_WEBSHARE_PROXY_5="${QUALIFICATION_WEBSHARE_PROXY_5:-}" \
+          -e QUALIFICATION_SCRAPINGDOG_API_KEY="${QUALIFICATION_SCRAPINGDOG_API_KEY:-}" \
+          -e QUALIFICATION_OPENROUTER_API_KEY="${QUALIFICATION_OPENROUTER_API_KEY:-}" \
+          -e DESEARCH_API_KEY="${DESEARCH_API_KEY:-}" \
+          -e BUILTWITH_API_KEY="${BUILTWITH_API_KEY:-}" \
+          -e QUALIFICATION_LEADS_TABLE="${QUALIFICATION_LEADS_TABLE:-test_leads_for_miners}" \
+          $QUAL_PROXY_ARGS \
+          leadpoet-validator:latest \
+          --mode qualification_worker \
+          --container-id "$i" > /dev/null
+        
+        echo "   ✅ Started: leadpoet-qual-worker-$i"
         echo ""
     done
     
-    echo "✅ All $QUAL_PROXY_COUNT qualification workers spawned"
+    echo "✅ All $QUAL_PROXY_COUNT qualification worker containers deployed"
+    echo "   (--restart unless-stopped: auto-recovers from crashes)"
     echo ""
 fi
 
@@ -326,7 +365,7 @@ echo ""
 echo "============================================================"
 echo "📊 CONTAINER STATUS"
 echo "============================================================"
-docker ps --filter "name=leadpoet-validator" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+docker ps --filter "name=leadpoet-validator" --filter "name=leadpoet-qual-worker" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 echo ""
 
 # Verify proxies
@@ -380,7 +419,7 @@ echo ""
 echo "📊 Summary:"
 echo "   - Sourcing containers: $TOTAL_CONTAINERS (1 coordinator + $PROXY_COUNT workers)"
 if [ $QUAL_PROXY_COUNT -gt 0 ]; then
-    echo "   - Qualification workers: $QUAL_PROXY_COUNT"
+    echo "   - Qualification containers: $QUAL_PROXY_COUNT (Docker, auto-restart)"
 fi
 echo "   - Lead distribution: FULLY DYNAMIC (adapts to gateway MAX_LEADS_PER_EPOCH)"
 echo "   - Unique IPs: $UNIQUE_COUNT / $TOTAL_COUNT"
@@ -393,7 +432,7 @@ echo ""
 echo "📋 Next Steps:"
 echo "   1. Monitor sourcing logs: docker logs -f leadpoet-validator-main"
 if [ $QUAL_PROXY_COUNT -gt 0 ]; then
-    echo "   2. Monitor qualification logs: tail -f qual_worker_1.log"
+    echo "   2. Monitor qualification logs: docker logs -f leadpoet-qual-worker-1"
 fi
 echo "   3. Check resource usage: docker stats"
 echo "   4. Verify lead distribution in logs (each container shows its range)"

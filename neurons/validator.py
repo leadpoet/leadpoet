@@ -5638,8 +5638,7 @@ class Validator(BaseValidatorNeuron):
             # Continue with rebenchmark if we have it
         
         if not all_models and not rebenchmark_model:
-            print(f"   ℹ️ No models to evaluate this epoch")
-            self._qual_dedicated_last_assigned_epoch = current_epoch
+            print(f"   ℹ️ No models to evaluate this epoch - will retry next iteration")
             return
         
         print(f"   📥 Received {len(all_models)} new models" + (f" + 1 rebenchmark" if rebenchmark_model else ""))

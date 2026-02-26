@@ -5623,7 +5623,7 @@ class Validator(BaseValidatorNeuron):
                             }
                         )
                     except Exception as re_register_err:
-                        print(f"   ❌ Re-registration failed: {re_register_err}")
+                        print(f"   ❌ Re-registration failed: {type(re_register_err).__name__}: {re_register_err or '(empty - likely timeout)'}")
                         # Will continue with empty all_models
                 
                 response.raise_for_status()
@@ -5631,7 +5631,7 @@ class Validator(BaseValidatorNeuron):
                 all_models = batch_response.get("models", [])
                 
         except Exception as e:
-            print(f"   ❌ Failed to fetch models from gateway: {e}")
+            print(f"   ❌ Failed to fetch models from gateway: {type(e).__name__}: {e or '(empty - likely timeout)'}")
             # Clear session on any error to force re-registration next epoch
             if "404" in str(e) or "Session not found" in str(e):
                 self._qualification_session_id = None

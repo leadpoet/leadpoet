@@ -96,11 +96,8 @@ from gateway.utils.geo_normalize import normalize_location, validate_location, n
 # ============================================================
 from gateway.db.company_info import (
     get_company_by_linkedin,
-    validate_against_stored,
-    insert_company,
-    update_employee_count,
-    check_employee_count_changed,
     is_company_data_fresh,
+    check_employee_count_changed,
 )
 
 
@@ -893,25 +890,9 @@ def check_linkedin_url_format(linkedin_url: str, company_linkedin_url: str) -> t
     # ========================================
     # Check 2: Company LinkedIn URL format (REQUIRED)
     # ========================================
-    if not company_linkedin_url:
-        return ("missing_company_linkedin",
-                "Company LinkedIn URL is required. Must be a company page URL (e.g., https://www.linkedin.com/company/company-name).")
-
-    if company_linkedin_url:
-        # Must be a LinkedIn URL
-        if "linkedin.com" not in company_linkedin_url:
-            return ("invalid_company_linkedin_url",
-                    f"Company LinkedIn URL '{company_linkedin_url}' is not a valid LinkedIn URL. Must contain 'linkedin.com'.")
-
-        # Must NOT be a personal profile (/in/) - common mistake
-        if "/in/" in company_linkedin_url:
-            return ("company_linkedin_wrong_type",
-                    f"Company LinkedIn URL '{company_linkedin_url}' is a personal profile, not a company page. Use /company/ URLs for company LinkedIn field.")
-
-        # Must be a company page (/company/)
-        if "/company/" not in company_linkedin_url:
-            return ("company_linkedin_missing_company_path",
-                    f"Company LinkedIn URL '{company_linkedin_url}' must be a company page URL (contain '/company/').")
+    if "linkedin.com/company/" not in company_linkedin_url:
+        return ("invalid_company_linkedin",
+                f"Company LinkedIn URL is required and must be a valid company page URL (e.g., https://www.linkedin.com/company/company-name). Got: '{company_linkedin_url}'.")
 
     return (None, None)  # Passed all checks
 
@@ -2536,11 +2517,11 @@ async def submit_lead(event: SubmitLeadEvent):
         # Company Information Table Lookup
         # ========================================
         # If company_linkedin exists in table:
-        #   - Validate against stored: name (case-sensitive), HQ, website, industry top 3
-        #   - Stage 5 will only validate employee count
+        #   - Replace lead fields with stored company data
+        #   - Skip Stage 5 entirely (_skip_stage5 flag)
         # If NOT in table:
-        #   - Full validation proceeds
-        #   - After Stage 5, company will be added to table
+        #   - Full validation proceeds in Stage 5
+        #   - After approval, company will be added to table
         # ========================================
         company_linkedin_url = lead_blob.get("company_linkedin", "").strip()
         company_name = lead_blob.get("business", "").strip()
@@ -2557,54 +2538,66 @@ async def submit_lead(event: SubmitLeadEvent):
 
             if stored_company:
                 company_exists_in_table = True
-                print(f"   ✅ Company found in table - validating against stored data")
+                print(f"   ✅ Company found in table - replacing lead fields with stored data")
 
-                # Validate against stored data
-                is_valid, rejection_reason = validate_against_stored(
-                    stored=stored_company,
-                    claimed_name=company_name,
-                    claimed_hq_city=hq_city,
-                    claimed_hq_state=hq_state,
-                    claimed_hq_country=hq_country,
-                    claimed_website=company_website,
-                    claimed_industry=claimed_industry,
-                    claimed_sub_industry=claimed_sub_industry
-                )
+                # Parse stored industry/sub_industry JSON
+                stored_industry = stored_company.get("company_industry") or {}
+                if isinstance(stored_industry, str):
+                    try:
+                        stored_industry = json.loads(stored_industry)
+                    except (json.JSONDecodeError, ValueError):
+                        stored_industry = {}
 
-                if not is_valid:
-                    print(f"❌ Company validation against stored data failed: {rejection_reason}")
-                    updated_stats = mark_submission_failed(event.actor_hotkey)
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "error": "company_validation_failed",
-                            "message": rejection_reason,
-                            "company_linkedin": company_linkedin_url,
-                            "stats": updated_stats
-                        }
-                    )
+                stored_sub_industry = stored_company.get("company_sub_industry") or {}
+                if isinstance(stored_sub_industry, str):
+                    try:
+                        stored_sub_industry = json.loads(stored_sub_industry)
+                    except (json.JSONDecodeError, ValueError):
+                        stored_sub_industry = {}
 
-                print(f"   ✅ Company validated against stored data")
+                # Replace lead fields with stored company data (all except employee_count for stale)
+                replacements = {
+                    "business": stored_company.get("company_name", ""),
+                    "hq_city": stored_company.get("company_hq_city") or "",
+                    "hq_state": stored_company.get("company_hq_state") or "",
+                    "hq_country": stored_company.get("company_hq_country", ""),
+                    "website": stored_company.get("company_website", ""),
+                    "industry": stored_industry.get("industry_match1", ""),
+                    "sub_industry": stored_sub_industry.get("sub_industry_match1", ""),
+                    "description": stored_company.get("company_description", ""),
+                }
 
-                # Check if company data is fresh (within 30 days)
+                # Check freshness
                 is_fresh, last_updated = is_company_data_fresh(stored_company, days=30)
 
                 if is_fresh:
-                    # Data is fresh - skip ALL Stage 5 validation
+                    # Fresh: replace ALL fields including employee_count, skip Stage 5
                     print(f"   ✅ Company data is fresh (last updated: {last_updated[:10] if last_updated else 'N/A'})")
-                    lead_blob["_company_exists"] = True
+                    replacements["employee_count"] = stored_company.get("company_employee_count") or ""
+
+                    for field, stored_val in replacements.items():
+                        claimed_val = lead_blob.get(field, "")
+                        if claimed_val != stored_val:
+                            print(f"      ↻ {field}: '{str(claimed_val)[:50]}' → '{str(stored_val)[:50]}'")
+                        lead_blob[field] = stored_val
+
                     lead_blob["_skip_stage5_validation"] = True
-                    lead_blob["_employee_count_changed"] = False
+                    lead_blob["_company_exists"] = True
                 else:
-                    # Data is stale (>30 days) - Stage 5 validates employee count only
+                    # Stale: replace all fields EXCEPT employee_count, validate employee count in Stage 5
                     print(f"   ⚠️ Company data is stale (last updated: {last_updated[:10] if last_updated else 'never'})")
+
+                    for field, stored_val in replacements.items():
+                        claimed_val = lead_blob.get(field, "")
+                        if claimed_val != stored_val:
+                            print(f"      ↻ {field}: '{str(claimed_val)[:50]}' → '{str(stored_val)[:50]}'")
+                        lead_blob[field] = stored_val
 
                     # Check if employee count changed
                     employee_count_from_lead = lead_blob.get("employee_count", "").strip()
                     count_changed, stored_count = check_employee_count_changed(stored_company, employee_count_from_lead)
 
                     lead_blob["_company_exists"] = True
-                    lead_blob["_skip_stage5_validation"] = False
                     lead_blob["_validate_employee_count_only"] = True
 
                     if count_changed:
@@ -2616,9 +2609,6 @@ async def submit_lead(event: SubmitLeadEvent):
                         lead_blob["_employee_count_changed"] = False
                         lead_blob["_prev_employee_count"] = stored_count
 
-                # Store company data for Stage 5
-                lead_blob["_stored_company"] = stored_company
-
             else:
                 print(f"   ℹ️ Company not in table - full validation will proceed")
                 lead_blob["_company_exists"] = False
@@ -2626,34 +2616,36 @@ async def submit_lead(event: SubmitLeadEvent):
         # ========================================
         # Validate employee_count format
         # ========================================
-        VALID_EMPLOYEE_COUNTS = [
-            "0-1", "2-10", "11-50", "51-200", "201-500", 
-            "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
-        ]
-        
-        employee_count = lead_blob.get("employee_count", "").strip()
-        if employee_count not in VALID_EMPLOYEE_COUNTS:
-            print(f"❌ Invalid employee_count: '{employee_count}'")
-            
-            updated_stats = mark_submission_failed(event.actor_hotkey)
-            
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "invalid_employee_count",
-                    "message": f"employee_count must be one of the valid ranges",
-                    "provided": employee_count,
-                    "valid_values": VALID_EMPLOYEE_COUNTS,
-                    "rate_limit_stats": {
-                        "submissions": updated_stats["submissions"],
-                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
-                        "rejections": updated_stats["rejections"],
-                        "max_rejections": MAX_REJECTIONS_PER_DAY
+        # Skip for fresh companies (employee_count already replaced with stored formatted value)
+        if not lead_blob.get("_skip_stage5_validation"):
+            VALID_EMPLOYEE_COUNTS = [
+                "0-1", "2-10", "11-50", "51-200", "201-500",
+                "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
+            ]
+
+            employee_count = lead_blob.get("employee_count", "").strip()
+            if employee_count not in VALID_EMPLOYEE_COUNTS:
+                print(f"❌ Invalid employee_count: '{employee_count}'")
+
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_employee_count",
+                        "message": f"employee_count must be one of the valid ranges",
+                        "provided": employee_count,
+                        "valid_values": VALID_EMPLOYEE_COUNTS,
+                        "rate_limit_stats": {
+                            "submissions": updated_stats["submissions"],
+                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                            "rejections": updated_stats["rejections"],
+                            "max_rejections": MAX_REJECTIONS_PER_DAY
+                        }
                     }
-                }
-            )
-        
-        print(f"   ✅ employee_count '{employee_count}' is valid")
+                )
+
+            print(f"   ✅ employee_count '{employee_count}' is valid")
         
         # ========================================
         # Verify source_type and source_url consistency

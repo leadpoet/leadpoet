@@ -39,6 +39,30 @@ _TRADEMARK_SYMBOLS_RE = re.compile(r'[®™©℠]+')
 _SLUG_RE = re.compile(r'^(?:https?://)?(?:www\.)?(?:[a-z]{1,2}\.)?linkedin\.com/company/([^/?#]+)')
 
 
+def _format_employee_count(count: str) -> str:
+    """Format employee count for storage: '0-1' → '1 employee', others → 'X-Y employees'."""
+    count = (count or "").strip()
+    if not count:
+        return count
+    if count.endswith(" employees") or count.endswith(" employee"):
+        return count
+    if count == "0-1":
+        return "1 employee"
+    return f"{count} employees"
+
+
+def _normalize_employee_count(count: str) -> str:
+    """Normalize employee count for comparison: strip suffix, map '1' → '0-1'."""
+    count = (count or "").strip()
+    if count.endswith(" employees"):
+        count = count[:-10].strip()
+    elif count.endswith(" employee"):
+        count = count[:-9].strip()
+    if count == "1":
+        count = "0-1"
+    return count
+
+
 def _extract_slug(company_linkedin: str) -> str:
     """Extract company slug from any LinkedIn company URL format.
 
@@ -274,7 +298,7 @@ def insert_company(
             "company_hq_city": company_hq_city or None,
             "company_industry": json.dumps(industry_top3),
             "company_sub_industry": json.dumps(sub_industry_top3),
-            "company_employee_count": company_employee_count,
+            "company_employee_count": _format_employee_count(company_employee_count),
             "company_last_updated": datetime.utcnow().isoformat()
         }
 
@@ -317,9 +341,10 @@ def update_employee_count(
     try:
         client = get_write_client()
 
+        formatted_count = _format_employee_count(new_employee_count)
         result = client.table(TABLE_NAME) \
             .update({
-                "company_employee_count": new_employee_count,
+                "company_employee_count": formatted_count,
                 "company_last_updated": datetime.utcnow().isoformat()
             }) \
             .eq("company_slug", slug) \
@@ -348,7 +373,7 @@ def check_employee_count_changed(stored: Dict[str, Any], claimed_count: str) -> 
         (changed: bool, stored_count: str)
     """
     stored_count = stored.get("company_employee_count", "")
-    changed = claimed_count != stored_count
+    changed = _normalize_employee_count(claimed_count) != _normalize_employee_count(stored_count)
     return changed, stored_count
 
 

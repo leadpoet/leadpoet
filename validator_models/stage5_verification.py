@@ -82,10 +82,12 @@ CLASSIFY_LLM_MODEL = "google/gemini-2.5-flash-lite"
 TOP_K_CANDIDATES = 30
 
 # Prompts (same as tested in classify_pipeline.py)
-VALIDATE_REFINE_PROMPT = """Do these describe the SAME TYPE of business? Ignore company name, location, and exact wording. Focus only on core business activities.
+VALIDATE_REFINE_PROMPT = """Compare these two descriptions. Do they describe the SAME TYPE of business?
+Focus only on core business activities. Ignore location and exact wording.
 
-If YES (same type of business): Output a 50-80 word refined description focusing on products/services/target market.
-If NO (completely different industries or business types): Output only: INVALID
+If YES: Write a standalone 50-80 word description of {company_name} starting with "{company_name} is".
+Focus on products/services/target market. Do not reference "both", "this business", or comparisons.
+If NO: Output only: INVALID
 
 Miner: {miner_description}
 
@@ -387,6 +389,7 @@ async def classify_company_industry(
         content_with_industry = f"[Industry: {extracted_industry}] {extracted_content}"
 
     prompt1 = VALIDATE_REFINE_PROMPT.format(
+        company_name=company_name or "This company",
         miner_description=miner_description[:2000],
         extracted_content=content_with_industry[:3000]
     )
@@ -4020,23 +4023,13 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
                     claimed_pair = (claimed_industry.lower(), claimed_sub_industry.lower())
                     top3_pairs = [(c['industry'].lower(), c['sub_industry'].lower()) for c in classifications[:3]]
                     if claimed_pair not in top3_pairs:
-                        print(f"   ❌ CLASSIFY: Miner claimed pair {claimed_pair} not in top 3 - REJECT but store company")
-                        # Store company with correct top 3 for future validation
-                        return False, {
-                            "stage": "Stage 5: Industry",
-                            "check_name": "check_stage5_unified",
-                            "message": f"Claimed industry/sub-industry pair not in top 3 classifications",
-                            "failed_fields": ["industry", "sub_industry"],
-                            "claimed": f"{claimed_industry} / {claimed_sub_industry}",
-                            "top3": top3_pairs,
-                            # Include company data so gateway can still insert it
-                            "company_table_action": "insert",
-                            "company_refined_description": refined_description,
-                            "company_industry_top3": industry_top3,
-                            "company_sub_industry_top3": sub_industry_top3,
-                            "company_verified_employee_count": claimed_employee_count
-                        }
-                    print(f"   ✅ CLASSIFY: Miner claimed pair matches top 3")
+                        # Replace with top-1 pair instead of rejecting
+                        top1 = classifications[0]
+                        lead["industry"] = top1['industry']
+                        lead["sub_industry"] = top1['sub_industry']
+                        print(f"   ⚠️ CLASSIFY: Miner claimed pair {claimed_pair} not in top 3 - corrected to top-1: ({top1['industry']}, {top1['sub_industry']})")
+                    else:
+                        print(f"   ✅ CLASSIFY: Miner claimed pair matches top 3")
             else:
                 # REJECT if miner description is invalid (doesn't match website)
                 if classify_error == "stage1_invalid_description":

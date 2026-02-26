@@ -44,6 +44,7 @@ from gateway.utils.leads_cache import (
 from gateway.db.company_info import (
     insert_company,
     update_employee_count,
+    _format_employee_count,
 )
 
 # Role normalization for approved leads
@@ -1073,9 +1074,24 @@ async def compute_epoch_consensus(epoch_id: int):
                 # Normalize role formatting for approved leads
                 # ========================================================================
                 updated_lead_blob = None
+                _stage5_data = {}
                 if final_status == "approved":
                     lead_blob = all_lead_blobs.get(lead_id, {})
                     if lead_blob and isinstance(lead_blob, dict):
+                        # Extract approving evidence once (reused for industry correction + company table)
+                        try:
+                            _lead_ev = evidence_by_lead.get(lead_id, [])
+                            _approving_ev = [ev for ev in _lead_ev if ev.get('decision') == 'approve' and ev.get('evidence_blob')]
+                            if _approving_ev:
+                                _ev_blob = _approving_ev[0].get("evidence_blob", {})
+                                if isinstance(_ev_blob, str):
+                                    _ev_blob = json.loads(_ev_blob)
+                                if "enhanced_lead" in _ev_blob and isinstance(_ev_blob["enhanced_lead"], dict):
+                                    _ev_blob = _ev_blob["enhanced_lead"]
+                                _stage5_data = _ev_blob.get("stage_5_verification", {})
+                        except Exception:
+                            pass
+
                         original_role = lead_blob.get("role", "")
                         if original_role and isinstance(original_role, str):
                             try:
@@ -1086,6 +1102,30 @@ async def compute_epoch_consensus(epoch_id: int):
                                     print(f"            - role normalized: '{original_role}' → '{normalized_role}'")
                             except Exception as e:
                                 print(f"            ⚠️  Role normalization failed (keeping original): {e}")
+
+                        # Format employee count for storage (e.g. "51-200" → "51-200 employees")
+                        original_emp = lead_blob.get("employee_count") or ""
+                        if original_emp:
+                            formatted_emp = _format_employee_count(original_emp)
+                            if formatted_emp != original_emp:
+                                lead_blob["employee_count"] = formatted_emp
+                                updated_lead_blob = lead_blob
+                                print(f"            - employee_count formatted: '{original_emp}' → '{formatted_emp}'")
+
+                        # Correct industry/sub_industry from Stage 5 classification (new companies)
+                        _ind_top3 = _stage5_data.get("company_industry_top3", {})
+                        _sub_top3 = _stage5_data.get("company_sub_industry_top3", {})
+                        if _ind_top3 and _sub_top3:
+                            correct_ind = _ind_top3.get("industry_match1", "")
+                            correct_sub = _sub_top3.get("sub_industry_match1", "")
+                            if correct_ind and lead_blob.get("industry") != correct_ind:
+                                print(f"            - industry corrected: '{lead_blob.get('industry', '')}' → '{correct_ind}'")
+                                lead_blob["industry"] = correct_ind
+                                updated_lead_blob = lead_blob
+                            if correct_sub and lead_blob.get("sub_industry") != correct_sub:
+                                print(f"            - sub_industry corrected: '{lead_blob.get('sub_industry', '')}' → '{correct_sub}'")
+                                lead_blob["sub_industry"] = correct_sub
+                                updated_lead_blob = lead_blob
 
                 # RETRY LOGIC: Handle transient connection errors
                 # - Errno 11: Resource temporarily unavailable (connection pool exhausted)
@@ -1167,58 +1207,42 @@ async def compute_epoch_consensus(epoch_id: int):
                         company_linkedin = lead_blob.get("company_linkedin", "")
 
                         if company_linkedin:
-                            lead_evidence = evidence_by_lead.get(lead_id, [])
-                            approving_evidence = [
-                                ev for ev in lead_evidence
-                                if ev.get('decision') == 'approve' and ev.get('evidence_blob')
-                            ]
+                            # Reuse _stage5_data extracted earlier (no duplicate evidence parsing)
+                            stage5_data = _stage5_data
+                            company_action = stage5_data.get("company_table_action")
 
-                            if approving_evidence:
-                                evidence_blob = approving_evidence[0].get("evidence_blob", {})
-                                if isinstance(evidence_blob, str):
-                                    evidence_blob = json.loads(evidence_blob)
+                            if company_action == "insert":
+                                print(f"         📝 Inserting new company: {company_linkedin[:50]}...")
+                                insert_result = await asyncio.to_thread(
+                                    insert_company,
+                                    company_linkedin=company_linkedin,
+                                    company_name=lead_blob.get("business", ""),
+                                    company_website=lead_blob.get("website", ""),
+                                    company_description=stage5_data.get("company_refined_description", ""),
+                                    company_hq_country=lead_blob.get("hq_country", ""),
+                                    company_hq_state=lead_blob.get("hq_state", ""),
+                                    company_hq_city=lead_blob.get("hq_city", ""),
+                                    industry_top3=stage5_data.get("company_industry_top3", {}),
+                                    sub_industry_top3=stage5_data.get("company_sub_industry_top3", {}),
+                                    company_employee_count=stage5_data.get("company_verified_employee_count", "")
+                                )
+                                if insert_result:
+                                    print(f"         ✅ Company inserted into table")
+                                else:
+                                    print(f"         ⚠️  Failed to insert company")
 
-                                # Handle wrapped evidence_blob from coordinator/single validators
-                                # Coordinator wraps as: {is_legitimate, enhanced_lead: <checks_data>, reason}
-                                # Worker sends raw: {passed, stage_5_verification, ...}
-                                if "enhanced_lead" in evidence_blob and isinstance(evidence_blob["enhanced_lead"], dict):
-                                    evidence_blob = evidence_blob["enhanced_lead"]
-
-                                stage5_data = evidence_blob.get("stage_5_verification", {})
-                                company_action = stage5_data.get("company_table_action")
-
-                                if company_action == "insert":
-                                    print(f"         📝 Inserting new company: {company_linkedin[:50]}...")
-                                    insert_result = await asyncio.to_thread(
-                                        insert_company,
-                                        company_linkedin=company_linkedin,
-                                        company_name=lead_blob.get("business", ""),
-                                        company_website=lead_blob.get("website", ""),
-                                        company_description=stage5_data.get("company_refined_description", ""),
-                                        company_hq_country=lead_blob.get("hq_country", ""),
-                                        company_hq_state=lead_blob.get("hq_state", ""),
-                                        company_hq_city=lead_blob.get("hq_city", ""),
-                                        industry_top3=stage5_data.get("company_industry_top3", {}),
-                                        sub_industry_top3=stage5_data.get("company_sub_industry_top3", {}),
-                                        company_employee_count=stage5_data.get("company_verified_employee_count", "")
-                                    )
-                                    if insert_result:
-                                        print(f"         ✅ Company inserted into table")
-                                    else:
-                                        print(f"         ⚠️  Failed to insert company")
-
-                                elif company_action == "update_employee_count":
-                                    print(f"         📝 Updating employee count: {company_linkedin[:50]}...")
-                                    update_result = await asyncio.to_thread(
-                                        update_employee_count,
-                                        company_linkedin=company_linkedin,
-                                        new_employee_count=stage5_data.get("new_employee_count", ""),
-                                        prev_employee_count=stage5_data.get("prev_employee_count", "")
-                                    )
-                                    if update_result:
-                                        print(f"         ✅ Employee count updated in table")
-                                    else:
-                                        print(f"         ⚠️  Failed to update employee count")
+                            elif company_action == "update_employee_count":
+                                print(f"         📝 Updating employee count: {company_linkedin[:50]}...")
+                                update_result = await asyncio.to_thread(
+                                    update_employee_count,
+                                    company_linkedin=company_linkedin,
+                                    new_employee_count=stage5_data.get("new_employee_count", ""),
+                                    prev_employee_count=stage5_data.get("prev_employee_count", "")
+                                )
+                                if update_result:
+                                    print(f"         ✅ Employee count updated in table")
+                                else:
+                                    print(f"         ⚠️  Failed to update employee count")
 
                     except Exception as e:
                         print(f"         ⚠️  Company table update failed: {e}")

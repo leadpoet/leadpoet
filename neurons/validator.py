@@ -8060,9 +8060,19 @@ def run_dedicated_qualification_worker(config):
     
     try:
         asyncio.run(worker.run_loop())
+        print(f"⚠️ QUAL WORKER {qual_container_id}: run_loop() returned normally (should never happen)")
     except KeyboardInterrupt:
-        print("\n🛑 Qualification worker shutting down...")
+        print(f"\n🛑 QUAL WORKER {qual_container_id}: KeyboardInterrupt received")
         worker.should_exit = True
+    except SystemExit as e:
+        print(f"🛑 QUAL WORKER {qual_container_id}: SystemExit received (code={e.code})")
+        import traceback
+        traceback.print_exc()
+    except BaseException as e:
+        print(f"💀 QUAL WORKER {qual_container_id}: FATAL BaseException: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 def main():
@@ -8145,8 +8155,23 @@ def main():
     # - Write results to qual_worker_{id}_results_{epoch}.json
     # ════════════════════════════════════════════════════════════════════════════
     if getattr(args, 'mode', None) == "qualification_worker":
+        qual_worker_id = getattr(args, 'container_id', 1)
+        
+        # Register signal handlers BEFORE anything else so we capture what kills us
+        import signal as _signal
+        def _qual_signal_handler(signum, frame):
+            sig_name = _signal.Signals(signum).name if hasattr(_signal, 'Signals') else str(signum)
+            print(f"\n💀 QUAL WORKER {qual_worker_id}: Received signal {sig_name} ({signum})")
+            print(f"   This is WHY the worker is dying. Investigate what sent this signal.")
+            import traceback
+            traceback.print_stack(frame)
+            sys.exit(128 + signum)
+        
+        _signal.signal(_signal.SIGTERM, _qual_signal_handler)
+        _signal.signal(_signal.SIGINT, _qual_signal_handler)
+        
         print("════════════════════════════════════════════════════════════════")
-        print("🎯 DEDICATED QUALIFICATION WORKER MODE")
+        print(f"🎯 DEDICATED QUALIFICATION WORKER MODE (ID: {qual_worker_id})")
         print("════════════════════════════════════════════════════════════════")
         print("   Skipping heavy initialization:")
         print("   ✗ Bittensor wallet/subtensor/metagraph")
@@ -8160,6 +8185,7 @@ def main():
         print("   ✓ Evaluate miner models via TEE sandbox")
         print(f"   ✓ Process up to {QUALIFICATION_MODELS_PER_CONTAINER} models per epoch")
         print("   ✓ Write results to qual_worker_N_results_EPOCH.json")
+        print(f"   ✓ Signal handlers: SIGTERM/SIGINT will log before exit")
         print("════════════════════════════════════════════════════════════════")
         print("")
         

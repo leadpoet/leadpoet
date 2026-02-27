@@ -43,6 +43,7 @@ class BaseNeuron:
             for var, value in saved_proxies.items():
                 os.environ[var] = value
         
+        # bittensor v10: metagraph initialization is now async-safe; sync init unchanged
         self.metagraph = bt.metagraph(netuid=self.config.netuid, subtensor=self.subtensor)
         self.step = 0
         self.block = self.subtensor.get_current_block()

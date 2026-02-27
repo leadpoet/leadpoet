@@ -125,7 +125,9 @@ def _load_taxonomy_embeddings():
 
         # Normalize embeddings for cosine similarity
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        norms[norms == 0] = 1
+        # NumPy 2.x: in-place modification of computed arrays; use explicit copy to avoid
+        # copy-on-write CoW issues with views. norms here is already a fresh array so this is safe.
+        norms = np.where(norms == 0, 1.0, norms)
         embeddings = embeddings / norms
 
         _TAXONOMY_CACHE = {

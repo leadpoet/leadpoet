@@ -24,6 +24,26 @@ from supabase import create_client, Client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
+async def check_and_store_nonce_async(nonce: str, actor_hotkey: str) -> bool:
+    """
+    Async version of check_and_store_nonce — non-blocking for the event loop.
+    """
+    try:
+        from gateway.db.client import get_async_write_client
+        client = await get_async_write_client()
+        result = await client.table("transparency_log").select("id").eq("nonce", nonce).execute()
+
+        if result.data:
+            print(f"⚠️  Replay attack detected: nonce {nonce} already used by {actor_hotkey[:20]}...")
+            return False
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Nonce check error: {e}")
+        return False
+
+
 def check_and_store_nonce(nonce: str, actor_hotkey: str) -> bool:
     """
     Check if nonce has been used before.

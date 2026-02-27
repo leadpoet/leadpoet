@@ -82,9 +82,8 @@ logger = logging.getLogger(__name__)
 
 # Supabase client accessor (lazily initialized)
 def _get_supabase():
-    """Get Supabase write client for logging events."""
+    """Get Supabase sync write client for logging events (legacy)."""
     try:
-        # Try both import paths to support local dev and EC2 deployment
         try:
             from gateway.db.client import get_write_client
         except ImportError:
@@ -92,6 +91,19 @@ def _get_supabase():
         return get_write_client()
     except Exception as e:
         logger.warning(f"⚠️  Supabase client unavailable: {e}")
+        return None
+
+
+async def _get_supabase_async():
+    """Get async Supabase write client — non-blocking for the event loop."""
+    try:
+        try:
+            from gateway.db.client import get_async_write_client
+        except ImportError:
+            from db.client import get_async_write_client
+        return await get_async_write_client()
+    except Exception as e:
+        logger.warning(f"⚠️  Async Supabase client unavailable: {e}")
         return None
 
 # Fallback logging directory (for TEE connection failures)
@@ -187,10 +199,9 @@ async def _log_event_legacy_format(event: Dict[str, Any]) -> Dict[str, Any]:
     # Store to Supabase (OLD format - no signing)
     # ============================================================
     
-    supabase = _get_supabase()
+    supabase = await _get_supabase_async()
     if supabase:
         try:
-            # Extract fields for Supabase columns (OLD schema)
             payload = event.get("payload")
             email_hash = None
             linkedin_combo_hash = None
@@ -199,13 +210,11 @@ async def _log_event_legacy_format(event: Dict[str, Any]) -> Dict[str, Any]:
                 email_hash = payload.get("email_hash")
                 linkedin_combo_hash = payload.get("linkedin_combo_hash")
             
-            # Fallback: check top-level event
             if not email_hash:
                 email_hash = event.get("email_hash")
             if not linkedin_combo_hash:
                 linkedin_combo_hash = event.get("linkedin_combo_hash")
             
-            # Create Supabase entry (OLD column set)
             supabase_entry = {
                 "event_type": event.get("event_type"),
                 "actor_hotkey": event.get("actor_hotkey"),
@@ -217,21 +226,17 @@ async def _log_event_legacy_format(event: Dict[str, Any]) -> Dict[str, Any]:
                 "payload": payload,
                 "email_hash": email_hash,
                 "linkedin_combo_hash": linkedin_combo_hash,
-                # TEE columns will be NULL (not set)
             }
             
-            # Remove None values
             supabase_entry = {k: v for k, v in supabase_entry.items() if v is not None}
             
-            # Insert into Supabase
-            supabase.table("transparency_log").insert(supabase_entry).execute()
+            await supabase.table("transparency_log").insert(supabase_entry).execute()
             
             logger.info(f"✅ Event logged (legacy format): {event_type}")
             
-            # Return OLD format response
             return {
                 "status": "buffered",
-                "sequence": 0,  # No TEE sequence in legacy mode
+                "sequence": 0,
                 "buffer_size": 0,
                 "overflow_warning": False,
             }
@@ -290,29 +295,23 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
     # Step 2: Store to Supabase (NEW format - with TEE columns)
     # ============================================================
     
-    supabase = _get_supabase()
+    supabase = await _get_supabase_async()
     if supabase:
         try:
-            # Extract optional fields for indexing
             email_hash = payload.get("email_hash") if isinstance(payload, dict) else None
             linkedin_combo_hash = payload.get("linkedin_combo_hash") if isinstance(payload, dict) else None
             actor_hotkey = payload.get("actor_hotkey") or payload.get("validator_hotkey") or payload.get("miner_hotkey")
             
-            # Create Supabase entry (NEW column set with TEE fields)
-            # CRITICAL: Keep "payload" as original payload for dashboard compatibility
-            # Store full signed envelope in "signed_log_entry" for auditor verification
-            
-            # Compute payload_hash for consistency with legacy format
             payload_hash = compute_payload_hash(payload)
             
             supabase_entry = {
                 "event_type": event_type,
-                "nonce": str(uuid.uuid4()),  # Required by DB NOT NULL constraint
-                "ts": signed_event["timestamp"],  # Legacy column (same as created_at)
-                "payload_hash": payload_hash,  # For consistency with legacy format
-                "signature": log_entry["enclave_signature"],  # TEE signature for this event
-                "payload": payload,  # ORIGINAL payload (unchanged for dashboards)
-                "signed_log_entry": log_entry,  # Full signed envelope (for auditors)
+                "nonce": str(uuid.uuid4()),
+                "ts": signed_event["timestamp"],
+                "payload_hash": payload_hash,
+                "signature": log_entry["enclave_signature"],
+                "payload": payload,
+                "signed_log_entry": log_entry,
                 "event_hash": event_hash,
                 "enclave_pubkey": log_entry["enclave_pubkey"],
                 "boot_id": signed_event["boot_id"],
@@ -325,11 +324,9 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
                 "build_id": BUILD_ID,
             }
             
-            # Remove None values
             supabase_entry = {k: v for k, v in supabase_entry.items() if v is not None}
             
-            # Insert into Supabase
-            supabase.table("transparency_log").insert(supabase_entry).execute()
+            await supabase.table("transparency_log").insert(supabase_entry).execute()
             
             logger.info(f"✅ Event stored (signed): {event_type} (hash={event_hash[:16]}...)")
         
@@ -434,18 +431,17 @@ async def get_log_entry_by_hash(event_hash: str) -> Optional[Dict[str, Any]]:
         The full log_entry dict if found, None otherwise
     """
     try:
-        # Try both import paths to support local dev and EC2 deployment
         try:
-            from gateway.db.client import get_read_client
+            from gateway.db.client import get_async_read_client
         except ImportError:
-            from db.client import get_read_client
-        read_client = get_read_client()
+            from db.client import get_async_read_client
+        read_client = await get_async_read_client()
     except Exception as e:
         logger.error(f"Supabase not configured - cannot query log entries: {e}")
         return None
     
     try:
-        result = read_client.table("transparency_log") \
+        result = await read_client.table("transparency_log") \
             .select("payload") \
             .eq("event_hash", event_hash) \
             .limit(1) \
@@ -477,12 +473,11 @@ async def get_log_entries_for_epoch(
         List of log_entry dicts
     """
     try:
-        # Try both import paths to support local dev and EC2 deployment
         try:
-            from gateway.db.client import get_read_client
+            from gateway.db.client import get_async_read_client
         except ImportError:
-            from db.client import get_read_client
-        read_client = get_read_client()
+            from db.client import get_async_read_client
+        read_client = await get_async_read_client()
     except Exception as e:
         logger.error(f"Supabase not configured - cannot query log entries: {e}")
         return []
@@ -495,9 +490,7 @@ async def get_log_entries_for_epoch(
         if event_type:
             query = query.eq("event_type", event_type)
         
-        # Filter by epoch_id in the payload
-        # Note: This requires the payload to have netuid and epoch_id
-        result = query.execute()
+        result = await query.execute()
         
         # Filter results by netuid and epoch_id in payload
         entries = []

@@ -36,20 +36,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Import configuration
-from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  # kept for any downstream usage
 
 # Import utilities
 from gateway.utils.signature import verify_wallet_signature, construct_signed_message, compute_payload_hash
 from gateway.utils.registry import is_registered_hotkey_async  # Use async version
-from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
+from gateway.utils.nonce import check_and_store_nonce_async, validate_nonce_format
 from gateway.utils.storage import verify_storage_proof
 from gateway.utils.rate_limiter import MAX_SUBMISSIONS_PER_DAY, MAX_REJECTIONS_PER_DAY
 
-# Import Supabase
-from supabase import create_client, Client
-
-# Create Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Async Supabase client (initialized once per request via get_async_write_client)
+from gateway.db.client import get_async_write_client
 
 # ============================================================
 # Role Sanity Check Configuration (loaded from JSON)
@@ -95,7 +92,7 @@ from gateway.utils.geo_normalize import normalize_location, validate_location, n
 # Company Information Table (cached company data)
 # ============================================================
 from gateway.db.company_info import (
-    get_company_by_linkedin,
+    get_company_by_linkedin_async,
     is_company_data_fresh,
     check_employee_count_changed,
 )
@@ -1051,6 +1048,9 @@ async def submit_lead(event: SubmitLeadEvent):
     
     import uuid  # For generating nonces for transparency log events
     
+    # Get async Supabase client (non-blocking I/O for all DB calls in this handler)
+    supabase = await get_async_write_client()
+    
     print(f"\n🔍 POST /submit called - lead_id={event.payload.lead_id}")
     
     # ========================================
@@ -1217,7 +1217,7 @@ async def submit_lead(event: SubmitLeadEvent):
             detail="Invalid nonce format (must be UUID v4)"
         )
     
-    if not check_and_store_nonce(event.nonce, event.actor_hotkey):
+    if not await check_and_store_nonce_async(event.nonce, event.actor_hotkey):
         raise HTTPException(
             status_code=400,
             detail="Nonce already used (replay attack detected)"
@@ -1249,7 +1249,7 @@ async def submit_lead(event: SubmitLeadEvent):
     try:
         # Query directly for the specific lead_id using JSONB operator
         # This avoids the Supabase 1000 row default limit issue when miners have many submissions
-        result = supabase.table("transparency_log") \
+        result = await supabase.table("transparency_log") \
             .select("*") \
             .eq("event_type", "SUBMISSION_REQUEST") \
             .eq("actor_hotkey", event.actor_hotkey) \
@@ -1317,7 +1317,7 @@ async def submit_lead(event: SubmitLeadEvent):
     try:
         # Step 1: Check for CONSENSUS_RESULT with this email_hash
         # This tells us the final outcome of any previous submission with this email
-        consensus_check = supabase.table("transparency_log") \
+        consensus_check = await supabase.table("transparency_log") \
             .select("payload, created_at") \
             .eq("email_hash", committed_email_hash) \
             .eq("event_type", "CONSENSUS_RESULT") \
@@ -1426,7 +1426,7 @@ async def submit_lead(event: SubmitLeadEvent):
             # Check for any SUBMISSION with this email (still processing)
             # NOTE: SUBMISSION (not SUBMISSION_REQUEST) means lead was actually accepted into queue
             # SUBMISSION_REQUEST is just the presign intent - doesn't mean lead was accepted
-            submission_check = supabase.table("transparency_log") \
+            submission_check = await supabase.table("transparency_log") \
                 .select("payload, created_at, actor_hotkey") \
                 .eq("email_hash", committed_email_hash) \
                 .eq("event_type", "SUBMISSION") \
@@ -1707,7 +1707,7 @@ async def submit_lead(event: SubmitLeadEvent):
             print(f"   🔍 Checking for duplicate LinkedIn combo...")
             try:
                 # Check for CONSENSUS_RESULT with this linkedin_combo_hash
-                linkedin_consensus_check = supabase.table("transparency_log") \
+                linkedin_consensus_check = await supabase.table("transparency_log") \
                     .select("payload, created_at") \
                     .eq("linkedin_combo_hash", actual_linkedin_combo_hash) \
                     .eq("event_type", "CONSENSUS_RESULT") \
@@ -1783,7 +1783,7 @@ async def submit_lead(event: SubmitLeadEvent):
                 else:
                     # No CONSENSUS_RESULT - check for pending SUBMISSION
                     # NOTE: SUBMISSION (not SUBMISSION_REQUEST) means lead was actually accepted into queue
-                    linkedin_submission_check = supabase.table("transparency_log") \
+                    linkedin_submission_check = await supabase.table("transparency_log") \
                         .select("payload, created_at, actor_hotkey") \
                         .eq("linkedin_combo_hash", actual_linkedin_combo_hash) \
                         .eq("event_type", "SUBMISSION") \
@@ -2534,7 +2534,7 @@ async def submit_lead(event: SubmitLeadEvent):
 
         if company_linkedin_url:
             print(f"   🔍 Looking up company in table: {company_linkedin_url}")
-            stored_company = get_company_by_linkedin(company_linkedin_url)
+            stored_company = await get_company_by_linkedin_async(company_linkedin_url)
 
             if stored_company:
                 company_exists_in_table = True
@@ -2853,7 +2853,7 @@ async def submit_lead(event: SubmitLeadEvent):
                 from datetime import timezone as tz
                 
                 # Check if attestation already exists for this wallet
-                existing = supabase.table("contributor_attestations") \
+                existing = await supabase.table("contributor_attestations") \
                     .select("id, wallet_ss58") \
                     .eq("wallet_ss58", wallet_ss58) \
                     .execute()
@@ -2863,22 +2863,17 @@ async def submit_lead(event: SubmitLeadEvent):
                     "terms_version_hash": terms_version_hash,
                     "accepted": True,
                     "timestamp_utc": datetime.now(tz.utc).isoformat(),
-                    "ip_address": None  # Privacy: Don't store IP in trustless model
+                    "ip_address": None
                 }
                 
-                # Note: Boolean attestation fields (lawful_collection, no_restricted_sources, license_granted)
-                # are stored in the lead metadata, not the attestation table
-                
                 if existing.data and len(existing.data) > 0:
-                    # Update existing record
-                    result = supabase.table("contributor_attestations") \
+                    result = await supabase.table("contributor_attestations") \
                         .update(attestation_data) \
                         .eq("wallet_ss58", wallet_ss58) \
                         .execute()
                     print(f"   ✅ Attestation updated in database (audit trail)")
                 else:
-                    # Insert new record
-                    result = supabase.table("contributor_attestations") \
+                    result = await supabase.table("contributor_attestations") \
                         .insert(attestation_data) \
                         .execute()
                     print(f"   ✅ Attestation inserted in database (audit trail)")
@@ -2950,7 +2945,7 @@ async def submit_lead(event: SubmitLeadEvent):
             if submitted_email:
                 try:
                     # Check if there's a denied lead with same email
-                    denied_check = supabase.table("leads_private") \
+                    denied_check = await supabase.table("leads_private") \
                         .select("lead_id") \
                         .eq("lead_blob->>email", submitted_email) \
                         .eq("status", "denied") \
@@ -2967,7 +2962,7 @@ async def submit_lead(event: SubmitLeadEvent):
                         # 2. Then delete from leads_private
                         
                         # Step 1: Delete validation evidence for the denied lead
-                        evidence_delete = supabase.table("validation_evidence_private") \
+                        evidence_delete = await supabase.table("validation_evidence_private") \
                             .delete() \
                             .eq("lead_id", old_lead_id) \
                             .execute()
@@ -2978,7 +2973,7 @@ async def submit_lead(event: SubmitLeadEvent):
                         
                         # Step 2: Delete the old denied lead from leads_private
                         # Extra safety: re-verify status is 'denied' before deleting
-                        supabase.table("leads_private") \
+                        await supabase.table("leads_private") \
                             .delete() \
                             .eq("lead_id", old_lead_id) \
                             .eq("status", "denied") \
@@ -2998,7 +2993,7 @@ async def submit_lead(event: SubmitLeadEvent):
                 "created_ts": datetime.now(tz.utc).isoformat()
             }
             
-            supabase.table("leads_private").insert(lead_private_entry).execute()
+            await supabase.table("leads_private").insert(lead_private_entry).execute()
             print(f"   ✅ Lead stored in leads_private (miner: {event.actor_hotkey[:10]}..., status: pending_validation)")
             
         except Exception as e:
@@ -3084,7 +3079,7 @@ async def submit_lead(event: SubmitLeadEvent):
         # Compute queue_position (simplified - just count total submissions)
         submission_timestamp = datetime.now(tz.utc).isoformat()
         try:
-            queue_count_result = supabase.table("leads_private").select("lead_id", count="exact").execute()
+            queue_count_result = await supabase.table("leads_private").select("lead_id", count="exact").execute()
             queue_position = queue_count_result.count if hasattr(queue_count_result, 'count') else None
         except Exception as e:
             print(f"⚠️  Could not compute queue_position: {e}")

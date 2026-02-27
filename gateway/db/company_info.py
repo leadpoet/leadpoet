@@ -79,7 +79,7 @@ def _extract_slug(company_linkedin: str) -> str:
 
 def get_company_by_linkedin(company_linkedin: str) -> Optional[Dict[str, Any]]:
     """
-    Look up company by slug extracted from company_linkedin URL.
+    Look up company by slug extracted from company_linkedin URL (sync).
 
     Args:
         company_linkedin: Company LinkedIn URL (any format)
@@ -107,6 +107,34 @@ def get_company_by_linkedin(company_linkedin: str) -> Optional[Dict[str, Any]]:
 
     except Exception as e:
         logger.error(f"❌ Error looking up company: {e}")
+        return None
+
+
+async def get_company_by_linkedin_async(company_linkedin: str) -> Optional[Dict[str, Any]]:
+    """
+    Async version — non-blocking for the event loop.
+    """
+    slug = _extract_slug(company_linkedin)
+    if not slug:
+        return None
+
+    try:
+        from gateway.db.client import get_async_write_client
+        client = await get_async_write_client()
+        result = await client.table(TABLE_NAME) \
+            .select("*") \
+            .eq("company_slug", slug) \
+            .limit(1) \
+            .execute()
+
+        if result.data and len(result.data) > 0:
+            logger.info(f"✅ Found company in table: {slug}")
+            return result.data[0]
+
+        return None
+
+    except Exception as e:
+        logger.error(f"❌ Error looking up company (async): {e}")
         return None
 
 

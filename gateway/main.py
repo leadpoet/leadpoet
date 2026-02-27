@@ -32,7 +32,7 @@ from gateway.models.responses import PresignedURLResponse, ErrorResponse, Health
 # Import utilities
 from gateway.utils.signature import verify_wallet_signature, compute_payload_hash, construct_signed_message
 from gateway.utils.registry import is_registered_hotkey
-from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
+from gateway.utils.nonce import check_and_store_nonce_async, validate_nonce_format
 from gateway.utils.storage import generate_presigned_put_urls
 
 # Import Supabase
@@ -583,7 +583,7 @@ async def presign_urls(event: SubmissionRequestEvent):
             detail="Invalid nonce format (must be UUID v4)"
         )
     
-    if not check_and_store_nonce(event.nonce, event.actor_hotkey):
+    if not await check_and_store_nonce_async(event.nonce, event.actor_hotkey):
         raise HTTPException(
             status_code=400,
             detail="Nonce already used (replay attack detected)"

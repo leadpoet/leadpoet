@@ -215,6 +215,19 @@ ALLOWED_LIBRARIES: Set[str] = {
     "supabase_functions",   # Supabase functions dependency (new name)
     "deprecation",          # Deprecation warnings - used by supabase
     "packaging",            # Version parsing - used by deprecation/supabase
+    "pyiceberg",            # Supabase 2.28 dependency - catalog/REST client
+    "cachetools",           # Caching utilities - needed by pyiceberg
+    "mmh3",                 # MurmurHash3 - needed by pyiceberg
+    "sortedcontainers",     # Sorted collections - needed by pyiceberg
+    "pyparsing",            # Parser library - needed by pyiceberg
+    "strictyaml",           # YAML parser - needed by pyiceberg
+    "tenacity",             # Retry library - needed by pyiceberg
+    "six",                  # Python 2/3 compat - needed by various deps
+    "pprint",               # Pretty printing - stdlib
+    "ast",                  # Abstract syntax trees - stdlib
+    "unittest",             # Testing framework - stdlib (used internally)
+    "argparse",             # Argument parsing - stdlib (used internally)
+    "glob",                 # File glob patterns - stdlib
     
     # =========================================================================
     # SEARCH & LLM CLIENTS

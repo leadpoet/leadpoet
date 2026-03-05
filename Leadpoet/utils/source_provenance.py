@@ -167,23 +167,44 @@ async def validate_source_url(url: str, source_type: str) -> Tuple[bool, str]:
         pass
     
     # Check 3: URL reachability
+    # 401/403 are treated as VALID: they prove a real server is actively responding.
+    # Redirect-host validation catches fake domains that redirect to unrelated sites.
     _BROWSER_HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    _OK_STATUSES = {200, 301, 302, 303, 307, 308}
+    _OK_STATUSES = {200, 206, 301, 302, 303, 307, 308}
+    _ALIVE_STATUSES = {401, 403}
+    
+    def _host_key(u: str) -> str:
+        from urllib.parse import urlparse as _up
+        h = (_up(u).netloc or "").lower().strip(".")
+        h = h[4:] if h.startswith("www.") else h
+        parts = h.split(".")
+        return ".".join(parts[-2:]) if len(parts) >= 2 else h
+    
+    source_host = _host_key(url)
+    
     try:
         async with aiohttp.ClientSession(headers=_BROWSER_HEADERS) as session:
             async with session.head(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as response:
+                final_host = _host_key(str(response.url))
+                if final_host != source_host and source_host and final_host:
+                    return False, f"Source URL redirected to different host: {response.url}"
                 if response.status in _OK_STATUSES:
                     return True, "Source URL validated"
-                # Some servers block HEAD or bare requests — fall back to GET
-                if response.status in (403, 405):
+                if response.status in _ALIVE_STATUSES:
+                    return True, f"Source URL reachable ({response.status})"
+                # 404/405 — server may reject HEAD or resolve differently, try GET
+                if response.status in (404, 405):
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as fallback:
-                        if fallback.status in _OK_STATUSES:
-                            return True, "Source URL validated"
+                        fb_host = _host_key(str(fallback.url))
+                        if fb_host != source_host and source_host and fb_host:
+                            return False, f"Source URL redirected to different host: {fallback.url}"
+                        if fallback.status in _OK_STATUSES or fallback.status in _ALIVE_STATUSES:
+                            return True, f"Source URL validated ({fallback.status})"
                         return False, f"Source URL returned status {fallback.status}"
                 return False, f"Source URL returned status {response.status}"
     except aiohttp.ClientError as e:

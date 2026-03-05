@@ -263,14 +263,9 @@ async def score_lead(
             f"${cost_penalty_threshold:.4f} (2× ${CONFIG.MAX_COST_PER_LEAD_USD:.4f})"
         )
     
-    # Time variability penalty
-    time_penalty_threshold = CONFIG.get_time_penalty_threshold()
-    if run_time_seconds > time_penalty_threshold:
-        time_penalty = float(CONFIG.VARIABILITY_PENALTY_POINTS)
-        logger.debug(
-            f"Time variability penalty applied: {run_time_seconds:.1f}s > "
-            f"{time_penalty_threshold:.1f}s (2× {CONFIG.MAX_TIME_PER_LEAD_SECONDS:.1f}s)"
-        )
+    # Time variability penalty - DISABLED
+    # Models should optimize for quality first, speed later.
+    # The 30s hard stop (RUNNING_MODEL_TIMEOUT_SECONDS) is the only time constraint.
     
     logger.debug(f"Variability penalties - cost: {cost_penalty:.0f} pts, time: {time_penalty:.0f} pts")
     

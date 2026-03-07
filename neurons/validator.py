@@ -7672,12 +7672,14 @@ def run_dedicated_qualification_worker(config):
                                 
                                 confidence = detection_result.get("confidence_hardcoded", 0)
                                 verdict = detection_result.get("verdict", "UNKNOWN")
+                                passed = detection_result.get("passed", True)
                                 
                                 print(f"      🔍 Hardcoding detection result:")
                                 print(f"         Verdict: {verdict}")
                                 print(f"         Confidence: {confidence}%")
+                                print(f"         Passed: {passed}")
                                 
-                                if verdict == "HARDCODED" and confidence >= 70:
+                                if not passed or (verdict == "HARDCODED" and confidence >= 70):
                                     print(f"      ❌ MODEL REJECTED: Hardcoding detected ({confidence}% confidence)")
                                     model_results.append({
                                         "model_id": model_id,

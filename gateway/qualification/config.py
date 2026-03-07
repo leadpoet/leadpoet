@@ -254,7 +254,7 @@ class QualificationConfig:
     # - Malicious code patterns
     #
     # Available models (in order of cost):
-    # Uses Claude Sonnet 4.5 (200K context, excellent reasoning)
+    # Uses Claude Sonnet 4.6 (1M context, excellent reasoning)
     # =========================================================================
     
     # Confidence threshold for rejection (0-100)
@@ -271,7 +271,7 @@ class QualificationConfig:
     
     # Maximum total submission size for analysis (bytes)
     # ALL files count: .py, .md, .txt, .json, requirements.txt, etc.
-    # 500KB ≈ 125K tokens, within Sonnet 4.5's 200K context window
+    # 500KB ≈ 125K tokens, within Sonnet 4.6's 1M context window
     # Miner decides allocation: big README = less space for code
     # Models exceeding this are REJECTED (prevents hiding code beyond LLM context)
     # IMPORTANT: This same limit is enforced at the gateway to prevent wasted submissions

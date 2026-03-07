@@ -13,7 +13,7 @@ HOW IT WORKS:
 - Only .py files are analyzed
 - Two-layer detection:
   Layer 1: Fast static regex checks (free, instant)
-  Layer 2: LLM analysis for sophisticated patterns (Claude Sonnet 4.5)
+  Layer 2: LLM analysis for sophisticated patterns (Claude Sonnet 4.6)
 
 SIZE LIMIT: 500KB total for all files. Miner decides how to allocate:
 - Big README? Less space for code.
@@ -49,10 +49,10 @@ def get_max_submission_size() -> int:
     """Get the max total submission size from config or use default (500KB)."""
     return _get_config_value("HARDCODING_MAX_SUBMISSION_SIZE_BYTES", 500_000)
 
-# LLM Model for hardcoding detection - Claude Sonnet 4.5 (1M context window)
-DETECTION_MODEL_ID = "anthropic/claude-sonnet-4.5"
-DETECTION_MODEL_COST_INPUT = 3.00   # $ per 1M tokens (Claude Sonnet 4.5)
-DETECTION_MODEL_COST_OUTPUT = 15.00  # $ per 1M tokens (Claude Sonnet 4.5)
+# LLM Model for hardcoding detection - Claude Sonnet 4.6 (1M context window)
+DETECTION_MODEL_ID = "anthropic/claude-sonnet-4.6"
+DETECTION_MODEL_COST_INPUT = 3.00   # $ per 1M tokens (Claude Sonnet 4.6)
+DETECTION_MODEL_COST_OUTPUT = 15.00  # $ per 1M tokens (Claude Sonnet 4.6)
 
 # Default confidence threshold (can be overridden by config)
 DEFAULT_REJECTION_THRESHOLD = 70  # 70% = likely hardcoded
@@ -759,7 +759,7 @@ async def analyze_model_for_hardcoding(
         # Get timeout from config
         timeout = _get_config_value("HARDCODING_DETECTION_TIMEOUT", 120)
         
-        # Call the LLM (Sonnet 4.5)
+        # Call the LLM (Sonnet 4.6)
         analysis_result, cost = await _call_reasoning_llm(
             prompt=prompt,
             api_key=openrouter_key,
@@ -775,6 +775,7 @@ async def analyze_model_for_hardcoding(
         
         result = {
             "passed": passed,
+            "verdict": parsed.get("verdict", "HARDCODED" if not passed else "CLEAN"),
             "confidence_hardcoded": parsed["confidence_hardcoded"],
             "red_flags": parsed["red_flags"],
             "evidence": parsed["evidence"],

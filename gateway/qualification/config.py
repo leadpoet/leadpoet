@@ -254,7 +254,7 @@ class QualificationConfig:
     # - Malicious code patterns
     #
     # Available models (in order of cost):
-    # Uses o3-mini (200K context, good reasoning, consistent results)
+    # Uses Claude Sonnet 4.5 (200K context, excellent reasoning)
     # =========================================================================
     
     # Confidence threshold for rejection (0-100)
@@ -271,10 +271,11 @@ class QualificationConfig:
     
     # Maximum total submission size for analysis (bytes)
     # ALL files count: .py, .md, .txt, .json, requirements.txt, etc.
-    # 200KB ≈ 50K tokens, well within o3-mini's 200K context
+    # 500KB ≈ 125K tokens, within Sonnet 4.5's 200K context window
     # Miner decides allocation: big README = less space for code
     # Models exceeding this are REJECTED (prevents hiding code beyond LLM context)
-    HARDCODING_MAX_SUBMISSION_SIZE_BYTES: int = 200_000
+    # IMPORTANT: This same limit is enforced at the gateway to prevent wasted submissions
+    HARDCODING_MAX_SUBMISSION_SIZE_BYTES: int = 500_000
     
     # =========================================================================
     # S3/Storage

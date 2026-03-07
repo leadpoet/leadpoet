@@ -582,6 +582,28 @@ async def submit_model(submission: ModelSubmission, request: Request):
     logger.info(f"S3 upload verified: {submission.s3_key} ({file_size} bytes)")
     
     # ---------------------------------------------------------------------
+    # Step 3b: Reject uploads exceeding the hardcoding analysis size limit
+    # This prevents miners from paying $5 TAO for a model that will be
+    # immediately rejected by the validator's hardcoding detector.
+    # ---------------------------------------------------------------------
+    max_analysis_size = CONFIG.HARDCODING_MAX_SUBMISSION_SIZE_BYTES
+    if file_size > max_analysis_size:
+        max_kb = max_analysis_size // 1000
+        actual_kb = file_size / 1000
+        logger.warning(
+            f"Model too large for analysis: {actual_kb:.1f}KB > {max_kb}KB limit "
+            f"(hotkey={submission.miner_hotkey[:16]}...)"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model submission is {actual_kb:.1f}KB which exceeds the {max_kb}KB limit. "
+                f"All files (py, md, txt, json, etc.) count toward this limit. "
+                f"Reduce file sizes or remove unnecessary files before resubmitting."
+            )
+        )
+    
+    # ---------------------------------------------------------------------
     # Step 4: Check rate limit and handle payment
     # ---------------------------------------------------------------------
     # Rate limit rules:

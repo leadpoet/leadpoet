@@ -9,13 +9,13 @@ This module analyzes submitted model code BEFORE execution to detect:
 
 HOW IT WORKS:
 - Extracts ALL files from the submitted tarball
-- ALL files count toward 200KB limit (py + md + txt + json + etc.)
+- ALL files count toward 500KB limit (py + md + txt + json + etc.)
 - Only .py files are analyzed
 - Two-layer detection:
   Layer 1: Fast static regex checks (free, instant)
-  Layer 2: LLM analysis for sophisticated patterns
+  Layer 2: LLM analysis for sophisticated patterns (Claude Sonnet 4.5)
 
-SIZE LIMIT: 200KB total for all files. Miner decides how to allocate:
+SIZE LIMIT: 500KB total for all files. Miner decides how to allocate:
 - Big README? Less space for code.
 - Multiple model files? Less space for docs.
 
@@ -46,8 +46,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 def get_max_submission_size() -> int:
-    """Get the max total submission size from config or use default (200KB)."""
-    return _get_config_value("HARDCODING_MAX_SUBMISSION_SIZE_BYTES", 200_000)
+    """Get the max total submission size from config or use default (500KB)."""
+    return _get_config_value("HARDCODING_MAX_SUBMISSION_SIZE_BYTES", 500_000)
 
 # LLM Model for hardcoding detection - Claude Sonnet 4.5 (1M context window)
 DETECTION_MODEL_ID = "anthropic/claude-sonnet-4.5"
@@ -690,7 +690,7 @@ async def analyze_model_for_hardcoding(
         if total_size > max_size:
             logger.warning(
                 f"❌ Model REJECTED: Total size {total_size:,} bytes exceeds "
-                f"limit of {max_size:,} bytes (200KB)"
+                f"limit of {max_size:,} bytes ({max_size // 1000}KB)"
             )
             return {
                 "passed": False,
@@ -698,7 +698,7 @@ async def analyze_model_for_hardcoding(
                 "red_flags": [f"Total submission size {total_size:,} bytes exceeds {max_size:,} byte limit"],
                 "evidence": (
                     f"Model submission contains {total_size:,} bytes total across all files "
-                    f"(py, md, txt, json, etc.). This exceeds the 200KB limit. "
+                    f"(py, md, txt, json, etc.). This exceeds the {max_size // 1000}KB limit. "
                     f"Reduce file sizes or remove unnecessary files."
                 ),
                 "model_used": None,
@@ -759,7 +759,7 @@ async def analyze_model_for_hardcoding(
         # Get timeout from config
         timeout = _get_config_value("HARDCODING_DETECTION_TIMEOUT", 120)
         
-        # Call the LLM (o3-mini)
+        # Call the LLM (Sonnet 4.5)
         analysis_result, cost = await _call_reasoning_llm(
             prompt=prompt,
             api_key=openrouter_key,
@@ -1098,7 +1098,7 @@ async def _call_reasoning_llm(
     timeout: float = 120.0
 ) -> Tuple[str, float]:
     """
-    Call OpenRouter API with o3-mini for hardcoding detection.
+    Call OpenRouter API with Claude Sonnet 4.5 for hardcoding detection.
     
     Returns:
         Tuple of (response_text, cost_usd)
@@ -1140,7 +1140,7 @@ async def _call_reasoning_llm(
         elif "total_cost" in usage:
             cost = usage["total_cost"]
         else:
-            # Estimate cost from tokens using o3-mini pricing
+            # Estimate cost from tokens using Sonnet 4.5 pricing
             input_tokens = usage.get("prompt_tokens", 0)
             output_tokens = usage.get("completion_tokens", 0)
             cost = (

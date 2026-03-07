@@ -161,6 +161,7 @@ async def promote_next_champion() -> Optional[Dict[str, Any]]:
         supabase.table("qualification_models").update({
             "is_champion": True,
             "champion_at": now_iso,
+            "dethroned_at": None,
         }).eq("id", promoted["id"]).execute()
 
         logger.warning(

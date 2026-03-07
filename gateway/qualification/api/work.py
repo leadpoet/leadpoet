@@ -624,30 +624,31 @@ async def receive_champion_status(request: ChampionStatusRequest):
                 f"(below minimum threshold) - NO CHAMPION exists now"
             )
         
+        elif request.is_rebenchmark and not request.was_dethroned:
+            # Champion was re-evaluated — just update score, keep champion status intact
+            supabase.table("qualification_models").update(base_update).eq("id", request.model_id).execute()
+            
+            logger.info(f"🔄 Updated Supabase: Champion {request.model_id[:8]}... rebenchmarked (new score: {request.score:.2f})")
+        
         elif request.became_champion:
-            # Dethrone any existing champion
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # Dethrone any existing champion EXCEPT the model being crowned
             supabase.table("qualification_models").update({
                 "is_champion": False,
-                "dethroned_at": datetime.now(timezone.utc).isoformat()
-            }).eq("is_champion", True).execute()
+                "dethroned_at": now_iso
+            }).eq("is_champion", True).neq("id", request.model_id).execute()
             
-            # Crown new champion AND mark as evaluated (merge with base update)
+            # Crown new champion AND mark as evaluated
             champion_update = {
                 **base_update,
                 "is_champion": True,
-                "champion_at": datetime.now(timezone.utc).isoformat()
+                "champion_at": now_iso,
+                "dethroned_at": None
             }
             supabase.table("qualification_models").update(champion_update).eq("id", request.model_id).execute()
             
             logger.info(f"👑 Updated Supabase: {request.model_id[:8]}... is now champion (score: {request.score:.2f}, status=evaluated)")
-        
-        elif request.is_rebenchmark:
-            # Champion was re-evaluated - update their score (even if lower)
-            # Note: If score fell below minimum, was_dethroned should be True instead
-            # Rebenchmark uses base_update which includes all fields
-            supabase.table("qualification_models").update(base_update).eq("id", request.model_id).execute()
-            
-            logger.info(f"🔄 Updated Supabase: Champion {request.model_id[:8]}... rebenchmarked (new score: {request.score:.2f})")
         
         else:
             # Model was evaluated but didn't become champion - still mark as evaluated
@@ -1755,10 +1756,11 @@ async def check_and_update_champion(
                 "dethroned_at": datetime.now(timezone.utc).isoformat()
             }).eq("id", old_champion_id).execute()
         
-        # Crown new champion
+        # Crown new champion (clear any stale dethroned_at)
         supabase.table("qualification_models").update({
             "is_champion": True,
-            "champion_at": datetime.now(timezone.utc).isoformat()
+            "champion_at": datetime.now(timezone.utc).isoformat(),
+            "dethroned_at": None
         }).eq("id", model_id).execute()
         
         logger.info(

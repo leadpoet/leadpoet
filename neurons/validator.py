@@ -4780,7 +4780,7 @@ class Validator(BaseValidatorNeuron):
         
         Returns:
             Tuple of (became_champion: bool, is_rebenchmark: bool)
-            - became_champion: True if model is now champion (new or rebenchmarked)
+            - became_champion: True only if a NEW model became champion (False for rebenchmarks)
             - is_rebenchmark: True if this was a rebenchmark of existing champion
         """
         from gateway.qualification.config import CONFIG
@@ -4838,8 +4838,8 @@ class Validator(BaseValidatorNeuron):
                 current_champion["num_leads_evaluated"] = num_leads
                 current_champion["last_rebenchmark_at"] = timestamp
                 
-                # Keep became_champion as True if they were already champion
-                became_champion = True
+                # Rebenchmark: champion retains title, no dethrone/re-crown needed
+                became_champion = False
                 
                 # Log the rebenchmark result
                 change_indicator = "📈" if score_change > 0 else "📉" if score_change < 0 else "➡️"
@@ -5388,10 +5388,10 @@ class Validator(BaseValidatorNeuron):
         
         Args:
             model_id: UUID of the model
-            became_champion: True if this model is now champion
+            became_champion: True only if a NEW model became champion (False for rebenchmarks)
             score: The evaluation score
             is_rebenchmark: True if this is a rebenchmark of the existing champion
-                           (signals gateway to update score even if became_champion=True)
+                           (gateway updates score without touching champion_at/dethroned_at)
             was_dethroned: True if champion was dethroned (score below minimum) with NO replacement
             evaluation_cost_usd: Total cost of the evaluation (optional)
             evaluation_time_seconds: Total time of the evaluation in seconds (optional)
@@ -5890,7 +5890,7 @@ class Validator(BaseValidatorNeuron):
                         num_leads=num_leads
                     )
                     current_champion_score = avg_score
-                    became_champion = True  # Still champion after rebenchmark
+                    became_champion = False  # Rebenchmark: retain title, no dethrone/re-crown
             else:
                 # New challenger - check if beats champion AND meets minimum threshold
                 beat_threshold = QUALIFICATION_CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT / 100.0

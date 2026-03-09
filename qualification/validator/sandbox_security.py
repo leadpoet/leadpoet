@@ -1338,6 +1338,7 @@ class SandboxSecurityContext:
         self._original_os_open = None
         self._original_builtins_import = None
         self._original_current_frames = None  # Block sys._current_frames()
+        self._original_recursion_limit = None  # Protect against models changing recursion limit
         # Store module references so we can access them in __exit__ without importing
         self._builtins_module = None
         self._io_module = None
@@ -1357,6 +1358,9 @@ class SandboxSecurityContext:
         # IMPORTANT: Order matters! We set up restrictions AFTER importing
         # the modules we need for setup (builtins, io).
         # =================================================================
+        
+        # 0. Save Python global state that models could corrupt
+        self._original_recursion_limit = sys.getrecursionlimit()
         
         # 1. Restrict file access FIRST (blocks /proc/self/environ)
         if self.enable_file_restriction:
@@ -1468,6 +1472,10 @@ class SandboxSecurityContext:
         if self._original_current_frames is not None:
             sys._current_frames = self._original_current_frames
             logger.info("  ✅ sys._current_frames restored")
+        
+        # 0. Restore Python global state last (belt-and-suspenders)
+        if self._original_recursion_limit is not None:
+            sys.setrecursionlimit(self._original_recursion_limit)
         
         return False  # Don't suppress exceptions
     

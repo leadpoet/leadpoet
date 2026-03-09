@@ -771,6 +771,7 @@ class NetworkInterceptor:
         self.evaluation_run_id = evaluation_run_id
         self.evaluation_id = evaluation_id
         self._original_request = None
+        self._original_httpx_request = None
         self._original_get = None
         self._original_post = None
     
@@ -893,9 +894,9 @@ class NetworkInterceptor:
         try:
             import httpx
             
-            # Similar for httpx
-            original_httpx_request = httpx.Client.request
+            self._original_httpx_request = httpx.Client.request
             interceptor = self
+            original_httpx_request = self._original_httpx_request
             
             def intercepted_httpx_request(client, method, url, **kwargs):
                 new_url, new_kwargs = interceptor.intercept_request(method, str(url), **kwargs)
@@ -913,6 +914,13 @@ class NetworkInterceptor:
             import requests
             if self._original_request:
                 requests.Session.request = self._original_request
+        except ImportError:
+            pass
+        
+        try:
+            import httpx
+            if hasattr(self, '_original_httpx_request') and self._original_httpx_request:
+                httpx.Client.request = self._original_httpx_request
         except ImportError:
             pass
 

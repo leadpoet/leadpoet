@@ -2535,14 +2535,14 @@ class Validator(BaseValidatorNeuron):
                             print(f"{'='*60}\n")
                             break
                         
-                        # FORCE PROCEED at block 300 (provides ~12 min buffer for weight accum + gateway submit)
-                        # Block 300 = 60 min into epoch, leaves 12 min before epoch ends
+                        # FORCE PROCEED at block 280 (provides ~16 min buffer for weight accum + gateway submit)
+                        # Block 280 = 56 min into epoch, leaves 16 min before epoch ends
                         # Weight accumulation (~5 min) + gateway submit (~5 sec) = ~5 min total
-                        # Buffer: 12 - 5 = ~7 minutes spare
-                        if blocks_into_epoch_check >= 300:
-                            print(f"   ⏰ BLOCK 300+ REACHED: Force proceeding with available results")
+                        # Buffer: 16 - 5 = ~11 minutes spare
+                        if blocks_into_epoch_check >= 280:
+                            print(f"   ⏰ BLOCK 280+ REACHED: Force proceeding with available results")
                             print(f"      Block: {blocks_into_epoch_check}/360")
-                            print(f"      ~12 minutes remaining for weight accumulation + gateway submission")
+                            print(f"      ~16 minutes remaining for weight accumulation + gateway submission")
                             missing = [f"Container-{wf[0]}" for wf in worker_files if not os.path.exists(wf[1])]
                             print(f"      Missing workers: {missing}")
                             print(f"      Proceeding with partial results")

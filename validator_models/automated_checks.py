@@ -975,14 +975,22 @@ async def run_stage4_5_repscore(
     # OPTIMIZATION: Run all rep score checks in parallel to save time
     # Old: Sequential execution = 6-12s total
     # New: Parallel execution = 3-4s total (time of slowest API)
-    results = await asyncio.gather(
-        check_wayback_machine(lead),
-        check_sec_edgar(lead),
-        check_whois_dnsbl_reputation(lead),
-        check_gdelt_mentions(lead),
-        check_companies_house(lead),
-        return_exceptions=True  # Don't fail entire batch if one check fails
-    )
+    _default_rep = (0, {"error": "timeout"})
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                check_wayback_machine(lead),
+                check_sec_edgar(lead),
+                check_whois_dnsbl_reputation(lead),
+                check_gdelt_mentions(lead),
+                check_companies_house(lead),
+                return_exceptions=True,
+            ),
+            timeout=45,
+        )
+    except asyncio.TimeoutError:
+        print(f"   ⚠️ Rep score checks timed out after 45s — using 0 scores")
+        results = [_default_rep, _default_rep, _default_rep, _default_rep, _default_rep]
 
     # Unpack results (handle exceptions gracefully)
     wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})
@@ -2104,14 +2112,22 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # OPTIMIZATION: Run all rep score checks in parallel to save time
     # Old: Sequential execution = 6-12s total
     # New: Parallel execution = 3-4s total (time of slowest API)
-    results = await asyncio.gather(
-        check_wayback_machine(lead),
-        check_sec_edgar(lead),
-        check_whois_dnsbl_reputation(lead),
-        check_gdelt_mentions(lead),
-        check_companies_house(lead),
-        return_exceptions=True  # Don't fail entire batch if one check fails
-    )
+    _default_rep = (0, {"error": "timeout"})
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                check_wayback_machine(lead),
+                check_sec_edgar(lead),
+                check_whois_dnsbl_reputation(lead),
+                check_gdelt_mentions(lead),
+                check_companies_house(lead),
+                return_exceptions=True,
+            ),
+            timeout=45,
+        )
+    except asyncio.TimeoutError:
+        print(f"   ⚠️ Rep score checks timed out after 45s — using 0 scores")
+        results = [_default_rep, _default_rep, _default_rep, _default_rep, _default_rep]
 
     # Unpack results (handle exceptions gracefully)
     wayback_score, wayback_data = results[0] if not isinstance(results[0], Exception) else (0, {"error": str(results[0])})

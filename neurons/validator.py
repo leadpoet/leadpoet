@@ -370,9 +370,9 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" a
 # ════════════════════════════════════════════════════════════════════════════
 
 QUALIFICATION_CONTAINERS_COUNT = 5  # 5 dedicated qualification containers
-QUALIFICATION_MODELS_PER_CONTAINER = 2  # Each container handles 2 models per epoch
-QUALIFICATION_MAX_MODELS_PER_EPOCH = QUALIFICATION_CONTAINERS_COUNT * QUALIFICATION_MODELS_PER_CONTAINER  # 10 models
-QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK = (QUALIFICATION_CONTAINERS_COUNT - 1) * QUALIFICATION_MODELS_PER_CONTAINER  # 8 models (1 container does rebenchmark)
+QUALIFICATION_MODELS_PER_CONTAINER = 1  # Each container handles 1 model per epoch
+QUALIFICATION_MAX_MODELS_PER_EPOCH = QUALIFICATION_CONTAINERS_COUNT * QUALIFICATION_MODELS_PER_CONTAINER  # 5 models
+QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK = (QUALIFICATION_CONTAINERS_COUNT - 1) * QUALIFICATION_MODELS_PER_CONTAINER  # 4 models (1 container does rebenchmark)
 
 def detect_qualification_proxies():
     """Detect QUALIFICATION_WEBSHARE_PROXY_* environment variables."""
@@ -5531,7 +5531,7 @@ class Validator(BaseValidatorNeuron):
         
         # Determine max models to pull
         if rebenchmark_needed:
-            # Worker 1 does rebenchmark, others get 2 each = 4*2 = 8 from queue
+            # Worker 1 does rebenchmark, others get 1 each = 4*1 = 4 from queue
             max_models = QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK
             print(f"   🔄 Rebenchmark needed - pulling max {max_models} new models from queue")
             
@@ -5587,7 +5587,7 @@ class Validator(BaseValidatorNeuron):
             except Exception as rebench_err:
                 print(f"   ⚠️ Rebenchmark request failed: {rebench_err}")
         else:
-            # All 5 workers get 2 each = 10 from queue
+            # All 5 workers get 1 each = 5 from queue
             max_models = QUALIFICATION_MAX_MODELS_PER_EPOCH
             print(f"   📦 No rebenchmark - pulling max {max_models} models from queue")
         

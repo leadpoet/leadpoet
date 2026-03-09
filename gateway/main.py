@@ -407,7 +407,7 @@ from gateway.middleware.priority import PriorityMiddleware
 
 app.add_middleware(
     PriorityMiddleware,
-    max_concurrent_miners=50  # Pool=150, miners=50, leaves 100 for validators/consensus
+    max_concurrent_miners=75  # Pool=150, miners=75, leaves 75 for validators/consensus (doubled miners: 128→256 UIDs)
 )
 
 # Production middleware: Only log errors and critical paths

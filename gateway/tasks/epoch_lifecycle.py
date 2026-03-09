@@ -879,10 +879,10 @@ async def compute_epoch_consensus(epoch_id: int):
         rejected_count = 0
         
         # ========================================================================
-        # BATCHED CONSENSUS: Process leads in batches of 50 to reduce yield points
-        # This reduces event loop interruptions from 3200 to 64 (50x fewer)
+        # BATCHED CONSENSUS: Process leads in batches of 200 to reduce yield points
+        # This reduces event loop interruptions from 7000 to 35 (200x fewer)
         # ========================================================================
-        CONSENSUS_BATCH_SIZE = 50
+        CONSENSUS_BATCH_SIZE = 200
         
         async def process_single_lead_consensus(lead_id: str, lead_index: int, total_leads: int):
             """

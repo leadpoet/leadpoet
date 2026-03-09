@@ -2335,8 +2335,8 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
     payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
     
-    # Retry loop: Up to 3 attempts with fresh nonce/timestamp
-    for attempt in range(1, 4):
+    # Retry loop: Up to 5 attempts with fresh nonce/timestamp
+    for attempt in range(1, 6):
         try:
             # Generate FRESH nonce and timestamp for each attempt
             nonce = str(uuid.uuid4())
@@ -2348,7 +2348,7 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
             if attempt == 1:
                 bt.logging.info(f"📤 Submitting {len(validations)} hashed validations to gateway...")
             else:
-                bt.logging.warning(f"🔄 Retry {attempt}/3: Submitting with fresh nonce/timestamp...")
+                bt.logging.warning(f"🔄 Retry {attempt}/5: Submitting with fresh nonce/timestamp...")
             
             # Sign the message
             signature = wallet.hotkey.sign(message.encode()).hex()
@@ -2379,13 +2379,13 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
             
             result = response.json()
             if attempt > 1:
-                bt.logging.info(f"✅ Retry {attempt}/3 succeeded!")
+                bt.logging.info(f"✅ Retry {attempt}/5 succeeded!")
             bt.logging.info(f"✅ Validation submitted successfully: {result.get('validation_count', len(validations))} validations")
             return True
             
         except Exception as e:
-            if attempt < 3:
-                bt.logging.warning(f"⚠️  Attempt {attempt}/3 failed: {e}")
+            if attempt < 5:
+                bt.logging.warning(f"⚠️  Attempt {attempt}/5 failed: {e}")
                 if hasattr(e, 'response') and e.response is not None:
                     try:
                         error_detail = e.response.json()
@@ -2397,7 +2397,7 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
                 continue  # Try again
             else:
                 # All attempts exhausted
-                bt.logging.error(f"❌ All 3 attempts failed. Last error: {e}")
+                bt.logging.error(f"❌ All 5 attempts failed. Last error: {e}")
                 if hasattr(e, 'response') and e.response is not None:
                     try:
                         error_detail = e.response.json()

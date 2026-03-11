@@ -296,6 +296,56 @@ LOW_VALUE_INTENT_SOURCES = [
     r'source\s*=\s*["\']other["\']',
 ]
 
+# === EVIDENCE MANIPULATION PATTERNS (HIGH SEVERITY) ===
+# Detect models that strip negative LLM assessments from descriptions.
+# Gaming models collect lists of negative phrases and use re.sub to remove
+# them so that "no specific evidence" becomes an empty/positive description.
+EVIDENCE_MANIPULATION_PATTERNS = [
+    # Tuple/list literal containing 3+ negative assessment phrases
+    # Catches any collection of negative phrases regardless of variable name
+    r'(?:["\']no\s+specific["\'].*["\']no\s+(?:relevant|evidence|indication)["\'])',
+    # re.sub call that removes negative-sounding phrases from text
+    r're\.sub\s*\([^)]*(?:no\s+specific|no\s+evidence|no\s+indication|does\s+not\s+indicate|lacks\s+specific)',
+    # Variable with "block" or "neg" or "emit" holding tuple of negative phrases
+    r'(?:_emit_block|_bare_neg|_no_ev|neg_phrases|block_phrases)\s*=\s*[\(\[]',
+    # Broad: any re.sub that strips phrases from a "description" field
+    r're\.sub\s*\([^)]+,\s*["\']["\'],\s*\w+\.get\s*\(\s*["\']description["\']\s*',
+]
+
+# === HARDCODED INTENT DEFAULTS (HIGH SEVERITY) ===
+# Detect models that inject fabricated intent keywords when the ICP doesn't
+# specify any. Instead of returning None, they search for "hiring, funding,
+# expansion" to always find *something* and present it as relevant.
+HARDCODED_INTENT_DEFAULTS = [
+    # Default intent keywords when ICP signals are empty (or-expressions)
+    r'''or\s+['"](?:hiring|funding|expansion)[\s,]+(?:hiring|funding|expansion)''',
+    # Hardcoded intent fallback in search queries / f-strings
+    r'''['"].*hiring.*funding.*expansion.*['"]''',
+    # "or 'hiring funding'" / 'or "hiring funding"' as fallback
+    r'''\bor\s+['"]hiring\s+funding''',
+    # Fallback with multiple intent keywords joined
+    r'''['"]hiring,?\s*funding,?\s*expansion(?:,?\s*(?:launch|partnership|product))*['"]''',
+]
+
+# === TODAY DATE FABRICATION PATTERNS (HIGH SEVERITY) ===
+# Detect models that assign today's date or recent computed dates to
+# signal/evidence dates when no real date exists in the content.
+# This is distinct from random-date fabrication (already detected above).
+TODAY_DATE_FABRICATION_PATTERNS = [
+    # sig_date = today_str (assigns pre-computed today to signal date)
+    r'sig_date\s*=\s*today_str',
+    # sig_date = date.today() (direct assignment)
+    r'sig_date\s*=\s*date\.today\(\)',
+    # today_str = date.today().isoformat() (computing today for later use as signal date)
+    r'today_str\s*=\s*date\.today\(\)\.isoformat\(\)',
+    # best_date = (date.today() - timedelta...) (computing a "recent" date)
+    r'best_date\s*=\s*\(?date\.today\(\)\s*-\s*(?:timedelta|delta)',
+    # Broader: any *_date variable assigned from date.today() minus timedelta
+    r'\w*date\s*=\s*\(?\s*date\.today\(\)\s*-\s*(?:timedelta|delta)\s*\)?\s*\.isoformat',
+    # Fabricated evidence text: f"{company} hiring {title}" or similar templates
+    r'''ev\s*=\s*f['"].*\{.*company.*\}.*(?:hiring|funding|expansion).*\{''',
+]
+
 STATIC_CHECK_TIMEOUT_SECONDS = 30
 
 
@@ -614,6 +664,77 @@ def _run_static_gaming_checks_inner(code_content: str) -> Tuple[bool, List[str],
         red_flags.append(f"SOURCE TYPE INFLATION: /careers or /jobs pages classified as 'job_board' instead of 'company_website' - inflates intent score multiplier")
         confidence = max(confidence, 65)  # Medium-high - clear gaming
     
+    # ==========================================================================
+    # EVIDENCE MANIPULATION DETECTION (HIGH SEVERITY)
+    # ==========================================================================
+    # Models that build lists of negative phrases (e.g. "no specific", "no
+    # evidence") and use re.sub to strip them from LLM output, hiding honest
+    # verification failures to inflate quality scores.
+    evidence_manip_matches = 0
+    for pattern in EVIDENCE_MANIPULATION_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+            evidence_manip_matches += 1
+
+    if evidence_manip_matches >= 2:
+        red_flags.append(
+            f"EVIDENCE MANIPULATION: Model strips negative LLM assessments from "
+            f"descriptions ({evidence_manip_matches} patterns) — hides verification "
+            f"failures to make bad evidence look good"
+        )
+        confidence = max(confidence, 90)
+    elif evidence_manip_matches == 1:
+        red_flags.append(
+            "Suspicious evidence manipulation: possible negative phrase stripping (needs LLM review)"
+        )
+        confidence = max(confidence, 65)
+
+    # ==========================================================================
+    # HARDCODED INTENT DEFAULTS DETECTION (HIGH SEVERITY)
+    # ==========================================================================
+    # Models that default to "hiring, funding, expansion" when the ICP has no
+    # specific intent signals — then search for those keywords and present the
+    # results as if they are ICP-requested evidence.
+    intent_default_matches = 0
+    for pattern in HARDCODED_INTENT_DEFAULTS:
+        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+            intent_default_matches += 1
+
+    if intent_default_matches >= 2:
+        red_flags.append(
+            f"FABRICATED INTENT DEFAULTS: Model injects hardcoded intent keywords "
+            f"('hiring, funding, expansion') as fallback when ICP doesn't specify any "
+            f"({intent_default_matches} patterns) — fabricates relevance"
+        )
+        confidence = max(confidence, 88)
+    elif intent_default_matches == 1:
+        red_flags.append(
+            "Suspicious hardcoded intent keywords detected (needs LLM review)"
+        )
+        confidence = max(confidence, 60)
+
+    # ==========================================================================
+    # TODAY-DATE FABRICATION DETECTION (HIGH SEVERITY)
+    # ==========================================================================
+    # Models that assign date.today() (or today minus small delta) to evidence
+    # dates when no real date was found — games recency scoring.
+    today_date_matches = 0
+    for pattern in TODAY_DATE_FABRICATION_PATTERNS:
+        if re.search(pattern, code_content, re.IGNORECASE | re.DOTALL):
+            today_date_matches += 1
+
+    if today_date_matches >= 2:
+        red_flags.append(
+            f"TODAY-DATE FABRICATION: Model assigns today's date (or computed "
+            f"recent date) to evidence dates ({today_date_matches} patterns) — "
+            f"stale content appears fresh"
+        )
+        confidence = max(confidence, 88)
+    elif today_date_matches == 1:
+        red_flags.append(
+            "Suspicious today-date assignment to evidence date (needs LLM review)"
+        )
+        confidence = max(confidence, 60)
+
     # Determine if we should fail immediately or defer to LLM
     passed = confidence < 85  # 85+ = instant fail, below = let LLM decide
     

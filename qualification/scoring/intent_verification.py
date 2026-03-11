@@ -219,6 +219,47 @@ def get_cache_stats() -> Dict[str, Any]:
 
 
 # =============================================================================
+# Snippet Verbatim Check (Pre-LLM Anti-Gaming)
+# =============================================================================
+
+def _normalize_text(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace."""
+    t = text.lower()
+    t = re.sub(r'[^\w\s]', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
+def compute_snippet_overlap(snippet: str, content: str) -> float:
+    """
+    Compute what fraction of a snippet's 4-word n-grams appear in the content.
+
+    Returns a float 0.0-1.0 representing the overlap ratio. Legitimate models
+    that extract verbatim text from web pages will score near 1.0. Models that
+    fabricate, template, or strip/modify text will score much lower.
+    """
+    norm_snippet = _normalize_text(snippet)
+    norm_content = _normalize_text(content)
+
+    snippet_words = norm_snippet.split()
+    if len(snippet_words) < 4:
+        return 1.0  # too short to check meaningfully
+
+    content_set: set = set()
+    content_words = norm_content.split()
+    for i in range(len(content_words) - 3):
+        content_set.add(tuple(content_words[i:i + 4]))
+
+    matches = 0
+    total = len(snippet_words) - 3
+    for i in range(total):
+        if tuple(snippet_words[i:i + 4]) in content_set:
+            matches += 1
+
+    return matches / total if total > 0 else 1.0
+
+
+# =============================================================================
 # Generic Intent Detection (Pre-LLM Check)
 # =============================================================================
 
@@ -567,6 +608,25 @@ async def verify_intent_signal(
         logger.warning(f"Insufficient content extracted from URL: {intent_signal.url}")
         return False, 0, "Insufficient content to verify claim", "fabricated"
     
+    # ── Snippet verbatim check (BEFORE LLM — saves cost on obvious fabrication) ──
+    # The snippet field must contain text actually found on the source page.
+    # Models that fabricate descriptions via templates, strip negative LLM
+    # assessments, or construct evidence from f-strings will fail this check.
+    snippet_text = getattr(intent_signal, 'snippet', None) or ""
+    if len(snippet_text.strip()) >= 30 and len(text.strip()) >= 200:
+        snippet_overlap = compute_snippet_overlap(snippet_text, text)
+        if snippet_overlap < 0.30:
+            logger.warning(
+                f"❌ Snippet verbatim check FAILED: overlap={snippet_overlap:.0%} "
+                f"for {intent_signal.url[:60]}"
+            )
+            return False, 0, (
+                f"Snippet not found in source content (overlap: {snippet_overlap:.0%}). "
+                f"The snippet text does not appear on the page — likely fabricated or manipulated."
+            ), "fabricated"
+        else:
+            logger.info(f"✓ Snippet verbatim check passed: overlap={snippet_overlap:.0%}")
+
     # Verify claim with LLM - now includes ICP context
     try:
         verified, confidence, reason, date_status, claim_supported = await llm_verify_claim_with_icp(

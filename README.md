@@ -536,6 +536,26 @@ Full allowlist: [`qualification/validator/sandbox_security.py`](qualification/va
 
 > **Security:** Models are scanned on upload (gateway) AND at runtime (validator sandbox). Models that call APIs not on the allowlist are terminated after 10 blocked attempts. Obfuscation attempts are caught by the runtime sandbox. Hardcoded/gaming models are detected by LLM analysis before execution.
 
+#### 5. Prohibited Practices (Instant Ban)
+
+Models that manipulate quality signals will be **banned** and the hotkey blacklisted. Specifically:
+
+| Violation | Example | Why It's Banned |
+|-----------|---------|-----------------|
+| **Stripping negative LLM assessments** | Using `re.sub` to delete phrases like "no specific evidence" from descriptions | Hides honest verification failures to make bad evidence look good |
+| **Fabricating dates** | Assigning `date.today()` when no date exists in the evidence | Games the recency score — stale content appears fresh |
+| **Injecting fake intent signals** | Defaulting to `"hiring, funding, expansion"` when the ICP doesn't specify any | Searches for evidence the buyer never asked for, then presents it as relevant |
+| **Fabricating evidence text** | Using `f"{company} hiring {title}"` instead of verbatim scraped text | Constructs fake descriptions not found in the source URL |
+| **Bypassing LLM verification** | Fallback layers that skip verification and accept any 50+ chars of website text | Submits unverified content as "evidence" |
+| **Defaulting verification to pass** | `claim_supported = parsed.get("claim_supported", True)` | When verification fails/is ambiguous, assumes it passed |
+
+**What good models do instead:**
+- Return `None` when no genuine intent evidence exists for an ICP
+- Use only verbatim text extracted from real sources as descriptions
+- Leave the date field empty or omit the signal if no verifiable date is found
+- Respect LLM verification results — if the LLM says "no evidence," don't submit that lead
+- Only search for intent signals that the ICP actually requested
+
 **Allowed APIs:**
 | Type | APIs |
 |------|------|

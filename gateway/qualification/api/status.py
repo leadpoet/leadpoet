@@ -609,22 +609,12 @@ async def get_champion() -> Optional[Dict[str, Any]]:
     """
     Get the current champion model.
     
+    Queries qualification_models table for the model with is_champion=True.
+    Returns the champion info in the format expected by the validator's
+    _fetch_current_champion_from_gateway() method.
+    
     Returns:
         Champion information dict or None if no champion
-    
-    TODO: Implement database query using qualification_current_champion view
     """
-    # Placeholder - in production, query qualification_current_champion view
-    # 
-    # from gateway.db.client import get_supabase_client
-    # supabase = await get_supabase_client()
-    # 
-    # response = await supabase.table("qualification_current_champion") \
-    #     .select("*") \
-    #     .single() \
-    #     .execute()
-    # 
-    # return response.data if response.data else None
-    
-    logger.warning("PLACEHOLDER: get_champion - implement database query")
-    return None
+    from gateway.qualification.api.work import get_current_champion
+    return await get_current_champion()

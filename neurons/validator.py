@@ -5839,6 +5839,7 @@ class Validator(BaseValidatorNeuron):
                 # Still send score_breakdown to gateway for rejected models
                 # (e.g., hardcoding detection includes a rejection breakdown)
                 score_breakdown = result.get("score_breakdown")
+                was_dethroned = False
                 if score_breakdown:
                     try:
                         await self._notify_gateway_champion_status(
@@ -5851,6 +5852,26 @@ class Validator(BaseValidatorNeuron):
                         print(f"      📋 Rejection breakdown sent to gateway")
                     except Exception as e:
                         print(f"      ⚠️ Failed to send rejection breakdown: {e}")
+
+                if is_rebenchmark:
+                    print(f"      🔄 Rebenchmark failed with error — dethroning champion")
+                    self._clear_qualification_champion()
+                    current_champion_score = 0.0
+                    current_champion_id = None
+                    was_dethroned = True
+
+                    try:
+                        await self._notify_gateway_champion_status(
+                            model_id=model_id,
+                            became_champion=False,
+                            score=0.0,
+                            is_rebenchmark=True,
+                            was_dethroned=True,
+                            score_breakdown=score_breakdown
+                        )
+                    except Exception:
+                        pass
+
                 continue
             
             # Minimum score required to become/remain champion

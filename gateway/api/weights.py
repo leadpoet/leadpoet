@@ -81,6 +81,7 @@ def get_subtensor():
     global _subtensor
     if _subtensor is None:
         import bittensor as bt
+        # bittensor v10: bt.subtensor() constructor unchanged; network defaults to 'finney'
         _subtensor = bt.subtensor()
     return _subtensor
 

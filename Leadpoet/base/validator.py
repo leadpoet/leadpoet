@@ -11,6 +11,7 @@ from Leadpoet.base.utils.weight_utils import (
     process_weights_for_netuid,
     convert_weights_and_uids_for_emit,
 )
+# bittensor v10: AsyncSubtensor is initialized async-safely; no API changes for sync usage
 from Leadpoet.utils.config import add_validator_args
 from Leadpoet.validator.reward import calculate_emissions
 

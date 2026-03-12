@@ -78,6 +78,13 @@ CONTENT_MAX_LENGTH = 5000  # Max chars to send to LLM
 # Cache TTL
 DEFAULT_CACHE_TTL_DAYS = 7
 
+# Date-required sources: these have genuine publication/posting dates.
+# An incorrect date on these sources is worse than no date (misleading to clients).
+# Duplicated from lead_scorer to avoid circular import.
+_SOURCES_DATE_REQUIRED = frozenset({
+    "linkedin", "job_board", "news", "social_media",
+})
+
 
 # =============================================================================
 # Types
@@ -643,38 +650,64 @@ async def verify_intent_signal(
         return False, 0, f"LLM verification error: {str(e)[:100]}", "fabricated"
     
     # ── Programmatic date precision override ──
-    # The LLM sometimes accepts "2025-01-01" as "roughly matching" content
-    # that merely mentions "2025". This programmatic check catches that.
+    # Three-tier date scoring for date-required sources (news, linkedin, etc.):
+    #   Correct date (verified)  → 1.0x  (with age-based time decay)
+    #   No date on page          → 0.5x  (unverifiable recency)
+    #   Incorrect/fabricated date → 0x    (worse than no date — misleads clients)
     if intent_signal.date and date_status != "fabricated":
         stripped_content = strip_dynamic_boilerplate_dates(
             strip_copyright_founded_years(text[:CONTENT_MAX_LENGTH])
         )
         precision = check_date_precision(intent_signal.date, stripped_content)
+        source_lower = source_str.lower().strip()
 
-        if precision == "year_only" and date_status == "verified":
-            date_status = "no_date"
-            confidence = min(confidence, 50)
-            reason = (
-                f"Date precision override: only the year appears in content, "
-                f"month/day were manufactured. {reason}"
-            )
-            logger.warning(
-                f"⚠️ Date precision downgrade: {intent_signal.date} → year_only "
-                f"(treating as no_date)"
-            )
-        elif precision == "no_match" and date_status == "verified":
-            date_status = "fabricated"
-            confidence = 0
-            reason = (
-                f"Date precision override: claimed year not found in content at all. "
-                f"{reason}"
-            )
-            logger.warning(
-                f"❌ Date precision rejection: {intent_signal.date} → no_match "
-                f"(treating as fabricated)"
-            )
+        if date_status == "verified":
+            if precision == "year_only":
+                if source_lower in _SOURCES_DATE_REQUIRED:
+                    date_status = "fabricated"
+                    confidence = 0
+                    reason = (
+                        f"Date precision override: only the year appears for "
+                        f"date-required source '{source_lower}' — specific date "
+                        f"{intent_signal.date} was fabricated. {reason}"
+                    )
+                    logger.warning(
+                        f"❌ Date fabricated: {intent_signal.date} → year_only "
+                        f"for date-required source {source_lower}"
+                    )
+                else:
+                    date_status = "no_date"
+                    confidence = min(confidence, 50)
+                    reason = (
+                        f"Date precision override: only the year appears in content, "
+                        f"month/day were manufactured. {reason}"
+                    )
+                    logger.warning(
+                        f"⚠️ Date precision downgrade: {intent_signal.date} → year_only "
+                        f"(treating as no_date)"
+                    )
+            elif precision == "no_match":
+                date_status = "fabricated"
+                confidence = 0
+                reason = (
+                    f"Date precision override: claimed year not found in content at all. "
+                    f"{reason}"
+                )
+                logger.warning(
+                    f"❌ Date precision rejection: {intent_signal.date} → no_match "
+                    f"(treating as fabricated)"
+                )
 
-        if precision in ("verified", "approximate"):
+        elif date_status == "no_date":
+            if precision in ("verified", "approximate"):
+                date_status = "verified"
+                confidence = max(confidence, 70)
+                logger.info(
+                    f"✓ Date precision upgrade: {intent_signal.date} found on page "
+                    f"(LLM had said no_date, precision={precision})"
+                )
+
+        if precision in ("verified", "approximate") and date_status not in ("fabricated",):
             logger.info(
                 f"✓ Date precision confirmed: {intent_signal.date} → {precision}"
             )

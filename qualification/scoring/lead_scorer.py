@@ -495,6 +495,7 @@ SOURCES_DATE_REQUIRED = frozenset({
 })
 
 MAX_INTENT_NO_DATE_REQUIRED = 15   # Cap for undated signals where date IS required
+MAX_INTENT_NO_DATE_UNKNOWN = 40   # Cap for undated signals from unrecognized source types
 MAX_INTENT_NO_DATE_OPTIONAL = 50  # Full score for undated signals where date is NOT required
 
 async def _score_single_intent_signal(
@@ -577,9 +578,9 @@ Respond with ONLY a single number (0-50):"""
             raw_score = min(raw_score, MAX_INTENT_NO_DATE_REQUIRED)
             logger.info(f"Undated {source_str} signal — date required, capped at {MAX_INTENT_NO_DATE_REQUIRED}")
         else:
-            # Unknown source type — be conservative, cap the score
-            raw_score = min(raw_score, MAX_INTENT_NO_DATE_REQUIRED)
-            logger.info(f"Undated {source_str} signal (unknown source) — capped at {MAX_INTENT_NO_DATE_REQUIRED}")
+            # Unknown source type — moderate cap (more lenient than date-required)
+            raw_score = min(raw_score, MAX_INTENT_NO_DATE_UNKNOWN)
+            logger.info(f"Undated {source_str} signal (unknown source) — capped at {MAX_INTENT_NO_DATE_UNKNOWN}")
     
     # Weight by verification confidence AND source type quality
     weighted_score = raw_score * (confidence / 100) * source_multiplier

@@ -622,6 +622,9 @@ FINAL CHECK - Before outputting, verify:
             intent_signals = icp.get("intent_signals", [])
             if isinstance(intent_signals, str):
                 intent_signals = [intent_signals]
+            if not intent_signals:
+                intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))
+                logger.warning(f"ICP {icp_id} had empty intent_signals from LLM, assigned fallback: {intent_signals}")
             
             geography = icp.get("geography", "United States, California")
             country = icp.get("country", "United States")

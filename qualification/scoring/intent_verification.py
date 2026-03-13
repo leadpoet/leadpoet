@@ -629,11 +629,12 @@ async def verify_intent_signal(
             logger.info(f"✓ Snippet verbatim check passed: overlap={snippet_overlap:.0%}")
 
     # Verify claim with LLM - now includes ICP context
+    date_for_llm = intent_signal.date or "Not provided"
     try:
         verified, confidence, reason, date_status, claim_supported = await llm_verify_claim_with_icp(
             claim=intent_signal.description,
             url=intent_signal.url,
-            date=intent_signal.date,
+            date=date_for_llm,
             content=text[:CONTENT_MAX_LENGTH],
             icp_industry=icp_industry,
             icp_criteria=icp_criteria,
@@ -643,6 +644,11 @@ async def verify_intent_signal(
         logger.error(f"LLM verification failed: {e}")
         return False, 0, f"LLM verification error: {str(e)[:100]}", "fabricated"
     
+    # If miner submitted no date, force no_date regardless of LLM response
+    if not intent_signal.date:
+        date_status = "no_date"
+        logger.info("No date provided by miner — treating as no_date")
+
     # ── Programmatic date precision override ──
     # ALL source types: an incorrect date is always 0x (misleads clients).
     #   Correct date (verified)  → 1.0x  (with age-based time decay)

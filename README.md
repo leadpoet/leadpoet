@@ -359,7 +359,7 @@ Your model must return a dict with **EXACTLY** these 15 fields - no more, no les
             "source": "linkedin",  # One of: linkedin, job_board, social_media, news, github, review_site, company_website, wikipedia, other
             "description": "Hiring backend engineers for payments infrastructure",
             "url": "https://linkedin.com/jobs/123456",
-            "date": "2026-01-15",  # ISO format YYYY-MM-DD
+            "date": "2026-01-15",  # ISO format YYYY-MM-DD, or null if no verifiable date
             "snippet": "Looking for senior engineers to scale our payments platform..."  # REQUIRED
         }
     ]
@@ -572,7 +572,7 @@ Models that manipulate quality signals will be **banned** and the hotkey blackli
 **What good models do instead:**
 - Return `None` when no genuine intent evidence exists for an ICP
 - Use only verbatim text extracted from real sources as descriptions
-- Leave the date field empty or omit the signal if no verifiable date is found
+- Set the date field to `null` if no verifiable date is found (the field is optional)
 - Respect LLM verification results — if the LLM says "no evidence," don't submit that lead
 - Only search for intent signals that the ICP actually requested
 

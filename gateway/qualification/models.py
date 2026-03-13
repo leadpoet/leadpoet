@@ -90,17 +90,19 @@ class IntentSignal(BaseModel):
     source: IntentSignalSource
     description: str = Field(..., max_length=500, description="Description of the intent signal")
     url: str = Field(..., description="URL to the source of the intent signal")
-    date: str = Field(..., description="Date of the signal in ISO 8601 format (YYYY-MM-DD)")
+    date: Optional[str] = Field(None, description="Date of the signal in ISO 8601 format (YYYY-MM-DD), or null if no verifiable date")
     snippet: str = Field(..., max_length=1000, description="Relevant text snippet extracted from source URL")
     
     @field_validator('date')
     @classmethod
-    def validate_date_format(cls, v: str) -> str:
-        """Validate date is in ISO 8601 format."""
+    def validate_date_format(cls, v: Optional[str]) -> Optional[str]:
+        """Validate date is in ISO 8601 format when provided."""
+        if v is None or v == "":
+            return None
         try:
             datetime.strptime(v, "%Y-%m-%d")
         except ValueError:
-            raise ValueError("Date must be in YYYY-MM-DD format")
+            raise ValueError("Date must be in YYYY-MM-DD format or null")
         return v
     
     @field_validator('url')

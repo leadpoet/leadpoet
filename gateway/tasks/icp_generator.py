@@ -297,15 +297,15 @@ PRODUCTS_BY_INDUSTRY = {
 # Intent signals / additional context
 INTENT_SIGNALS = [
     "Recently raised funding and expanding team",
-    "Posted job openings for relevant roles",
+    "Hiring for senior engineering or sales roles",
     "Company mentioned in industry news for growth",
     "Executive spoke at industry conference",
     "Company blog discusses digital transformation",
-    "Hiring for specific technology skills",
+    "Evaluating new vendors or platforms",
     "Announced new market expansion",
     "Recent leadership change",
-    "Published case study on operational challenges",
-    "Active on LinkedIn discussing industry trends"
+    "Launched or announced a new product line",
+    "Posted on LinkedIn about upcoming initiatives"
 ]
 
 

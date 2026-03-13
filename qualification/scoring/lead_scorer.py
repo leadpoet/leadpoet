@@ -167,16 +167,15 @@ async def score_lead(
         decision_maker = await score_decision_maker(lead, icp)
         logger.debug(f"Decision maker score: {decision_maker}")
         
-        # Score Intent Signals (0-50 pts) - verifies each signal, uses the best
-        intent_raw, verification_confidence, best_signal_date, best_date_status, best_source = await score_intent_signal(lead, icp)
-        logger.debug(f"Intent signal raw score: {intent_raw} (confidence: {verification_confidence}, date_status: {best_date_status})")
+        # Score Intent Signals (0-50 pts) — scores ALL signals, averages after per-signal time decay
+        intent_raw, intent_final, decay_multiplier, max_confidence, all_fabricated = await score_intent_signal(lead, icp)
+        logger.debug(f"Intent signal avg_raw={intent_raw:.1f}, avg_final={intent_final:.1f}, decay={decay_multiplier:.2f}")
         
         # =====================================================================
-        # CRITICAL: Zero ENTIRE lead score if intent is clearly fabricated
-        # This catches gaming where models provide fake dates or generic claims
+        # CRITICAL: Zero ENTIRE lead score if ALL intent signals are fabricated
         # =====================================================================
-        if verification_confidence == 0:
-            logger.warning(f"❌ FABRICATED INTENT DETECTED - zeroing entire lead score")
+        if all_fabricated:
+            logger.warning(f"❌ ALL INTENT SIGNALS FABRICATED - zeroing entire lead score")
             return LeadScoreBreakdown(
                 icp_fit=0,
                 decision_maker=0,
@@ -204,42 +203,7 @@ async def score_lead(
         )
     
     # =========================================================================
-    # STEP 4: Apply time decay to intent signal (uses best signal's date)
-    # =========================================================================
-    NO_DATE_DECAY_MULTIPLIER = 0.5  # Multiplier for undated signals where date IS required
-    
-    if best_date_status == "no_date":
-        best_source_lower = (best_source or "").lower().strip()
-        if best_source_lower in SOURCES_DATE_NOT_REQUIRED:
-            decay_multiplier = 1.0
-            intent_final = intent_raw
-            age_months = -1
-            logger.info(f"Undated {best_source_lower} signal — date not required, full score (1.0x)")
-        else:
-            decay_multiplier = NO_DATE_DECAY_MULTIPLIER
-            intent_final = intent_raw * decay_multiplier
-            age_months = -1
-            logger.info(f"Undated {best_source_lower} signal — date required, decay {NO_DATE_DECAY_MULTIPLIER}x")
-    else:
-        try:
-            signal_date = date.fromisoformat(best_signal_date) if best_signal_date else None
-        except (ValueError, AttributeError):
-            signal_date = None
-            logger.warning(f"Invalid signal date '{best_signal_date}' - zeroing intent score")
-        
-        if signal_date is None:
-            intent_final = 0
-            decay_multiplier = 0
-            age_months = -1
-        else:
-            age_months = calculate_age_months(signal_date)
-            decay_multiplier = calculate_time_decay_multiplier(age_months)
-            intent_final = intent_raw * decay_multiplier
-    
-    logger.debug(f"Intent after decay: {intent_final} (age: {age_months} months, multiplier: {decay_multiplier})")
-    
-    # =========================================================================
-    # STEP 5: Calculate variability penalties
+    # STEP 4: Calculate variability penalties
     # =========================================================================
     # NEW SYSTEM: No penalty if within budget, 5-point penalty for high variability
     #
@@ -270,7 +234,7 @@ async def score_lead(
     logger.debug(f"Variability penalties - cost: {cost_penalty:.0f} pts, time: {time_penalty:.0f} pts")
     
     # =========================================================================
-    # STEP 6: Calculate final score (floor at 0)
+    # STEP 5: Calculate final score (floor at 0)
     # =========================================================================
     total_raw = icp_fit + decision_maker + intent_final
     final_score = max(0.0, total_raw - cost_penalty - time_penalty)
@@ -420,61 +384,95 @@ SOURCE_TYPE_MULTIPLIERS = {
 }
 
 
-async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, int, Optional[str]]:
+def _apply_signal_time_decay(
+    raw_score: float,
+    signal_date: Optional[str],
+    date_status: str,
+    source_str: str,
+) -> Tuple[float, float]:
     """
-    Score the quality and relevance of the lead's intent signals.
+    Apply time decay to a single signal's raw score.
     
-    Models can provide multiple intent signals per lead. Each signal is
-    verified and scored independently, and the BEST signal is used.
+    Returns:
+        Tuple of (after_decay_score, decay_multiplier)
+    """
+    NO_DATE_DECAY_MULTIPLIER = 0.5
+    source_lower = (source_str or "").lower().strip()
+
+    if date_status == "no_date":
+        if source_lower in SOURCES_DATE_NOT_REQUIRED:
+            return raw_score, 1.0
+        else:
+            return raw_score * NO_DATE_DECAY_MULTIPLIER, NO_DATE_DECAY_MULTIPLIER
+
+    try:
+        parsed_date = date.fromisoformat(signal_date) if signal_date else None
+    except (ValueError, AttributeError):
+        parsed_date = None
+
+    if parsed_date is None:
+        return 0.0, 0.0
+
+    age_months = calculate_age_months(parsed_date)
+    decay = calculate_time_decay_multiplier(age_months)
+    return raw_score * decay, decay
+
+
+async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, float, float, int, bool]:
+    """
+    Score ALL intent signals submitted by the model.
+    
+    Each signal is verified, scored, and time-decayed independently.
+    The final intent score is the AVERAGE of all after-decay scores.
+    This rewards models that submit multiple high-quality signals and
+    penalizes padding with fabricated or weak signals (they drag the average down).
     
     Args:
         lead: The lead to score (has intent_signals: List[IntentSignal])
         icp: The ICP prompt
     
     Returns:
-        Tuple of (best_score 0-50, best_confidence 0-100, best_signal_date)
+        Tuple of (avg_raw, avg_final, avg_decay_multiplier, max_confidence, all_fabricated)
     """
-    # Build ICP criteria for intent verification.
-    # ONLY include criteria that the intent URL content can reasonably prove.
-    # employee_count, geography, company_stage are structural fields already
-    # verified by db_verification.py against the leads database — asking the
-    # LLM to also find them in a news article or job posting is unreasonable
-    # and causes false negatives.
     icp_criteria = None
-    
-    best_score = 0.0
-    best_confidence = 0
-    best_date: Optional[str] = None
-    best_date_status = "fabricated"
-    best_source: Optional[str] = None
-    
+
+    signal_results = []
     for signal in lead.intent_signals:
         score, confidence, date_status = await _score_single_intent_signal(
             signal, icp, icp_criteria, lead.business
         )
-        if score > best_score:
-            best_score = score
-            best_confidence = confidence
-            best_date = signal.date
-            best_date_status = date_status
-            best_source = (signal.source or "").lower().strip()
-        elif confidence > best_confidence:
-            # Track highest confidence even when score is 0.
-            # This matters for distinguishing "fabricated" (confidence=0)
-            # from "no_date" or "not verified" (confidence>0).
-            best_confidence = confidence
-            best_date_status = date_status
-    
-    # If no signal scored > 0, use the first signal's date for decay
-    if best_date is None and lead.intent_signals:
-        best_date = lead.intent_signals[0].date
-    if best_source is None and lead.intent_signals:
-        best_source = (lead.intent_signals[0].source or "").lower().strip()
-    
-    if len(lead.intent_signals) > 1:
-        logger.info(f"Scored {len(lead.intent_signals)} intent signals — best: {best_score:.1f} (confidence: {best_confidence}, date: {best_date_status})")
-    
-    return best_score, best_confidence, best_date, best_date_status, best_source
+        source_str = (signal.source.value if hasattr(signal.source, 'value') else str(signal.source))
+        after_decay, decay_mult = _apply_signal_time_decay(
+            score, signal.date, date_status, source_str
+        )
+        signal_results.append({
+            "raw": score,
+            "after_decay": after_decay,
+            "decay": decay_mult,
+            "confidence": confidence,
+            "date_status": date_status,
+        })
+        logger.info(
+            f"  Signal {len(signal_results)}: raw={score:.1f}, decay={decay_mult:.2f}, "
+            f"final={after_decay:.1f}, confidence={confidence}, date_status={date_status}"
+        )
+
+    if not signal_results:
+        return 0.0, 0.0, 1.0, 0, True
+
+    n = len(signal_results)
+    avg_raw = sum(r["raw"] for r in signal_results) / n
+    avg_final = sum(r["after_decay"] for r in signal_results) / n
+    avg_decay = sum(r["decay"] for r in signal_results) / n
+    max_confidence = max(r["confidence"] for r in signal_results)
+    all_fabricated = all(r["confidence"] == 0 for r in signal_results)
+
+    logger.info(
+        f"Scored {n} intent signal(s) — avg_raw={avg_raw:.1f}, avg_final={avg_final:.1f}, "
+        f"avg_decay={avg_decay:.2f}, max_confidence={max_confidence}, all_fabricated={all_fabricated}"
+    )
+
+    return avg_raw, avg_final, avg_decay, max_confidence, all_fabricated
 
 
 # Source-dependent date requirements:

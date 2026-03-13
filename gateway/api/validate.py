@@ -456,22 +456,27 @@ async def submit_validation(event: ValidationEvent):
             print(f"   Validator stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
         else:
             # MAINNET: Normal operation - insert to validation_evidence_private
+            # Batch inserts in groups of 500 to stay within Supabase's 8s statement_timeout
+            # (single INSERT of 7000 rows takes ~12s → times out every time)
+            EVIDENCE_BATCH_SIZE = 500
             try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        lambda: supabase.table("validation_evidence_private").insert(evidence_records).execute()
-                    ),
-                    timeout=30.0  # 30 second timeout for Supabase insert
-                )
-                print(f"✅ Stored {len(evidence_records)} evidence blobs in private DB")
+                total_stored = 0
+                for i in range(0, len(evidence_records), EVIDENCE_BATCH_SIZE):
+                    batch = evidence_records[i:i + EVIDENCE_BATCH_SIZE]
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            lambda b=batch: supabase.table("validation_evidence_private").insert(b).execute()
+                        ),
+                        timeout=30.0
+                    )
+                    total_stored += len(batch)
+                print(f"✅ Stored {total_stored} evidence blobs in private DB ({(total_stored + EVIDENCE_BATCH_SIZE - 1) // EVIDENCE_BATCH_SIZE} batches of {EVIDENCE_BATCH_SIZE})")
                 print(f"   Validator stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
             except asyncio.TimeoutError:
-                # FAIL the entire request - validator will retry
-                # This preserves atomicity: either everything succeeds or nothing succeeds
-                print(f"❌ Supabase insert timed out after 30s")
+                print(f"❌ Supabase insert timed out after 30s (stored {total_stored}/{len(evidence_records)} so far)")
                 raise HTTPException(
                     status_code=504,
-                    detail="Database timeout while storing evidence blobs - please retry"
+                    detail=f"Database timeout while storing evidence blobs ({total_stored}/{len(evidence_records)} stored) - please retry"
                 )
     
     except HTTPException:

@@ -436,6 +436,26 @@ TABLE_NAME = "test_leads_for_miners"
 
 **Note:** Personal information (email, name, personal LinkedIn) is NOT available - models find company+role matches, and can enrich contacts using external APIs.
 
+### Expired ICP Sets (Debug Your Model)
+
+Once an ICP set expires (after its 24-hour evaluation window), it becomes publicly available via the `qualification_expired_icp_sets` view. Use this to replay past evaluations locally and debug your model's scoring.
+
+```python
+import requests
+
+url = "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/qualification_expired_icp_sets"
+headers = {"apikey": SUPABASE_ANON_KEY}
+
+# Most recent expired set
+resp = requests.get(url, headers=headers, params={"select": "*", "limit": "1"})
+icp_set = resp.json()[0]
+
+# Get a specific day's ICPs
+resp = requests.get(url, headers=headers, params={"select": "*", "set_id": "eq.20260311"})
+```
+
+Each row contains `set_id`, `active_from`, `active_until`, and the full `icps` array (100 ICP prompts with industry, geography, target roles, intent signals, etc.). Active ICP sets are never exposed.
+
 ### Quick-Start Model Template
 
 Here's a minimal working model to get you started. Create a `qualify.py` file:

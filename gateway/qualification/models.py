@@ -69,6 +69,20 @@ class IntentSignalSource(str, Enum):
     WIKIPEDIA = "wikipedia"
     OTHER = "other"
 
+    @classmethod
+    def _missing_(cls, value: str):
+        """Case-insensitive + whitespace-tolerant enum lookup.
+        
+        Miners may submit 'LinkedIn', 'Job Board', 'COMPANY_WEBSITE', etc.
+        """
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower().replace(" ", "_").replace("-", "_")
+        for member in cls:
+            if member.value == normalized:
+                return member
+        return None
+
 
 class Seniority(str, Enum):
     """Seniority levels for leads."""
@@ -77,6 +91,28 @@ class Seniority(str, Enum):
     DIRECTOR = "Director"
     MANAGER = "Manager"
     INDIVIDUAL_CONTRIBUTOR = "Individual Contributor"
+
+    @classmethod
+    def _missing_(cls, value: str):
+        """Case-insensitive enum lookup for seniority.
+        
+        Miners may submit 'c-suite', 'vp', 'individual contributor', etc.
+        """
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        lookup = {m.value.lower(): m for m in cls}
+        if normalized in lookup:
+            return lookup[normalized]
+        aliases = {
+            "c_suite": cls.C_SUITE, "csuite": cls.C_SUITE, "c suite": cls.C_SUITE,
+            "exec": cls.C_SUITE, "executive": cls.C_SUITE,
+            "vice president": cls.VP, "vice_president": cls.VP,
+            "dir": cls.DIRECTOR,
+            "mgr": cls.MANAGER,
+            "ic": cls.INDIVIDUAL_CONTRIBUTOR, "individual_contributor": cls.INDIVIDUAL_CONTRIBUTOR,
+        }
+        return aliases.get(normalized)
 
 
 # =============================================================================

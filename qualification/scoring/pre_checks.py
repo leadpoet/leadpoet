@@ -351,11 +351,32 @@ def check_role_match(lead_role: str, icp_target_roles: list) -> ValidationResult
     )
 
 
+_COUNTRY_ALIASES: dict = {
+    "usa": "united states", "us": "united states", "u.s.": "united states",
+    "u.s.a.": "united states", "united states of america": "united states",
+    "uk": "united kingdom", "great britain": "united kingdom",
+    "england": "united kingdom", "u.k.": "united kingdom",
+    "uae": "united arab emirates",
+    "south korea": "korea, republic of", "republic of korea": "korea, republic of",
+    "russia": "russian federation",
+    "taiwan": "taiwan, province of china",
+    "czech republic": "czechia",
+    "holland": "netherlands",
+}
+
+
+def _normalize_country(name: str) -> str:
+    """Normalize country name to handle common aliases."""
+    stripped = name.strip().lower()
+    return _COUNTRY_ALIASES.get(stripped, stripped)
+
+
 def check_country_match(lead_country: str, icp_country: str) -> ValidationResult:
     """
     Verify lead's country matches ICP requirement.
     
-    Uses case-insensitive exact match. Both must be non-empty.
+    Uses case-insensitive matching with common alias normalization
+    (e.g., USA = United States, UK = United Kingdom).
     If the ICP doesn't specify a country, any country is accepted.
     """
     if not icp_country or not icp_country.strip():
@@ -367,7 +388,7 @@ def check_country_match(lead_country: str, icp_country: str) -> ValidationResult
             reason=f"Missing country (ICP requires '{icp_country}')"
         )
     
-    if lead_country.strip().lower() != icp_country.strip().lower():
+    if _normalize_country(lead_country) != _normalize_country(icp_country):
         return ValidationResult(
             passed=False,
             reason=f"Country mismatch: '{lead_country}' vs ICP '{icp_country}'"
@@ -377,6 +398,17 @@ def check_country_match(lead_country: str, icp_country: str) -> ValidationResult
 
 # Seniority hierarchy — index 0 is highest
 _SENIORITY_LEVELS = ["C-Suite", "VP", "Director", "Manager", "Individual Contributor"]
+_SENIORITY_LOOKUP: dict = {}
+for _i, _level in enumerate(_SENIORITY_LEVELS):
+    _SENIORITY_LOOKUP[_level.lower()] = _i
+_SENIORITY_LOOKUP.update({
+    "c_suite": 0, "csuite": 0, "c suite": 0, "exec": 0, "executive": 0, "ceo": 0, "cto": 0, "cfo": 0, "coo": 0,
+    "vice president": 1, "vice_president": 1, "svp": 1, "evp": 1,
+    "dir": 2,
+    "mgr": 2, "manager": 3,
+    "ic": 4, "individual_contributor": 4, "individual contributor": 4, "contributor": 4,
+})
+
 
 def check_seniority_match(lead_seniority: str, icp_seniority: str) -> ValidationResult:
     """
@@ -392,6 +424,7 @@ def check_seniority_match(lead_seniority: str, icp_seniority: str) -> Validation
       ICP=IC      → accept all
     
     Leads ABOVE the target always pass (a CEO is fine for a VP ICP).
+    Uses case-insensitive matching with common abbreviation support.
     """
     if not icp_seniority or not icp_seniority.strip():
         return ValidationResult(passed=True)
@@ -399,26 +432,21 @@ def check_seniority_match(lead_seniority: str, icp_seniority: str) -> Validation
     if not lead_seniority or not lead_seniority.strip():
         return ValidationResult(passed=True)
     
-    lead_s = lead_seniority.strip()
-    icp_s = icp_seniority.strip()
+    lead_key = lead_seniority.strip().lower()
+    icp_key = icp_seniority.strip().lower()
     
-    try:
-        lead_idx = _SENIORITY_LEVELS.index(lead_s)
-    except ValueError:
+    lead_idx = _SENIORITY_LOOKUP.get(lead_key)
+    if lead_idx is None:
         return ValidationResult(passed=True)
     
-    try:
-        icp_idx = _SENIORITY_LEVELS.index(icp_s)
-    except ValueError:
+    icp_idx = _SENIORITY_LOOKUP.get(icp_key)
+    if icp_idx is None:
         return ValidationResult(passed=True)
     
-    # lead_idx <= icp_idx means lead is at or above target (always OK)
-    # lead_idx == icp_idx + 1 means 1 level below (tolerated)
-    # lead_idx > icp_idx + 1 means too junior
     if lead_idx > icp_idx + 1:
         return ValidationResult(
             passed=False,
-            reason=f"Seniority too low: '{lead_s}' for ICP target '{icp_s}' (min: {_SENIORITY_LEVELS[min(icp_idx + 1, len(_SENIORITY_LEVELS) - 1)]})"
+            reason=f"Seniority too low: '{lead_seniority.strip()}' for ICP target '{icp_seniority.strip()}' (min: {_SENIORITY_LEVELS[min(icp_idx + 1, len(_SENIORITY_LEVELS) - 1)]})"
         )
     
     return ValidationResult(passed=True)

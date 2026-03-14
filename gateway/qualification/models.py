@@ -11,6 +11,7 @@ See business_files/tasks10.md Phase 1.2 for specification.
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Literal, Dict, Any
 from datetime import date, datetime
+from urllib.parse import urlparse, urlunparse
 from uuid import UUID
 from enum import Enum
 
@@ -96,22 +97,56 @@ class IntentSignal(BaseModel):
     @field_validator('date')
     @classmethod
     def validate_date_format(cls, v: Optional[str]) -> Optional[str]:
-        """Validate date is in ISO 8601 format when provided."""
-        if v is None or v == "":
+        """Normalize date to YYYY-MM-DD — handles miner variability.
+        
+        Accepts common formats miners might use:
+        - 2026-02-01 (correct ISO)
+        - 2026/02/01 (slashes)
+        - 02-01-2026, 02/01/2026 (US format)
+        - 2026-2-1 (no leading zeros)
+        - null, empty string (treated as no date)
+        """
+        if v is None or v.strip() == "":
             return None
-        try:
-            datetime.strptime(v, "%Y-%m-%d")
-        except ValueError:
-            raise ValueError("Date must be in YYYY-MM-DD format or null")
-        return v
+        v = v.strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m-%d-%Y", "%m/%d/%Y", "%d-%m-%Y", "%d/%m/%Y"):
+            try:
+                parsed = datetime.strptime(v, fmt)
+                return parsed.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        raise ValueError("Date must be in YYYY-MM-DD format or null")
     
     @field_validator('url')
     @classmethod
     def validate_url(cls, v: str) -> str:
-        """Basic URL validation."""
-        if not v.startswith(('http://', 'https://')):
-            raise ValueError("URL must start with http:// or https://")
-        return v
+        """Normalize and validate URL — handles miner variability.
+        
+        Fixes common issues from miner models:
+        - Missing scheme (techcrunch.com/article → https://techcrunch.com/article)
+        - Wrong case (HTTP://WWW.TECHCRUNCH.COM → https://www.techcrunch.com)
+        - Whitespace
+        """
+        v = v.strip()
+        if not v:
+            raise ValueError("URL cannot be empty")
+        
+        if not v.lower().startswith(('http://', 'https://')):
+            v = 'https://' + v
+        
+        parsed = urlparse(v)
+        if not parsed.hostname:
+            raise ValueError("URL must contain a valid hostname")
+        
+        normalized = urlunparse((
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
+        return normalized
 
 
 # =============================================================================

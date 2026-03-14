@@ -420,13 +420,23 @@ def _apply_signal_time_decay(
 
 
 def _extract_domain(url: str) -> str:
-    """Extract the registrable domain from a URL (e.g. 'www.bloomberg.com' → 'bloomberg.com')."""
+    """Extract the registrable domain from a URL (e.g. 'www.bloomberg.com' → 'bloomberg.com').
+    
+    Handles miner variability: missing schemes, www prefixes, mixed casing.
+    URLs are normalized at the Pydantic layer, but this is defensive.
+    """
     try:
-        hostname = urlparse(url).hostname or ""
-        parts = hostname.lower().split(".")
+        clean = url.strip()
+        if not clean.lower().startswith(('http://', 'https://')):
+            clean = 'https://' + clean
+        hostname = urlparse(clean).hostname or ""
+        hostname = hostname.lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        parts = hostname.split(".")
         if len(parts) >= 2:
             return ".".join(parts[-2:])
-        return hostname.lower()
+        return hostname
     except Exception:
         return url.lower().strip()
 

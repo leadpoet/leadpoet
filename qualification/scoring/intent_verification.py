@@ -611,7 +611,10 @@ def check_source_url_mismatch(source_str: str, url: str) -> Optional[str]:
         return None
 
     try:
-        domain = urlparse(url).hostname or ""
+        clean_url = url.strip()
+        if not clean_url.lower().startswith(('http://', 'https://')):
+            clean_url = 'https://' + clean_url
+        domain = urlparse(clean_url).hostname or ""
     except Exception:
         return None
 
@@ -701,6 +704,13 @@ async def verify_intent_signal(
         Tuple of (verified: bool, confidence: int 0-100, reason: str, date_status: str)
         date_status is one of: "verified", "no_date", "fabricated"
     """
+    # Defensive URL normalization (Pydantic handles this at entry, but this
+    # function may be called directly in tests or non-Pydantic code paths)
+    url = intent_signal.url.strip()
+    if url and not url.lower().startswith(('http://', 'https://')):
+        url = 'https://' + url
+        intent_signal = intent_signal.model_copy(update={"url": url})
+    
     logger.info(f"Verifying intent signal: {intent_signal.source} - {intent_signal.url[:50]}...")
     
     # Get source as string for comparisons

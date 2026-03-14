@@ -370,9 +370,10 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" a
 # ════════════════════════════════════════════════════════════════════════════
 
 QUALIFICATION_CONTAINERS_COUNT = 5  # 5 dedicated qualification containers
-QUALIFICATION_MODELS_PER_CONTAINER = 1  # Each container handles 1 model per epoch
+QUALIFICATION_MODELS_PER_CONTAINER = 1  # Each container handles 1 model per evaluation cycle
 QUALIFICATION_MAX_MODELS_PER_EPOCH = QUALIFICATION_CONTAINERS_COUNT * QUALIFICATION_MODELS_PER_CONTAINER  # 5 models
 QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK = (QUALIFICATION_CONTAINERS_COUNT - 1) * QUALIFICATION_MODELS_PER_CONTAINER  # 4 models (1 container does rebenchmark)
+QUALIFICATION_EVAL_EPOCH_WINDOW = 2  # Models get 2 full epochs to complete evaluation before forced cutoff
 
 def detect_qualification_proxies():
     """Detect QUALIFICATION_WEBSHARE_PROXY_* environment variables."""
@@ -3901,30 +3902,56 @@ class Validator(BaseValidatorNeuron):
                 return
             
             # ═══════════════════════════════════════════════════════════════════
-            # QUALIFICATION COLLECTION LOGIC:
-            # IMMEDIATE REVEAL MODE (Jan 2026): No reveal waiting needed
-            # Validators submit hash+values in one request, so there's no separate reveal phase.
-            # 1. Check if workers are done IMMEDIATELY after sourcing completes
-            # 2. Block 335 is the CUTOFF - if workers aren't done by then, submit what's ready
+            # QUALIFICATION COLLECTION LOGIC (2-EPOCH WINDOW):
+            # Models are assigned in epoch N and get QUALIFICATION_EVAL_EPOCH_WINDOW
+            # epochs to complete. We try to collect results from any epoch in the
+            # window (current and previous epochs).
+            #
+            # Lifecycle:
+            #   Epoch N:   models assigned to workers, evaluation starts
+            #   Epoch N+1: evaluation continues (workers still running)
+            #   End of N+1 (after gateway submission): collect results, force-cutoff
+            #   Epoch N+2: new models can be assigned
             # ═══════════════════════════════════════════════════════════════════
             
-            # NOTE: Previous reveal waiting logic REMOVED - IMMEDIATE REVEAL MODE
-            # With immediate reveal, validators submit both hashes AND values in one request.
-            # No separate reveal phase - just proceed directly to qualification collection.
+            # Find the epoch with active work files (could be current or previous)
+            from pathlib import Path
+            weights_dir = Path("validator_weights")
+            active_work_epoch = None
+            for check_epoch in range(current_epoch, current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW - 1, -1):
+                if check_epoch < 0:
+                    break
+                for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
+                    work_file = weights_dir / f"qual_worker_{i}_work_{check_epoch}.json"
+                    if work_file.exists():
+                        active_work_epoch = check_epoch
+                        break
+                if active_work_epoch is not None:
+                    break
             
-            # Proceed directly to qualification workers.
-            # Block 335 is the CUTOFF - if workers aren't done by then, submit what's ready
+            if active_work_epoch is None:
+                return
+            
+            # How many epochs have passed since models were assigned?
+            epochs_since_assignment = current_epoch - active_work_epoch
+            
+            # Determine if we should force-submit:
+            # - If models were assigned THIS epoch: use block 335 cutoff as before
+            # - If models were assigned in a PREVIOUS epoch: they've had their full window,
+            #   force-submit after gateway sourcing completes (which already happened)
             past_cutoff = blocks_into_epoch >= 335
+            force_due_to_window = epochs_since_assignment >= QUALIFICATION_EVAL_EPOCH_WINDOW
+            force_submit = past_cutoff or force_due_to_window
             
             # Collect results (with cutoff logic handled in the collection function)
             try:
                 results, all_workers_done = await self._collect_dedicated_qualification_results(
-                    current_epoch, 
-                    force_submit=past_cutoff
+                    active_work_epoch, 
+                    force_submit=force_submit
                 )
                 
-                # If not past cutoff and workers aren't done, wait and show progress
-                if not past_cutoff and not all_workers_done:
+                # If workers aren't done and we're not forcing, wait and show progress
+                if not force_submit and not all_workers_done:
                     # Track last log time for periodic updates
                     if not hasattr(self, '_qual_waiting_last_log_time'):
                         self._qual_waiting_last_log_time = 0
@@ -3933,7 +3960,6 @@ class Validator(BaseValidatorNeuron):
                     
                     import time
                     current_time = time.time()
-                    # Log every 30 seconds OR on first call OR if block changed significantly
                     should_log = (
                         current_time - self._qual_waiting_last_log_time >= 30 or
                         self._qual_waiting_last_log_block == -1 or
@@ -3941,14 +3967,11 @@ class Validator(BaseValidatorNeuron):
                     )
                     
                     if should_log:
-                        # Get worker status for detailed logging
-                        from pathlib import Path
-                        weights_dir = Path("validator_weights")
                         pending_workers = []
                         completed_workers = []
                         for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
-                            work_file = weights_dir / f"qual_worker_{i}_work_{current_epoch}.json"
-                            results_file = weights_dir / f"qual_worker_{i}_results_{current_epoch}.json"
+                            work_file = weights_dir / f"qual_worker_{i}_work_{active_work_epoch}.json"
+                            results_file = weights_dir / f"qual_worker_{i}_results_{active_work_epoch}.json"
                             if work_file.exists():
                                 if results_file.exists():
                                     completed_workers.append(i)
@@ -3956,7 +3979,9 @@ class Validator(BaseValidatorNeuron):
                                     pending_workers.append(i)
                         
                         if pending_workers:
-                            print(f"🎯 QUALIFICATION: Waiting for workers to finish (block {blocks_into_epoch}/335)")
+                            remaining_epochs = QUALIFICATION_EVAL_EPOCH_WINDOW - epochs_since_assignment
+                            print(f"🎯 QUALIFICATION: Waiting for workers (assigned epoch {active_work_epoch}, "
+                                  f"{remaining_epochs} epoch(s) remaining)")
                             print(f"   ⏳ Pending: Qual Workers {pending_workers}")
                             if completed_workers:
                                 print(f"   ✅ Complete: Qual Workers {completed_workers}")
@@ -3969,9 +3994,12 @@ class Validator(BaseValidatorNeuron):
                 print(f"\n{'='*70}")
                 print(f"🎯 QUALIFICATION: Collecting worker results")
                 print(f"{'='*70}")
-                print(f"   Epoch: {current_epoch}")
+                print(f"   Current epoch: {current_epoch}, Work epoch: {active_work_epoch}")
                 print(f"   Block: {blocks_into_epoch}/360")
-                if past_cutoff and not all_workers_done:
+                if force_due_to_window and not all_workers_done:
+                    print(f"   ⚠️ {QUALIFICATION_EVAL_EPOCH_WINDOW}-epoch window expired — "
+                          f"submitting available results and clearing workers")
+                elif past_cutoff and not all_workers_done:
                     print(f"   ⚠️ Block 335 cutoff reached - submitting available results")
                 else:
                     print(f"   ✅ All workers complete - submitting results")
@@ -5484,11 +5512,37 @@ class Validator(BaseValidatorNeuron):
         weights_dir = Path("validator_weights")
         weights_dir.mkdir(exist_ok=True)
         
-        # Clean up old qualification worker files
+        # ── 2-EPOCH WINDOW: Check if workers from a recent epoch are still running ──
+        # Models get QUALIFICATION_EVAL_EPOCH_WINDOW epochs to finish.
+        # If work files from a recent epoch exist without corresponding results,
+        # workers are still evaluating — don't assign new work yet.
+        still_running_epoch = None
+        for check_epoch in range(current_epoch - 1, current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW - 1, -1):
+            if check_epoch < 0:
+                break
+            has_pending = False
+            for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
+                work_file = weights_dir / f"qual_worker_{i}_work_{check_epoch}.json"
+                results_file = weights_dir / f"qual_worker_{i}_results_{check_epoch}.json"
+                if work_file.exists() and not results_file.exists():
+                    has_pending = True
+                    break
+            if has_pending:
+                still_running_epoch = check_epoch
+                break
+        
+        if still_running_epoch is not None:
+            print(f"   ⏳ Workers still evaluating models from epoch {still_running_epoch} "
+                  f"(window={QUALIFICATION_EVAL_EPOCH_WINDOW} epochs) — skipping new assignment")
+            self._qual_dedicated_last_assigned_epoch = current_epoch
+            return
+        
+        # Clean up old qualification worker files (older than the eval window)
+        cutoff_epoch = current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW
         for old_file in weights_dir.glob("qual_worker_*_work_*.json"):
             try:
                 file_epoch = int(old_file.stem.split('_')[-1])
-                if file_epoch < current_epoch:
+                if file_epoch < cutoff_epoch:
                     old_file.unlink()
                     print(f"   🧹 Cleaned up stale qual work: {old_file.name}")
             except:
@@ -5497,7 +5551,7 @@ class Validator(BaseValidatorNeuron):
         for old_file in weights_dir.glob("qual_worker_*_results_*.json"):
             try:
                 file_epoch = int(old_file.stem.split('_')[-1])
-                if file_epoch < current_epoch:
+                if file_epoch < cutoff_epoch:
                     old_file.unlink()
                     print(f"   🧹 Cleaned up stale qual results: {old_file.name}")
             except:
@@ -5755,11 +5809,11 @@ class Validator(BaseValidatorNeuron):
         
         all_done = (completed_workers == expected_workers)
         
-        # If force_submit (block 335 cutoff), clear work files for incomplete workers
-        # so they can process models for the next epoch
+        # If force_submit (block 335 cutoff or epoch window expired), clear work files
+        # for incomplete workers so they can process models in the next cycle
         if force_submit and not all_done:
             incomplete_workers = expected_workers - completed_workers
-            print(f"   ⚠️ Block 335 cutoff - clearing {len(incomplete_workers)} incomplete worker(s): {sorted(incomplete_workers)}")
+            print(f"   ⚠️ Force cutoff - clearing {len(incomplete_workers)} incomplete worker(s): {sorted(incomplete_workers)}")
             for worker_id in incomplete_workers:
                 work_file = weights_dir / f"qual_worker_{worker_id}_work_{current_epoch}.json"
                 try:
@@ -5767,7 +5821,7 @@ class Validator(BaseValidatorNeuron):
                     print(f"      🗑️ Cleared work file for Qual Worker {worker_id}")
                 except Exception as e:
                     print(f"      ⚠️ Failed to clear work file for Qual Worker {worker_id}: {e}")
-            print(f"   ℹ️ Models from incomplete workers will be re-evaluated next epoch (status stays 'submitted')")
+            print(f"   ℹ️ Models from incomplete workers will be re-evaluated next cycle (status stays 'submitted')")
         
         # Log collection status
         if all_done and completed_workers:
@@ -7551,30 +7605,38 @@ def run_dedicated_qualification_worker(config):
             """
             Process qualification models assigned to this dedicated worker.
             
-            Qualification workers start at epoch start and process up to 2 models.
+            With the 2-epoch evaluation window, workers check for work files
+            from the current epoch AND previous epochs within the window.
             """
             qual_container_id = self.config.neuron.qualification_container_id
             weights_dir = Path("validator_weights")
             
-            # Check if already completed this epoch
-            if current_epoch in self._completed_epochs:
-                return
+            # Look for work file — check current epoch first, then previous epochs in window
+            work_file = None
+            results_file = None
+            work_epoch = None
+            for check_epoch in range(current_epoch, current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW - 1, -1):
+                if check_epoch < 0:
+                    break
+                if check_epoch in self._completed_epochs:
+                    continue
+                candidate_work = weights_dir / f"qual_worker_{qual_container_id}_work_{check_epoch}.json"
+                candidate_results = weights_dir / f"qual_worker_{qual_container_id}_results_{check_epoch}.json"
+                if candidate_work.exists():
+                    if candidate_results.exists():
+                        self._completed_epochs.add(check_epoch)
+                        continue
+                    work_file = candidate_work
+                    results_file = candidate_results
+                    work_epoch = check_epoch
+                    break
             
-            # Look for work file specific to this qualification worker
-            # Format: qual_worker_{id}_work_{epoch}.json
-            work_file = weights_dir / f"qual_worker_{qual_container_id}_work_{current_epoch}.json"
-            results_file = weights_dir / f"qual_worker_{qual_container_id}_results_{current_epoch}.json"
+            if work_file is None:
+                return  # No pending work
             
-            if not work_file.exists():
-                return  # No work assigned yet
-            
-            if results_file.exists():
-                # Already completed
-                self._completed_epochs.add(current_epoch)
-                return
-            
+            epoch_label = f"epoch {work_epoch}" + (f" (assigned {current_epoch - work_epoch} epoch(s) ago)" if work_epoch != current_epoch else "")
             print(f"\n{'='*70}")
-            print(f"🎯 QUALIFICATION WORKER {qual_container_id}: Work found for epoch {current_epoch}")
+            print(f"🎯 QUALIFICATION WORKER {qual_container_id}: Work found for {epoch_label}")
             print(f"{'='*70}")
             
             try:
@@ -7599,13 +7661,13 @@ def run_dedicated_qualification_worker(config):
                     print(f"   ❌ Qualification module not available: {e}")
                     with open(results_file, 'w') as f:
                         json.dump({
-                            "epoch": current_epoch,
+                            "epoch": work_epoch,
                             "qual_worker_id": qual_container_id,
                             "error": f"Qualification module not available: {e}",
                             "model_results": [],
                             "timestamp": time.time()
                         }, f)
-                    self._completed_epochs.add(current_epoch)
+                    self._completed_epochs.add(work_epoch)
                     return
                 
                 # Process each model
@@ -8013,14 +8075,14 @@ def run_dedicated_qualification_worker(config):
                 # Write all results
                 with open(results_file, 'w') as f:
                     json.dump({
-                        "epoch": current_epoch,
+                        "epoch": work_epoch,
                         "qual_worker_id": qual_container_id,
                         "is_rebenchmark_container": is_rebenchmark_container,
                         "model_results": model_results,
                         "timestamp": time.time()
                     }, f, indent=2)
                 
-                self._completed_epochs.add(current_epoch)
+                self._completed_epochs.add(work_epoch)
                 print(f"\n{'='*70}")
                 print(f"✅ QUALIFICATION WORKER {qual_container_id}: Completed {len(model_results)} models")
                 print(f"{'='*70}\n")
@@ -8032,13 +8094,13 @@ def run_dedicated_qualification_worker(config):
                 # Write error result
                 with open(results_file, 'w') as f:
                     json.dump({
-                        "epoch": current_epoch,
+                        "epoch": work_epoch,
                         "qual_worker_id": qual_container_id,
                         "error": str(e),
                         "model_results": [],
                         "timestamp": time.time()
                     }, f)
-                self._completed_epochs.add(current_epoch)
+                self._completed_epochs.add(work_epoch)
         
         async def run_loop(self):
             """Main loop for dedicated qualification worker."""

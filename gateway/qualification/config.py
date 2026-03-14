@@ -46,9 +46,9 @@ class QualificationConfig:
     # Cost/Time Limits (per-lead base values - totals are computed dynamically)
     # =========================================================================
     MAX_COST_PER_LEAD_USD: float = 0.05  # $0.05 average per lead (total = leads × $0.05)
-    MAX_TIME_PER_LEAD_SECONDS: float = 15.0  # 15s average per lead (total = leads × 15s)
-    RUNNING_MODEL_TIMEOUT_SECONDS: int = 30  # 30s HARD max per single lead - if exceeded, INSTANT FAIL
-    TOTAL_EVALUATION_TIMEOUT_MINUTES: int = 60  # 1 hour absolute max (safety net)
+    MAX_TIME_PER_LEAD_SECONDS: float = 45.0  # 45s average per lead (total = leads × 45s)
+    RUNNING_MODEL_TIMEOUT_SECONDS: int = 90  # 90s HARD max per single lead - if exceeded, INSTANT FAIL
+    TOTAL_EVALUATION_TIMEOUT_MINUTES: int = 180  # 3 hour absolute max (safety net, 100 leads × 90s = 150min)
     
     # =========================================================================
     # Screening Thresholds
@@ -131,9 +131,9 @@ class QualificationConfig:
     # NEW SYSTEM: No penalty if within budget, small penalty for high variability
     #
     # - NO penalty if cost ≤ MAX_COST_PER_LEAD_USD ($0.05)
-    # - NO penalty if time ≤ MAX_TIME_PER_LEAD_SECONDS (15s)
+    # - NO penalty if time ≤ MAX_TIME_PER_LEAD_SECONDS (45s)
     # - 5-point penalty if cost > 2× MAX_COST_PER_LEAD_USD ($0.10)
-    # - 5-point penalty if time > 2× MAX_TIME_PER_LEAD_SECONDS (16s)
+    # - 5-point penalty if time > 2× MAX_TIME_PER_LEAD_SECONDS (90s)
     #
     # These thresholds are DYNAMIC: if you change MAX_COST_PER_LEAD_USD from
     # $0.05 to $0.10, the penalty threshold automatically becomes $0.20.
@@ -314,9 +314,9 @@ class QualificationConfig:
             
             # Cost/Time Limits (per-lead base values)
             MAX_COST_PER_LEAD_USD=float(os.getenv("QUAL_MAX_COST_PER_LEAD_USD", 0.05)),
-            MAX_TIME_PER_LEAD_SECONDS=float(os.getenv("QUAL_MAX_TIME_PER_LEAD_SECONDS", 8.0)),
-            RUNNING_MODEL_TIMEOUT_SECONDS=int(os.getenv("QUAL_RUNNING_MODEL_TIMEOUT_SECONDS", 30)),
-            TOTAL_EVALUATION_TIMEOUT_MINUTES=int(os.getenv("QUAL_TOTAL_EVALUATION_TIMEOUT_MINUTES", 60)),
+            MAX_TIME_PER_LEAD_SECONDS=float(os.getenv("QUAL_MAX_TIME_PER_LEAD_SECONDS", 45.0)),
+            RUNNING_MODEL_TIMEOUT_SECONDS=int(os.getenv("QUAL_RUNNING_MODEL_TIMEOUT_SECONDS", 90)),
+            TOTAL_EVALUATION_TIMEOUT_MINUTES=int(os.getenv("QUAL_TOTAL_EVALUATION_TIMEOUT_MINUTES", 180)),
             
             # Screening Thresholds
             SCREENING_1_THRESHOLD=float(os.getenv("QUAL_SCREENING_1_THRESHOLD", 0.20)),

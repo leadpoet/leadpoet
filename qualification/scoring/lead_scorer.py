@@ -36,6 +36,7 @@ import logging
 from datetime import date, datetime
 from typing import Set, Optional, Tuple, List
 from collections import Counter
+from urllib.parse import urlparse
 
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import LeadOutput, ICPPrompt, LeadScoreBreakdown
@@ -418,6 +419,18 @@ def _apply_signal_time_decay(
     return raw_score * decay, decay
 
 
+def _extract_domain(url: str) -> str:
+    """Extract the registrable domain from a URL (e.g. 'www.bloomberg.com' → 'bloomberg.com')."""
+    try:
+        hostname = urlparse(url).hostname or ""
+        parts = hostname.lower().split(".")
+        if len(parts) >= 2:
+            return ".".join(parts[-2:])
+        return hostname.lower()
+    except Exception:
+        return url.lower().strip()
+
+
 async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, float, float, int, bool]:
     """
     Score ALL intent signals submitted by the model.
@@ -426,6 +439,10 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     The final intent score is the AVERAGE of all after-decay scores.
     This rewards models that submit multiple high-quality signals and
     penalizes padding with fabricated or weak signals (they drag the average down).
+    
+    URL deduplication: only the first signal from a given domain is scored
+    normally — subsequent signals pointing to the same domain score 0
+    (they're the same evidence repackaged).
     
     Args:
         lead: The lead to score (has intent_signals: List[IntentSignal])
@@ -436,8 +453,24 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
     """
     icp_criteria = None
 
+    seen_domains: set = set()
     signal_results = []
     for signal in lead.intent_signals:
+        domain = _extract_domain(signal.url)
+        if domain in seen_domains:
+            logger.warning(
+                f"  ⚠ Duplicate domain '{domain}' — signal scores 0 (URL dedup)"
+            )
+            signal_results.append({
+                "raw": 0.0,
+                "after_decay": 0.0,
+                "decay": 0.0,
+                "confidence": 0,
+                "date_status": "fabricated",
+            })
+            continue
+        seen_domains.add(domain)
+
         score, confidence, date_status = await _score_single_intent_signal(
             signal, icp, icp_criteria, lead.business
         )

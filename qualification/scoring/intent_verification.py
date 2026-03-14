@@ -35,8 +35,9 @@ import re
 import json
 import hashlib
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, date, timezone, timedelta
 from typing import Optional, Tuple, Dict, Any, NamedTuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -75,8 +76,9 @@ LLM_TIMEOUT = 30.0
 CONFIDENCE_THRESHOLD = 70  # Minimum confidence to consider verified
 CONTENT_MAX_LENGTH = 5000  # Max chars to send to LLM
 
-# Cache TTL
-DEFAULT_CACHE_TTL_DAYS = 7
+# Cache TTL — kept short so stale content (removed job posts, paywalled articles)
+# doesn't cause false positives on re-verification.
+DEFAULT_CACHE_TTL_DAYS = 2
 
 
 
@@ -534,6 +536,168 @@ def check_date_precision(claimed_date: str, content: str) -> str:
 
 
 # =============================================================================
+# Pre-check Utilities (cheap checks that run before LLM / ScrapingDog calls)
+# =============================================================================
+
+# Maps each declared source type to URL domains that are valid for it.
+# If the source type isn't in this map, we skip the mismatch check.
+_SOURCE_DOMAIN_ALLOWLIST: Dict[str, frozenset] = {
+    "linkedin": frozenset({"linkedin.com", "www.linkedin.com"}),
+    "github": frozenset({"github.com", "www.github.com", "raw.githubusercontent.com"}),
+    "wikipedia": frozenset({"en.wikipedia.org", "wikipedia.org"}),
+    "job_board": frozenset({
+        "linkedin.com", "www.linkedin.com",
+        "indeed.com", "www.indeed.com",
+        "glassdoor.com", "www.glassdoor.com",
+        "lever.co", "greenhouse.io", "boards.greenhouse.io",
+        "jobs.lever.co", "apply.workable.com",
+        "careers.google.com", "jobs.apple.com",
+        "builtin.com", "www.builtin.com",
+        "ziprecruiter.com", "www.ziprecruiter.com",
+        "monster.com", "www.monster.com",
+        "wellfound.com", "angel.co",
+        "dice.com", "www.dice.com",
+        "simplyhired.com", "www.simplyhired.com",
+        "roberthalf.com", "www.roberthalf.com",
+        "himalayas.app", "remoteok.com",
+        "weworkremotely.com", "flexjobs.com",
+    }),
+    "news": frozenset({
+        "reuters.com", "www.reuters.com",
+        "bloomberg.com", "www.bloomberg.com",
+        "techcrunch.com",
+        "forbes.com", "www.forbes.com",
+        "cnbc.com", "www.cnbc.com",
+        "wsj.com", "www.wsj.com",
+        "nytimes.com", "www.nytimes.com",
+        "bbc.com", "www.bbc.com", "bbc.co.uk", "www.bbc.co.uk",
+        "apnews.com",
+        "businessinsider.com", "www.businessinsider.com",
+        "venturebeat.com",
+        "theverge.com", "www.theverge.com",
+        "wired.com", "www.wired.com",
+        "axios.com", "www.axios.com",
+        "ft.com", "www.ft.com",
+        "prnewswire.com", "www.prnewswire.com",
+        "businesswire.com", "www.businesswire.com",
+        "globenewswire.com", "www.globenewswire.com",
+        "yahoo.com", "finance.yahoo.com", "news.yahoo.com",
+        "crunchbase.com", "news.crunchbase.com",
+        "zdnet.com", "www.zdnet.com",
+        "cnet.com", "www.cnet.com",
+        "siliconangle.com",
+        "marketwatch.com", "www.marketwatch.com",
+        "thestreet.com", "www.thestreet.com",
+        "seekingalpha.com",
+        "benzinga.com", "www.benzinga.com",
+        "investopedia.com", "www.investopedia.com",
+        "medium.com",
+        "theinformation.com", "www.theinformation.com",
+        "protocol.com",
+        "arstechnica.com",
+        "engadget.com", "www.engadget.com",
+        "washingtonpost.com", "www.washingtonpost.com",
+        "guardian.co.uk", "www.theguardian.com", "theguardian.com",
+        "economist.com", "www.economist.com",
+    }),
+    "social_media": frozenset({
+        "twitter.com", "x.com",
+        "facebook.com", "www.facebook.com",
+        "instagram.com", "www.instagram.com",
+        "reddit.com", "www.reddit.com", "old.reddit.com",
+        "youtube.com", "www.youtube.com",
+        "tiktok.com", "www.tiktok.com",
+        "threads.net", "www.threads.net",
+        "linkedin.com", "www.linkedin.com",
+    }),
+    "review_site": frozenset({
+        "g2.com", "www.g2.com",
+        "capterra.com", "www.capterra.com",
+        "trustpilot.com", "www.trustpilot.com",
+        "trustradius.com", "www.trustradius.com",
+        "gartner.com", "www.gartner.com",
+        "softwareadvice.com", "www.softwareadvice.com",
+        "getapp.com", "www.getapp.com",
+        "peerspot.com", "www.peerspot.com",
+        "glassdoor.com", "www.glassdoor.com",
+        "yelp.com", "www.yelp.com",
+    }),
+}
+
+
+def check_source_url_mismatch(source_str: str, url: str) -> Optional[str]:
+    """
+    Check if the declared source type is plausible given the URL domain.
+    
+    Returns an error message if there's a clear mismatch, None if OK.
+    Only flags when the source is in _SOURCE_DOMAIN_ALLOWLIST AND the URL
+    domain doesn't match — so unknown sources or company_website pass through.
+    """
+    source_lower = source_str.lower().strip()
+    if source_lower in ("company_website", "other"):
+        return None
+
+    allowed = _SOURCE_DOMAIN_ALLOWLIST.get(source_lower)
+    if allowed is None:
+        return None
+
+    try:
+        domain = urlparse(url).hostname or ""
+    except Exception:
+        return None
+
+    domain = domain.lower()
+    if domain in allowed:
+        return None
+
+    return (
+        f"Source type '{source_str}' declared but URL domain '{domain}' "
+        f"is not a recognized {source_str} domain"
+    )
+
+
+def check_future_date(signal_date: Optional[str]) -> Optional[str]:
+    """
+    Reject dates set in the future — obviously fabricated.
+    
+    Returns an error message if the date is in the future, None if OK.
+    """
+    if not signal_date:
+        return None
+    try:
+        parsed = date.fromisoformat(signal_date)
+    except (ValueError, TypeError):
+        return None
+    if parsed > date.today():
+        return f"Signal date {signal_date} is in the future — fabricated"
+    return None
+
+
+def check_company_in_content(company_name: str, text: str) -> bool:
+    """
+    Check whether the company name appears in the scraped page content.
+    
+    Uses case-insensitive substring matching with word-boundary awareness.
+    Also handles common abbreviations (e.g. "IBM" in "International Business Machines").
+    """
+    if not company_name or not text:
+        return False
+    name_lower = company_name.lower().strip()
+    text_lower = text.lower()
+
+    if name_lower in text_lower:
+        return True
+
+    # Try matching individual significant words (>=4 chars) from the company name.
+    # This handles cases like "Acme Corp" appearing as "Acme Corporation" on the page.
+    words = [w for w in name_lower.split() if len(w) >= 4]
+    if words and all(w in text_lower for w in words):
+        return True
+
+    return False
+
+
+# =============================================================================
 # Main Verification Function
 # =============================================================================
 
@@ -582,6 +746,18 @@ async def verify_intent_signal(
         logger.warning("Rejected: 'other' source with short description")
         return False, 10, "Low-value source type 'other' with insufficient description", "fabricated"
     
+    # PRE-CHECK: Reject future dates (obviously fabricated)
+    future_err = check_future_date(intent_signal.date)
+    if future_err:
+        logger.warning(f"❌ Future date rejected: {future_err}")
+        return False, 0, future_err, "fabricated"
+
+    # PRE-CHECK: Source type vs URL domain mismatch
+    mismatch_err = check_source_url_mismatch(source_str, intent_signal.url)
+    if mismatch_err:
+        logger.warning(f"❌ Source/URL mismatch: {mismatch_err}")
+        return False, 0, mismatch_err, "fabricated"
+
     # Check cache first (include ICP in cache key if provided)
     icp_cache_suffix = f"|{icp_industry}|{icp_criteria}" if icp_industry else ""
     cache_key = compute_cache_key(intent_signal.url + icp_cache_suffix, source_str, intent_signal.date)
@@ -608,7 +784,23 @@ async def verify_intent_signal(
     if not text or len(text.strip()) < 50:
         logger.warning(f"Insufficient content extracted from URL: {intent_signal.url}")
         return False, 0, "Insufficient content to verify claim", "fabricated"
-    
+
+    # ── URL-to-company check (BEFORE LLM — catch misattributed articles cheaply) ──
+    # A model might find a great article about Company A and attribute it to Company B.
+    # Skip for generic aggregator pages (job boards, review sites) where the company
+    # name may not dominate the page text, and for Wikipedia which uses formal names.
+    if company_name and source_str.lower() not in ("job_board", "review_site", "wikipedia"):
+        if not check_company_in_content(company_name, text[:CONTENT_MAX_LENGTH]):
+            logger.warning(
+                f"❌ Company name '{company_name}' not found in content from {intent_signal.url[:60]}"
+            )
+            return False, 0, (
+                f"Company '{company_name}' not mentioned in source content — "
+                f"signal may be misattributed to the wrong company"
+            ), "fabricated"
+        else:
+            logger.info(f"✓ Company '{company_name}' found in page content")
+
     # ── Snippet verbatim check (BEFORE LLM — saves cost on obvious fabrication) ──
     # The snippet field must contain text actually found on the source page.
     # Models that fabricate descriptions via templates, strip negative LLM

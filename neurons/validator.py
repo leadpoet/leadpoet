@@ -2918,15 +2918,16 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             # SOURCING EMISSIONS SYSTEM (Threshold-Based)
             # ═══════════════════════════════════════════════════════════════════
-            # Allocation shares (must sum to 1.0)
+            # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
-            CHAMPION_SHARE = 0.05          # 5% to qualification model champion
-            MAX_SOURCING_SHARE = 0.95      # 95% max to sourcing miners
+            CHAMPION_SHARE = 0.10          # 10% to qualification model champion (when active)
+            # MAX_SOURCING_SHARE is computed dynamically:
+            #   No champion → 100% to sourcing miners
+            #   Active champion → 90% to sourcing, 10% to champion
             
-            # CONFIGURABLE THRESHOLD: Approved leads needed in 30 epochs for full 95%
-            # If network produces >= this many leads, full 95% is distributed
+            # CONFIGURABLE THRESHOLD: Approved leads needed in 30 epochs for full sourcing share
+            # If network produces >= this many leads, full share is distributed
             # If below, proportional share distributed and rest burned
-            # This puts a floor at roughly current profitability level
             SOURCING_FLOOR_THRESHOLD = 125_000  # EASILY ADJUSTABLE
             
             # Minimum total rep score to distribute (prevents tiny denominator instability)
@@ -2944,7 +2945,7 @@ class Validator(BaseValidatorNeuron):
             
             # ═══════════════════════════════════════════════════════════════════
             # Get rolling 30 epoch scores BEFORE checking if we should proceed
-            # This ensures we still distribute rolling 15% even if gateway was down
+            # This ensures we still distribute rolling share even if gateway was down
             # ═══════════════════════════════════════════════════════════════════
             rolling_scores, rolling_lead_count = self.get_rolling_epoch_scores(current_epoch, window=ROLLING_WINDOW)
             
@@ -3011,13 +3012,13 @@ class Validator(BaseValidatorNeuron):
                 return False
             
             # ═══════════════════════════════════════════════════════════════════
-            # QUALIFICATION CHAMPION: Read from local JSON for 1% emission share
+            # QUALIFICATION CHAMPION: Read from local JSON
+            # Determines dynamic split: champion active → 90/10, none → 100/0
             # ═══════════════════════════════════════════════════════════════════
-            # Champion info is stored locally in validator_weights/qualification_champion.json
-            # Updated when validator evaluates models via _store_qualification_champion()
             champion_hotkey = None
             champion_uid = None
             effective_champion_share = 0.0
+            champion_active = False
             
             try:
                 champion_data = self._read_qualification_champion()
@@ -3030,25 +3031,27 @@ class Validator(BaseValidatorNeuron):
                     print(f"      Score: {champion_data.get('score', 0):.2f}")
                     print(f"      Since: {champion_data.get('became_champion_at', 'Unknown')}")
                     
-                    # Verify champion is registered on subnet
                     if champion_hotkey and champion_hotkey in self.metagraph.hotkeys:
                         champion_uid = self.metagraph.hotkeys.index(champion_hotkey)
                         effective_champion_share = CHAMPION_SHARE
+                        champion_active = True
                         print(f"      UID: {champion_uid}")
                         print(f"      Emission Share: {CHAMPION_SHARE*100:.0f}%")
                     else:
-                        print(f"      ⚠️  Champion not registered on subnet - share goes to burn")
+                        print(f"      ⚠️  Champion not registered on subnet - share goes to sourcing miners")
                 else:
-                    print(f"   📭 No qualification champion yet - {CHAMPION_SHARE*100:.0f}% goes to burn")
-                    print(f"      (File: validator_weights/qualification_champion.json does not exist or is empty)")
+                    print(f"   📭 No qualification champion yet - 100% to sourcing miners")
             except Exception as e:
-                print(f"   ⚠️  Error reading champion: {e} - {CHAMPION_SHARE*100:.0f}% goes to burn")
+                print(f"   ⚠️  Error reading champion: {e} - 100% to sourcing miners")
             
+            # Dynamic sourcing share: 100% if no champion, 90% if champion active
+            MAX_SOURCING_SHARE = 1.0 - CHAMPION_SHARE if champion_active else 1.0
+            print(f"\n   📊 SPLIT: Sourcing={MAX_SOURCING_SHARE*100:.0f}%, Champion={effective_champion_share*100:.0f}%")
             print()
             
             # ═══════════════════════════════════════════════════════════════════
             # THRESHOLD-BASED SOURCING EMISSIONS
-            # - If ≥SOURCING_FLOOR_THRESHOLD leads in 30 epochs: Full 95% distributed
+            # - If ≥SOURCING_FLOOR_THRESHOLD leads in 30 epochs: Full sourcing share distributed
             # - If <SOURCING_FLOOR_THRESHOLD: Proportional share, rest burned
             # - Within that share: split by rep score proportion
             # ═══════════════════════════════════════════════════════════════════
@@ -3105,18 +3108,16 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             if rolling_lead_count >= SOURCING_FLOOR_THRESHOLD:
                 # ✅ Network healthy: ≥125k approved leads in 30 epochs
-                # Full 95% split among sourcing miners
                 effective_sourcing_share = MAX_SOURCING_SHARE
-                print(f"   ✅ NETWORK HEALTHY - Full {MAX_SOURCING_SHARE*100:.0f}% to miners")
+                print(f"   ✅ NETWORK HEALTHY - Full {MAX_SOURCING_SHARE*100:.0f}% to sourcing miners")
                 print(f"      Approved leads ({ROLLING_WINDOW} epochs): {rolling_lead_count:,} ≥ {SOURCING_FLOOR_THRESHOLD:,}")
             else:
-                # ⚠️ Below threshold: <125k approved leads
-                # Proportional share to miners, rest burned
+                # ⚠️ Below threshold: proportional share to miners, rest burned
                 effective_sourcing_share = (rolling_lead_count / SOURCING_FLOOR_THRESHOLD) * MAX_SOURCING_SHARE
                 print(f"   ⚠️  BELOW THRESHOLD - Proportional distribution")
                 print(f"      Approved leads ({ROLLING_WINDOW} epochs): {rolling_lead_count:,} < {SOURCING_FLOOR_THRESHOLD:,}")
                 print(f"      Rate: {rolling_lead_count:,} / {SOURCING_FLOOR_THRESHOLD:,} = {(rolling_lead_count/SOURCING_FLOOR_THRESHOLD)*100:.1f}%")
-                print(f"      → {effective_sourcing_share*100:.2f}% to miners")
+                print(f"      → {effective_sourcing_share*100:.2f}% to sourcing miners")
                 print(f"      → {(MAX_SOURCING_SHARE - effective_sourcing_share)*100:.2f}% burned (underperformance)")
             
             # Calculate burn for deregistered miners (proportional to their share of total)
@@ -3129,16 +3130,15 @@ class Validator(BaseValidatorNeuron):
             effective_sourcing_to_miners = effective_sourcing_share - dereg_burn
             
             # Calculate total burn share
+            # When no champion: MAX_SOURCING_SHARE=100%, so burn = only threshold shortfall + dereg
+            # When champion active: MAX_SOURCING_SHARE=90%, champion gets 10%, burn = shortfall + dereg
             unused_sourcing_share = MAX_SOURCING_SHARE - effective_sourcing_share
-            unused_champion_share = CHAMPION_SHARE - effective_champion_share
-            total_burn_share = BASE_BURN_SHARE + unused_sourcing_share + unused_champion_share + dereg_burn
+            total_burn_share = BASE_BURN_SHARE + unused_sourcing_share + dereg_burn
             
             print()
             print(f"   📊 WEIGHT DISTRIBUTION:")
-            print(f"      Base burn:            {BASE_BURN_SHARE*100:.0f}%")
-            print(f"      Unused sourcing:      {unused_sourcing_share*100:.2f}%")
+            print(f"      Unused sourcing:      {unused_sourcing_share*100:.2f}% (threshold shortfall)")
             print(f"      Deregistered miners:  {dereg_burn*100:.2f}%")
-            print(f"      Unused champion:      {unused_champion_share*100:.0f}%")
             print(f"      ─────────────────────────────")
             print(f"      Total burn → UID 0:   {total_burn_share*100:.2f}%")
             print(f"      Champion → UID {champion_uid if champion_uid else '?'}:     {effective_champion_share*100:.0f}%")
@@ -5092,10 +5092,10 @@ class Validator(BaseValidatorNeuron):
                 print(f"      Model:  {new_champion.get('model_name', 'unknown')}")
                 print(f"      Miner:  {new_champion.get('miner_hotkey', 'unknown')[:20]}...")
                 print(f"      Score:  {new_champion.get('score', 0):.2f}")
-                print(f"      5% champion share → new champion")
+                print(f"      10% champion share → new champion")
             else:
                 print(f"   📭 No replacement champion found")
-                print(f"   5% champion share → burn (UID 0)")
+                print(f"   10% champion share → sourcing miners")
             print(f"{'='*60}\n")
             
             with open(champion_file, 'w') as f:

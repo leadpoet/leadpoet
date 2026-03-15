@@ -262,6 +262,75 @@ def compute_snippet_overlap(snippet: str, content: str) -> float:
     return matches / total if total > 0 else 1.0
 
 
+def check_description_grounding(description: str, source_content: str) -> float:
+    """
+    Check what fraction of the description's meaningful words appear in the source content.
+
+    Unlike snippet overlap (which checks 4-grams), this checks individual content words
+    (nouns, verbs, adjectives ≥5 chars, excluding stopwords) to catch LLM-generated
+    descriptions that sound specific but contain claims not present in the source.
+
+    Returns 0.0-1.0. Legitimate descriptions based on real content score >0.4.
+    LLM-fabricated descriptions with injected signal words score <0.25.
+    """
+    _STOP_WORDS = {
+        "about", "after", "being", "between", "could", "during", "every",
+        "first", "their", "these", "those", "through", "under", "using",
+        "which", "while", "would", "other", "there", "where", "should",
+        "company", "business", "service", "services", "solution", "solutions",
+        "based", "including", "across", "within", "through",
+    }
+
+    desc_lower = _normalize_text(description)
+    content_lower = _normalize_text(source_content)
+
+    content_words = set(content_lower.split())
+
+    desc_words = [
+        w for w in desc_lower.split()
+        if len(w) >= 5 and w not in _STOP_WORDS
+    ]
+
+    if len(desc_words) < 3:
+        return 1.0
+
+    found = sum(1 for w in desc_words if w in content_words)
+    return found / len(desc_words)
+
+
+def check_signal_word_grounding(description: str, source_content: str) -> tuple:
+    """
+    Check whether intent signal words in the description actually appear in the source.
+
+    Signal words are action verbs that indicate buying intent (launched, hired, raised, etc.).
+    If the description contains these words but the source doesn't, the LLM likely injected
+    them to satisfy a prompt requirement.
+
+    Returns (grounded_count, total_signal_words, ungrounded_words).
+    """
+    _SIGNAL_WORDS = {
+        "launched", "announced", "raised", "hired", "hiring", "acquired",
+        "expanded", "expanding", "partnered", "partnership", "funding",
+        "funded", "invested", "investment", "merged", "acquisition",
+        "recruited", "recruiting", "opening", "openings",
+    }
+
+    content_lower = _normalize_text(source_content)
+    content_words = set(content_lower.split())
+
+    desc_lower = _normalize_text(description)
+    desc_words = set(desc_lower.split())
+
+    signal_in_desc = desc_words & _SIGNAL_WORDS
+    if not signal_in_desc:
+        return 0, 0, []
+
+    grounded = signal_in_desc & content_words
+    ungrounded = signal_in_desc - content_words
+
+    return len(grounded), len(signal_in_desc), sorted(ungrounded)
+
+
 # =============================================================================
 # Generic Intent Detection (Pre-LLM Check)
 # =============================================================================
@@ -651,22 +720,54 @@ def check_company_in_content(company_name: str, text: str) -> bool:
     """
     Check whether the company name appears in the scraped page content.
     
-    Uses case-insensitive substring matching with word-boundary awareness.
-    Also handles common abbreviations (e.g. "IBM" in "International Business Machines").
+    Uses case-insensitive matching with strict rules to prevent false positives
+    from partial name matches (e.g., "Forum" matching "Forum Research" when
+    the lead is "Forum Health").
+    
+    Rules:
+    - Full name match: always passes ("Forum Health" in text)
+    - Multi-word names: ALL significant words (≥4 chars) must appear, AND at least
+      one word must appear adjacent to another company word (prevents coincidental
+      matches where "Forum" and "Health" appear in unrelated contexts)
+    - Single-word names: require word boundary match (not substring)
     """
     if not company_name or not text:
         return False
     name_lower = company_name.lower().strip()
     text_lower = text.lower()
 
+    # Full name exact match (best case)
     if name_lower in text_lower:
         return True
 
-    # Try matching individual significant words (>=4 chars) from the company name.
-    # This handles cases like "Acme Corp" appearing as "Acme Corporation" on the page.
-    words = [w for w in name_lower.split() if len(w) >= 4]
-    if words and all(w in text_lower for w in words):
-        return True
+    # Strip common suffixes for matching
+    _SUFFIXES = {"inc", "inc.", "llc", "llc.", "ltd", "ltd.", "corp", "corp.",
+                 "co", "co.", "company", "group", "holdings", "partners", "lp", "l.p."}
+    words = [w for w in name_lower.split() if w not in _SUFFIXES and len(w) >= 3]
+
+    if not words:
+        return False
+
+    # Single significant word: require word boundary match
+    if len(words) == 1:
+        import re
+        pattern = r'\b' + re.escape(words[0]) + r'\b'
+        return bool(re.search(pattern, text_lower))
+
+    # Multi-word name: ALL significant words must appear
+    if not all(w in text_lower for w in words):
+        return False
+
+    # Additional check: the company words must appear as a near-contiguous phrase
+    # (within 3 words of each other) to prevent coincidental matches like
+    # "Forum Research" + "public health" matching "Forum Health".
+    text_words = text_lower.split()
+    for i, tw in enumerate(text_words):
+        if tw == words[0] or tw.startswith(words[0]):
+            nearby = text_words[i:i + len(words) + 3]
+            nearby_str = " ".join(nearby)
+            if all(w in nearby_str for w in words):
+                return True
 
     return False
 
@@ -800,6 +901,45 @@ async def verify_intent_signal(
             ), "fabricated"
         else:
             logger.info(f"✓ Snippet verbatim check passed: overlap={snippet_overlap:.0%}")
+
+    # ── Description grounding check (BEFORE LLM — catch LLM-fabricated descriptions) ──
+    # The snippet may be real scraped text, but the DESCRIPTION could be LLM-generated
+    # embellishment that adds claims not present in the source. Check that the description's
+    # key content words actually appear in the scraped text.
+    if intent_signal.description and len(text.strip()) >= 200:
+        desc_grounding = check_description_grounding(intent_signal.description, text[:CONTENT_MAX_LENGTH])
+        if desc_grounding < 0.25:
+            logger.warning(
+                f"❌ Description grounding FAILED: overlap={desc_grounding:.0%} "
+                f"for {intent_signal.url[:60]}"
+            )
+            return False, 0, (
+                f"Description not grounded in source content (overlap: {desc_grounding:.0%}). "
+                f"The description contains claims not found on the page — likely LLM-fabricated."
+            ), "fabricated"
+        else:
+            logger.info(f"✓ Description grounding check passed: overlap={desc_grounding:.0%}")
+
+    # ── Signal word grounding check (catch LLM-injected action verbs) ──
+    # Models that force LLM prompts to include words like "launched", "announced",
+    # "hiring" will inject these words even when the source content doesn't contain them.
+    if intent_signal.description and len(text.strip()) >= 200:
+        grounded_count, total_signal, ungrounded = check_signal_word_grounding(
+            intent_signal.description, text[:CONTENT_MAX_LENGTH]
+        )
+        if total_signal > 0 and grounded_count == 0:
+            logger.warning(
+                f"❌ Signal word grounding FAILED: {ungrounded} not in source content"
+            )
+            return False, 0, (
+                f"Intent signal words ({', '.join(ungrounded)}) not found in source content. "
+                f"The description likely contains LLM-injected action verbs not supported by evidence."
+            ), "fabricated"
+        elif total_signal > 0:
+            logger.info(
+                f"✓ Signal word grounding: {grounded_count}/{total_signal} grounded"
+                + (f", ungrounded: {ungrounded}" if ungrounded else "")
+            )
 
     # Verify claim with LLM - now includes ICP context
     date_for_llm = intent_signal.date or "Not provided"

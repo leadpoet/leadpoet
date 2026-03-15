@@ -573,13 +573,16 @@ async def _score_single_intent_signal(
     # Use both: full prompt for complete buyer context, product_service for what's being sold
     buyer_request = icp.prompt or icp.product_service
     
+    icp_intent_list = ", ".join(str(s) for s in (icp.intent_signals or [])) if hasattr(icp, 'intent_signals') and icp.intent_signals else ""
+    icp_intent_section = f"\nBUYER'S EXPECTED INTENT SIGNALS: \"{icp_intent_list}\"\n" if icp_intent_list else ""
+
     prompt = f"""Score how relevant this intent signal is to the buyer's request on a scale of 0-50.
 
 BUYER IS SELLING: "{icp.product_service}"
 
 BUYER'S FULL REQUEST:
 "{buyer_request}"
-
+{icp_intent_section}
 INTENT SIGNAL FOUND:
 - Source: {source_str}
 - Description: {signal.description}
@@ -587,22 +590,25 @@ INTENT SIGNAL FOUND:
 - Snippet: {signal.snippet}
 
 SCORING GUIDELINES:
-- 40-50: Signal directly proves the company matches the buyer's request (e.g., buyer wants "companies ramping up managed IT" and signal shows new IT partnerships)
-- 30-39: Signal strongly suggests the company fits (e.g., hiring for roles related to what buyer is selling)
-- 20-29: Signal is somewhat relevant but indirect
-- 10-19: Tangentially related, weak connection to what the buyer wants
-- 0-9: Signal exists but has no meaningful connection to the buyer's request
+- 40-50: Signal directly proves the company matches the buyer's request AND matches the buyer's expected intent signals (e.g., buyer expects "hiring for specific roles" and signal shows actual job postings)
+- 30-39: Signal strongly suggests the company fits AND is related to the expected intent type
+- 20-29: Signal is somewhat relevant but the intent TYPE doesn't match what the buyer asked for (e.g., buyer expected "hiring signals" but signal shows "product launch")
+- 10-19: Signal is tangentially related — generic company activity that doesn't match the specific intent the buyer described
+- 0-9: Signal has no meaningful connection to the buyer's request OR is generic marketing copy rephrased to sound like intent
 
-IMPORTANT: Penalize generic descriptions. Examples of LOW scores:
-- "Company is actively operating in X industry" → 0-5 (too generic)
-- "Visible market activity" → 0-5 (no specific intent)
-- Vague descriptions without specific actions → max 10
+CRITICAL: Score 0-10 if the description is just rephrased website marketing copy. Examples:
+- "Company launched advanced [product category]" when the source is just an About page → 0-5
+- "Company is committed to innovative solutions" → 0-5
+- "Company announced [generic capability]" when there's no actual announcement → 0-5
+- Description uses action words (launched, announced, hiring) but the source content is just a static company page → 0-10
+
+IMPORTANT: The description must reflect a SPECIFIC, TIMELY action (a real event that happened) — not a restatement of what the company does in general.
 
 Consider:
-1. Does this signal match what the buyer specifically asked for?
-2. Does it show evidence of the SPECIFIC intent the buyer described (e.g., "ramping up offerings", "expanding dev teams", "undergoing digital transformation")?
-3. Would a salesperson use this signal to pitch "{icp.product_service}" to this company?
-4. Is the description specific or generic/templated?
+1. Does this signal match the buyer's SPECIFIC expected intent signals?
+2. Is the described action a REAL EVENT or just rephrased marketing copy from the company website?
+3. Would a salesperson use this signal to pitch "{icp.product_service}" to this company TODAY?
+4. Is the description specific enough to be verifiable (names, dates, amounts) or vague enough to apply to any company?
 
 Respond with ONLY a single number (0-50):"""
 

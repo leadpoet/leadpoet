@@ -2630,6 +2630,100 @@ async def submit_lead(event: SubmitLeadEvent):
         _website_domain = re.sub(r'^www\.', '', _website_domain)
         _website_domain = _website_domain.split('/')[0].split('?')[0].split('#')[0].split(':')[0]
 
+        # Root domain extraction — used for both website subdomain check and email comparison
+        _MULTI_PART_TLDS = frozenset({
+            'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'net.uk',
+            'com.au', 'net.au', 'org.au', 'edu.au',
+            'co.jp', 'or.jp', 'ne.jp', 'ac.jp',
+            'co.in', 'net.in', 'org.in',
+            'co.kr', 'or.kr', 'ne.kr',
+            'com.br', 'net.br', 'org.br',
+            'co.nz', 'net.nz', 'org.nz',
+            'co.za', 'org.za', 'web.za',
+            'com.mx', 'org.mx', 'net.mx',
+            'com.cn', 'net.cn', 'org.cn',
+            'com.tw', 'org.tw', 'net.tw',
+            'com.sg', 'org.sg', 'net.sg',
+            'co.il', 'org.il', 'net.il',
+            'com.tr', 'org.tr', 'net.tr',
+            'co.id', 'or.id', 'web.id',
+            'com.ar', 'org.ar', 'net.ar',
+            'com.my', 'org.my', 'net.my',
+            'com.ph', 'org.ph', 'net.ph',
+            'co.th', 'or.th', 'in.th',
+            'com.vn', 'net.vn', 'org.vn',
+            'com.ng', 'org.ng', 'net.ng',
+            'com.eg', 'org.eg', 'net.eg',
+            'com.pk', 'org.pk', 'net.pk',
+            'co.ke', 'or.ke',
+            'com.ua', 'org.ua', 'net.ua',
+            'com.hk', 'org.hk', 'net.hk',
+        })
+
+        def _extract_root_domain(domain: str) -> str:
+            parts = domain.split('.')
+            if len(parts) >= 3:
+                last_two = '.'.join(parts[-2:])
+                if last_two in _MULTI_PART_TLDS:
+                    return '.'.join(parts[-3:])
+            return '.'.join(parts[-2:]) if len(parts) >= 2 else domain
+
+        # Reject website subdomains — website must be a root domain (e.g. acme.com, not sales.acme.com)
+        if _website_domain:
+            _website_root = _extract_root_domain(_website_domain)
+            if _website_domain != _website_root:
+                print(f"❌ Website is a subdomain: '{_website_domain}' (expected root domain '{_website_root}')")
+
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+                try:
+                    from gateway.utils.logger import log_event
+
+                    validation_failed_event = {
+                        "event_type": "VALIDATION_FAILED",
+                        "actor_hotkey": event.actor_hotkey,
+                        "nonce": str(uuid.uuid4()),
+                        "ts": datetime.utcnow().isoformat(),
+                        "payload_hash": hashlib.sha256(json.dumps({
+                            "lead_id": event.payload.lead_id,
+                            "reason": "website_is_subdomain",
+                            "website_domain": _website_domain,
+                            "expected_root": _website_root,
+                        }, sort_keys=True).encode()).hexdigest(),
+                        "build_id": "gateway",
+                        "signature": "website_subdomain_check",
+                        "payload": {
+                            "lead_id": event.payload.lead_id,
+                            "reason": "website_is_subdomain",
+                            "website_domain": _website_domain,
+                            "expected_root": _website_root,
+                            "miner_hotkey": event.actor_hotkey
+                        }
+                    }
+
+                    await log_event(validation_failed_event)
+                    print(f"   ✅ Logged VALIDATION_FAILED to TEE buffer")
+                except Exception as e:
+                    print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "website_is_subdomain",
+                        "message": f"Website '{_website_domain}' is a subdomain. Submit the root company domain '{_website_root}' instead.",
+                        "website_domain": _website_domain,
+                        "expected_root": _website_root,
+                        "rate_limit_stats": {
+                            "submissions": updated_stats["submissions"],
+                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                            "rejections": updated_stats["rejections"],
+                            "max_rejections": MAX_REJECTIONS_PER_DAY,
+                            "reset_at": updated_stats["reset_at"]
+                        }
+                    }
+                )
+
         # Reject if email domain can't be extracted (no @, empty, or invalid)
         if not _email_domain or '.' not in _email_domain:
             print(f"❌ Invalid email format — cannot extract domain: '{_email}'")
@@ -2742,46 +2836,6 @@ async def submit_lead(event: SubmitLeadEvent):
 
         # Domain mismatch check — email domain must match company website domain
         if _email_domain and _website_domain:
-            # Extract registrable domain for comparison
-            # Handles country-code TLDs like .co.uk, .com.au, .co.jp where
-            # naively taking the last 2 parts would give "co.uk" for every UK domain.
-            _MULTI_PART_TLDS = frozenset({
-                'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'net.uk',
-                'com.au', 'net.au', 'org.au', 'edu.au',
-                'co.jp', 'or.jp', 'ne.jp', 'ac.jp',
-                'co.in', 'net.in', 'org.in',
-                'co.kr', 'or.kr', 'ne.kr',
-                'com.br', 'net.br', 'org.br',
-                'co.nz', 'net.nz', 'org.nz',
-                'co.za', 'org.za', 'web.za',
-                'com.mx', 'org.mx', 'net.mx',
-                'com.cn', 'net.cn', 'org.cn',
-                'com.tw', 'org.tw', 'net.tw',
-                'com.sg', 'org.sg', 'net.sg',
-                'co.il', 'org.il', 'net.il',
-                'com.tr', 'org.tr', 'net.tr',
-                'co.id', 'or.id', 'web.id',
-                'com.ar', 'org.ar', 'net.ar',
-                'com.my', 'org.my', 'net.my',
-                'com.ph', 'org.ph', 'net.ph',
-                'co.th', 'or.th', 'in.th',
-                'com.vn', 'net.vn', 'org.vn',
-                'com.ng', 'org.ng', 'net.ng',
-                'com.eg', 'org.eg', 'net.eg',
-                'com.pk', 'org.pk', 'net.pk',
-                'co.ke', 'or.ke',
-                'com.ua', 'org.ua', 'net.ua',
-                'com.hk', 'org.hk', 'net.hk',
-            })
-
-            def _extract_root_domain(domain: str) -> str:
-                parts = domain.split('.')
-                if len(parts) >= 3:
-                    last_two = '.'.join(parts[-2:])
-                    if last_two in _MULTI_PART_TLDS:
-                        return '.'.join(parts[-3:])
-                return '.'.join(parts[-2:]) if len(parts) >= 2 else domain
-
             _email_root = _extract_root_domain(_email_domain)
             _website_root = _extract_root_domain(_website_domain)
 

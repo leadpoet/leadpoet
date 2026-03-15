@@ -2657,8 +2657,31 @@ async def submit_lead(event: SubmitLeadEvent):
             'com.pk', 'org.pk', 'net.pk',
             'co.ke', 'or.ke',
             'com.ua', 'org.ua', 'net.ua',
-            'com.hk', 'org.hk', 'net.hk',
-        })
+                'com.hk', 'org.hk', 'net.hk',
+                # US state government domains (<agency>.<state>.gov)
+                'al.gov', 'ak.gov', 'az.gov', 'ar.gov', 'ca.gov', 'co.gov',
+                'ct.gov', 'de.gov', 'fl.gov', 'ga.gov', 'hi.gov', 'id.gov',
+                'il.gov', 'in.gov', 'ia.gov', 'ks.gov', 'ky.gov', 'la.gov',
+                'me.gov', 'md.gov', 'ma.gov', 'mi.gov', 'mn.gov', 'ms.gov',
+                'mo.gov', 'mt.gov', 'ne.gov', 'nv.gov', 'nh.gov', 'nj.gov',
+                'nm.gov', 'ny.gov', 'nc.gov', 'nd.gov', 'oh.gov', 'ok.gov',
+                'or.gov', 'pa.gov', 'ri.gov', 'sc.gov', 'sd.gov', 'tn.gov',
+                'tx.gov', 'ut.gov', 'vt.gov', 'va.gov', 'wa.gov', 'wv.gov',
+                'wi.gov', 'wy.gov', 'dc.gov',
+                # Canadian province domains (<org>.<province>.ca)
+                'on.ca', 'bc.ca', 'ab.ca', 'qc.ca', 'mb.ca', 'sk.ca',
+                'ns.ca', 'nb.ca', 'nl.ca', 'pe.ca', 'nt.ca', 'yt.ca', 'nu.ca',
+                # US state .us domains (<org>.<state>.us)
+                'al.us', 'ak.us', 'az.us', 'ar.us', 'ca.us', 'co.us',
+                'ct.us', 'de.us', 'fl.us', 'ga.us', 'hi.us', 'id.us',
+                'il.us', 'in.us', 'ia.us', 'ks.us', 'ky.us', 'la.us',
+                'me.us', 'md.us', 'ma.us', 'mi.us', 'mn.us', 'ms.us',
+                'mo.us', 'mt.us', 'ne.us', 'nv.us', 'nh.us', 'nj.us',
+                'nm.us', 'ny.us', 'nc.us', 'nd.us', 'oh.us', 'ok.us',
+                'or.us', 'pa.us', 'ri.us', 'sc.us', 'sd.us', 'tn.us',
+                'tx.us', 'ut.us', 'vt.us', 'va.us', 'wa.us', 'wv.us',
+                'wi.us', 'wy.us', 'dc.us',
+            })
 
         def _extract_root_domain(domain: str) -> str:
             parts = domain.split('.')

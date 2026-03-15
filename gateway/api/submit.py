@@ -2740,9 +2740,52 @@ async def submit_lead(event: SubmitLeadEvent):
                 }
             )
 
-        # Domain mismatch check — email domain must exactly match company website domain
+        # Domain mismatch check — email domain must match company website domain
         if _email_domain and _website_domain:
-            if _email_domain != _website_domain:
+            # Extract registrable domain for comparison
+            # Handles country-code TLDs like .co.uk, .com.au, .co.jp where
+            # naively taking the last 2 parts would give "co.uk" for every UK domain.
+            _MULTI_PART_TLDS = frozenset({
+                'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'net.uk',
+                'com.au', 'net.au', 'org.au', 'edu.au',
+                'co.jp', 'or.jp', 'ne.jp', 'ac.jp',
+                'co.in', 'net.in', 'org.in',
+                'co.kr', 'or.kr', 'ne.kr',
+                'com.br', 'net.br', 'org.br',
+                'co.nz', 'net.nz', 'org.nz',
+                'co.za', 'org.za', 'web.za',
+                'com.mx', 'org.mx', 'net.mx',
+                'com.cn', 'net.cn', 'org.cn',
+                'com.tw', 'org.tw', 'net.tw',
+                'com.sg', 'org.sg', 'net.sg',
+                'co.il', 'org.il', 'net.il',
+                'com.tr', 'org.tr', 'net.tr',
+                'co.id', 'or.id', 'web.id',
+                'com.ar', 'org.ar', 'net.ar',
+                'com.my', 'org.my', 'net.my',
+                'com.ph', 'org.ph', 'net.ph',
+                'co.th', 'or.th', 'in.th',
+                'com.vn', 'net.vn', 'org.vn',
+                'com.ng', 'org.ng', 'net.ng',
+                'com.eg', 'org.eg', 'net.eg',
+                'com.pk', 'org.pk', 'net.pk',
+                'co.ke', 'or.ke',
+                'com.ua', 'org.ua', 'net.ua',
+                'com.hk', 'org.hk', 'net.hk',
+            })
+
+            def _extract_root_domain(domain: str) -> str:
+                parts = domain.split('.')
+                if len(parts) >= 3:
+                    last_two = '.'.join(parts[-2:])
+                    if last_two in _MULTI_PART_TLDS:
+                        return '.'.join(parts[-3:])
+                return '.'.join(parts[-2:]) if len(parts) >= 2 else domain
+
+            _email_root = _extract_root_domain(_email_domain)
+            _website_root = _extract_root_domain(_website_domain)
+
+            if _email_root != _website_root:
                 print(f"❌ Email domain mismatch: email='{_email_domain}' vs website='{_website_domain}'")
 
                 updated_stats = mark_submission_failed(event.actor_hotkey)
@@ -2795,7 +2838,7 @@ async def submit_lead(event: SubmitLeadEvent):
                     }
                 )
 
-            print(f"   ✅ Email domain matches company website ({_email_domain})")
+            print(f"   ✅ Email domain matches company website ({_email_root})")
         elif not _website_domain and _email_domain:
             # Website is empty/missing — cannot verify email domain, reject
             print(f"❌ Cannot verify email domain '{_email_domain}' — no company website available")

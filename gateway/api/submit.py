@@ -2614,6 +2614,283 @@ async def submit_lead(event: SubmitLeadEvent):
                 lead_blob["_company_exists"] = False
 
         # ========================================
+        # EARLY EXIT: Email Domain vs Company Website Domain Check
+        # ========================================
+        # Runs AFTER company table lookup so we compare against the authoritative
+        # stored website (not the miner-submitted one which could be faked).
+        # Free/consumer email domains are rejected at gateway before reaching validators.
+        print(f"   🔍 Validating email domain vs company website domain...")
+
+        _email = lead_blob.get("email", "").strip().lower()
+        _website = lead_blob.get("website", "").strip().lower()
+
+        _email_domain = _email.split("@")[-1] if "@" in _email else ""
+        # Strip protocol and www from website to get domain
+        _website_domain = re.sub(r'^https?://', '', _website)
+        _website_domain = re.sub(r'^www\.', '', _website_domain)
+        _website_domain = _website_domain.split('/')[0].split('?')[0].split('#')[0].split(':')[0]
+
+        # Reject if email domain can't be extracted (no @, empty, or invalid)
+        if not _email_domain or '.' not in _email_domain:
+            print(f"❌ Invalid email format — cannot extract domain: '{_email}'")
+
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+            try:
+                from gateway.utils.logger import log_event
+
+                validation_failed_event = {
+                    "event_type": "VALIDATION_FAILED",
+                    "actor_hotkey": event.actor_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.utcnow().isoformat(),
+                    "payload_hash": hashlib.sha256(json.dumps({
+                        "lead_id": event.payload.lead_id,
+                        "reason": "invalid_email_format",
+                    }, sort_keys=True).encode()).hexdigest(),
+                    "build_id": "gateway",
+                    "signature": "email_domain_check",
+                    "payload": {
+                        "lead_id": event.payload.lead_id,
+                        "reason": "invalid_email_format",
+                        "miner_hotkey": event.actor_hotkey
+                    }
+                }
+
+                await log_event(validation_failed_event)
+                print(f"   ✅ Logged VALIDATION_FAILED to TEE buffer")
+            except Exception as e:
+                print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_email_format",
+                    "message": "Email must contain a valid domain (user@domain.com).",
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": updated_stats["reset_at"]
+                    }
+                }
+            )
+
+        # Free/consumer email domains — reject at gateway (B2B leads require corporate email)
+        _FREE_EMAIL_DOMAINS = {
+            'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'yahoo.fr',
+            'yahoo.co.in', 'yahoo.co.jp', 'outlook.com', 'hotmail.com', 'live.com',
+            'msn.com', 'aol.com', 'mail.com', 'protonmail.com', 'proton.me',
+            'icloud.com', 'me.com', 'mac.com', 'zoho.com', 'yandex.com',
+            'gmx.com', 'gmx.net', 'mail.ru', 'qq.com', '163.com', '126.com',
+            'foxmail.com', 'sina.com', 'rediffmail.com', 'tutanota.com',
+            'web.de', 't-online.de', 'wanadoo.fr', 'naver.com', 'daum.net',
+            'hanmail.net', '139.com', 'sohu.com', 'aliyun.com',
+        }
+
+        if _email_domain in _FREE_EMAIL_DOMAINS:
+            print(f"❌ Free email domain rejected: '{_email_domain}'")
+
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+            try:
+                from gateway.utils.logger import log_event
+
+                validation_failed_event = {
+                    "event_type": "VALIDATION_FAILED",
+                    "actor_hotkey": event.actor_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.utcnow().isoformat(),
+                    "payload_hash": hashlib.sha256(json.dumps({
+                        "lead_id": event.payload.lead_id,
+                        "reason": "free_email_domain",
+                        "email_domain": _email_domain,
+                    }, sort_keys=True).encode()).hexdigest(),
+                    "build_id": "gateway",
+                    "signature": "free_email_check",
+                    "payload": {
+                        "lead_id": event.payload.lead_id,
+                        "reason": "free_email_domain",
+                        "email_domain": _email_domain,
+                        "miner_hotkey": event.actor_hotkey
+                    }
+                }
+
+                await log_event(validation_failed_event)
+                print(f"   ✅ Logged VALIDATION_FAILED to TEE buffer")
+            except Exception as e:
+                print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "free_email_domain",
+                    "message": f"Email uses free consumer domain '{_email_domain}'. B2B leads require corporate email.",
+                    "email_domain": _email_domain,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": updated_stats["reset_at"]
+                    }
+                }
+            )
+
+        # Domain mismatch check — email domain must match company website domain
+        if _email_domain and _website_domain:
+            # Extract registrable domain for comparison
+            # Handles country-code TLDs like .co.uk, .com.au, .co.jp where
+            # naively taking the last 2 parts would give "co.uk" for every UK domain.
+            _MULTI_PART_TLDS = frozenset({
+                'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'net.uk',
+                'com.au', 'net.au', 'org.au', 'edu.au',
+                'co.jp', 'or.jp', 'ne.jp', 'ac.jp',
+                'co.in', 'net.in', 'org.in',
+                'co.kr', 'or.kr', 'ne.kr',
+                'com.br', 'net.br', 'org.br',
+                'co.nz', 'net.nz', 'org.nz',
+                'co.za', 'org.za', 'web.za',
+                'com.mx', 'org.mx', 'net.mx',
+                'com.cn', 'net.cn', 'org.cn',
+                'com.tw', 'org.tw', 'net.tw',
+                'com.sg', 'org.sg', 'net.sg',
+                'co.il', 'org.il', 'net.il',
+                'com.tr', 'org.tr', 'net.tr',
+                'co.id', 'or.id', 'web.id',
+                'com.ar', 'org.ar', 'net.ar',
+                'com.my', 'org.my', 'net.my',
+                'com.ph', 'org.ph', 'net.ph',
+                'co.th', 'or.th', 'in.th',
+                'com.vn', 'net.vn', 'org.vn',
+                'com.ng', 'org.ng', 'net.ng',
+                'com.eg', 'org.eg', 'net.eg',
+                'com.pk', 'org.pk', 'net.pk',
+                'co.ke', 'or.ke',
+                'com.ua', 'org.ua', 'net.ua',
+                'com.hk', 'org.hk', 'net.hk',
+            })
+
+            def _extract_root_domain(domain: str) -> str:
+                parts = domain.split('.')
+                if len(parts) >= 3:
+                    last_two = '.'.join(parts[-2:])
+                    if last_two in _MULTI_PART_TLDS:
+                        return '.'.join(parts[-3:])
+                return '.'.join(parts[-2:]) if len(parts) >= 2 else domain
+
+            _email_root = _extract_root_domain(_email_domain)
+            _website_root = _extract_root_domain(_website_domain)
+
+            if _email_root != _website_root:
+                print(f"❌ Email domain mismatch: email='{_email_domain}' vs website='{_website_domain}'")
+
+                updated_stats = mark_submission_failed(event.actor_hotkey)
+                print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+                try:
+                    from gateway.utils.logger import log_event
+
+                    validation_failed_event = {
+                        "event_type": "VALIDATION_FAILED",
+                        "actor_hotkey": event.actor_hotkey,
+                        "nonce": str(uuid.uuid4()),
+                        "ts": datetime.utcnow().isoformat(),
+                        "payload_hash": hashlib.sha256(json.dumps({
+                            "lead_id": event.payload.lead_id,
+                            "reason": "email_domain_mismatch",
+                            "email_domain": _email_domain,
+                            "website_domain": _website_domain,
+                        }, sort_keys=True).encode()).hexdigest(),
+                        "build_id": "gateway",
+                        "signature": "email_domain_check",
+                        "payload": {
+                            "lead_id": event.payload.lead_id,
+                            "reason": "email_domain_mismatch",
+                            "email_domain": _email_domain,
+                            "website_domain": _website_domain,
+                            "miner_hotkey": event.actor_hotkey
+                        }
+                    }
+
+                    await log_event(validation_failed_event)
+                    print(f"   ✅ Logged VALIDATION_FAILED to TEE buffer")
+                except Exception as e:
+                    print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "email_domain_mismatch",
+                        "message": f"Email domain '{_email_domain}' does not match company website domain '{_website_domain}'. B2B leads require corporate email matching the company.",
+                        "email_domain": _email_domain,
+                        "website_domain": _website_domain,
+                        "rate_limit_stats": {
+                            "submissions": updated_stats["submissions"],
+                            "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                            "rejections": updated_stats["rejections"],
+                            "max_rejections": MAX_REJECTIONS_PER_DAY,
+                            "reset_at": updated_stats["reset_at"]
+                        }
+                    }
+                )
+
+            print(f"   ✅ Email domain matches company website ({_email_root})")
+        elif not _website_domain and _email_domain:
+            # Website is empty/missing — cannot verify email domain, reject
+            print(f"❌ Cannot verify email domain '{_email_domain}' — no company website available")
+
+            updated_stats = mark_submission_failed(event.actor_hotkey)
+            print(f"   📊 Rate limit updated: submissions={updated_stats['submissions']}/{MAX_SUBMISSIONS_PER_DAY}, rejections={updated_stats['rejections']}/{MAX_REJECTIONS_PER_DAY}")
+
+            try:
+                from gateway.utils.logger import log_event
+
+                validation_failed_event = {
+                    "event_type": "VALIDATION_FAILED",
+                    "actor_hotkey": event.actor_hotkey,
+                    "nonce": str(uuid.uuid4()),
+                    "ts": datetime.utcnow().isoformat(),
+                    "payload_hash": hashlib.sha256(json.dumps({
+                        "lead_id": event.payload.lead_id,
+                        "reason": "missing_website_for_domain_check",
+                        "email_domain": _email_domain,
+                    }, sort_keys=True).encode()).hexdigest(),
+                    "build_id": "gateway",
+                    "signature": "email_domain_check",
+                    "payload": {
+                        "lead_id": event.payload.lead_id,
+                        "reason": "missing_website_for_domain_check",
+                        "email_domain": _email_domain,
+                        "miner_hotkey": event.actor_hotkey
+                    }
+                }
+
+                await log_event(validation_failed_event)
+                print(f"   ✅ Logged VALIDATION_FAILED to TEE buffer")
+            except Exception as e:
+                print(f"   ⚠️  Failed to log VALIDATION_FAILED: {e}")
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "missing_website_for_domain_check",
+                    "message": "Company website is required to verify email domain. Cannot accept lead without website.",
+                    "email_domain": _email_domain,
+                    "rate_limit_stats": {
+                        "submissions": updated_stats["submissions"],
+                        "max_submissions": MAX_SUBMISSIONS_PER_DAY,
+                        "rejections": updated_stats["rejections"],
+                        "max_rejections": MAX_REJECTIONS_PER_DAY,
+                        "reset_at": updated_stats["reset_at"]
+                    }
+                }
+            )
+
+        # ========================================
         # Validate employee_count format
         # ========================================
         # Skip for fresh companies (employee_count already replaced with stored formatted value)

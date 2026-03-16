@@ -517,7 +517,7 @@ async def score_intent_signal(lead: LeadOutput, icp: ICPPrompt) -> Tuple[float, 
         seen_domains.add(domain)
 
         score, confidence, date_status = await _score_single_intent_signal(
-            signal, icp, icp_criteria, lead.business
+            signal, icp, icp_criteria, lead.business, lead.company_website
         )
         source_str = (signal.source.value if hasattr(signal.source, 'value') else str(signal.source))
         after_decay, decay_mult = _apply_signal_time_decay(
@@ -578,7 +578,8 @@ async def _score_single_intent_signal(
     signal: "IntentSignal",
     icp: ICPPrompt,
     icp_criteria: Optional[str],
-    company_name: str
+    company_name: str,
+    company_website: str = ""
 ) -> Tuple[float, int, str]:
     """
     Verify and score a single intent signal.
@@ -591,7 +592,8 @@ async def _score_single_intent_signal(
         signal,
         icp_industry=icp.industry,
         icp_criteria=icp_criteria,
-        company_name=company_name
+        company_name=company_name,
+        company_website=company_website
     )
     
     if not verified:

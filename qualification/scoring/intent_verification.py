@@ -817,7 +817,8 @@ async def verify_intent_signal(
     intent_signal: IntentSignal,
     icp_industry: Optional[str] = None,
     icp_criteria: Optional[str] = None,
-    company_name: Optional[str] = None
+    company_name: Optional[str] = None,
+    company_website: Optional[str] = None
 ) -> Tuple[bool, int, str, str]:
     """
     Verify an intent signal claim AND check for ICP evidence.
@@ -876,6 +877,32 @@ async def verify_intent_signal(
     if mismatch_err:
         logger.warning(f"❌ Source/URL mismatch: {mismatch_err}")
         return False, 0, mismatch_err, "fabricated"
+
+    # PRE-CHECK: If source is "company_website", the signal URL domain must match
+    # the lead's actual company_website domain. A signal from prnewswire.com or
+    # wvcapital.com is NOT the company's own website.
+    if source_str.lower() == "company_website" and company_website:
+        def _base_domain(u: str) -> str:
+            try:
+                from urllib.parse import urlparse as _up
+                h = (_up(u if u.startswith(("http://", "https://")) else f"https://{u}").hostname or "").lower()
+                h = h[4:] if h.startswith("www.") else h
+                parts = h.split(".")
+                return ".".join(parts[-2:]) if len(parts) >= 2 else h
+            except Exception:
+                return ""
+
+        lead_domain = _base_domain(company_website)
+        signal_domain = _base_domain(intent_signal.url)
+        if lead_domain and signal_domain and lead_domain != signal_domain:
+            logger.warning(
+                f"❌ company_website domain mismatch: signal={signal_domain}, lead={lead_domain}"
+            )
+            return False, 0, (
+                f"Source is 'company_website' but signal URL domain ({signal_domain}) "
+                f"doesn't match lead's company website ({lead_domain}). "
+                f"Use the correct source type (news, job_board, etc.) for third-party URLs."
+            ), "fabricated"
 
     # Check cache first (include ICP in cache key if provided)
     icp_cache_suffix = f"|{icp_industry}|{icp_criteria}" if icp_industry else ""

@@ -286,15 +286,20 @@ async def score_icp_fit(lead: LeadOutput, icp: ICPPrompt) -> float:
     Returns:
         Score from 0-20
     """
+    icp_product = icp.product_service or ""
+    icp_prompt_text = icp.prompt or ""
+
     prompt = f"""Score how well this lead matches the Ideal Customer Profile (ICP) on a scale of 0-20.
 
 ICP CRITERIA:
 - Industry: {icp.industry}
 - Sub-industry: {icp.sub_industry}
+- Product/Service buyer is selling: {icp_product}
 - Target roles: {', '.join(icp.target_roles) if icp.target_roles else 'Any'}
 - Target seniority: {icp.target_seniority}
 - Employee count: {icp.employee_count}
 - Geography: {icp.geography}
+- Full buyer request: "{icp_prompt_text}"
 
 LEAD DATA:
 - Industry: {lead.industry}
@@ -305,12 +310,27 @@ LEAD DATA:
 - Company: {lead.business}
 - Location: {lead.city}, {lead.state}, {lead.country}
 
-SCORING GUIDELINES:
-- 18-20: Perfect or near-perfect match on all criteria
-- 14-17: Strong match with minor deviations
-- 10-13: Good match but some criteria don't align
-- 5-9: Partial match, significant gaps
-- 0-4: Poor match, most criteria don't align
+SCORING GUIDELINES (check EACH criterion):
+
+1. INDUSTRY FIT (0-8 points):
+   - Exact industry + sub-industry match: 7-8
+   - Same industry, different sub-industry: 4-6
+   - Related industry: 2-3
+   - Unrelated industry: 0-1
+
+2. PRODUCT/SERVICE RELEVANCE (0-6 points):
+   - Company would clearly be a buyer of "{icp_product}": 5-6
+   - Company might use this type of product: 3-4
+   - Weak connection to the product: 1-2
+   - No connection: 0
+
+3. STRUCTURAL FIT (0-6 points):
+   - Role matches target roles, right seniority, right geography, right size: 5-6
+   - Most structural criteria match: 3-4
+   - Some match: 1-2
+   - Poor structural fit: 0
+
+Add the three sub-scores together (max 20).
 
 Respond with ONLY a single number (0-20):"""
 
@@ -339,7 +359,12 @@ async def score_decision_maker(lead: LeadOutput, icp: ICPPrompt) -> float:
     Returns:
         Score from 0-30
     """
-    prompt = f"""Score whether this role is likely a decision-maker for purchasing "{icp.product_service}" on a scale of 0-30.
+    target_roles_str = ', '.join(icp.target_roles) if icp.target_roles else 'Any senior role'
+
+    prompt = f"""Score whether this lead's role matches what the buyer is looking for AND has decision-making authority, on a scale of 0-30.
+
+BUYER IS LOOKING FOR THESE SPECIFIC ROLES: {target_roles_str}
+BUYER IS SELLING: "{icp.product_service}"
 
 LEAD:
 - Role: {lead.role}
@@ -347,17 +372,27 @@ LEAD:
 - Company: {lead.business}
 - Industry: {lead.industry}
 
-SCORING GUIDELINES:
-- 25-30: Definitely a decision-maker (C-suite, VP with relevant authority, budget owner)
-- 18-24: Likely a decision-maker or strong influencer
-- 10-17: May influence the decision but unlikely to have final authority
-- 5-9: Has some involvement but limited decision power
-- 0-4: Unlikely to be involved in purchasing decisions
+SCORING (two dimensions — BOTH matter):
 
-Consider:
-1. Is this role typically involved in purchasing this type of product?
-2. Does the seniority level suggest budget authority?
-3. Is this someone a sales team should prioritize reaching out to?
+1. ROLE MATCH (0-15 points):
+   - Lead's role is one of the buyer's target roles or very close equivalent: 13-15
+     (e.g., buyer wants "CTO" and lead IS the CTO)
+   - Lead's role is in the same department/function as target roles: 8-12
+     (e.g., buyer wants "VP of Engineering" and lead is "Director of Engineering")
+   - Lead's role is senior but in a different function: 3-7
+     (e.g., buyer wants "Supply Chain Director" and lead is "CEO" — senior but different function)
+   - Lead's role is unrelated to any target role: 0-2
+     (e.g., buyer wants "CTO" and lead is "HR Director")
+
+2. DECISION-MAKING AUTHORITY (0-15 points):
+   - C-suite or VP with clear budget authority for this product type: 13-15
+   - Director-level with likely purchasing influence for this product: 8-12
+   - Manager-level, may influence but not decide: 4-7
+   - Individual contributor or unrelated authority: 0-3
+
+Add both sub-scores together (max 30).
+
+CRITICAL: A CEO always scores high on authority (13-15) but should score LOW on role match (3-7) if the buyer specifically asked for a technical role like "CTO" or "Head of DevOps". The buyer knows who they want to reach — don't override their targeting.
 
 Respond with ONLY a single number (0-30):"""
 

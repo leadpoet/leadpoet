@@ -46,7 +46,7 @@ requirements = [
     "httpx>=0.28.1",
     
     # Data processing and ML
-    "numpy>=1.24.0",
+    "numpy>=2.4.2",
     "pandas>=2.0.0",
     # "torch[cpu]>=2.0.0",  # DEPRECATED: Only needed for unused collusion detection
     # "torch_geometric>=2.4.0",  # DEPRECATED: Only needed for unused collusion detection

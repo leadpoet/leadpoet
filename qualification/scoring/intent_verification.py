@@ -646,6 +646,10 @@ _SOURCE_DOMAIN_ALLOWLIST: Dict[str, frozenset] = {
         "washingtonpost.com", "www.washingtonpost.com",
         "guardian.co.uk", "www.theguardian.com", "theguardian.com",
         "economist.com", "www.economist.com",
+        "nasdaq.com", "pharmaceutical-technology.com",
+        "intellectia.ai", "fiercepharma.com", "fiercebiotech.com",
+        "statnews.com", "biopharmadive.com", "supplychaindive.com",
+        "retaildive.com", "ciodive.com", "hrdive.com",
     }),
     "social_media": frozenset({
         "twitter.com", "x.com",
@@ -663,16 +667,49 @@ _SOURCE_DOMAIN_ALLOWLIST: Dict[str, frozenset] = {
 }
 
 
+def _is_known_third_party_domain(domain: str) -> Optional[str]:
+    """Check if a domain belongs to a known third-party platform.
+    Returns the actual source type if it's a known platform, None otherwise."""
+    domain = domain.lower().strip(".")
+    if domain.startswith("www."):
+        domain = domain[4:]
+    for source_type, domains in _SOURCE_DOMAIN_ALLOWLIST.items():
+        if domain in domains:
+            return source_type
+    return None
+
+
 def check_source_url_mismatch(source_str: str, url: str) -> Optional[str]:
     """
     Check if the declared source type is plausible given the URL domain.
     
     Returns an error message if there's a clear mismatch, None if OK.
-    Only flags when the source is in _SOURCE_DOMAIN_ALLOWLIST AND the URL
-    domain doesn't match — so unknown sources or company_website pass through.
+    
+    CRITICAL: If source is "company_website" but the URL is actually a known
+    third-party platform (news site, job board, Wikipedia, etc.), flag it.
+    This catches models that label everything as "company_website" to bypass
+    source type validation.
     """
     source_lower = source_str.lower().strip()
+    
+    try:
+        clean_url = url.strip()
+        if not clean_url.lower().startswith(('http://', 'https://')):
+            clean_url = 'https://' + clean_url
+        url_domain = (urlparse(clean_url).hostname or "").lower()
+        if url_domain.startswith("www."):
+            url_domain = url_domain[4:]
+    except Exception:
+        return None
+    
+    # If source is "company_website", verify URL isn't a known third-party platform
     if source_lower in ("company_website", "other"):
+        actual_type = _is_known_third_party_domain(url_domain)
+        if actual_type:
+            return (
+                f"Source declared as '{source_str}' but URL domain '{url_domain}' "
+                f"is a known {actual_type} platform — source type should be '{actual_type}'"
+            )
         return None
 
     allowed = _SOURCE_DOMAIN_ALLOWLIST.get(source_lower)

@@ -53,7 +53,7 @@ def inject_async_subtensor(async_subtensor):
     print(f"✅ AsyncSubtensor injected into registry utils (network: {_async_subtensor.network})")
 
 
-async def get_metagraph_async() -> bt.metagraph:
+async def get_metagraph_async() -> "bt.metagraph":
     """
     Get Bittensor metagraph using injected async subtensor (ASYNC VERSION).
     

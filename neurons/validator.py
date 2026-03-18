@@ -5151,12 +5151,16 @@ class Validator(BaseValidatorNeuron):
             bt.logging.warning(f"Failed to fetch champion from gateway: {e}")
             return None
     
-    def _clear_qualification_champion(self):
+    def _clear_qualification_champion(self, reason: str = "score_below_minimum"):
         """
         Clear the qualification champion (dethrone without replacement).
         
         Called when champion's rebenchmark score falls below minimum threshold.
         Removes the current_champion from the local JSON file.
+        
+        Args:
+            reason: Why the champion was dethroned (e.g. "score_below_minimum",
+                    "banned", "deregistered")
         """
         try:
             champion_file = Path("validator_weights") / "qualification_champion.json"
@@ -5174,7 +5178,7 @@ class Validator(BaseValidatorNeuron):
             if old_champion:
                 bt.logging.info(
                     f"👎 DETHRONING CHAMPION: {old_champion.get('model_name', 'Unknown')} "
-                    f"(score: {old_champion.get('score', 0):.2f})"
+                    f"(score: {old_champion.get('score', 0):.2f}) — reason: {reason}"
                 )
                 
                 # Track dethronement history
@@ -5183,7 +5187,7 @@ class Validator(BaseValidatorNeuron):
                 
                 from datetime import datetime, timezone
                 old_champion["dethroned_at"] = datetime.now(timezone.utc).isoformat()
-                old_champion["dethrone_reason"] = "score_below_minimum"
+                old_champion["dethrone_reason"] = reason
                 data["dethronement_history"].append(old_champion)
             
             # Clear current champion
@@ -5469,11 +5473,19 @@ class Validator(BaseValidatorNeuron):
                     bt.logging.info(f"   Retrying in {wait}s...")
                     await asyncio.sleep(wait)
         
-        # All retries exhausted — log a loud error (this should never happen)
+        # All retries exhausted
         bt.logging.error(
             f"🚨 CRITICAL: Gateway champion notification FAILED after {MAX_RETRIES} attempts! "
             f"model={model_id}, became_champion={became_champion}, was_dethroned={was_dethroned}, "
             f"score={score}. Supabase may be out of sync."
+        )
+        print(
+            f"\n{'='*70}\n"
+            f"🚨 CRITICAL: GATEWAY NOTIFICATION FAILED — SUPABASE OUT OF SYNC\n"
+            f"   model={model_id}, became_champion={became_champion}, "
+            f"was_dethroned={was_dethroned}, score={score}\n"
+            f"   The dashboard/Supabase will NOT reflect this change.\n"
+            f"{'='*70}\n"
         )
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -5890,41 +5902,41 @@ class Validator(BaseValidatorNeuron):
             
             if error:
                 print(f"      ❌ Error: {error}")
-                # Still send score_breakdown to gateway for rejected models
-                # (e.g., hardcoding detection includes a rejection breakdown)
                 score_breakdown = result.get("score_breakdown")
                 was_dethroned = False
-                if score_breakdown:
-                    try:
-                        await self._notify_gateway_champion_status(
-                            model_id=model_id,
-                            became_champion=False,
-                            score=0.0,
-                            is_rebenchmark=is_rebenchmark,
-                            score_breakdown=score_breakdown
-                        )
-                        print(f"      📋 Rejection breakdown sent to gateway")
-                    except Exception as e:
-                        print(f"      ⚠️ Failed to send rejection breakdown: {e}")
 
                 if is_rebenchmark:
-                    print(f"      🔄 Rebenchmark failed with error — dethroning champion")
-                    self._clear_qualification_champion()
-                    current_champion_score = 0.0
-                    current_champion_id = None
-                    was_dethroned = True
-
-                    try:
-                        await self._notify_gateway_champion_status(
-                            model_id=model_id,
-                            became_champion=False,
-                            score=0.0,
-                            is_rebenchmark=True,
-                            was_dethroned=True,
-                            score_breakdown=score_breakdown
-                        )
-                    except Exception:
-                        pass
+                    # Rebenchmark failed with an evaluation error (API timeout, proxy
+                    # failure, infrastructure issue, etc.).  Do NOT dethrone — the
+                    # champion's previous score is still valid.  It will be
+                    # re-evaluated automatically in the next rebenchmark cycle.
+                    print(f"      🔄 Rebenchmark hit an error — keeping champion, will retry next cycle")
+                    if score_breakdown:
+                        try:
+                            await self._notify_gateway_champion_status(
+                                model_id=model_id,
+                                became_champion=False,
+                                score=current_champion_score,
+                                is_rebenchmark=True,
+                                score_breakdown=score_breakdown
+                            )
+                            print(f"      📋 Error breakdown sent to gateway (champion retained)")
+                        except Exception as e:
+                            print(f"      ⚠️ Failed to send error breakdown: {e}")
+                else:
+                    # New challenger failed — send rejection breakdown if available
+                    if score_breakdown:
+                        try:
+                            await self._notify_gateway_champion_status(
+                                model_id=model_id,
+                                became_champion=False,
+                                score=0.0,
+                                is_rebenchmark=False,
+                                score_breakdown=score_breakdown
+                            )
+                            print(f"      📋 Rejection breakdown sent to gateway")
+                        except Exception as e:
+                            print(f"      ⚠️ Failed to send rejection breakdown: {e}")
 
                 continue
             

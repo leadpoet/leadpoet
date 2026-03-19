@@ -103,7 +103,7 @@ async def fetch_full_leads_for_epoch(epoch_id: int) -> list:
         print(f"   💾 Fetching full lead data from database...")
         leads_result = await asyncio.to_thread(
             lambda: supabase.table("leads_private")
-                .select("lead_id, lead_blob, lead_blob_hash")
+                .select("lead_id, lead_blob, lead_blob_hash, miner_hotkey")
                 .in_("lead_id", assigned_lead_ids)
                 .execute()
         )
@@ -112,7 +112,7 @@ async def fetch_full_leads_for_epoch(epoch_id: int) -> list:
         full_leads = []
         for lead_row in leads_result.data:
             lead_blob = lead_row.get("lead_blob", {})
-            miner_hotkey = lead_blob.get("wallet_ss58", "unknown")
+            miner_hotkey = lead_row.get("miner_hotkey", "unknown")
             
             full_leads.append({
                 "lead_id": lead_row["lead_id"],
@@ -847,27 +847,32 @@ async def compute_epoch_consensus(epoch_id: int):
                 evidence_by_lead[lid] = []
             evidence_by_lead[lid].append(ev)
         
-        # Pre-fetch all lead_blobs for rejection count tracking (batch query)
-        print(f"   🚀 Pre-fetching lead_blobs for {len(unique_leads)} leads...")
+        # Pre-fetch lead data (columns + blob) for consensus processing
+        print(f"   🚀 Pre-fetching lead data for {len(unique_leads)} leads...")
         
-        all_lead_blobs = {}
-        leads_batch_size = 500  # Smaller batches to avoid URL length limits
+        _LEAD_COLUMNS = (
+            "lead_id, lead_blob, miner_hotkey, email, role, company_name, "
+            "linkedin, website, company_linkedin, industry, sub_industry, "
+            "hq_city, hq_state, hq_country, employee_count"
+        )
+        all_lead_data = {}
+        leads_batch_size = 500
         
         for batch_start in range(0, len(unique_leads), leads_batch_size):
             batch_ids = unique_leads[batch_start:batch_start + leads_batch_size]
             
             leads_batch = await asyncio.to_thread(
                 lambda ids=batch_ids: consensus_supabase.table("leads_private")
-                    .select("lead_id, lead_blob")
+                    .select(_LEAD_COLUMNS)
                     .in_("lead_id", ids)
                     .execute()
             )
             
             if leads_batch.data:
                 for lead in leads_batch.data:
-                    all_lead_blobs[lead['lead_id']] = lead.get('lead_blob', {})
+                    all_lead_data[lead['lead_id']] = lead
         
-        print(f"   ✅ Pre-fetched {len(all_lead_blobs)} lead_blobs")
+        print(f"   ✅ Pre-fetched {len(all_lead_data)} leads")
         print(f"   🏁 Starting consensus computation with pre-fetched data...\n")
         
         # Helper class for backwards compatibility with code expecting .data attribute
@@ -1076,8 +1081,8 @@ async def compute_epoch_consensus(epoch_id: int):
                 updated_lead_blob = None
                 _stage5_data = {}
                 if final_status == "approved":
-                    lead_blob = all_lead_blobs.get(lead_id, {})
-                    if lead_blob and isinstance(lead_blob, dict):
+                    lead_data = all_lead_data.get(lead_id, {})
+                    if lead_data:
                         # Extract approving evidence once (reused for industry correction + company table)
                         try:
                             _lead_ev = evidence_by_lead.get(lead_id, [])
@@ -1092,7 +1097,11 @@ async def compute_epoch_consensus(epoch_id: int):
                         except Exception:
                             pass
 
-                        original_role = lead_blob.get("role", "")
+                        lead_blob = lead_data.get("lead_blob", {})
+                        if isinstance(lead_blob, str):
+                            lead_blob = json.loads(lead_blob)
+
+                        original_role = lead_data.get("role", "") or ""
                         if original_role and isinstance(original_role, str):
                             try:
                                 normalized_role = normalize_role_format(original_role)
@@ -1103,8 +1112,7 @@ async def compute_epoch_consensus(epoch_id: int):
                             except Exception as e:
                                 print(f"            ⚠️  Role normalization failed (keeping original): {e}")
 
-                        # Format employee count for storage (e.g. "51-200" → "51-200 employees")
-                        original_emp = lead_blob.get("employee_count") or ""
+                        original_emp = lead_data.get("employee_count") or ""
                         if original_emp:
                             formatted_emp = _format_employee_count(original_emp)
                             if formatted_emp != original_emp:
@@ -1112,18 +1120,19 @@ async def compute_epoch_consensus(epoch_id: int):
                                 updated_lead_blob = lead_blob
                                 print(f"            - employee_count formatted: '{original_emp}' → '{formatted_emp}'")
 
-                        # Correct industry/sub_industry from Stage 5 classification (new companies)
                         _ind_top3 = _stage5_data.get("company_industry_top3", {})
                         _sub_top3 = _stage5_data.get("company_sub_industry_top3", {})
                         if _ind_top3 and _sub_top3:
                             correct_ind = _ind_top3.get("industry_match1", "")
                             correct_sub = _sub_top3.get("sub_industry_match1", "")
-                            if correct_ind and lead_blob.get("industry") != correct_ind:
-                                print(f"            - industry corrected: '{lead_blob.get('industry', '')}' → '{correct_ind}'")
+                            current_ind = lead_data.get("industry", "") or ""
+                            current_sub = lead_data.get("sub_industry", "") or ""
+                            if correct_ind and current_ind != correct_ind:
+                                print(f"            - industry corrected: '{current_ind}' → '{correct_ind}'")
                                 lead_blob["industry"] = correct_ind
                                 updated_lead_blob = lead_blob
-                            if correct_sub and lead_blob.get("sub_industry") != correct_sub:
-                                print(f"            - sub_industry corrected: '{lead_blob.get('sub_industry', '')}' → '{correct_sub}'")
+                            if correct_sub and current_sub != correct_sub:
+                                print(f"            - sub_industry corrected: '{current_sub}' → '{correct_sub}'")
                                 lead_blob["sub_industry"] = correct_sub
                                 updated_lead_blob = lead_blob
 
@@ -1194,20 +1203,24 @@ async def compute_epoch_consensus(epoch_id: int):
                     return ('error', lead_id)
                 
                 # Log CONSENSUS_RESULT publicly for miner transparency
-                # Pass pre-fetched lead_blob to avoid redundant DB query
-                prefetched_lead_blob = all_lead_blobs.get(lead_id, {})
-                await log_consensus_result(lead_id, epoch_id, outcome, lead_blob=prefetched_lead_blob, is_icp_value=is_icp_multiplier)
+                _ld = all_lead_data.get(lead_id, {})
+                await log_consensus_result(
+                    lead_id, epoch_id, outcome,
+                    lead_email=(_ld.get("email") or ""),
+                    lead_linkedin=(_ld.get("linkedin") or ""),
+                    lead_company_linkedin=(_ld.get("company_linkedin") or ""),
+                    is_icp_value=is_icp_multiplier
+                )
                 
                 if outcome['final_decision'] == 'approve':
                     # ================================================================
                     # Company Table Update (for approved leads)
                     # ================================================================
                     try:
-                        lead_blob = all_lead_blobs.get(lead_id, {})
-                        company_linkedin = lead_blob.get("company_linkedin", "")
+                        lead_data = all_lead_data.get(lead_id, {})
+                        company_linkedin = lead_data.get("company_linkedin", "") or ""
 
                         if company_linkedin:
-                            # Reuse _stage5_data extracted earlier (no duplicate evidence parsing)
                             stage5_data = _stage5_data
                             company_action = stage5_data.get("company_table_action")
 
@@ -1216,12 +1229,12 @@ async def compute_epoch_consensus(epoch_id: int):
                                 insert_result = await asyncio.to_thread(
                                     insert_company,
                                     company_linkedin=company_linkedin,
-                                    company_name=lead_blob.get("business", ""),
-                                    company_website=lead_blob.get("website", ""),
+                                    company_name=lead_data.get("company_name", "") or "",
+                                    company_website=lead_data.get("website", "") or "",
                                     company_description=stage5_data.get("company_refined_description", ""),
-                                    company_hq_country=lead_blob.get("hq_country", ""),
-                                    company_hq_state=lead_blob.get("hq_state", ""),
-                                    company_hq_city=lead_blob.get("hq_city", ""),
+                                    company_hq_country=lead_data.get("hq_country", "") or "",
+                                    company_hq_state=lead_data.get("hq_state", "") or "",
+                                    company_hq_city=lead_data.get("hq_city", "") or "",
                                     industry_top3=stage5_data.get("company_industry_top3", {}),
                                     sub_industry_top3=stage5_data.get("company_sub_industry_top3", {}),
                                     company_employee_count=stage5_data.get("company_verified_employee_count", "")
@@ -1254,26 +1267,17 @@ async def compute_epoch_consensus(epoch_id: int):
                     try:
                         print(f"         📊 Lead rejected - incrementing miner's rejection count...")
                         
-                        # Use pre-fetched lead_blob data (O(1) lookup instead of DB query)
-                        lead_blob = all_lead_blobs.get(lead_id, {})
+                        lead_data = all_lead_data.get(lead_id, {})
+                        miner_hotkey = lead_data.get("miner_hotkey")
                         
-                        if lead_blob:
-                            miner_hotkey = lead_blob.get("wallet_ss58")
+                        if miner_hotkey:
+                            from gateway.utils.rate_limiter import mark_submission_failed
+                            updated_stats = mark_submission_failed(miner_hotkey)
                             
-                            if miner_hotkey:
-                                # Increment rejection count for this miner
-                                # NOTE: Use mark_submission_failed() NOT increment_submission()!
-                                # The submission was already counted in reserve_submission_slot() at /submit time.
-                                # increment_submission() would DOUBLE-COUNT the submission.
-                                from gateway.utils.rate_limiter import mark_submission_failed
-                                updated_stats = mark_submission_failed(miner_hotkey)
-                                
-                                print(f"         ✅ Rejection count incremented for {miner_hotkey[:20]}...")
-                                print(f"            Stats: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/8")
-                            else:
-                                print(f"         ⚠️  Could not find miner_hotkey in lead_blob")
+                            print(f"         ✅ Rejection count incremented for {miner_hotkey[:20]}...")
+                            print(f"            Stats: submissions={updated_stats['submissions']}/10, rejections={updated_stats['rejections']}/8")
                         else:
-                            print(f"         ⚠️  Could not fetch lead_blob for rejection count")
+                            print(f"         ⚠️  Could not find miner_hotkey for rejection count")
                             
                     except Exception as e:
                         print(f"         ⚠️  Failed to increment rejection count: {e}")
@@ -1284,12 +1288,11 @@ async def compute_epoch_consensus(epoch_id: int):
                     # When miner's claimed industry/sub-industry doesn't match top 3,
                     # we still insert the company with correct classification for future validation.
                     try:
-                        lead_blob = all_lead_blobs.get(lead_id, {})
-                        company_linkedin = lead_blob.get("company_linkedin", "")
+                        lead_data = all_lead_data.get(lead_id, {})
+                        company_linkedin = lead_data.get("company_linkedin", "") or ""
 
                         if company_linkedin:
                             lead_evidence = evidence_by_lead.get(lead_id, [])
-                            # Check rejection evidence for company_table_action
                             rejecting_evidence = [
                                 ev for ev in lead_evidence
                                 if ev.get('decision') == 'deny' and ev.get('evidence_blob')
@@ -1300,9 +1303,6 @@ async def compute_epoch_consensus(epoch_id: int):
                                 if isinstance(evidence_blob, str):
                                     evidence_blob = json.loads(evidence_blob)
 
-                                # Handle wrapped evidence_blob from coordinator/single validators
-                                # Coordinator wraps as: {is_legitimate, enhanced_lead: {}, reason: <rejection>}
-                                # Worker sends raw: {passed, rejection_reason: <rejection>, ...}
                                 if "enhanced_lead" in evidence_blob:
                                     rejection_reason = evidence_blob.get("reason", {})
                                 else:
@@ -1310,19 +1310,18 @@ async def compute_epoch_consensus(epoch_id: int):
                                 if isinstance(rejection_reason, str):
                                     rejection_reason = json.loads(rejection_reason)
 
-                                # Check if rejection includes company data to store
                                 company_action = rejection_reason.get("company_table_action")
                                 if company_action == "insert":
                                     print(f"         📝 Rejected lead but inserting company with correct classification: {company_linkedin[:50]}...")
                                     insert_result = await asyncio.to_thread(
                                         insert_company,
                                         company_linkedin=company_linkedin,
-                                        company_name=lead_blob.get("business", ""),
-                                        company_website=lead_blob.get("website", ""),
+                                        company_name=lead_data.get("company_name", "") or "",
+                                        company_website=lead_data.get("website", "") or "",
                                         company_description=rejection_reason.get("company_refined_description", ""),
-                                        company_hq_country=lead_blob.get("hq_country", ""),
-                                        company_hq_state=lead_blob.get("hq_state", ""),
-                                        company_hq_city=lead_blob.get("hq_city", ""),
+                                        company_hq_country=lead_data.get("hq_country", "") or "",
+                                        company_hq_state=lead_data.get("hq_state", "") or "",
+                                        company_hq_city=lead_data.get("hq_city", "") or "",
                                         industry_top3=rejection_reason.get("company_industry_top3", {}),
                                         sub_industry_top3=rejection_reason.get("company_sub_industry_top3", {}),
                                         company_employee_count=rejection_reason.get("company_verified_employee_count", "")
@@ -1395,7 +1394,7 @@ async def compute_epoch_consensus(epoch_id: int):
         # ========================================================================
         del all_evidence_data
         del evidence_by_lead
-        del all_lead_blobs
+        del all_lead_data
         print(f"   🧹 Cleaned up pre-fetched data from memory")
     
     except Exception as e:
@@ -1405,7 +1404,7 @@ async def compute_epoch_consensus(epoch_id: int):
         raise  # Re-raise so caller knows consensus failed and can retry
 
 
-async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict, lead_blob: dict = None, is_icp_value: float = None):
+async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict, lead_email: str = "", lead_linkedin: str = "", lead_company_linkedin: str = "", is_icp_value: float = None):
     """
     Log CONSENSUS_RESULT event to transparency log for miner transparency.
     
@@ -1423,43 +1422,37 @@ async def log_consensus_result(lead_id: str, epoch_id: int, outcome: dict, lead_
         lead_id: Lead UUID
         epoch_id: Epoch ID
         outcome: Consensus result from compute_weighted_consensus()
-        lead_blob: Optional pre-fetched lead_blob (avoids DB query if provided)
+        lead_email: Email from the extracted column
+        lead_linkedin: LinkedIn URL from the extracted column
+        lead_company_linkedin: Company LinkedIn URL from the extracted column
         is_icp_value: Optional pre-fetched is_icp_multiplier value
     """
     try:
         email_hash = None
         linkedin_combo_hash = None
-        is_icp_multiplier = is_icp_value if is_icp_value is not None else 0.0  # Default for new leads
-        
-        # Use pre-fetched lead_blob if provided, otherwise fetch from DB
-        if lead_blob is None or lead_blob == {}:
-            # Fallback: Fetch lead_blob from DB (for backwards compatibility)
+        is_icp_multiplier = is_icp_value if is_icp_value is not None else 0.0
+
+        if not lead_email and not lead_linkedin:
             lead_result = await asyncio.to_thread(
                 lambda: consensus_supabase.table("leads_private")
-                    .select("lead_blob, is_icp_multiplier")
+                    .select("email, linkedin, company_linkedin, is_icp_multiplier")
                     .eq("lead_id", lead_id)
                     .execute()
             )
-            
             if lead_result.data and len(lead_result.data) > 0:
-                lead_blob = lead_result.data[0].get("lead_blob", {})
-                if isinstance(lead_blob, str):
-                    lead_blob = json.loads(lead_blob)
-                is_icp_multiplier = lead_result.data[0].get("is_icp_multiplier", 0.0)
-        
-        if lead_blob:
-            if isinstance(lead_blob, str):
-                lead_blob = json.loads(lead_blob)
-            
-            # Extract email and compute hash (same logic as submit.py)
-            email = lead_blob.get("email", "").strip().lower()
-            if email:
-                email_hash = hashlib.sha256(email.encode()).hexdigest()
-            
-            # Compute linkedin_combo_hash for person+company duplicate detection
-            linkedin_url = lead_blob.get("linkedin", "")
-            company_linkedin_url = lead_blob.get("company_linkedin", "")
-            linkedin_combo_hash = compute_linkedin_combo_hash(linkedin_url, company_linkedin_url)
+                row = lead_result.data[0]
+                lead_email = row.get("email", "") or ""
+                lead_linkedin = row.get("linkedin", "") or ""
+                lead_company_linkedin = row.get("company_linkedin", "") or ""
+                is_icp_multiplier = row.get("is_icp_multiplier", 0.0)
+
+        email = (lead_email or "").strip().lower()
+        if email:
+            email_hash = hashlib.sha256(email.encode()).hexdigest()
+
+        linkedin_combo_hash = compute_linkedin_combo_hash(
+            lead_linkedin or "", lead_company_linkedin or ""
+        )
         
         payload = {
             "lead_id": lead_id,

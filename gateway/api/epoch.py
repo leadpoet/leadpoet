@@ -276,7 +276,7 @@ async def get_epoch_leads(
                 batch_result = await asyncio.wait_for(
                     asyncio.to_thread(
                         lambda s=start, e=end: supabase.table("leads_private")
-                            .select("lead_id, lead_blob, lead_blob_hash")
+                            .select("lead_id, lead_blob, lead_blob_hash, miner_hotkey")
                             .eq("status", "pending_validation")
                             .order("created_ts", desc=False)
                             .range(s, e)
@@ -485,7 +485,7 @@ async def get_epoch_leads(
                 
                 # Need to capture batch_ids in closure properly
                 def make_query(ids):
-                    return lambda: supabase.table("leads_private").select("lead_id, lead_blob, lead_blob_hash").in_("lead_id", ids).execute()
+                    return lambda: supabase.table("leads_private").select("lead_id, lead_blob, lead_blob_hash, miner_hotkey").in_("lead_id", ids).execute()
                 
                 batch_result = await asyncio.wait_for(
                     asyncio.to_thread(make_query(batch_ids)),
@@ -535,15 +535,13 @@ async def get_epoch_leads(
         print(f"✅ Step 5: Skipped (already have {len(leads_result.data)} leads from fallback)")
     
     # Step 6: Build full_leads with miner_hotkey extracted from lead_blob
-    # NOTE: miner_hotkey column doesn't exist yet, so we extract from lead_blob (wallet_ss58)
     try:
         print(f"🔍 Step 6: Building full lead data for {len(leads_result.data)} leads...")
         full_leads = []
         for idx, lead_row in enumerate(leads_result.data):
             try:
-                # Extract miner_hotkey from lead_blob (wallet_ss58 field)
                 lead_blob = lead_row.get("lead_blob", {})
-                miner_hotkey = lead_blob.get("wallet_ss58", "unknown")
+                miner_hotkey = lead_row.get("miner_hotkey", "unknown")
                 
                 full_leads.append({
                     "lead_id": lead_row["lead_id"],

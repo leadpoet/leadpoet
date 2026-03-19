@@ -180,11 +180,9 @@ COMPANY_STAGES = [
     "Seed", "Series A", "Series B", "Series C+", "Private Equity", "Public"
 ]
 
-# Geographies - ALL 51 US states/territories + 5 international metros
+# Geographies - ALL 51 US states/territories + Dubai & Abu Dhabi (UAE)
 # US states from gateway/utils/geo_lookup_fast.json (source of truth)
-# International metros: Major global business hubs
 GEOGRAPHIES = [
-    # === ALL 51 US STATES/TERRITORIES ===
     "United States, Alabama",
     "United States, Alaska",
     "United States, Arizona",
@@ -236,12 +234,9 @@ GEOGRAPHIES = [
     "United States, West Virginia",
     "United States, Wisconsin",
     "United States, Wyoming",
-    # === 5 INTERNATIONAL METROPOLITAN AREAS ===
-    "United Kingdom, London",
-    "Hong Kong",
-    "Singapore",
-    "Germany, Berlin",
-    "Canada, Toronto",
+    # === UAE (investor-focused ICPs only) ===
+    "United Arab Emirates, Dubai",
+    "United Arab Emirates, Abu Dhabi",
 ]
 
 # Products/Services by industry (what the miner's model should help sell)
@@ -467,9 +462,11 @@ For Manufacturing:
 - "plant managers automotive suppliers hiring"
 
 GEOGRAPHIES TO USE:
-US States: Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, DC, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, Wyoming
+US States (98 prompts): Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, DC, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, Wyoming
 
-International (5-10 prompts only): London UK, Hong Kong, Singapore, Berlin Germany, Toronto Canada
+UAE (exactly 2 prompts): Dubai and Abu Dhabi. These 2 prompts MUST be Financial Services industry and investor-focused (e.g., "looking for sovereign wealth fund investors in Dubai", "need contacts at PE firms or family offices in Abu Dhabi looking to invest in US tech"). The target roles for these should be investor/fund manager types.
+
+IMPORTANT: Do NOT include any other international geographies besides Dubai and Abu Dhabi. 98 US + 2 UAE = 100 total.
 
 COMPANY SIZES: 10-50, 50-200, 200-500, 500-1000, 1000-5000, 5000+
 COMPANY STAGES: Seed, Series A, Series B, Series C+, Private Equity, Public
@@ -518,7 +515,9 @@ FINAL CHECK - Before outputting, verify:
 1. NO prompt starts with "Who should we target" or "Who should we find"
 2. NO prompt uses "Find decision makers in X sector" more than 3 times
 3. Prompts use 5 different starting styles distributed evenly
-4. Each prompt sounds like a different human typed it"""
+4. Each prompt sounds like a different human typed it
+5. Exactly 98 prompts use US geographies and exactly 2 use UAE (Dubai, Abu Dhabi) — no other international locations
+6. The 2 UAE prompts MUST be Financial Services / investor-focused"""
 
     try:
         logger.info(f"Calling OpenRouter {OPENROUTER_MODEL} to generate {total_icps} ICPs...")
@@ -627,23 +626,16 @@ FINAL CHECK - Before outputting, verify:
                 logger.warning(f"ICP {icp_id} had empty intent_signals from LLM, assigned fallback: {intent_signals}")
             
             geography = icp.get("geography", "United States, California")
-            country = icp.get("country", "United States")
-            if not country:
-                # Extract country from geography
-                if "United States" in geography:
-                    country = "United States"
-                elif "United Kingdom" in geography or "London" in geography:
-                    country = "United Kingdom"
-                elif "Hong Kong" in geography:
-                    country = "Hong Kong"
-                elif "Singapore" in geography:
-                    country = "Singapore"
-                elif "Germany" in geography or "Berlin" in geography:
-                    country = "Germany"
-                elif "Canada" in geography or "Toronto" in geography:
-                    country = "Canada"
-                else:
-                    country = "United States"
+            
+            # Allow US and UAE only; override anything else
+            if geography and "United Arab Emirates" in geography:
+                country = "United Arab Emirates"
+            elif geography and "United States" in geography:
+                country = "United States"
+            else:
+                logger.warning(f"ICP {icp_id} has non-US/UAE geography '{geography}', overriding to California")
+                geography = "United States, California"
+                country = "United States"
             
             validated_icp = {
                 "icp_id": icp_id,

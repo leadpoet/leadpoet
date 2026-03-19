@@ -26,6 +26,51 @@ from supabase import create_client
 # Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+_LEADS_SELECT = (
+    "lead_id, lead_blob, lead_blob_hash, miner_hotkey, "
+    "first_name, last_name, email, role, company_name, linkedin, website, "
+    "company_linkedin, industry, sub_industry, city, state, country, "
+    "hq_city, hq_state, hq_country, employee_count, description"
+)
+
+_BLOB_FIELD_MAP = {
+    "first": "first_name",
+    "last": "last_name",
+    "email": "email",
+    "role": "role",
+    "business": "company_name",
+    "linkedin": "linkedin",
+    "website": "website",
+    "company_linkedin": "company_linkedin",
+    "industry": "industry",
+    "sub_industry": "sub_industry",
+    "city": "city",
+    "state": "state",
+    "country": "country",
+    "hq_city": "hq_city",
+    "hq_state": "hq_state",
+    "hq_country": "hq_country",
+    "employee_count": "employee_count",
+    "description": "description",
+}
+
+
+def _rebuild_blob(row: dict) -> dict:
+    """Reconstruct a complete lead_blob from columns + overflow blob.
+    Columns are the source of truth for the 18 extracted fields.
+    The blob retains all other fields (attestation, flags, etc.)."""
+    blob = row.get("lead_blob") or {}
+    if isinstance(blob, str):
+        import json
+        blob = json.loads(blob)
+    blob = dict(blob)
+    for blob_key, col_name in _BLOB_FIELD_MAP.items():
+        val = row.get(col_name)
+        if val is not None:
+            blob[blob_key] = val
+    return blob
+
+
 # Create router
 router = APIRouter(prefix="/epoch", tags=["Epoch"])
 
@@ -276,7 +321,7 @@ async def get_epoch_leads(
                 batch_result = await asyncio.wait_for(
                     asyncio.to_thread(
                         lambda s=start, e=end: supabase.table("leads_private")
-                            .select("lead_id, lead_blob, lead_blob_hash, miner_hotkey")
+                            .select(_LEADS_SELECT)
                             .eq("status", "pending_validation")
                             .order("created_ts", desc=False)
                             .range(s, e)
@@ -485,7 +530,7 @@ async def get_epoch_leads(
                 
                 # Need to capture batch_ids in closure properly
                 def make_query(ids):
-                    return lambda: supabase.table("leads_private").select("lead_id, lead_blob, lead_blob_hash, miner_hotkey").in_("lead_id", ids).execute()
+                    return lambda: supabase.table("leads_private").select(_LEADS_SELECT).in_("lead_id", ids).execute()
                 
                 batch_result = await asyncio.wait_for(
                     asyncio.to_thread(make_query(batch_ids)),
@@ -540,14 +585,14 @@ async def get_epoch_leads(
         full_leads = []
         for idx, lead_row in enumerate(leads_result.data):
             try:
-                lead_blob = lead_row.get("lead_blob", {})
+                lead_blob = _rebuild_blob(lead_row)
                 miner_hotkey = lead_row.get("miner_hotkey", "unknown")
                 
                 full_leads.append({
                     "lead_id": lead_row["lead_id"],
                     "lead_blob": lead_blob,
                     "lead_blob_hash": lead_row["lead_blob_hash"],
-                    "miner_hotkey": miner_hotkey  # Extracted from lead_blob
+                    "miner_hotkey": miner_hotkey
                 })
             except Exception as e:
                 print(f"❌ ERROR building lead {idx}: {e}")

@@ -327,19 +327,33 @@ async def submit_validation(event: ValidationEvent):
     # for the same epoch (double-dipping)
     try:
         existing_submission = supabase.table("validation_evidence_private") \
-            .select("evidence_id") \
+            .select("evidence_id", count="exact") \
             .eq("validator_hotkey", event.actor_hotkey) \
             .eq("epoch_id", event.payload.epoch_id) \
             .limit(1) \
             .execute()
         
-        if existing_submission.data:
+        expected_count = len(event.payload.validations)
+        existing_count = existing_submission.count or 0
+        
+        if existing_count >= expected_count:
             raise HTTPException(
                 status_code=400,
                 detail=f"Duplicate submission detected: validator {event.actor_hotkey[:20]}... already submitted validations for epoch {event.payload.epoch_id}. Cannot submit twice."
             )
         
-        print(f"✅ Step 5.4: Duplicate submission check passed (first submission for epoch {event.payload.epoch_id})")
+        if existing_count > 0:
+            print(f"⚠️  Step 5.4: Found {existing_count}/{expected_count} partial records from a previous attempt — cleaning up for retry")
+            await asyncio.to_thread(
+                lambda: supabase.table("validation_evidence_private")
+                    .delete()
+                    .eq("validator_hotkey", event.actor_hotkey)
+                    .eq("epoch_id", event.payload.epoch_id)
+                    .execute()
+            )
+            print(f"✅ Step 5.4: Cleaned up {existing_count} partial records — retry can proceed")
+        else:
+            print(f"✅ Step 5.4: First submission for epoch {event.payload.epoch_id}")
     
     except HTTPException:
         # Re-raise HTTPException (duplicate submission error)

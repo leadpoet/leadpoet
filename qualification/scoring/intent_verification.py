@@ -1154,6 +1154,10 @@ async def fetch_url_content(url: str, source: str) -> str:
     if source_lower == "linkedin":
         return await scrapingdog_linkedin(url)
     elif source_lower == "job_board":
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        if "indeed.com" in hostname:
+            return await scrapingdog_indeed(url)
         return await scrapingdog_jobs(url)
     elif source_lower == "github":
         return await github_api(url)
@@ -1251,15 +1255,35 @@ async def scrapingdog_linkedin(url: str) -> str:
         return json.dumps(data)
 
 
+async def scrapingdog_indeed(url: str) -> str:
+    """
+    Fetch Indeed content via ScrapingDog's dedicated Indeed API (1 credit).
+    Falls back to dynamic general scrape (5 credits) if the dedicated API
+    is unavailable (maintenance, rate limit, etc.).
+    """
+    if not SCRAPINGDOG_API_KEY:
+        raise ValueError("SCRAPINGDOG_API_KEY not configured")
+
+    # Try dedicated Indeed API first (1 credit, structured JSON)
+    try:
+        api_url = "https://api.scrapingdog.com/indeed"
+        params = {"api_key": SCRAPINGDOG_API_KEY, "url": url}
+        async with httpx.AsyncClient() as client:
+            response = await client.get(api_url, params=params, timeout=DEFAULT_TIMEOUT)
+            response.raise_for_status()
+            return response.text
+    except Exception as e:
+        logger.warning(f"Indeed dedicated API failed ({e}), falling back to dynamic scrape")
+
+    # Fallback: general scrape with JS rendering (5 credits)
+    return await scrapingdog_jobs(url)
+
+
 async def scrapingdog_jobs(url: str) -> str:
     """
-    Fetch job board content via ScrapingDog scraper.
-    
-    Args:
-        url: Job posting URL
-    
-    Returns:
-        HTML content
+    Fetch job board content via ScrapingDog scraper with JS rendering.
+    Uses dynamic=true (5 credits) because major job boards like Glassdoor
+    require JavaScript rendering to return meaningful content.
     """
     if not SCRAPINGDOG_API_KEY:
         raise ValueError("SCRAPINGDOG_API_KEY not configured")
@@ -1268,11 +1292,11 @@ async def scrapingdog_jobs(url: str) -> str:
     params = {
         "api_key": SCRAPINGDOG_API_KEY,
         "url": url,
-        "dynamic": "false",
+        "dynamic": "true",
     }
     
     async with httpx.AsyncClient() as client:
-        response = await client.get(api_url, params=params, timeout=DEFAULT_TIMEOUT)
+        response = await client.get(api_url, params=params, timeout=30.0)
         response.raise_for_status()
         return response.text
 
@@ -1445,6 +1469,15 @@ def extract_verification_content(html_or_json: str, source: str) -> str:
     if source_lower == "github":
         return _extract_github_content(html_or_json)
     
+    # Handle Indeed JSON (from dedicated Indeed API)
+    if source_lower == "job_board":
+        try:
+            data = json.loads(html_or_json)
+            if isinstance(data, list):
+                return _extract_indeed_content(data)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     # Handle HTML content
     return _extract_html_content(html_or_json, source_lower)
 
@@ -1512,6 +1545,36 @@ def _extract_github_content(json_str: str) -> str:
         return "\n".join(parts) if parts else json_str[:CONTENT_MAX_LENGTH]
     except json.JSONDecodeError:
         return json_str[:CONTENT_MAX_LENGTH]
+
+
+def _extract_indeed_content(data: list) -> str:
+    """Extract text from ScrapingDog Indeed API JSON response.
+    
+    The Indeed API returns a list of job objects with fields like
+    jobTitle, companyName, companyLocation, jobDescription, Salary, jobMetaData.
+    """
+    parts = []
+    for job in data[:10]:
+        title = job.get("jobTitle", "")
+        company = job.get("companyName", "")
+        location = job.get("companyLocation", "")
+        description = job.get("jobDescription", "")
+        salary = job.get("Salary", "")
+        meta = job.get("jobMetaData", [])
+        posting = job.get("jobPosting", "")
+
+        entry = f"Job: {title} at {company}. Location: {location}."
+        if salary:
+            entry += f" Salary: {salary}."
+        if meta:
+            entry += f" Type: {', '.join(meta)}."
+        if posting:
+            entry += f" Posted: {posting}."
+        if description:
+            entry += f"\nDescription: {description.strip()}"
+        parts.append(entry)
+
+    return "\n\n".join(parts)[:CONTENT_MAX_LENGTH] if parts else ""
 
 
 def _extract_html_content(html: str, source: str) -> str:

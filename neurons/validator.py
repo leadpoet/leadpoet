@@ -3343,19 +3343,31 @@ class Validator(BaseValidatorNeuron):
             
             # ═══════════════════════════════════════════════════════════════════
             # Step 1: Convert floats to u16 using canonical function
+            # CRITICAL FIX: Bittensor's convert_weights_and_uids_for_emit removes
+            # zero-weight UIDs, so we must filter BEFORE calling normalize_to_u16
+            # to ensure UIDs and weights stay aligned.
             # ═══════════════════════════════════════════════════════════════════
-            weights_u16 = normalize_to_u16(uids, weights)
             
-            # Filter to sparse (remove zeros) and ensure sorted
-            sparse_pairs = [(uid, w) for uid, w in zip(uids, weights_u16) if w > 0]
-            sparse_pairs.sort(key=lambda x: x[0])  # Sort by UID
-            
-            if not sparse_pairs:
-                bt.logging.warning("⚠️ No non-zero weights after u16 conversion")
+            # First, filter out zero weights to keep UIDs aligned with weights
+            non_zero_pairs = [(uid, w) for uid, w in zip(uids, weights) if w > 0]
+            if not non_zero_pairs:
+                bt.logging.warning("⚠️ No non-zero weights to submit")
                 return None
             
-            sparse_uids = [p[0] for p in sparse_pairs]
-            sparse_weights_u16 = [p[1] for p in sparse_pairs]
+            non_zero_pairs.sort(key=lambda x: x[0])  # Sort by UID
+            filtered_uids = [p[0] for p in non_zero_pairs]
+            filtered_weights = [p[1] for p in non_zero_pairs]
+            
+            # Now convert to u16 - all weights are non-zero so no UID removal will occur
+            weights_u16 = normalize_to_u16(filtered_uids, filtered_weights)
+            
+            # Verify lengths match (sanity check)
+            if len(filtered_uids) != len(weights_u16):
+                bt.logging.error(f"⚠️ UID/weight length mismatch after u16 conversion: {len(filtered_uids)} vs {len(weights_u16)}")
+                return None
+            
+            sparse_uids = filtered_uids
+            sparse_weights_u16 = weights_u16
             
             # ═══════════════════════════════════════════════════════════════════
             # Step 2: Sign weights with enclave key

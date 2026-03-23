@@ -583,23 +583,24 @@ async def receive_champion_status(request: ChampionStatusRequest):
     This is ONE-WAY: validator tells gateway, gateway does NOT send anything back.
     The validator's local JSON is the source of truth for weight submission.
     """
-    logger.info(
+    msg = (
         f"📥 Champion status from validator: model={request.model_id[:8]}..., "
-        f"became_champion={request.became_champion}, score={request.score:.2f}"
+        f"became_champion={request.became_champion}, was_dethroned={request.was_dethroned}, "
+        f"is_rebenchmark={request.is_rebenchmark}, score={request.score:.2f}"
     )
+    logger.info(msg)
+    print(msg)
     
     try:
         from gateway.db.client import get_write_client
         supabase = get_write_client()
         
-        # Build base update data (always include these if provided)
         base_update = {
             "score": request.score,
             "status": "evaluated",
             "evaluated_at": datetime.now(timezone.utc).isoformat()
         }
         
-        # Add optional fields if provided (for full DB update)
         if request.evaluation_cost_usd is not None:
             base_update["evaluation_cost_usd"] = request.evaluation_cost_usd
         if request.evaluation_time_seconds is not None:
@@ -610,8 +611,6 @@ async def receive_champion_status(request: ChampionStatusRequest):
             base_update["score_breakdown"] = request.score_breakdown
         
         if request.was_dethroned:
-            # Champion was dethroned due to score falling below minimum threshold
-            # NO replacement champion - there is now NO champion
             dethrone_update = {
                 **base_update,
                 "is_champion": False,
@@ -619,27 +618,28 @@ async def receive_champion_status(request: ChampionStatusRequest):
             }
             supabase.table("qualification_models").update(dethrone_update).eq("id", request.model_id).execute()
             
-            logger.info(
-                f"👎 CHAMPION DETHRONED! Model {request.model_id[:8]}... score dropped to {request.score:.2f} "
-                f"(below minimum threshold) - NO CHAMPION exists now"
+            msg = (
+                f"👎 CHAMPION DETHRONED! Model {request.model_id[:8]}... score={request.score:.2f} "
+                f"(below minimum) — NO CHAMPION now"
             )
+            logger.info(msg)
+            print(msg)
         
         elif request.is_rebenchmark and not request.was_dethroned:
-            # Champion was re-evaluated — just update score, keep champion status intact
             supabase.table("qualification_models").update(base_update).eq("id", request.model_id).execute()
             
-            logger.info(f"🔄 Updated Supabase: Champion {request.model_id[:8]}... rebenchmarked (new score: {request.score:.2f})")
+            msg = f"🔄 Champion rebenchmarked: {request.model_id[:8]}... new score={request.score:.2f}"
+            logger.info(msg)
+            print(msg)
         
         elif request.became_champion:
             now_iso = datetime.now(timezone.utc).isoformat()
 
-            # Dethrone any existing champion EXCEPT the model being crowned
             supabase.table("qualification_models").update({
                 "is_champion": False,
                 "dethroned_at": now_iso
             }).eq("is_champion", True).neq("id", request.model_id).execute()
             
-            # Crown new champion AND mark as evaluated
             champion_update = {
                 **base_update,
                 "is_champion": True,
@@ -648,19 +648,23 @@ async def receive_champion_status(request: ChampionStatusRequest):
             }
             supabase.table("qualification_models").update(champion_update).eq("id", request.model_id).execute()
             
-            logger.info(f"👑 Updated Supabase: {request.model_id[:8]}... is now champion (score: {request.score:.2f}, status=evaluated)")
+            msg = f"👑 NEW CHAMPION in Supabase: {request.model_id[:8]}... score={request.score:.2f}"
+            logger.info(msg)
+            print(msg)
         
         else:
-            # Model was evaluated but didn't become champion - still mark as evaluated
             supabase.table("qualification_models").update(base_update).eq("id", request.model_id).execute()
             
-            logger.info(f"📊 Model {request.model_id[:8]}... evaluated (score: {request.score:.2f}) but did not become champion")
+            msg = f"📊 Model evaluated (not champion): {request.model_id[:8]}... score={request.score:.2f}"
+            logger.info(msg)
+            print(msg)
         
         return {"status": "ok", "message": "Champion status recorded"}
         
     except Exception as e:
-        logger.error(f"Failed to update champion status in Supabase: {e}")
-        # Still return OK - validator's local JSON is source of truth
+        msg = f"❌ Failed to update champion status in Supabase: {e}"
+        logger.error(msg)
+        print(msg)
         return {"status": "ok", "message": "Champion status acknowledged (Supabase update failed)"}
 
 

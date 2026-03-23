@@ -9,8 +9,8 @@ Agent competition. It combines:
 1. Automatic-zero pre-checks (deterministic validation)
 2. LLM-based scoring for three components:
    - ICP Fit (0-20 points)
-   - Decision Maker (0-30 points)
-   - Intent Signal (0-50 points, with time decay)
+   - Decision Maker (0-20 points)
+   - Intent Signal (0-60 points, with time decay)
 3. Penalties for cost and time
 4. Final score calculation
 
@@ -56,8 +56,8 @@ logger = logging.getLogger(__name__)
 
 # Score component maximums
 MAX_ICP_FIT_SCORE = 20
-MAX_DECISION_MAKER_SCORE = 30
-MAX_INTENT_SIGNAL_SCORE = 50
+MAX_DECISION_MAKER_SCORE = 20
+MAX_INTENT_SIGNAL_SCORE = 60
 MAX_TOTAL_SCORE = MAX_ICP_FIT_SCORE + MAX_DECISION_MAKER_SCORE + MAX_INTENT_SIGNAL_SCORE
 
 # LLM temperature for scoring (slightly higher for nuanced scoring)
@@ -87,8 +87,8 @@ async def score_lead(
     
     Scoring Components:
     - ICP Fit: 0-20 pts (how well lead matches ICP criteria)
-    - Decision Maker: 0-30 pts (is this person a buyer/decision maker)
-    - Intent Signal: 0-50 pts (quality and relevance of intent signal)
+    - Decision Maker: 0-20 pts (is this person a buyer/decision maker)
+    - Intent Signal: 0-60 pts (quality and relevance of intent signal)
     
     Time Decay:
     - ≤2 months old: 100% (multiplier 1.0)
@@ -168,7 +168,7 @@ async def score_lead(
         decision_maker = await score_decision_maker(lead, icp)
         logger.debug(f"Decision maker score: {decision_maker}")
         
-        # Score Intent Signals (0-50 pts) — scores ALL signals, averages after per-signal time decay
+        # Score Intent Signals (0-60 pts) — scores ALL signals, averages after per-signal time decay
         intent_raw, intent_final, decay_multiplier, max_confidence, all_fabricated = await score_intent_signal(lead, icp)
         logger.debug(f"Intent signal avg_raw={intent_raw:.1f}, avg_final={intent_final:.1f}, decay={decay_multiplier:.2f}")
         
@@ -361,7 +361,7 @@ async def score_decision_maker(lead: LeadOutput, icp: ICPPrompt) -> float:
     """
     target_roles_str = ', '.join(icp.target_roles) if icp.target_roles else 'Any senior role'
 
-    prompt = f"""Score whether this lead's role matches what the buyer is looking for AND has decision-making authority, on a scale of 0-30.
+    prompt = f"""Score whether this lead's role matches what the buyer is looking for AND has decision-making authority, on a scale of 0-20.
 
 BUYER IS LOOKING FOR THESE SPECIFIC ROLES: {target_roles_str}
 BUYER IS SELLING: "{icp.product_service}"
@@ -374,27 +374,27 @@ LEAD:
 
 SCORING (two dimensions — BOTH matter):
 
-1. ROLE MATCH (0-15 points):
-   - Lead's role is one of the buyer's target roles or very close equivalent: 13-15
+1. ROLE MATCH (0-10 points):
+   - Lead's role is one of the buyer's target roles or very close equivalent: 9-10
      (e.g., buyer wants "CTO" and lead IS the CTO)
-   - Lead's role is in the same department/function as target roles: 8-12
+   - Lead's role is in the same department/function as target roles: 5-8
      (e.g., buyer wants "VP of Engineering" and lead is "Director of Engineering")
-   - Lead's role is senior but in a different function: 3-7
+   - Lead's role is senior but in a different function: 2-4
      (e.g., buyer wants "Supply Chain Director" and lead is "CEO" — senior but different function)
-   - Lead's role is unrelated to any target role: 0-2
+   - Lead's role is unrelated to any target role: 0-1
      (e.g., buyer wants "CTO" and lead is "HR Director")
 
-2. DECISION-MAKING AUTHORITY (0-15 points):
-   - C-suite or VP with clear budget authority for this product type: 13-15
-   - Director-level with likely purchasing influence for this product: 8-12
-   - Manager-level, may influence but not decide: 4-7
-   - Individual contributor or unrelated authority: 0-3
+2. DECISION-MAKING AUTHORITY (0-10 points):
+   - C-suite or VP with clear budget authority for this product type: 9-10
+   - Director-level with likely purchasing influence for this product: 5-8
+   - Manager-level, may influence but not decide: 2-4
+   - Individual contributor or unrelated authority: 0-1
 
-Add both sub-scores together (max 30).
+Add both sub-scores together (max 20).
 
-CRITICAL: A CEO always scores high on authority (13-15) but should score LOW on role match (3-7) if the buyer specifically asked for a technical role like "CTO" or "Head of DevOps". The buyer knows who they want to reach — don't override their targeting.
+CRITICAL: A CEO always scores high on authority (9-10) but should score LOW on role match (2-4) if the buyer specifically asked for a technical role like "CTO" or "Head of DevOps". The buyer knows who they want to reach — don't override their targeting.
 
-Respond with ONLY a single number (0-30):"""
+Respond with ONLY a single number (0-20):"""
 
     response = await openrouter_chat(prompt, model="gpt-4o-mini")
     score = extract_score(response, max_score=MAX_DECISION_MAKER_SCORE)
@@ -570,9 +570,9 @@ SOURCES_DATE_REQUIRED = frozenset({
     "social_media",     # Social posts need dates — could be old
 })
 
-MAX_INTENT_NO_DATE_REQUIRED = 15   # Cap for undated signals where date IS required
-MAX_INTENT_NO_DATE_UNKNOWN = 40   # Cap for undated signals from unrecognized source types
-MAX_INTENT_NO_DATE_OPTIONAL = 50  # Full score for undated signals where date is NOT required
+MAX_INTENT_NO_DATE_REQUIRED = 18   # Cap for undated signals where date IS required
+MAX_INTENT_NO_DATE_UNKNOWN = 48   # Cap for undated signals from unrecognized source types
+MAX_INTENT_NO_DATE_OPTIONAL = 60  # Full score for undated signals where date is NOT required
 
 async def _score_single_intent_signal(
     signal: "IntentSignal",
@@ -585,7 +585,7 @@ async def _score_single_intent_signal(
     Verify and score a single intent signal.
     
     Returns:
-        Tuple of (score 0-50, verification_confidence 0-100, date_status)
+        Tuple of (score 0-60, verification_confidence 0-100, date_status)
     """
     # Verify the signal is real AND provides evidence of ICP fit
     verified, confidence, reason, date_status = await verify_intent_signal(
@@ -613,7 +613,7 @@ async def _score_single_intent_signal(
     icp_intent_list = ", ".join(str(s) for s in (icp.intent_signals or [])) if hasattr(icp, 'intent_signals') and icp.intent_signals else ""
     icp_intent_section = f"\nBUYER'S EXPECTED INTENT SIGNALS: \"{icp_intent_list}\"\n" if icp_intent_list else ""
 
-    prompt = f"""Score how relevant this intent signal is to the buyer's request on a scale of 0-50.
+    prompt = f"""Score how relevant this intent signal is to the buyer's request on a scale of 0-60.
 
 BUYER IS SELLING: "{icp.product_service}"
 
@@ -627,9 +627,9 @@ INTENT SIGNAL FOUND:
 - Snippet: {signal.snippet}
 
 SCORING GUIDELINES:
-- 40-50: Signal directly proves the company matches the buyer's request AND matches the buyer's expected intent signals (e.g., buyer expects "hiring for specific roles" and signal shows actual job postings)
-- 30-39: Signal strongly suggests the company fits AND is related to the expected intent type
-- 20-29: Signal is somewhat relevant but the intent TYPE doesn't match what the buyer asked for (e.g., buyer expected "hiring signals" but signal shows "product launch")
+- 48-60: Signal directly proves the company matches the buyer's request AND matches the buyer's expected intent signals (e.g., buyer expects "hiring for specific roles" and signal shows actual job postings)
+- 36-47: Signal strongly suggests the company fits AND is related to the expected intent type
+- 24-35: Signal is somewhat relevant but the intent TYPE doesn't match what the buyer asked for (e.g., buyer expected "hiring signals" but signal shows "product launch")
 - 10-19: Signal is tangentially related — generic company activity that doesn't match the specific intent the buyer described
 - 0-9: Signal has no meaningful connection to the buyer's request OR is generic marketing copy rephrased to sound like intent
 
@@ -647,7 +647,7 @@ Consider:
 3. Would a salesperson use this signal to pitch "{icp.product_service}" to this company TODAY?
 4. Is the description specific enough to be verifiable (names, dates, amounts) or vague enough to apply to any company?
 
-Respond with ONLY a single number (0-50):"""
+Respond with ONLY a single number (0-60):"""
 
     response = await openrouter_chat(prompt, model="gpt-4o-mini")
     raw_score = extract_score(response, max_score=MAX_INTENT_SIGNAL_SCORE)

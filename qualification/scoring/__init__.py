@@ -16,8 +16,8 @@ The qualification scoring is completely separate from the validator scoring.
 
 Scoring Components:
 - ICP Fit: 0-20 points
-- Decision Maker: 0-30 points
-- Intent Signal: 0-50 points (with time decay)
+- Decision Maker: 0-20 points
+- Intent Signal: 0-60 points (with time decay)
 - Penalties: Cost and time deductions
 
 Max Score per Lead: 100 points

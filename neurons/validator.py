@@ -5900,6 +5900,18 @@ class Validator(BaseValidatorNeuron):
                 except Exception as e:
                     print(f"      ⚠️ Failed to clear work file for Qual Worker {worker_id}: {e}")
 
+                # Restart the container to clear accumulated proxy/connection errors
+                try:
+                    import subprocess
+                    container_name = f"leadpoet-qual-worker-{worker_id}"
+                    subprocess.run(
+                        ["docker", "restart", container_name],
+                        capture_output=True, timeout=30
+                    )
+                    print(f"      🔄 Restarted container {container_name} (clearing stale connections)")
+                except Exception as restart_err:
+                    print(f"      ⚠️ Failed to restart container for Worker {worker_id}: {restart_err}")
+
             with open(fail_tracker_path, 'w') as f:
                 json.dump(fail_counts, f)
 

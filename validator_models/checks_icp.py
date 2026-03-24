@@ -269,19 +269,19 @@ ICP_DEFINITIONS = [
             "cto", "chief technology officer", "coo", "chief operating officer",
             "cfo", "chief financial officer",
             # Risk & Compliance Leadership
-            "cro", "chief risk officer", "vp of risk", "vp risk", "head of risk",
+            "cro", "chief risk officer", "head of risk",
             "director of risk", "risk director",
-            "cco", "chief compliance officer", "vp of compliance", "vp compliance",
+            "cco", "chief compliance officer",
             "head of compliance", "director of compliance", "compliance director",
-            # VP / Director
-            "vp of engineering", "vp engineering", "head of engineering",
-            "director of engineering", "vp of product", "head of product",
-            "director of product", "vp of technology", "head of technology",
+            # Director / Head
+            "head of engineering",
+            "director of engineering", "head of product",
+            "director of product", "head of technology",
             "managing director", "managing partner",
             # Compliance Operations
             "compliance officer", "senior compliance officer", "compliance manager",
             "bsa officer", "aml officer", "kyc manager", "director of aml",
-            "vp of bsa", "head of bsa", "anti-money laundering officer",
+            "head of bsa", "anti-money laundering officer",
             "financial crimes manager", "director of financial crimes",
             # Risk Operations
             "risk officer", "senior risk officer", "risk manager",

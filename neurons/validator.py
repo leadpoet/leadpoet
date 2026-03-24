@@ -2944,6 +2944,20 @@ class Validator(BaseValidatorNeuron):
             # Default: 05:00 UTC (5:00 AM) - first full epoch after this time triggers rebenchmark
             
             # ═══════════════════════════════════════════════════════════════════
+            # BANNED HOTKEY SOURCING PENALTY
+            # Fetch banned hotkeys from Supabase and set their scores to -100,000
+            # in both history and current weight files BEFORE loading rolling scores.
+            # This ensures banned miners cannot receive sourcing emissions even if
+            # new leads continue to trickle in with positive scores.
+            # ═══════════════════════════════════════════════════════════════════
+            try:
+                banned_hotkeys = self._get_all_banned_hotkeys()
+                if banned_hotkeys:
+                    self._apply_banned_hotkey_sourcing_penalties(banned_hotkeys)
+            except Exception as e:
+                print(f"   ⚠️  Banned hotkey check failed (non-fatal): {e}")
+
+            # ═══════════════════════════════════════════════════════════════════
             # Get rolling 30 epoch scores BEFORE checking if we should proceed
             # This ensures we still distribute rolling share even if gateway was down
             # ═══════════════════════════════════════════════════════════════════
@@ -5070,6 +5084,92 @@ class Validator(BaseValidatorNeuron):
             bt.logging.warning(f"Failed to check banned hotkeys: {e}")
             return False  # On error, don't clear champion
     
+    def _get_all_banned_hotkeys(self) -> set:
+        """Fetch all hotkeys from Supabase banned_hotkeys table.
+
+        Used before weight submission to apply sourcing penalties to banned miners.
+        Returns empty set on error (fail-open so weight submission isn't blocked).
+        """
+        try:
+            from supabase import create_client
+
+            SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
+            SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwbHdvaXNscGxrY2VndmRtYmltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDcwMDUsImV4cCI6MjA2MDQyMzAwNX0.5E0WjAthYDXaCWY6qjzXm2k20EhadWfigak9hleKZk8"
+
+            supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+            result = supabase.table("banned_hotkeys")\
+                .select("hotkey")\
+                .execute()
+
+            banned = {r["hotkey"] for r in (result.data or [])}
+            if banned:
+                bt.logging.info(f"🚨 Found {len(banned)} banned hotkeys in Supabase")
+            return banned
+        except Exception as e:
+            bt.logging.warning(f"Failed to fetch banned hotkeys: {e}")
+            return set()
+
+    def _apply_banned_hotkey_sourcing_penalties(self, banned_hotkeys: set):
+        """Set sourcing scores to -100,000 for banned hotkeys in weight files.
+
+        Modifies ONLY the entries for hotkeys present in banned_hotkeys.
+        Other miners' data is never read or written by this method.
+
+        Files modified:
+        - validator_weights/validator_weights_history (rolling window source)
+        - validator_weights/validator_weights (current epoch)
+        """
+        if not banned_hotkeys:
+            return
+
+        PENALTY = -100_000
+        history_file = Path("validator_weights") / "validator_weights_history"
+        weights_file = Path("validator_weights") / "validator_weights"
+
+        penalized_count = 0
+
+        if history_file.exists():
+            with open(history_file, 'r') as f:
+                history_data = json.load(f)
+
+            for epoch_str, epoch_data in history_data.items():
+                if not epoch_str.isdigit():
+                    continue
+                miner_scores = epoch_data.get("miner_scores", {})
+                for hotkey in banned_hotkeys:
+                    if hotkey in miner_scores and miner_scores[hotkey] != PENALTY:
+                        miner_scores[hotkey] = PENALTY
+                        penalized_count += 1
+
+            if penalized_count > 0:
+                with open(history_file, 'w') as f:
+                    json.dump(history_data, f, indent=2)
+
+        weights_penalized = 0
+
+        if weights_file.exists():
+            with open(weights_file, 'r') as f:
+                weights_data = json.load(f)
+
+            for key, val in weights_data.items():
+                if not key.isdigit():
+                    continue
+                miner_scores = val.get("miner_scores", {})
+                for hotkey in banned_hotkeys:
+                    if hotkey in miner_scores and miner_scores[hotkey] != PENALTY:
+                        miner_scores[hotkey] = PENALTY
+                        weights_penalized += 1
+
+            if weights_penalized > 0:
+                with open(weights_file, 'w') as f:
+                    json.dump(weights_data, f, indent=2)
+
+        if penalized_count > 0 or weights_penalized > 0:
+            hk_list = ", ".join(h[:20] + "..." for h in banned_hotkeys)
+            print(f"   🚨 BANNED HOTKEY SOURCING PENALTY: Set {penalized_count} history entries + {weights_penalized} current entries to {PENALTY:,}")
+            print(f"      Hotkeys: {hk_list}")
+
     def _clear_qualification_champion_for_ban(self, banned_hotkey: str):
         """Clear champion from local JSON due to hotkey ban, then check
         Supabase for a new champion that the gateway may have auto-promoted."""

@@ -1021,13 +1021,16 @@ if __name__ == "__main__":
                        f"roles={icp_data.get('target_roles', ['Unknown'])}")
         
         # =================================================================
-        # EXECUTE MODEL
+        # EXECUTE MODEL (in thread pool to avoid blocking the event loop)
         # =================================================================
-        # Call model - SIGNATURE: qualify(icp: Dict) -> Optional[Dict]
-        # The model searches the leads database and returns the best match
+        # Models use synchronous HTTP clients (httpx.Client, requests).
+        # Running them directly on the event loop blocks asyncio.wait_for
+        # from firing timeouts. By running in a thread, the event loop stays
+        # responsive and can cancel the task if it exceeds the timeout.
         # =================================================================
         
-        lead = qualify_func(icp_data)
+        loop = asyncio.get_event_loop()
+        lead = await loop.run_in_executor(None, qualify_func, icp_data)
         
         # Cost tracking is handled by the proxy (authoritative source)
         # Models should NOT track costs - the proxy intercepts all API calls

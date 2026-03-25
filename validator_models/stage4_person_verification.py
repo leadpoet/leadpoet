@@ -751,18 +751,19 @@ async def run_lead_validation_stage4(
                         role_query_result = r
                         break
 
-            if role_query_result:
-                # Check rule-based match on role query result first
-                rq_combined = f"{role_query_result.get('title', '')} {role_query_result.get('snippet', '')}"
-                if check_role_matches(role, rq_combined):
+            if rq_results:
+                # Rule-based check on RQ results (LinkedIn profile only)
+                rq_passed, rq_method = validate_role_rule_based(
+                    role, rq_results, linkedin_url, full_name
+                )
+                if rq_passed:
                     result['data']['role_verified'] = True
-                    result['data']['role_method'] = 'role_query'
-                    print(f"   ✅ Role verified (role query rule-based)")
+                    result['data']['role_method'] = f'role_query_{rq_method}'
+                    print(f"   ✅ Role verified (role query rule-based): {rq_method}")
                 else:
-                    # Pass role query result to LLM instead
-                    print("   🤖 Role query found profile but no rule-based match, trying LLM")
+                    print("   ⚠️ Role query: no rule-based match in RQ results")
             else:
-                print("   ⚠️ Role query: no exact slug match found")
+                print("   ⚠️ Role query: no results returned")
 
             if not result['data']['role_verified']:
                 print("   🤖 Trying LLM verification")
@@ -775,10 +776,29 @@ async def run_lead_validation_stage4(
                 elif url_matched_result:
                     exact_url_text = f"Title: {url_matched_result.get('title', '')}\nSnippet: {url_matched_result.get('snippet', '')}"
 
+                # Separate LinkedIn directory pages from other results
+                # Directory pages (/pub/dir/) show actual profile headlines — reliable
+                directory_text = []
                 other_results_text = []
-                for r in all_results[:10]:
-                    if 'linkedin.com' not in r.get('link', '').lower():
-                        other_results_text.append(f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}")
+                seen_links = set()
+                name_lower = full_name.lower()
+                company_lower = company.lower()
+                for r in list(all_results[:10]) + list(rq_results or []):
+                    link = r.get('link', '').lower()
+                    if link in seen_links:
+                        continue
+                    result_lid = get_linkedin_id(link)
+                    if result_lid and result_lid == expected_lid:
+                        continue
+                    seen_links.add(link)
+                    combined = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
+                    entry = f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}"
+                    if 'linkedin.com' in link:
+                        # LinkedIn directory pages with name+company → LINKEDIN DIRECTORY
+                        if name_lower in combined and company_lower in combined:
+                            directory_text.append(entry)
+                    else:
+                        other_results_text.append(entry)
 
                 # Get OpenRouter API key
                 openrouter_key = openrouter_api_key or OPENROUTER_KEY
@@ -787,7 +807,8 @@ async def run_lead_validation_stage4(
                     llm_result = validate_role_with_llm(
                         full_name, company, role,
                         exact_url_text, other_results_text[:5],
-                        openrouter_key
+                        openrouter_key,
+                        directory_results=directory_text[:3]
                     )
 
                     if llm_result.get('success') and llm_result.get('role_pass'):

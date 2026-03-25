@@ -322,7 +322,11 @@ INVALID_SMALL = {
 # ============================================================================
 
 def get_linkedin_id(url: Optional[str]) -> Optional[str]:
-    """Extract LinkedIn ID from URL."""
+    """Extract LinkedIn ID from /in/ URL only.
+
+    Does NOT support /pub/ URLs (pre-2014 format) — these are stale data
+    and their slugs can differ from /in/ slugs, causing false matches.
+    """
     if not url:
         return None
     m = re.search(r'linkedin\.com/in/([^/?]+)', str(url), re.IGNORECASE)
@@ -1789,7 +1793,12 @@ def check_locations_match(extracted: str, ground_truth: str, full_text: str = ""
 
 
 def check_role_matches(gt_role: str, text: str) -> bool:
-    """Check if ground truth role matches text."""
+    """Check if ground truth role matches text using strict abbreviation-only matching.
+
+    No synonyms allowed (Developer ≠ Engineer). Only abbreviation expansion
+    (CEO = Chief Executive Officer, VP = Vice President).
+    Single-keyword roles always return False (forced to LLM fallback).
+    """
     if not gt_role or not text:
         return False
     gt_norm = normalize_role(str(gt_role))
@@ -1797,15 +1806,73 @@ def check_role_matches(gt_role: str, text: str) -> bool:
     if not gt_norm or not text_norm:
         return False
     skip_words = {'the', 'and', 'for', 'at', 'of', 'in', 'to', 'a', 'an'}
-    gt_words = [w for w in gt_norm.split() if len(w) > 2 and w not in skip_words]
-    if not gt_words:
-        gt_words = [w for w in gt_norm.split() if len(w) > 1]
+    gt_words = [w for w in gt_norm.split() if w not in skip_words]
     if not gt_words:
         return False
-    if len(gt_words) <= 2:
-        return all(w in text_norm for w in gt_words)
-    else:
-        return all(w in text_norm for w in gt_words[:3])
+    # Single-keyword roles are too vague for rule-based matching
+    # (e.g., "Director", "President", "Engineer") — force to LLM
+    if len(gt_words) == 1:
+        return False
+    # Use word-level matching (not substring) and require phrase order.
+    # "engineer" must NOT match "engineering" — exact word match only.
+    # "software engineer" must appear as a consecutive phrase, not scattered.
+    text_words = text_norm.split()
+    check_words = gt_words if len(gt_words) <= 3 else gt_words[:3]
+    # Find consecutive phrase match in text_words
+    phrase_found = False
+    for i in range(len(text_words)):
+        if text_words[i] == check_words[0]:
+            # Try to match remaining words consecutively (allowing skip words between)
+            ti = i + 1
+            gi = 1
+            while gi < len(check_words) and ti < len(text_words):
+                if text_words[ti] in skip_words:
+                    ti += 1
+                    continue
+                if text_words[ti] == check_words[gi]:
+                    gi += 1
+                    ti += 1
+                else:
+                    break
+            if gi == len(check_words):
+                phrase_found = True
+                # Check up to 2 words before the phrase for known role qualifiers
+                # not in the claimed role. If text says "Senior Software Engineer"
+                # or "Avionics Systems Engineer" but claimed is "Software Engineer",
+                # the qualifier prefix means a different, more specific role → fail.
+                role_qualifiers = {
+                    # Seniority
+                    'senior', 'junior', 'lead', 'principal', 'staff', 'chief', 'head',
+                    'associate', 'assistant', 'executive', 'managing', 'deputy',
+                    # Specialization - engineering
+                    'specialist', 'technical', 'clinical', 'strategic', 'creative',
+                    'digital', 'embedded', 'mechanical', 'electrical', 'structural',
+                    'nuclear', 'industrial', 'chemical', 'biomedical', 'environmental',
+                    'aerospace', 'avionics', 'propulsion', 'optical', 'thermal',
+                    'hydraulic', 'pneumatic', 'marine', 'naval', 'automotive',
+                    # Specialization - business/finance
+                    'director', 'analyst', 'trader', 'advisor', 'consultant',
+                    'architect', 'administrator', 'coordinator', 'supervisor',
+                    'officer', 'counsel', 'auditor', 'comptroller', 'treasurer',
+                    # Scope
+                    'global', 'regional', 'group', 'divisional', 'general',
+                    'national', 'international', 'corporate', 'field', 'district', 'area',
+                }
+                for j in range(max(0, i - 2), i):
+                    if text_words[j] in role_qualifiers and text_words[j] not in gt_words:
+                        return False
+                # Check up to 2 words AFTER the phrase for disqualifiers
+                # "mechanical engineer seeking a job" → not an actual title
+                disqualifiers = {
+                    'seeking', 'looking', 'aspiring', 'student', 'intern',
+                    'candidate', 'graduate', 'enthusiast', 'wannabe', 'hopeful'
+                }
+                phrase_end = ti  # ti is where the phrase match ended
+                for j in range(phrase_end, min(phrase_end + 2, len(text_words))):
+                    if text_words[j] in disqualifiers:
+                        return False
+                return True
+    return False
 
 
 def validate_role_rule_based(
@@ -1815,7 +1882,11 @@ def validate_role_rule_based(
     full_name: str
 ) -> Tuple[bool, Optional[str]]:
     """
-    Validate role using rule-based matching.
+    Validate role using rule-based matching against LinkedIn snippet ONLY.
+
+    Only checks the URL-matched LinkedIn result (the person's actual profile).
+    Does NOT check other URLs (company pages, news, posts) to prevent
+    false matches from unrelated mentions.
 
     Returns:
         (is_valid, method) - method is None if not valid
@@ -1824,20 +1895,13 @@ def validate_role_rule_based(
         return False, None
     expected_lid = get_linkedin_id(linkedin_url)
 
-    # First try URL-matched result
+    # Only check the URL-matched LinkedIn result
     for result in search_results:
         result_lid = get_linkedin_id(result.get('link', ''))
         if result_lid and expected_lid and result_lid == expected_lid:
             combined = f"{result.get('title', '')} {result.get('snippet', '')}"
             if check_role_matches(gt_role, combined):
                 return True, 'url_match'
-
-    # Then try name-matched results
-    for result in search_results:
-        if check_name_in_result(full_name, result, linkedin_url):
-            combined = f"{result.get('title', '')} {result.get('snippet', '')}"
-            if check_role_matches(gt_role, combined):
-                return True, 'name_match'
 
     return False, None
 
@@ -1849,7 +1913,8 @@ def validate_role_with_llm(
     exact_url_result: Optional[str],
     other_results: List[str],
     openrouter_api_key: str,
-    model: str = 'google/gemini-2.5-flash-lite'
+    model: str = 'google/gemini-2.5-flash-lite',
+    directory_results: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Validate role using LLM.
@@ -1864,14 +1929,18 @@ def validate_role_with_llm(
         }
     """
     other_text = "\n".join([f"{i+1}. {r}" for i, r in enumerate(other_results[:5])]) if other_results else "None"
+    dir_text = "\n".join([f"{i+1}. {r}" for i, r in enumerate((directory_results or [])[:3])]) if directory_results else "None"
 
-    prompt = f'''You are a strict job title verifier. You can ONLY verify a role if you see evidence of it in the search results below. NEVER assume or guess.
+    prompt = f'''You are a strict job title verifier. You can ONLY verify a role if you see evidence of it in the results below. NEVER assume or guess.
 
 Person: "{name}" at "{company}"
 Claimed role: "{claimed_role}"
 
 [LINKEDIN RESULT]
 {exact_url_result or "Not found"}
+
+[LINKEDIN DIRECTORY]
+{dir_text}
 
 [OTHER RESULTS]
 {other_text}
@@ -1880,13 +1949,25 @@ RULES (follow in order):
 1. FAIL if "{claimed_role}" contains company name
 2. FAIL if "{claimed_role}" is generic (e.g., "Job Title", "N/A", "Title", "Employee")
 3. FAIL if LinkedIn shows different company than "{company}"
-4. FAIL if different function (Sales≠Product, Engineer≠Marketing)
-5. FAIL if NO job title or role text appears in any result above. Do NOT assume "Chief Executive Officer", "CEO", "Manager", or any title unless you can quote it from the results. If the results only show a name and company with no role, return role_pass=false.
-6. PASS only if a matching role is explicitly written in the results above:
-   - Ignore seniority (Manager≈Sr.Manager, Engineer≈Senior Engineer)
-   - Match synonyms (Developer≈Engineer, VP≈Vice President)
-   - Match abbreviations (Dev≈Developer, Mgr≈Manager, Dir≈Director)
-7. Use OTHER RESULTS only if role not found in LINKEDIN RESULT
+4. Check if the person's exact LinkedIn URL result (title + snippet) mentions a job title/role for this person:
+   a. If YES (a role is visible in the LINKEDIN RESULT):
+      - Compare it against "{claimed_role}"
+      - Abbreviations OK (CEO=Chief Executive Officer, VP=Vice President, Dev=Developer, Mgr=Manager, Dir=Director, Eng=Engineer)
+      - NO synonyms (Developer≠Engineer, Manager≠Director, Analyst≠Consultant)
+      - The role must appear as an EXACT title, not as scattered words in a description. "Experienced engineer in mechanical design" is NOT "Mechanical Engineer" — the words appear in a descriptive sentence, not as a job title. Only match if the exact title phrase appears (e.g., "Mechanical Engineer at Boeing").
+      - C-suite titles NOT interchangeable (CEO≠CTO≠CFO≠CIO≠CISO≠CCO≠CMO)
+      - Seniority must match (Senior Software Engineer ≠ Software Engineer)
+      - CRITICAL: Claimed role must match the FULL title, not just part of it. Examples of FAIL: LinkedIn says "Principal and Client Advisor" but claimed is "Principal" → FAIL. LinkedIn says "Software Engineer and Team Lead" but claimed is "Software Engineer" → FAIL. LinkedIn says "Director of Sales and Marketing" but claimed is "Director of Sales" → FAIL. The claimed role must cover the complete title.
+      - A role mentioned in a LinkedIn POST, comment, article, or About/summary section describing volunteer/community work is NOT the person's professional title — only their profile title/headline counts.
+      - Match → PASS. Mismatch → FAIL immediately. Do NOT check LINKEDIN DIRECTORY or OTHER RESULTS.
+   b. If NO (LINKEDIN RESULT shows no role, just name/company):
+      - Check LINKEDIN DIRECTORY next — these show the person's LinkedIn headline.
+      - IMPORTANT: LinkedIn headlines are self-written and may NOT reflect the actual job title. Be suspicious of headlines that:
+        * Contain pipe "|" separators (e.g., "Mechanical Engineer | Hardware Expert | BS in ME") — these are keyword taglines, not real titles
+        * Are descriptive/aspirational rather than a specific title (e.g., "Passionate about AI and innovation")
+        * Mention "Student", "Intern", "Seeking", "Looking for", "Aspiring", "Open to" — these are NOT professional titles
+      - Only PASS if the LINKEDIN DIRECTORY shows a clean, specific job title (e.g., "Software Engineer", "VP of Sales") that matches the claimed role.
+      - If LINKEDIN DIRECTORY has no role, is "None", or only has a tagline/keyword headline, then check OTHER RESULTS that mention BOTH "{name}" AND "{company}". Apply the same strict rules.
 
 JSON only: {{"role_pass": bool, "role_found": ""}}'''
 

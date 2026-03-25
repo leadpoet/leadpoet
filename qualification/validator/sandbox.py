@@ -818,6 +818,9 @@ if __name__ == "__main__":
         local_proxy_url = self._local_proxy_url or self.api_proxy_url
         request["api_proxy_url"] = local_proxy_url
         
+        # Snapshot proxy cost before this ICP so we can compute delta
+        cost_before = self._local_proxy.get_total_cost() if self._local_proxy else 0.0
+        
         # =================================================================
         # STEP 2: Enter security context (sanitizes os.environ)
         # =================================================================
@@ -836,14 +839,15 @@ if __name__ == "__main__":
             result = await self._import_and_run_model(request, model_dir)
             
             # =============================================================
-            # STEP 4: Get ACTUAL cost from proxy (source of truth)
+            # STEP 4: Get per-ICP cost delta from proxy (source of truth)
             # =============================================================
             if self._local_proxy:
-                proxy_cost = self._local_proxy.get_total_cost()
+                cost_after = self._local_proxy.get_total_cost()
+                icp_cost = cost_after - cost_before
                 proxy_summary = self._local_proxy.get_cost_summary()
-                self._last_run_cost = proxy_cost
+                self._last_run_cost = icp_cost
                 
-                logger.info(f"💰 PROXY COST (authoritative): ${proxy_cost:.6f}")
+                logger.info(f"💰 PROXY COST this ICP: ${icp_cost:.6f} (cumulative: ${cost_after:.6f})")
                 logger.info(f"   Call counts: {proxy_summary.get('call_counts', {})}")
             
             return result

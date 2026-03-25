@@ -33,6 +33,7 @@ lead verification scripts.
 import os
 import re
 import json
+import asyncio
 import hashlib
 import logging
 from datetime import datetime, date, timezone, timedelta
@@ -1921,40 +1922,55 @@ Examples:
         raise
 
 
-async def openrouter_chat(prompt: str, model: str = "gpt-4o-mini") -> str:
+async def openrouter_chat(
+    prompt: str,
+    model: str = "gpt-4o-mini",
+    max_retries: int = 2,
+) -> str:
     """
-    Call OpenRouter LLM API.
+    Call OpenRouter LLM API with automatic retry on transient failures.
     
-    Args:
-        prompt: The prompt to send
-        model: Model to use (default: gpt-4o-mini)
-    
-    Returns:
-        LLM response text
+    Retries on 5xx, 429 (rate limit), and network errors.
     """
     if not OPENROUTER_API_KEY:
         raise ValueError("OPENROUTER_API_KEY not configured")
     
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://leadpoet.ai",
-                "X-Title": "Leadpoet Qualification"
-            },
-            json={
-                "model": f"openai/{model}",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,  # Lower temperature for more consistent verification
-                "max_tokens": 200,
-            },
-            timeout=LLM_TIMEOUT
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
+    last_error = None
+    for attempt in range(1 + max_retries):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://leadpoet.ai",
+                        "X-Title": "Leadpoet Qualification"
+                    },
+                    json={
+                        "model": f"openai/{model}",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": 200,
+                    },
+                    timeout=LLM_TIMEOUT
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as e:
+            last_error = e
+            is_retryable = isinstance(e, (httpx.TimeoutException, httpx.ConnectError))
+            if isinstance(e, httpx.HTTPStatusError):
+                is_retryable = e.response.status_code in (429, 500, 502, 503, 504)
+            
+            if is_retryable and attempt < max_retries:
+                wait = 1.5 * (attempt + 1)
+                logger.warning(f"OpenRouter call failed (attempt {attempt+1}), retrying in {wait}s: {e}")
+                await asyncio.sleep(wait)
+                continue
+            raise
+    raise last_error
 
 
 # =============================================================================

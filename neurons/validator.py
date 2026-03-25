@@ -5654,7 +5654,9 @@ class Validator(BaseValidatorNeuron):
         if busy_workers:
             print(f"   ⏳ Busy workers (still evaluating from previous epoch): {sorted(busy_workers)}")
         
-        # Clean up old qualification worker files (older than the eval window)
+        # Clean up old work files (older than the eval window).
+        # CRITICAL: Do NOT clean up results files here — the collection step
+        # needs them. Results are cleaned up AFTER they are collected and processed.
         cutoff_epoch = current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW
         for old_file in weights_dir.glob("qual_worker_*_work_*.json"):
             try:
@@ -5662,15 +5664,6 @@ class Validator(BaseValidatorNeuron):
                 if file_epoch < cutoff_epoch:
                     old_file.unlink()
                     print(f"   🧹 Cleaned up stale qual work: {old_file.name}")
-            except:
-                pass
-        
-        for old_file in weights_dir.glob("qual_worker_*_results_*.json"):
-            try:
-                file_epoch = int(old_file.stem.split('_')[-1])
-                if file_epoch < cutoff_epoch:
-                    old_file.unlink()
-                    print(f"   🧹 Cleaned up stale qual results: {old_file.name}")
             except:
                 pass
         
@@ -5923,17 +5916,33 @@ class Validator(BaseValidatorNeuron):
         weights_dir = Path("validator_weights")
         all_results = []
         
-        # Check which workers have work assigned
+        # Check which workers have work assigned for current epoch
         expected_workers = set()
         for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
             work_file = weights_dir / f"qual_worker_{i}_work_{current_epoch}.json"
             if work_file.exists():
                 expected_workers.add(i)
         
-        if not expected_workers:
+        # Also collect uncollected results from recent epochs (workers may have
+        # finished a previous epoch's work after the coordinator moved on).
+        for results_file in sorted(weights_dir.glob("qual_worker_*_results_*.json")):
+            try:
+                file_epoch = int(results_file.stem.split('_')[-1])
+                if file_epoch != current_epoch and file_epoch >= current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW:
+                    with open(results_file, 'r') as f:
+                        worker_data = json.load(f)
+                    worker_results = worker_data.get("model_results", [])
+                    if worker_results:
+                        all_results.extend(worker_results)
+                        print(f"   📥 Collected {len(worker_results)} late result(s) from epoch {file_epoch}")
+                    results_file.unlink()
+            except Exception:
+                pass
+        
+        if not expected_workers and not all_results:
             return [], True  # No workers = done
         
-        # Check which workers have completed
+        # Check which workers have completed for current epoch
         completed_workers = set()
         for worker_id in expected_workers:
             results_file = weights_dir / f"qual_worker_{worker_id}_results_{current_epoch}.json"
@@ -5963,7 +5972,15 @@ class Validator(BaseValidatorNeuron):
                 except Exception as e:
                     print(f"   ⚠️ Error reading results from worker {worker_id}: {e}")
         
-        all_done = (completed_workers == expected_workers)
+        all_done = (completed_workers == expected_workers) or not expected_workers
+        
+        # Clean up collected results files (prevent re-collection)
+        for worker_id in completed_workers:
+            results_file = weights_dir / f"qual_worker_{worker_id}_results_{current_epoch}.json"
+            try:
+                results_file.unlink()
+            except:
+                pass
         
         # If force_submit (block 335 cutoff or epoch window expired), clear work files
         # for incomplete workers so they can process models in the next cycle.

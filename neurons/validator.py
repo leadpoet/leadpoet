@@ -5637,30 +5637,22 @@ class Validator(BaseValidatorNeuron):
         weights_dir = Path("validator_weights")
         weights_dir.mkdir(exist_ok=True)
         
-        # ── 2-EPOCH WINDOW: Check if workers from a recent epoch are still running ──
-        # Models get QUALIFICATION_EVAL_EPOCH_WINDOW epochs to finish.
-        # If work files from a recent epoch exist without corresponding results,
-        # workers are still evaluating — don't assign new work yet.
-        still_running_epoch = None
+        # ── PER-WORKER BUSY CHECK: Only assign to workers that are free ──
+        # A worker is "busy" if it has a work file from a recent epoch without
+        # a corresponding results file. Instead of blocking ALL assignment,
+        # we track which workers are busy and only assign to free ones.
+        busy_workers = set()
         for check_epoch in range(current_epoch - 1, current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW - 1, -1):
             if check_epoch < 0:
                 break
-            has_pending = False
             for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
                 work_file = weights_dir / f"qual_worker_{i}_work_{check_epoch}.json"
                 results_file = weights_dir / f"qual_worker_{i}_results_{check_epoch}.json"
                 if work_file.exists() and not results_file.exists():
-                    has_pending = True
-                    break
-            if has_pending:
-                still_running_epoch = check_epoch
-                break
+                    busy_workers.add(i)
         
-        if still_running_epoch is not None:
-            print(f"   ⏳ Workers still evaluating models from epoch {still_running_epoch} "
-                  f"(window={QUALIFICATION_EVAL_EPOCH_WINDOW} epochs) — skipping new assignment")
-            self._qual_dedicated_last_assigned_epoch = current_epoch
-            return
+        if busy_workers:
+            print(f"   ⏳ Busy workers (still evaluating from previous epoch): {sorted(busy_workers)}")
         
         # Clean up old qualification worker files (older than the eval window)
         cutoff_epoch = current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW
@@ -5838,21 +5830,43 @@ class Validator(BaseValidatorNeuron):
         worker_assignments = {}  # {qual_container_id: {"models": [...], "is_rebenchmark_container": bool}}
         
         if rebenchmark_needed and rebenchmark_model:
-            # Worker 1 does ONLY the rebenchmark (full focus)
-            worker_assignments[1] = {
-                "models": [rebenchmark_model],
-                "is_rebenchmark_container": True
-            }
-            # Mark rebenchmark model
-            rebenchmark_model["is_rebenchmark"] = True
+            # Worker 1 does ONLY the rebenchmark (full focus) — unless busy
+            if 1 not in busy_workers:
+                worker_assignments[1] = {
+                    "models": [rebenchmark_model],
+                    "is_rebenchmark_container": True
+                }
+                rebenchmark_model["is_rebenchmark"] = True
+            else:
+                # Worker 1 is busy — assign rebenchmark to first free worker
+                for w in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
+                    if w not in busy_workers:
+                        worker_assignments[w] = {
+                            "models": [rebenchmark_model],
+                            "is_rebenchmark_container": True
+                        }
+                        rebenchmark_model["is_rebenchmark"] = True
+                        break
             
-            # Distribute remaining models to workers 2-5 (round-robin)
+            # Distribute remaining models to free workers (excluding rebenchmark worker)
             models_to_distribute = all_models
-            available_workers = [2, 3, 4, 5]
+            rebenchmark_worker = next(iter(worker_assignments), None)
+            available_workers = [
+                w for w in range(1, QUALIFICATION_CONTAINERS_COUNT + 1)
+                if w not in busy_workers and w != rebenchmark_worker
+            ]
         else:
-            # No rebenchmark - all 5 workers available (round-robin)
+            # No rebenchmark - all free workers available (round-robin)
             models_to_distribute = all_models
-            available_workers = [1, 2, 3, 4, 5]
+            available_workers = [
+                w for w in range(1, QUALIFICATION_CONTAINERS_COUNT + 1)
+                if w not in busy_workers
+            ]
+        
+        if not available_workers and not worker_assignments:
+            print(f"   ⚠️ All workers busy — skipping assignment this epoch")
+            self._qual_dedicated_last_assigned_epoch = current_epoch
+            return
         
         # ROUND-ROBIN DISTRIBUTION: Each model goes to next worker, wrap around
         for model_idx, model in enumerate(models_to_distribute):

@@ -190,12 +190,12 @@ async def run_champion_selection(
         champion_score = current_champion.score
     
     # Calculate threshold: must beat champion by >5%
-    threshold = champion_score * (1 + CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT)
+    threshold = champion_score + CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS
     
     logger.info(
         f"Champion score: {champion_score:.2f}, "
         f"Threshold to dethrone: {threshold:.2f} "
-        f"(+{CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT * 100:.0f}%)"
+        f"(+{CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS:.0f} points)"
     )
     
     # Find challengers that beat the threshold
@@ -231,7 +231,7 @@ async def run_champion_selection(
             previous_champion=current_champion,
             action="dethroned",
             margin=margin,
-            reason=f"Challenger beat champion by {margin:.1f}% (threshold: {CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT * 100:.0f}%)"
+            reason=f"Challenger beat champion by {margin:.1f}% (threshold: +{CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS:.0f} points)"
         )
     else:
         # No challenger beats threshold - champion retained
@@ -251,7 +251,7 @@ async def run_champion_selection(
         )
         if best_challenger:
             best_margin = (best_challenger.total_score - champion_score) / champion_score * 100
-            reason = f"Best challenger at {best_margin:.1f}% (need >{CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT * 100:.0f}%)"
+            reason = f"Best challenger at {best_margin:.1f}% (need +{CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS:.0f} points)"
         else:
             reason = "No challengers"
         
@@ -576,17 +576,18 @@ def calculate_margin(challenger_score: float, champion_score: float) -> float:
     return (challenger_score - champion_score) / champion_score * 100
 
 
-def is_valid_dethrone_margin(margin: float) -> bool:
+def is_valid_dethrone_margin(challenger_score: float, champion_score: float) -> bool:
     """
-    Check if margin is sufficient to dethrone champion.
+    Check if score difference is sufficient to dethrone champion.
     
     Args:
-        margin: Percentage margin over champion
+        challenger_score: Challenger's absolute score
+        champion_score: Champion's absolute score
     
     Returns:
-        True if margin exceeds threshold
+        True if challenger leads by more than CHAMPION_DETHRONING_THRESHOLD_POINTS
     """
-    return margin > CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT * 100
+    return (challenger_score - champion_score) > CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS
 
 
 async def get_champion_history(limit: int = 10) -> List[dict]:
@@ -629,7 +630,7 @@ def get_champion_selection_summary() -> dict:
     """
     return {
         "config": {
-            "dethroning_threshold_pct": CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT * 100,
+            "dethroning_threshold_points": CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS,
             "min_champion_duration_epochs": CONFIG.MIN_CHAMPION_DURATION_EPOCHS,
             "evaluation_set_rotation_epochs": CONFIG.EVALUATION_SET_ROTATION_EPOCHS,
         },

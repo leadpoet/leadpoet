@@ -2937,8 +2937,8 @@ class Validator(BaseValidatorNeuron):
             # Rolling window for historical lead count and rep scores
             ROLLING_WINDOW = 30
             
-            # Champion beat threshold is defined in qualification/config.py (CHAMPION_DETHRONING_THRESHOLD_PCT)
-            # Currently set to 2% - challenger must beat champion by 2% to dethrone
+            # Champion beat threshold is defined in qualification/config.py (CHAMPION_DETHRONING_THRESHOLD_POINTS)
+            # Currently set to 10 absolute points - challenger must score 10+ points higher to dethrone
             # Champion rebenchmark time is defined in qualification/config.py:
             #   CHAMPION_REBENCHMARK_HOUR_UTC, CHAMPION_REBENCHMARK_MINUTE_UTC
             # Default: 05:00 UTC (5:00 AM) - first full epoch after this time triggers rebenchmark
@@ -4809,7 +4809,7 @@ class Validator(BaseValidatorNeuron):
         
         Rules:
         1. If no current champion exists, new model becomes champion (if score > 0)
-        2. If current champion exists, new model must beat by 2% (CHAMPION_DETHRONING_THRESHOLD_PCT)
+        2. If current champion exists, new model must beat by 10 absolute points (CHAMPION_DETHRONING_THRESHOLD_POINTS)
         3. If this is a REBENCHMARK of the existing champion, ALWAYS update the score
         
         Format: validator_weights/qualification_champion.json
@@ -4838,7 +4838,7 @@ class Validator(BaseValidatorNeuron):
             - is_rebenchmark: True if this was a rebenchmark of existing champion
         """
         from gateway.qualification.config import CONFIG
-        THRESHOLD = CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT
+        THRESHOLD = CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS
         
         try:
             weights_dir = Path("validator_weights")
@@ -4928,7 +4928,7 @@ class Validator(BaseValidatorNeuron):
             else:
                 # Case 2: Current champion exists - new challenger needs to beat by threshold
                 current_score = current_champion.get("score", 0)
-                required_score = current_score * (1 + THRESHOLD)
+                required_score = current_score + THRESHOLD
                 
                 if score <= current_score:
                     # Didn't beat current score
@@ -4940,7 +4940,7 @@ class Validator(BaseValidatorNeuron):
                     print(f"📊 CHALLENGER FELL SHORT")
                     print(f"   Model: {model_name} (score: {score:.2f})")
                     print(f"   Improvement: +{improvement:.1f}%")
-                    print(f"   Required: +{THRESHOLD*100:.0f}% ({required_score:.2f})")
+                    print(f"   Required: +{THRESHOLD:.0f} points ({required_score:.2f})")
                     print(f"   Champion: {current_champion.get('model_name')} (score: {current_score:.2f})")
                     print(f"{'='*60}\n")
                 else:
@@ -6162,8 +6162,7 @@ class Validator(BaseValidatorNeuron):
                     became_champion = False  # Rebenchmark: retain title, no dethrone/re-crown
             else:
                 # New challenger - check if beats champion AND meets minimum threshold
-                beat_threshold = QUALIFICATION_CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT / 100.0
-                threshold_score = current_champion_score * (1 + beat_threshold)
+                threshold_score = current_champion_score + QUALIFICATION_CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS
                 
                 if avg_score > threshold_score:
                     # Check minimum score requirement

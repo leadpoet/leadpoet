@@ -15,7 +15,7 @@ from typing import Optional
 # =============================================================================
 # Default Constants (single source of truth)
 # =============================================================================
-_DEFAULT_CHAMPION_DETHRONING_THRESHOLD_PCT = 0.10  # 10% better to dethrone champion
+_DEFAULT_CHAMPION_DETHRONING_THRESHOLD_POINTS = 10  # Must score 10+ absolute points higher to dethrone
 
 
 @dataclass
@@ -60,7 +60,7 @@ class QualificationConfig:
     # =========================================================================
     # Champion Rules
     # =========================================================================
-    CHAMPION_DETHRONING_THRESHOLD_PCT: float = _DEFAULT_CHAMPION_DETHRONING_THRESHOLD_PCT
+    CHAMPION_DETHRONING_THRESHOLD_POINTS: float = _DEFAULT_CHAMPION_DETHRONING_THRESHOLD_POINTS
     MIN_CHAMPION_DURATION_EPOCHS: int = 1  # Minimum epochs as champion before can be dethroned
     MINIMUM_CHAMPION_SCORE: float = 10.0  # Minimum score to become/remain champion (out of 100)
     
@@ -324,7 +324,7 @@ class QualificationConfig:
             PRUNE_THRESHOLD=float(os.getenv("QUAL_PRUNE_THRESHOLD", 0.10)),
             
             # Champion Rules
-            CHAMPION_DETHRONING_THRESHOLD_PCT=float(os.getenv("QUAL_CHAMPION_DETHRONING_THRESHOLD_PCT", _DEFAULT_CHAMPION_DETHRONING_THRESHOLD_PCT)),
+            CHAMPION_DETHRONING_THRESHOLD_POINTS=float(os.getenv("QUAL_CHAMPION_DETHRONING_THRESHOLD_POINTS", _DEFAULT_CHAMPION_DETHRONING_THRESHOLD_POINTS)),
             MIN_CHAMPION_DURATION_EPOCHS=int(os.getenv("QUAL_MIN_CHAMPION_DURATION_EPOCHS", 1)),
             
             # Champion Rebenchmark Timing (UTC)

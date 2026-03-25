@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # Import champion thresholds from central config (single source of truth)
 from gateway.qualification.config import CONFIG
-CHAMPION_BEAT_THRESHOLD = CONFIG.CHAMPION_DETHRONING_THRESHOLD_PCT  # Currently 2%
+CHAMPION_BEAT_THRESHOLD = CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS  # Currently 10 absolute points
 MINIMUM_CHAMPION_SCORE = CONFIG.MINIMUM_CHAMPION_SCORE  # Currently 10.0
 
 router = APIRouter(prefix="/validator", tags=["validator-work"])

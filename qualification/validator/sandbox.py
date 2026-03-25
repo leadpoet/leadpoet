@@ -177,6 +177,10 @@ class TEESandbox:
         # Cost tracking (updated after each run)
         self._last_run_cost = 0.0
         
+        # Local proxy (started once per model, shared across all ICPs)
+        self._local_proxy = None
+        self._local_proxy_url = None
+        
         logger.info(
             f"TEESandbox created: run_id={evaluation_run_id}, "
             f"code_hash={self._code_hash}, code_size={len(model_code)} bytes"
@@ -217,6 +221,23 @@ class TEESandbox:
             else:
                 # Testing: Local process with same security restrictions
                 await self._start_local_sandbox()
+            
+            # Start local proxy ONCE for the entire model evaluation.
+            # Models cache proxy URLs in globals — restarting per-ICP causes
+            # stale URL references and BrokenPipe floods.
+            if LOCAL_PROXY_AVAILABLE:
+                try:
+                    self._local_proxy = LocalProxyServer()
+                    self._local_proxy_url = self._local_proxy.start()
+                    logger.info(f"🔐 Local proxy started at {self._local_proxy_url} (shared across all ICPs)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Local proxy failed to start: {e}")
+                    self._local_proxy = None
+                    self._local_proxy_url = None
+            
+            if not self._local_proxy_url:
+                self._local_proxy_url = self.api_proxy_url
+                logger.info(f"Using gateway proxy: {self._local_proxy_url}")
             
             self.started = True
             logger.info(
@@ -311,6 +332,16 @@ class TEESandbox:
         Always safe to call (even if not started or already cleaned up).
         """
         logger.info(f"Cleaning up sandbox: run_id={self.evaluation_run_id}")
+        
+        # Stop local proxy first (before enclave teardown)
+        if self._local_proxy:
+            try:
+                self._local_proxy.stop()
+                logger.info("🔐 Local proxy stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping local proxy: {e}")
+            self._local_proxy = None
+            self._local_proxy_url = None
         
         try:
             if self.enclave_id and USE_NITRO_ENCLAVE:
@@ -783,79 +814,39 @@ if __name__ == "__main__":
         # proxy thread still has them in its closure. Model's thread cannot
         # access the proxy thread's stack (inspect.stack() is per-thread).
         # =================================================================
-        local_proxy_url = None
-        local_proxy = None
-        
-        if LOCAL_PROXY_AVAILABLE:
-            try:
-                local_proxy = LocalProxyServer()
-                local_proxy_url = local_proxy.start()
-                logger.info(f"🔐 Local proxy started at {local_proxy_url}")
-            except Exception as e:
-                logger.warning(f"⚠️ Local proxy failed to start: {e}, falling back to gateway proxy")
-                local_proxy = None
-                local_proxy_url = None
-        
-        # Fall back to gateway proxy if local proxy unavailable
-        if not local_proxy_url:
-            local_proxy_url = self.api_proxy_url
-            logger.info(f"Using gateway proxy: {local_proxy_url}")
-        
-        # Update request with local proxy URL
+        # Use the proxy that was started in start() — shared across all ICPs
+        local_proxy_url = self._local_proxy_url or self.api_proxy_url
         request["api_proxy_url"] = local_proxy_url
         
-        try:
-            # =================================================================
-            # STEP 2: Enter security context (sanitizes os.environ)
-            # =================================================================
-            # NOTE: Do NOT use "as ctx" - this would expose _original_open
-            # to frame inspection attacks from malicious models.
-            # =================================================================
-            async with SandboxSecurityContext(
-                evaluation_run_id=evaluation_run_id,
-                evaluation_id=evaluation_id or "",
-                enable_import_restriction=True,
-                enable_network_interception=True,
-                enable_env_sanitization=True,
-                enable_file_restriction=True,
-                proxy_url=local_proxy_url
-            ):
-                # =============================================================
-                # STEP 3: Run model (os.environ sanitized, can only call proxy)
-                # =============================================================
-                result = await self._import_and_run_model(request, model_dir)
+        # =================================================================
+        # STEP 2: Enter security context (sanitizes os.environ)
+        # =================================================================
+        async with SandboxSecurityContext(
+            evaluation_run_id=evaluation_run_id,
+            evaluation_id=evaluation_id or "",
+            enable_import_restriction=True,
+            enable_network_interception=True,
+            enable_env_sanitization=True,
+            enable_file_restriction=True,
+            proxy_url=local_proxy_url
+        ):
+            # =============================================================
+            # STEP 3: Run model (os.environ sanitized, can only call proxy)
+            # =============================================================
+            result = await self._import_and_run_model(request, model_dir)
+            
+            # =============================================================
+            # STEP 4: Get ACTUAL cost from proxy (source of truth)
+            # =============================================================
+            if self._local_proxy:
+                proxy_cost = self._local_proxy.get_total_cost()
+                proxy_summary = self._local_proxy.get_cost_summary()
+                self._last_run_cost = proxy_cost
                 
-                # =============================================================
-                # STEP 4: Get ACTUAL cost from proxy (source of truth)
-                # =============================================================
-                # This is the authoritative cost - NOT the model's self-reported cost.
-                # The proxy intercepts all API calls and tracks actual costs from
-                # OpenRouter responses (using usage.total_cost or token-based estimate).
-                if local_proxy:
-                    proxy_cost = local_proxy.get_total_cost()
-                    proxy_summary = local_proxy.get_cost_summary()
-                    
-                    # Store proxy cost (overrides any model-reported cost)
-                    self._last_run_cost = proxy_cost
-                    
-                    logger.info(f"💰 PROXY COST (authoritative): ${proxy_cost:.6f}")
-                    logger.info(f"   Call counts: {proxy_summary.get('call_counts', {})}")
-                    if proxy_summary.get('token_counts'):
-                        for provider, tokens in proxy_summary['token_counts'].items():
-                            logger.info(f"   {provider} tokens: {tokens['input']}+{tokens['output']}")
-                
-                return result
-        
-        finally:
-            # =================================================================
-            # STEP 5: Stop local proxy (cleanup)
-            # =================================================================
-            if local_proxy:
-                try:
-                    local_proxy.stop()
-                    logger.info("🔐 Local proxy stopped")
-                except Exception as e:
-                    logger.warning(f"Error stopping local proxy: {e}")
+                logger.info(f"💰 PROXY COST (authoritative): ${proxy_cost:.6f}")
+                logger.info(f"   Call counts: {proxy_summary.get('call_counts', {})}")
+            
+            return result
     
     async def _import_and_run_model(
         self, 

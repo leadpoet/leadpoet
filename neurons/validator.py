@@ -3108,9 +3108,10 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             registered_rolling_scores = {h: p for h, p in rolling_scores.items() if h in hotkey_to_uid}
             
-            # Calculate totals
-            all_rolling_total = sum(rolling_scores.values()) if rolling_scores else 0
-            registered_rolling_total = sum(registered_rolling_scores.values()) if registered_rolling_scores else 0
+            # Calculate totals (only positive scores count — miners with score <= 0 are
+            # skipped during distribution, so negatives must not drag down the denominator)
+            all_rolling_total = sum(s for s in rolling_scores.values() if s > 0) if rolling_scores else 0
+            registered_rolling_total = sum(s for s in registered_rolling_scores.values() if s > 0) if registered_rolling_scores else 0
             deregistered_rolling_points = all_rolling_total - registered_rolling_total
             
             # Log deregistered miners

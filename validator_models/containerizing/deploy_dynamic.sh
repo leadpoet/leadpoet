@@ -231,6 +231,7 @@ start_container() {
       $LOG_DRIVER_ARGS \
       -v ~/.bittensor/wallets:/root/.bittensor/wallets:ro \
       -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
+      -e PYTHONUNBUFFERED=1 \
       -e LEADPOET_CONTAINER_MODE=1 \
       -e LEADPOET_WRAPPER_ACTIVE=1 \
       -e MEV_API_KEY="$MEV_API_KEY" \
@@ -329,6 +330,7 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
           --log-opt awslogs-stream=qual-worker-$i \
           --log-opt awslogs-create-group=true \
           -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
+          -e PYTHONUNBUFFERED=1 \
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
           -e GATEWAY_URL="${GATEWAY_URL:-http://52.91.135.79:8000}" \

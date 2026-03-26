@@ -3979,8 +3979,10 @@ class Validator(BaseValidatorNeuron):
                     force_submit=force_submit
                 )
                 
-                # If workers aren't done and we're not forcing, wait and show progress
-                if not force_submit and not all_workers_done:
+                # If we collected late results, process them immediately (they're complete
+                # evaluations whose files were already deleted during collection).
+                # Only wait/return early if there's nothing to process yet.
+                if not force_submit and not all_workers_done and not results:
                     # Track last log time for periodic updates
                     if not hasattr(self, '_qual_waiting_last_log_time'):
                         self._qual_waiting_last_log_time = 0

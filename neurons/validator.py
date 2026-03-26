@@ -5863,11 +5863,12 @@ class Validator(BaseValidatorNeuron):
             self._qual_dedicated_last_assigned_epoch = current_epoch
             return
         
-        # ROUND-ROBIN DISTRIBUTION: Each model goes to next worker, wrap around
-        for model_idx, model in enumerate(models_to_distribute):
-            # Round-robin: model 0 → worker[0], model 1 → worker[1], ...
-            # model 5 → worker[0] again (wrap around)
-            worker_id = available_workers[model_idx % len(available_workers)]
+        # 1:1 DISTRIBUTION: Each worker gets exactly 1 model (max).
+        # If more models than workers, excess models wait for next epoch.
+        max_assignable = min(len(models_to_distribute), len(available_workers))
+        for model_idx in range(max_assignable):
+            worker_id = available_workers[model_idx]
+            model = models_to_distribute[model_idx]
             
             if worker_id not in worker_assignments:
                 worker_assignments[worker_id] = {"models": [], "is_rebenchmark_container": False}

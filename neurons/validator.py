@@ -4030,8 +4030,6 @@ class Validator(BaseValidatorNeuron):
                 if force_due_to_window and not all_workers_done:
                     print(f"   ⚠️ {QUALIFICATION_EVAL_EPOCH_WINDOW}-epoch window expired — "
                           f"submitting available results and clearing workers")
-                elif past_cutoff and not all_workers_done:
-                    print(f"   ⚠️ Block 335 cutoff reached - submitting available results")
                 else:
                     print(f"   ✅ All workers complete - submitting results")
                 

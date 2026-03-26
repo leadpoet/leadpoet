@@ -47,7 +47,7 @@ class QualificationConfig:
     # =========================================================================
     MAX_COST_PER_LEAD_USD: float = 0.05  # $0.05 average per lead (total = leads × $0.05)
     MAX_TIME_PER_LEAD_SECONDS: float = 45.0  # 45s average per lead (total = leads × 45s)
-    RUNNING_MODEL_TIMEOUT_SECONDS: int = 90  # 90s HARD max per single lead - if exceeded, INSTANT FAIL
+    RUNNING_MODEL_TIMEOUT_SECONDS: int = 80  # 80s HARD max per single lead - if exceeded, INSTANT FAIL
     TOTAL_EVALUATION_TIMEOUT_MINUTES: int = 180  # 3 hour absolute max (safety net, 100 leads × 90s = 150min)
     
     # =========================================================================

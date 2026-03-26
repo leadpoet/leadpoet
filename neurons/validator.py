@@ -373,7 +373,7 @@ QUALIFICATION_CONTAINERS_COUNT = 5  # 5 dedicated qualification containers
 QUALIFICATION_MODELS_PER_CONTAINER = 1  # Each container handles 1 model per evaluation cycle
 QUALIFICATION_MAX_MODELS_PER_EPOCH = QUALIFICATION_CONTAINERS_COUNT * QUALIFICATION_MODELS_PER_CONTAINER  # 5 models
 QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK = (QUALIFICATION_CONTAINERS_COUNT - 1) * QUALIFICATION_MODELS_PER_CONTAINER  # 4 models (1 container does rebenchmark)
-QUALIFICATION_EVAL_EPOCH_WINDOW = 2  # Models get 2 full epochs to complete evaluation before forced cutoff
+QUALIFICATION_EVAL_EPOCH_WINDOW = 3  # Models get 3 full epochs (~216 min) to complete 100-ICP evaluation before forced cutoff
 
 def detect_qualification_proxies():
     """Detect QUALIFICATION_WEBSHARE_PROXY_* environment variables."""
@@ -3963,12 +3963,14 @@ class Validator(BaseValidatorNeuron):
             epochs_since_assignment = current_epoch - active_work_epoch
             
             # Determine if we should force-submit:
-            # - If models were assigned THIS epoch: use block 335 cutoff as before
-            # - If models were assigned in a PREVIOUS epoch: they've had their full window,
-            #   force-submit after gateway sourcing completes (which already happened)
-            past_cutoff = blocks_into_epoch >= 335
+            # Only force-cutoff AFTER the full epoch window has elapsed.
+            # Within the window, just collect any results that are ready
+            # without penalizing still-running workers.
             force_due_to_window = epochs_since_assignment >= QUALIFICATION_EVAL_EPOCH_WINDOW
-            force_submit = past_cutoff or force_due_to_window
+            past_cutoff_in_final_epoch = (
+                force_due_to_window and blocks_into_epoch >= 335
+            )
+            force_submit = past_cutoff_in_final_epoch
             
             # Collect results (with cutoff logic handled in the collection function)
             try:

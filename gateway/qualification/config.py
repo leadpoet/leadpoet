@@ -62,7 +62,7 @@ class QualificationConfig:
     # =========================================================================
     CHAMPION_DETHRONING_THRESHOLD_POINTS: float = _DEFAULT_CHAMPION_DETHRONING_THRESHOLD_POINTS
     MIN_CHAMPION_DURATION_EPOCHS: int = 1  # Minimum epochs as champion before can be dethroned
-    MINIMUM_CHAMPION_SCORE: float = 25.0  # Minimum score to become/remain champion (out of 100)
+    MINIMUM_CHAMPION_SCORE: float = 30.0  # Minimum score to become/remain champion (out of 100)
     
     # =========================================================================
     # Champion Rebenchmark Timing (UTC)

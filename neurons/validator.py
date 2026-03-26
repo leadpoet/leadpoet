@@ -5639,10 +5639,34 @@ class Validator(BaseValidatorNeuron):
         weights_dir = Path("validator_weights")
         weights_dir.mkdir(exist_ok=True)
         
+        # ── STARTUP CLEANUP: On first assignment after restart, clear ALL
+        # orphaned work files. Restarted workers won't resume old work, so
+        # work files without results are stale and make workers appear "busy".
+        if not hasattr(self, '_qual_startup_cleanup_done'):
+            self._qual_startup_cleanup_done = True
+            cleaned = 0
+            for old_file in weights_dir.glob("qual_worker_*_work_*.json"):
+                try:
+                    file_epoch = int(old_file.stem.split('_')[-1])
+                    if file_epoch != current_epoch:
+                        old_file.unlink()
+                        cleaned += 1
+                except:
+                    pass
+            if cleaned:
+                print(f"   🧹 Startup cleanup: removed {cleaned} stale work file(s) from previous run")
+            # Also clear failure counter on fresh start
+            fail_tracker = weights_dir / "qual_eval_failure_counts.json"
+            if fail_tracker.exists():
+                try:
+                    fail_tracker.write_text("{}")
+                    print(f"   🧹 Startup cleanup: reset failure counter")
+                except:
+                    pass
+        
         # ── PER-WORKER BUSY CHECK: Only assign to workers that are free ──
-        # A worker is "busy" if it has a work file from a recent epoch without
-        # a corresponding results file. Instead of blocking ALL assignment,
-        # we track which workers are busy and only assign to free ones.
+        # A worker is "busy" if it has a work file from THIS epoch's window
+        # without a corresponding results file.
         busy_workers = set()
         for check_epoch in range(current_epoch - 1, current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW - 1, -1):
             if check_epoch < 0:

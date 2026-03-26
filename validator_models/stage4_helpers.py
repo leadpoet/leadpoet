@@ -1955,6 +1955,7 @@ RULES (follow in order):
       - Abbreviations OK (CEO=Chief Executive Officer, VP=Vice President, Dev=Developer, Mgr=Manager, Dir=Director, Eng=Engineer)
       - NO synonyms (Developer≠Engineer, Manager≠Director, Analyst≠Consultant)
       - The role must appear as an EXACT title, not as scattered words in a description. "Experienced engineer in mechanical design" is NOT "Mechanical Engineer" — the words appear in a descriptive sentence, not as a job title. Only match if the exact title phrase appears (e.g., "Mechanical Engineer at Boeing").
+      - Word order variations of the same title ARE acceptable (e.g., "Distribution Center and Transportation Administrator" = "Transportation and Distribution Center Administrator") — as long as all the same words are present in a title context, not scattered in a sentence.
       - C-suite titles NOT interchangeable (CEO≠CTO≠CFO≠CIO≠CISO≠CCO≠CMO)
       - Seniority must match (Senior Software Engineer ≠ Software Engineer)
       - CRITICAL: Claimed role must match the FULL title, not just part of it. Examples of FAIL: LinkedIn says "Principal and Client Advisor" but claimed is "Principal" → FAIL. LinkedIn says "Software Engineer and Team Lead" but claimed is "Software Engineer" → FAIL. LinkedIn says "Director of Sales and Marketing" but claimed is "Director of Sales" → FAIL. The claimed role must cover the complete title.

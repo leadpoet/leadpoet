@@ -1,5 +1,5 @@
 # Core Bittensor dependencies
-bittensor>=9.10,<10.0.0
+bittensor>=10.1.0
 
 # HTTP and networking
 requests>=2.31.0

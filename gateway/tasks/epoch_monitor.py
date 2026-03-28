@@ -24,6 +24,8 @@ import logging
 from datetime import datetime
 import bittensor as bt
 
+# bittensor v10: AsyncSubtensor initialization is now async-safe
+
 # Use print() instead of logger to match rest of gateway
 # logger = logging.getLogger(__name__)
 
@@ -84,6 +86,7 @@ class EpochMonitor:
         print("="*80 + "\n")
         
         # Initialize subtensor (sync version - for polling)
+        # bittensor v10: bt.subtensor() constructor unchanged for sync usage
         try:
             self.subtensor = bt.subtensor(network=self.network)
             print(f"✅ Connected to {self.network} chain")

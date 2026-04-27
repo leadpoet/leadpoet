@@ -44,7 +44,17 @@ FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES = int(os.getenv("FULFILLMENT_CONSENSUS_TIM
 FULFILLMENT_BANS_ENABLED = os.getenv("FULFILLMENT_BANS_ENABLED", "false").lower() == "true"
 
 FULFILLMENT_MAX_PARALLEL_REQUESTS = int(os.getenv("FULFILLMENT_MAX_PARALLEL_REQUESTS", "5"))
-FULFILLMENT_MIN_REMAINING_WINDOW_MINUTES = int(os.getenv("FULFILLMENT_MIN_REMAINING_WINDOW_MINUTES", "15"))
+# Visibility cutoff: /fulfillment/requests/active hides any open or
+# continued_open request whose window_end is less than this many minutes
+# from now.  The intent is to avoid handing miners work they can't
+# realistically commit + reveal in time.  Lowered from 15 → 5 minutes on
+# 2026-04-27 because synchronized cycling (all 5 active requests promoting
+# together with identical 72-min windows, then closing together) was
+# producing a ~15-min "/active returns 0" dead-window every cycle —
+# miner-reported and dashboard-confirmed.  Five minutes still gives a
+# committed miner enough time to hash-and-commit while shrinking the
+# dead-window proportionally.  Override via env var if needed.
+FULFILLMENT_MIN_REMAINING_WINDOW_MINUTES = int(os.getenv("FULFILLMENT_MIN_REMAINING_WINDOW_MINUTES", "5"))
 
 # Per-miner submission cap is (request.num_leads * this multiplier), ceil'd.
 # Default 1.5 so a miner can commit ~50% more leads than the request requires

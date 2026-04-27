@@ -284,10 +284,23 @@ async def _lifecycle_tick_inner(supabase) -> None:
         print(f"Lifecycle: {len(open_past_window.data)} open/continued_open request(s) past window_end")
     for r in (open_past_window.data or []):
         try:
-            supabase.rpc("fulfillment_close_window", {
-                "p_request_id": r["request_id"],
-                "p_new_status": "commit_closed",
-            }).execute()
+            # Direct UPDATE rather than the legacy fulfillment_close_window
+            # RPC: that RPC was hardcoded to only accept source status
+            # 'open' and silently no-op'd on 'continued_open' rows, so
+            # every chain that recycled into a partially_fulfilled
+            # successor would freeze at its window_end with the status
+            # column still showing 'continued_open' indefinitely
+            # (observed Apr 27 2026 on Browser chain head a0c71809; one
+            # successor stuck for 60 minutes before detection).  The
+            # equivalent UPDATE here accepts both source states and is
+            # also idempotent — re-running on an already-closed row
+            # affects 0 rows because of the `.in_("status", ...)`
+            # source-state filter.
+            supabase.table("fulfillment_requests").update({
+                "status": "commit_closed",
+            }).eq("request_id", r["request_id"]) \
+              .in_("status", ["open", "continued_open"]) \
+              .execute()
             # Verify the transition actually happened
             verify = supabase.table("fulfillment_requests") \
                 .select("status") \
@@ -329,10 +342,17 @@ async def _lifecycle_tick_inner(supabase) -> None:
 
         if reveals.data:
             try:
-                supabase.rpc("fulfillment_close_window", {
-                    "p_request_id": rid,
-                    "p_new_status": "scoring",
-                }).execute()
+                # Direct UPDATE rather than the legacy fulfillment_close_window
+                # RPC, mirroring the Step 1 fix above.  The RPC's accepted
+                # source-state list is opaque (defined in Supabase, not in
+                # this repo) and we already saw it silently no-op for
+                # 'continued_open' source rows.  A direct UPDATE with the
+                # source-state guard is both transparent and idempotent.
+                supabase.table("fulfillment_requests").update({
+                    "status": "scoring",
+                }).eq("request_id", rid) \
+                  .eq("status", "commit_closed") \
+                  .execute()
                 print(f"   ✅ {rid[:8]}... -> scoring ({len(reveals.data)} reveal(s))")
             except Exception as e:
                 print(f"   ❌ Error transitioning {rid[:8]}... to scoring: {e}")

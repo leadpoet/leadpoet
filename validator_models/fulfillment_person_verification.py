@@ -736,6 +736,7 @@ async def fulfillment_person_verification(
     lead_slug = _extract_company_slug(lead_company_linkedin)
 
     if apify_slug and not apify_slug.isdigit():
+        # Real slug — must match miner's slug
         if apify_slug != lead_slug:
             print(f"   ❌ Company URL mismatch: Apify='{apify_slug}' vs Lead='{lead_slug}'")
             return False, _rejection(
@@ -744,8 +745,32 @@ async def fulfillment_person_verification(
                 ["company_linkedin"],
             )
         print(f"   ✅ Company URL match: {apify_slug}")
+    elif apify_slug and apify_slug.isdigit():
+        # Numeric ID — compare against ScrapingDog's linkedin_internal_id
+        sd_internal_id = lead.get("_sd_linkedin_internal_id", "")
+        if sd_internal_id and apify_slug != sd_internal_id:
+            print(f"   ❌ Company ID mismatch: Apify='{apify_slug}' vs SD='{sd_internal_id}'")
+            return False, _rejection(
+                "fulfillment_person_company_id_mismatch",
+                f"Company LinkedIn ID mismatch: Apify '{apify_slug}' vs ScrapingDog '{sd_internal_id}'",
+                ["company_linkedin"],
+            )
+        elif not sd_internal_id:
+            print(f"   ❌ Cannot verify numeric company ID '{apify_slug}' — no SD internal ID")
+            return False, _rejection(
+                "fulfillment_person_company_id_unverifiable",
+                f"Apify returned numeric company ID '{apify_slug}' but no ScrapingDog internal ID to verify against",
+                ["company_linkedin"],
+            )
+        print(f"   ✅ Company ID match: {apify_slug}")
     else:
-        print(f"   ⚠️ Company URL skipped (Apify returned numeric ID '{apify_slug}')")
+        # No company URL at all
+        print(f"   ❌ No company URL from Apify")
+        return False, _rejection(
+            "fulfillment_person_no_company_url",
+            "No company LinkedIn URL found in Apify current position",
+            ["company_linkedin"],
+        )
 
     # --- Company name match (always from Apify, normalized) ---
     if _normalize_company(actual_company) != _normalize_company(lead_company):

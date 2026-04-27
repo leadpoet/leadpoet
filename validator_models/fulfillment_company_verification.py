@@ -328,6 +328,10 @@ async def fulfillment_company_verification(
             ["company_linkedin"],
         )
 
+    # Store company IDs for person verification (Stage 4) to use
+    lead["_sd_linkedin_internal_id"] = str(sd_data.get("linkedin_internal_id", ""))
+    lead["_sd_universal_name_id"] = sd_data.get("universal_name_id", "")
+
     # ---- 1. Company name match ----
     sd_name = sd_data.get("company_name", "")
     name_match, name_reason = _validate_name_match(company, sd_name)
@@ -399,7 +403,12 @@ async def fulfillment_company_verification(
                 )
             print(f"   ✅ Website domain match: {sd_domain}")
         else:
-            print(f"   ⚠️ Website domain could not be parsed — skipping")
+            print(f"   ❌ Website domain could not be parsed")
+            return False, _rejection(
+                "fulfillment_company_website_parse_failed",
+                f"Could not parse website domains: LinkedIn='{sd_website}', Miner='{lead_website}'",
+                ["website"],
+            )
     elif sd_website and not lead_website:
         print(f"   ❌ LinkedIn has website but miner didn't submit one")
         return False, _rejection(
@@ -408,7 +417,12 @@ async def fulfillment_company_verification(
             ["website"],
         )
     elif not sd_website:
-        print(f"   ⚠️ No website from LinkedIn — skipping domain check")
+        print(f"   ❌ No website on LinkedIn company page")
+        return False, _rejection(
+            "fulfillment_company_no_linkedin_website",
+            "LinkedIn company page has no website",
+            ["website"],
+        )
 
     # ---- 5. Description + Industry classification ----
     # Build description content from ScrapingDog data
@@ -468,15 +482,17 @@ async def fulfillment_company_verification(
                 sub_industry_top3[f"sub_industry_match{i}"] = c["sub_industry"]
             print(f"   ✅ Classification: {[(c['industry'], c['sub_industry']) for c in classifications[:3]]}")
 
-            # Auto-correct if miner's pair not in top 3
+            # Reject if miner's claimed pair not in top 3
             if claimed_industry and claimed_sub_industry:
                 claimed_pair = (claimed_industry.lower(), claimed_sub_industry.lower())
                 top3_pairs = [(c["industry"].lower(), c["sub_industry"].lower()) for c in classifications[:3]]
                 if claimed_pair not in top3_pairs:
-                    top1 = classifications[0]
-                    lead["industry"] = top1["industry"]
-                    lead["sub_industry"] = top1["sub_industry"]
-                    print(f"   ⚠️ Miner pair {claimed_pair} not in top 3 — corrected to ({top1['industry']}, {top1['sub_industry']})")
+                    print(f"   ❌ Miner claimed ({claimed_industry}, {claimed_sub_industry}) not in top 3: {top3_pairs}")
+                    return False, _rejection(
+                        "fulfillment_company_industry_mismatch",
+                        f"Claimed industry/sub_industry not in top 3 classifications",
+                        ["industry", "sub_industry"],
+                    )
 
             # Store for company table
             lead["_insert_new_company"] = True

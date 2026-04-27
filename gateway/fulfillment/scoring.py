@@ -356,80 +356,110 @@ async def score_fulfillment_lead(
             failure_reason=t2_failure,
         )
 
-    # --- Fulfillment Stage 5 + Stage 4 (before Tier 2b) ---
-    # Company verification first (cheaper), then person verification
-    skip_stage4 = False
-    skip_stage5 = False
-    if use_apify:
-        apify_token = os.environ.get("APIFY_API_TOKEN", "")
-        openrouter_key = os.environ.get("OPENROUTER_KEY", "")
-        scrapingdog_key = os.environ.get("SCRAPINGDOG_API_KEY", "")
+    # --- Tier 2b: Verification ---
+    # Fulfillment flow: Email → Company → Person → Rep score
+    # Old flow (use_apify=False): run_stage4_5_repscore (email + S4 + S5 + rep)
+    scrapingdog_key = os.environ.get("SCRAPINGDOG_API_KEY", "")
+    openrouter_key = os.environ.get("OPENROUTER_KEY", "")
 
-        # Fulfillment Stage 5: ScrapingDog LinkedIn company verification (cheap)
-        if scrapingdog_key:
-            s5_passed, s5_rejection = await fulfillment_company_verification(
-                validator_dict, scrapingdog_key, openrouter_key,
-            )
-            if not s5_passed:
-                reason = s5_rejection.get("check_name", "fulfillment_company_failed") if s5_rejection else "fulfillment_company_failed"
+    if scrapingdog_key:
+        # --- Email check (from batch result, no API call) ---
+        email_verified = False
+        if email_result:
+            batch_status = email_result.get("status", "unknown")
+            if batch_status == "email_ok":
+                email_verified = True
+            else:
                 return FulfillmentScoreResult(
-                    tier1_passed=True, tier2_passed=True,
-                    failure_reason=reason,
+                    tier1_passed=True, tier2_passed=False,
+                    failure_reason=f"email_{batch_status}",
                 )
-            skip_stage5 = True
+        else:
+            return FulfillmentScoreResult(
+                tier1_passed=True, tier2_passed=False,
+                failure_reason="email_verification_unavailable",
+            )
 
-        # Fulfillment Stage 4: Person verification (Q1 → SD → Apify)
-        if apify_token and skip_stage5:
+        # --- Company verification (always uses ScrapingDog LinkedIn) ---
+        s5_passed, s5_rejection = await fulfillment_company_verification(
+            validator_dict, scrapingdog_key, openrouter_key,
+        )
+        if not s5_passed:
+            reason = s5_rejection.get("check_name", "fulfillment_company_failed") if s5_rejection else "fulfillment_company_failed"
+            return FulfillmentScoreResult(
+                tier1_passed=True, tier2_passed=True,
+                email_verified=email_verified,
+                failure_reason=reason,
+            )
+        company_verified = True
+
+        # --- Person verification ---
+        person_verified = False
+        skip_stage4 = False
+        apify_token = os.environ.get("APIFY_API_TOKEN", "")
+        if use_apify and apify_token:
+            # New: Q1 → SD → Apify
             passed, rejection_reason = await fulfillment_person_verification(
                 validator_dict, apify_token, openrouter_key, scrapingdog_key,
             )
             if passed:
+                person_verified = True
                 skip_stage4 = True
             elif rejection_reason and rejection_reason.get("check_name") == "fulfillment_person_fetch_failed":
-                # Apify API error — fall back to ScrapingDog Stage 4
+                # Apify API error — fall back to old Stage 4
                 print("   ⚠️ Apify fetch failed, falling back to ScrapingDog Stage 4")
-            elif not passed:
+            else:
                 reason = rejection_reason.get("check_name", "fulfillment_person_verification_failed") if rejection_reason else "fulfillment_person_verification_failed"
                 return FulfillmentScoreResult(
                     tier1_passed=True, tier2_passed=True,
+                    email_verified=email_verified,
+                    company_verified=company_verified,
                     failure_reason=reason,
                 )
 
-    # --- Tier 2b: Stage 3+4+5 verification ---
-    verif_failure, verif_data = await _run_verification_stages(
-        validator_dict, email_result, stage0_2_data,
-        skip_stage4=skip_stage4, skip_stage5=skip_stage5,
-    )
+        # If person not yet verified (Apify off or fetch failed), use old Stage 4
+        if not person_verified:
+            verif_failure, verif_data = await _run_verification_stages(
+                validator_dict, email_result, stage0_2_data,
+                skip_stage4=False, skip_stage5=True,
+            )
+            if verif_failure:
+                return FulfillmentScoreResult(
+                    tier1_passed=True, tier2_passed=True,
+                    email_verified=email_verified,
+                    company_verified=company_verified,
+                    failure_reason=verif_failure,
+                )
+            person_verified = verif_data.get("stage_4_linkedin", {}).get("linkedin_verified", False)
+            rep_score_val = float(verif_data.get("rep_score", {}).get("total_score", 0))
+        else:
+            # Person verified via Apify — still need rep score
+            verif_failure, verif_data = await _run_verification_stages(
+                validator_dict, email_result, stage0_2_data,
+                skip_stage4=True, skip_stage5=True,
+            )
+            rep_score_val = float(verif_data.get("rep_score", {}).get("total_score", 0))
 
-    email_verified = verif_data.get("stage_3_email", {}).get("email_status") == "valid"
-    person_verified = verif_data.get("stage_4_linkedin", {}).get("linkedin_verified", False)
-    stage5 = verif_data.get("stage_5_verification", {})
-    # Stage 5 populates company_name_verified, company_size_verified,
-    # company_hq_verified, and industry_verified (see
-    # validator_models/automated_checks.py ~L919-922).  The previous
-    # code read `role_verified` from here, which is actually a Stage 4
-    # field (stage4_person_verification sets it), not Stage 5 — so
-    # this flag was always False for every lead ever scored, even
-    # though Stage 5 itself hard-rejects name / size / HQ-country /
-    # domain mismatches and therefore WAS verifying the company.
-    # The display flag now correctly reflects Stage 5's company-name
-    # match: if LinkedIn's scraped company name matches the miner's
-    # submitted company, company_verified=True.  This does not change
-    # any rejection behavior (Stage 5 already rejects mismatches); it
-    # only fixes the informational flag that surfaces to clients via
-    # consensus_company_verified in /fulfillment/results/{id}.
-    company_verified = stage5.get("company_name_verified", False)
-    rep_score_val = float(verif_data.get("rep_score", {}).get("total_score", 0))
-
-    if verif_failure:
-        return FulfillmentScoreResult(
-            tier1_passed=True, tier2_passed=True,
-            email_verified=email_verified,
-            person_verified=person_verified,
-            company_verified=company_verified,
-            rep_score=rep_score_val,
-            failure_reason=verif_failure,
+    else:
+        # No ScrapingDog key — use old pipeline entirely
+        verif_failure, verif_data = await _run_verification_stages(
+            validator_dict, email_result, stage0_2_data,
         )
+        email_verified = verif_data.get("stage_3_email", {}).get("email_status") == "valid"
+        person_verified = verif_data.get("stage_4_linkedin", {}).get("linkedin_verified", False)
+        stage5 = verif_data.get("stage_5_verification", {})
+        company_verified = stage5.get("company_name_verified", False)
+        rep_score_val = float(verif_data.get("rep_score", {}).get("total_score", 0))
+
+        if verif_failure:
+            return FulfillmentScoreResult(
+                tier1_passed=True, tier2_passed=True,
+                email_verified=email_verified,
+                person_verified=person_verified,
+                company_verified=company_verified,
+                rep_score=rep_score_val,
+                failure_reason=verif_failure,
+            )
 
     # --- Tier 3: Intent Scoring ---
     api_key = get_fulfillment_api_key()

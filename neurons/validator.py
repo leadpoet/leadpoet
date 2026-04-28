@@ -5120,13 +5120,12 @@ class Validator(BaseValidatorNeuron):
                     except Exception as e:
                         bt.logging.warning(f"Sandbox cleanup error: {e}")
             
-            # Calculate final coverage-weighted score
+            # Calculate final coverage-weighted score.
             # Divide by total ICPs (not just scored ones) so failures pull the
-            # average down. Multiply by 10 to keep the historical leaderboard
-            # range/threshold familiar after the formula correction
-            # (legacy: total_score / leads_scored had no coverage penalty —
-            # a model that scored only 1/100 ICPs at 100 pts would get 100/100).
-            raw_avg_score = (total_score / len(runs)) * 10 if len(runs) > 0 else 0.0
+            # average down. Legacy formula divided by leads_scored which had no
+            # coverage penalty — a model that scored only 1/100 ICPs at 100 pts
+            # would get 100/100 even though it failed 99% of client demand.
+            raw_avg_score = total_score / len(runs) if len(runs) > 0 else 0.0
             
             # ═══════════════════════════════════════════════════════════════════
             # FABRICATION INTEGRITY PENALTY
@@ -5166,11 +5165,11 @@ class Validator(BaseValidatorNeuron):
             print(f"   Miner: {work.get('miner_hotkey', 'Unknown')[:16]}...")
             print(f"   ICPs evaluated: {run_idx if 'run_idx' in dir() else len(runs)}/{len(runs)}")
             if integrity_multiplier < 1.0:
-                print(f"   📊 Raw Score: {raw_avg_score:.2f} / 1000")
+                print(f"   📊 Raw Score: {raw_avg_score:.2f} / 100")
                 print(f"   🚨 Fabrication: {fabrication_count}/{leads_scored} leads ({fabrication_rate:.0%}) → integrity penalty {integrity_multiplier:.2f}x")
-                print(f"   📊 Final Score: {avg_score:.2f} / 1000 (after integrity penalty)")
+                print(f"   📊 Final Score: {avg_score:.2f} / 100 (after integrity penalty)")
             else:
-                print(f"   📊 Final Score: {avg_score:.2f} / 1000 (coverage-weighted, x10)")
+                print(f"   📊 Final Score: {avg_score:.2f} / 100 (coverage-weighted)")
             print(f"   ⏱️  Total Time: {total_time:.2f}s ({total_time/60:.1f} min)")
             print(f"   💰 Total cost: ${total_evaluation_cost:.4f}")
             if evaluation_stopped_early:
@@ -8966,9 +8965,8 @@ def run_dedicated_qualification_worker(config):
                                 pass
                     
                     # Coverage-weighted score: divide by total ICPs (not just scored ones)
-                    # so failures pull the average down. x10 multiplier preserves the
-                    # historical leaderboard range/threshold.
-                    raw_avg_score_w = (total_score / len(runs)) * 10 if len(runs) > 0 else 0.0
+                    # so failures pull the average down.
+                    raw_avg_score_w = total_score / len(runs) if len(runs) > 0 else 0.0
                     
                     # Apply fabrication integrity penalty (same logic as main eval path)
                     FABRICATION_TOLERANCE_W = 0.05

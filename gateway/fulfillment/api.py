@@ -765,13 +765,35 @@ async def commit_leads(commit: FulfillmentCommitRequest):
                 f"cap is {num_leads_max}.  {cap_suffix}"
             ))
 
+        # Direct INSERT instead of the legacy fulfillment_accept_commit RPC.
+        #
+        # The RPC was hardcoded to require source ``status='open'`` and
+        # rejected every commit to a ``continued_open`` request with
+        # ``Window not open (status=continued_open)`` (raised as Postgres
+        # P0001), surfacing to miners as HTTP 500.  Same class of latent
+        # bug as the lifecycle's fulfillment_close_window RPC fixed earlier
+        # today — any code path that hardcodes status='open' breaks under
+        # the new partial-fulfillment chain semantics.
+        #
+        # The status check is already done above (line ~696) where we
+        # accept ``status IN (open, continued_open)``, and the commit
+        # window expiry check is right after it.  So by the time we
+        # reach this branch, the status is verified-good and we can do
+        # a plain INSERT.  Race safety still comes from the unique
+        # constraint on (request_id, miner_hotkey) — a duplicate insert
+        # raises and we surface a 409 to the miner.
+        from uuid import uuid4 as _uuid4
+        new_submission_id = str(_uuid4())
         try:
-            sub_resp = supabase.rpc("fulfillment_accept_commit", {
-                "p_request_id": commit.request_id,
-                "p_miner_hotkey": commit.miner_hotkey,
-                "p_lead_hashes": new_entries,
+            supabase.table("fulfillment_submissions").insert({
+                "submission_id": new_submission_id,
+                "request_id": commit.request_id,
+                "miner_hotkey": commit.miner_hotkey,
+                "num_leads": len(new_entries),
+                "lead_hashes": new_entries,
+                "revealed": False,
             }).execute()
-            submission_id = sub_resp.data
+            submission_id = new_submission_id
         except Exception as e:
             err_msg = str(e)
             if "unique" in err_msg.lower() or "duplicate" in err_msg.lower():

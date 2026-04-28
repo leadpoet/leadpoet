@@ -5566,6 +5566,27 @@ class Validator(BaseValidatorNeuron):
                 from datetime import datetime as dt_datetime, timezone as dt_timezone
                 current_utc_date = dt_datetime.now(dt_timezone.utc).date().isoformat()
                 current_champion["last_evaluated_utc_date"] = current_utc_date
+
+                # ═══════════════════════════════════════════════════════════════
+                # FIX (2026-04-28): on initial championship, also set
+                # last_rebenchmark_at to today's timestamp.
+                #
+                # Previously, last_rebenchmark_at was set ONLY on the
+                # is_rebenchmark branch (line above). When a fresh model became
+                # champion mid-day, last_rebenchmark_at stayed empty, so the
+                # rebenchmark gate at _check_champion_rebenchmark_needed
+                # (which uses last_rebenchmark_at as source-of-truth for
+                # "completed today?") evaluated completed_today=False and
+                # dispatched an immediate second benchmark on the next epoch.
+                # Result: same code_hash, two evaluations within ~2 hours,
+                # noisy/diverging scores (e.g., king on 2026-04-28 ran at
+                # 08:26 UTC then again at 10:48 UTC — once-per-day contract
+                # silently violated). Setting last_rebenchmark_at here
+                # guarantees the initial benchmark counts as today's eval
+                # and the next rebenchmark waits for the next UTC day.
+                # ═══════════════════════════════════════════════════════════════
+                if became_champion:
+                    current_champion["last_rebenchmark_at"] = timestamp
             
             # Save to JSON
             new_data = {

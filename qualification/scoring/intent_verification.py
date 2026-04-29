@@ -2254,33 +2254,33 @@ def _format_instagram_profile_blob(data: dict) -> str:
     """Format ScrapingDog Instagram Profile API response into a verification
     text blob.
 
-    Response shape (best-effort field names — ScrapingDog occasionally renames):
-      {"username", "full_name" | "fullname", "biography" | "bio",
-       "external_url" | "external_link", "followers" | "followers_count" | "edge_followed_by",
-       "following" | "following_count" | "edge_follow",
-       "posts" | "post_count" | "media_count" | "edge_owner_to_timeline_media",
-       "is_verified", "is_business_account" | "is_business",
-       "is_private", "category" | "category_name" | "business_category_name",
-       "profile_pic_url", "recent_posts" | "edge_owner_to_timeline_media": {"edges": [{"node": {"caption", "taken_at_timestamp"}}]}}
+    Field names verified against live API response 2026-04-29:
+      {"username", "profile_id", "full_name", "bio",
+       "followers_count", "following_count",
+       "is_verified", "is_business_account", "is_professional_account",
+       "is_private", "is_joined_recently",
+       "business_category_name", "category_name", "overall_category_name",
+       "bio_links": [{"title", "url", "lynx_url", "link_type"}, ...],
+       "owner_to_timeline_media": {"count": N, "media": [...]},
+       "video_timeline":          {"count": N, "videos": [
+           {"shortcode", "caption", "timestamp" (unix),
+            "video_view_count", "comment_count", "display_url"}, ...]}}
 
-    We try multiple aliases for each metric so the extractor is resilient to
-    ScrapingDog field renames (history of TikTok endpoint suggests this is a
-    real risk). Returns "" on parse failure → caller treats as "could not
-    verify" rather than "verified".
+    Aliases for legacy/GraphQL field names are kept as fallbacks so the
+    extractor is resilient to future ScrapingDog field renames (the TikTok
+    endpoint has done this before — see _format_tiktok_profile_blob comment).
+    Returns "" on parse failure → caller treats as "could not verify".
     """
     if not isinstance(data, dict):
         return ""
 
-    # Resolve username (the only required field — without it, treat as failure)
-    username = (
-        data.get("username")
-        or data.get("user", {}).get("username") if isinstance(data.get("user"), dict) else None
-    ) or data.get("username")
+    user_obj = data.get("user") if isinstance(data.get("user"), dict) else {}
+    username = data.get("username") or user_obj.get("username")
     if not username:
         return ""
 
     def _first(*keys, default=None):
-        """Return the first non-None / non-empty value across alias keys."""
+        """Return first non-empty value across alias keys (top-level only)."""
         for k in keys:
             v = data.get(k)
             if v is not None and v != "" and v != []:
@@ -2289,20 +2289,40 @@ def _format_instagram_profile_blob(data: dict) -> str:
 
     full_name = _first("full_name", "fullname", "name")
     biography = _first("biography", "bio", "description")
-    external_url = _first("external_url", "external_link", "website")
-    followers = _first("followers", "followers_count", "edge_followed_by")
+    followers = _first("followers_count", "followers", "edge_followed_by")
     if isinstance(followers, dict):
         followers = followers.get("count")
-    following = _first("following", "following_count", "edge_follow")
+    following = _first("following_count", "following", "edge_follow")
     if isinstance(following, dict):
         following = following.get("count")
-    post_count = _first("posts", "post_count", "media_count", "edge_owner_to_timeline_media")
+
+    # Post count — ScrapingDog nests under owner_to_timeline_media.count
+    # (no edge_ prefix, no _count suffix on the parent key)
+    post_count = _first("post_count", "media_count", "posts")
+    if post_count is None:
+        otm = data.get("owner_to_timeline_media") or data.get("edge_owner_to_timeline_media")
+        if isinstance(otm, dict):
+            post_count = otm.get("count")
     if isinstance(post_count, dict):
         post_count = post_count.get("count")
+
     is_verified = _first("is_verified", "verified")
     is_business = _first("is_business_account", "is_business")
+    is_professional = data.get("is_professional_account")
     is_private = _first("is_private", "private")
-    category = _first("category", "category_name", "business_category_name")
+    category = _first("business_category_name", "category_name",
+                      "overall_category_name", "category")
+
+    # External URL — ScrapingDog shape: bio_links[0].url. Fall back to legacy
+    # flat field names for GraphQL-shaped or older payloads.
+    external_url = _first("external_url", "external_link", "website")
+    if not external_url:
+        bio_links = data.get("bio_links") or []
+        if isinstance(bio_links, list):
+            for bl in bio_links:
+                if isinstance(bl, dict) and bl.get("url"):
+                    external_url = bl["url"]
+                    break
 
     parts = ["[INSTAGRAM PROFILE]"]
     parts.append(f"Username: @{username}")
@@ -2312,6 +2332,8 @@ def _format_instagram_profile_blob(data: dict) -> str:
         parts.append(f"Verified: {bool(is_verified)}")
     if is_business is not None:
         parts.append(f"Business account: {bool(is_business)}")
+    if is_professional is not None:
+        parts.append(f"Professional account: {bool(is_professional)}")
     if is_private is not None:
         parts.append(f"Private: {bool(is_private)}")
     if category:
@@ -2327,19 +2349,53 @@ def _format_instagram_profile_blob(data: dict) -> str:
     if biography:
         parts.append(f"\nBio:\n{biography}")
 
-    # Recent posts — try a few aliases, format as "<ISO date>: <caption>"
-    recent = _first("recent_posts", "latest_posts", "posts_data") or []
-    # Some shapes nest under edge_owner_to_timeline_media.edges[].node
-    if not recent:
-        edges_obj = data.get("edge_owner_to_timeline_media")
-        if isinstance(edges_obj, dict):
-            recent = [e.get("node") for e in (edges_obj.get("edges") or []) if isinstance(e, dict)]
+    # Recent posts — collect from BOTH owner_to_timeline_media.media and
+    # video_timeline.videos (videos are posts too) and merge by timestamp.
+    candidates: list = []
+    # 1. ScrapingDog photo/carousel posts: owner_to_timeline_media.media
+    otm = data.get("owner_to_timeline_media") or data.get("edge_owner_to_timeline_media")
+    if isinstance(otm, dict):
+        media = otm.get("media") or []
+        if isinstance(media, list):
+            candidates.extend(m for m in media if isinstance(m, dict))
+        # GraphQL-style fallback: edges[].node
+        edges = otm.get("edges") or []
+        if isinstance(edges, list):
+            candidates.extend(
+                e["node"] for e in edges
+                if isinstance(e, dict) and isinstance(e.get("node"), dict)
+            )
+    # 2. Video posts (reels): video_timeline.videos
+    vt = data.get("video_timeline")
+    if isinstance(vt, dict):
+        videos = vt.get("videos") or []
+        if isinstance(videos, list):
+            candidates.extend(v for v in videos if isinstance(v, dict))
+    # 3. Legacy aliases (top-level lists)
+    for k in ("recent_posts", "latest_posts", "posts_data"):
+        v = data.get(k)
+        if isinstance(v, list):
+            candidates.extend(p for p in v if isinstance(p, dict))
 
-    if isinstance(recent, list) and recent:
+    # Sort by timestamp desc, dedupe by shortcode/video_id
+    seen_ids = set()
+    posts_with_ts: list = []
+    for p in candidates:
+        pid = p.get("shortcode") or p.get("video_id") or p.get("id") or id(p)
+        if pid in seen_ids:
+            continue
+        seen_ids.add(pid)
+        ts_raw = p.get("timestamp") or p.get("taken_at_timestamp") or p.get("taken_at")
+        try:
+            ts_num = float(ts_raw) if ts_raw is not None else 0.0
+        except (ValueError, TypeError):
+            ts_num = 0.0
+        posts_with_ts.append((ts_num, p))
+    posts_with_ts.sort(key=lambda x: x[0], reverse=True)
+
+    if posts_with_ts:
         post_lines = []
-        for p in recent[:6]:  # cap at 6 most recent
-            if not isinstance(p, dict):
-                continue
+        for ts_num, p in posts_with_ts[:6]:
             caption = (
                 p.get("caption")
                 or p.get("text")
@@ -2347,16 +2403,12 @@ def _format_instagram_profile_blob(data: dict) -> str:
                     .get("node", {}).get("text") if isinstance(p.get("edge_media_to_caption"), dict) else None)
                 or ""
             )
-            ts = p.get("timestamp") or p.get("taken_at_timestamp") or p.get("taken_at")
             ts_str = ""
-            if ts:
+            if ts_num > 0:
                 try:
-                    if isinstance(ts, (int, float)):
-                        ts_str = datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
-                    else:
-                        ts_str = str(ts)
+                    ts_str = datetime.fromtimestamp(ts_num, tz=timezone.utc).strftime("%Y-%m-%d")
                 except Exception:
-                    ts_str = str(ts)
+                    ts_str = ""
             line = f"  - {ts_str}: {caption[:200]}".rstrip()
             if line.strip(" -:"):
                 post_lines.append(line)

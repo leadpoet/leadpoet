@@ -1496,7 +1496,12 @@ async def fetch_url_content(url: str, source: str) -> str:
             return await scrapingdog_youtube(url)
         if hostname in ("tiktok.com", "m.tiktok.com", "vm.tiktok.com"):
             return await scrapingdog_tiktok(url)
-        # Facebook, Instagram, Reddit, Threads, Pinterest etc. — no dedicated
+        if hostname in ("instagram.com", "m.instagram.com", "www.instagram.com"):
+            # ScrapingDog's generic scraper does NOT support instagram.com — it
+            # returns a "Contact us for IG scraping" stub. Route to the
+            # dedicated /instagram/profile endpoint via username extraction.
+            return await scrapingdog_instagram(url)
+        # Facebook, Reddit, Threads, Pinterest etc. — no dedicated
         # ScrapingDog endpoints, fall back to generic rendered scrape.
         return await scrapingdog_generic(url)
     elif source_lower == "review_site":
@@ -2192,6 +2197,218 @@ async def scrapingdog_tiktok(url: str) -> str:
         logger.info(f"Could not extract TikTok username from {url[:100]}, using generic scrape")
         return await scrapingdog_generic(url)
     return await scrapingdog_tiktok_profile(username)
+
+
+# =============================================================================
+# Instagram — dedicated ScrapingDog Profile endpoint (5 credits)
+# =============================================================================
+#
+# ScrapingDog's /scrape (generic) endpoint does NOT support instagram.com —
+# it returns a "Contact us for IG scraping" stub regardless of input. Routing
+# IG URLs through generic scrape made every IG-based intent signal fail Tier 3
+# verification (snippet verbatim check could never match because the fetched
+# content was always the stub message). This blocked any fulfillment ICP that
+# specified Instagram metrics (e.g., "<10k followers", "no posts in 30 days",
+# "running paid IG ads").
+#
+# The dedicated /instagram/profile endpoint returns structured JSON with:
+#   bio, follower count, following count, post count, verified status,
+#   business-account flag, category, recent posts (caption + timestamp).
+# That's enough to ground signals like "Tampa restaurant with weak online
+# presence (<500 followers, last post 90+ days ago)" — which is the shape of
+# the Flaer fulfillment request that's currently un-fulfillable.
+#
+# Post URLs (instagram.com/p/{shortcode}, /reel/{shortcode}) don't expose the
+# author's username deterministically, so we fall back to skipping rather than
+# returning a false-positive verification. Story / explore / directory paths
+# are reserved keywords and are filtered out.
+
+# Reserved IG path segments that are NOT usernames
+_IG_RESERVED_PATHS = {
+    "p", "reel", "reels", "stories", "explore", "directory",
+    "tv", "accounts", "about", "developer", "legal", "press",
+    "privacy", "tags", "locations", "web", "ajax",
+}
+
+_IG_USERNAME_RE = re.compile(r'instagram\.com/([A-Za-z0-9_.]+)')
+
+
+def _extract_instagram_username(url: str) -> Optional[str]:
+    """Extract Instagram username (without @) from a profile URL.
+
+    Returns None for post/reel/story URLs (no deterministic author mapping)
+    and for reserved IG paths.
+    """
+    m = _IG_USERNAME_RE.search(url)
+    if not m:
+        return None
+    username = m.group(1).rstrip("/").strip()
+    if not username or username.lower() in _IG_RESERVED_PATHS:
+        return None
+    if len(username) > 30:  # IG usernames cap at 30 chars
+        return None
+    return username
+
+
+def _format_instagram_profile_blob(data: dict) -> str:
+    """Format ScrapingDog Instagram Profile API response into a verification
+    text blob.
+
+    Response shape (best-effort field names — ScrapingDog occasionally renames):
+      {"username", "full_name" | "fullname", "biography" | "bio",
+       "external_url" | "external_link", "followers" | "followers_count" | "edge_followed_by",
+       "following" | "following_count" | "edge_follow",
+       "posts" | "post_count" | "media_count" | "edge_owner_to_timeline_media",
+       "is_verified", "is_business_account" | "is_business",
+       "is_private", "category" | "category_name" | "business_category_name",
+       "profile_pic_url", "recent_posts" | "edge_owner_to_timeline_media": {"edges": [{"node": {"caption", "taken_at_timestamp"}}]}}
+
+    We try multiple aliases for each metric so the extractor is resilient to
+    ScrapingDog field renames (history of TikTok endpoint suggests this is a
+    real risk). Returns "" on parse failure → caller treats as "could not
+    verify" rather than "verified".
+    """
+    if not isinstance(data, dict):
+        return ""
+
+    # Resolve username (the only required field — without it, treat as failure)
+    username = (
+        data.get("username")
+        or data.get("user", {}).get("username") if isinstance(data.get("user"), dict) else None
+    ) or data.get("username")
+    if not username:
+        return ""
+
+    def _first(*keys, default=None):
+        """Return the first non-None / non-empty value across alias keys."""
+        for k in keys:
+            v = data.get(k)
+            if v is not None and v != "" and v != []:
+                return v
+        return default
+
+    full_name = _first("full_name", "fullname", "name")
+    biography = _first("biography", "bio", "description")
+    external_url = _first("external_url", "external_link", "website")
+    followers = _first("followers", "followers_count", "edge_followed_by")
+    if isinstance(followers, dict):
+        followers = followers.get("count")
+    following = _first("following", "following_count", "edge_follow")
+    if isinstance(following, dict):
+        following = following.get("count")
+    post_count = _first("posts", "post_count", "media_count", "edge_owner_to_timeline_media")
+    if isinstance(post_count, dict):
+        post_count = post_count.get("count")
+    is_verified = _first("is_verified", "verified")
+    is_business = _first("is_business_account", "is_business")
+    is_private = _first("is_private", "private")
+    category = _first("category", "category_name", "business_category_name")
+
+    parts = ["[INSTAGRAM PROFILE]"]
+    parts.append(f"Username: @{username}")
+    if full_name:
+        parts.append(f"Display name: {full_name}")
+    if is_verified is not None:
+        parts.append(f"Verified: {bool(is_verified)}")
+    if is_business is not None:
+        parts.append(f"Business account: {bool(is_business)}")
+    if is_private is not None:
+        parts.append(f"Private: {bool(is_private)}")
+    if category:
+        parts.append(f"Category: {category}")
+    if followers is not None:
+        parts.append(f"Followers: {followers}")
+    if following is not None:
+        parts.append(f"Following: {following}")
+    if post_count is not None:
+        parts.append(f"Post count: {post_count}")
+    if external_url:
+        parts.append(f"Website: {external_url}")
+    if biography:
+        parts.append(f"\nBio:\n{biography}")
+
+    # Recent posts — try a few aliases, format as "<ISO date>: <caption>"
+    recent = _first("recent_posts", "latest_posts", "posts_data") or []
+    # Some shapes nest under edge_owner_to_timeline_media.edges[].node
+    if not recent:
+        edges_obj = data.get("edge_owner_to_timeline_media")
+        if isinstance(edges_obj, dict):
+            recent = [e.get("node") for e in (edges_obj.get("edges") or []) if isinstance(e, dict)]
+
+    if isinstance(recent, list) and recent:
+        post_lines = []
+        for p in recent[:6]:  # cap at 6 most recent
+            if not isinstance(p, dict):
+                continue
+            caption = (
+                p.get("caption")
+                or p.get("text")
+                or (p.get("edge_media_to_caption", {}).get("edges", [{}])[0]
+                    .get("node", {}).get("text") if isinstance(p.get("edge_media_to_caption"), dict) else None)
+                or ""
+            )
+            ts = p.get("timestamp") or p.get("taken_at_timestamp") or p.get("taken_at")
+            ts_str = ""
+            if ts:
+                try:
+                    if isinstance(ts, (int, float)):
+                        ts_str = datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+                    else:
+                        ts_str = str(ts)
+                except Exception:
+                    ts_str = str(ts)
+            line = f"  - {ts_str}: {caption[:200]}".rstrip()
+            if line.strip(" -:"):
+                post_lines.append(line)
+        if post_lines:
+            parts.append("\nRecent posts:")
+            parts.extend(post_lines)
+
+    return "\n".join(parts)
+
+
+async def scrapingdog_instagram_profile(username: str) -> str:
+    """Fetch Instagram profile via ScrapingDog Instagram Profile API.
+
+    Endpoint: api.scrapingdog.com/instagram/profile
+    Parameter: username (without leading @)
+    Returns formatted text blob (or "" on failure).
+    """
+    if not SCRAPINGDOG_API_KEY:
+        raise ValueError("SCRAPINGDOG_API_KEY not configured")
+
+    api_url = "https://api.scrapingdog.com/instagram/profile"
+    params = {"api_key": SCRAPINGDOG_API_KEY, "username": username}
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(api_url, params=params, timeout=DEFAULT_TIMEOUT)
+            response.raise_for_status()
+            data = response.json() or {}
+        blob = _format_instagram_profile_blob(data)
+        if not blob:
+            logger.warning(f"Instagram Profile API returned unrecognized payload for @{username}")
+        return blob
+    except Exception as e:
+        logger.warning(f"Instagram Profile API failed for @{username}: {e}")
+        return ""
+
+
+async def scrapingdog_instagram(url: str) -> str:
+    """Route any instagram.com URL to the Profile API via username extraction.
+
+    Post / reel / story URLs cannot be deterministically mapped to a username
+    from the URL alone — return "" instead of falling through to generic
+    scrape (which is blocked for instagram.com on ScrapingDog and would just
+    return a "Contact us for IG scraping" stub that fails verbatim checks).
+    """
+    username = _extract_instagram_username(url)
+    if not username:
+        logger.info(
+            f"Could not extract Instagram username from {url[:100]} "
+            f"(post/reel/story URLs are unsupported); skipping fetch"
+        )
+        return ""
+    return await scrapingdog_instagram_profile(username)
 
 
 # =============================================================================

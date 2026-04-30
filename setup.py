@@ -42,7 +42,7 @@ requirements = [
     # HTTP and networking
     "requests>=2.31.0",
     "aiohttp>=3.9.5",
-    "aiodns>=3.5.0",
+    "aiodns>=4.0.0",
     "httpx>=0.28.1",
     
     # Data processing and ML

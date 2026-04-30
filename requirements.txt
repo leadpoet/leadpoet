@@ -1,5 +1,10 @@
 # Core Bittensor dependencies
 bittensor>=9.10,<10.0.0
+# Pin async-substrate-interface to work around a bittensor SDK bug in 1.7+
+# (per Yuma 2026-04-29). Without this pin, the validator's chain client
+# raises an error on cold start. Remove once upstream bittensor releases
+# a compatible substrate-interface bump.
+async-substrate-interface==1.6.4
 
 # HTTP and networking
 requests>=2.31.0

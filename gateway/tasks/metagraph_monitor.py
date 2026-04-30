@@ -26,6 +26,8 @@ from gateway.utils.block_publisher import BlockListener, BlockInfo
 
 logger = logging.getLogger(__name__)
 
+# bittensor v10: AsyncSubtensor async initialization fix applied upstream
+
 
 class MetagraphMonitor(BlockListener):
     """

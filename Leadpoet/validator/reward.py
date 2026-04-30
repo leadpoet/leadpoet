@@ -79,9 +79,8 @@ async def _get_current_block_async() -> int:
             import time
             
             # Use async call to get block (NO new instance created!)
-            # Access via .substrate interface (AsyncSubstrateInterface)
-            block_data = await _async_subtensor.substrate.get_block()
-            current_block = block_data["header"]["number"]
+            # In bittensor v10, use get_current_block() directly on AsyncSubtensor
+            current_block = await _async_subtensor.get_current_block()
             
             # Cache the successful result
             with _block_cache_lock:

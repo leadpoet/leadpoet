@@ -59,7 +59,9 @@ def inject_async_subtensor(async_subtensor):
     _async_subtensor = async_subtensor
     
     # Create sync subtensor for quick block queries (avoids WebSocket subscription conflicts)
-    _sync_subtensor = bt.subtensor(network=_async_subtensor.network)
+    # bittensor v10: AsyncSubtensor exposes .network attribute directly
+    _network = getattr(_async_subtensor, 'network', _async_subtensor.chain_endpoint if hasattr(_async_subtensor, 'chain_endpoint') else 'finney')
+    _sync_subtensor = bt.subtensor(network=_network)
     
     print(f"✅ AsyncSubtensor injected into epoch utils (network: {_async_subtensor.network})")
     print(f"✅ Sync subtensor created for block queries (avoids subscription conflicts)")

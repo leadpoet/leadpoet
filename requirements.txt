@@ -1,13 +1,21 @@
 # Core Bittensor dependencies
 bittensor>=9.10,<10.0.0
-# Pin async-substrate-interface to work around a bittensor SDK bug in 1.7+
-# (per Yuma 2026-04-29). Without this pin, the validator's chain client
-# raises an error on cold start.  Pinned to 1.6.1 — the highest pre-1.7
-# release that is compatible with Python 3.9 (which the validator's
-# Dockerfile uses; 1.6.2-1.6.4 require Python >=3.10 and break the
-# Docker build).  Remove once upstream bittensor releases a compatible
-# substrate-interface bump.
-async-substrate-interface==1.6.1
+# Pin async-substrate-interface below 1.7 to work around a bittensor SDK
+# bug in 1.7+ (per Yuma 2026-04-29).  Without this cap, the validator's
+# chain client raises an error on cold start.
+#
+# Range pin (rather than an exact ==1.6.4 the way Yuma quoted) because
+# the validator's Dockerfile currently uses python:3.9-slim, and async-
+# substrate-interface 1.6.2-1.6.4 require Python >=3.10 (1.6.1 is the
+# highest 3.9-compatible release).  pip resolves dynamically:
+#   - Python 3.9   → 1.6.1
+#   - Python 3.10+ → 1.6.4
+# So we get Yuma's recommended version automatically once we bump the
+# Docker base image; no requirements.txt change needed at that point.
+#
+# Remove the cap once upstream bittensor releases a substrate-interface
+# bump that's compatible with whatever they shipped in 1.7+.
+async-substrate-interface>=1.6.1,<1.7
 
 # HTTP and networking
 requests>=2.31.0

@@ -17,7 +17,14 @@ T_EPOCHS = int(os.getenv("FULFILLMENT_T_EPOCHS", "1"))
 T_SECONDS_OVERRIDE = int(os.getenv("FULFILLMENT_T_SECONDS", "0"))
 M_MINUTES = int(os.getenv("FULFILLMENT_M_MINUTES", "15"))
 BLOCK_TIME_SECONDS = 12
-Z_PERCENT = float(os.getenv("FULFILLMENT_Z_PERCENT", "0.001"))
+# Per-winning-lead emission share, paid every epoch for L_EPOCHS (30) epochs
+# after the lead is fulfilled.  Bumped 0.001 → 0.0015 on 2026-04-30 to lift
+# fulfillment incentives without touching the 20% sourcing share — co-founder
+# call ("plenty of emission overall even for more requests") in favor of a
+# per-lead bump over a pool-share rebalance.  Existing reward rows stay at
+# their original reward_pct until expiry; only newly-fulfilled leads use the
+# new rate, so the rollover is gradual (~36h to fully transition).
+Z_PERCENT = float(os.getenv("FULFILLMENT_Z_PERCENT", "0.0015"))
 L_EPOCHS = int(os.getenv("FULFILLMENT_L_EPOCHS", "30"))
 FULFILLMENT_MAX_CONCURRENT_SOURCES = int(os.getenv("FULFILLMENT_MAX_CONCURRENT_SOURCES", "2"))
 FULFILLMENT_OPENROUTER_API_KEY = os.getenv("FULFILLMENT_OPENROUTER_API_KEY", "")

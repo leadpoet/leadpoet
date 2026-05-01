@@ -239,6 +239,7 @@ start_container() {
       -e LEADPOET_WRAPPER_ACTIVE=1 \
       -e MEV_API_KEY="$MEV_API_KEY" \
       -e TRUELIST_API_KEY="$TRUELIST_API_KEY" \
+      -e ZEROBOUNCE_API_KEY="${ZEROBOUNCE_API_KEY:-}" \
       -e SCRAPINGDOG_API_KEY="$SCRAPINGDOG_API_KEY" \
       -e OPENROUTER_KEY="$OPENROUTER_KEY" \
       -e APIFY_API_TOKEN="${APIFY_API_TOKEN:-}" \
@@ -449,6 +450,7 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           -e APIFY_API_TOKEN="${APIFY_API_TOKEN:-}" \
           -e FULFILLMENT_USE_APIFY="${FULFILLMENT_USE_APIFY:-false}" \
           -e TRUELIST_API_KEY="${TRUELIST_API_KEY:-}" \
+          -e ZEROBOUNCE_API_KEY="${ZEROBOUNCE_API_KEY:-}" \
           $FF_PROXY_ARGS \
           leadpoet-validator:latest \
           --mode fulfillment_worker \

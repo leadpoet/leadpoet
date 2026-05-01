@@ -2,9 +2,12 @@
 bittensor>=9.10,<10.0.0
 # Pin async-substrate-interface to work around a bittensor SDK bug in 1.7+
 # (per Yuma 2026-04-29). Without this pin, the validator's chain client
-# raises an error on cold start. Remove once upstream bittensor releases
-# a compatible substrate-interface bump.
-async-substrate-interface==1.6.4
+# raises an error on cold start.  Pinned to 1.6.1 — the highest pre-1.7
+# release that is compatible with Python 3.9 (which the validator's
+# Dockerfile uses; 1.6.2-1.6.4 require Python >=3.10 and break the
+# Docker build).  Remove once upstream bittensor releases a compatible
+# substrate-interface bump.
+async-substrate-interface==1.6.1
 
 # HTTP and networking
 requests>=2.31.0

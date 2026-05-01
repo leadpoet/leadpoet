@@ -1169,6 +1169,95 @@ async def get_active_rewards(current_epoch: int):
 
 
 # ---------------------------------------------------------------
+# GET /fulfillment/leaderboard  — top fulfillment miners by lifetime wins
+# ---------------------------------------------------------------
+@fulfillment_router.get("/leaderboard")
+async def get_fulfillment_leaderboard(limit: int = 3):
+    """Return top fulfillment miners ranked by all-time `is_winner` count.
+
+    Used by the validator each weight-set cycle to identify the top-3
+    miners eligible for the lifetime leaderboard emission bonus
+    (LEADERBOARD_BONUS_SHARE in neurons/validator.py — split 2.5/1/0.5%
+    across rank 1, 2, 3).  Also intended to power a public dashboard.
+
+    Banned hotkeys are filtered out — we don't surface or pay them.
+    Ties are broken by total `reward_pct` (sums the partial-fulfillment
+    weighting) so a miner who won 10 leads at full weight ranks above
+    one who won 10 at half weight.
+
+    Args:
+        limit: max number of top miners to return (default 3, capped at 100).
+
+    Returns:
+        {
+          "leaderboard": [
+            {"rank": 1, "miner_hotkey": "5...", "wins": 87, "total_reward_pct": 4.32},
+            ...
+          ],
+          "computed_at": "2026-04-30T03:14:00Z",
+          "total_unique_winners": 12
+        }
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+
+    supabase = _get_supabase()
+
+    # Fetch all winning consensus rows (typical scale: low thousands —
+    # cheap.  If this ever balloons we move to a materialized view).
+    resp = supabase.table("fulfillment_score_consensus") \
+        .select("miner_hotkey, reward_pct") \
+        .eq("is_winner", True) \
+        .execute()
+
+    # Banned hotkeys to exclude
+    try:
+        banned_resp = supabase.table("banned_hotkeys") \
+            .select("hotkey") \
+            .execute()
+        banned_set = {r["hotkey"] for r in (banned_resp.data or [])}
+    except Exception:
+        banned_set = set()
+
+    # Aggregate per miner
+    per_miner: dict = {}
+    for row in (resp.data or []):
+        hk = row["miner_hotkey"]
+        if hk in banned_set:
+            continue
+        rec = per_miner.setdefault(hk, {"wins": 0, "total_reward_pct": 0.0})
+        rec["wins"] += 1
+        try:
+            rec["total_reward_pct"] += float(row.get("reward_pct") or 0.0)
+        except (TypeError, ValueError):
+            pass
+
+    # Rank: wins desc, total_reward_pct desc as tiebreaker
+    ranked = sorted(
+        per_miner.items(),
+        key=lambda kv: (-kv[1]["wins"], -kv[1]["total_reward_pct"]),
+    )[:limit]
+
+    leaderboard = [
+        {
+            "rank": i + 1,
+            "miner_hotkey": hk,
+            "wins": rec["wins"],
+            "total_reward_pct": round(rec["total_reward_pct"], 4),
+        }
+        for i, (hk, rec) in enumerate(ranked)
+    ]
+
+    return {
+        "leaderboard": leaderboard,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "total_unique_winners": len(per_miner),
+    }
+
+
+# ---------------------------------------------------------------
 # POST /fulfillment/ban/{hotkey}  — validator requests a ban
 # ---------------------------------------------------------------
 @fulfillment_router.post("/ban/{hotkey}")

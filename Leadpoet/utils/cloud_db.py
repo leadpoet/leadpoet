@@ -2641,6 +2641,57 @@ def gateway_submit_fulfillment_scores(
     return False
 
 
+def gateway_get_fulfillment_leaderboard(wallet: bt.wallet, limit: int = 3) -> List[Dict]:
+    """Fetch the top-N fulfillment miners ranked by lifetime wins.
+
+    Mirrors gateway_get_all_fulfillment_rewards' retry/backoff pattern.
+    Used by the validator each set_weights cycle to allocate the
+    LEADERBOARD_BONUS_SHARE (2.5% / 1% / 0.5% to ranks 1/2/3).  Banned
+    hotkeys are filtered server-side; an empty leaderboard list is a
+    legitimate response (e.g., very early subnet life with no winners
+    yet) and the caller should burn the entire bonus pool in that case.
+
+    Args:
+        wallet: validator wallet (unused for this endpoint, kept for
+            signature consistency with other gateway helpers).
+        limit: max number of top entries to return (default 3).
+
+    Returns:
+        Ordered list of {"rank", "miner_hotkey", "wins", "total_reward_pct"},
+        rank 1 first.  Empty list if no winners exist yet or every winner
+        is banned.
+
+    Raises:
+        RuntimeError when all retries are exhausted — caller should
+        treat this as "no leaderboard available, full bonus pool to burn"
+        rather than silently retry forever.
+    """
+    last_err: Optional[Exception] = None
+    backoffs = [1, 3]
+    for attempt in range(len(backoffs) + 1):
+        try:
+            response = requests.get(
+                f"{GATEWAY_URL}/fulfillment/leaderboard",
+                params={"limit": limit},
+                timeout=45,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("leaderboard", [])
+        except Exception as e:
+            last_err = e
+            if attempt < len(backoffs):
+                delay = backoffs[attempt]
+                bt.logging.warning(
+                    f"gateway_get_fulfillment_leaderboard attempt {attempt + 1} failed "
+                    f"({type(e).__name__}: {e}); retrying in {delay}s"
+                )
+                time.sleep(delay)
+    raise RuntimeError(
+        f"gateway_get_fulfillment_leaderboard failed after {len(backoffs) + 1} attempts: {last_err}"
+    )
+
+
 def gateway_get_all_fulfillment_rewards(wallet: bt.wallet, current_epoch: int) -> Dict[str, float]:
     """Fetch active fulfillment rewards grouped by miner hotkey.
 

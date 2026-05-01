@@ -3100,13 +3100,28 @@ class Validator(BaseValidatorNeuron):
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
             CHAMPION_SHARE = 0.05          # 5% to qualification model champion (when active)
-            FULFILLMENT_POOL_SHARE = 0.75  # 75% reserved for fulfillment (when enabled)
+            FULFILLMENT_POOL_SHARE = 0.71  # 71% reserved for per-epoch fulfillment rewards
+            # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30
+            # Top 3 fulfillment miners (all-time wins) get an emission bonus on
+            # top of any per-epoch rewards.  Carved from the prior 75%
+            # fulfillment pool (75 → 71 + 4 = same total reserved for fulfillment-
+            # related allocations, just split into per-epoch + lifetime
+            # leaderboard).  Gamifies sustained high performance — incumbent
+            # top-3 miners stay incentivized to keep winning, new miners can
+            # see a clear leaderboard to climb.
+            LEADERBOARD_BONUS_SHARE = 0.04   # 4% total: 2.5 + 1.0 + 0.5
+            LEADERBOARD_TOP1_PCT     = 0.025 # 2.5% to all-time #1
+            LEADERBOARD_TOP2_PCT     = 0.010 # 1.0% to all-time #2
+            LEADERBOARD_TOP3_PCT     = 0.005 # 0.5% to all-time #3
             # MAX_SOURCING_SHARE is computed dynamically:
             #   No champion, no fulfillment → 100% to sourcing miners
-            #   Both active → 20% sourcing, 5% champion, 75% fulfillment pool
+            #   Both active → 20% sourcing, 5% champion, 71% fulfillment pool, 4% leaderboard bonus
             # Updated 2026-04-27: shifted 15 points from sourcing → fulfillment
             # to incentivize miners to focus on the (more validator-cost-
             # intensive) fulfillment work.  Prior allocation was 35/5/60.
+            # Updated 2026-04-30: introduced 4% all-time leaderboard bonus
+            # carved from fulfillment pool (75 → 71 + 4).  Total fulfillment-
+            # flavored allocation unchanged at 75%.
             
             # CONFIGURABLE THRESHOLD: Approved leads needed in 30 epochs for full sourcing share
             # If network produces >= this many leads, full share is distributed
@@ -3245,9 +3260,25 @@ class Validator(BaseValidatorNeuron):
             # on this validator, or no miners earned rewards this epoch, the unused
             # portion flows to burn — it does NOT redistribute back to sourcing.
             ff_enabled = os.environ.get("ENABLE_FULFILLMENT", "false").lower() == "true"
-            MAX_SOURCING_SHARE = 1.0 - (CHAMPION_SHARE if champion_active else 0.0) - FULFILLMENT_POOL_SHARE
+            # MAX_SOURCING_SHARE is always 20% (1 - 5 champion - 71 ff pool - 4 leaderboard).
+            # The leaderboard carve is permanent regardless of ff_enabled — when
+            # fulfillment is disabled, the full 4% burns rather than rerouting
+            # to sourcing, mirroring how the 71% fulfillment pool itself burns.
+            # Keeps the incentive design clean: sourcing share is fixed.
+            MAX_SOURCING_SHARE = (
+                1.0
+                - (CHAMPION_SHARE if champion_active else 0.0)
+                - FULFILLMENT_POOL_SHARE
+                - LEADERBOARD_BONUS_SHARE
+            )
             effective_fulfillment_pool = FULFILLMENT_POOL_SHARE
-            print(f"\n   📊 SPLIT: Sourcing={MAX_SOURCING_SHARE*100:.0f}%, Champion={effective_champion_share*100:.0f}%, Fulfillment={effective_fulfillment_pool*100:.0f}%")
+            effective_leaderboard_share = LEADERBOARD_BONUS_SHARE if ff_enabled else 0.0
+            print(
+                f"\n   📊 SPLIT: Sourcing={MAX_SOURCING_SHARE*100:.0f}%, "
+                f"Champion={effective_champion_share*100:.0f}%, "
+                f"Fulfillment={effective_fulfillment_pool*100:.0f}%, "
+                f"Leaderboard={effective_leaderboard_share*100:.0f}%"
+            )
             print()
             
             # ═══════════════════════════════════════════════════════════════════
@@ -3355,21 +3386,93 @@ class Validator(BaseValidatorNeuron):
                 fulfillment_per_miner = {}
                 unused_fulfillment = effective_fulfillment_pool
                 print(f"      Fulfillment emission error (safe fallback — full pool to burn): {e}")
-            
+
+            # ════════════════════════════════════════════════════════════════
+            # FULFILLMENT LEADERBOARD BONUS (top-3 all-time fulfillment winners)
+            # Same safe-fallback pattern as fulfillment_share: any error here
+            # zeros the bonus and the full LEADERBOARD_BONUS_SHARE flows to
+            # burn — never silently redistributes to other allocations.
+            # Each rank's slot is independent: a deregistered #1 burns 2.5%
+            # but #2 and #3 still pay out, etc.
+            # ════════════════════════════════════════════════════════════════
+            leaderboard_per_uid: dict = {}      # {uid: pct_to_award}
+            # When ff is disabled, the entire LEADERBOARD_BONUS_SHARE flows to
+            # burn (mirroring how the fulfillment pool burns when disabled).
+            # When ff is enabled, the burn starts at 0 and grows for any
+            # rank slot that falls through (deregistered top-N or fewer than
+            # 3 lifetime winners).
+            leaderboard_burn = 0.0 if ff_enabled else LEADERBOARD_BONUS_SHARE
+            try:
+                if ff_enabled and effective_leaderboard_share > 0:
+                    from Leadpoet.utils.cloud_db import gateway_get_fulfillment_leaderboard
+                    leaders = gateway_get_fulfillment_leaderboard(self.wallet, limit=3)
+                    rank_pcts = [
+                        LEADERBOARD_TOP1_PCT,
+                        LEADERBOARD_TOP2_PCT,
+                        LEADERBOARD_TOP3_PCT,
+                    ]
+                    print(f"      Leaderboard top-3 (all-time fulfillment wins):")
+                    for rank_idx, rank_pct in enumerate(rank_pcts):
+                        if rank_idx >= len(leaders):
+                            # No miner at this rank — bonus burns
+                            leaderboard_burn += rank_pct
+                            print(
+                                f"        #{rank_idx+1}: <no miner> "
+                                f"→ {rank_pct*100:.2f}% BURN"
+                            )
+                            continue
+                        entry = leaders[rank_idx]
+                        hk = entry.get("miner_hotkey", "")
+                        wins = entry.get("wins", 0)
+                        if hk in self.metagraph.hotkeys:
+                            uid = self.metagraph.hotkeys.index(hk)
+                            leaderboard_per_uid[uid] = (
+                                leaderboard_per_uid.get(uid, 0.0) + rank_pct
+                            )
+                            print(
+                                f"        #{rank_idx+1}: UID {uid} ({hk[:14]}...) "
+                                f"wins={wins} → {rank_pct*100:.2f}%"
+                            )
+                        else:
+                            # Top-N miner has deregistered — bonus burns
+                            leaderboard_burn += rank_pct
+                            print(
+                                f"        #{rank_idx+1}: {hk[:14]}... wins={wins} "
+                                f"→ {rank_pct*100:.2f}% BURN (deregistered)"
+                            )
+            except Exception as e:
+                # Any failure: zero out bonuses, full leaderboard pool burns.
+                leaderboard_per_uid = {}
+                leaderboard_burn = effective_leaderboard_share
+                print(
+                    f"      Leaderboard emission error "
+                    f"(safe fallback — full {effective_leaderboard_share*100:.2f}% to burn): {e}"
+                )
+
             # Calculate total burn share
-            # Includes: threshold shortfall + deregistered miners + unused fulfillment pool
+            # Includes: threshold shortfall + deregistered miners + unused fulfillment pool +
+            # leaderboard slots that fell through (deregistered top-N or fewer than 3 winners)
             unused_sourcing_share = MAX_SOURCING_SHARE - effective_sourcing_share
-            total_burn_share = BASE_BURN_SHARE + unused_sourcing_share + dereg_burn + unused_fulfillment
+            total_burn_share = (
+                BASE_BURN_SHARE
+                + unused_sourcing_share
+                + dereg_burn
+                + unused_fulfillment
+                + leaderboard_burn
+            )
             
             print()
+            leaderboard_paid = sum(leaderboard_per_uid.values())
             print(f"   📊 WEIGHT DISTRIBUTION:")
             print(f"      Unused sourcing:      {unused_sourcing_share*100:.2f}% (threshold shortfall)")
             print(f"      Unused fulfillment:   {unused_fulfillment*100:.2f}%")
             print(f"      Deregistered miners:  {dereg_burn*100:.2f}%")
+            print(f"      Leaderboard burn:     {leaderboard_burn*100:.2f}%")
             print(f"      ─────────────────────────────")
             print(f"      Total burn → UID 0:   {total_burn_share*100:.2f}%")
             print(f"      Champion → UID {champion_uid if champion_uid else '?'}:     {effective_champion_share*100:.0f}%")
             print(f"      Fulfillment miners:   {fulfillment_share*100:.4f}%")
+            print(f"      Leaderboard top-3:    {leaderboard_paid*100:.2f}%")
             print(f"      Sourcing miners:      {effective_sourcing_to_miners*100:.2f}%")
             print()
             
@@ -3402,6 +3505,13 @@ class Validator(BaseValidatorNeuron):
                     else:
                         uid_weights[UID_ZERO] = uid_weights.get(UID_ZERO, 0) + ff_pct
                         print(f"   🎯 Fulfillment ({ff_hotkey[:12]}...): {ff_pct*100:.4f}% → BURN (deregistered)")
+
+            # Leaderboard top-3 bonuses (independent of per-epoch fulfillment rewards)
+            for lb_uid, lb_pct in leaderboard_per_uid.items():
+                if lb_uid not in uid_weights:
+                    uid_weights[lb_uid] = 0
+                uid_weights[lb_uid] += lb_pct
+                print(f"   🏆 Leaderboard bonus (UID {lb_uid}): {lb_pct*100:.2f}%")
             
             # ═══════════════════════════════════════════════════════════════════
             # DISTRIBUTE SOURCING SHARE BY REP SCORE

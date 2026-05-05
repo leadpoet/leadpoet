@@ -227,17 +227,10 @@ def _tier1_check(
     """
     Return failure_reason string if the lead fails any ICP check, else None.
     """
-    # ``icp.industry`` and ``icp.sub_industry`` are lists of taxonomy values.
-    # The Tier 1 gate matches a lead if its single industry/sub_industry
-    # tag is present in the corresponding ICP list (set-membership), so a
-    # client can target multiple verticals in one request (e.g.
-    # restaurants + gyms + medspas) without splitting it into N separate
-    # requests.  Empty list means "any industry accepted" — same semantics
-    # as the legacy empty-string sentinel.
-    #
-    # Defensive ``isinstance(..., list)`` guards: an old icp_details row
-    # that pre-dates the multi-value migration may still be a plain str
-    # if any code path bypasses the model's ``mode="before"`` validator.
+    # Industry / sub-industry: free pre-filter on miner's claimed values.
+    # Stage 5 can correct the industry within the top-3 classification,
+    # but a completely wrong claim (e.g., "Software" for a "Commerce and
+    # Shopping" ICP) should be caught here without spending API calls.
     if icp.industry:
         allowed_inds = icp.industry if isinstance(icp.industry, list) else [icp.industry]
         if lead.industry not in allowed_inds:
@@ -411,6 +404,10 @@ async def score_fulfillment_lead(
         # --- Company verification (always uses ScrapingDog LinkedIn) ---
         s5_passed, s5_rejection = await fulfillment_company_verification(
             validator_dict, scrapingdog_key, openrouter_key,
+            icp_prompt=icp.prompt,
+            icp_product_service=icp.product_service,
+            icp_industry=icp.industry or [],
+            icp_sub_industry=icp.sub_industry or [],
         )
         if not s5_passed:
             reason = s5_rejection.get("check_name", "fulfillment_company_failed") if s5_rejection else "fulfillment_company_failed"

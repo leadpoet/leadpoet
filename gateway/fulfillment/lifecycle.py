@@ -913,7 +913,7 @@ async def _resolve_chain_topk(
         # may have produced multiple consensus rows from tied miners.  We
         # surface the tied set so reward_pct is split correctly.
         tied = supabase.table("fulfillment_score_consensus") \
-            .select("submission_id, lead_id, miner_hotkey, request_id") \
+            .select("submission_id, lead_id, miner_hotkey, request_id, intent_signal_mapping") \
             .eq("request_id", r["request_id"]) \
             .eq("lead_id", r["lead_id"]) \
             .execute()

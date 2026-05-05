@@ -34,13 +34,22 @@ from validator_models.stage5_verification import (
 
 SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY", "")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
+APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "")
 
 _SD_LINKEDIN_URL = "https://api.scrapingdog.com/linkedin"
+_SD_GOOGLE_URL = "https://api.scrapingdog.com/google"
 _SD_TIMEOUT_S = 30
 _MAX_RETRIES = 2
 
+_APIFY_COMPANY_ACTOR = "harvestapi~linkedin-company"
+_APIFY_COMPANY_ENDPOINT = (
+    f"https://api.apify.com/v2/acts/{_APIFY_COMPANY_ACTOR}/run-sync-get-dataset-items"
+)
+_APIFY_TIMEOUT_S = 120
+
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _LOCATION_MODEL = "google/gemini-2.5-flash-lite"
+_ICP_FIT_MODEL = "google/gemini-2.5-flash"
 
 _HQ_LOCATION_PROMPT = (
     'Miner claims company HQ: city="{m_city}", state="{m_state}", country="{m_country}"\n'
@@ -52,6 +61,24 @@ _HQ_LOCATION_PROMPT = (
     '- If LinkedIn shows a city, the miner must also provide a city.\n'
     '- For non-US companies, state is not required to match — only city and country.\n'
     'Return JSON only: {{"valid": true/false, "match": true/false}}'
+)
+
+_ICP_BUYER_FIT_PROMPT = (
+    'The BUYER is selling: "{product_service}"\n\n'
+    'The BUYER\'s ideal customer profile:\n'
+    '"{icp_prompt}"\n\n'
+    'Target Industry: "{target_industry}"\n'
+    'Target Sub-Industry: "{target_sub_industry}"\n\n'
+    'Company being evaluated:\n'
+    'Name: "{company_name}"\n'
+    'Description: "{description}"\n'
+    'LinkedIn Industry: "{linkedin_industry}"\n\n'
+    'Does this company match the BUYER\'s ideal customer profile?\n'
+    'Consider:\n'
+    '- Is this company a potential CUSTOMER for what the buyer sells?\n'
+    '- Or is it a PROVIDER of the same service as the buyer (competitor/peer)?\n'
+    '- A competitor that sells the same product/service as the buyer is NOT a match.\n\n'
+    'Return JSON only: {{"match": true/false, "reason": "one sentence explanation"}}'
 )
 
 
@@ -119,6 +146,165 @@ async def _fetch_sd_company(slug: str, api_key: str) -> Optional[dict]:
                 continue
             return None
     return None
+
+
+async def _gse_company_slug_exists(slug: str, sd_key: str) -> bool:
+    """Check if a LinkedIn company slug exists via ScrapingDog Google Search.
+
+    Searches ``site:linkedin.com/company/{slug}`` and returns True if any
+    result URL contains the slug.  Used to confirm a company page is real
+    before falling back to Apify when the direct SD fetch fails.
+    """
+    query = f"site:linkedin.com/company/{slug}"
+    timeout = aiohttp.ClientTimeout(total=15)
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(_SD_GOOGLE_URL, params={
+                    "api_key": sd_key, "query": query, "results": 5,
+                }) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        results = data.get("organic_results", [])
+                        for r in results:
+                            link = (r.get("link") or "").lower()
+                            if f"/company/{slug}" in link:
+                                return True
+                        return False
+                    elif resp.status == 429 and attempt < _MAX_RETRIES:
+                        await asyncio.sleep(3 * (attempt + 1))
+                        continue
+                    else:
+                        if attempt < _MAX_RETRIES:
+                            await asyncio.sleep(1)
+                            continue
+                        return False
+        except Exception:
+            if attempt < _MAX_RETRIES:
+                await asyncio.sleep(1)
+                continue
+            return False
+    return False
+
+
+async def _fetch_apify_company(slug: str, api_token: str) -> Optional[dict]:
+    """Fetch company data from Apify LinkedIn company scraper.
+
+    Returns a dict with fields mapped to match the ScrapingDog response
+    format so downstream code doesn't need changes.
+    """
+    company_url = f"https://www.linkedin.com/company/{slug}"
+    payload = {
+        "companies": [company_url],
+    }
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+    timeout = aiohttp.ClientTimeout(total=_APIFY_TIMEOUT_S)
+
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    _APIFY_COMPANY_ENDPOINT, json=payload, headers=headers,
+                ) as resp:
+                    if resp.status in (200, 201):
+                        data = await resp.json()
+                        if isinstance(data, list) and data:
+                            raw = data[0]
+                            # Map Apify fields to ScrapingDog format
+                            return _map_apify_to_sd_format(raw, slug)
+                        return None
+                    elif resp.status == 429 and attempt < _MAX_RETRIES:
+                        print(f"   ⚠️ Apify company rate limited, retrying ({attempt + 1}/{_MAX_RETRIES})...")
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    else:
+                        print(f"   ❌ Apify company HTTP {resp.status}")
+                        if attempt < _MAX_RETRIES:
+                            await asyncio.sleep(1)
+                            continue
+                        return None
+        except Exception as e:
+            print(f"   ❌ Apify company fetch error: {e}")
+            if attempt < _MAX_RETRIES:
+                await asyncio.sleep(1)
+                continue
+            return None
+    return None
+
+
+def _map_apify_to_sd_format(apify_data: dict, slug: str) -> dict:
+    """Map Apify company scraper response to ScrapingDog field names.
+
+    Apify (harvestapi~linkedin-company) fields:
+      name, description, tagline, website, employeeCount,
+      employeeCountRange, locations, industries, specialities,
+      id, universalName, phone
+
+    ScrapingDog fields used downstream:
+      company_name, company_size, headquarters, website, about,
+      tagline, specialties, industry, locations, linkedin_internal_id,
+      universal_name_id
+    """
+    # Find HQ from locations array
+    hq_str = ""
+    sd_locations = []
+    for loc in apify_data.get("locations", []):
+        parsed = loc.get("parsed", {})
+        is_hq = loc.get("headquarter", False)
+        address_line = parsed.get("text", "")
+        if not address_line:
+            parts = [loc.get("city", ""), loc.get("geographicArea", ""), loc.get("country", "")]
+            address_line = ", ".join(p for p in parts if p)
+        sd_locations.append({
+            "is_hq": is_hq,
+            "office_address_line_2": address_line,
+        })
+        if is_hq:
+            hq_str = address_line
+
+    # If no location marked as HQ, use the first one
+    if not hq_str and sd_locations:
+        hq_str = sd_locations[0].get("office_address_line_2", "")
+
+    # Employee count: Apify returns int (234) and range dict ({start:201, end:500})
+    # SD returns a string like "201-500 employees"
+    emp_range = apify_data.get("employeeCountRange", {})
+    if emp_range and emp_range.get("start"):
+        end = emp_range.get("end")
+        if end:
+            company_size = f"{emp_range['start']}-{end}"
+        else:
+            company_size = f"{emp_range['start']}+"
+    elif apify_data.get("employeeCount"):
+        company_size = str(apify_data["employeeCount"])
+    else:
+        company_size = ""
+
+    # Industry: Apify returns list of dicts [{id, name, urn, title}]
+    # SD returns a single string
+    industries = apify_data.get("industries", [])
+    industry_str = industries[0].get("name", "") if industries else ""
+
+    # Specialities: Apify returns list of strings
+    specialities = apify_data.get("specialities", [])
+    specialties_str = ", ".join(specialities) if isinstance(specialities, list) else str(specialities or "")
+
+    return {
+        "company_name": apify_data.get("name", ""),
+        "company_size": company_size,
+        "headquarters": hq_str,
+        "website": apify_data.get("website", ""),
+        "about": apify_data.get("description", ""),
+        "tagline": apify_data.get("tagline", ""),
+        "specialties": specialties_str,
+        "industry": industry_str,
+        "locations": sd_locations,
+        "linkedin_internal_id": str(apify_data.get("id", "")),
+        "universal_name_id": apify_data.get("universalName", slug),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +464,132 @@ async def _llm_hq_match(
         return False
 
 
+async def _llm_icp_buyer_fit(
+    company_name: str,
+    extracted_description: str,
+    linkedin_industry: str,
+    icp_prompt: str,
+    icp_product_service: str,
+    icp_industry: list,
+    icp_sub_industry: list,
+    openrouter_key: str,
+) -> Tuple[bool, str]:
+    """Check if company matches the ICP buyer profile.
+
+    Returns (matches, reason).  On LLM failure returns (False, reason)
+    so that unverified leads never slip through.
+    """
+    # Escape curly braces in free-text fields to prevent .format() errors
+    # (client ICP prompt or LinkedIn descriptions may contain { or })
+    safe_icp = icp_prompt[:3000].replace("{", "{{").replace("}", "}}")
+    safe_ps = (icp_product_service or "(not specified)").replace("{", "{{").replace("}", "}}")
+    safe_desc = extracted_description[:1500].replace("{", "{{").replace("}", "}}")
+    safe_name = company_name.replace("{", "{{").replace("}", "}}")
+    safe_ind = (linkedin_industry or "unknown").replace("{", "{{").replace("}", "}}")
+    target_ind_str = ", ".join(icp_industry) if icp_industry else "any"
+    target_sub_str = ", ".join(icp_sub_industry) if icp_sub_industry else "any"
+    safe_target_ind = target_ind_str.replace("{", "{{").replace("}", "}}")
+    safe_target_sub = target_sub_str.replace("{", "{{").replace("}", "}}")
+
+    prompt = _ICP_BUYER_FIT_PROMPT.format(
+        product_service=safe_ps,
+        icp_prompt=safe_icp,
+        target_industry=safe_target_ind,
+        target_sub_industry=safe_target_sub,
+        company_name=safe_name,
+        description=safe_desc,
+        linkedin_industry=safe_ind,
+    )
+
+    for attempt in range(3):
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    _OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": _ICP_FIT_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 100,
+                        "temperature": 0,
+                    },
+                ) as resp:
+                    if resp.status == 429 and attempt < 2:
+                        print(f"   ⚠️ ICP buyer-fit LLM rate limited, retrying ({attempt + 1}/3)...")
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    if resp.status != 200:
+                        if attempt < 2:
+                            print(f"   ⚠️ ICP buyer-fit LLM HTTP {resp.status}, retrying ({attempt + 1}/3)...")
+                            await asyncio.sleep(1)
+                            continue
+                        print(f"   ❌ ICP buyer-fit LLM HTTP {resp.status} after 3 attempts")
+                        return False, "icp_buyer_fit_check_failed"
+                    body = await resp.json()
+                    content = body["choices"][0]["message"]["content"]
+                    match = re.search(r"\{[^}]+\}", content)
+                    if match:
+                        result = json.loads(match.group())
+                        is_match = bool(result.get("match", False))
+                        reason = str(result.get("reason", ""))
+                        return is_match, reason
+                    if attempt < 2:
+                        print(f"   ⚠️ ICP buyer-fit LLM response not valid JSON, retrying ({attempt + 1}/3)...")
+                        continue
+                    print(f"   ❌ ICP buyer-fit LLM returned unparseable response after 3 attempts")
+                    return False, "icp_buyer_fit_check_failed"
+        except Exception as e:
+            if attempt < 2:
+                print(f"   ⚠️ ICP buyer-fit LLM error: {e}, retrying ({attempt + 1}/3)...")
+                await asyncio.sleep(1)
+                continue
+            print(f"   ❌ ICP buyer-fit LLM error after 3 attempts: {e}")
+            return False, "icp_buyer_fit_check_failed"
+    return False, "icp_buyer_fit_check_failed"
+
+
+def _pick_best_industry(
+    classifications: list,
+    icp_industry: list,
+    icp_sub_industry: list,
+) -> Tuple[str, str]:
+    """Pick the best industry/sub_industry from top 3 classifications.
+
+    Priority:
+      1. Pair matching both ICP industry AND sub_industry
+      2. Pair matching ICP industry (any sub_industry)
+      3. Classification match 1 (highest confidence)
+
+    ``icp_industry`` and ``icp_sub_industry`` are lists of strings.
+    """
+    if not classifications:
+        return "", ""
+
+    icp_inds = {i.strip().lower() for i in (icp_industry or []) if i.strip()}
+    icp_subs = {s.strip().lower() for s in (icp_sub_industry or []) if s.strip()}
+
+    # Priority 1: exact match on both industry + sub_industry
+    for c in classifications:
+        ind = c.get("industry", "")
+        sub = c.get("sub_industry", "")
+        if ind and sub and ind.lower() in icp_inds and sub.lower() in icp_subs:
+            return ind, sub
+
+    # Priority 2: match on industry only
+    for c in classifications:
+        ind = c.get("industry", "")
+        sub = c.get("sub_industry", "")
+        if ind and ind.lower() in icp_inds:
+            return ind, sub
+
+    # Priority 3: highest confidence (first in list)
+    return classifications[0].get("industry", ""), classifications[0].get("sub_industry", "")
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -286,6 +598,10 @@ async def fulfillment_company_verification(
     lead: dict,
     scrapingdog_key: str = "",
     openrouter_key: str = "",
+    icp_prompt: str = "",
+    icp_product_service: str = "",
+    icp_industry: list = None,
+    icp_sub_industry: list = None,
 ) -> Tuple[bool, Optional[dict]]:
     """
     Fulfillment-specific Stage 5 company verification using ScrapingDog LinkedIn.
@@ -322,11 +638,34 @@ async def fulfillment_company_verification(
     print(f"   🔍 Fulfillment Stage 5: Fetching company '{company}' (slug: {slug})")
     sd_data = await _fetch_sd_company(slug, sd_key)
     if not sd_data:
-        return False, _rejection(
-            "fulfillment_company_fetch_failed",
-            f"Failed to fetch company data from ScrapingDog LinkedIn after {_MAX_RETRIES + 1} attempts",
-            ["company_linkedin"],
-        )
+        # SD LinkedIn fetch failed — verify slug exists via GSE before Apify fallback
+        print(f"   ⚠️ ScrapingDog fetch failed, checking if slug exists via GSE...")
+        slug_exists = await _gse_company_slug_exists(slug, sd_key)
+        if not slug_exists:
+            print(f"   ❌ GSE confirms company slug '{slug}' does not exist on LinkedIn")
+            return False, _rejection(
+                "fulfillment_company_not_found",
+                f"Company LinkedIn page '{slug}' not found (SD fetch failed, GSE confirms no match)",
+                ["company_linkedin"],
+            )
+        # Slug exists but SD couldn't fetch — try Apify
+        apify_key = APIFY_API_TOKEN
+        if not apify_key:
+            print(f"   ❌ SD fetch failed, slug exists but no APIFY_API_TOKEN for fallback")
+            return False, _rejection(
+                "fulfillment_company_fetch_failed",
+                f"ScrapingDog fetch failed and no Apify token configured for fallback",
+                ["company_linkedin"],
+            )
+        print(f"   🔄 Slug exists on LinkedIn — falling back to Apify company scraper")
+        sd_data = await _fetch_apify_company(slug, apify_key)
+        if not sd_data:
+            print(f"   ❌ Apify company fetch also failed for slug '{slug}'")
+            return False, _rejection(
+                "fulfillment_company_fetch_failed",
+                f"Both ScrapingDog and Apify failed to fetch company data for '{slug}'",
+                ["company_linkedin"],
+            )
 
     # Store company IDs for person verification (Stage 4) to use
     lead["_sd_linkedin_internal_id"] = str(sd_data.get("linkedin_internal_id", ""))
@@ -444,8 +783,11 @@ async def fulfillment_company_verification(
         # Fallback: scrape company website
         print(f"   ⚠️ No LinkedIn description — falling back to website scrape")
         if lead_website:
-            website_content = await _scrape_website_content(lead_website)
-            extracted_content = website_content.get("combined_description", "")
+            try:
+                website_content = await _scrape_website_content(lead_website)
+                extracted_content = website_content.get("combined_description", "")
+            except Exception as e:
+                print(f"   ⚠️ Website scrape failed: {e}")
 
     if not extracted_content:
         print(f"   ❌ No description available for classification")
@@ -455,11 +797,37 @@ async def fulfillment_company_verification(
             ["description"],
         )
 
+    # ---- 5a. ICP Buyer-Fit Check ----
+    # Before running the expensive classification pipeline, verify that the
+    # company actually matches the ICP buyer profile.  Catches competitors
+    # (companies that SELL the same service the client sells) and companies
+    # that are simply the wrong type for the ICP.
+    sd_industry = sd_data.get("industry", "")
+    if icp_prompt or icp_product_service:
+        buyer_fit, fit_reason = await _llm_icp_buyer_fit(
+            company_name=company,
+            extracted_description=extracted_content,
+            linkedin_industry=sd_industry,
+            icp_prompt=icp_prompt,
+            icp_product_service=icp_product_service,
+            icp_industry=icp_industry,
+            icp_sub_industry=icp_sub_industry,
+            openrouter_key=or_key,
+        )
+        if not buyer_fit:
+            print(f"   ❌ ICP buyer-fit mismatch: {fit_reason}")
+            return False, _rejection(
+                "fulfillment_company_icp_mismatch",
+                f"Company does not match ICP buyer profile: {fit_reason}",
+                ["description", "industry"],
+            )
+        print(f"   ✅ ICP buyer-fit match: {fit_reason}")
+
+    # ---- 5b. Industry classification ----
     # Run 3-stage classification pipeline
     claimed_description = lead.get("description", "")
     claimed_industry = lead.get("industry", "")
     claimed_sub_industry = lead.get("sub_industry", "")
-    sd_industry = sd_data.get("industry", "")
 
     # Use claimed_description or extracted_content as miner_description
     miner_desc = claimed_description or extracted_content
@@ -482,17 +850,21 @@ async def fulfillment_company_verification(
                 sub_industry_top3[f"sub_industry_match{i}"] = c["sub_industry"]
             print(f"   ✅ Classification: {[(c['industry'], c['sub_industry']) for c in classifications[:3]]}")
 
-            # Reject if miner's claimed pair not in top 3
-            if claimed_industry and claimed_sub_industry:
-                claimed_pair = (claimed_industry.lower(), claimed_sub_industry.lower())
-                top3_pairs = [(c["industry"].lower(), c["sub_industry"].lower()) for c in classifications[:3]]
-                if claimed_pair not in top3_pairs:
-                    print(f"   ❌ Miner claimed ({claimed_industry}, {claimed_sub_industry}) not in top 3: {top3_pairs}")
-                    return False, _rejection(
-                        "fulfillment_company_industry_mismatch",
-                        f"Claimed industry/sub_industry not in top 3 classifications",
-                        ["industry", "sub_industry"],
-                    )
+            # Pick the best-fit industry pair from top 3 that aligns
+            # with the ICP's target industry.  If the miner's claim matches,
+            # great — otherwise override it with the corrected pair.
+            best_ind, best_sub = _pick_best_industry(
+                classifications[:3], icp_industry, icp_sub_industry,
+            )
+            if best_ind and best_sub:
+                old_pair = (claimed_industry, claimed_sub_industry)
+                new_pair = (best_ind, best_sub)
+                if old_pair != new_pair:
+                    print(f"   🔄 Industry corrected: {old_pair} → {new_pair}")
+                else:
+                    print(f"   ✅ Industry confirmed: {new_pair}")
+                lead["industry"] = best_ind
+                lead["sub_industry"] = best_sub
 
             # Store for company table
             lead["_insert_new_company"] = True

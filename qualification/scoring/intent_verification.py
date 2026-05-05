@@ -919,7 +919,7 @@ _SOURCE_DOMAIN_ALLOWLIST: Dict[str, frozenset] = {
         "crunchbase.com", "news.crunchbase.com",
         "zdnet.com", "cnet.com", "siliconangle.com",
         "marketwatch.com", "thestreet.com", "seekingalpha.com",
-        "benzinga.com", "investopedia.com", "medium.com",
+        "benzinga.com", "investopedia.com",
         "theinformation.com", "www.theinformation.com",
         "protocol.com",
         "arstechnica.com",

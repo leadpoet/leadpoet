@@ -49,7 +49,7 @@ _APIFY_TIMEOUT_S = 120
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _LOCATION_MODEL = "google/gemini-2.5-flash-lite"
-_ICP_FIT_MODEL = "google/gemini-2.5-flash"
+_ICP_FIT_MODEL = "perplexity/sonar"
 
 _HQ_LOCATION_PROMPT = (
     'Miner claims company HQ: city="{m_city}", state="{m_state}", country="{m_country}"\n'
@@ -71,11 +71,14 @@ _ICP_BUYER_FIT_PROMPT = (
     'Target Sub-Industry: "{target_sub_industry}"\n\n'
     'Company being evaluated:\n'
     'Name: "{company_name}"\n'
-    'Description: "{description}"\n'
-    'LinkedIn Industry: "{linkedin_industry}"\n\n'
-    'Does this company fit the BUYER\'s ideal customer profile?\n'
-    'Rules:\n'
-    '1. Match the company against the SPECIFIC criteria in the ICP — industry verticals, '
+    'Website: "{website}"\n'
+    'LinkedIn Description: "{description}"\n'
+    'LinkedIn Industry: "{linkedin_industry}"\n'
+    'Employee Count: "{employee_count}"\n\n'
+    'Search the web for additional details about what {company_name} actually '
+    'does, who their customers are, and what products/services they sell. '
+    'Combine with the LinkedIn data above to evaluate:\n\n'
+    '1. Does this company match the SPECIFIC criteria in the ICP — industry verticals, '
     'company type, size signals, and any other requirements stated.\n'
     '2. Reject if the company is a DIRECT COMPETITOR that sells the same specific '
     'product/service as the buyer. Example: if the buyer sells 3PL fulfillment and '
@@ -479,6 +482,8 @@ async def _llm_icp_buyer_fit(
     icp_industry: list,
     icp_sub_industry: list,
     openrouter_key: str,
+    website: str = "",
+    employee_count: str = "",
 ) -> Tuple[bool, str]:
     """Check if company matches the ICP buyer profile.
 
@@ -496,6 +501,8 @@ async def _llm_icp_buyer_fit(
     target_sub_str = ", ".join(icp_sub_industry) if icp_sub_industry else "any"
     safe_target_ind = target_ind_str.replace("{", "{{").replace("}", "}}")
     safe_target_sub = target_sub_str.replace("{", "{{").replace("}", "}}")
+    safe_website = (website or "unknown").replace("{", "{{").replace("}", "}}")
+    safe_emp_count = (employee_count or "unknown").replace("{", "{{").replace("}", "}}")
 
     prompt = _ICP_BUYER_FIT_PROMPT.format(
         product_service=safe_ps,
@@ -503,13 +510,15 @@ async def _llm_icp_buyer_fit(
         target_industry=safe_target_ind,
         target_sub_industry=safe_target_sub,
         company_name=safe_name,
+        website=safe_website,
         description=safe_desc,
         linkedin_industry=safe_ind,
+        employee_count=safe_emp_count,
     )
 
     for attempt in range(3):
         try:
-            timeout = aiohttp.ClientTimeout(total=30)
+            timeout = aiohttp.ClientTimeout(total=45)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     _OPENROUTER_URL,
@@ -520,7 +529,7 @@ async def _llm_icp_buyer_fit(
                     json={
                         "model": _ICP_FIT_MODEL,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 100,
+                        "max_tokens": 150,
                         "temperature": 0,
                     },
                 ) as resp:
@@ -819,6 +828,8 @@ async def fulfillment_company_verification(
             icp_industry=icp_industry,
             icp_sub_industry=icp_sub_industry,
             openrouter_key=or_key,
+            website=lead.get("website", "") or lead.get("company_website", ""),
+            employee_count=sd_data.get("company_size", ""),
         )
         if not buyer_fit:
             print(f"   ❌ ICP buyer-fit mismatch: {fit_reason}")

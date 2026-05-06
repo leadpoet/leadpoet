@@ -3369,7 +3369,7 @@ class Validator(BaseValidatorNeuron):
             # ════════════════════════════════════════════════════════════════
             fulfillment_share = 0.0
             fulfillment_per_miner = {}
-            unused_fulfillment = 0.0
+            unused_fulfillment = 0.0 if ff_enabled else effective_fulfillment_pool
             try:
                 if ff_enabled:
                     fulfillment_share, fulfillment_per_miner = self._get_fulfillment_emission_share(

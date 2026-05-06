@@ -61,10 +61,13 @@ def _normalize_company(name: str) -> str:
 _ROLE_PROMPT = (
     'LinkedIn shows current role: "{actual_role}" at "{company}".\n'
     'Miner claims role: "{claimed_role}".\n\n'
+    'IMPORTANT: Compare ONLY the two title strings. Do NOT use your knowledge '
+    'about the company or who actually holds this role.\n\n'
     'Are these the SAME job title? Answer true if:\n'
     '- Only formatting differs (Sr./Senior, VP/Vice President, &/and, |/-, ®, punctuation)\n'
     '- One is a shorter version of the other (e.g. "Director, Marketing | Americas" = "Director, Marketing")\n'
     '- Title with extra qualifier matches base title (e.g. "Manufacturing Engineer - Advanced" = "Manufacturing Engineer")\n'
+    '- A combined title contains the claimed role (e.g. "Co-Founder & CEO" = "CEO", "Co-Founder/CTO" = "CTO")\n'
     '- Owner/Founder at the same small company\n'
     'Answer false if:\n'
     '- Different job function (e.g. Engineer vs Sales, Planner vs Student)\n'
@@ -406,6 +409,19 @@ async def _llm_role_match(
     actual_role: str, claimed_role: str, company: str, openrouter_key: str,
 ) -> bool:
     """LLM role comparison. Called when exact match fails."""
+    a = actual_role.strip().lower()
+    c = claimed_role.strip().lower()
+    if a == c:
+        return True
+    # Check if claimed role is contained in a combined title
+    # e.g. "Co-Founder & CEO" contains "CEO", "President & COO" contains "COO"
+    for sep in (" & ", " and ", "/", " | ", ", "):
+        parts = [p.strip() for p in a.split(sep)]
+        if c in parts:
+            return True
+        parts_c = [p.strip() for p in c.split(sep)]
+        if a in parts_c:
+            return True
     if not openrouter_key:
         print("   ⚠️ No OpenRouter key for role LLM")
         return False

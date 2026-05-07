@@ -451,6 +451,7 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           -e FULFILLMENT_USE_APIFY="${FULFILLMENT_USE_APIFY:-false}" \
           -e TRUELIST_API_KEY="${TRUELIST_API_KEY:-}" \
           -e ZEROBOUNCE_API_KEY="${ZEROBOUNCE_API_KEY:-}" \
+          -e FULFILLMENT_WEBSITE_TIMEOUT_S="${FULFILLMENT_WEBSITE_TIMEOUT_S:-30}" \
           $FF_PROXY_ARGS \
           leadpoet-validator:latest \
           --mode fulfillment_worker \

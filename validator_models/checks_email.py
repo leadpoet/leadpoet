@@ -1859,6 +1859,15 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
     Many enterprise sites (Intuit, 3M, etc.) block HEAD requests but work with GET.
     Uses browser User-Agent to avoid anti-bot blocking.
     Uses custom SSL context with broader cipher support for enterprise sites (Hartford, etc.)
+
+    Timeouts:
+      HEAD: fixed 10s (fast path; healthy sites should respond well within this).
+      GET fallback: ``FULFILLMENT_WEBSITE_TIMEOUT_S`` env var, default 10s. The
+        validator deploy sets this to 30s in fulfillment-worker containers
+        (qualification workers leave it unset → 10s) so slow / cold-start
+        client sites that 10s used to kill have a chance to resolve, while
+        the qualification scoring path stays unchanged.  Worst case for a
+        truly dead site is HEAD(10s) + GET(timeout_s) = 20s/40s respectively.
     """
     import ssl
 
@@ -1866,6 +1875,11 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
         return False, "No domain provided"
     if not company_domain.startswith(("http://", "https://")):
         company_domain = f"https://{company_domain}"
+
+    try:
+        get_timeout_s = int(os.getenv("FULFILLMENT_WEBSITE_TIMEOUT_S", "10"))
+    except ValueError:
+        get_timeout_s = 10
 
     # Status codes that indicate website exists (pass immediately)
     # 429 = Too Many Requests (rate limiting/bot protection) - proves site exists, just blocking automated requests
@@ -1911,7 +1925,7 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
             # HEAD failed or returned non-pass status - try GET as fallback
             # Many enterprise sites (Intuit, 3M) block HEAD but allow GET
             try:
-                async with session.get(company_domain, timeout=10, allow_redirects=True) as response:
+                async with session.get(company_domain, timeout=get_timeout_s, allow_redirects=True) as response:
                     get_status = response.status
                     if get_status in PASS_STATUS_CODES:
                         return True, f"Website accessible (GET fallback: {get_status})"

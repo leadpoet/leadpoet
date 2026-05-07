@@ -271,8 +271,15 @@ def _tier1_check(
 
     if icp.target_seniority:
         try:
+            from gateway.qualification.models import Seniority
             lead_sen = lead_output.seniority.value if hasattr(lead_output.seniority, "value") else str(lead_output.seniority)
-            if lead_sen.lower() != icp.target_seniority.lower():
+            # Normalize ICP target_seniority through the same alias mapping
+            # so "Owner" → "C-Suite", matching what miners resolve to
+            try:
+                target_sen = Seniority(icp.target_seniority).value
+            except (ValueError, KeyError):
+                target_sen = icp.target_seniority
+            if lead_sen.lower() != target_sen.lower():
                 return "seniority_mismatch"
         except Exception:
             return "seniority_mismatch"

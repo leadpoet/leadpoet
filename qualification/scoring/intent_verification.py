@@ -1755,30 +1755,49 @@ async def scrapingdog_x_profile_by_id(profile_id: str) -> str:
 
 async def scrapingdog_generic(url: str) -> str:
     """
-    Generic web scraping via ScrapingDog.
-    
-    ScrapingDog handles proxy rotation internally.
-    
+    Generic web scraping via ScrapingDog with smart JS fallback.
+
+    Tries static fetch first (1 credit). If content is too sparse
+    (< 200 chars of visible text), retries with JS rendering enabled
+    (5 credits). This handles JS-heavy SPAs (company websites) without
+    wasting credits on server-rendered pages (news sites, blogs).
+
     Args:
         url: URL to scrape
-    
+
     Returns:
         HTML content
     """
     if not SCRAPINGDOG_API_KEY:
         raise ValueError("SCRAPINGDOG_API_KEY not configured")
-    
+
     api_url = "https://api.scrapingdog.com/scrape"
     params = {
         "api_key": SCRAPINGDOG_API_KEY,
         "url": url,
         "dynamic": "false",
     }
-    
+
     async with httpx.AsyncClient() as client:
         response = await client.get(api_url, params=params, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
-        return response.text
+        content = response.text
+
+        # Check if static fetch returned enough visible text
+        # Strip HTML tags for a rough text length check
+        import re as _re
+        visible_text = _re.sub(r'<[^>]+>', ' ', content)
+        visible_text = ' '.join(visible_text.split())
+
+        if len(visible_text) < 200:
+            # Sparse content — likely a JS-heavy SPA, retry with rendering
+            logger.info(f"   🔄 Static fetch sparse ({len(visible_text)} chars), retrying with JS rendering: {url[:60]}")
+            params["dynamic"] = "true"
+            response = await client.get(api_url, params=params, timeout=30)
+            response.raise_for_status()
+            content = response.text
+
+        return content
 
 
 # =============================================================================

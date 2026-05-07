@@ -96,7 +96,7 @@ class Seniority(str, Enum):
     @classmethod
     def _missing_(cls, value: str):
         """Case-insensitive enum lookup for seniority.
-        
+
         Miners may submit 'c-suite', 'vp', 'individual contributor', etc.
         """
         if not isinstance(value, str):
@@ -108,6 +108,8 @@ class Seniority(str, Enum):
         aliases = {
             "c_suite": cls.C_SUITE, "csuite": cls.C_SUITE, "c suite": cls.C_SUITE,
             "exec": cls.C_SUITE, "executive": cls.C_SUITE,
+            "owner": cls.C_SUITE, "founder": cls.C_SUITE, "co-founder": cls.C_SUITE,
+            "co_founder": cls.C_SUITE, "cofounder": cls.C_SUITE, "proprietor": cls.C_SUITE,
             "vice president": cls.VP, "vice_president": cls.VP,
             "dir": cls.DIRECTOR,
             "mgr": cls.MANAGER,

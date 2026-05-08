@@ -28,8 +28,7 @@ from validator_models.stage5_verification import (
     _validate_name_match,
     _validate_size_match,
     _normalize_domain,
-    classify_company_industry,
-    _scrape_website_content,
+    _load_taxonomy_embeddings,
 )
 
 SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY", "")
@@ -49,6 +48,42 @@ _APIFY_TIMEOUT_S = 120
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _LOCATION_MODEL = "google/gemini-2.5-flash-lite"
+_VALIDATE_MODEL = "google/gemini-2.5-flash"
+
+_ENRICH_PROMPT = (
+    'What does "{company_name}" ({website}) do?\n\n'
+    'Known information:\n'
+    'LinkedIn Description: "{linkedin_description}"\n'
+    'LinkedIn Industry: "{linkedin_industry}"\n\n'
+    'Search the web for additional details about their products, services, '
+    'and target market. Provide a 2-3 sentence description.'
+)
+
+_VALIDATE_MATCH_PROMPT = (
+    'Company: "{company_name}"\n'
+    'Description: "{enriched_description}"\n'
+    'LinkedIn Industry: "{linkedin_industry}"\n'
+    'Miner Description: "{miner_description}"\n\n'
+    'ICP Target: {icp_target}\n\n'
+    '1. Does the miner description match what the company actually does? '
+    '(same type of business, ignore exact wording)\n'
+    '2. Does the company match any of the target entries above? '
+    'The LinkedIn industry field is the primary signal — if it does not '
+    'match any target industry, the company does not match.\n'
+    '{sub_industry_instruction}'
+    '\nIf industry_match is true, return the matched industry and sub-industry.\n\n'
+    'Return JSON only: {{"description_valid": true/false, "industry_match": true/false, '
+    '"matched_industry": "", "matched_sub_industry": "", "reason": "one sentence"}}'
+)
+
+_SUB_INDUSTRY_PICK_PROMPT = (
+    'Company: "{company_name}"\n'
+    'Description: "{enriched_description}"\n'
+    'Industry: "{matched_industry}"\n\n'
+    'Pick the most appropriate sub-industry from this list:\n'
+    '{sub_industry_options}\n\n'
+    'Return JSON only: {{"sub_industry": "the picked sub-industry"}}'
+)
 
 _HQ_LOCATION_PROMPT = (
     'Miner claims company HQ: city="{m_city}", state="{m_state}", country="{m_country}"\n'
@@ -445,42 +480,223 @@ async def _llm_hq_match(
         return False
 
 
-def _pick_best_industry(
-    classifications: list,
+async def _sonar_enrich(
+    company_name: str,
+    website: str,
+    linkedin_description: str,
+    linkedin_industry: str,
+    openrouter_key: str,
+) -> str:
+    """Enrich company description using Perplexity Sonar web search.
+
+    Returns enriched description string. On failure returns empty string.
+    """
+    safe_name = company_name.replace("{", "{{").replace("}", "}}")
+    safe_website = (website or "unknown").replace("{", "{{").replace("}", "}}")
+    safe_desc = (linkedin_description or "")[:1500].replace("{", "{{").replace("}", "}}")
+    safe_ind = (linkedin_industry or "unknown").replace("{", "{{").replace("}", "}}")
+
+    prompt = _ENRICH_PROMPT.format(
+        company_name=safe_name,
+        website=safe_website,
+        linkedin_description=safe_desc,
+        linkedin_industry=safe_ind,
+    )
+
+    for attempt in range(3):
+        try:
+            timeout = aiohttp.ClientTimeout(total=45)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    _OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "perplexity/sonar",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 200,
+                        "temperature": 0,
+                    },
+                ) as resp:
+                    if resp.status == 429 and attempt < 2:
+                        print(f"   ⚠️ Sonar enrich rate limited, retrying ({attempt + 1}/3)...")
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    if resp.status != 200:
+                        if attempt < 2:
+                            print(f"   ⚠️ Sonar enrich HTTP {resp.status}, retrying ({attempt + 1}/3)...")
+                            await asyncio.sleep(1)
+                            continue
+                        print(f"   ❌ Sonar enrich HTTP {resp.status} after 3 attempts")
+                        return ""
+                    body = await resp.json()
+                    content = body["choices"][0]["message"]["content"]
+                    return content.strip()
+        except Exception as e:
+            if attempt < 2:
+                print(f"   ⚠️ Sonar enrich error: {e}, retrying ({attempt + 1}/3)...")
+                await asyncio.sleep(1)
+                continue
+            print(f"   ❌ Sonar enrich error after 3 attempts: {e}")
+            return ""
+    return ""
+
+
+async def _gemini_validate_and_match(
+    company_name: str,
+    enriched_description: str,
+    linkedin_industry: str,
+    miner_description: str,
     icp_industry: list,
     icp_sub_industry: list,
-) -> Tuple[str, str]:
-    """Pick the best industry/sub_industry from top 3 classifications.
+    openrouter_key: str,
+) -> dict:
+    """Validate miner description + match industry using Gemini.
 
-    Priority:
-      1. Pair matching both ICP industry AND sub_industry
-      2. Pair matching ICP industry (any sub_industry)
-      3. Classification match 1 (highest confidence)
-
-    ``icp_industry`` and ``icp_sub_industry`` are lists of strings.
+    Returns dict with description_valid, industry_match, matched_industry,
+    matched_sub_industry, reason. On failure returns None.
     """
-    if not classifications:
-        return "", ""
+    safe_name = company_name.replace("{", "{{").replace("}", "}}")
+    safe_enriched = enriched_description[:1500].replace("{", "{{").replace("}", "}}")
+    safe_ind = (linkedin_industry or "unknown").replace("{", "{{").replace("}", "}}")
+    safe_miner = miner_description[:500].replace("{", "{{").replace("}", "}}")
 
-    icp_inds = {i.strip().lower() for i in (icp_industry or []) if i.strip()}
-    icp_subs = {s.strip().lower() for s in (icp_sub_industry or []) if s.strip()}
+    # Format ICP target and sub-industry instruction
+    if icp_sub_industry:
+        pairs = [f"{i} / {s}" for i in icp_industry for s in icp_sub_industry]
+        icp_target = "\n".join(pairs)
+        sub_inst = (
+            'If a sub-industry is specified (e.g., "Software / SaaS"), '
+            'the company must match BOTH the industry AND the sub-industry.\n'
+        )
+    else:
+        icp_target = "\n".join(icp_industry) if icp_industry else "any"
+        sub_inst = (
+            'No sub-industry is specified — pick the most appropriate '
+            'sub-industry based on the company description.\n'
+        )
+    safe_target = icp_target.replace("{", "{{").replace("}", "}}")
+    safe_sub_inst = sub_inst.replace("{", "{{").replace("}", "}}")
 
-    # Priority 1: exact match on both industry + sub_industry
-    for c in classifications:
-        ind = c.get("industry", "")
-        sub = c.get("sub_industry", "")
-        if ind and sub and ind.lower() in icp_inds and sub.lower() in icp_subs:
-            return ind, sub
+    prompt = _VALIDATE_MATCH_PROMPT.format(
+        company_name=safe_name,
+        enriched_description=safe_enriched,
+        linkedin_industry=safe_ind,
+        miner_description=safe_miner,
+        icp_target=safe_target,
+        sub_industry_instruction=safe_sub_inst,
+    )
 
-    # Priority 2: match on industry only
-    for c in classifications:
-        ind = c.get("industry", "")
-        sub = c.get("sub_industry", "")
-        if ind and ind.lower() in icp_inds:
-            return ind, sub
+    for attempt in range(3):
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    _OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": _VALIDATE_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 150,
+                        "temperature": 0,
+                    },
+                ) as resp:
+                    if resp.status == 429 and attempt < 2:
+                        print(f"   ⚠️ Gemini validate rate limited, retrying ({attempt + 1}/3)...")
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    if resp.status != 200:
+                        if attempt < 2:
+                            print(f"   ⚠️ Gemini validate HTTP {resp.status}, retrying ({attempt + 1}/3)...")
+                            await asyncio.sleep(1)
+                            continue
+                        print(f"   ❌ Gemini validate HTTP {resp.status} after 3 attempts")
+                        return None
+                    body = await resp.json()
+                    content = body["choices"][0]["message"]["content"]
+                    match = re.search(r"\{[^}]+\}", content)
+                    if match:
+                        return json.loads(match.group())
+                    if attempt < 2:
+                        print(f"   ⚠️ Gemini validate response not valid JSON, retrying ({attempt + 1}/3)...")
+                        continue
+                    print(f"   ❌ Gemini validate unparseable response after 3 attempts")
+                    return None
+        except Exception as e:
+            if attempt < 2:
+                print(f"   ⚠️ Gemini validate error: {e}, retrying ({attempt + 1}/3)...")
+                await asyncio.sleep(1)
+                continue
+            print(f"   ❌ Gemini validate error after 3 attempts: {e}")
+            return None
+    return None
 
-    # Priority 3: highest confidence (first in list)
-    return classifications[0].get("industry", ""), classifications[0].get("sub_industry", "")
+
+def _get_valid_sub_industries(industry: str) -> list:
+    """Get valid sub-industries for a given industry from taxonomy."""
+    taxonomy = _load_taxonomy_embeddings()
+    if not taxonomy:
+        return []
+    # taxonomy['industries'] maps sub_industry → [list of industries]
+    subs = []
+    for sub, ind_list in taxonomy.get('industries', {}).items():
+        if industry.lower() in [i.lower() for i in ind_list]:
+            subs.append(sub)
+    return sorted(subs)
+
+
+async def _gemini_pick_sub_industry(
+    company_name: str,
+    enriched_description: str,
+    matched_industry: str,
+    sub_industry_options: list,
+    openrouter_key: str,
+) -> str:
+    """Ask Gemini to pick the best sub-industry from taxonomy list."""
+    safe_name = company_name.replace("{", "{{").replace("}", "}}")
+    safe_enriched = enriched_description[:1500].replace("{", "{{").replace("}", "}}")
+    safe_ind = matched_industry.replace("{", "{{").replace("}", "}}")
+    options_str = "\n".join(f"- {s}" for s in sub_industry_options)
+
+    prompt = _SUB_INDUSTRY_PICK_PROMPT.format(
+        company_name=safe_name,
+        enriched_description=safe_enriched,
+        matched_industry=safe_ind,
+        sub_industry_options=options_str,
+    )
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                _OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": _VALIDATE_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 50,
+                    "temperature": 0,
+                },
+            ) as resp:
+                if resp.status != 200:
+                    return ""
+                body = await resp.json()
+                content = body["choices"][0]["message"]["content"]
+                match = re.search(r"\{[^}]+\}", content)
+                if match:
+                    result = json.loads(match.group())
+                    return str(result.get("sub_industry", ""))
+    except Exception as e:
+        print(f"   ⚠️ Sub-industry pick error: {e}")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -656,129 +872,123 @@ async def fulfillment_company_verification(
             ["website"],
         )
 
-    # ---- 5. Description + Industry classification ----
-    # Build description content from ScrapingDog data
+    # ---- 5. Description validation + Industry match ----
+    # Two-step: Sonar enriches company description, Gemini validates
+    # miner's description and checks industry match against ICP.
     sd_about = sd_data.get("about", "")
-    extracted_content = sd_about
+    sd_industry = sd_data.get("industry", "")
+    lead_website = lead.get("website", "") or lead.get("company_website", "")
+    claimed_description = lead.get("description", "")
+    miner_desc = claimed_description or sd_about
 
-    if not extracted_content:
-        # Fallback: combine tagline + specialties + industry
+    # Build LinkedIn description from available data
+    linkedin_desc = sd_about
+    if not linkedin_desc:
         parts = []
         if sd_data.get("tagline"):
             parts.append(sd_data["tagline"])
         if sd_data.get("specialties"):
             parts.append(f"Specialties: {sd_data['specialties']}")
-        if sd_data.get("industry"):
-            parts.append(f"Industry: {sd_data['industry']}")
-        extracted_content = ". ".join(parts)
+        linkedin_desc = ". ".join(parts)
 
-    if not extracted_content:
-        # Fallback: scrape company website
-        print(f"   ⚠️ No LinkedIn description — falling back to website scrape")
-        if lead_website:
-            try:
-                website_content = await _scrape_website_content(lead_website)
-                extracted_content = website_content.get("combined_description", "")
-            except Exception as e:
-                print(f"   ⚠️ Website scrape failed: {e}")
-
-    if not extracted_content:
-        print(f"   ❌ No description available for classification")
+    # Step 1: Sonar enrich
+    print(f"   🔍 Sonar enriching: {company}")
+    enriched = await _sonar_enrich(
+        company_name=company,
+        website=lead_website,
+        linkedin_description=linkedin_desc,
+        linkedin_industry=sd_industry,
+        openrouter_key=or_key,
+    )
+    if not enriched:
+        print(f"   ❌ Sonar enrichment failed — no description available")
         return False, _rejection(
-            "fulfillment_company_no_description",
-            "No description available (LinkedIn about, tagline, specialties, and website all empty)",
+            "fulfillment_company_enrich_failed",
+            "Could not enrich company description via web search",
+            ["description"],
+        )
+    print(f"   ✅ Sonar enriched: {enriched[:80]}...")
+
+    # Step 2: Gemini validate + industry match
+    print(f"   🔍 Gemini validating description + industry match")
+    result = await _gemini_validate_and_match(
+        company_name=company,
+        enriched_description=enriched,
+        linkedin_industry=sd_industry,
+        miner_description=miner_desc,
+        icp_industry=icp_industry or [],
+        icp_sub_industry=icp_sub_industry or [],
+        openrouter_key=or_key,
+    )
+    if result is None:
+        print(f"   ❌ Gemini validation failed")
+        return False, _rejection(
+            "fulfillment_company_validation_failed",
+            "Company validation failed (LLM error)",
+            ["description", "industry"],
+        )
+
+    desc_valid = bool(result.get("description_valid", False))
+    ind_match = bool(result.get("industry_match", False))
+    matched_ind = str(result.get("matched_industry", ""))
+    matched_sub = str(result.get("matched_sub_industry", ""))
+    reason = str(result.get("reason", ""))
+
+    if not desc_valid:
+        print(f"   ❌ Miner description does not match company: {reason}")
+        return False, _rejection(
+            "fulfillment_company_description_invalid",
+            f"Miner description does not match company: {reason}",
             ["description"],
         )
 
-    # ---- 5b. Industry classification ----
-    # ICP profile matching is handled by Tier 1 (miner's claimed values) +
-    # 5b classification (LinkedIn-verified). No separate 5a check needed —
-    # the buyer defines the ICP, and if a company matches the criteria,
-    # it's a valid lead regardless of whether it looks like a "competitor".
-    # Run 3-stage classification pipeline
-    claimed_description = lead.get("description", "")
-    claimed_industry = lead.get("industry", "")
-    claimed_sub_industry = lead.get("sub_industry", "")
-
-    # Use claimed_description or extracted_content as miner_description
-    miner_desc = claimed_description or extracted_content
-
-    try:
-        classifications, refined_description, classify_error = await classify_company_industry(
-            miner_description=miner_desc,
-            extracted_content=extracted_content,
-            extracted_industry=sd_industry,
-            company_name=company,
-            miner_industry=claimed_industry,
-            miner_sub_industry=claimed_sub_industry,
-        )
-
-        if classifications and len(classifications) >= 1:
-            industry_top3 = {}
-            sub_industry_top3 = {}
-            for i, c in enumerate(classifications[:3], 1):
-                industry_top3[f"industry_match{i}"] = c["industry"]
-                sub_industry_top3[f"sub_industry_match{i}"] = c["sub_industry"]
-            print(f"   ✅ Classification: {[(c['industry'], c['sub_industry']) for c in classifications[:3]]}")
-
-            # Pick the best-fit industry pair from top 3 that aligns
-            # with the ICP's target industry.  If the miner's claim matches,
-            # great — otherwise override it with the corrected pair.
-            best_ind, best_sub = _pick_best_industry(
-                classifications[:3], icp_industry, icp_sub_industry,
-            )
-            if best_ind and best_sub:
-                # Check if the best-fit industry is in the ICP target list.
-                # If none of the top 3 matched, _pick_best_industry falls back
-                # to #1 which may not be in the ICP target — reject in that case.
-                if icp_industry:
-                    icp_inds = {i.strip().lower() for i in icp_industry if i.strip()}
-                    if best_ind.lower() not in icp_inds:
-                        top3_str = ", ".join(f"{c['industry']}/{c['sub_industry']}" for c in classifications[:3])
-                        print(f"   ❌ Industry not in ICP target: classified as '{best_ind}' but ICP wants {icp_industry}")
-                        print(f"      Top 3: {top3_str}")
-                        return False, _rejection(
-                            "fulfillment_company_industry_classification_mismatch",
-                            f"Company classified as '{best_ind}/{best_sub}' — none of top 3 match ICP target industry {icp_industry}",
-                            ["industry", "sub_industry"],
-                        )
-
-                old_pair = (claimed_industry, claimed_sub_industry)
-                new_pair = (best_ind, best_sub)
-                if old_pair != new_pair:
-                    print(f"   🔄 Industry corrected: {old_pair} → {new_pair}")
-                else:
-                    print(f"   ✅ Industry confirmed: {new_pair}")
-                lead["industry"] = best_ind
-                lead["sub_industry"] = best_sub
-
-            # Store for company table
-            lead["_insert_new_company"] = True
-            lead["_company_refined_description"] = refined_description
-            lead["_company_industry_top3"] = industry_top3
-            lead["_company_sub_industry_top3"] = sub_industry_top3
-            lead["_company_verified_employee_count"] = claimed_employee_count
-        else:
-            if classify_error == "stage1_invalid_description":
-                print(f"   ❌ Miner description does not match LinkedIn content")
-                return False, _rejection(
-                    "fulfillment_company_description_invalid",
-                    "Miner description does not match LinkedIn content (INVALID)",
-                    ["description"],
-                )
-            print(f"   ❌ Classification failed: {classify_error}")
-            return False, _rejection(
-                "fulfillment_company_classification_failed",
-                f"Classification failed: {classify_error}",
-                ["industry", "sub_industry"],
-            )
-    except Exception as e:
-        print(f"   ❌ Classification exception: {e}")
+    if not ind_match:
+        print(f"   ❌ Industry mismatch: {reason}")
         return False, _rejection(
-            "fulfillment_company_classification_failed",
-            f"Classification failed: {e}",
+            "fulfillment_company_industry_classification_mismatch",
+            f"Company industry does not match ICP target: {reason}",
             ["industry", "sub_industry"],
         )
+
+    # Step 3: Pick sub-industry from taxonomy (only if ICP has no sub-industry)
+    if matched_ind and not icp_sub_industry:
+        valid_subs = _get_valid_sub_industries(matched_ind)
+        if valid_subs:
+            print(f"   🔍 Picking sub-industry from {len(valid_subs)} taxonomy options for '{matched_ind}'")
+            picked = await _gemini_pick_sub_industry(
+                company_name=company,
+                enriched_description=enriched,
+                matched_industry=matched_ind,
+                sub_industry_options=valid_subs,
+                openrouter_key=or_key,
+            )
+            if picked:
+                matched_sub = picked
+                print(f"   ✅ Sub-industry picked: {picked}")
+
+    # Update lead with matched industry
+    if matched_ind:
+        old_pair = (lead.get("industry", ""), lead.get("sub_industry", ""))
+        new_pair = (matched_ind, matched_sub)
+        if old_pair != new_pair:
+            print(f"   🔄 Industry corrected: {old_pair} → {new_pair}")
+        else:
+            print(f"   ✅ Industry confirmed: {new_pair}")
+        lead["industry"] = matched_ind
+        lead["sub_industry"] = matched_sub
+
+    # Store for company table
+    lead["_insert_new_company"] = True
+    lead["_company_refined_description"] = enriched
+    lead["_company_industry_top3"] = {
+        "industry_match1": matched_ind,
+    }
+    lead["_company_sub_industry_top3"] = {
+        "sub_industry_match1": matched_sub,
+    }
+    lead["_company_verified_employee_count"] = claimed_employee_count
+
+    print(f"   ✅ Industry match: {matched_ind}/{matched_sub}")
 
     # ---- Populate lead dict for downstream ----
     lead["stage5_name_match"] = True

@@ -63,31 +63,30 @@ _HQ_LOCATION_PROMPT = (
     'Return JSON only: {{"valid": true/false, "match": true/false}}'
 )
 
-_ICP_BUYER_FIT_PROMPT = (
-    'The BUYER is selling: "{product_service}"\n\n'
-    'The BUYER\'s ideal customer profile:\n'
+_ICP_PROFILE_PROMPT = (
+    'A company is looking for customers that match this profile:\n'
     '"{icp_prompt}"\n\n'
-    'Target Industry: "{target_industry}"\n'
-    'Target Sub-Industry: "{target_sub_industry}"\n\n'
+    'Target Industry: {target_industry}\n'
+    'Target Sub-Industry: {target_sub_industry}\n\n'
     'Company being evaluated:\n'
-    'Name: "{company_name}"\n'
-    'Website: "{website}"\n'
-    'LinkedIn Description: "{description}"\n'
-    'LinkedIn Industry: "{linkedin_industry}"\n'
-    'Employee Count: "{employee_count}"\n\n'
-    'Search the web for additional details about what {company_name} actually '
-    'does, who their customers are, and what products/services they sell. '
-    'Combine with the LinkedIn data above to evaluate:\n\n'
-    '1. Does this company match the SPECIFIC criteria in the ICP — industry verticals, '
-    'company type, size signals, and any other requirements stated.\n'
-    '2. Reject if the company is a DIRECT COMPETITOR that sells the same specific '
-    'product/service as the buyer. Example: if the buyer sells 3PL fulfillment and '
-    'the company IS a 3PL fulfillment provider, reject.\n'
-    '3. Do NOT reject just because the company "provides a service" or "sells software". '
-    'Most ICP targets are businesses that sell something — that does not make them competitors.\n'
-    '4. Reject if the company clearly falls outside the ICP criteria '
-    '(wrong industry vertical, wrong company type, wrong market).\n\n'
-    'Return JSON only: {{"match": true/false, "reason": "one sentence explanation"}}'
+    'Name: "{company_name}"\nWebsite: "{website}"\n'
+    'Description: "{description}"\nIndustry: "{linkedin_industry}"\n\n'
+    'Does this company match the industry and company type in the profile?\n'
+    'Do NOT check size, funding stage, employee count, or geography — '
+    'those are verified separately.\n'
+    'REJECT only if wrong industry or wrong company type.\n'
+    'PASS if the company reasonably fits.\n\n'
+    'Return JSON only: {{"match": true/false, "reason": "one sentence"}}'
+)
+
+_ICP_COMPETITOR_PROMPT = (
+    'The buyer sells: "{product_service}"\n\n'
+    'Company: "{company_name}" ({website})\n'
+    'Description: "{description}"\n\n'
+    'Does this company sell the SAME specific product/service as the buyer?\n'
+    'Only answer true if they sell the EXACT SAME thing.\n'
+    'A company in a different business is NOT a competitor.\n\n'
+    'Return JSON only: {{"competitor": true/false, "reason": "one sentence"}}'
 )
 
 
@@ -473,49 +472,11 @@ async def _llm_hq_match(
         return False
 
 
-async def _llm_icp_buyer_fit(
-    company_name: str,
-    extracted_description: str,
-    linkedin_industry: str,
-    icp_prompt: str,
-    icp_product_service: str,
-    icp_industry: list,
-    icp_sub_industry: list,
-    openrouter_key: str,
-    website: str = "",
-    employee_count: str = "",
-) -> Tuple[bool, str]:
-    """Check if company matches the ICP buyer profile.
+async def _sonar_call(prompt: str, openrouter_key: str) -> dict:
+    """Make a single Sonar API call with 3-retry logic.
 
-    Returns (matches, reason).  On LLM failure returns (False, reason)
-    so that unverified leads never slip through.
+    Returns parsed JSON dict or None on failure.
     """
-    # Escape curly braces in free-text fields to prevent .format() errors
-    # (client ICP prompt or LinkedIn descriptions may contain { or })
-    safe_icp = icp_prompt[:3000].replace("{", "{{").replace("}", "}}")
-    safe_ps = (icp_product_service or "(not specified)").replace("{", "{{").replace("}", "}}")
-    safe_desc = extracted_description[:1500].replace("{", "{{").replace("}", "}}")
-    safe_name = company_name.replace("{", "{{").replace("}", "}}")
-    safe_ind = (linkedin_industry or "unknown").replace("{", "{{").replace("}", "}}")
-    target_ind_str = ", ".join(icp_industry) if icp_industry else "any"
-    target_sub_str = ", ".join(icp_sub_industry) if icp_sub_industry else "any"
-    safe_target_ind = target_ind_str.replace("{", "{{").replace("}", "}}")
-    safe_target_sub = target_sub_str.replace("{", "{{").replace("}", "}}")
-    safe_website = (website or "unknown").replace("{", "{{").replace("}", "}}")
-    safe_emp_count = (employee_count or "unknown").replace("{", "{{").replace("}", "}}")
-
-    prompt = _ICP_BUYER_FIT_PROMPT.format(
-        product_service=safe_ps,
-        icp_prompt=safe_icp,
-        target_industry=safe_target_ind,
-        target_sub_industry=safe_target_sub,
-        company_name=safe_name,
-        website=safe_website,
-        description=safe_desc,
-        linkedin_industry=safe_ind,
-        employee_count=safe_emp_count,
-    )
-
     for attempt in range(3):
         try:
             timeout = aiohttp.ClientTimeout(total=45)
@@ -534,37 +495,98 @@ async def _llm_icp_buyer_fit(
                     },
                 ) as resp:
                     if resp.status == 429 and attempt < 2:
-                        print(f"   ⚠️ ICP buyer-fit LLM rate limited, retrying ({attempt + 1}/3)...")
+                        print(f"   ⚠️ ICP check rate limited, retrying ({attempt + 1}/3)...")
                         await asyncio.sleep(2 * (attempt + 1))
                         continue
                     if resp.status != 200:
                         if attempt < 2:
-                            print(f"   ⚠️ ICP buyer-fit LLM HTTP {resp.status}, retrying ({attempt + 1}/3)...")
+                            print(f"   ⚠️ ICP check HTTP {resp.status}, retrying ({attempt + 1}/3)...")
                             await asyncio.sleep(1)
                             continue
-                        print(f"   ❌ ICP buyer-fit LLM HTTP {resp.status} after 3 attempts")
-                        return False, "icp_buyer_fit_check_failed"
+                        print(f"   ❌ ICP check HTTP {resp.status} after 3 attempts")
+                        return None
                     body = await resp.json()
                     content = body["choices"][0]["message"]["content"]
                     match = re.search(r"\{[^}]+\}", content)
                     if match:
-                        result = json.loads(match.group())
-                        is_match = bool(result.get("match", False))
-                        reason = str(result.get("reason", ""))
-                        return is_match, reason
+                        return json.loads(match.group())
                     if attempt < 2:
-                        print(f"   ⚠️ ICP buyer-fit LLM response not valid JSON, retrying ({attempt + 1}/3)...")
+                        print(f"   ⚠️ ICP check response not valid JSON, retrying ({attempt + 1}/3)...")
                         continue
-                    print(f"   ❌ ICP buyer-fit LLM returned unparseable response after 3 attempts")
-                    return False, "icp_buyer_fit_check_failed"
+                    print(f"   ❌ ICP check unparseable response after 3 attempts")
+                    return None
         except Exception as e:
             if attempt < 2:
-                print(f"   ⚠️ ICP buyer-fit LLM error: {e}, retrying ({attempt + 1}/3)...")
+                print(f"   ⚠️ ICP check error: {e}, retrying ({attempt + 1}/3)...")
                 await asyncio.sleep(1)
                 continue
-            print(f"   ❌ ICP buyer-fit LLM error after 3 attempts: {e}")
-            return False, "icp_buyer_fit_check_failed"
-    return False, "icp_buyer_fit_check_failed"
+            print(f"   ❌ ICP check error after 3 attempts: {e}")
+            return None
+    return None
+
+
+async def _llm_icp_buyer_fit(
+    company_name: str,
+    extracted_description: str,
+    linkedin_industry: str,
+    icp_prompt: str,
+    icp_product_service: str,
+    icp_industry: list,
+    icp_sub_industry: list,
+    openrouter_key: str,
+    website: str = "",
+    employee_count: str = "",
+) -> Tuple[bool, str]:
+    """Two-step ICP buyer-fit check.
+
+    Step 1: Profile match — does company match the customer type?
+    Step 2: Competitor check — does company sell the same product? (only if Step 1 passed)
+
+    Returns (matches, reason).  On failure returns (False, reason).
+    """
+    # Escape curly braces in free-text fields
+    safe_icp = icp_prompt[:3000].replace("{", "{{").replace("}", "}}")
+    safe_ps = (icp_product_service or "(not specified)").replace("{", "{{").replace("}", "}}")
+    safe_desc = extracted_description[:1500].replace("{", "{{").replace("}", "}}")
+    safe_name = company_name.replace("{", "{{").replace("}", "}}")
+    safe_ind = (linkedin_industry or "unknown").replace("{", "{{").replace("}", "}}")
+    safe_website = (website or "unknown").replace("{", "{{").replace("}", "}}")
+    target_ind_str = ", ".join(icp_industry) if icp_industry else "any"
+    target_sub_str = ", ".join(icp_sub_industry) if icp_sub_industry else "any"
+    safe_target_ind = target_ind_str.replace("{", "{{").replace("}", "}}")
+    safe_target_sub = target_sub_str.replace("{", "{{").replace("}", "}}")
+
+    # ── Step 1: Profile match ──
+    profile_prompt = _ICP_PROFILE_PROMPT.format(
+        icp_prompt=safe_icp,
+        target_industry=safe_target_ind,
+        target_sub_industry=safe_target_sub,
+        company_name=safe_name,
+        website=safe_website,
+        description=safe_desc,
+        linkedin_industry=safe_ind,
+    )
+    r1 = await _sonar_call(profile_prompt, openrouter_key)
+    if r1 is None:
+        return False, "icp_buyer_fit_check_failed"
+    if not bool(r1.get("match", False)):
+        return False, str(r1.get("reason", "profile mismatch"))
+
+    # ── Step 2: Competitor check (only if profile matched) ──
+    if icp_product_service:
+        competitor_prompt = _ICP_COMPETITOR_PROMPT.format(
+            product_service=safe_ps,
+            company_name=safe_name,
+            website=safe_website,
+            description=safe_desc,
+        )
+        r2 = await _sonar_call(competitor_prompt, openrouter_key)
+        if r2 is None:
+            return False, "icp_competitor_check_failed"
+        if bool(r2.get("competitor", False)):
+            return False, f"competitor: {r2.get('reason', 'direct competitor')}"
+
+    return True, str(r1.get("reason", "profile match"))
 
 
 def _pick_best_industry(
@@ -832,9 +854,10 @@ async def fulfillment_company_verification(
             employee_count=sd_data.get("company_size", ""),
         )
         if not buyer_fit:
+            check_name = "fulfillment_company_competitor" if fit_reason.startswith("competitor:") else "fulfillment_company_icp_mismatch"
             print(f"   ❌ ICP buyer-fit mismatch: {fit_reason}")
             return False, _rejection(
-                "fulfillment_company_icp_mismatch",
+                check_name,
                 f"Company does not match ICP buyer profile: {fit_reason}",
                 ["description", "industry"],
             )

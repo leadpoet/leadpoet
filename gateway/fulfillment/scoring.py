@@ -315,6 +315,133 @@ def _tier1_check(
     return None
 
 
+def _build_failure_detail(
+    failure_reason: str,
+    lead: "FulfillmentLead" = None,
+    lead_output: "LeadOutput" = None,
+    icp: "FulfillmentICP" = None,
+    s5_rejection: dict = None,
+    person_rejection: dict = None,
+    signal_details: list = None,
+    intent_final: float = 0.0,
+) -> str:
+    """Build a human-readable failure detail for the public dashboard.
+
+    Shows miner's submitted values (non-PII) and generic reason.
+    Never exposes: email, person name, company name, website, LinkedIn URL, ICP prompt.
+    """
+    r = failure_reason or ""
+
+    # --- Tier 1 ---
+    if r == "industry_mismatch" and lead:
+        return f"Submitted industry '{lead.industry}' does not match target industry"
+    if r == "sub_industry_mismatch" and lead:
+        return f"Submitted sub-industry '{lead.sub_industry}' does not match target sub-industry"
+    if r == "role_mismatch" and lead:
+        return f"Submitted role '{lead.role}' does not match target roles"
+    if r == "role_type_mismatch" and lead:
+        return f"Submitted role type '{lead.role_type}' does not match target role types"
+    if r == "seniority_mismatch" and lead_output:
+        sen = lead_output.seniority.value if hasattr(lead_output.seniority, "value") else str(lead_output.seniority)
+        return f"Submitted seniority '{sen}' does not match target seniority"
+    if r == "country_mismatch" and lead:
+        return f"Submitted country '{lead.company_hq_country}' does not match target country"
+    if r == "employee_count_mismatch" and lead:
+        return f"Submitted employee count '{lead.employee_count}' does not match target range"
+    if r == "company_excluded":
+        return "Company is on the exclusion list for this request"
+    if r == "duplicate_company":
+        return "Another lead for the same company was already submitted in this batch"
+    if r == "data_quality":
+        return "Missing required field: company name"
+
+    # --- Email ---
+    if r.startswith("email_"):
+        if "no_mailbox" in r:
+            return "Email mailbox does not exist"
+        if "greylisted" in r or "failed_greylisted" in r:
+            return "Email server temporarily rejected verification"
+        if "catch" in r or "accept_all" in r:
+            return "Email domain accepts all addresses (catch-all) — cannot verify individual mailbox"
+        if r == "email_verification_unavailable":
+            return "Email verification service unavailable"
+        return f"Email verification failed ({r.replace('email_', '')})"
+
+    # --- Company verification ---
+    if r.startswith("fulfillment_company_"):
+        if s5_rejection:
+            msg = s5_rejection.get("message", "")
+            check = s5_rejection.get("check_name", "")
+            if check == "fulfillment_company_size_mismatch":
+                return msg if msg else "Submitted employee count does not match LinkedIn verified size"
+            if check == "fulfillment_company_hq_mismatch":
+                return msg if msg else "Submitted HQ location does not match LinkedIn HQ"
+            if check == "fulfillment_company_website_mismatch":
+                return "Submitted website does not match LinkedIn website"
+            if check == "fulfillment_company_description_invalid":
+                return "Submitted description does not match what the company actually does"
+            if check == "fulfillment_company_industry_classification_mismatch":
+                return msg if msg else "Company's verified industry does not match target industry"
+            if check == "fulfillment_company_enrich_failed":
+                return "Could not verify company details via web search"
+            if check == "fulfillment_company_no_description":
+                return "No company description available for verification"
+            if check == "fulfillment_company_validation_failed":
+                return "Company verification failed due to processing error"
+        return "Company verification failed"
+
+    # --- Person verification ---
+    if r.startswith("fulfillment_person_"):
+        if person_rejection:
+            check = person_rejection.get("check_name", "")
+            if check == "fulfillment_person_role_mismatch":
+                submitted = person_rejection.get("claimed_role", "")
+                actual = person_rejection.get("actual_role", "")
+                if submitted and actual:
+                    return f"Submitted role '{submitted}' does not match LinkedIn role '{actual}'"
+                return "Submitted role does not match LinkedIn profile role"
+            if check == "fulfillment_person_company_name_mismatch":
+                return "Person's LinkedIn company does not match submitted company"
+            if check == "fulfillment_person_company_url_mismatch":
+                return "Person's LinkedIn company URL does not match submitted company"
+            if check == "fulfillment_person_no_company_url":
+                return "Person's LinkedIn profile has no company URL to verify"
+            if check == "fulfillment_person_fetch_failed":
+                return "Could not fetch person's LinkedIn profile for verification"
+        return "Person verification failed"
+
+    # --- Intent ---
+    if r == "insufficient_intent":
+        parts = [f"Intent score {intent_final:.1f} below threshold 5.0"]
+        if signal_details:
+            for i, sd in enumerate(signal_details):
+                src = sd.get("source", "unknown")
+                conf = sd.get("confidence", 0)
+                date_status = sd.get("date_status", "")
+                score = sd.get("after_decay_score", 0)
+                if conf == 0 or score == 0:
+                    if date_status == "fabricated":
+                        parts.append(f"Signal {i+1} ({src}): content not verified against source")
+                    elif date_status == "duplicate_domain":
+                        parts.append(f"Signal {i+1} ({src}): duplicate source domain")
+                    else:
+                        parts.append(f"Signal {i+1} ({src}): could not verify (confidence={conf})")
+        return " — ".join(parts)
+
+    # --- Structural similarity ---
+    if r == "structural_similarity_detected":
+        return "Multiple leads have identical templated descriptions"
+
+    # --- Stage 0-2 ---
+    if r == "check_head_request":
+        return "Company website URL is not reachable"
+    if r.startswith("check_"):
+        return f"Data accuracy check failed: {r.replace('check_', '').replace('_', ' ')}"
+
+    # Fallback
+    return r.replace("_", " ").replace("fulfillment ", "")
+
+
 # ---------------------------------------------------------------------------
 # Scoring pipeline
 # ---------------------------------------------------------------------------
@@ -346,6 +473,7 @@ async def score_fulfillment_lead(
         return FulfillmentScoreResult(
             tier1_passed=False,
             failure_reason=t1_failure,
+            failure_detail=_build_failure_detail(t1_failure, lead=lead, lead_output=lead_output, icp=icp),
         )
 
     # Build a mutable dict that validator check functions can annotate in-place
@@ -358,6 +486,7 @@ async def score_fulfillment_lead(
         return FulfillmentScoreResult(
             tier1_passed=True, tier2_passed=False,
             failure_reason=t2_failure,
+            failure_detail=_build_failure_detail(t2_failure),
         )
 
     # --- Tier 2b: Verification ---
@@ -393,19 +522,24 @@ async def score_fulfillment_lead(
                         f"   📧 Email catch-all ({batch_status}) — ZeroBounce did not confirm "
                         f"(zb_status={zb_status}, sub={zb_sub or 'n/a'}); keeping reject"
                     )
+                    _email_reason = f"email_{batch_status}_zb_{zb_status}"
                     return FulfillmentScoreResult(
                         tier1_passed=True, tier2_passed=False,
-                        failure_reason=f"email_{batch_status}_zb_{zb_status}",
+                        failure_reason=_email_reason,
+                        failure_detail=_build_failure_detail(_email_reason),
                     )
             else:
+                _email_reason = f"email_{batch_status}"
                 return FulfillmentScoreResult(
                     tier1_passed=True, tier2_passed=False,
-                    failure_reason=f"email_{batch_status}",
+                    failure_reason=_email_reason,
+                    failure_detail=_build_failure_detail(_email_reason),
                 )
         else:
             return FulfillmentScoreResult(
                 tier1_passed=True, tier2_passed=False,
                 failure_reason="email_verification_unavailable",
+                failure_detail=_build_failure_detail("email_verification_unavailable"),
             )
 
         # --- Company verification (always uses ScrapingDog LinkedIn) ---
@@ -422,6 +556,7 @@ async def score_fulfillment_lead(
                 tier1_passed=True, tier2_passed=True,
                 email_verified=email_verified,
                 failure_reason=reason,
+                failure_detail=_build_failure_detail(reason, s5_rejection=s5_rejection),
             )
         company_verified = True
 
@@ -447,6 +582,7 @@ async def score_fulfillment_lead(
                     email_verified=email_verified,
                     company_verified=company_verified,
                     failure_reason=reason,
+                    failure_detail=_build_failure_detail(reason, person_rejection=rejection_reason),
                 )
 
         # If person not yet verified (Apify off or fetch failed), use old Stage 4
@@ -461,6 +597,7 @@ async def score_fulfillment_lead(
                     email_verified=email_verified,
                     company_verified=company_verified,
                     failure_reason=verif_failure,
+                    failure_detail=_build_failure_detail(verif_failure),
                 )
             person_verified = verif_data.get("stage_4_linkedin", {}).get("linkedin_verified", False)
             rep_score_val = float(verif_data.get("rep_score", {}).get("total_score", 0))
@@ -491,6 +628,7 @@ async def score_fulfillment_lead(
                 company_verified=company_verified,
                 rep_score=rep_score_val,
                 failure_reason=verif_failure,
+                failure_detail=_build_failure_detail(verif_failure),
             )
 
     # --- Tier 3: Intent Scoring ---
@@ -616,6 +754,11 @@ async def score_fulfillment_lead(
             **shared_fields,
             final_score=0.0,
             failure_reason="insufficient_intent",
+            failure_detail=_build_failure_detail(
+                "insufficient_intent",
+                signal_details=signal_details,
+                intent_final=intent_signal_final,
+            ),
         )
 
     return FulfillmentScoreResult(
@@ -663,6 +806,7 @@ async def score_fulfillment_batch(
                         **results[global_idx].model_dump(),
                         "final_score": 0.0,
                         "failure_reason": "structural_similarity_detected",
+                        "failure_detail": "Multiple leads have identical templated descriptions",
                     }
                 )
     except Exception as e:

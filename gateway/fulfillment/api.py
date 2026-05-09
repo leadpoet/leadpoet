@@ -1050,22 +1050,26 @@ async def submit_scores(
     # lead_id) which is the same natural key the RPC upserts on.  This
     # is best-effort: one failed patch doesn't fail the whole submission.
     for s in scores:
-        detail = s.get("intent_signals_detail")
-        if not detail:
+        patch_fields = {}
+        if s.get("intent_signals_detail"):
+            patch_fields["intent_signals_detail"] = s["intent_signals_detail"]
+        if s.get("failure_detail"):
+            patch_fields["failure_detail"] = s["failure_detail"]
+        if not patch_fields:
             continue
         lid = s.get("lead_id")
         if not lid:
             continue
         try:
-            supabase.table("fulfillment_scores").update({
-                "intent_signals_detail": detail,
-            }).eq("request_id", s.get("request_id", request_id)) \
+            supabase.table("fulfillment_scores").update(
+                patch_fields
+            ).eq("request_id", s.get("request_id", request_id)) \
               .eq("validator_hotkey", validator_hotkey) \
               .eq("lead_id", lid) \
               .execute()
         except Exception as e:
             logger.warning(
-                f"Failed to patch intent_signals_detail for lead "
+                f"Failed to patch fields for lead "
                 f"{str(lid)[:8]}: {e}"
             )
 
@@ -1073,7 +1077,8 @@ async def submit_scores(
         "request_id": request_id,
         "scores": [
             {"miner_hotkey": s.get("miner_hotkey"), "lead_id": s.get("lead_id"),
-             "score": s.get("final_score"), "reason": s.get("failure_reason")}
+             "score": s.get("final_score"), "reason": s.get("failure_reason"),
+             "detail": s.get("failure_detail")}
             for s in scores
         ],
         "score_timestamp": datetime.now(timezone.utc).isoformat(),

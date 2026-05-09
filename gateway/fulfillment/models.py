@@ -617,6 +617,7 @@ class FulfillmentScoreResult(BaseModel):
     final_score: float = 0.0
     all_fabricated: bool = False
     failure_reason: Optional[str] = None
+    failure_detail: Optional[str] = None
     # Per-miner-signal breakdown, only populated when Tier 3 intent scoring runs.
     # Each entry maps a miner-submitted signal to the best-matching client
     # (ICP) intent signal, plus the raw/after-decay score for that signal.

@@ -670,32 +670,45 @@ async def _gemini_pick_sub_industry(
         sub_industry_options=options_str,
     )
 
-    try:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                _OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {openrouter_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": _VALIDATE_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 50,
-                    "temperature": 0,
-                },
-            ) as resp:
-                if resp.status != 200:
+    for attempt in range(3):
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    _OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": _VALIDATE_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 50,
+                        "temperature": 0,
+                    },
+                ) as resp:
+                    if resp.status == 429 and attempt < 2:
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    if resp.status != 200:
+                        if attempt < 2:
+                            await asyncio.sleep(1)
+                            continue
+                        return ""
+                    body = await resp.json()
+                    content = body["choices"][0]["message"]["content"]
+                    match = re.search(r"\{[^}]+\}", content)
+                    if match:
+                        result = json.loads(match.group())
+                        return str(result.get("sub_industry", ""))
+                    if attempt < 2:
+                        continue
                     return ""
-                body = await resp.json()
-                content = body["choices"][0]["message"]["content"]
-                match = re.search(r"\{[^}]+\}", content)
-                if match:
-                    result = json.loads(match.group())
-                    return str(result.get("sub_industry", ""))
-    except Exception as e:
-        print(f"   ⚠️ Sub-industry pick error: {e}")
+        except Exception as e:
+            if attempt < 2:
+                await asyncio.sleep(1)
+                continue
+            print(f"   ⚠️ Sub-industry pick error: {e}")
     return ""
 
 
@@ -946,7 +959,7 @@ async def fulfillment_company_verification(
         print(f"   ❌ Industry mismatch: {reason}")
         return False, _rejection(
             "fulfillment_company_industry_classification_mismatch",
-            f"Company industry does not match ICP target: {reason}",
+            f"Company verified as '{sd_industry}' industry — does not match target industry",
             ["industry", "sub_industry"],
         )
 

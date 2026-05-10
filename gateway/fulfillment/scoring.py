@@ -281,10 +281,13 @@ async def score_fulfillment_lead(
         print(f"   ✅ Tier 1.5: Sub-industry semantic match: '{lead.sub_industry}' → '{matched_sub}'")
 
     # Call 2: Location validation + geography match (when ICP has specific geography)
-    # Skip when geography is just the country (Tier 1 country check handles it)
+    # Skip when geography is just naming a country already in icp.country
+    # (Tier 1 country gate handles that). icp.country is List[str] post the
+    # multi-country change.
     icp_geo = (icp.geography or "").strip()
-    icp_country = (icp.country or "").strip()
-    if icp_geo and icp_geo != icp_country:
+    _countries = icp.country if isinstance(icp.country, list) else ([icp.country] if icp.country else [])
+    icp_countries_norm = {(c or "").strip().lower() for c in _countries if c}
+    if icp_geo and icp_geo.lower() not in icp_countries_norm:
         # Pre-check: if miner submitted no location at all, reject before LLM
         if not lead.company_hq_city and not lead.company_hq_state and not lead.company_hq_country:
             return FulfillmentScoreResult(

@@ -354,6 +354,8 @@ Your model must return a dict with **EXACTLY** these 15 fields - no more, no les
     "seniority": "VP",  # Must be: "C-Suite", "VP", "Director", "Manager", "Individual Contributor"
     
     # Intent signals (REQUIRED - list of one or more signals)
+    # IMPORTANT: `source` must match the URL's domain — see "Picking the right `source`" below.
+    # Tagging a PRNewswire/TechCrunch/TheBlock article as "company_website" auto-rejects it as fabricated.
     "intent_signals": [
         {
             "source": "linkedin",  # One of: linkedin, job_board, social_media, news, github, review_site, company_website, wikipedia, other
@@ -695,7 +697,44 @@ Miners must submit leads with this exact structure via the commit-reveal endpoin
 - `seniority` — One of: `C-Suite`, `VP`, `Director`, `Manager`, `Individual Contributor`
 - `intent_signals` — At least one signal required. Each signal needs `source`, `description`, `url`, `date` (ISO format or null), and `snippet` (verbatim text from the URL)
 
-**Intent signal sources:** `linkedin`, `job_board`, `company_website`, `news`, `social_media`, `github`, `review_site`, `wikipedia`, `other`
+#### Picking the right `source` for each URL
+
+The validator enforces that the URL's domain must match the `source` you claim. Mis-tagging a real signal with the wrong source gets the lead **auto-rejected as fabricated** (confidence=0, intent score=0). Use this table:
+
+| If the URL is on... | Use `source` |
+|---------------------|--------------|
+| The lead's own company site (same domain as `company_website`, e.g. `acme.com/blog/...`) | `company_website` |
+| A jobs page — Lever, Greenhouse, Indeed, the company's own `/careers` page | `job_board` |
+| A press release or news article — PRNewswire, GlobeNewswire, TechCrunch, TheBlock, Bizjournals, local news outlets | `news` |
+| LinkedIn (any post, company page, or job listing) | `linkedin` |
+| Twitter / X / Threads / Instagram / Facebook / TikTok | `social_media` |
+| GitHub (repo, release, or organization page) | `github` |
+| G2, Capterra, TrustRadius, Glassdoor, Trustpilot | `review_site` |
+| Wikipedia | `wikipedia` |
+| Anything else with a verifiable dated event | `other` |
+
+**The most common mistake**: tagging a third-party news article (PRNewswire, TechCrunch, TheBlock, etc.) as `company_website`. The validator checks that the signal URL's domain matches the lead's `company_website` field. If it doesn't, the signal is auto-rejected as fabricated. **For third-party news, always use `source: news`.**
+
+**Examples:**
+
+```jsonc
+// CORRECT: company's own blog post
+{ "source": "company_website", "url": "https://acme.com/blog/series-b-announcement", ... }
+
+// WRONG: third-party press release tagged as company_website -> auto-fabricated
+{ "source": "company_website", "url": "https://www.prnewswire.com/news/acme-raises-50m", ... }
+
+// CORRECT: same press release with the right source
+{ "source": "news",            "url": "https://www.prnewswire.com/news/acme-raises-50m", ... }
+
+// CORRECT: LinkedIn job posting
+{ "source": "linkedin",        "url": "https://linkedin.com/jobs/view/12345", ... }
+
+// WRONG: LinkedIn job tagged as company_website -> auto-fabricated
+{ "source": "company_website", "url": "https://linkedin.com/jobs/view/12345", ... }
+```
+
+What also matters: the `snippet` must be **verbatim text from the URL** (a literal substring of the page body), and the `description` must be grounded in that snippet. Generic boilerplate like "Acme is a leading provider of..." pulled from a homepage About page won't pass — the verifier looks for a specific dated event (funding, hire, expansion, product launch, etc.).
 
 ### Commit-Reveal Flow
 

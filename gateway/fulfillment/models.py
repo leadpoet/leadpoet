@@ -277,6 +277,9 @@ class FulfillmentICP(BaseModel):
           * Single ``str``               -> ``[str]`` (back-compat with
             legacy icp_details rows where industry was stored as a plain
             string before the column became multi-valued)
+          * Python-repr stringified list ``"['X', 'Y']"`` -> parsed list
+            (recovers from legacy DB rows / CSV round-trips that lost the
+            JSON list shape; see icp_checks._coerce_industry_list rationale)
           * ``List[str]``                -> validated, deduped (case-sensitive
             because taxonomy keys are canonical-case strings)
 
@@ -285,7 +288,19 @@ class FulfillmentICP(BaseModel):
         if v is None or v == "" or v == []:
             return []
         if isinstance(v, str):
-            v = [v]
+            s = v.strip()
+            if s.startswith("[") and s.endswith("]"):
+                try:
+                    import ast
+                    parsed = ast.literal_eval(s)
+                    if isinstance(parsed, (list, tuple)):
+                        v = list(parsed)
+                    else:
+                        v = [s]
+                except (ValueError, SyntaxError):
+                    v = [s]
+            else:
+                v = [s]
         if not isinstance(v, list):
             raise ValueError(
                 f"industry must be a list or string, got {type(v).__name__}"
@@ -315,11 +330,26 @@ class FulfillmentICP(BaseModel):
         sub-industries spanning multiple parent industries (e.g.
         ``industry=["Food and Beverage", "Health Care"]``,
         ``sub_industry=["Restaurants", "Fitness"]``).
+
+        Also recovers Python-repr stringified lists (``"['X', 'Y']"``) the
+        same way ``validate_industry`` does, for legacy DB rows.
         """
         if v is None or v == "" or v == []:
             return []
         if isinstance(v, str):
-            v = [v]
+            s = v.strip()
+            if s.startswith("[") and s.endswith("]"):
+                try:
+                    import ast
+                    parsed = ast.literal_eval(s)
+                    if isinstance(parsed, (list, tuple)):
+                        v = list(parsed)
+                    else:
+                        v = [s]
+                except (ValueError, SyntaxError):
+                    v = [s]
+            else:
+                v = [s]
         if not isinstance(v, list):
             raise ValueError(
                 f"sub_industry must be a list or string, got {type(v).__name__}"

@@ -1784,18 +1784,20 @@ async def scrapingdog_generic(url: str) -> str:
         content = response.text
 
         # Check if static fetch returned enough visible text
-        # Strip HTML tags for a rough text length check
         import re as _re
         visible_text = _re.sub(r'<[^>]+>', ' ', content)
         visible_text = ' '.join(visible_text.split())
 
-        if len(visible_text) < 200:
-            # Sparse content — likely a JS-heavy SPA, retry with rendering
+        if len(visible_text) < 500:
+            # Sparse content — retry with JS rendering (5 credits)
             logger.info(f"   🔄 Static fetch sparse ({len(visible_text)} chars), retrying with JS rendering: {url[:60]}")
             params["dynamic"] = "true"
-            response = await client.get(api_url, params=params, timeout=30)
-            response.raise_for_status()
-            content = response.text
+            try:
+                response = await client.get(api_url, params=params, timeout=45)
+                response.raise_for_status()
+                content = response.text
+            except Exception as e:
+                logger.warning(f"   ⚠️ JS rendering failed/timed out, using static content: {e}")
 
         return content
 

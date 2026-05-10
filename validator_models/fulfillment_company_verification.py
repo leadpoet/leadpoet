@@ -558,6 +558,12 @@ async def _gemini_validate_and_match(
     Returns dict with description_valid, industry_match, matched_industry,
     matched_sub_industry, reason. On failure returns None.
     """
+    # Defense-in-depth: tolerate any caller that hands us a stringified list
+    # or single string instead of the canonical List[str].
+    from gateway.fulfillment.icp_checks import _coerce_industry_list
+    icp_industry = _coerce_industry_list(icp_industry)
+    icp_sub_industry = _coerce_industry_list(icp_sub_industry)
+
     safe_name = company_name.replace("{", "{{").replace("}", "}}")
     safe_enriched = enriched_description[:1500].replace("{", "{{").replace("}", "}}")
     safe_ind = (linkedin_industry or "unknown").replace("{", "{{").replace("}", "}}")
@@ -738,6 +744,12 @@ async def fulfillment_company_verification(
     sd_key = scrapingdog_key or SCRAPINGDOG_API_KEY
     or_key = openrouter_key or OPENROUTER_KEY
 
+    # Defense-in-depth: callers may hand us a stringified list ("['X', 'Y']")
+    # for legacy/CSV-mediated paths.  Normalize once at the entry point.
+    from gateway.fulfillment.icp_checks import _coerce_industry_list
+    icp_industry = _coerce_industry_list(icp_industry)
+    icp_sub_industry = _coerce_industry_list(icp_sub_industry)
+
     company_linkedin = lead.get("company_linkedin", "")
     slug = _extract_company_slug(company_linkedin)
     company = lead.get("company", "") or lead.get("business", "")
@@ -884,6 +896,35 @@ async def fulfillment_company_verification(
             "LinkedIn company page has no website",
             ["website"],
         )
+
+    # ---- Apify enrichment for sparse SD data ----
+    # If SD returned data but is missing description/industry, try Apify
+    # to fill the gaps before Sonar+Gemini step. Only fills empty fields,
+    # never overrides SD data that already passed structural checks.
+    _sd_about = sd_data.get("about", "")
+    _sd_industry = sd_data.get("industry", "")
+    _has_desc = _sd_about or sd_data.get("tagline") or sd_data.get("specialties")
+
+    if not _has_desc or not _sd_industry:
+        _apify_key = APIFY_API_TOKEN
+        if _apify_key:
+            print(f"   🔄 SD data sparse (desc={bool(_has_desc)}, industry={bool(_sd_industry)}), trying Apify enrichment...")
+            _apify_data = await _fetch_apify_company(slug, _apify_key)
+            if _apify_data:
+                if not _has_desc and _apify_data.get("about"):
+                    sd_data["about"] = _apify_data["about"]
+                    print(f"   ✅ Apify filled description: {_apify_data['about'][:60]}...")
+                if not _sd_industry and _apify_data.get("industry"):
+                    sd_data["industry"] = _apify_data["industry"]
+                    print(f"   ✅ Apify filled industry: {_apify_data['industry']}")
+                if not sd_data.get("tagline") and _apify_data.get("tagline"):
+                    sd_data["tagline"] = _apify_data["tagline"]
+                if not sd_data.get("specialties") and _apify_data.get("specialties"):
+                    sd_data["specialties"] = _apify_data["specialties"]
+            else:
+                print(f"   ⚠️ Apify enrichment also returned no data — continuing with sparse SD data")
+        else:
+            print(f"   ⚠️ SD data sparse but no APIFY_API_TOKEN — continuing with sparse SD data")
 
     # ---- 5. Description validation + Industry match ----
     # Two-step: Sonar enriches company description, Gemini validates

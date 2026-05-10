@@ -1413,12 +1413,18 @@ def validate_model_output_for_gaming(
     # This is the most reliable gaming detection we can do
     if lead_from_db:
         output_industry = output.get("industry", "")
-        icp_industry = icp.get("industry", "")
+        # Multi-industry ICPs store industry as List[str]; coerce to a flat
+        # set of canonical strings for comparison rather than calling .lower()
+        # on a list (which would raise) or on a stringified-list (which never
+        # matches anything sensibly).
+        from gateway.fulfillment.icp_checks import _coerce_industry_list
+        icp_industries = [s.lower() for s in _coerce_industry_list(icp.get("industry"))]
         lead_industry = lead_from_db.get("industry", "")
-        
-        # If output industry matches ICP exactly but differs from lead's actual industry
-        if (output_industry and icp_industry and lead_industry and
-            output_industry.lower() == icp_industry.lower() and
+
+        # If output industry matches ANY ICP industry exactly but differs
+        # from lead's actual industry, that's the manipulation pattern.
+        if (output_industry and icp_industries and lead_industry and
+            output_industry.lower() in icp_industries and
             output_industry.lower() != lead_industry.lower()):
             issues.append(
                 f"Data manipulation: output industry '{output_industry}' matches ICP "

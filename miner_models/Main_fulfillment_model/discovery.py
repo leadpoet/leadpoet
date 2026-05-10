@@ -951,7 +951,12 @@ async def _run_validator_intent_verification(
         ``verified_signals`` contains only the signals that scored > 0.
     """
     api_key = OPENROUTER_API_KEY
-    icp_industry = icp.get("industry", "")
+    # Multi-industry ICPs store industry/sub_industry as List[str]; ICPPrompt
+    # is the legacy single-string schema, so collapse via the same coercer
+    # used by tier1_check (also handles legacy stringified-list values).
+    from gateway.fulfillment.icp_checks import _coerce_industry_list
+    icp_industry = ", ".join(_coerce_industry_list(icp.get("industry"))) or ""
+    icp_sub_industry = ", ".join(_coerce_industry_list(icp.get("sub_industry"))) or ""
     icp_product = icp.get("product_service", "") or icp.get("prompt", "")
     icp_intent_list = icp.get("intent_signals", [])
 
@@ -959,7 +964,7 @@ async def _run_validator_intent_verification(
         icp_id=icp.get("icp_id", "miner-pre-check"),
         prompt=icp.get("prompt", ""),
         industry=icp_industry,
-        sub_industry=icp.get("sub_industry", ""),
+        sub_industry=icp_sub_industry,
         employee_count=icp.get("employee_count", ""),
         company_stage=icp.get("company_stage", ""),
         geography=icp.get("geography", icp.get("country", "")),

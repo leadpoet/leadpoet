@@ -25,6 +25,11 @@ from gateway.fulfillment.models import (
     VALID_ROLE_TYPES,
 )
 from gateway.qualification.models import LeadOutput, ICPPrompt
+from gateway.fulfillment.icp_checks import (
+    tier1_check,
+    semantic_sub_industry_match,
+    validate_lead_geography,
+)
 from validator_models.fulfillment_person_verification import fulfillment_person_verification
 from validator_models.fulfillment_company_verification import fulfillment_company_verification
 from validator_models.checks_zerobounce import (
@@ -84,245 +89,6 @@ def _ranges_overlap(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
     return a[0] <= b[1] and b[0] <= a[1]
 
 
-# ---------------------------------------------------------------------------
-# Country normalization (reuses existing logic)
-# ---------------------------------------------------------------------------
-
-def _normalize_country(c: str) -> str:
-    """Simple country alias normalization."""
-    aliases = {
-        "us": "united states", "usa": "united states", "u.s.": "united states",
-        "u.s.a.": "united states", "uk": "united kingdom",
-        "gb": "united kingdom", "great britain": "united kingdom",
-    }
-    c = c.strip().lower()
-    return aliases.get(c, c)
-
-
-# ---------------------------------------------------------------------------
-# Fuzzy role matching for ICP Tier 1
-# ---------------------------------------------------------------------------
-
-_ROLE_TITLE_EQUIVALENTS = {
-    "vp": ["vp", "vice president", "v.p."],
-    "svp": ["svp", "senior vice president", "senior vp"],
-    "evp": ["evp", "executive vice president"],
-    "director": ["director", "dir"],
-    "head": ["head", "head of"],
-    "cro": ["cro", "chief revenue officer"],
-    "coo": ["coo", "chief operating officer"],
-    "cmo": ["cmo", "chief marketing officer"],
-    "cto": ["cto", "chief technology officer"],
-    "cfo": ["cfo", "chief financial officer"],
-    "ceo": ["ceo", "chief executive officer"],
-    "cio": ["cio", "chief information officer"],
-    "manager": ["manager", "mgr"],
-    "gm": ["gm", "general manager"],
-    "md": ["md", "managing director"],
-}
-
-_ROLE_FUNCTION_EQUIVALENTS = {
-    "sales": ["sales", "revenue", "commercial", "business development", "gtm", "go-to-market", "go to market"],
-    "marketing": ["marketing", "growth", "demand generation", "brand"],
-    "engineering": ["engineering", "software engineering", "development", "r&d"],
-    "product": ["product", "product management"],
-    "operations": ["operations", "ops"],
-    "hr": ["hr", "human resources", "people", "talent"],
-    "finance": ["finance", "financial"],
-    "it": ["it", "information technology"],
-    "customer success": ["customer success", "client success", "cx"],
-    "partnerships": ["partnerships", "alliances", "channel"],
-}
-
-
-def _normalize_role_tokens(role: str) -> set:
-    """Break a role into normalized tokens, expanding equivalents."""
-    role_lower = role.lower().strip()
-
-    # Handle slash/comma separated roles: "CRO / VP Sales" → ["cro", "vp", "sales"]
-    role_lower = re.sub(r'[/,&]+', ' ', role_lower)
-    role_lower = re.sub(r'\s+of\s+', ' ', role_lower)
-    role_lower = re.sub(r'\s+', ' ', role_lower).strip()
-
-    tokens = set(role_lower.split())
-
-    # Expand title equivalents
-    expanded = set()
-    for token in tokens:
-        for canonical, equivalents in _ROLE_TITLE_EQUIVALENTS.items():
-            if token in equivalents:
-                expanded.update(equivalents)
-                break
-        for canonical, equivalents in _ROLE_FUNCTION_EQUIVALENTS.items():
-            if token in equivalents:
-                expanded.update(equivalents)
-                break
-
-    return tokens | expanded
-
-
-def _fuzzy_role_match(lead_role: str, target_roles: list) -> bool:
-    """Check if lead_role is a fuzzy match for any target role.
-
-    Handles: "CRO / VP Sales" matching "VP of Sales",
-    "Director, Revenue" matching "Director of Sales",
-    "Head of GTM" matching "Head of Revenue", etc.
-    """
-    if not lead_role or not target_roles:
-        return False
-
-    lead_tokens = _normalize_role_tokens(lead_role)
-
-    for target in target_roles:
-        target_tokens = _normalize_role_tokens(target)
-
-        # Check overlap: if both roles share a title token AND a function token, it's a match
-        lead_titles = set()
-        lead_functions = set()
-        target_titles = set()
-        target_functions = set()
-
-        for token in lead_tokens:
-            for _, equivs in _ROLE_TITLE_EQUIVALENTS.items():
-                if token in equivs:
-                    lead_titles.add(token)
-            for _, equivs in _ROLE_FUNCTION_EQUIVALENTS.items():
-                if token in equivs:
-                    lead_functions.add(token)
-
-        for token in target_tokens:
-            for _, equivs in _ROLE_TITLE_EQUIVALENTS.items():
-                if token in equivs:
-                    target_titles.add(token)
-            for _, equivs in _ROLE_FUNCTION_EQUIVALENTS.items():
-                if token in equivs:
-                    target_functions.add(token)
-
-        # Match if: shared title level AND shared function area
-        title_overlap = bool(lead_titles & target_titles)
-        function_overlap = bool(lead_functions & target_functions)
-
-        if title_overlap and function_overlap:
-            return True
-
-        # Fallback: high token overlap (>= 50% of smaller set)
-        overlap = lead_tokens & target_tokens
-        min_size = min(len(lead_tokens), len(target_tokens))
-        if min_size > 0 and len(overlap) / min_size >= 0.5:
-            return True
-
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Tier 1: ICP Fit Gate (free, deterministic)
-# ---------------------------------------------------------------------------
-
-def _tier1_check(
-    lead: FulfillmentLead,
-    lead_output: LeadOutput,
-    icp: FulfillmentICP,
-    seen_companies: Set[str],
-) -> Optional[str]:
-    """
-    Return failure_reason string if the lead fails any ICP check, else None.
-    """
-    # Industry / sub-industry: free pre-filter on miner's claimed values.
-    # Stage 5 can correct the industry within the top-3 classification,
-    # but a completely wrong claim (e.g., "Software" for a "Commerce and
-    # Shopping" ICP) should be caught here without spending API calls.
-    if icp.industry:
-        allowed_inds = icp.industry if isinstance(icp.industry, list) else [icp.industry]
-        if lead.industry not in allowed_inds:
-            return "industry_mismatch"
-
-    if icp.sub_industry:
-        allowed_subs = icp.sub_industry if isinstance(icp.sub_industry, list) else [icp.sub_industry]
-        if lead.sub_industry not in allowed_subs:
-            return "sub_industry_mismatch"
-
-    # Excluded companies: leads whose company EXACTLY matches any entry
-    # in the ICP's excluded_companies list (case-insensitive only, no
-    # suffix stripping, no punctuation normalization) are hard-rejected
-    # at Tier 1.  Populated by the gateway at create_request time from
-    # the client's prior FULFILLED requests unless the client supplied
-    # an explicit list in the create payload.
-    #
-    # Exact-match is intentional: the lead's `business` field gets
-    # coerced to LinkedIn's canonical company name at Stage 5 of the
-    # original submit flow, so two submissions for the same company
-    # will have byte-identical `business` strings.  If the client
-    # manually types "Microsoft" in their excluded list and LinkedIn
-    # returns "Microsoft Corporation", those are treated as DIFFERENT
-    # companies here by design — fuzzy suffix-stripping would be too
-    # eager and could incorrectly block legitimate parent / subsidiary
-    # distinctions (e.g. "Meta" vs "Meta Platforms, Inc.").
-    if icp.excluded_companies and lead.business:
-        excluded_keys = {c.strip().lower() for c in icp.excluded_companies if c and c.strip()}
-        if lead.business.strip().lower() in excluded_keys:
-            return "company_excluded"
-
-    if icp.target_role_types and lead.role_type not in icp.target_role_types:
-        return "role_type_mismatch"
-
-    if icp.target_roles and lead.role not in icp.target_roles:
-        if not _fuzzy_role_match(lead.role, icp.target_roles):
-            return "role_mismatch"
-
-    if icp.target_seniority:
-        try:
-            from gateway.qualification.models import Seniority
-            lead_sen = lead_output.seniority.value if hasattr(lead_output.seniority, "value") else str(lead_output.seniority)
-            # Normalize ICP target_seniority through the same alias mapping
-            # so "Owner" → "C-Suite", matching what miners resolve to
-            try:
-                target_sen = Seniority(icp.target_seniority).value
-            except (ValueError, KeyError):
-                target_sen = icp.target_seniority
-            if lead_sen.lower() != target_sen.lower():
-                return "seniority_mismatch"
-        except Exception:
-            return "seniority_mismatch"
-
-    # Multi-country support: ``icp.country`` is a ``List[str]`` (the field
-    # validator coerces legacy single-string values to ``[str]``).  An
-    # empty list means "any country accepted" and skips the check.
-    # Otherwise the lead's HQ country must match ANY listed target after
-    # alias normalization (so "US" / "USA" / "United States" all collide,
-    # see _normalize_country above).
-    if icp.country and lead.company_hq_country:
-        targets = icp.country if isinstance(icp.country, list) else [icp.country]
-        target_set = {_normalize_country(c) for c in targets if c}
-        if target_set and _normalize_country(lead.company_hq_country) not in target_set:
-            return "country_mismatch"
-
-    # Exact-bucket match: ``icp.employee_count`` is a list of canonical
-    # buckets (e.g. ``["201-500", "501-1,000", "1,001-5,000"]``).  Miners
-    # submit leads using the same canonical vocabulary (enforced in
-    # gateway/api/submit.py), so this is a pure set-membership check.
-    # Prior implementation used a range-overlap test which let leads
-    # slip through when their bucket touched the ICP range at a single
-    # endpoint (e.g. a ``"51-200"`` lead against a ``"200-5000"`` ICP
-    # matched via the shared 200-employee boundary even though the
-    # client excluded companies below 200 employees).
-    if icp.employee_count and lead.employee_count:
-        allowed = icp.employee_count if isinstance(icp.employee_count, list) else [icp.employee_count]
-        if lead.employee_count not in allowed:
-            return "employee_count_mismatch"
-
-    if icp.company_stage and lead_output.role:
-        pass
-
-    biz_lower = lead_output.business.strip().lower()
-    if not biz_lower:
-        return "data_quality"
-    if biz_lower in seen_companies:
-        return "duplicate_company"
-    seen_companies.add(biz_lower)
-
-    return None
-
-
 def _build_failure_detail(
     failure_reason: str,
     lead: "FulfillmentLead" = None,
@@ -371,6 +137,12 @@ def _build_failure_detail(
         return "Another lead for the same company was already submitted in this batch"
     if r == "data_quality":
         return "Missing required field: company name"
+    if r == "invalid_hq_location" and lead:
+        return f"Submitted HQ '{lead.company_hq_city}, {lead.company_hq_state}, {lead.company_hq_country}' is not a valid location"
+    if r == "geography_mismatch" and lead:
+        return f"Submitted HQ '{lead.company_hq_city}, {lead.company_hq_state}, {lead.company_hq_country}' is not within target geography"
+    if r == "geography_missing":
+        return "No HQ location submitted but ICP requires specific geography"
 
     # --- Email ---
     if r.startswith("email_"):
@@ -484,14 +256,59 @@ async def score_fulfillment_lead(
     lead_output = lead.to_lead_output()
     icp_prompt = icp.to_icp_prompt()
 
-    # --- Tier 1: ICP Fit ---
-    t1_failure = _tier1_check(lead, lead_output, icp, seen_companies)
-    if t1_failure:
+    # --- Tier 1: ICP Fit (deterministic, free) ---
+    t1_failure = tier1_check(lead, lead_output, icp, seen_companies)
+    if t1_failure and t1_failure != "sub_industry_needs_llm":
         return FulfillmentScoreResult(
             tier1_passed=False,
             failure_reason=t1_failure,
             failure_detail=_build_failure_detail(t1_failure, lead=lead, lead_output=lead_output, icp=icp),
         )
+
+    # --- Tier 1.5: LLM-based checks (sub-industry semantic + location) ---
+    # Call 1: Sub-industry semantic match (only if Tier 1 exact+containment failed)
+    if t1_failure == "sub_industry_needs_llm":
+        icp_subs = icp.sub_industry if isinstance(icp.sub_industry, list) else [icp.sub_industry]
+        sub_matched, matched_sub = await semantic_sub_industry_match(
+            lead.industry, lead.sub_industry, icp_subs,
+        )
+        if not sub_matched:
+            return FulfillmentScoreResult(
+                tier1_passed=False,
+                failure_reason="sub_industry_mismatch",
+                failure_detail=_build_failure_detail("sub_industry_mismatch", lead=lead, lead_output=lead_output, icp=icp),
+            )
+        print(f"   ✅ Tier 1.5: Sub-industry semantic match: '{lead.sub_industry}' → '{matched_sub}'")
+
+    # Call 2: Location validation + geography match (when ICP has specific geography)
+    # Skip when geography is just the country (Tier 1 country check handles it)
+    icp_geo = (icp.geography or "").strip()
+    icp_country = (icp.country or "").strip()
+    if icp_geo and icp_geo != icp_country:
+        # Pre-check: if miner submitted no location at all, reject before LLM
+        if not lead.company_hq_city and not lead.company_hq_state and not lead.company_hq_country:
+            return FulfillmentScoreResult(
+                tier1_passed=False,
+                failure_reason="geography_missing",
+                failure_detail="No HQ location submitted but ICP requires specific geography",
+            )
+        loc_valid, geo_match = await validate_lead_geography(
+            lead.company_hq_city, lead.company_hq_state, lead.company_hq_country,
+            icp.geography,
+        )
+        if not loc_valid:
+            return FulfillmentScoreResult(
+                tier1_passed=False,
+                failure_reason="invalid_hq_location",
+                failure_detail=f"Submitted HQ '{lead.company_hq_city}, {lead.company_hq_state}, {lead.company_hq_country}' is not a valid location",
+            )
+        if not geo_match:
+            return FulfillmentScoreResult(
+                tier1_passed=False,
+                failure_reason="geography_mismatch",
+                failure_detail=f"Submitted HQ '{lead.company_hq_city}, {lead.company_hq_state}, {lead.company_hq_country}' is not within target geography",
+            )
+        print(f"   ✅ Tier 1.5: Geography match: '{lead.company_hq_city}, {lead.company_hq_state}' within '{icp.geography}'")
 
     # Build a mutable dict that validator check functions can annotate in-place
     # (they add domain_age_days, has_mx, gse_search_count, etc.)

@@ -389,11 +389,19 @@ def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # ==========================================================================
     # EXTRACT ICP CRITERIA
     # ==========================================================================
-    icp_industry = icp.get("industry", "")
-    icp_sub_industry = icp.get("sub_industry", "")
+    # Multi-industry ICPs store industry/sub_industry as List[str]; the ILIKE
+    # below expects a single string, so collapse via the same coercer used by
+    # tier1_check (also tolerates legacy stringified-list values).
+    from gateway.fulfillment.icp_checks import _coerce_industry_list
+    icp_industry_list = _coerce_industry_list(icp.get("industry"))
+    icp_sub_industry_list = _coerce_industry_list(icp.get("sub_industry"))
+    # Pick the first entry as the SQL pattern; multi-industry ICPs are rare
+    # in this sample miner — the canonical pipeline uses tier1_check instead.
+    icp_industry = icp_industry_list[0] if icp_industry_list else ""
+    icp_sub_industry = icp_sub_industry_list[0] if icp_sub_industry_list else ""
     icp_target_roles = icp.get("target_roles", [])
     icp_country = icp.get("country", "")
-    
+
     print(f"📋 ICP: {icp_industry} / {icp_sub_industry}")
     print(f"   Roles: {icp_target_roles[:2] if icp_target_roles else ['any']}...")
     

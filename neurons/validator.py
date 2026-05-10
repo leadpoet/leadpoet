@@ -651,6 +651,26 @@ def _llm_score_batch(leads: list[dict], description: str, model: str) -> dict:
             result[id(lead)] = min(overlap * 0.05, 0.5)
         return result
 
+
+def _normalize_icp_dict_for_prompt(icp_data: dict) -> dict:
+    """Return a shallow copy of ``icp_data`` with industry/sub_industry coerced
+    to comma-joined strings suitable for ``ICPPrompt`` (which types both as
+    ``str``).  Multi-industry ICPs store these as ``List[str]``; without this
+    coercion ``ICPPrompt(**icp_data)`` either raises a ValidationError (real
+    list) or silently stringifies to ``"['X', 'Y']"`` (legacy bad shape) —
+    both wedge downstream comparisons.
+    """
+    if not isinstance(icp_data, dict):
+        return icp_data
+    from gateway.fulfillment.icp_checks import _coerce_industry_list
+    out = dict(icp_data)
+    if "industry" in out:
+        out["industry"] = ", ".join(_coerce_industry_list(out.get("industry"))) or ""
+    if "sub_industry" in out:
+        out["sub_industry"] = ", ".join(_coerce_industry_list(out.get("sub_industry"))) or ""
+    return out
+
+
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
@@ -5024,12 +5044,12 @@ class Validator(BaseValidatorNeuron):
                     evaluation_run_id = run.get("evaluation_run_id")
                     icp_data = run.get("icp_data", {})
                     icp_industry = icp_data.get("industry", "Unknown")
-                    
+
                     print(f"\n   📋 ICP {run_idx}/{len(runs)}: {icp_industry}")
-                    
+
                     try:
                         # Create ICP prompt
-                        icp = ICPPrompt(**icp_data)
+                        icp = ICPPrompt(**_normalize_icp_dict_for_prompt(icp_data))
                         
                         # Run model with timeout
                         start_time = time.time()
@@ -8997,12 +9017,12 @@ def run_dedicated_qualification_worker(config):
                             evaluation_run_id = run.get("evaluation_run_id")
                             icp_data = run.get("icp_data", {})
                             icp_industry = icp_data.get("industry", "Unknown")
-                            
+
                             print(f"\n      📋 ICP {run_idx}/{len(runs)}: {icp_industry}")
-                            
+
                             try:
                                 # Create ICP prompt
-                                icp = ICPPrompt(**icp_data)
+                                icp = ICPPrompt(**_normalize_icp_dict_for_prompt(icp_data))
                                 
                                 # Run model with timeout (asyncio imported at top of file)
                                 start_time = time.time()

@@ -629,6 +629,30 @@ async def get_active_requests(miner_hotkey: str = ""):
         icp["sub_industry"] = ", ".join(sub_list)
         icp["sub_industries"] = sub_list
 
+        # Country: same dual-shape treatment as industry/sub_industry.
+        # ``country`` is now a list internally but legacy miners parsed it
+        # as a single string.  Expose:
+        #   - ``country``    : comma-joined string (back-compat).  For
+        #                      multi-country ICPs this WILL contain commas
+        #                      (e.g. ``"Brazil, Argentina, Colombia"``);
+        #                      legacy miners doing exact-match comparisons
+        #                      should migrate to the list below.
+        #   - ``countries``  : authoritative list.  This is what the
+        #                      validator's Tier 1 gate uses (set-membership
+        #                      with alias normalization), so any miner that
+        #                      wants their leads to pass the country check
+        #                      MUST verify lead.company_hq_country against
+        #                      this list.  Empty list = "any country".
+        country_val = icp.get("country")
+        if isinstance(country_val, list):
+            country_list = [s for s in country_val if isinstance(s, str) and s]
+        elif isinstance(country_val, str) and country_val:
+            country_list = [country_val]
+        else:
+            country_list = []
+        icp["country"] = ", ".join(country_list)
+        icp["countries"] = country_list
+
         requests_out.append({
             "request_id": r["request_id"],
             "icp": icp,

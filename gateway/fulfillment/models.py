@@ -177,7 +177,23 @@ class FulfillmentICP(BaseModel):
     employee_count: List[str] = Field(default_factory=list)
     company_stage: str = ""
     geography: str = ""
-    country: str = ""
+    # List of target countries the client will accept.  A single client ICP
+    # frequently spans multiple countries (e.g. LATAM = 12 countries,
+    # Nordics = 5, "Western Europe" = ~10), so this is a list and the Tier 1
+    # gate accepts a lead matching ANY listed country (set membership, with
+    # alias normalization through _normalize_country in scoring.py).
+    #
+    # Empty list = "any country accepted" (Tier 1 country check skipped
+    # entirely, same as the legacy ``country=""`` default).
+    #
+    # The field validator below accepts BOTH a list and a single string —
+    # the single-string form is required for back-compat with historical
+    # icp_details JSON in the DB (every fulfillment_requests row created
+    # before this column became multi-valued has ``"country": "United States"``
+    # or similar).  Without that coercion, validator-side
+    # ``FulfillmentICP(**icp_details)`` re-parses would crash on every
+    # in-flight legacy request and wedge the entire scoring pipeline.
+    country: List[str] = Field(default_factory=list)
     product_service: str = ""
     intent_signals: List[str] = Field(default_factory=list)
     # Companies whose leads must be rejected at Tier 1 for this request.
@@ -336,6 +352,55 @@ class FulfillmentICP(BaseModel):
             out.append(s)
         return out
 
+    @field_validator("country", mode="before")
+    @classmethod
+    def validate_country(cls, v) -> List[str]:
+        """Coerce ``country`` to ``List[str]``.
+
+        Accepts:
+          * ``None`` / ``""`` / ``[]``      -> ``[]`` (Tier 1 country check
+            skipped — "any country accepted")
+          * Single ``str``                   -> ``[str]`` (back-compat with
+            legacy icp_details rows where ``country`` was stored as a plain
+            string before the column became multi-valued — every
+            ``fulfillment_requests`` row created before this change has
+            this shape, and the validator must continue to re-parse them
+            without crashing or scoring will wedge for in-flight requests)
+          * ``List[str]``                    -> stripped, deduped (case-
+            insensitive on the dedup key, but original casing preserved
+            for display / failure-detail messages)
+
+        Whitespace-only entries are dropped.  No taxonomy validation here
+        because there's no canonical "valid country" set in the project
+        (qualification has its own list of 199 valid countries used at
+        lead-submit time, but fulfillment historically accepted any free-
+        form country string and we shouldn't tighten that contract here).
+        Normalization for the Tier 1 comparison happens in
+        ``gateway/fulfillment/scoring.py::_normalize_country`` at check
+        time so this validator stays cheap.
+        """
+        if v is None or v == "" or v == []:
+            return []
+        if isinstance(v, str):
+            s = v.strip()
+            return [s] if s else []
+        if not isinstance(v, list):
+            raise ValueError(
+                f"country must be a list or string, got {type(v).__name__}"
+            )
+        seen = set()
+        out: List[str] = []
+        for entry in v:
+            s = str(entry).strip()
+            if not s:
+                continue
+            key = s.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(s)
+        return out
+
     @field_validator("target_role_types")
     @classmethod
     def validate_role_types(cls, v: List[str]) -> List[str]:
@@ -414,6 +479,13 @@ class FulfillmentICP(BaseModel):
         # form is purely cosmetic for the rest.
         industry_str = ", ".join(self.industry) if self.industry else ""
         sub_industry_str = ", ".join(self.sub_industry) if self.sub_industry else ""
+        # ``ICPPrompt.country`` is still a single ``str`` (shared with
+        # qualification/sourcing miners that don't yet handle multi-country
+        # ICPs).  Collapse the list to a comma-joined string the same way
+        # we do for industry / sub_industry above so downstream consumers
+        # at least receive readable target context, even if their Tier 1
+        # check still uses single-value equality.
+        country_str = ", ".join(self.country) if self.country else ""
         return ICPPrompt(
             icp_id=self.icp_id,
             prompt=self.prompt,
@@ -424,7 +496,7 @@ class FulfillmentICP(BaseModel):
             employee_count=ec_str,
             company_stage=self.company_stage,
             geography=self.geography,
-            country=self.country,
+            country=country_str,
             product_service=self.product_service,
             intent_signals=self.intent_signals,
         )

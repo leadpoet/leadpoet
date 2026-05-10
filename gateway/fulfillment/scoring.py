@@ -284,8 +284,16 @@ def _tier1_check(
         except Exception:
             return "seniority_mismatch"
 
+    # Multi-country support: ``icp.country`` is a ``List[str]`` (the field
+    # validator coerces legacy single-string values to ``[str]``).  An
+    # empty list means "any country accepted" and skips the check.
+    # Otherwise the lead's HQ country must match ANY listed target after
+    # alias normalization (so "US" / "USA" / "United States" all collide,
+    # see _normalize_country above).
     if icp.country and lead.company_hq_country:
-        if _normalize_country(lead.company_hq_country) != _normalize_country(icp.country):
+        targets = icp.country if isinstance(icp.country, list) else [icp.country]
+        target_set = {_normalize_country(c) for c in targets if c}
+        if target_set and _normalize_country(lead.company_hq_country) not in target_set:
             return "country_mismatch"
 
     # Exact-bucket match: ``icp.employee_count`` is a list of canonical
@@ -345,6 +353,15 @@ def _build_failure_detail(
         sen = lead_output.seniority.value if hasattr(lead_output.seniority, "value") else str(lead_output.seniority)
         return f"Submitted seniority '{sen}' does not match target seniority"
     if r == "country_mismatch" and lead:
+        if icp and icp.country:
+            targets = icp.country if isinstance(icp.country, list) else [icp.country]
+            target_str = ", ".join(str(c) for c in targets if c)
+            if target_str:
+                label = "country" if len(targets) == 1 else "countries"
+                return (
+                    f"Submitted country '{lead.company_hq_country}' does not "
+                    f"match target {label}: {target_str}"
+                )
         return f"Submitted country '{lead.company_hq_country}' does not match target country"
     if r == "employee_count_mismatch" and lead:
         return f"Submitted employee count '{lead.employee_count}' does not match target range"

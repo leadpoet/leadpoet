@@ -1060,8 +1060,13 @@ def _has_contradicting_state_or_province(city: str, state: str, country: str, fu
 
     This catches cases like:
     - Claimed: Vancouver, Washington, USA
-    - Text shows: "Vancouver, British Columbia" → CONTRADICTION (BC is Canada, not WA)
-    - URL is ca.linkedin.com when claiming US → CONTRADICTION
+    - Text shows: "Vancouver, British Columbia" -> CONTRADICTION (BC is Canada, not WA)
+
+    Note: The LinkedIn URL country prefix (e.g. uk.linkedin.com) is NOT used as
+    a contradiction signal — both www.linkedin.com/in/x and uk.linkedin.com/in/x
+    resolve to the same profile, and the prefix typically reflects the viewer's
+    locale, not the profile owner's country. The text-based city/state/province
+    contradiction logic below is the authoritative signal.
 
     Returns:
         True if a contradicting state/province/country is found
@@ -1070,60 +1075,6 @@ def _has_contradicting_state_or_province(city: str, state: str, country: str, fu
         return False
 
     claimed_country_lower = country.lower().strip() if country else ""
-
-    if linkedin_url:
-        country_domain_match = re.search(r'https?://([a-z]{2})\.linkedin\.com', linkedin_url.lower())
-        if country_domain_match:
-            url_country_code = country_domain_match.group(1)
-            if url_country_code not in ('ww', 'www'[:2]):
-                country_to_code = {
-                    'united states': None, 'us': None, 'usa': None, 'u.s.': None, 'u.s.a.': None,  # US uses www
-                    'canada': 'ca', 'uk': 'uk', 'united kingdom': 'uk', 'great britain': 'uk', 'england': 'uk',
-                    'australia': 'au', 'germany': 'de', 'france': 'fr', 'spain': 'es', 'italy': 'it',
-                    'brazil': 'br', 'india': 'in', 'japan': 'jp', 'china': 'cn', 'mexico': 'mx',
-                    'netherlands': 'nl', 'belgium': 'be', 'sweden': 'se', 'norway': 'no', 'denmark': 'dk',
-                    'finland': 'fi', 'switzerland': 'ch', 'austria': 'at', 'poland': 'pl', 'ireland': 'ie',
-                    'portugal': 'pt', 'greece': 'gr', 'turkey': 'tr', 'russia': 'ru', 'ukraine': 'ua',
-                    'south africa': 'za', 'egypt': 'eg', 'nigeria': 'ng', 'kenya': 'ke', 'morocco': 'ma',
-                    'algeria': 'dz', 'tunisia': 'tn', 'israel': 'il', 'saudi arabia': 'sa', 'uae': 'ae',
-                    'united arab emirates': 'ae', 'qatar': 'qa', 'kuwait': 'kw', 'bahrain': 'bh',
-                    'pakistan': 'pk', 'bangladesh': 'bd', 'indonesia': 'id', 'malaysia': 'my',
-                    'singapore': 'sg', 'thailand': 'th', 'vietnam': 'vn', 'philippines': 'ph',
-                    'south korea': 'kr', 'korea': 'kr', 'taiwan': 'tw', 'hong kong': 'hk',
-                    'new zealand': 'nz', 'argentina': 'ar', 'chile': 'cl', 'colombia': 'co', 'peru': 'pe',
-                    'venezuela': 've', 'czech republic': 'cz', 'czechia': 'cz', 'hungary': 'hu',
-                    'romania': 'ro', 'bulgaria': 'bg', 'croatia': 'hr', 'serbia': 'rs', 'slovakia': 'sk',
-                    # Additional countries
-                    'afghanistan': 'af', 'chad': 'td', 'ethiopia': 'et', 'ghana': 'gh', 'cameroon': 'cm',
-                    'ivory coast': 'ci', 'senegal': 'sn', 'uganda': 'ug', 'tanzania': 'tz', 'zimbabwe': 'zw',
-                    'jordan': 'jo', 'lebanon': 'lb', 'iraq': 'iq', 'iran': 'ir', 'oman': 'om', 'yemen': 'ye',
-                    'nepal': 'np', 'sri lanka': 'lk', 'myanmar': 'mm', 'cambodia': 'kh', 'laos': 'la',
-                    'luxembourg': 'lu', 'slovenia': 'si', 'estonia': 'ee', 'latvia': 'lv', 'lithuania': 'lt',
-                    'iceland': 'is', 'malta': 'mt', 'cyprus': 'cy', 'bosnia': 'ba', 'north macedonia': 'mk',
-                    'ecuador': 'ec', 'bolivia': 'bo', 'paraguay': 'py', 'uruguay': 'uy', 'costa rica': 'cr',
-                    'panama': 'pa', 'guatemala': 'gt', 'honduras': 'hn', 'el salvador': 'sv', 'nicaragua': 'ni',
-                    'dominican republic': 'do', 'puerto rico': 'pr', 'jamaica': 'jm', 'cuba': 'cu',
-                }
-                expected_code = country_to_code.get(claimed_country_lower)
-
-                # US claims should have www.linkedin.com (no country code)
-                if claimed_country_lower in ['united states', 'us', 'usa', 'u.s.', 'u.s.a.']:
-                    return True  # Contradiction - non-US domain for US claim
-
-                # For other countries, check if URL domain matches expected
-                if expected_code and url_country_code != expected_code:
-                    return True  # Contradiction - different country domain
-
-                # If country not in our mapping but we see a specific domain, be suspicious
-                # Build reverse lookup from domain code to country
-                if not expected_code and claimed_country_lower:
-                    code_to_country = {}
-                    for cname, ccode in country_to_code.items():
-                        if ccode and ccode not in code_to_country:
-                            code_to_country[ccode] = cname
-                    # If URL domain code maps to a known country that's different from claimed
-                    if url_country_code in code_to_country:
-                        return True  # URL shows known country but claimed country is different/unknown
 
     city_lower = city.lower().strip()
     text_lower = full_text.lower()
@@ -1345,10 +1296,9 @@ def _verify_state_or_country_for_strict_validation(city: str, state: str, countr
         return False
     else:
         if claimed_country_lower:
-            if linkedin_url:
-                url_country = get_linkedin_url_country(linkedin_url)
-                if url_country:
-                    return url_country == claimed_country_lower
+            # LinkedIn URL country prefix is unreliable (both www. and a regional
+            # subdomain serve the same profile; the prefix reflects the viewer's
+            # locale). Fall through to text-based country verification below.
 
             for match in city_matches:
                 city_start_pos = match.start()
@@ -2322,15 +2272,12 @@ def validate_lead(
 
     # STEP 4: Location check
     full_text = f"{url_matched_result.get('title', '')} {url_matched_result.get('snippet', '')}"
-
-    # STEP 4a: Check LinkedIn URL country matches claimed country
     result_url = url_matched_result.get('link', '')
-    url_country_valid, url_country_error = check_linkedin_url_country_match(result_url, country)
-    if not url_country_valid:
-        result['checks']['location']['method'] = 'url_country_mismatch'
-        result['checks']['location']['extracted'] = get_linkedin_url_country(result_url)
-        result['rejection_reason'] = 'url_country_mismatch'
-        return result
+
+    # NOTE: STEP 4a (LinkedIn URL country contradiction check) removed —
+    # both www.linkedin.com/in/x and uk.linkedin.com/in/x serve the same
+    # profile, and the country prefix reflects the viewer's locale, not the
+    # profile owner's country.  Text-based extraction below is authoritative.
 
     extracted_loc = extract_location_from_text(full_text)
 

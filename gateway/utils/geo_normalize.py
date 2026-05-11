@@ -457,6 +457,9 @@ _ISO_COUNTRY_CODES: dict = {
     # --- Anglosphere (alpha-2 — US/UK already covered above but repeated for completeness) ---
     "us": "united states", "gb": "united kingdom",
 
+    # --- Russia (alpha-2; alpha-3 "rus" is in the Asia block below) ---
+    "ru": "russia",
+
     # --- ISO alpha-3 (Africa) ---
     "dza": "algeria", "ago": "angola", "ben": "benin", "bwa": "botswana",
     "bfa": "burkina faso", "bdi": "burundi", "cpv": "cape verde",

@@ -918,6 +918,18 @@ async def _resolve_chain_topk(
             .eq("lead_id", r["lead_id"]) \
             .execute()
         tied_rows = list(tied.data or [])
+        # When the predecessor-scoped re-query yields no rows (race with a
+        # concurrent write, stale read, or cross-generation schema skew),
+        # use the topk row itself as the single tied entry so the lead is
+        # still represented in reward distribution.
+        if not tied_rows:
+            print(
+                f"   ⚠️  tied re-query returned 0 rows for "
+                f"request={str(r.get('request_id',''))[:8]} "
+                f"lead={str(r.get('lead_id',''))[:8]} — "
+                f"using topk row as the single tied entry"
+            )
+            tied_rows = [r]
         tied_groups.append((r["lead_id"], tied_rows))
 
     return {
@@ -958,7 +970,11 @@ async def _finalize_chain_rewards(
     winners: list = []
     for r in topk:
         lid = r["lead_id"]
-        tied_rows = tied_by_lead.get(lid, [])
+        # _resolve_chain_topk always seeds tied_groups with at least one
+        # entry per topk lead; the `or [r]` is a belt-and-suspenders default
+        # so any future change to that contract still distributes the
+        # reward for this lead.
+        tied_rows = tied_by_lead.get(lid) or [r]
         tie_count = max(1, len(tied_rows))
         for tr in tied_rows:
             winners.append({
@@ -989,18 +1005,22 @@ async def _attach_intent_details_for_winners(
     request_id: str,
     winners: list,
 ) -> None:
-    """Generate + persist the Intent Details passage for each winning lead.
+    """Generate + persist the Intent Details payload for each winning lead.
+
+    One LLM call per winner produces:
+      - an overall paragraph -> ``fulfillment_score_consensus.intent_details``
+      - a per-signal breakdown -> ``fulfillment_score_consensus.intent_breakdown``
 
     Uses the consensus row's ``intent_signal_mapping`` as the source of
     verified signals and the request's ``icp_details`` as the ICP context.
-    Writes the generated paragraph back to
-    ``fulfillment_score_consensus.intent_details``.
+    Either column is written only when its content is non-empty so a
+    partial parse failure cannot blank out a prior successful write.
     """
     if not winners:
         return
 
     try:
-        from gateway.fulfillment.intent_details import generate_intent_details_passage
+        from gateway.fulfillment.intent_details import generate_intent_details
     except Exception as e:
         print(f"   ⚠️  intent_details module unavailable, skipping: {e}")
         return
@@ -1021,22 +1041,35 @@ async def _attach_intent_details_for_winners(
         submission_id = w.get("submission_id")
         signals = w.get("intent_signal_mapping") or []
         try:
-            passage = await generate_intent_details_passage(icp, signals)
+            out = await generate_intent_details(icp, signals)
         except Exception as e:
             print(f"   ⚠️  intent_details LLM call raised for {str(lead_id)[:8]}: {e}")
-            passage = ""
+            out = {"passage": "", "per_signal": []}
 
-        if not passage:
+        passage = out.get("passage", "")
+        per_signal = out.get("per_signal", [])
+
+        # Nothing to write — skip the row entirely so we don't NULL out an
+        # earlier successful run on a retry.
+        if not passage and not per_signal:
             continue
 
+        update_payload = {}
+        if passage:
+            update_payload["intent_details"] = passage
+        if per_signal:
+            update_payload["intent_breakdown"] = {"per_signal": per_signal}
+
         try:
-            supabase.table("fulfillment_score_consensus").update({
-                "intent_details": passage,
-            }).eq("request_id", request_id) \
+            supabase.table("fulfillment_score_consensus").update(update_payload) \
+              .eq("request_id", request_id) \
               .eq("submission_id", submission_id) \
               .eq("lead_id", lead_id) \
               .execute()
-            print(f"   📝 Intent details stored for lead {str(lead_id)[:8]} ({len(passage)} chars)")
+            print(
+                f"   📝 Intent details stored for lead {str(lead_id)[:8]} "
+                f"(passage={len(passage)} chars, per_signal={len(per_signal)})"
+            )
         except Exception as e:
             print(f"   ⚠️  Failed to persist intent_details for {str(lead_id)[:8]}: {e}")
 

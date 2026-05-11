@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -39,36 +39,47 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 LLM_MODEL = "openai/gpt-4o-mini"
 LLM_TIMEOUT_SECONDS = 60
 
+# Label used when a credited signal (after_decay_score > 0) arrives without
+# a specific matched_icp_signal — gives the LLM and the customer-facing UI
+# a stable header instead of an empty string.
+UNTAGGED_SIGNAL_LABEL = "Aligned with overall buyer profile"
+
 
 # Prompt text closely mirrors the exact rule list the client uses when
 # hand-crafting Intent Details in Perplexity.  If you adjust a rule, this
 # should be a product decision synced with whatever's in the client-facing
 # UI spec, not a silent code change.
-_PROMPT_TEMPLATE = """Fill in the Intent Details paragraph for one specific company using the provided ICP and the identified intent signals below.
+_PROMPT_TEMPLATE = """Produce two outputs for the company below: (A) one overall Intent Details paragraph, and (B) one client-ready explanation per intent signal. Both grounded strictly in the provided signals.
 
-Rules (strictly enforced):
-- Only produce the Intent Details paragraph. No preamble, no apology, no disclaimer, no mention of "search results", "available information", or your own limitations.
+Rules (strictly enforced for BOTH outputs):
+- No preamble, no apology, no disclaimer, no mention of "search results", "available information", or your own limitations.
 - Synthesize ONLY from the intent signals provided below. Do not invent facts, do not speculate beyond what the signals support, and do not reference any source outside the inputs.
-- Intent Details must be expanded with rich buying-signal context explaining why the observed activity indicates relevance for the ICP.
-- Write as a single natural paragraph. No subtitles, bullets, labels, or markdown.
-- Do not reference "this list", "these candidates", or the source file.
-- Do not add links, citations, or references.
-- Output must be client-ready for direct use in the UI.
-- Use natural paragraph prose. No em dashes. Avoid over-using hyphens.
+- Each output must be expanded with rich buying-signal context explaining why the observed activity indicates relevance for the ICP.
+- Use natural prose. No bullets, no labels inside the prose, no markdown, no em dashes, no links, no citations.
 - Do not restate the client name or ICP facts (country, employee count, industry, etc.).
-- Ensure every claim is grounded in the provided evidence. If a specific claim cannot be supported by the provided signals, omit it — write a shorter paragraph rather than fabricating detail.
+- If a claim cannot be supported by the provided signals, omit it — write shorter rather than fabricating detail.
+- Output must be client-ready for direct use in the UI.
 
 Inputs:
 
 ICP:
 {icp_block}
 
-Intent Signals (the only evidence you may cite):
+Intent Signals (the only evidence you may cite; numbered 1..N):
 {signals_block}
 
-Output:
+Output format (return EXACTLY this structure; the === markers are required):
 
-A single polished paragraph for the Intent Details column that clearly explains the relevance and strength of this company's buying intent, grounded in the provided signals."""
+=== OVERALL ===
+<single natural paragraph synthesizing all the signals into one buying-intent narrative>
+
+=== SIGNAL 1 ===
+<single short paragraph explaining how signal 1 specifically indicates buying intent for the ICP>
+
+=== SIGNAL 2 ===
+<single short paragraph for signal 2>
+
+(continue for every numbered signal; do not skip any; do not invent extras)"""
 
 
 # Patterns that indicate the LLM emitted meta-commentary / refusal instead
@@ -121,34 +132,56 @@ def _format_icp_block(icp: Dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "(empty ICP)"
 
 
+def _compute_keepers(signals: List[Dict[str, Any]]) -> List[Tuple[int, Dict[str, Any]]]:
+    """Return ``[(source_index, signal), ...]`` for signals that passed scoring.
+
+    ``source_index`` is the 0-based position in the ORIGINAL
+    ``intent_signal_mapping`` array.  Filtered list preserves that position
+    so the per-signal breakdown can store a ``source_index`` field pointing
+    at the correct raw evidence row even when failed signals are skipped.
+
+    Returns an empty list when no signal has ``after_decay_score > 0`` (or
+    ``raw_score > 0`` as a fallback for legacy rows missing the decay
+    field).  In that case the caller renders "(no intent signals)" to the
+    LLM and the lifecycle persists nothing — by design.  A lead that won
+    consensus must have ``intent_final > 0`` and therefore at least one
+    passing signal, so this empty return should not fire in production for
+    a legitimate winner; the explicit empty path exists so a failed-signal
+    edge case never produces per-signal explanations for evidence that did
+    not qualify.
+    """
+    raw = list(signals or [])
+    return [
+        (i, s) for i, s in enumerate(raw)
+        if float(s.get("after_decay_score") or s.get("raw_score") or 0) > 0
+    ]
+
+
 def _format_signals_block(signals: List[Dict[str, Any]]) -> str:
-    """Render the verified intent signals as a numbered block.
+    """Render the verified intent signals as a numbered block for the LLM.
 
     Each ``signal`` entry should have the shape produced by
     ``gateway/fulfillment/scoring.py`` -> ``intent_signals_detail`` items:
     ``url, description, snippet, date, source, matched_icp_signal``.
-    Unscored / zero-score signals are filtered out before rendering so the
-    LLM only sees the evidence that actually counted.
+    Unscored / zero-score signals are filtered out so the LLM only sees the
+    evidence that actually counted.  The 1-based LLM-facing number is the
+    position in the filtered list; the parser separately stores a
+    ``source_index`` so callers can locate the raw row in the original
+    intent_signal_mapping.
     """
-    keepers = [
-        s for s in (signals or [])
-        if float(s.get("after_decay_score") or s.get("raw_score") or 0) > 0
-    ]
-    if not keepers:
-        keepers = list(signals or [])
+    keepers = _compute_keepers(signals)
     if not keepers:
         return "(no intent signals)"
 
     lines = []
-    for i, s in enumerate(keepers, 1):
+    for i, (_src_idx, s) in enumerate(keepers, 1):
         desc = (s.get("description") or "").strip()
         snippet = (s.get("snippet") or "").strip()
         date = s.get("date") or "n/a"
-        matched = s.get("matched_icp_signal")
+        matched = (s.get("matched_icp_signal") or "").strip() or UNTAGGED_SIGNAL_LABEL
         source = s.get("source") or "n/a"
         header = f"{i}. Source: {source}"
-        if matched:
-            header += f"  |  Matches ICP signal: \"{matched}\""
+        header += f"  |  Matches ICP signal: \"{matched}\""
         header += f"  |  Date: {date}"
         lines.append(header)
         if desc:
@@ -215,20 +248,134 @@ def _get_api_key() -> Optional[str]:
     )
 
 
-async def generate_intent_details_passage(
+_OVERALL_HEADER_RE = re.compile(r"^={2,}\s*OVERALL\s*={2,}\s*$", re.IGNORECASE | re.MULTILINE)
+_SIGNAL_HEADER_RE = re.compile(r"^={2,}\s*SIGNAL\s+(\d+)\s*(?:[:\-]\s*(.+?))?\s*={2,}\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _parse_combined_output(
+    content: str,
+    keepers: List[Tuple[int, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Parse the marker-delimited LLM response into (passage, per_signal).
+
+    Robust to per-section malformation: an unparseable SIGNAL N block simply
+    omits that index from per_signal, leaving the rest intact.  The overall
+    passage is independently extractable.
+
+    ``keepers`` is ``[(source_index, signal), ...]`` from ``_compute_keepers``.
+    Each emitted per_signal entry carries:
+      - ``index``: the 1-based number the LLM saw (position in keepers)
+      - ``source_index``: 0-based position in the ORIGINAL
+        intent_signal_mapping array — frontend zips by this to land on the
+        correct raw evidence row when failed signals were filtered out
+      - ``icp_signal``: matched ICP label (from the keeper)
+      - ``details``: the LLM's client-ready paragraph for this signal
+    """
+    result: Dict[str, Any] = {"passage": "", "per_signal": []}
+    if not content:
+        return result
+
+    # Find all section boundaries in order. We treat the content as a
+    # series of [marker, body] pairs and slice between markers.
+    headers: List[Tuple[int, int, str, Optional[int]]] = []
+    for m in _OVERALL_HEADER_RE.finditer(content):
+        headers.append((m.start(), m.end(), "overall", None))
+    for m in _SIGNAL_HEADER_RE.finditer(content):
+        try:
+            idx = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        headers.append((m.start(), m.end(), "signal", idx))
+
+    if not headers:
+        # No markers at all — fall back to treating the whole content as the
+        # overall passage. Per-signal is empty.
+        result["passage"] = _clean_passage(content)
+        return result
+
+    headers.sort(key=lambda h: h[0])
+
+    # Track signal indices we've already captured so a model that emits
+    # duplicate "=== SIGNAL N ===" sections doesn't produce duplicate
+    # per_signal entries.  First non-empty occurrence wins.
+    seen_signal_indices: set = set()
+
+    for i, (_start, body_start, kind, idx) in enumerate(headers):
+        body_end = headers[i + 1][0] if i + 1 < len(headers) else len(content)
+        body = content[body_start:body_end].strip()
+        cleaned = _clean_passage(body)
+        if not cleaned:
+            continue
+        if kind == "overall":
+            # If the model emits multiple OVERALL blocks (rare), keep the
+            # first non-empty one.
+            if not result["passage"]:
+                result["passage"] = cleaned
+        elif kind == "signal" and idx is not None:
+            # 1-based index from the prompt; clamp to keepers range and
+            # skip duplicates (first non-empty section per index wins).
+            if not (1 <= idx <= len(keepers)):
+                continue
+            if idx in seen_signal_indices:
+                continue
+            seen_signal_indices.add(idx)
+            src_idx, keeper = keepers[idx - 1]
+            icp_signal = (keeper.get("matched_icp_signal") or "").strip() or UNTAGGED_SIGNAL_LABEL
+            # _idx is the 1-based LLM-emit position; carried only for the
+            # canonical sort below, stripped before return so it doesn't
+            # bloat the stored JSONB (array order is the public contract).
+            result["per_signal"].append(
+                {
+                    "_idx": idx,
+                    "source_index": src_idx,
+                    "icp_signal": icp_signal,
+                    "details": cleaned,
+                }
+            )
+
+    # Canonical order — consumers rely on array position, not on any
+    # numeric field, so sort here and drop the internal _idx key.
+    result["per_signal"].sort(key=lambda e: e["_idx"])
+    for entry in result["per_signal"]:
+        entry.pop("_idx", None)
+    return result
+
+
+async def generate_intent_details(
     icp: Dict[str, Any],
     intent_signals_detail: List[Dict[str, Any]],
-) -> str:
-    """Generate the client-ready Intent Details paragraph.
+) -> Dict[str, Any]:
+    """Generate both the overall Intent Details paragraph and a per-signal breakdown.
 
-    Returns an empty string on any failure — the caller (lifecycle) must
-    treat a missing passage as non-fatal and proceed with reward payout.
-    The passage is persisted on ``fulfillment_score_consensus.intent_details``.
+    One LLM round-trip produces both outputs from the same ICP + signals
+    context.  Returns a dict with two keys:
+
+        ``passage`` -> the overall client-ready paragraph (string; empty
+            on any failure).  Persisted to
+            ``fulfillment_score_consensus.intent_details``.
+        ``per_signal`` -> list of ``{source_index, icp_signal, details}``
+            entries in canonical order, one per verified (score > 0)
+            signal.  Empty list on failure.  Persisted to
+            ``fulfillment_score_consensus.intent_breakdown.per_signal``.
+
+    Caller (lifecycle) treats any empty piece as non-fatal and proceeds
+    with reward payout.  The two outputs are independent: a parse failure
+    on a single SIGNAL section drops only that index, the overall paragraph
+    and the other signals survive.
     """
+    empty: Dict[str, Any] = {"passage": "", "per_signal": []}
+
     api_key = _get_api_key()
     if not api_key:
-        logger.warning("generate_intent_details_passage: no OpenRouter API key set")
-        return ""
+        logger.warning("generate_intent_details: no OpenRouter API key set")
+        return empty
+
+    # Same keepers filter used to format the signals block.  Each entry is
+    # ``(source_index, signal)`` so the parser can emit a per_signal record
+    # whose ``source_index`` field points at the correct raw row in the
+    # original intent_signal_mapping array even when failed signals were
+    # filtered out.
+    keepers = _compute_keepers(intent_signals_detail)
 
     icp_block = _format_icp_block(icp or {})
     signals_block = _format_signals_block(intent_signals_detail or [])
@@ -256,34 +403,34 @@ async def generate_intent_details_passage(
                             "content": (
                                 "You write client-ready buying-intent summaries "
                                 "strictly from the evidence provided by the user. "
-                                "Absolute rules: respond with ONLY the final "
-                                "paragraph. Never apologize, never say 'I need to "
-                                "clarify', 'I appreciate', 'unfortunately', 'based "
-                                "on search results', or any similar meta-commentary. "
-                                "Never mention your own limitations or the source "
-                                "of the information. Never invent facts beyond the "
-                                "provided intent signals. If the provided signals "
-                                "are thin, write a shorter paragraph using only "
-                                "what is there, but still write a paragraph. "
-                                "No preamble, no labels, no markdown, no em dashes, "
-                                "no links."
+                                "Absolute rules: respond with ONLY the requested "
+                                "marker-delimited sections. Never apologize, never "
+                                "say 'I need to clarify', 'I appreciate', "
+                                "'unfortunately', 'based on search results', or any "
+                                "similar meta-commentary. Never mention your own "
+                                "limitations or the source of the information. "
+                                "Never invent facts beyond the provided intent "
+                                "signals. If the provided signals are thin, write "
+                                "shorter sections using only what is there. "
+                                "No preamble, no extra labels, no markdown, no em "
+                                "dashes, no links."
                             ),
                         },
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.3,
-                    "max_tokens": 800,
+                    "max_tokens": 3000,
                 },
             )
     except Exception as e:
         logger.warning(f"Intent details LLM call failed: {e}")
-        return ""
+        return empty
 
     if resp.status_code != 200:
         logger.warning(
             f"Intent details LLM returned {resp.status_code}: {resp.text[:300]}"
         )
-        return ""
+        return empty
 
     try:
         data = resp.json()
@@ -292,6 +439,20 @@ async def generate_intent_details_passage(
         )
     except Exception as e:
         logger.warning(f"Intent details LLM response parse failed: {e}")
-        return ""
+        return empty
 
-    return _clean_passage(content)
+    return _parse_combined_output(content, keepers)
+
+
+async def generate_intent_details_passage(
+    icp: Dict[str, Any],
+    intent_signals_detail: List[Dict[str, Any]],
+) -> str:
+    """Backward-compatible wrapper returning only the overall passage.
+
+    New callers should prefer ``generate_intent_details`` and persist both
+    the passage and the per-signal breakdown.  This shim exists so any
+    code still calling the old name keeps working with no behavior change.
+    """
+    out = await generate_intent_details(icp, intent_signals_detail)
+    return out.get("passage", "")

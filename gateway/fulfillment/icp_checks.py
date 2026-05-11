@@ -86,14 +86,17 @@ _LOCATION_CHECK_PROMPT = (
 # ---------------------------------------------------------------------------
 
 def _normalize_country(c: str) -> str:
-    """Simple country alias normalization."""
-    aliases = {
-        "us": "united states", "usa": "united states", "u.s.": "united states",
-        "u.s.a.": "united states", "uk": "united kingdom",
-        "gb": "united kingdom", "great britain": "united kingdom",
-    }
-    c = c.strip().lower()
-    return aliases.get(c, c)
+    """Country alias normalization for the Tier 1 country gate.
+
+    Delegates to gateway.utils.geo_normalize.normalize_country so the full
+    alias map (ISO-2, ISO-3, common variants for all 199 supported
+    countries) is the single source of truth. Returns lowercase for
+    case-insensitive equality against the lead's normalized HQ country.
+    """
+    if not c:
+        return ""
+    from gateway.utils.geo_normalize import normalize_country as _gn
+    return _gn(c).lower()
 
 
 # ---------------------------------------------------------------------------

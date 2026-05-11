@@ -375,6 +375,160 @@ COUNTRY_ALIASES = {
     "zaire": "democratic republic of the congo",
 }
 
+
+# ============================================================
+# ISO 3166-1 alpha-2 / alpha-3 codes -> canonical lowercase name
+# ============================================================
+# Miners and external data sources (ScrapingDog, LinkedIn URL prefixes,
+# phonenumbers library) often emit countries as 2- or 3-letter ISO codes.
+# Expanding the alias map here is the single source of truth so every
+# call site (Tier 1 country gate, submit intake, Stage 5 HQ verification)
+# resolves them consistently. All keys are lowercase; values must match a
+# canonical name already present in VALID_COUNTRIES_SET.
+_ISO_COUNTRY_CODES: dict = {
+    # --- Africa (alpha-2) ---
+    "dz": "algeria", "ao": "angola", "bj": "benin", "bw": "botswana",
+    "bf": "burkina faso", "bi": "burundi", "cv": "cape verde",
+    "cm": "cameroon", "cf": "central african republic", "td": "chad",
+    "km": "comoros", "cg": "republic of the congo",
+    "cd": "democratic republic of the congo", "ci": "ivory coast",
+    "dj": "djibouti", "eg": "egypt", "gq": "equatorial guinea",
+    "er": "eritrea", "sz": "eswatini", "et": "ethiopia", "ga": "gabon",
+    "gm": "gambia", "gh": "ghana", "gn": "guinea", "gw": "guinea-bissau",
+    "ke": "kenya", "ls": "lesotho", "lr": "liberia", "ly": "libya",
+    "mg": "madagascar", "mw": "malawi", "ml": "mali", "mr": "mauritania",
+    "mu": "mauritius", "ma": "morocco", "mz": "mozambique",
+    "na": "namibia", "ne": "niger", "ng": "nigeria", "rw": "rwanda",
+    "st": "sao tome and principe", "sn": "senegal", "sc": "seychelles",
+    "sl": "sierra leone", "so": "somalia", "za": "south africa",
+    "ss": "south sudan", "sd": "sudan", "tz": "tanzania", "tg": "togo",
+    "tn": "tunisia", "ug": "uganda", "zm": "zambia", "zw": "zimbabwe",
+
+    # --- Americas (alpha-2) ---
+    "ag": "antigua and barbuda", "ar": "argentina", "bs": "bahamas",
+    "bb": "barbados", "bz": "belize", "bo": "bolivia", "br": "brazil",
+    "ca": "canada", "cl": "chile", "co": "colombia", "cr": "costa rica",
+    "cu": "cuba", "dm": "dominica", "do": "dominican republic",
+    "ec": "ecuador", "sv": "el salvador", "gd": "grenada",
+    "gt": "guatemala", "gy": "guyana", "ht": "haiti", "hn": "honduras",
+    "jm": "jamaica", "mx": "mexico", "ni": "nicaragua", "pa": "panama",
+    "py": "paraguay", "pe": "peru", "kn": "saint kitts and nevis",
+    "lc": "saint lucia", "vc": "saint vincent and the grenadines",
+    "sr": "suriname", "tt": "trinidad and tobago", "uy": "uruguay",
+    "ve": "venezuela",
+
+    # --- Europe (alpha-2) ---
+    "al": "albania", "ad": "andorra", "at": "austria", "by": "belarus",
+    "be": "belgium", "ba": "bosnia and herzegovina", "bg": "bulgaria",
+    "hr": "croatia", "cy": "cyprus", "cz": "czech republic",
+    "dk": "denmark", "ee": "estonia", "fi": "finland", "fr": "france",
+    "de": "germany", "gr": "greece", "hu": "hungary", "is": "iceland",
+    "ie": "ireland", "it": "italy", "xk": "kosovo", "lv": "latvia",
+    "li": "liechtenstein", "lt": "lithuania", "lu": "luxembourg",
+    "mt": "malta", "md": "moldova", "mc": "monaco", "me": "montenegro",
+    "nl": "netherlands", "mk": "north macedonia", "no": "norway",
+    "pl": "poland", "pt": "portugal", "ro": "romania", "sm": "san marino",
+    "rs": "serbia", "sk": "slovakia", "si": "slovenia", "es": "spain",
+    "se": "sweden", "ch": "switzerland", "ua": "ukraine", "va": "vatican city",
+
+    # --- Asia (alpha-2) ---
+    "af": "afghanistan", "am": "armenia", "az": "azerbaijan",
+    "bh": "bahrain", "bd": "bangladesh", "bt": "bhutan", "bn": "brunei",
+    "kh": "cambodia", "cn": "china", "ge": "georgia", "hk": "hong kong",
+    "in": "india", "id": "indonesia", "ir": "iran", "iq": "iraq",
+    "il": "israel", "jp": "japan", "jo": "jordan", "kz": "kazakhstan",
+    "kw": "kuwait", "kg": "kyrgyzstan", "la": "laos", "lb": "lebanon",
+    "mo": "macau", "my": "malaysia", "mv": "maldives", "mn": "mongolia",
+    "mm": "myanmar", "np": "nepal", "om": "oman", "pk": "pakistan",
+    "ps": "palestine", "ph": "philippines", "qa": "qatar",
+    "sa": "saudi arabia", "sg": "singapore", "kr": "south korea",
+    "lk": "sri lanka", "sy": "syria", "tw": "taiwan", "tj": "tajikistan",
+    "th": "thailand", "tl": "timor-leste", "tr": "turkey",
+    "tm": "turkmenistan", "ae": "united arab emirates", "uz": "uzbekistan",
+    "vn": "vietnam", "ye": "yemen",
+
+    # --- Oceania (alpha-2) ---
+    "au": "australia", "fj": "fiji", "ki": "kiribati",
+    "mh": "marshall islands", "fm": "micronesia", "nr": "nauru",
+    "nz": "new zealand", "pw": "palau", "pg": "papua new guinea",
+    "ws": "samoa", "sb": "solomon islands", "to": "tonga",
+    "tv": "tuvalu", "vu": "vanuatu",
+
+    # --- Anglosphere (alpha-2 — US/UK already covered above but repeated for completeness) ---
+    "us": "united states", "gb": "united kingdom",
+
+    # --- ISO alpha-3 (Africa) ---
+    "dza": "algeria", "ago": "angola", "ben": "benin", "bwa": "botswana",
+    "bfa": "burkina faso", "bdi": "burundi", "cpv": "cape verde",
+    "cmr": "cameroon", "caf": "central african republic", "tcd": "chad",
+    "com": "comoros", "cog": "republic of the congo",
+    "cod": "democratic republic of the congo", "civ": "ivory coast",
+    "dji": "djibouti", "egy": "egypt", "gnq": "equatorial guinea",
+    "eri": "eritrea", "swz": "eswatini", "eth": "ethiopia",
+    "gab": "gabon", "gmb": "gambia", "gha": "ghana", "gin": "guinea",
+    "gnb": "guinea-bissau", "ken": "kenya", "lso": "lesotho",
+    "lbr": "liberia", "lby": "libya", "mdg": "madagascar",
+    "mwi": "malawi", "mli": "mali", "mrt": "mauritania",
+    "mus": "mauritius", "mar": "morocco", "moz": "mozambique",
+    "nam": "namibia", "ner": "niger", "nga": "nigeria", "rwa": "rwanda",
+    "stp": "sao tome and principe", "sen": "senegal", "syc": "seychelles",
+    "sle": "sierra leone", "som": "somalia", "zaf": "south africa",
+    "ssd": "south sudan", "sdn": "sudan", "tza": "tanzania", "tgo": "togo",
+    "tun": "tunisia", "uga": "uganda", "zmb": "zambia", "zwe": "zimbabwe",
+
+    # --- ISO alpha-3 (Americas) ---
+    "atg": "antigua and barbuda", "arg": "argentina", "bhs": "bahamas",
+    "brb": "barbados", "blz": "belize", "bol": "bolivia", "bra": "brazil",
+    "can": "canada", "chl": "chile", "col": "colombia", "cri": "costa rica",
+    "cub": "cuba", "dma": "dominica", "dom": "dominican republic",
+    "ecu": "ecuador", "slv": "el salvador", "grd": "grenada",
+    "gtm": "guatemala", "guy": "guyana", "hti": "haiti", "hnd": "honduras",
+    "jam": "jamaica", "mex": "mexico", "nic": "nicaragua", "pan": "panama",
+    "pry": "paraguay", "per": "peru", "kna": "saint kitts and nevis",
+    "lca": "saint lucia", "vct": "saint vincent and the grenadines",
+    "sur": "suriname", "tto": "trinidad and tobago", "ury": "uruguay",
+    "ven": "venezuela", "usa": "united states",
+
+    # --- ISO alpha-3 (Europe) ---
+    "alb": "albania", "and": "andorra", "aut": "austria", "blr": "belarus",
+    "bel": "belgium", "bih": "bosnia and herzegovina", "bgr": "bulgaria",
+    "hrv": "croatia", "cyp": "cyprus", "cze": "czech republic",
+    "dnk": "denmark", "est": "estonia", "fin": "finland", "fra": "france",
+    "deu": "germany", "grc": "greece", "hun": "hungary", "isl": "iceland",
+    "irl": "ireland", "ita": "italy", "xkk": "kosovo", "lva": "latvia",
+    "lie": "liechtenstein", "ltu": "lithuania", "lux": "luxembourg",
+    "mlt": "malta", "mda": "moldova", "mco": "monaco", "mne": "montenegro",
+    "nld": "netherlands", "mkd": "north macedonia", "nor": "norway",
+    "pol": "poland", "prt": "portugal", "rou": "romania", "smr": "san marino",
+    "srb": "serbia", "svk": "slovakia", "svn": "slovenia", "esp": "spain",
+    "swe": "sweden", "che": "switzerland", "ukr": "ukraine",
+    "vat": "vatican city", "gbr": "united kingdom",
+
+    # --- ISO alpha-3 (Asia) ---
+    "afg": "afghanistan", "arm": "armenia", "aze": "azerbaijan",
+    "bhr": "bahrain", "bgd": "bangladesh", "btn": "bhutan", "brn": "brunei",
+    "khm": "cambodia", "chn": "china", "geo": "georgia", "hkg": "hong kong",
+    "ind": "india", "idn": "indonesia", "irn": "iran", "irq": "iraq",
+    "isr": "israel", "jpn": "japan", "jor": "jordan", "kaz": "kazakhstan",
+    "kwt": "kuwait", "kgz": "kyrgyzstan", "lao": "laos", "lbn": "lebanon",
+    "mac": "macau", "mys": "malaysia", "mdv": "maldives", "mng": "mongolia",
+    "mmr": "myanmar", "npl": "nepal", "omn": "oman", "pak": "pakistan",
+    "pse": "palestine", "phl": "philippines", "qat": "qatar",
+    "sau": "saudi arabia", "sgp": "singapore", "kor": "south korea",
+    "lka": "sri lanka", "syr": "syria", "twn": "taiwan", "tjk": "tajikistan",
+    "tha": "thailand", "tls": "timor-leste", "tur": "turkey",
+    "tkm": "turkmenistan", "are": "united arab emirates", "uzb": "uzbekistan",
+    "vnm": "vietnam", "yem": "yemen", "rus": "russia",
+
+    # --- ISO alpha-3 (Oceania) ---
+    "aus": "australia", "fji": "fiji", "kir": "kiribati",
+    "mhl": "marshall islands", "fsm": "micronesia", "nru": "nauru",
+    "nzl": "new zealand", "plw": "palau", "png": "papua new guinea",
+    "wsm": "samoa", "slb": "solomon islands", "ton": "tonga",
+    "tuv": "tuvalu", "vut": "vanuatu",
+}
+COUNTRY_ALIASES.update(_ISO_COUNTRY_CODES)
+
 # VALID_COUNTRIES is now VALID_COUNTRIES_SET (loaded from JSON above)
 
 # Country name -> city lookup key mapping

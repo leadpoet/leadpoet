@@ -1303,7 +1303,7 @@ async def _get_current_epoch() -> int:
     ``_get_current_block()``, which explicitly raises ``RuntimeError`` when
     invoked from a thread that already has a running loop.  The previous
     implementation swallowed that error and returned 0, causing every
-    newly-awarded ``reward_expires_epoch`` to be ``0 + L_EPOCHS`` (e.g. 30)
+    newly-awarded ``reward_expires_epoch`` to be ``0 + L_EPOCHS`` (e.g. 100)
     instead of ``current_epoch + L_EPOCHS`` (e.g. 22264) — making every
     winner expired-at-birth and silently zeroing out fulfillment emission.
 

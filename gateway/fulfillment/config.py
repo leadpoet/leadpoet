@@ -17,15 +17,25 @@ T_EPOCHS = int(os.getenv("FULFILLMENT_T_EPOCHS", "1"))
 T_SECONDS_OVERRIDE = int(os.getenv("FULFILLMENT_T_SECONDS", "0"))
 M_MINUTES = int(os.getenv("FULFILLMENT_M_MINUTES", "15"))
 BLOCK_TIME_SECONDS = 12
-# Per-winning-lead emission share, paid every epoch for L_EPOCHS (30) epochs
-# after the lead is fulfilled.  Bumped 0.001 → 0.0015 on 2026-04-30 to lift
-# fulfillment incentives without touching the 20% sourcing share — co-founder
-# call ("plenty of emission overall even for more requests") in favor of a
-# per-lead bump over a pool-share rebalance.  Existing reward rows stay at
-# their original reward_pct until expiry; only newly-fulfilled leads use the
-# new rate, so the rollover is gradual (~36h to fully transition).
-Z_PERCENT = float(os.getenv("FULFILLMENT_Z_PERCENT", "0.0015"))
-L_EPOCHS = int(os.getenv("FULFILLMENT_L_EPOCHS", "30"))
+# Per-winning-lead emission share, paid every epoch for L_EPOCHS (100) epochs
+# after the lead is fulfilled.  Trajectory:
+#   2026-04-30: 0.001  → 0.0015 (per-lead bump over pool-share rebalance,
+#               L_EPOCHS still 30, total per lead = 30 × 0.15% = 4.5%)
+#   2026-05-11: 0.0015 → 0.0005 AND L_EPOCHS 30 → 100.  Total per lead is
+#               now 100 × 0.05% = 5.0% (slight bump, ~11% lift).  The real
+#               change is the reward runway: 100 epochs × 72 min/epoch =
+#               7200 min = 120 hours = 5 days, up from ~36 hours.  Goal is
+#               de-reg protection — a single fulfilled lead now keeps a
+#               miner earning emission for ~5 days, so miners with even
+#               one win in a low-volume window don't get pushed off the
+#               subnet by the daily de-reg sweep.  Co-founder call.
+# Existing reward rows stay at their original (reward_pct, reward_expires_epoch)
+# until expiry; only newly-fulfilled leads use the new rate AND new runway,
+# so the rollover is gradual.  Old rows finish on their original 30-epoch
+# schedule (~36h), at which point all live rows are paying the new 0.0005
+# rate.
+Z_PERCENT = float(os.getenv("FULFILLMENT_Z_PERCENT", "0.0005"))
+L_EPOCHS = int(os.getenv("FULFILLMENT_L_EPOCHS", "100"))
 FULFILLMENT_MAX_CONCURRENT_SOURCES = int(os.getenv("FULFILLMENT_MAX_CONCURRENT_SOURCES", "2"))
 FULFILLMENT_OPENROUTER_API_KEY = os.getenv("FULFILLMENT_OPENROUTER_API_KEY", "")
 FULFILLMENT_LIFECYCLE_INTERVAL_SECONDS = int(os.getenv("FULFILLMENT_LIFECYCLE_INTERVAL_SECONDS", "30"))
@@ -45,7 +55,7 @@ FULFILLMENT_MIN_VALIDATORS = int(os.getenv("FULFILLMENT_MIN_VALIDATORS", "1"))
 #           posted in a 2-second batch 14 minutes after the recycle.
 # Bumping to 180 min to clear the observed 1h 44m scoring path with a
 # comfortable margin for ff-worker queueing under high request load.
-# Still well under the 72-min-epoch × 30-epoch reward runway, so there
+# Still well under the 72-min-epoch × 100-epoch reward runway, so there
 # is no downstream incentive impact from the longer wait.
 FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES = int(os.getenv("FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES", "180"))
 FULFILLMENT_BANS_ENABLED = os.getenv("FULFILLMENT_BANS_ENABLED", "false").lower() == "true"

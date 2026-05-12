@@ -613,7 +613,7 @@ Fulfillment is a new incentive mechanism where miners compete directly on real c
    - **Tier 2 (Data Accuracy)** — Email verification (TrueList), LinkedIn/person verification (ScrapingDog), company verification, reputation score
    - **Tier 3 (Intent Scoring)** — Each intent signal URL is fetched and verified. An LLM evaluates relevance. Signals are scored and aggregated with time decay. Minimum threshold: 5.0
 
-5. **Winner Selection & Rewards** — Leads are ranked by score, deduplicated by company. The top `num_leads` (as requested by the client) are selected as winners. Each winning lead earns **0.1% of emission for 30 epochs**. Ties on the same company split the reward.
+5. **Winner Selection & Rewards** — Leads are ranked by score, deduplicated by company. The top `num_leads` (as requested by the client) are selected as winners. Each winning lead earns **0.05% of emission per epoch for 100 epochs** (about 5 days of payout per lead). Ties on the same company split the reward. The longer runway is intentional: a single winning lead keeps a miner earning emission for ~5 days, protecting active miners from de-registration during low-volume windows.
 
 ### Fulfillment Request Schema (What Miners See)
 

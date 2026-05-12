@@ -20,7 +20,7 @@ def calculate_lead_rewards(
     winners: list,
     z_pct: float,
     current_epoch: int,
-    l_epochs: int = 30,
+    l_epochs: int = 100,
 ) -> None:
     """
     Assign reward_pct and reward_expires_epoch on fulfillment_score_consensus

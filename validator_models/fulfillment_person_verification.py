@@ -780,13 +780,13 @@ async def fulfillment_person_verification(
             )
         print(f"   ✅ Company ID match: {apify_slug}")
     else:
-        # No company URL at all
-        print(f"   ❌ No company URL from Apify")
-        return False, _rejection(
-            "fulfillment_person_no_company_url",
-            "No company LinkedIn URL found in Apify current position",
-            ["company_linkedin"],
-        )
+        # No /company/ URL or numeric ID from Apify. This commonly happens for
+        # small businesses where the LinkedIn profile lists the company as
+        # plain text without linking to a /company/ page — Apify substitutes
+        # a "linkedin.com/search/results/all/?keywords=..." URL.  Apify still
+        # returns the company NAME in that case, so let the name-match step
+        # below decide.  Do not reject yet.
+        print(f"   ⚠️ No /company/ URL from Apify — falling through to name match")
 
     # --- Company name match (always from Apify, normalized) ---
     if _normalize_company(actual_company) != _normalize_company(lead_company):

@@ -481,6 +481,26 @@ def check_description_grounding(description: str, source_content: str) -> float:
     return found / len(desc_words)
 
 
+# Canonical set of single-word "buying intent" verbs/nouns used by both the
+# description and snippet grounding checks.  Keep this list synced with the
+# words clients actually mention in ICP intent_signals — if a miner is using
+# the word as evidence of a real event, the source page should contain the
+# same word (or its lemma). Curated from production false-positives.
+_SIGNAL_WORDS = {
+    # General intent verbs
+    "launched", "announced", "expanded", "expanding", "partnered",
+    "partnership", "merged", "acquisition", "acquired",
+    # Hiring / talent
+    "hired", "hiring", "recruited", "recruiting", "opening", "openings",
+    # Funding-related — gameable cluster, extended after the Risotto
+    # 2026-05-12 incident where a miner glued "Recently secured seed
+    # funding to support product development" onto a real GitHub labels
+    # JSON. None of the funding words appeared on the actual page.
+    "funding", "funded", "raised", "secured", "closed", "obtained",
+    "invested", "investment", "seed", "series",
+}
+
+
 def check_signal_word_grounding(description: str, source_content: str) -> tuple:
     """
     Check whether intent signal words in the description actually appear in the source.
@@ -491,13 +511,6 @@ def check_signal_word_grounding(description: str, source_content: str) -> tuple:
 
     Returns (grounded_count, total_signal_words, ungrounded_words).
     """
-    _SIGNAL_WORDS = {
-        "launched", "announced", "raised", "hired", "hiring", "acquired",
-        "expanded", "expanding", "partnered", "partnership", "funding",
-        "funded", "invested", "investment", "merged", "acquisition",
-        "recruited", "recruiting", "opening", "openings",
-    }
-
     content_lower = _normalize_text(source_content)
     content_words = set(content_lower.split())
 
@@ -512,6 +525,44 @@ def check_signal_word_grounding(description: str, source_content: str) -> tuple:
     ungrounded = signal_in_desc - content_words
 
     return len(grounded), len(signal_in_desc), sorted(ungrounded)
+
+
+def check_snippet_signal_grounding(snippet: str, source_content: str) -> tuple:
+    """
+    Check whether intent signal words in the SNIPPET actually appear in the source.
+
+    Mirror of ``check_signal_word_grounding`` for the snippet field. Catches the
+    pattern observed in the 2026-05-12 Risotto false positive: a miner glues
+    fabricated prose ("Recently secured seed funding to support product
+    development") onto a real chunk of scraped content (a GitHub labels JSON
+    payload). The 4-gram snippet-overlap check passes because the labels JSON
+    dominates the snippet by length, but the fabricated funding claim never
+    appears on the actual page.
+
+    Returns ``(grounded_count, total_signal_words, ungrounded_words)``. Callers
+    treat ``total_signal_words > 0 and grounded_count == 0`` as a hard reject
+    (same posture as the description-side check) — if EVERY funding/hiring
+    word in the snippet is missing from the page, the snippet is fabricated.
+
+    We intentionally do NOT reject when the snippet mentions e.g.
+    "expanded into Europe" and the source page only has "expanded their team"
+    — partial grounding is enough to confirm the snippet is anchored in the
+    page rather than entirely invented.
+    """
+    content_lower = _normalize_text(source_content)
+    content_words = set(content_lower.split())
+
+    snip_lower = _normalize_text(snippet)
+    snip_words = set(snip_lower.split())
+
+    signal_in_snip = snip_words & _SIGNAL_WORDS
+    if not signal_in_snip:
+        return 0, 0, []
+
+    grounded = signal_in_snip & content_words
+    ungrounded = signal_in_snip - content_words
+
+    return len(grounded), len(signal_in_snip), sorted(ungrounded)
 
 
 # =============================================================================
@@ -1304,6 +1355,44 @@ async def verify_intent_signal(
             logger.info(
                 f"✓ Signal word grounding: {grounded_count}/{total_signal} grounded"
                 + (f", ungrounded: {ungrounded}" if ungrounded else "")
+            )
+
+    # ── SNIPPET signal word grounding (mirror of the description check) ──
+    # Necessary because miners can keep the description clean of suspicious
+    # verbs and hide the fabricated claim inside the snippet. The
+    # 2026-05-12 Risotto false positive used exactly this pattern: a
+    # neutral-looking description about documentation labels, plus a
+    # snippet that bolted "Recently secured seed funding to support
+    # product development" onto a real GitHub labels JSON blob.
+    # ``compute_snippet_overlap`` passed at 30% (the JSON dominates length),
+    # ``check_description_grounding`` passed (description was honest), and
+    # ``check_signal_word_grounding`` ran against the clean description so
+    # it found nothing to ground. The fabricated funding claim then made
+    # it into the LLM scorer's user message, the scorer matched it to
+    # "Raised Seed funding in the last few weeks", and the lead won.
+    #
+    # This check closes that gap: if the snippet contains funding/hiring/
+    # acquisition verbs AND none of them appear on the actual page, the
+    # snippet is rejected with the same posture as the description-side
+    # check.
+    if snippet_text and len(text.strip()) >= 200:
+        snip_grounded, snip_total, snip_ungrounded = check_snippet_signal_grounding(
+            snippet_text, text[:CONTENT_MAX_LENGTH]
+        )
+        if snip_total > 0 and snip_grounded == 0:
+            logger.warning(
+                f"❌ Snippet signal-word grounding FAILED: {snip_ungrounded} "
+                f"not in source content for {intent_signal.url[:60]}"
+            )
+            return False, 0, (
+                f"Intent signal words in snippet ({', '.join(snip_ungrounded)}) "
+                f"not found in source content. The snippet appears to splice "
+                f"fabricated claim text onto real scraped content."
+            ), "fabricated", None
+        elif snip_total > 0:
+            logger.info(
+                f"✓ Snippet signal-word grounding: {snip_grounded}/{snip_total} grounded"
+                + (f", ungrounded: {snip_ungrounded}" if snip_ungrounded else "")
             )
 
     # Verify claim with LLM - now includes ICP context

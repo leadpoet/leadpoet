@@ -54,7 +54,9 @@ _PROMPT_TEMPLATE = """Produce two outputs for the company below: (A) one overall
 Rules (strictly enforced for BOTH outputs):
 - No preamble, no apology, no disclaimer, no mention of "search results", "available information", or your own limitations.
 - Synthesize ONLY from the intent signals provided below. Do not invent facts, do not speculate beyond what the signals support, and do not reference any source outside the inputs.
-- Each output must be expanded with rich buying-signal context explaining why the observed activity indicates relevance for the ICP.
+- Stay strictly inside the provided evidence. NEVER introduce specific quantities — dollar amounts, percentages, headcounts, round sizes, valuations, role counts, dates, or company stage labels — that are not explicitly stated in the Summary or Evidence fields below. If the snippet says "secured seed funding" with no dollar figure, write "secured seed funding"; do NOT write "raised $10 million" or any other invented number. If the snippet says "expanded their team" with no headcount, do NOT specify a headcount.
+- Stay close to the wording the snippet actually uses. You may rephrase for fluency, but every concrete claim (the WHAT, WHEN, HOW MUCH) must trace back to a verbatim phrase in the Summary or Evidence above. If something is not in the evidence, leave it out.
+- Each output must be expanded with rich buying-signal context explaining why the observed activity indicates relevance for the ICP — but that context must come from interpreting the signals provided, NOT from adding new facts about the company. Explain why the signal matters, not what additionally exists.
 - Use natural prose. No bullets, no labels inside the prose, no markdown, no em dashes, no links, no citations.
 - Do not restate the client name or ICP facts (country, employee count, industry, etc.).
 - If a claim cannot be supported by the provided signals, omit it — write shorter rather than fabricating detail.

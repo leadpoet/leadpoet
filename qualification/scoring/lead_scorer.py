@@ -602,6 +602,50 @@ MAX_INTENT_NO_DATE_REQUIRED = 18   # Cap for undated signals where date IS requi
 MAX_INTENT_NO_DATE_UNKNOWN = 48   # Cap for undated signals from unrecognized source types
 MAX_INTENT_NO_DATE_OPTIONAL = 60  # Full score for undated signals where date is NOT required
 
+
+# Compiled regex patterns that identify time-bound ICP intent signals. These
+# are claims whose meaning depends on recency — submitting an undated source
+# for a claim like "Raised seed funding in the last few weeks" defeats the
+# purpose of the claim regardless of how trustworthy the source category is.
+# Used by ``_icp_signal_is_time_bound`` below.
+_TIME_BOUND_ICP_PHRASES = re.compile(
+    r"\b("
+    r"in the (last|past) (\d+ )?(few |couple of )?(day|week|month|quarter|year)s?"
+    r"|in the last \d+"
+    r"|this (week|month|quarter|year)"
+    r"|last (week|month|quarter|year)"
+    r"|past (week|month|quarter|year)"
+    r"|recent(?:ly)?"
+    r"|just (raised|secured|closed|launched|announced|hired|acquired|partnered)"
+    r"|new(?:ly)? (funded|hired|launched|opened)"
+    r"|(\d+\+? )?days? ago"
+    r"|\bytd\b|year[- ]to[- ]date"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _icp_signal_is_time_bound(icp_signal_text: str) -> bool:
+    """Return True when the ICP signal phrase encodes a recency requirement.
+
+    Examples that should match (recency is the whole point):
+      - "Raised Seed funding in the last few weeks"
+      - "Hired a CTO this quarter"
+      - "Recently posted 10+ engineering roles"
+      - "Just announced Series B"
+
+    Examples that should NOT match (state, not event):
+      - "Uses Procore"
+      - "Has 50-200 employees"
+      - "Headquartered in Mexico"
+
+    Keep this function pure — no API calls, no LLM. The matched-claim cap
+    runs on every undated signal score, so this is on the hot path.
+    """
+    if not icp_signal_text:
+        return False
+    return bool(_TIME_BOUND_ICP_PHRASES.search(icp_signal_text))
+
 def _parse_intent_score_response(
     response: str,
     max_score: int,
@@ -803,6 +847,39 @@ Apply the scoring rules from your system message and return the JSON object."""
             # Unknown source type — moderate cap (more lenient than date-required)
             raw_score = min(raw_score, MAX_INTENT_NO_DATE_UNKNOWN)
             logger.info(f"Undated {source_str} signal (unknown source) — capped at {MAX_INTENT_NO_DATE_UNKNOWN}")
+
+        # ── Time-bound ICP-claim cap ──
+        # SOURCES_DATE_NOT_REQUIRED lets ongoing signals (tech stack, About-page
+        # info) pass with full score because they're not inherently dated.
+        # But if the matched ICP intent_signal is itself a time-bound claim
+        # ("Raised Seed funding in the last few weeks", "Hired a CTO this
+        # quarter", "Launched the product in the past month"), an undated
+        # signal cannot legitimately support it — recency is the entire
+        # point of the claim.
+        #
+        # Production trigger (2026-05-12): a github source with no date was
+        # matched to "Raised Seed funding in the last few weeks" and scored
+        # 49.3 because github is date-not-required. The github page held no
+        # funding info at all (it was a labels page), but the cap path
+        # never engaged because the source category was permissive.
+        #
+        # Approach: detect time-bound phrases in the matched ICP signal text
+        # and hard-cap the undated raw_score to MAX_INTENT_NO_DATE_REQUIRED
+        # regardless of source category. The cap is intentionally severe —
+        # we want the lead to fail the FULFILLMENT_MIN_INTENT_SCORE floor on
+        # this signal alone unless multiple corroborating signals exist.
+        if (
+            0 <= matched_idx < len(icp_signals_list)
+            and _icp_signal_is_time_bound(icp_signals_list[matched_idx])
+        ):
+            old = raw_score
+            raw_score = min(raw_score, MAX_INTENT_NO_DATE_REQUIRED)
+            if raw_score < old:
+                logger.warning(
+                    f"⏱️  Time-bound ICP claim with no date: matched "
+                    f"'{icp_signals_list[matched_idx][:60]}' — capped raw "
+                    f"score {old:.1f} → {raw_score:.1f}"
+                )
 
     # Weight by verification confidence AND source type quality
     weighted_score = raw_score * (confidence / 100) * source_multiplier

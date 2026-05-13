@@ -22,6 +22,48 @@ echo "============================================================"
 echo "📊 Lead distribution: FULLY DYNAMIC (adapts to gateway setting)"
 echo ""
 
+# ============================================================
+# SAFEGUARD: pull latest from GitHub origin/main before deploy
+# ============================================================
+# Background: the validator host was twice silently overwritten with
+# an older snapshot (2026-05-11 and 2026-05-13), each time wiping
+# important fixes.  This step makes every deploy idempotently pull
+# the canonical code from GitHub before building the image, so a
+# rogue rsync cannot keep production on a stale commit.
+#
+# The host directory must be initialised as a git repo once.  Run:
+#   cd /home/ec2-user/leadpoet/leadpoet
+#   git init && git remote add origin https://github.com/leadpoet/leadpoet.git
+#   git fetch origin main && git reset --hard origin/main
+# After that, every deploy_dynamic.sh invocation self-heals.
+# ============================================================
+REPO_DIR="/home/ec2-user/leadpoet/leadpoet"
+if [ -d "$REPO_DIR/.git" ]; then
+    echo "🔄 SAFEGUARD: pulling latest from GitHub origin/main..."
+    (
+        cd "$REPO_DIR"
+        if git fetch --quiet origin main 2>&1; then
+            ORIGIN_SHA=$(git rev-parse origin/main)
+            HEAD_SHA=$(git rev-parse HEAD)
+            if [ "$ORIGIN_SHA" != "$HEAD_SHA" ]; then
+                echo "   📥 HEAD=$HEAD_SHA  origin=$ORIGIN_SHA  → resetting to origin/main"
+                git reset --hard "$ORIGIN_SHA" 2>&1 | head -3
+                echo "   ✅ Reset complete (image will build from GitHub HEAD)"
+            else
+                echo "   ✅ Already at origin/main HEAD ($HEAD_SHA)"
+            fi
+        else
+            echo "   ⚠️  git fetch failed; continuing with on-disk code (deploy is NOT self-healing this run)"
+        fi
+    ) || echo "   ⚠️  safeguard subshell failed; continuing with on-disk code"
+else
+    echo "⚠️  SAFEGUARD SKIPPED: $REPO_DIR is not a git repo."
+    echo "   To enable auto-pull from GitHub on every deploy, run once:"
+    echo "     cd $REPO_DIR && git init && git remote add origin https://github.com/leadpoet/leadpoet.git"
+    echo "     git fetch origin main && git reset --hard origin/main"
+fi
+echo ""
+
 # SIMPLIFIED CONFIGURATION: Read from main .env file
 # Validators just add WEBSHARE_PROXY_1 and WEBSHARE_PROXY_2 to their existing .env
 MAIN_ENV_PATH="../../.env"

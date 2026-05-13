@@ -1000,6 +1000,77 @@ async def _finalize_chain_rewards(
     return {w["lead_id"] for w in winners}
 
 
+def _synthesize_intent_details_fallback(
+    icp: dict,
+    signals: list,
+) -> str:
+    """Deterministic, LLM-free synthesis used when the OpenRouter call fails.
+
+    Stitches together a client-readable paragraph directly from the verified
+    intent signals (``intent_signal_mapping``) so a winning lead is never
+    persisted with a NULL ``intent_details``.  The output is intentionally
+    plainer than the LLM version — its job is to guarantee something
+    informative shows up in the dashboard even when:
+
+      - The OpenRouter key isn't provisioned on this gateway box.
+      - OpenRouter is rate-limited / down / returning refusals.
+      - The schema migration adding intent_breakdown hasn't run, so the
+        joined LLM persist call was failing and zeroing intent_details too
+        (see ``_attach_intent_details_for_winners`` — we now write the two
+        columns independently so this fallback also unblocks the schema
+        case).
+
+    Returns the empty string only when there is genuinely nothing to say
+    (no credited signals at all). The lifecycle caller treats empty as
+    "skip the write" so a prior successful run isn't blanked.
+    """
+    # Only include signals that actually earned credit (after_decay_score > 0,
+    # or raw_score > 0 as a legacy fallback). Failed signals must not appear
+    # in the client-facing passage.
+    credited = []
+    for s in signals or []:
+        try:
+            score = float(s.get("after_decay_score") or s.get("raw_score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        if score > 0:
+            credited.append(s)
+    if not credited:
+        return ""
+
+    sentences: list = []
+    for s in credited:
+        matched = (s.get("matched_icp_signal") or "").strip()
+        desc = (s.get("description") or "").strip()
+        snippet = (s.get("snippet") or "").strip()
+        source = (s.get("source") or "").strip()
+        date = (s.get("date") or "").strip()
+
+        # Prefer the upstream-written description (already prose-shaped by
+        # the scoring pipeline). If absent fall back to a trimmed snippet,
+        # then to a minimal "Matched X on source / date" stub so the lead
+        # is never reduced to a literal blank.
+        body = desc or snippet[:400]
+        if body:
+            sentence = body.rstrip(". ").rstrip()
+            if matched and matched.lower() not in sentence.lower():
+                sentence = f"{sentence} (matches the ICP signal '{matched}')"
+            sentences.append(sentence + ".")
+        elif matched:
+            tag = []
+            if source:
+                tag.append(source)
+            if date:
+                tag.append(date)
+            tail = f" ({', '.join(tag)})" if tag else ""
+            sentences.append(f"Matched the ICP signal '{matched}'{tail}.")
+
+    # Join with single spaces. Refusals / markdown / em-dashes can't leak in
+    # because we're authoring the prose ourselves from structured fields.
+    out = " ".join(sentences).strip()
+    return out
+
+
 async def _attach_intent_details_for_winners(
     supabase,
     request_id: str,
@@ -1007,12 +1078,22 @@ async def _attach_intent_details_for_winners(
 ) -> None:
     """Generate + persist the Intent Details payload for each winning lead.
 
-    One LLM call per winner produces:
-      - an overall paragraph -> ``fulfillment_score_consensus.intent_details``
-      - a per-signal breakdown -> ``fulfillment_score_consensus.intent_breakdown``
+    For each winner:
+      1. Try the LLM (one call per winner). Returns:
+         - an overall paragraph -> ``fulfillment_score_consensus.intent_details``
+         - a per-signal breakdown -> ``fulfillment_score_consensus.intent_breakdown``
+      2. If the LLM call yields an empty passage (no key, refusal, timeout,
+         non-200, parse failure), fall back to a deterministic synthesizer
+         that stitches a passage straight from ``intent_signal_mapping``.
+         This guarantees that a winning lead with any credited signal at
+         all gets a populated ``intent_details``.
+      3. Persist ``intent_details`` and ``intent_breakdown`` in SEPARATE
+         Supabase updates. The two columns are independent products of the
+         same LLM call — one being unwritable (column missing on a stale
+         schema, JSONB constraint, transient Postgres error) must not blank
+         out the other. Previously the combined update silently zeroed
+         intent_details when intent_breakdown failed.
 
-    Uses the consensus row's ``intent_signal_mapping`` as the source of
-    verified signals and the request's ``icp_details`` as the ICP context.
     Either column is written only when its content is non-empty so a
     partial parse failure cannot blank out a prior successful write.
     """
@@ -1022,8 +1103,13 @@ async def _attach_intent_details_for_winners(
     try:
         from gateway.fulfillment.intent_details import generate_intent_details
     except Exception as e:
-        print(f"   ⚠️  intent_details module unavailable, skipping: {e}")
-        return
+        # Even with the LLM module unavailable we still want winning leads
+        # to carry a populated intent_details column — fall through to the
+        # synthesizer path below by stubbing the function.
+        print(f"   ⚠️  intent_details module unavailable, using fallback synthesizer only: {e}")
+
+        async def generate_intent_details(_icp, _signals):  # type: ignore
+            return {"passage": "", "per_signal": []}
 
     # Fetch the ICP once — it's the same for every winner in this request.
     try:
@@ -1040,38 +1126,90 @@ async def _attach_intent_details_for_winners(
         lead_id = w.get("lead_id")
         submission_id = w.get("submission_id")
         signals = w.get("intent_signal_mapping") or []
-        try:
-            out = await generate_intent_details(icp, signals)
-        except Exception as e:
-            print(f"   ⚠️  intent_details LLM call raised for {str(lead_id)[:8]}: {e}")
-            out = {"passage": "", "per_signal": []}
 
-        passage = out.get("passage", "")
-        per_signal = out.get("per_signal", [])
+        # ----------------------------------------------------------------
+        # Step 1: try the LLM, with up to 3 attempts on transient errors.
+        # The LLM module itself returns empty (not raises) on refusal /
+        # non-200 / parse failure, so we only retry when an exception
+        # actually escapes (network blip, httpx timeout).
+        # ----------------------------------------------------------------
+        out = {"passage": "", "per_signal": []}
+        for attempt in range(3):
+            try:
+                out = await generate_intent_details(icp, signals)
+                break
+            except Exception as e:
+                print(
+                    f"   ⚠️  intent_details LLM call raised for "
+                    f"{str(lead_id)[:8]} (attempt {attempt + 1}/3): {e}"
+                )
+                # Exponential backoff: 1s, 2s, 4s. Cheap relative to the
+                # LLM call itself; bounded so a hard outage doesn't stall
+                # consensus close.
+                if attempt < 2:
+                    await asyncio.sleep(1 << attempt)
 
-        # Nothing to write — skip the row entirely so we don't NULL out an
-        # earlier successful run on a retry.
-        if not passage and not per_signal:
-            continue
+        passage = out.get("passage", "") or ""
+        per_signal = out.get("per_signal", []) or []
 
-        update_payload = {}
+        # ----------------------------------------------------------------
+        # Step 2: if the LLM didn't produce a passage, synthesize one from
+        # the raw signal mapping. Per_signal is LLM-only (the deterministic
+        # path doesn't try to break the synthesis into LLM-style
+        # paragraphs); if the LLM gave no per_signal we simply skip that
+        # column for this lead.
+        # ----------------------------------------------------------------
+        passage_source = "llm"
+        if not passage:
+            fallback = _synthesize_intent_details_fallback(icp, signals)
+            if fallback:
+                passage = fallback
+                passage_source = "fallback"
+
+        # ----------------------------------------------------------------
+        # Step 3: persist intent_details and intent_breakdown INDEPENDENTLY.
+        # A failure on the second update (e.g. column missing because the
+        # operator hasn't run migration 16) must not roll back the first.
+        # ----------------------------------------------------------------
         if passage:
-            update_payload["intent_details"] = passage
-        if per_signal:
-            update_payload["intent_breakdown"] = {"per_signal": per_signal}
+            try:
+                supabase.table("fulfillment_score_consensus").update(
+                    {"intent_details": passage}
+                ).eq("request_id", request_id) \
+                  .eq("submission_id", submission_id) \
+                  .eq("lead_id", lead_id) \
+                  .execute()
+                print(
+                    f"   📝 intent_details stored for lead {str(lead_id)[:8]} "
+                    f"(passage={len(passage)} chars, source={passage_source})"
+                )
+            except Exception as e:
+                print(
+                    f"   ⚠️  Failed to persist intent_details for "
+                    f"{str(lead_id)[:8]}: {e}"
+                )
 
-        try:
-            supabase.table("fulfillment_score_consensus").update(update_payload) \
-              .eq("request_id", request_id) \
-              .eq("submission_id", submission_id) \
-              .eq("lead_id", lead_id) \
-              .execute()
-            print(
-                f"   📝 Intent details stored for lead {str(lead_id)[:8]} "
-                f"(passage={len(passage)} chars, per_signal={len(per_signal)})"
-            )
-        except Exception as e:
-            print(f"   ⚠️  Failed to persist intent_details for {str(lead_id)[:8]}: {e}")
+        if per_signal:
+            try:
+                supabase.table("fulfillment_score_consensus").update(
+                    {"intent_breakdown": {"per_signal": per_signal}}
+                ).eq("request_id", request_id) \
+                  .eq("submission_id", submission_id) \
+                  .eq("lead_id", lead_id) \
+                  .execute()
+                print(
+                    f"   📝 intent_breakdown stored for lead "
+                    f"{str(lead_id)[:8]} (per_signal={len(per_signal)})"
+                )
+            except Exception as e:
+                # Common cause: ``intent_breakdown`` column missing because
+                # scripts/16-fulfillment-intent-breakdown-column.sql hasn't
+                # been applied. intent_details survives because we wrote it
+                # in a separate request above.
+                print(
+                    f"   ⚠️  Failed to persist intent_breakdown for "
+                    f"{str(lead_id)[:8]} (intent_details was still saved): {e}"
+                )
 
 
 def _recycle_request(

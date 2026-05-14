@@ -10,7 +10,7 @@ See business_files/tasks10.md Phase 1.2 for specification.
 
 import re
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional, List, Literal, Dict, Any
+from typing import Optional, List, Dict, Any
 from datetime import date, datetime
 from urllib.parse import urlparse, urlunparse
 from uuid import UUID
@@ -385,15 +385,15 @@ class LeadOutputRedacted(BaseModel):
 #     the competition target that hard part lets every fulfillment miner
 #     benefit from a constantly-improving company-sourcing model.
 #
-# This output schema is the company-mode equivalent of LeadOutput.  ICPs
-# whose ``mode == "company"`` are scored against CompanyOutput; ICPs
-# whose ``mode == "lead"`` (the default for backward compatibility) still
-# route through LeadOutput.
+# This is THE output schema for the model competition (as of May 2026).
+# ``LeadOutput`` below is retained because gateway-side fulfillment code
+# (gateway/fulfillment/*) still consumes contact-shaped lead rows, but
+# the model competition no longer produces or scores LeadOutput.
 
 class CompanyOutput(BaseModel):
-    """Schema returned by qualification models when icp.mode == "company".
+    """Schema returned by qualification models in the model competition.
 
-    Models receive a company-mode ICP and must return ONE company that
+    Models receive an ``ICPPrompt`` and must return ONE company that
     matches the ICP criteria (industry / sub-industry / size / geography /
     stage) AND has at least one verifiable intent signal.
 
@@ -484,35 +484,10 @@ class ICPPrompt(BaseModel):
     """
     icp_id: str = Field(..., description="Unique identifier for this ICP")
 
-    # =========================================================================
-    # MODE — selects which output schema + scoring path the model competition
-    # uses for this ICP.
-    #
-    #   "lead"     (default, backward-compat)  — model returns a LeadOutput
-    #              (one company + contact + intent).  Scoring runs the
-    #              historical pipeline: DB field verification, role /
-    #              seniority pre-checks, decision-maker LLM, ICP-fit LLM,
-    #              intent verification.
-    #
-    #   "company"  (new, May 2026)              — model returns a
-    #              CompanyOutput (one company + intent signals, NO
-    #              contact fields).  Scoring skips DB verification, role
-    #              / seniority / decision-maker checks; runs a
-    #              company-only ICP-fit LLM + company-existence
-    #              verification + the same per-signal intent verification.
-    #
-    # ICPs are scheduled mode-by-mode by the operator.  In-flight
-    # evaluations against legacy mode="lead" ICPs continue to work
-    # unchanged; no breaking schema change for existing miners.
-    # =========================================================================
-    mode: Literal["lead", "company"] = Field(
-        "lead",
-        description=(
-            "Output schema + scoring path for this ICP.  'lead' (default) uses "
-            "LeadOutput + the full historical pipeline.  'company' uses "
-            "CompanyOutput + the company-mode pipeline (no contact verification)."
-        ),
-    )
+    # NOTE: As of May 2026 the model competition is single-path company-mode
+    # (miners return a ``CompanyOutput``).  There is no ``mode`` field on
+    # this schema — it was briefly present during the transition but has
+    # been removed.  Fulfillment-side use of ``ICPPrompt`` is unchanged.
 
     # PRIMARY FIELD - Models should interpret this natural language prompt
     prompt: str = Field("", description="Natural language prompt describing the ideal customer (PRIMARY)")
@@ -667,26 +642,27 @@ class EvaluationResult(BaseModel):
 
 class LeadScoreBreakdown(BaseModel):
     """
-    Detailed score breakdown for a single lead.
+    Detailed score breakdown for a single company.
     Used internally during scoring and included in transparency logs.
 
-    Score ranges are widened (vs. the documentation strings) so the
-    SAME breakdown shape can carry company-mode results.  See
-    ``ICPPrompt.mode``:
+    Score caps used by ``score_company``:
+      * ``icp_fit``        ≤ 40
+      * ``decision_maker`` = 0   (no contact dimension in the model
+                                  competition; field kept on the
+                                  breakdown for backward compatibility
+                                  with downstream readers)
+      * ``intent_signal``  ≤ 60   (after time decay)
+      * Total              ≤ 100
 
-      * Lead-mode caps used by ``score_lead``:
-          icp_fit ≤ 20, decision_maker ≤ 20, intent_signal ≤ 60.
-          (Total ≤ 100.)
-      * Company-mode caps used by ``score_company``:
-          icp_fit ≤ 40, decision_maker = 0 (unused),
-          intent_signal ≤ 60.  (Total ≤ 100.)
-
-    Pydantic upper bounds below are the union of both modes; per-mode
-    caps are enforced inside the scoring functions themselves.
+    NOTE: The historical class name ``LeadScoreBreakdown`` is retained
+    rather than renamed, because the breakdown shape is also written to
+    Supabase (``qualification_leaderboard`` etc.) and consumed by the
+    admin dashboard; renaming would require a coordinated rollout that
+    isn't worth the churn for a cosmetic rename.
     """
     # Component scores
-    icp_fit: float = Field(..., ge=0, le=40, description="ICP fit score (0-20 lead-mode, 0-40 company-mode)")
-    decision_maker: float = Field(..., ge=0, le=30, description="Decision-maker score (0-20 lead-mode, 0 in company-mode)")
+    icp_fit: float = Field(..., ge=0, le=40, description="ICP fit score (0-40)")
+    decision_maker: float = Field(..., ge=0, le=30, description="Always 0 in company-mode (no contact)")
     intent_signal_raw: float = Field(..., ge=0, le=60, description="Intent signal score before decay (0-60)")
     
     # Time decay

@@ -32,7 +32,7 @@ import httpx
 from gateway.qualification.config import CONFIG, QualificationConfig
 from gateway.qualification.models import (
     ICPPrompt,
-    LeadOutput,
+    CompanyOutput,
     LeadScoreBreakdown,
     EvaluationRunStatus,
     ValidatorHeartbeat,
@@ -428,36 +428,34 @@ class QualificationValidator:
                     await self.update_run_status(evaluation_run_id, "validating_lead")
                     
                     lead_data = result.get("lead") if isinstance(result, dict) else None
-                    lead = None
-                    lead_valid = False
-                    
+                    company: Optional[CompanyOutput] = None
+                    company_valid = False
+
                     if lead_data:
                         try:
-                            # Parse lead output
-                            lead = LeadOutput(**lead_data)
-                            lead_valid = await self.validate_lead(lead, icp)
+                            company = CompanyOutput(**lead_data)
+                            company_valid = await self.validate_company(company, icp)
                         except Exception as e:
-                            logger.warning(f"Lead parsing/validation failed: {e}")
-                            lead_valid = False
+                            logger.warning(f"Company parsing/validation failed: {e}")
+                            company_valid = False
                     else:
-                        logger.info("Model returned no lead")
-                    
+                        logger.info("Model returned no company")
+
                     # -----------------------------------------------------
-                    # Step 5: Score lead
+                    # Step 5: Score company
                     # -----------------------------------------------------
                     await self.update_run_status(evaluation_run_id, "scoring")
-                    
+
                     scores = None
-                    if lead and lead_valid:
-                        scores = await self.score_lead(
-                            lead=lead,
+                    if company and company_valid:
+                        scores = await self.score_company(
+                            company=company,
                             icp=icp,
                             run_cost_usd=run_cost,
                             run_time_seconds=run_time,
-                            seen_companies=seen_companies
+                            seen_companies=seen_companies,
                         )
                     else:
-                        # Create zero score for invalid/missing lead
                         scores = LeadScoreBreakdown(
                             icp_fit=0,
                             decision_maker=0,
@@ -467,18 +465,21 @@ class QualificationValidator:
                             cost_penalty=0,
                             time_penalty=0,
                             final_score=0,
-                            failure_reason="No valid lead returned" if not lead else "Lead validation failed"
+                            failure_reason=(
+                                "No valid company returned" if not company
+                                else "Company validation failed"
+                            ),
                         )
-                    
+
                     # -----------------------------------------------------
                     # Step 6: Report results
                     # -----------------------------------------------------
                     await self.report_results(
                         evaluation_run_id=evaluation_run_id,
-                        lead=lead,
+                        lead=company,
                         scores=scores,
                         run_cost_usd=run_cost,
-                        run_time_seconds=run_time
+                        run_time_seconds=run_time,
                     )
                     
                     logger.info(
@@ -634,95 +635,70 @@ class QualificationValidator:
             return self._current_sandbox.get_last_run_cost()
         return 0.0
     
-    async def validate_lead(self, lead: LeadOutput, icp: ICPPrompt) -> bool:
+    async def validate_company(self, company: CompanyOutput, icp: ICPPrompt) -> bool:
         """
-        Validate a lead against basic requirements.
-        
-        Args:
-            lead: The lead to validate
-            icp: The ICP it should match
-        
-        Returns:
-            True if lead passes basic validation
-        
-        TODO: Implement lead validation
+        Basic shape validation for a CompanyOutput submission.
+
+        Deep validation (industry match, country match, dup-company,
+        company existence, fabricated-signal detection) happens
+        inside ``score_company``; this just bails early if the model
+        returned an unusable skeleton.
         """
-        # Basic validation - check required fields exist
-        # NOTE: email and full_name are NOT allowed (models cannot fabricate PII)
-        if not lead.business:
+        if not company.company_name or not company.company_website:
             return False
-        
-        if not lead.role or not lead.industry or not lead.sub_industry:
+        if not company.industry:
             return False
-        
-        if not lead.intent_signals:
+        if not company.intent_signals:
             return False
-        
         return True
-    
-    async def score_lead(
+
+    async def score_company(
         self,
-        lead: LeadOutput,
+        company: CompanyOutput,
         icp: ICPPrompt,
         run_cost_usd: float,
         run_time_seconds: float,
-        seen_companies: Set[str]
+        seen_companies: Set[str],
     ) -> LeadScoreBreakdown:
         """
-        Score a lead against an ICP using the full scoring pipeline.
-        
-        This calls the LLM-based scoring system which:
-        1. Runs automatic-zero pre-checks
-        2. Scores ICP fit (0-20 pts) via LLM
-        3. Scores decision maker (0-30 pts) via LLM
-        4. Verifies and scores intent signal (0-50 pts) via LLM
-        5. Applies time decay to intent signal
-        6. Calculates penalties (cost × 1000 + time × 1)
-        
-        Args:
-            lead: The lead to score
-            icp: The ICP to score against
-            run_cost_usd: API cost for this run
-            run_time_seconds: Execution time
-            seen_companies: Set of companies already scored (for duplicate detection)
-        
-        Returns:
-            LeadScoreBreakdown with detailed scores
-        
+        Score a company against an ICP using the full company-mode pipeline.
+
+        Delegates to ``qualification.scoring.lead_scorer.score_company``:
+          1. ``run_company_zero_checks`` — deterministic gates.
+          2. ``verify_company_exists`` — HTTP fetch hard gate.
+          3. Company-mode ICP-fit LLM (0-40).
+          4. Per-signal intent verification + time decay (0-60).
+          5. Cost variability penalty.
+
         Requires:
-            OPENROUTER_API_KEY environment variable for LLM scoring
-            SCRAPINGDOG_API_KEY environment variable for intent verification
+            OPENROUTER_API_KEY env var for LLM scoring
+            SCRAPINGDOG_API_KEY env var for intent verification
         """
-        # Use the full scoring pipeline from qualification.scoring
         try:
-            from qualification.scoring.lead_scorer import score_lead as _score_lead
-            
-            logger.info(f"Scoring lead: {lead.business} / {lead.role} against ICP {icp.icp_id}")
-            
-            scores = await _score_lead(
-                lead=lead,
+            from qualification.scoring.lead_scorer import score_company as _score_company
+
+            logger.info(
+                f"Scoring company: {company.company_name} "
+                f"({company.company_website}) against ICP {icp.icp_id}"
+            )
+
+            scores = await _score_company(
+                company=company,
                 icp=icp,
                 run_cost_usd=run_cost_usd,
                 run_time_seconds=run_time_seconds,
-                seen_companies=seen_companies
+                seen_companies=seen_companies,
             )
-            
+
             logger.info(
-                f"Lead scored: {scores.final_score:.2f} "
-                f"(ICP:{scores.icp_fit:.1f}, DM:{scores.decision_maker:.1f}, "
+                f"Company scored: {scores.final_score:.2f} "
+                f"(ICP:{scores.icp_fit:.1f}, "
                 f"Intent:{scores.intent_signal_final:.1f})"
             )
-            
             return scores
-            
-        except ImportError as e:
-            logger.error(f"Failed to import scoring module: {e}")
-            # Fallback to basic scoring if module not available
-            return self._basic_score_lead(lead, icp, run_cost_usd, run_time_seconds)
-            
+
         except Exception as e:
-            logger.error(f"Scoring failed: {e}")
-            # Return zero score with failure reason
+            logger.error(f"Scoring failed: {e}\n{traceback.format_exc()}")
             return LeadScoreBreakdown(
                 icp_fit=0,
                 decision_maker=0,
@@ -732,66 +708,13 @@ class QualificationValidator:
                 cost_penalty=0,
                 time_penalty=0,
                 final_score=0,
-                failure_reason=f"Scoring error: {str(e)[:100]}"
+                failure_reason=f"Scoring error: {str(e)[:100]}",
             )
-    
-    def _basic_score_lead(
-        self,
-        lead: LeadOutput,
-        icp: ICPPrompt,
-        run_cost_usd: float,
-        run_time_seconds: float
-    ) -> LeadScoreBreakdown:
-        """
-        Basic scoring fallback when full scoring is unavailable.
-        
-        Uses simple heuristics instead of LLM:
-        - ICP Fit: Check industry/role match
-        - Decision Maker: Check seniority
-        - Intent Signal: Check if present and recent
-        """
-        logger.warning("Using basic scoring fallback (no LLM)")
-        
-        # Basic ICP fit (check industry match)
-        icp_fit = 10.0 if lead.industry.lower() in icp.industry.lower() else 5.0
-        
-        # Basic decision maker (check seniority)
-        dm_score = 15.0
-        if lead.seniority:
-            seniority_lower = lead.seniority.lower()
-            if 'c-suite' in seniority_lower or 'vp' in seniority_lower:
-                dm_score = 25.0
-            elif 'director' in seniority_lower:
-                dm_score = 20.0
-        
-        # Basic intent signal (check if present)
-        intent_score = 0.0
-        if lead.intent_signals and lead.intent_signals[0].url:
-            intent_score = 25.0  # Give partial credit for having a signal
-        
-        # Calculate penalties
-        cost_penalty = run_cost_usd * self.config.COST_PENALTY_MULTIPLIER
-        time_penalty = run_time_seconds * self.config.TIME_PENALTY_MULTIPLIER
-        
-        total = icp_fit + dm_score + intent_score
-        final_score = max(0, total - cost_penalty - time_penalty)
-        
-        return LeadScoreBreakdown(
-            icp_fit=icp_fit,
-            decision_maker=dm_score,
-            intent_signal_raw=intent_score,
-            time_decay_multiplier=1.0,
-            intent_signal_final=intent_score,
-            cost_penalty=cost_penalty,
-            time_penalty=time_penalty,
-            final_score=final_score,
-            failure_reason="Basic scoring fallback (no LLM available)"
-        )
     
     async def report_results(
         self,
         evaluation_run_id: UUID,
-        lead: Optional[LeadOutput],
+        lead: Optional[CompanyOutput],
         scores: Optional[LeadScoreBreakdown],
         run_cost_usd: float,
         run_time_seconds: float
@@ -801,7 +724,9 @@ class QualificationValidator:
         
         Args:
             evaluation_run_id: UUID of the run
-            lead: The lead returned (may be None)
+            lead: The company returned (may be None) — parameter is named
+                ``lead`` for backward compatibility with the wire payload
+                key; the value is a ``CompanyOutput``.
             scores: Score breakdown (may be None)
             run_cost_usd: Total API cost
             run_time_seconds: Total execution time

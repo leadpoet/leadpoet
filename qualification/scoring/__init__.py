@@ -1,103 +1,95 @@
 """
 Qualification System: Scoring Module
 
-This module implements the lead scoring system for the Lead Qualification
-Agent competition. It includes:
+Validator-side scoring for the Lead Qualification Agent competition
+(the "model competition").
 
-- Pre-score validation (automatic zero checks) - Phase 5.0
-- Intent signal verification - Phase 5.1
-- Lead scoring (ICP fit, decision maker, intent signal) - Phase 5.2
-- Champion selection logic - Phase 6.1
-- Emissions distribution - Phase 6.2
+As of May 2026 the competition is single-path company-mode: miners
+submit ``CompanyOutput`` rows (companies surfaced from the open web)
+against ``ICPPrompt`` instances; the validator scores each row with
+``score_company``.  The historical lead-mode pipeline (DB row
+equality + role / seniority / email checks + decision-maker LLM) has
+been removed — see lead_scorer.py module docstring for rationale.
 
-CRITICAL: This is NEW scoring logic for qualification only.
-Do NOT modify any existing validation in validator_models/automated_checks.py.
-The qualification scoring is completely separate from the validator scoring.
+Scoring Components (per company):
+- ICP Fit:        0-40 points  (industry + product + structural + intent fit)
+- Intent Signal:  0-60 points  (per-signal verification + time decay,
+                                averaged across all submitted signals)
+- Penalties:      cost variability deduction
 
-Scoring Components:
-- ICP Fit: 0-20 points
-- Decision Maker: 0-20 points
-- Intent Signal: 0-60 points (with time decay)
-- Penalties: Cost and time deductions
+Max Score per Company: MAX_COMPANY_TOTAL_SCORE = 100 points
 
-Max Score per Lead: 100 points
+This module re-exports a curated public API; submodules
+(``lead_scorer``, ``pre_checks``, ``intent_verification``,
+``company_verification``, ``champion``, ``emissions``) may also be
+imported directly.
+
+NOTE: ``lead_scorer.py`` still contains shared helpers
+(``_score_single_intent_signal``, ``_apply_signal_time_decay``,
+``_extract_domain``, ``detect_structural_similarity``,
+``calculate_age_months``, ``calculate_time_decay_multiplier``,
+``extract_score``) that are imported directly by
+``gateway/fulfillment/scoring.py`` for fulfillment-side lead ranking,
+which still operates on contacts.  Do not move them.
 """
 
 from qualification.scoring.pre_checks import (
-    run_automatic_zero_checks,
-    validate_email,
-    check_data_quality,
+    run_company_zero_checks,
     check_industry_match,
     check_sub_industry_match,
-    check_role_match,
+    check_country_match,
     check_cost_limit,
     check_time_limit,
+    check_hard_time_limit,
     check_duplicate_company,
-    # Validation result type
     ValidationResult,
 )
 
 from qualification.scoring.intent_verification import (
-    # Main verification function
     verify_intent_signal,
-    # Content fetching
     fetch_url_content,
     scrapingdog_linkedin,
     scrapingdog_jobs,
     scrapingdog_generic,
     github_api,
-    # URL parsing
     extract_linkedin_id,
     extract_github_info,
-    # Content extraction
     extract_verification_content,
-    # LLM verification
     llm_verify_claim,
     openrouter_chat,
-    # Cache functions
     compute_cache_key,
     get_cached_verification,
     cache_verification,
     clear_cache,
     get_cache_stats,
-    # Batch verification
     verify_intent_signals_batch,
-    # Configuration
     is_verification_configured,
     get_verification_config,
-    # Types
     VerificationResult,
     CachedVerification,
 )
 
 from qualification.scoring.lead_scorer import (
-    # Main scoring function
-    score_lead,
-    # Individual scoring functions
-    score_icp_fit,
-    score_decision_maker,
-    score_intent_signal,
-    # Time decay
+    score_company,
+    score_company_icp_fit,
+    score_company_intent_signal,
     calculate_age_months,
     calculate_time_decay_multiplier,
-    # Helpers
     extract_score,
-    # Batch scoring
-    score_leads_batch,
-    summarize_scores,
-    # Constants
-    MAX_ICP_FIT_SCORE,
-    MAX_DECISION_MAKER_SCORE,
-    MAX_INTENT_SIGNAL_SCORE,
-    MAX_TOTAL_SCORE,
+    detect_structural_similarity,
+    MAX_COMPANY_ICP_FIT_SCORE,
+    MAX_COMPANY_INTENT_SIGNAL_SCORE,
+    MAX_COMPANY_TOTAL_SCORE,
+)
+
+from qualification.scoring.company_verification import (
+    verify_company_exists,
 )
 
 from qualification.scoring.champion import (
-    # Main champion selection
     run_champion_selection,
     champion_rebenchmark,
     check_evaluation_set_rotation,
-    # Database operations (placeholders)
     get_current_champion,
     get_finished_models,
     set_champion,
@@ -105,57 +97,46 @@ from qualification.scoring.champion import (
     get_model_score,
     create_evaluation,
     log_champion_selected,
-    # Utilities
     calculate_margin,
     is_valid_dethrone_margin,
     get_champion_history,
     get_current_set_id,
     get_champion_selection_summary,
-    # Testing helpers
     reset_champion_state,
     set_mock_champion,
-    # Types
     ChampionInfo,
     ModelScore,
     ChampionSelectionResult,
 )
 
 from qualification.scoring.emissions import (
-    # Main emissions function
     distribute_emissions,
-    # Hotkey verification
     is_hotkey_registered,
-    # Transparency log
     log_emissions_event,
-    # Weight calculation helpers
     get_champion_weight_allocation,
     get_champion_for_weights,
     calculate_weight_with_champion,
-    # History and summary
     get_emissions_history,
     get_emissions_summary,
     get_emissions_config,
-    # Testing helpers
     reset_emissions_history,
     add_mock_emissions_result,
-    # Types
     EmissionsResult,
     EmissionsSummary,
 )
 
 __all__ = [
-    # Pre-checks (Phase 5.0)
-    "run_automatic_zero_checks",
-    "validate_email",
-    "check_data_quality",
+    # Pre-checks
+    "run_company_zero_checks",
     "check_industry_match",
     "check_sub_industry_match",
-    "check_role_match",
+    "check_country_match",
     "check_cost_limit",
     "check_time_limit",
+    "check_hard_time_limit",
     "check_duplicate_company",
     "ValidationResult",
-    # Intent verification (Phase 5.1)
+    # Intent verification
     "verify_intent_signal",
     "fetch_url_content",
     "scrapingdog_linkedin",
@@ -177,21 +158,20 @@ __all__ = [
     "get_verification_config",
     "VerificationResult",
     "CachedVerification",
-    # Lead scoring (Phase 5.2)
-    "score_lead",
-    "score_icp_fit",
-    "score_decision_maker",
-    "score_intent_signal",
+    # Company scoring
+    "score_company",
+    "score_company_icp_fit",
+    "score_company_intent_signal",
     "calculate_age_months",
     "calculate_time_decay_multiplier",
     "extract_score",
-    "score_leads_batch",
-    "summarize_scores",
-    "MAX_ICP_FIT_SCORE",
-    "MAX_DECISION_MAKER_SCORE",
-    "MAX_INTENT_SIGNAL_SCORE",
-    "MAX_TOTAL_SCORE",
-    # Champion selection (Phase 6.1)
+    "detect_structural_similarity",
+    "MAX_COMPANY_ICP_FIT_SCORE",
+    "MAX_COMPANY_INTENT_SIGNAL_SCORE",
+    "MAX_COMPANY_TOTAL_SCORE",
+    # Company-existence verification
+    "verify_company_exists",
+    # Champion selection
     "run_champion_selection",
     "champion_rebenchmark",
     "check_evaluation_set_rotation",
@@ -212,7 +192,7 @@ __all__ = [
     "ChampionInfo",
     "ModelScore",
     "ChampionSelectionResult",
-    # Emissions distribution (Phase 6.2)
+    # Emissions distribution
     "distribute_emissions",
     "is_hotkey_registered",
     "log_emissions_event",

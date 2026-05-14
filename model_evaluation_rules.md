@@ -5,25 +5,30 @@ This document defines every check to perform when evaluating a qualification mod
 
 **Critical mindset**: When reviewing model code, assume NOTHING is benign. Code that looks like "good engineering" or "defensive programming" may in fact be gaming the scoring algorithm. If a piece of logic directly affects how the validator scores a lead, and the model author clearly understands the scoring mechanics, treat it as gaming until proven otherwise.
 
-### Applies to both ICP modes (May 2026)
-As of May 2026 the model competition supports two ICP modes (`icp.mode`):
+### Scope (May 2026 cutover)
+As of May 2026 the model competition is single-path: miners receive an
+`ICPPrompt` and must return ONE `CompanyOutput` per ICP (one company +
+intent signals; **no contact fields** — no name, role, email,
+seniority, person LinkedIn URL).  Score components per ICP:
 
-* **`lead`** (legacy / default) — model returns a `LeadOutput`
-  (one company + contact + intent signals).
-* **`company`** (new) — model returns a `CompanyOutput`
-  (one company + intent signals; **no contact fields** — no name,
-  role, email, seniority, person LinkedIn URL).  Score components
-  shift: no decision-maker LLM, ICP-fit LLM is widened to 0-40,
-  intent signal scoring is unchanged.
+* `icp_fit` LLM             — 0-40
+* `decision_maker`          — always 0 (no contact dimension)
+* `intent_signal_final`     — 0-60 (per-signal verification + time decay)
+* Penalties                 — cost variability
+* Hard gates                — fabricated intent signals zero the
+                              entire score; company-existence HTTP
+                              check (see
+                              `qualification/scoring/company_verification.py`)
+                              must pass.
 
-**Every check below applies to BOTH modes** unless explicitly noted.
-Hardcoded dates, LLM-assisted fabrication, generic marketing copy,
-length padding, etc. are all just as disqualifying for a
-`CompanyOutput` as they were for a `LeadOutput`.  Company-mode adds
-one *additional* hard gate: the model's `company_website` must
-resolve to a live page that mentions the claimed `company_name`
-and isn't a parked / for-sale domain (see
-`qualification/scoring/company_verification.py`).
+Lead-mode (the historical leads-with-contacts pipeline:
+`LeadOutput` + DB row equality + role / seniority / email checks +
+decision-maker LLM) was removed.  Surfacing contacts cleanly requires
+Apify / LinkedIn scraping which we do not want baked into the base
+miner; fulfillment miners layer contact enrichment on top.
+
+All hardcoding / gaming / fabrication checks below apply to
+`CompanyOutput` submissions.
 
 ---
 

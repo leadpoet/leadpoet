@@ -25,35 +25,37 @@ THE CONTRACT
 ``qualify(icp: dict) -> dict``
 
 The validator passes ICP as a JSON-serialized dict and JSON-decodes
-your return value.  The schemas live in
-``gateway/qualification/models.py``:
+your return value.  As of May 2026 the competition is single-path:
+miners must return a ``CompanyOutput`` dict matching the schema in
+``gateway/qualification/models.py``.
 
-  * ``ICPPrompt``      — what you receive
-  * ``LeadOutput``     — what you return when ``icp['mode'] == 'lead'``
-                         (legacy / default)
-  * ``CompanyOutput``  — what you return when ``icp['mode'] == 'company'``
+There is no person / role / email / seniority dimension.  Surfacing
+contacts cleanly requires Apify / LinkedIn scraping, which we do not
+want baked into the base miner.  Fulfillment miners can layer their
+own contact enrichment on top of a license-clean base model.
 
-Pydantic ``extra = 'forbid'`` is set on both output models: any extra
-key (e.g. an email field on a CompanyOutput) gives an instant 0 for
+Pydantic ``extra = 'forbid'`` is set on ``CompanyOutput``: any extra
+key (e.g. a ``full_name`` or ``email`` field) gives an instant 0 for
 that ICP.  Build to the schema exactly.
 
 SCORING
 -------
-For the same ICP, validators run:
+For each ICP, the validator runs ``score_company`` in
+``qualification/scoring/lead_scorer.py``:
 
-* Lead-mode (``score_lead`` in ``qualification/scoring/lead_scorer.py``):
-  ICP fit LLM (0-20), decision-maker LLM (0-20), per-signal intent
-  verification with time decay (0-60), cost penalty.  Max 100.
+  * Hard gate: company-existence check (HTTP fetch of
+    ``company_website`` — must return 2xx/3xx, must mention
+    ``company_name``, must not be a parked / for-sale domain).
+    Failure → score 0.
+  * Company-mode ICP-fit LLM (0-40): industry + product + structural
+    + intent-class fit.
+  * Per-signal intent verification with time decay (0-60).
+  * Cost variability penalty (-5 if run cost exceeds 2x average).
+  * Max total = 100.
 
-* Company-mode (``score_company`` in the same file):
-  Company-existence check (HTTP fetch — must pass), company-mode ICP
-  fit LLM (0-40), per-signal intent verification (0-60), cost penalty.
-  Max 100.
-
-In both modes, fabricated intent signals (signals whose URL doesn't
-contain the claim, hardcoded dates, dup domains) zero the entire
-score.  See ``qualification/scoring/intent_verification.py`` for the
-exact rules.
+Fabricated intent signals (signals whose URL doesn't contain the
+claim, hardcoded dates, dup domains) zero the entire score.  See
+``qualification/scoring/intent_verification.py`` for the exact rules.
 """
 
 from __future__ import annotations
@@ -61,54 +63,22 @@ from __future__ import annotations
 from typing import Any, Dict
 
 
-def _lead_mode_stub(icp: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a trivially valid LeadOutput skeleton.
+def qualify(icp: Dict[str, Any]) -> Dict[str, Any]:
+    """Validator entry point.
 
-    This is NOT a real lead — it's the shape only.  A real implementation
-    here would query the published leads table
-    (``test_leads_for_miners``) intelligently using
-    ``icp['industry']``, ``icp['target_roles']``, etc., and attach
-    verifiable intent signals from public sources (LinkedIn, news,
-    job boards).  Score 0 expected from this stub.
-    """
-    return {
-        "lead_id": 0,
-        "business": "ExampleCo",
-        "company_linkedin": "https://www.linkedin.com/company/exampleco",
-        "company_website": "https://exampleco.com",
-        "employee_count": icp.get("employee_count") or "51-200",
-        "industry": icp.get("industry") or "Unknown",
-        "sub_industry": icp.get("sub_industry") or "Unknown",
-        "country": icp.get("country") or icp.get("geography") or "United States",
-        "city": "San Francisco",
-        "state": "California",
-        "role": (icp.get("target_roles") or ["VP Sales"])[0],
-        "role_type": "Sales",
-        "seniority": icp.get("target_seniority") or "VP",
-        "intent_signals": [
-            {
-                "source": "news",
-                "description": "Placeholder signal — replace with real evidence",
-                "url": "https://example.com/never-going-to-verify",
-                "date": None,
-                "snippet": "This signal is intentionally fake and will score 0.",
-            }
-        ],
-    }
-
-
-def _company_mode_stub(icp: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a trivially valid CompanyOutput skeleton.
+    The validator-side TEE sandbox imports this as
+    ``from model import qualify`` and calls ``qualify(icp_dict)``,
+    where ``icp_dict`` is ``ICPPrompt.model_dump(mode='json')``.
+    Return one ``CompanyOutput``-shaped dict.
 
     A real implementation would search the open web (news, job boards,
-    company websites) for companies that match ``icp`` and have at
-    least one verifiable intent signal.  The model competition is
-    explicitly NOT about contact enrichment — leave that to
-    fulfillment miners.
+    company websites, GitHub, LinkedIn company pages) for companies
+    that match ``icp`` and have at least one verifiable intent signal.
 
     This stub returns a known-fake company so it scores 0; replace
-    everything between the comments below.
+    everything between the REPLACE markers below.
     """
+    icp = icp or {}
     return {
         # --- REPLACE: pick a real company that matches the ICP -------
         "company_name": "ExampleCo",
@@ -141,18 +111,3 @@ def _company_mode_stub(icp: Dict[str, Any]) -> Dict[str, Any]:
         ],
         # ------------------------------------------------------------
     }
-
-
-def qualify(icp: Dict[str, Any]) -> Dict[str, Any]:
-    """Validator entry point.
-
-    The validator-side TEE sandbox imports this as
-    ``from model import qualify`` and calls ``qualify(icp_dict)``,
-    where ``icp_dict`` is ``ICPPrompt.model_dump(mode='json')``.
-    Return one output dict matching the schema selected by
-    ``icp['mode']`` ("lead" — default — or "company").
-    """
-    mode = (icp or {}).get("mode") or "lead"
-    if mode == "company":
-        return _company_mode_stub(icp)
-    return _lead_mode_stub(icp)

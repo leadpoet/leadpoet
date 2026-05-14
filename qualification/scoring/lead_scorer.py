@@ -39,13 +39,22 @@ from collections import Counter
 from urllib.parse import urlparse
 
 from gateway.qualification.config import CONFIG
-from gateway.qualification.models import LeadOutput, ICPPrompt, LeadScoreBreakdown
-from qualification.scoring.pre_checks import run_automatic_zero_checks
+from gateway.qualification.models import (
+    LeadOutput,
+    ICPPrompt,
+    LeadScoreBreakdown,
+    CompanyOutput,
+)
+from qualification.scoring.pre_checks import (
+    run_automatic_zero_checks,
+    run_company_zero_checks,
+)
 from qualification.scoring.db_verification import verify_leads_batch
 from qualification.scoring.intent_verification import (
     verify_intent_signal,
     openrouter_chat,
 )
+from qualification.scoring.company_verification import verify_company_exists
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +63,22 @@ logger = logging.getLogger(__name__)
 # Configuration
 # =============================================================================
 
-# Score component maximums
+# Score component maximums — LEAD MODE (icp.mode == "lead", the default)
 MAX_ICP_FIT_SCORE = 20
 MAX_DECISION_MAKER_SCORE = 20
 MAX_INTENT_SIGNAL_SCORE = 60
 MAX_TOTAL_SCORE = MAX_ICP_FIT_SCORE + MAX_DECISION_MAKER_SCORE + MAX_INTENT_SIGNAL_SCORE
+
+# Score component maximums — COMPANY MODE (icp.mode == "company")
+# No decision-maker score (there's no contact in company-mode).  The
+# 20 freed-up points go to a richer ICP-fit prompt covering industry,
+# product fit, structural fit (size/geo/stage), and pre-verification
+# alignment with the buyer's intent-signal expectations.  Intent
+# signal cap is identical to lead-mode so the per-signal verifier
+# (``intent_verification.verify_intent_signal``) is reused unchanged.
+MAX_COMPANY_ICP_FIT_SCORE = 40
+MAX_COMPANY_INTENT_SIGNAL_SCORE = 60
+MAX_COMPANY_TOTAL_SCORE = MAX_COMPANY_ICP_FIT_SCORE + MAX_COMPANY_INTENT_SIGNAL_SCORE  # = 100
 
 # LLM temperature for scoring (slightly higher for nuanced scoring)
 SCORING_TEMPERATURE = 0.4
@@ -263,6 +283,408 @@ async def score_lead(
         final_score=final_score,
         failure_reason=None
     )
+
+
+# =============================================================================
+# Company-Mode Scoring (icp.mode == "company")
+# =============================================================================
+#
+# Mirror of ``score_lead`` but for the company-mode model competition.
+# Key differences from lead-mode:
+#
+#   * Input is ``CompanyOutput`` (company + intent signals, no contact).
+#   * NO DB field verification (companies come from the open web, not
+#     from ``test_leads_for_miners``).
+#   * NO role / seniority / decision-maker checks.
+#   * ICP fit prompt is rewritten to be company-centric (industry +
+#     product + structural + intent-signal-class match), worth 0-40.
+#   * NEW: company-existence verification gate (web fetch).  Hard
+#     pass/fail — a CompanyOutput that fails this scores 0 regardless
+#     of intent quality.  This plays the same anti-fabrication role
+#     that DB verification plays in lead-mode.
+#   * Intent verification logic is shared with lead-mode by calling
+#     ``_score_single_intent_signal`` directly.
+#
+# Total max score = MAX_COMPANY_TOTAL_SCORE = 100 (40 ICP + 60 intent),
+# so the existing champion thresholds in CONFIG (MINIMUM_CHAMPION_SCORE,
+# CHAMPION_DETHRONING_THRESHOLD_POINTS) carry over unchanged.
+
+
+async def score_company(
+    company: CompanyOutput,
+    icp: ICPPrompt,
+    run_cost_usd: float,
+    run_time_seconds: float,
+    seen_companies: Set[str],
+    force_fail_reason: Optional[str] = None,
+) -> LeadScoreBreakdown:
+    """Score a CompanyOutput against a company-mode ICP.
+
+    Returns a ``LeadScoreBreakdown`` with the same shape used by
+    ``score_lead`` so the validator's aggregation, transparency
+    logging, and champion-status reporting can stay mode-agnostic.
+    ``decision_maker`` is always 0 in company-mode.
+
+    Pipeline:
+
+      0. Forced-fail short-circuit (e.g. structural-templating
+         detection set by ``score_leads_batch``).
+      1. ``run_company_zero_checks`` — country/geo match, duplicate
+         company tracking, cost / time hard limits.  Skips role /
+         seniority / DB-row checks.
+      2. ``verify_company_exists`` — HTTP fetch of the company's
+         website to confirm it's a real page that mentions the
+         claimed company name and isn't a parked / for-sale domain.
+         Hard gate: failure -> score 0.
+      3. ``score_company_icp_fit`` — single LLM call, 0-40 score
+         (richer prompt than lead-mode ICP fit).
+      4. ``score_company_intent_signal`` — per-signal verification +
+         time decay, identical algorithm to lead-mode.  Fabrication
+         detection: if all signals are fabricated, zero entire score.
+      5. Cost variability penalty (same rules as lead-mode).
+      6. ``final_score = max(0, icp_fit + intent_final - cost_penalty)``.
+    """
+    if force_fail_reason:
+        logger.info(
+            f"Company forced to fail (company-mode): {force_fail_reason}"
+        )
+        return LeadScoreBreakdown(
+            icp_fit=0,
+            decision_maker=0,
+            intent_signal_raw=0,
+            time_decay_multiplier=1.0,
+            intent_signal_final=0,
+            cost_penalty=0,
+            time_penalty=0,
+            final_score=0,
+            failure_reason=force_fail_reason,
+        )
+
+    # -----------------------------------------------------------------
+    # STEP 1: Company-mode pre-checks (deterministic, no LLM)
+    # -----------------------------------------------------------------
+    passes, failure_reason = await run_company_zero_checks(
+        company, icp, run_cost_usd, run_time_seconds, seen_companies
+    )
+    if not passes:
+        logger.info(f"Company failed company-mode pre-checks: {failure_reason}")
+        return LeadScoreBreakdown(
+            icp_fit=0,
+            decision_maker=0,
+            intent_signal_raw=0,
+            time_decay_multiplier=1.0,
+            intent_signal_final=0,
+            cost_penalty=0,
+            time_penalty=0,
+            final_score=0,
+            failure_reason=failure_reason,
+        )
+
+    # -----------------------------------------------------------------
+    # STEP 2: Company-existence verification (web fetch — hard gate)
+    # -----------------------------------------------------------------
+    try:
+        co_verified, co_reason = await verify_company_exists(
+            company.company_name, company.company_website
+        )
+    except Exception as e:
+        # Never let a transient web error crash the scorer; log and
+        # treat as a soft failure so the model just gets a 0 on this
+        # ICP (rather than wedging the whole evaluation batch).
+        logger.error(f"Company verification raised: {e}")
+        co_verified, co_reason = False, f"company verification error: {str(e)[:120]}"
+    if not co_verified:
+        logger.info(
+            f"Company failed existence check: {co_reason} "
+            f"(name={company.company_name!r}, url={company.company_website!r})"
+        )
+        return LeadScoreBreakdown(
+            icp_fit=0,
+            decision_maker=0,
+            intent_signal_raw=0,
+            time_decay_multiplier=1.0,
+            intent_signal_final=0,
+            cost_penalty=0,
+            time_penalty=0,
+            final_score=0,
+            failure_reason=f"Company verification failed: {co_reason}",
+        )
+    logger.debug(f"Company existence verified: {co_reason}")
+
+    # -----------------------------------------------------------------
+    # STEP 3: Mark company as seen (first lead per company wins)
+    # -----------------------------------------------------------------
+    if company.company_name:
+        seen_companies.add(company.company_name.lower().strip())
+
+    # -----------------------------------------------------------------
+    # STEP 4: LLM-based scoring
+    # -----------------------------------------------------------------
+    try:
+        icp_fit = await score_company_icp_fit(company, icp)
+        logger.debug(f"Company ICP fit score: {icp_fit}")
+
+        intent_raw, intent_final, decay_multiplier, _max_confidence, all_fabricated = (
+            await score_company_intent_signal(company, icp)
+        )
+        logger.debug(
+            f"Company intent signal avg_raw={intent_raw:.1f}, "
+            f"avg_final={intent_final:.1f}, decay={decay_multiplier:.2f}"
+        )
+
+        # Fabrication zeroing — same rule as lead-mode.
+        if all_fabricated:
+            logger.warning(
+                f"❌ ALL INTENT SIGNALS FABRICATED for company "
+                f"{company.company_name!r} — zeroing entire score"
+            )
+            return LeadScoreBreakdown(
+                icp_fit=0,
+                decision_maker=0,
+                intent_signal_raw=0,
+                time_decay_multiplier=1.0,
+                intent_signal_final=0,
+                cost_penalty=0,
+                time_penalty=0,
+                final_score=0,
+                failure_reason=(
+                    "Intent fabrication detected (hardcoded date or "
+                    "generic claim)"
+                ),
+            )
+    except Exception as e:
+        logger.error(f"Company-mode LLM scoring failed: {e}")
+        return LeadScoreBreakdown(
+            icp_fit=0,
+            decision_maker=0,
+            intent_signal_raw=0,
+            time_decay_multiplier=1.0,
+            intent_signal_final=0,
+            cost_penalty=0,
+            time_penalty=0,
+            final_score=0,
+            failure_reason=f"LLM scoring error: {str(e)[:100]}",
+        )
+
+    # -----------------------------------------------------------------
+    # STEP 5: Cost variability penalty (same rules as lead-mode)
+    # -----------------------------------------------------------------
+    cost_penalty = 0.0
+    time_penalty = 0.0
+    cost_penalty_threshold = CONFIG.get_cost_penalty_threshold()
+    if run_cost_usd > cost_penalty_threshold:
+        cost_penalty = float(CONFIG.VARIABILITY_PENALTY_POINTS)
+        logger.debug(
+            f"Cost variability penalty applied: ${run_cost_usd:.4f} > "
+            f"${cost_penalty_threshold:.4f}"
+        )
+
+    # -----------------------------------------------------------------
+    # STEP 6: Final score (floor at 0, ceiling at MAX_COMPANY_TOTAL_SCORE)
+    # -----------------------------------------------------------------
+    total_raw = icp_fit + intent_final
+    final_score = max(0.0, total_raw - cost_penalty - time_penalty)
+    final_score = min(final_score, float(MAX_COMPANY_TOTAL_SCORE))
+
+    total_penalty = cost_penalty + time_penalty
+    if total_penalty > 0:
+        logger.info(
+            f"Company scored: {final_score:.2f} "
+            f"(ICP: {icp_fit}, Intent: {intent_final:.2f}, "
+            f"Variability penalty: -{total_penalty:.0f} pts)"
+        )
+    else:
+        logger.info(
+            f"Company scored: {final_score:.2f} "
+            f"(ICP: {icp_fit}, Intent: {intent_final:.2f}, "
+            f"No variability penalty)"
+        )
+
+    return LeadScoreBreakdown(
+        icp_fit=icp_fit,
+        decision_maker=0,
+        intent_signal_raw=intent_raw,
+        time_decay_multiplier=decay_multiplier,
+        intent_signal_final=intent_final,
+        cost_penalty=cost_penalty,
+        time_penalty=time_penalty,
+        final_score=final_score,
+        failure_reason=None,
+    )
+
+
+async def score_company_icp_fit(
+    company: CompanyOutput, icp: ICPPrompt, api_key: str = ""
+) -> float:
+    """Company-mode ICP-fit scorer (0-40).
+
+    Replaces the lead-mode trio of ``score_icp_fit`` (industry +
+    product + structural fit, max 20) + ``score_decision_maker``
+    (role + authority, max 20).  In company-mode there is no
+    contact, so the decision-maker dimension is removed and the
+    ICP-fit budget is widened to 40 with four sub-scores:
+
+      1. Industry / sub-industry fit            (0-10)
+      2. Product / service buying fit           (0-10)
+      3. Structural fit (size, geo, stage)      (0-10)
+      4. ICP intent-class alignment             (0-10)
+         (Does this company plausibly carry the
+          *kind* of intent the buyer asked for?
+          Verifying individual signals is the
+          job of score_company_intent_signal —
+          here we just check fit.)
+    """
+    icp_product = icp.product_service or ""
+    icp_prompt_text = icp.prompt or ""
+    icp_signals_str = (
+        "; ".join(icp.intent_signals)
+        if icp.intent_signals
+        else "Any verifiable buying intent"
+    )
+
+    prompt = f"""You are scoring how well a company matches a buyer's Ideal Customer Profile on a 0-40 scale.
+
+ICP CRITERIA:
+- Industry: {icp.industry}
+- Sub-industry: {icp.sub_industry}
+- Employee count: {icp.employee_count}
+- Company stage: {icp.company_stage}
+- Geography: {icp.geography}
+- Product/service the buyer is selling: {icp_product}
+- Intent signals the buyer wants the company to be showing: {icp_signals_str}
+- Full buyer request: "{icp_prompt_text}"
+
+COMPANY DATA:
+- Company: {company.company_name}
+- Website: {company.company_website}
+- Industry: {company.industry}
+- Sub-industry: {company.sub_industry}
+- Employee count: {company.employee_count}
+- Company stage: {company.company_stage}
+- Location: {company.country} ({company.state or 'state unspecified'})
+- Description: {company.description or '(none provided)'}
+
+SCORING — give a sub-score for EACH dimension then sum.  All dimensions are 0-10.
+
+1. INDUSTRY FIT (0-10):
+   - Exact industry + sub-industry match: 9-10
+   - Same industry, different sub-industry: 6-8
+   - Adjacent/related industry: 3-5
+   - Unrelated: 0-2
+
+2. PRODUCT-FIT (0-10):
+   - Company is clearly a likely buyer of "{icp_product}" given its
+     business model: 8-10
+   - Company plausibly uses this kind of product: 5-7
+   - Weak product fit: 2-4
+   - No connection: 0-1
+
+3. STRUCTURAL FIT (0-10):
+   - Employee count, company stage, AND geography all match the ICP: 9-10
+   - 2 of 3 structural criteria match: 6-8
+   - 1 of 3 structural criteria match: 3-5
+   - None match: 0-2
+
+4. INTENT-CLASS FIT (0-10):
+   This is about whether the *type* of company is consistent with the
+   buyer's intent class, not whether individual intent signals are
+   verified (that's done separately).
+   - The company is the kind of company that would plausibly show
+     the buyer's expected intent signals AND its description /
+     industry is consistent with those signals: 8-10
+   - Plausible match but mixed signals: 5-7
+   - Tenuous: 2-4
+   - Clearly inconsistent: 0-1
+
+Sum the four sub-scores.  Final score is in [0, 40].
+
+CRITICAL: Be conservative.  If the company's industry / sub-industry
+does NOT match the ICP, even high product-fit and structural-fit
+shouldn't push the total above 20.  The buyer told us their industry.
+
+Respond with ONLY a single integer 0-40."""
+
+    response = await openrouter_chat(prompt, model="gpt-4o-mini", api_key=api_key)
+    score = extract_score(response, max_score=MAX_COMPANY_ICP_FIT_SCORE)
+    return score
+
+
+async def score_company_intent_signal(
+    company: CompanyOutput, icp: ICPPrompt, api_key: str = ""
+) -> Tuple[float, float, float, int, bool]:
+    """Score ALL intent signals on a CompanyOutput.
+
+    Identical algorithm to ``score_intent_signal`` (lead-mode) but
+    parameterized over CompanyOutput fields.  Reuses
+    ``_score_single_intent_signal`` so every per-signal rule
+    (verification via ``verify_intent_signal``, source multipliers,
+    time decay, dedup, fabrication marker) is shared.
+
+    Returns ``(avg_raw, avg_final, avg_decay, max_confidence, all_fabricated)``
+    — same tuple shape as ``score_intent_signal``.
+    """
+    icp_criteria = None  # Same as score_intent_signal — built inside _score_single
+    seen_domains: set = set()
+    signal_results = []
+
+    for signal in company.intent_signals:
+        domain = _extract_domain(signal.url)
+        if domain in seen_domains:
+            logger.warning(
+                f"  ⚠ Duplicate domain {domain!r} on company "
+                f"{company.company_name!r} — signal scores 0 (URL dedup)"
+            )
+            signal_results.append({
+                "raw": 0.0,
+                "after_decay": 0.0,
+                "decay": 0.0,
+                "confidence": 0,
+                "date_status": "fabricated",
+            })
+            continue
+        seen_domains.add(domain)
+
+        score, confidence, date_status, content_found_date, _matched_idx = (
+            await _score_single_intent_signal(
+                signal,
+                icp,
+                icp_criteria,
+                company.company_name,
+                company.company_website,
+                api_key=api_key,
+            )
+        )
+
+        after_decay, decay = _apply_signal_time_decay(
+            score, signal.date, date_status,
+            signal.source.value if hasattr(signal.source, 'value') else str(signal.source),
+            content_found_date=content_found_date,
+        )
+        signal_results.append({
+            "raw": score,
+            "after_decay": after_decay,
+            "decay": decay,
+            "confidence": confidence,
+            "date_status": date_status,
+        })
+
+    if not signal_results:
+        return 0.0, 0.0, 0.0, 0, True
+
+    raw_scores = [r["raw"] for r in signal_results]
+    decayed_scores = [r["after_decay"] for r in signal_results]
+    decays = [r["decay"] for r in signal_results if r["decay"] > 0]
+    confidences = [r["confidence"] for r in signal_results]
+
+    avg_raw = sum(raw_scores) / len(raw_scores)
+    avg_final = sum(decayed_scores) / len(decayed_scores)
+    avg_decay = sum(decays) / len(decays) if decays else 0.0
+    max_confidence = max(confidences) if confidences else 0
+    # Fabrication marker: every signal was either fabricated, a domain
+    # dup, or otherwise scored 0.  Matches lead-mode semantics.
+    all_fabricated = all(r["raw"] == 0.0 for r in signal_results)
+
+    return avg_raw, avg_final, avg_decay, max_confidence, all_fabricated
 
 
 # =============================================================================

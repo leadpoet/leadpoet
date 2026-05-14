@@ -4882,8 +4882,13 @@ class Validator(BaseValidatorNeuron):
             import base64
             import httpx
             from qualification.validator.sandbox import TEESandbox
-            from gateway.qualification.models import LeadOutput, ICPPrompt, LeadScoreBreakdown
-            from qualification.scoring.lead_scorer import score_lead
+            from gateway.qualification.models import (
+                LeadOutput,
+                ICPPrompt,
+                LeadScoreBreakdown,
+                CompanyOutput,
+            )
+            from qualification.scoring.lead_scorer import score_lead, score_company
             from qualification.scoring.pre_checks import run_automatic_zero_checks
             
             gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
@@ -5050,7 +5055,12 @@ class Validator(BaseValidatorNeuron):
                     try:
                         # Create ICP prompt
                         icp = ICPPrompt(**_normalize_icp_dict_for_prompt(icp_data))
-                        
+                        # ICPPrompt.mode is "lead" (default, legacy) or "company"
+                        # (new May 2026 path).  All in-flight evaluations against
+                        # legacy mode="lead" ICPs continue to work unchanged; new
+                        # ICP sets opt into company-mode by setting mode="company".
+                        icp_mode = getattr(icp, "mode", "lead") or "lead"
+
                         # Run model with timeout
                         start_time = time.time()
                         result = await asyncio.wait_for(
@@ -5058,20 +5068,61 @@ class Validator(BaseValidatorNeuron):
                             timeout=QUALIFICATION_CONFIG.RUNNING_MODEL_TIMEOUT_SECONDS
                         )
                         run_time = time.time() - start_time
-                        
+
                         # Get cost from sandbox (tracks API calls made by model)
                         run_cost = sandbox.get_run_cost() if hasattr(sandbox, 'get_run_cost') else 0.01
-                        
+
                         # Accumulate total cost for $5 hard stop
                         total_evaluation_cost += run_cost
-                        
-                        # Parse lead output and check for errors
+
+                        # Parse model output (lead-mode or company-mode) and check for errors
                         lead_data = result.get("lead") if isinstance(result, dict) else None
                         error_msg = result.get("error") if isinstance(result, dict) else None
-                        lead = LeadOutput(**lead_data) if lead_data else None
-                        
-                        # Score lead
-                        if lead:
+
+                        # NOTE on the wire payload key: the sandbox always
+                        # places the model's return value under
+                        # ``result["lead"]`` regardless of mode — the key
+                        # name is historical.  In company-mode the dict
+                        # under that key is a CompanyOutput, not a
+                        # LeadOutput.  We dispatch on icp.mode rather
+                        # than on the shape of the payload to keep
+                        # parsing strict per Pydantic ``extra=forbid``.
+                        lead: Optional[Any] = None  # LeadOutput in lead-mode
+                        company: Optional[Any] = None  # CompanyOutput in company-mode
+                        parse_error: Optional[str] = None
+                        if lead_data:
+                            try:
+                                if icp_mode == "company":
+                                    company = CompanyOutput(**lead_data)
+                                else:
+                                    lead = LeadOutput(**lead_data)
+                            except Exception as parse_exc:
+                                # Strict-shape parse failure for either
+                                # mode: zero this run with a clear
+                                # reason rather than crashing the
+                                # whole evaluation loop.
+                                parse_error = (
+                                    f"Model returned invalid {icp_mode}-mode "
+                                    f"output: {str(parse_exc)[:200]}"
+                                )
+
+                        # Score lead OR company depending on ICP mode
+                        if parse_error:
+                            scores = LeadScoreBreakdown(
+                                icp_fit=0, decision_maker=0, intent_signal_raw=0,
+                                time_decay_multiplier=1.0, intent_signal_final=0,
+                                cost_penalty=0, time_penalty=0, final_score=0,
+                                failure_reason=parse_error,
+                            )
+                        elif icp_mode == "company" and company is not None:
+                            scores = await score_company(
+                                company=company,
+                                icp=icp,
+                                run_cost_usd=run_cost,
+                                run_time_seconds=run_time,
+                                seen_companies=seen_companies,
+                            )
+                        elif icp_mode != "company" and lead is not None:
                             scores = await score_lead(
                                 lead=lead,
                                 icp=icp,
@@ -5080,8 +5131,10 @@ class Validator(BaseValidatorNeuron):
                                 seen_companies=seen_companies
                             )
                         else:
-                            # Use actual error message if available
-                            failure_reason = error_msg if error_msg else "No lead returned"
+                            # No output at all from the model.
+                            failure_reason = error_msg if error_msg else (
+                                f"No {'company' if icp_mode == 'company' else 'lead'} returned"
+                            )
                             scores = LeadScoreBreakdown(
                                 icp_fit=0, decision_maker=0, intent_signal_raw=0,
                                 time_decay_multiplier=1.0, intent_signal_final=0,
@@ -5089,23 +5142,27 @@ class Validator(BaseValidatorNeuron):
                                 failure_reason=failure_reason
                             )
                         
-                        # Report results
+                        # Report results — pass whichever output object
+                        # is populated for this mode.  The reporter
+                        # already calls ``.model_dump()`` generically,
+                        # so CompanyOutput serializes correctly.
                         await self._qualification_report_results(
                             evaluation_run_id=evaluation_run_id,
-                            lead=lead,
+                            lead=(company if icp_mode == "company" else lead),
                             scores=scores,
                             run_cost_usd=run_cost,
                             run_time_seconds=run_time
                         )
-                        
+
                         # Accumulate scores and time for summary
                         total_score += scores.final_score
                         total_time += run_time
                         leads_scored += 1
-                        
+
                         # Collect run detail for score_breakdown
                         run_detail = {
                             "final_score": scores.final_score,
+                            "icp_mode": icp_mode,
                             "icp_prompt": icp_data.get("prompt", ""),
                             "icp_industry": icp_data.get("industry", ""),
                             "icp_sub_industry": icp_data.get("sub_industry", ""),
@@ -5129,7 +5186,31 @@ class Validator(BaseValidatorNeuron):
                             "run_time_seconds": round(run_time, 2),
                             "run_cost_usd": round(run_cost, 6),
                         }
-                        if lead:
+
+                        # Populate per-mode ``lead`` / ``company`` summary
+                        # blocks.  We keep BOTH keys on the run_detail so
+                        # downstream consumers (dashboard, transparency
+                        # log) can branch on icp_mode without missing
+                        # fields.  In company-mode the ``lead`` key is
+                        # None and the ``company`` key carries the
+                        # CompanyOutput summary; vice-versa in lead-mode.
+                        if icp_mode == "company" and company is not None:
+                            co_dict = company.model_dump()
+                            run_detail["lead"] = None
+                            run_detail["company"] = {
+                                "company_name": co_dict.get("company_name", ""),
+                                "company_website": co_dict.get("company_website", ""),
+                                "company_linkedin": co_dict.get("company_linkedin", ""),
+                                "industry": co_dict.get("industry", ""),
+                                "sub_industry": co_dict.get("sub_industry", ""),
+                                "employee_count": co_dict.get("employee_count", ""),
+                                "company_stage": co_dict.get("company_stage", ""),
+                                "country": co_dict.get("country", ""),
+                                "state": co_dict.get("state", ""),
+                                "description": co_dict.get("description", ""),
+                            }
+                            intent_signals = co_dict.get("intent_signals", [])
+                        elif lead is not None:
                             lead_dict = lead.model_dump()
                             run_detail["lead"] = {
                                 "business": lead_dict.get("business", ""),
@@ -5143,27 +5224,37 @@ class Validator(BaseValidatorNeuron):
                                 "company_linkedin": lead_dict.get("company_linkedin", ""),
                                 "company_website": lead_dict.get("company_website", ""),
                             }
+                            run_detail["company"] = None
                             intent_signals = lead_dict.get("intent_signals", [])
-                            run_detail["intent_signals"] = [
-                                {
-                                    "source": sig.get("source", ""),
-                                    "description": sig.get("description", "")[:200],
-                                    "url": sig.get("url", ""),
-                                    "date": sig.get("date", ""),
-                                    "snippet": sig.get("snippet", "")[:300],
-                                }
-                                for sig in (intent_signals if isinstance(intent_signals, list) else [])
-                            ]
                         else:
                             run_detail["lead"] = None
-                            run_detail["intent_signals"] = []
+                            run_detail["company"] = None
+                            intent_signals = []
+
+                        run_detail["intent_signals"] = [
+                            {
+                                "source": sig.get("source", ""),
+                                "description": sig.get("description", "")[:200],
+                                "url": sig.get("url", ""),
+                                "date": sig.get("date", ""),
+                                "snippet": sig.get("snippet", "")[:300],
+                            }
+                            for sig in (intent_signals if isinstance(intent_signals, list) else [])
+                        ]
                         run_details.append(run_detail)
-                        
-                        if lead:
-                            print(f"      ✅ Lead returned: {lead.role} @ {lead.business}")
-                            print(f"      📊 Score: {scores.final_score:.2f} (ICP:{scores.icp_fit}, DM:{scores.decision_maker}, Intent:{scores.intent_signal_final:.2f})")
+
+                        if icp_mode == "company":
+                            if company is not None:
+                                print(f"      ✅ Company returned: {company.company_name} ({company.company_website})")
+                                print(f"      📊 Score: {scores.final_score:.2f} (ICP:{scores.icp_fit}, Intent:{scores.intent_signal_final:.2f})")
+                            else:
+                                print(f"      ❌ No company returned: {scores.failure_reason}")
                         else:
-                            print(f"      ❌ No lead returned: {scores.failure_reason}")
+                            if lead is not None:
+                                print(f"      ✅ Lead returned: {lead.role} @ {lead.business}")
+                                print(f"      📊 Score: {scores.final_score:.2f} (ICP:{scores.icp_fit}, DM:{scores.decision_maker}, Intent:{scores.intent_signal_final:.2f})")
+                            else:
+                                print(f"      ❌ No lead returned: {scores.failure_reason}")
                         print(f"      ⏱️  Time: {run_time:.2f}s, 💰 Cost: ${run_cost:.6f} (Total: ${total_evaluation_cost:.4f}/${MAX_TOTAL_COST:.2f})")
                         
                         bt.logging.info(
@@ -8830,8 +8921,13 @@ def run_dedicated_qualification_worker(config):
                 # Import qualification modules
                 try:
                     from qualification.validator.sandbox import TEESandbox
-                    from gateway.qualification.models import LeadOutput, ICPPrompt, LeadScoreBreakdown
-                    from qualification.scoring.lead_scorer import score_lead
+                    from gateway.qualification.models import (
+                        LeadOutput,
+                        ICPPrompt,
+                        LeadScoreBreakdown,
+                        CompanyOutput,
+                    )
+                    from qualification.scoring.lead_scorer import score_lead, score_company
                     from qualification.scoring.pre_checks import run_automatic_zero_checks
                     from gateway.qualification.config import CONFIG as QUAL_CONFIG
                 except ImportError as e:
@@ -9023,7 +9119,10 @@ def run_dedicated_qualification_worker(config):
                             try:
                                 # Create ICP prompt
                                 icp = ICPPrompt(**_normalize_icp_dict_for_prompt(icp_data))
-                                
+                                # See coordinator path for the mode dispatch
+                                # rationale; default is "lead" for backward-compat.
+                                icp_mode = getattr(icp, "mode", "lead") or "lead"
+
                                 # Run model with timeout (asyncio imported at top of file)
                                 start_time = time.time()
                                 result = await asyncio.wait_for(
@@ -9031,18 +9130,48 @@ def run_dedicated_qualification_worker(config):
                                     timeout=QUAL_CONFIG.RUNNING_MODEL_TIMEOUT_SECONDS
                                 )
                                 run_time = time.time() - start_time
-                                
+
                                 # Get cost from sandbox
                                 run_cost = sandbox.get_run_cost() if hasattr(sandbox, 'get_run_cost') else 0.01
                                 total_cost += run_cost
-                                
-                                # Parse result
+
+                                # Parse result (lead-mode or company-mode)
                                 lead_data = result.get("lead") if isinstance(result, dict) else None
                                 error_msg = result.get("error") if isinstance(result, dict) else None
-                                lead = LeadOutput(**lead_data) if lead_data else None
-                                
-                                # Score lead
-                                if lead:
+                                lead = None
+                                company = None
+                                parse_error = None
+                                if lead_data:
+                                    try:
+                                        if icp_mode == "company":
+                                            company = CompanyOutput(**lead_data)
+                                        else:
+                                            lead = LeadOutput(**lead_data)
+                                    except Exception as parse_exc:
+                                        parse_error = (
+                                            f"Model returned invalid {icp_mode}-mode "
+                                            f"output: {str(parse_exc)[:200]}"
+                                        )
+
+                                # Score lead OR company depending on ICP mode
+                                if parse_error:
+                                    scores = LeadScoreBreakdown(
+                                        icp_fit=0, decision_maker=0, intent_signal_raw=0,
+                                        time_decay_multiplier=1.0, intent_signal_final=0,
+                                        cost_penalty=0, time_penalty=0, final_score=0,
+                                        failure_reason=parse_error,
+                                    )
+                                    score = 0.0
+                                elif icp_mode == "company" and company is not None:
+                                    scores = await score_company(
+                                        company=company,
+                                        icp=icp,
+                                        run_cost_usd=run_cost,
+                                        run_time_seconds=run_time,
+                                        seen_companies=seen_companies,
+                                    )
+                                    score = scores.final_score
+                                elif icp_mode != "company" and lead is not None:
                                     scores = await score_lead(
                                         lead=lead,
                                         icp=icp,
@@ -9052,7 +9181,9 @@ def run_dedicated_qualification_worker(config):
                                     )
                                     score = scores.final_score
                                 else:
-                                    failure_reason = error_msg if error_msg else "No lead returned"
+                                    failure_reason = error_msg if error_msg else (
+                                        f"No {'company' if icp_mode == 'company' else 'lead'} returned"
+                                    )
                                     scores = LeadScoreBreakdown(
                                         icp_fit=0, decision_maker=0, intent_signal_raw=0,
                                         time_decay_multiplier=1.0, intent_signal_final=0,
@@ -9060,30 +9191,48 @@ def run_dedicated_qualification_worker(config):
                                         failure_reason=failure_reason
                                     )
                                     score = 0.0
-                                
+
                                 # Accumulate
                                 total_score += score
                                 total_time += run_time
                                 leads_scored += 1
-                                
+
                                 # Track fabrication
                                 w_fr = scores.failure_reason or ""
                                 if "fabrication" in w_fr.lower() or "fabricated" in w_fr.lower():
                                     worker_fabrication_count += 1
-                                
-                                # Store per-ICP result
+
+                                # Store per-ICP result.  ``lead_returned``
+                                # carries whichever output was produced
+                                # for this mode (LeadOutput dict in
+                                # lead-mode, CompanyOutput dict in
+                                # company-mode); downstream consumers
+                                # branch on ``icp_mode`` (now embedded
+                                # in the run's ICP data).
+                                returned_payload = None
+                                if company is not None:
+                                    returned_payload = company.model_dump()
+                                elif lead is not None:
+                                    returned_payload = lead.model_dump()
                                 per_icp_results.append({
                                     "evaluation_run_id": evaluation_run_id,
-                                    "lead_returned": lead.model_dump() if lead else None,
+                                    "icp_mode": icp_mode,
+                                    "lead_returned": returned_payload,
                                     "scores": scores.model_dump() if scores else None,
                                     "run_cost_usd": run_cost,
                                     "run_time_seconds": run_time
                                 })
-                                
-                                if lead:
-                                    print(f"         ✅ {lead.role} @ {lead.business} (Score: {score:.2f})")
+
+                                if icp_mode == "company":
+                                    if company is not None:
+                                        print(f"         ✅ {company.company_name} ({company.company_website}) (Score: {score:.2f})")
+                                    else:
+                                        print(f"         ❌ {scores.failure_reason}")
                                 else:
-                                    print(f"         ❌ {scores.failure_reason}")
+                                    if lead is not None:
+                                        print(f"         ✅ {lead.role} @ {lead.business} (Score: {score:.2f})")
+                                    else:
+                                        print(f"         ❌ {scores.failure_reason}")
                                 
                             except asyncio.TimeoutError:
                                 print(f"         ⚠️ TIMEOUT")
@@ -9143,11 +9292,13 @@ def run_dedicated_qualification_worker(config):
                     run_details_for_breakdown = []
                     for pir_idx, pir in enumerate(per_icp_results):
                         pir_scores = pir.get("scores") or {}
-                        pir_lead = pir.get("lead_returned")
+                        pir_payload = pir.get("lead_returned")  # lead OR company dict
+                        pir_mode = pir.get("icp_mode") or "lead"
                         pir_run = runs[pir_idx] if pir_idx < len(runs) else {}
                         pir_icp = pir_run.get("icp_data", {})
                         rd = {
                             "final_score": pir_scores.get("final_score", 0),
+                            "icp_mode": pir_mode,
                             "icp_prompt": pir_icp.get("prompt", ""),
                             "icp_industry": pir_icp.get("industry", ""),
                             "icp_sub_industry": pir_icp.get("sub_industry", ""),
@@ -9171,33 +9322,50 @@ def run_dedicated_qualification_worker(config):
                             "run_time_seconds": round(pir.get("run_time_seconds", 0), 2),
                             "run_cost_usd": round(pir.get("run_cost_usd", 0), 6),
                         }
-                        if pir_lead:
-                            rd["lead"] = {
-                                "business": pir_lead.get("business", ""),
-                                "role": pir_lead.get("role", ""),
-                                "industry": pir_lead.get("industry", ""),
-                                "sub_industry": pir_lead.get("sub_industry", ""),
-                                "employee_count": pir_lead.get("employee_count", ""),
-                                "country": pir_lead.get("country", ""),
-                                "city": pir_lead.get("city", ""),
-                                "state": pir_lead.get("state", ""),
-                                "company_linkedin": pir_lead.get("company_linkedin", ""),
-                                "company_website": pir_lead.get("company_website", ""),
+                        if pir_payload and pir_mode == "company":
+                            rd["lead"] = None
+                            rd["company"] = {
+                                "company_name": pir_payload.get("company_name", ""),
+                                "company_website": pir_payload.get("company_website", ""),
+                                "company_linkedin": pir_payload.get("company_linkedin", ""),
+                                "industry": pir_payload.get("industry", ""),
+                                "sub_industry": pir_payload.get("sub_industry", ""),
+                                "employee_count": pir_payload.get("employee_count", ""),
+                                "company_stage": pir_payload.get("company_stage", ""),
+                                "country": pir_payload.get("country", ""),
+                                "state": pir_payload.get("state", ""),
+                                "description": pir_payload.get("description", ""),
                             }
-                            intent_signals = pir_lead.get("intent_signals", [])
-                            rd["intent_signals"] = [
-                                {
-                                    "source": sig.get("source", ""),
-                                    "description": (sig.get("description", "") or "")[:200],
-                                    "url": sig.get("url", ""),
-                                    "date": sig.get("date", ""),
-                                    "snippet": (sig.get("snippet", "") or "")[:300],
-                                }
-                                for sig in (intent_signals if isinstance(intent_signals, list) else [])
-                            ]
+                            intent_signals = pir_payload.get("intent_signals", [])
+                        elif pir_payload:
+                            rd["lead"] = {
+                                "business": pir_payload.get("business", ""),
+                                "role": pir_payload.get("role", ""),
+                                "industry": pir_payload.get("industry", ""),
+                                "sub_industry": pir_payload.get("sub_industry", ""),
+                                "employee_count": pir_payload.get("employee_count", ""),
+                                "country": pir_payload.get("country", ""),
+                                "city": pir_payload.get("city", ""),
+                                "state": pir_payload.get("state", ""),
+                                "company_linkedin": pir_payload.get("company_linkedin", ""),
+                                "company_website": pir_payload.get("company_website", ""),
+                            }
+                            rd["company"] = None
+                            intent_signals = pir_payload.get("intent_signals", [])
                         else:
                             rd["lead"] = None
-                            rd["intent_signals"] = []
+                            rd["company"] = None
+                            intent_signals = []
+                        rd["intent_signals"] = [
+                            {
+                                "source": sig.get("source", ""),
+                                "description": (sig.get("description", "") or "")[:200],
+                                "url": sig.get("url", ""),
+                                "date": sig.get("date", ""),
+                                "snippet": (sig.get("snippet", "") or "")[:300],
+                            }
+                            for sig in (intent_signals if isinstance(intent_signals, list) else [])
+                        ]
                         run_details_for_breakdown.append(rd)
                     
                     scored_rds = [r for r in run_details_for_breakdown if r["final_score"] > 0]

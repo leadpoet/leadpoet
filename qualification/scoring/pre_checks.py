@@ -52,7 +52,7 @@ except ImportError:
     fuzz = FuzzFallback()
 
 from gateway.qualification.config import CONFIG
-from gateway.qualification.models import LeadOutput, ICPPrompt
+from gateway.qualification.models import LeadOutput, ICPPrompt, CompanyOutput
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +193,131 @@ async def run_automatic_zero_checks(
     
     # All checks passed
     logger.debug(f"Lead passed all pre-checks: {lead.business} / {lead.role}")
+    return True, None
+
+
+# =============================================================================
+# Company-Mode Pre-Checks (icp.mode == "company")
+# =============================================================================
+
+async def run_company_zero_checks(
+    company: CompanyOutput,
+    icp: ICPPrompt,
+    run_cost_usd: float,
+    run_time_seconds: float,
+    seen_companies: Set[str],
+) -> Tuple[bool, Optional[str]]:
+    """Company-mode equivalent of ``run_automatic_zero_checks``.
+
+    Deterministic pre-checks that run BEFORE any LLM scoring in
+    company-mode.  Compared to lead-mode, the following checks are
+    DROPPED because they only make sense when there is a contact:
+
+      * Role fuzzy match           (no role field on CompanyOutput)
+      * Seniority match            (no seniority field on CompanyOutput)
+      * Email validation           (no email field on CompanyOutput)
+      * Lead-shaped data quality   (covers contact fields)
+
+    Checks RETAINED (with company-shaped arguments):
+
+      * Hard time limit (30s safety net) — same as lead-mode
+      * Industry fuzzy match (80%)        — same as lead-mode
+      * Sub-industry fuzzy match (70%)    — same as lead-mode, but only
+                                            enforced if the ICP provides a
+                                            sub-industry AND the model
+                                            provides one (sub-industry is
+                                            optional on CompanyOutput)
+      * Country match                     — same as lead-mode
+      * Duplicate company tracking        — same as lead-mode, keyed off
+                                            ``company.company_name``
+
+    Returns ``(passed, failure_reason)``.  Identical contract to
+    ``run_automatic_zero_checks`` so the scorer can stay mode-agnostic.
+    """
+    # Check 1: HARD time limit (30s safety net) — unchanged from lead-mode.
+    result = check_hard_time_limit(run_time_seconds)
+    if not result.passed:
+        logger.info(f"Company failed hard time limit: {result.reason}")
+        return False, result.reason
+
+    # Check 2: Industry fuzzy match (80% threshold) — unchanged.
+    result = check_industry_match(company.industry, icp.industry)
+    if not result.passed:
+        logger.info(f"Company failed industry check: {result.reason}")
+        return False, result.reason
+
+    # Check 3: Sub-industry fuzzy match — relaxed.  CompanyOutput marks
+    # sub_industry as optional; if either side is empty we skip the check
+    # rather than failing (industry fit is the primary filter).
+    if (icp.sub_industry and icp.sub_industry.strip()
+            and company.sub_industry and company.sub_industry.strip()):
+        result = check_sub_industry_match(company.sub_industry, icp.sub_industry)
+        if not result.passed:
+            logger.info(f"Company failed sub-industry check: {result.reason}")
+            return False, result.reason
+
+    # Check 4: Country match — unchanged.
+    result = check_country_match(company.country, icp.country)
+    if not result.passed:
+        logger.info(f"Company failed country check: {result.reason}")
+        return False, result.reason
+
+    # Check 5: Company-shaped data quality — light check for placeholder
+    # text in the company name and website fields.  We do NOT call
+    # check_data_quality(lead) here because that function reads
+    # role / seniority / etc. that don't exist on CompanyOutput.
+    quality_valid, quality_reason = _check_company_data_quality(company)
+    if not quality_valid:
+        logger.info(f"Company failed data quality check: {quality_reason}")
+        return False, f"Data quality issue: {quality_reason}"
+
+    # Check 6: Duplicate company tracking — first surface wins.
+    result = check_duplicate_company(company.company_name, seen_companies)
+    if not result.passed:
+        logger.info(f"Company failed duplicate check: {result.reason}")
+        return False, result.reason
+
+    logger.debug(f"Company passed all company-mode pre-checks: {company.company_name}")
+    return True, None
+
+
+def _check_company_data_quality(
+    company: CompanyOutput,
+) -> Tuple[bool, Optional[str]]:
+    """Light data-quality check for CompanyOutput.
+
+    We only verify the two free-form text fields that get used in
+    downstream prompts: company name and company website.  Both must:
+      * be non-empty,
+      * not match obvious placeholder text ('test', 'foo', etc.),
+      * not contain suspicious characters that indicate templated junk.
+
+    Industry / sub-industry / country are already enforced by their own
+    fuzzy / exact-match checks elsewhere in run_company_zero_checks, so
+    we don't re-validate them here.
+    """
+    name = (company.company_name or "").strip()
+    if not name:
+        return False, "Missing company_name"
+    name_lower = name.lower()
+    for placeholder in PLACEHOLDER_PATTERNS:
+        # Whole-word match so a real name containing 'na' (e.g.
+        # 'Nautical Inc') isn't tripped up.  Cheaper than re.search
+        # because placeholders are simple identifiers.
+        if name_lower == placeholder or name_lower.startswith(placeholder + " "):
+            return False, f"company_name looks like placeholder text: {name!r}"
+    if SUSPICIOUS_CHAR_PATTERN.search(name):
+        return False, f"company_name contains suspicious characters: {name!r}"
+
+    website = (company.company_website or "").strip()
+    if not website:
+        return False, "Missing company_website"
+    # Pydantic already URL-normalized the website at parse time; we
+    # only need to guard against placeholder-y URLs slipping past
+    # parsing (e.g. 'https://example.com').
+    if "example.com" in website.lower() or "example.org" in website.lower():
+        return False, f"company_website is example/placeholder: {website!r}"
+
     return True, None
 
 

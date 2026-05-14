@@ -368,6 +368,100 @@ class LeadOutputRedacted(BaseModel):
 
 
 # =============================================================================
+# Company Models (company-mode model competition)
+# =============================================================================
+#
+# As of May 2026 the model competition is transitioning from "surface a
+# specific high-intent lead (company + contact) from the published leads
+# table" to "surface companies from the open web with verified intent
+# signals."  Fulfillment miners can then layer their own contact
+# enrichment on top.  Why the shift:
+#
+#   * Finding contacts requires Apify / LinkedIn scraping; baking that
+#     into the base miner model would force every miner who builds on it
+#     to take on those licensing risks.
+#   * The genuinely hard part of fulfillment is surfacing companies with
+#     intent, not finding employees once you have the company.  Making
+#     the competition target that hard part lets every fulfillment miner
+#     benefit from a constantly-improving company-sourcing model.
+#
+# This output schema is the company-mode equivalent of LeadOutput.  ICPs
+# whose ``mode == "company"`` are scored against CompanyOutput; ICPs
+# whose ``mode == "lead"`` (the default for backward compatibility) still
+# route through LeadOutput.
+
+class CompanyOutput(BaseModel):
+    """Schema returned by qualification models when icp.mode == "company".
+
+    Models receive a company-mode ICP and must return ONE company that
+    matches the ICP criteria (industry / sub-industry / size / geography /
+    stage) AND has at least one verifiable intent signal.
+
+    No contact-level fields (no person name, no role, no email, no
+    person LinkedIn, no phone, no seniority).  Any extra field causes
+    immediate validation failure with score 0, same gaming-prevention
+    rule as LeadOutput.
+    """
+    model_config = {"extra": "forbid"}
+
+    # Identity
+    company_name: str = Field(..., min_length=1, max_length=200, description="Legal or common business name")
+    company_website: str = Field(..., description="Company website URL (root domain preferred)")
+    company_linkedin: str = Field("", description="Company LinkedIn URL (optional but strongly preferred)")
+
+    # Classification
+    industry: str = Field(..., description="Company industry")
+    sub_industry: str = Field("", description="Company sub-industry (optional)")
+    employee_count: str = Field(..., description="Employee count range (e.g. '51-200', '1001-5000')")
+    company_stage: str = Field("", description="Funding / lifecycle stage (e.g. 'Series B', 'Public', 'Bootstrapped')")
+
+    # Location — HQ-level only.  No city, since company-mode targets
+    # account-level intent and city granularity is meaningless without
+    # contacts.  State is optional.
+    country: str = Field(..., description="HQ country (e.g. 'United States')")
+    state: str = Field("", description="HQ state / region (optional)")
+
+    # Optional descriptive blurb to help the ICP-fit LLM disambiguate
+    # similarly-named or generically-named companies.  Bounded so it
+    # cannot be used as a prompt-injection lever (same pattern as
+    # IntentSignal.description).
+    description: str = Field("", max_length=500, description="Short company description / one-liner (optional)")
+
+    # Intent signals — at least one, same schema as LeadOutput.  This is
+    # the load-bearing field for company-mode scoring; the whole point
+    # of the competition is verifiable intent.
+    intent_signals: List[IntentSignal] = Field(..., min_length=1, description="Verifiable intent signals tied to this company")
+
+    @field_validator('company_website')
+    @classmethod
+    def _normalize_company_website(cls, v: str) -> str:
+        """Normalize same way IntentSignal.url does — accept miner variability."""
+        v = v.strip()
+        if not v:
+            raise ValueError("company_website cannot be empty")
+        if not v.lower().startswith(('http://', 'https://')):
+            v = 'https://' + v
+        parsed = urlparse(v)
+        if not parsed.hostname:
+            raise ValueError("company_website must contain a valid hostname")
+        return urlunparse((
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
+
+    @field_validator('description')
+    @classmethod
+    def _no_injection_in_description(cls, v: str) -> str:
+        if v:
+            _scan_for_prompt_injection(v, "description")
+        return v
+
+
+# =============================================================================
 # ICP Models
 # =============================================================================
 
@@ -389,7 +483,37 @@ class ICPPrompt(BaseModel):
     3. Return the best matching leads
     """
     icp_id: str = Field(..., description="Unique identifier for this ICP")
-    
+
+    # =========================================================================
+    # MODE — selects which output schema + scoring path the model competition
+    # uses for this ICP.
+    #
+    #   "lead"     (default, backward-compat)  — model returns a LeadOutput
+    #              (one company + contact + intent).  Scoring runs the
+    #              historical pipeline: DB field verification, role /
+    #              seniority pre-checks, decision-maker LLM, ICP-fit LLM,
+    #              intent verification.
+    #
+    #   "company"  (new, May 2026)              — model returns a
+    #              CompanyOutput (one company + intent signals, NO
+    #              contact fields).  Scoring skips DB verification, role
+    #              / seniority / decision-maker checks; runs a
+    #              company-only ICP-fit LLM + company-existence
+    #              verification + the same per-signal intent verification.
+    #
+    # ICPs are scheduled mode-by-mode by the operator.  In-flight
+    # evaluations against legacy mode="lead" ICPs continue to work
+    # unchanged; no breaking schema change for existing miners.
+    # =========================================================================
+    mode: Literal["lead", "company"] = Field(
+        "lead",
+        description=(
+            "Output schema + scoring path for this ICP.  'lead' (default) uses "
+            "LeadOutput + the full historical pipeline.  'company' uses "
+            "CompanyOutput + the company-mode pipeline (no contact verification)."
+        ),
+    )
+
     # PRIMARY FIELD - Models should interpret this natural language prompt
     prompt: str = Field("", description="Natural language prompt describing the ideal customer (PRIMARY)")
     
@@ -545,15 +669,29 @@ class LeadScoreBreakdown(BaseModel):
     """
     Detailed score breakdown for a single lead.
     Used internally during scoring and included in transparency logs.
+
+    Score ranges are widened (vs. the documentation strings) so the
+    SAME breakdown shape can carry company-mode results.  See
+    ``ICPPrompt.mode``:
+
+      * Lead-mode caps used by ``score_lead``:
+          icp_fit ≤ 20, decision_maker ≤ 20, intent_signal ≤ 60.
+          (Total ≤ 100.)
+      * Company-mode caps used by ``score_company``:
+          icp_fit ≤ 40, decision_maker = 0 (unused),
+          intent_signal ≤ 60.  (Total ≤ 100.)
+
+    Pydantic upper bounds below are the union of both modes; per-mode
+    caps are enforced inside the scoring functions themselves.
     """
     # Component scores
-    icp_fit: float = Field(..., ge=0, le=20, description="ICP fit score (0-20)")
-    decision_maker: float = Field(..., ge=0, le=30, description="Decision-maker score (0-30)")
-    intent_signal_raw: float = Field(..., ge=0, le=50, description="Intent signal score before decay (0-50)")
+    icp_fit: float = Field(..., ge=0, le=40, description="ICP fit score (0-20 lead-mode, 0-40 company-mode)")
+    decision_maker: float = Field(..., ge=0, le=30, description="Decision-maker score (0-20 lead-mode, 0 in company-mode)")
+    intent_signal_raw: float = Field(..., ge=0, le=60, description="Intent signal score before decay (0-60)")
     
     # Time decay
     time_decay_multiplier: float = Field(..., ge=0, le=1, description="1.0, 0.5, or 0.25 based on signal age")
-    intent_signal_final: float = Field(..., ge=0, le=50, description="Intent signal score after decay")
+    intent_signal_final: float = Field(..., ge=0, le=60, description="Intent signal score after decay (0-60)")
     
     # Penalties
     cost_penalty: float = Field(..., ge=0, description="Penalty for API costs")

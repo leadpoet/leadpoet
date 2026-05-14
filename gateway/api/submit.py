@@ -997,11 +997,43 @@ class SubmitLeadEvent(BaseModel):
 # POST /submit - Verify and finalize lead submission
 # ============================================================
 
+# ============================================================
+# Open-pool sourcing is DISABLED.
+#
+# As of May 2026 we stopped accepting miner-sourced leads for the open
+# marketplace.  Miners now only earn rewards via the fulfillment flow
+# (/fulfillment/request, /fulfillment/commit, /fulfillment/reveal, ...).
+#
+# This handler is kept in place so any miner client that still calls
+# POST /submit/ gets an unambiguous 410 Gone with a clear message,
+# rather than silently failing or hitting a half-broken pipeline.
+#
+# To re-enable later: delete the early `raise HTTPException(410, ...)`
+# below.  The full historical implementation is preserved underneath.
+# ============================================================
+
+_SOURCING_DISABLED_MESSAGE = (
+    "Open-pool lead submission is disabled. Miners can no longer submit "
+    "leads via /presign + /submit/. Earn rewards via the fulfillment flow "
+    "instead: GET /fulfillment/requests/active, then POST /fulfillment/commit "
+    "and POST /fulfillment/reveal."
+)
+
+
 @router.post("/")
 async def submit_lead(event: SubmitLeadEvent):
     """
+    DISABLED.  Open-pool sourcing has been turned off.  Returns 410 Gone.
+    """
+    raise HTTPException(status_code=410, detail=_SOURCING_DISABLED_MESSAGE)
+
+
+async def _submit_lead_disabled_legacy(event: SubmitLeadEvent):
+    """
+    Legacy implementation preserved for reference only.  No route points here.
+
     Verify uploaded lead blob and finalize submission.
-    
+
     Called by miner after uploading lead blob to S3 via presigned URL.
     
     Flow (BRD Section 4.1, Steps 5-6):

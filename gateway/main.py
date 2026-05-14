@@ -461,7 +461,12 @@ app.include_router(epoch.router)
 app.include_router(validate.router)  # Individual + Batch validation (IMMEDIATE REVEAL MODE)
 # NOTE: reveal.router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
 app.include_router(manifest.router)
-app.include_router(submit.router)
+# Open-pool sourcing DISABLED (May 2026).  We still import submit.router so
+# that any internal references resolve, but we no longer register it on the
+# app, so POST /submit/ is gone from the public API.  The handler inside
+# submit.router also raises 410 Gone as defense-in-depth.  Re-enable by
+# uncommenting the include_router line below.
+# app.include_router(submit.router)
 app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)
 app.include_router(attestation.router)  # TEE attestation endpoint (/attestation/document, /attestation/pubkey)
 app.include_router(weights.router)  # Weights submission for auditor validators
@@ -507,11 +512,40 @@ async def health():
 # Miner Submission Flow
 # ============================================================
 
+# ============================================================
+# Open-pool sourcing is DISABLED.
+#
+# As of May 2026 miners no longer submit leads for the open marketplace.
+# POST /presign was the entry point of the sourcing flow (presign → S3
+# upload → POST /submit/).  We now return 410 Gone immediately so miner
+# clients fail loudly and operators can see the deprecation in logs.
+#
+# To re-enable later: delete the early `raise HTTPException(410, ...)`
+# below.  The full historical implementation is preserved underneath.
+# ============================================================
+
+_SOURCING_DISABLED_MESSAGE = (
+    "Open-pool lead submission is disabled. Miners can no longer submit "
+    "leads via /presign + /submit/. Earn rewards via the fulfillment flow "
+    "instead: GET /fulfillment/requests/active, then POST /fulfillment/commit "
+    "and POST /fulfillment/reveal."
+)
+
+
 @app.post("/presign", response_model=PresignedURLResponse)
 async def presign_urls(event: SubmissionRequestEvent):
     """
+    DISABLED.  Open-pool sourcing has been turned off.  Returns 410 Gone.
+    """
+    raise HTTPException(status_code=410, detail=_SOURCING_DISABLED_MESSAGE)
+
+
+async def _presign_urls_disabled_legacy(event: SubmissionRequestEvent):
+    """
+    Legacy implementation preserved for reference only.  No route points here.
+
     Generate presigned PUT URL for miner submission to S3.
-    
+
     Flow:
     1. Verify wallet signature (MUST be first to prove identity)
     2. Check rate limits (uses verified hotkey, blocks before expensive ops)

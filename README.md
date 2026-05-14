@@ -1,17 +1,15 @@
 # Leadpoet | AI Sales Agents Powered by Bittensor
 
-Leadpoet is Subnet 71, the decentralized AI sales agent subnet built on Bittensor. Leadpoet's vision is streamlining the top of sales funnel, starting with high-quality lead generation today and evolving into a fully automated sales engine where meetings with your ideal customers seamlessly appear on your calendar.
+Leadpoet is Subnet 71, the decentralized AI sales agent subnet built on Bittensor. Leadpoet's vision is streamlining the top of the sales funnel, starting with high-quality lead generation today and evolving into a fully automated sales engine where meetings with your ideal customers seamlessly appear on your calendar.
 
 ## Overview
 
-Leadpoet transforms lead generation by creating a decentralized marketplace where:
-- **Miners** source high-quality prospects using web scraping and AI
-- **Validators** ensure quality through consensus-based validation
-- **Buyers** access curated prospects optimized for their Ideal Customer Profile (ICP)
+Leadpoet runs two complementary miner tracks on a single subnet:
 
-Unlike traditional lead databases, Leadpoet requires **consensus from multiple validators** before a lead is approved:
-- Each prospect is validated by three independent validators
-- Prevents gaming and ensures the lead pool limited to **verified, highest quality** leads
+- **Model Competition** — Miners submit AI/ML models that surface in-market **companies** from the open web that match a buyer's ICP and show genuine intent signals. The best-scoring model becomes the **champion** and earns rewards while it holds the crown.
+- **Fulfillment** — Miners compete head-to-head on real, paid **client requests** for fully enriched leads (contact, company, intent evidence). Top-scoring leads per request earn rewards over a 100-epoch runway.
+
+Both tracks are validated by **independent validators** running the same scoring pipeline (ICP fit + data accuracy + intent evidence), so quality is measured the same way across the subnet.
 
 ---
 
@@ -23,7 +21,7 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 - **Network**: Stable internet connection
 
 ### Software Requirements
-- Python 3.9 - 3.12       
+- Python 3.9 - 3.12
 - Bittensor CLI: `pip install bittensor>=9.10`
 - Bittensor Wallet: `btcli wallet create`
 
@@ -31,9 +29,11 @@ Unlike traditional lead databases, Leadpoet requires **consensus from multiple v
 
 ### For Miners
 
-Miners choose their own tools and APIs for sourcing leads. Common examples include web scraping APIs (ScrapingDog, Firecrawl), LLMs (OpenRouter), and search APIs — but miners are free to use any approach (that is in compliance with out ToS).
+Miners choose their own tools and APIs for sourcing companies and enriching leads. Common examples include web scraping APIs (ScrapingDog, Firecrawl, Apify), LLMs (OpenRouter), and search APIs — but miners are free to use any approach (that is in compliance with our ToS).
 
-For **qualification models**, paid API calls (LLM, ScrapingDog) go through the validator's proxy which injects keys server-side. Your model never needs API keys directly.
+For **qualification models** (Model Competition), paid API calls (LLM, ScrapingDog, etc.) go through the validator's proxy which injects keys server-side. Your model never needs API keys directly.
+
+For **Fulfillment**, miners run their own infrastructure end-to-end (sourcing, enrichment, intent evidence collection) and pay for their own API calls.
 
 ### For Validators
 
@@ -110,156 +110,23 @@ python neurons/miner.py \
     --subtensor_network finney
 ```
 
-### How Miners Work
-
-1. **Continuous Sourcing**: Actively search for new prospects
-2. **Secure Submission**: Get pre-signed S3 URL, hash lead data, sign with private key, and upload
-3. **Consensus Validation**: Prospects validated by multiple validators using commit/reveal protocol
-4. **Approved Leads**: Only consensus-approved leads enter the main lead pool
-
-### Lead JSON Structure
-
-Miners must submit prospects with the following structure:
-
-
-```json
-{
-  "business": "Microsoft",                 # REQUIRED
-  "full_name": "Satya Nadella",            # REQUIRED
-  "first": "Satya",                        # REQUIRED
-  "last": "Nadella",                       # REQUIRED
-  "email": "satya@microsoft.com",          # REQUIRED
-  "role": "CEO",                           # REQUIRED
-  "website": "https://microsoft.com",      # REQUIRED
-  "industry": "Software",                  # REQUIRED - must be from industry_taxonomy.py
-  "sub_industry": "Enterprise Software",   # REQUIRED - must be from industry_taxonomy.py
-  "country": "United States",              # REQUIRED - see Country Format below
-  "state": "Washington",                   # REQUIRED for US leads only
-  "city": "Redmond",                       # REQUIRED for all leads
-  "linkedin": "https://linkedin.com/in/satyanadella", # REQUIRED
-  "company_linkedin": "https://linkedin.com/company/microsoft", # REQUIRED
-  "source_url": "https://microsoft.com/about", # REQUIRED (URL where lead was found, OR "proprietary_database")
-  "description": "Technology company developing software, cloud services, and AI solutions", # REQUIRED
-  "employee_count": "10,001+",             # REQUIRED - valid ranges: "0-1", "2-10", "11-50", "51-200", "201-500", "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
-  "hq_country": "United States",           # REQUIRED - company HQ country
-  "hq_state": "Washington",               # OPTIONAL (required for US companies)
-  "hq_city": "Redmond",                   # OPTIONAL
-  "source_type": "company_site",           # OPTIONAL
-  "phone_numbers": ["+1-425-882-8080"],    # OPTIONAL
-  "socials": {"twitter": "Microsoft"}      # OPTIONAL
-}
-```
-
-**Source URL:** Provide the actual URL where the lead was found. For proprietary databases, set both `source_url` and `source_type` to `"proprietary_database"`. LinkedIn URLs in `source_url` are blocked.
-
-**Industry & Sub-Industry:** Must be exact values from `validator_models/industry_taxonomy.py`. The `sub_industry` key maps to valid parent `industries`.
-
-**Company HQ Location:**
-- `hq_country` is **required** for all leads
-- `hq_state` is required for US companies, optional otherwise
-- `hq_city` is optional
-- For remote companies, set `hq_city` to `"Remote"` with `hq_state` and `hq_country` blank
-
-**Contact Location (country/state/city):**
-- **US leads:** Require `country`, `state`, AND `city` (e.g., "United States", "California", "San Francisco")
-- **Non-US leads:** Require `country` and `city` only (`state` is optional)
-- **Accepted country names:** Use standard names like "United States", "United Kingdom", "Germany", etc. Common aliases are also accepted: "USA", "US", "UK", "UAE", etc.
-- **199 countries supported** - see `gateway/api/submit.py` for the full list
-
-### Lead Requirements
-
-**Email Quality:**
-- **Only "Valid" emails accepted** - Catch-all, invalid, and unknown emails will be rejected
-- **No general purpose emails** - Addresses like hello@, info@, team@, support@, contact@ are not accepted
-- **Proper email format required** - Must follow standard `name@domain.com` structure
-
-**Name-Email Matching:**
-
-Contact's first or last name must appear in the email address. We accept 26 common patterns plus partial matches to ensure quality while capturing the majority of legitimate business emails:
-
-**Starting with first name:**
-```
-johndoe, john.doe, john_doe, john-doe
-johnd, john.d, john_d, john-d
-jdoe, j.doe, j_doe, j-doe
-```
-
-**Starting with last name:**
-```
-doejohn, doe.john, doe_john, doe-john
-doej, doe.j, doe_j, doe-j
-djohn, d.john, d_john, d-john
-```
-
-**Single tokens:**
-```
-john, doe
-```
-
-These strict requirements at initial go-live demonstrate our dedication to quality leads, while still capturing majority of good emails.
-
-### Reward System
-
-Miners earn rewards based on the **quality and validity** of leads they submit, with rewards weighted entirely by a rolling 30-epoch history to incentivize consistent long-term quality:
-
-**How It Works:**
-1. Each epoch, validators receive leads to validate
-2. Validators run automated checks on all leads (email verification, domain checks, LinkedIn validation, reputation scoring)
-3. Each validator calculates weights proportionally: miners who submitted **VALID** (approved) leads receive rewards
-4. Rewards are weighted by each lead's reputation score (0-48 points: domain history, regulatory filings, and press coverage)
-5. Formula: `miner_reward ∝ Σ(rep_score for all approved leads from that miner)`
-
-**Example:** If Miner A submitted 3 valid leads (scores: 10, 15, 12) and Miner B submitted 2 valid leads (scores: 8, 20), then:
-- Miner A total: 37 points
-- Miner B total: 28 points
-- Weights distributed proportionally: 57% to Miner A, 43% to Miner B
-
-
-### Rejection Feedback
-
-If your lead is rejected by validator consensus, the rejection reason is recorded in the transparency log. This helps you improve lead quality and increase approval rates.
-
-**Common Rejection Reasons & Fixes:**
-
-| Issue | Fix |
-|-------|-----|
-| Invalid email format | Verify email follows `name@domain.com` format |
-| Email from disposable provider | Use business emails only (no tempmail, 10minutemail, etc.) |
-| Domain too new (< 7 days) | Wait for domain to age |
-| Email marked invalid | Check for typos, verify email exists |
-| Website not accessible | Verify website is online and accessible |
-| Domain blacklisted | Avoid domains flagged for spam/abuse |
-
-### Rate Limits & Cooldown
-
-To maintain lead quality and prevent spam, we enforce daily submission limits server-side. Think of it as guardrails to keep the lead pool high-quality.
-
-**Daily Limits (Reset at 12:00 AM UTC):**
-- **1000 submission attempts per day** - Counts all submission attempts (including duplicates/invalid)
-- **200 rejections per day** - Includes:
-  - Duplicate submissions
-  - Missing required fields
-  - **Validator consensus rejections** - When validator consensus rejects your lead based on quality checks
-
-**What Happens at Rate Limit:**
-
-When you hit the rejection limit, all subsequent submissions are blocked until the daily reset at midnight UTC. All rate limit events are logged to the TEE buffer and permanently stored on Arweave for transparency.
+The miner participates in both Model Competition (if you've submitted a model) and Fulfillment (if you respond to client requests). The two tracks are independent and you can run either or both.
 
 ---
 
-## Qualification Model System (Lead Curation)
+## Model Competition (Company Discovery)
 
-In addition to sourcing leads, miners can submit **qualification models** - AI/ML models that curate leads from the approved lead pool based on Ideal Customer Profiles (ICPs).
+Miners submit **qualification models** — AI/ML models that surface in-market companies from the open web matching a buyer's ICP. Models compete continuously: the highest-scoring model becomes the **champion** and earns rewards until a new model beats it by the published threshold.
 
 ### How It Works
 
-1. **Miner develops a model** that queries a leads database and finds leads matching given ICPs
+1. **Miner builds a model** that takes an ICP and returns a single best-matching company plus verifiable intent evidence
 2. **Miner submits the model** to the gateway (as a tarball) with a TAO payment
-3. **Validators evaluate the model** by running it against 100 ICPs
-4. **Model is scored** based on how well it finds matching leads
-5. **Champion model** earns rewards for its curation ability
+3. **Validators evaluate the model** by running it against 100 fresh ICPs
+4. **Model is scored** on ICP fit, intent-signal quality, cost, and runtime
+5. **Champion model** holds the crown and earns rewards until dethroned
 
-### Qualification Model Requirements
+### Model Requirements
 
 Your model must follow these **strict requirements**:
 
@@ -270,92 +137,61 @@ Your model must expose a function named `find_leads` (or `qualify` for backwards
 ```python
 def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Find the best lead from the database matching the given ICP.
-    
+    Find the best-fit company from the open web for the given ICP.
+
     CRITICAL: The 'prompt' field contains a NATURAL LANGUAGE description
-    that your model must INTERPRET to find matching leads.
-    
+    that your model must INTERPRET to find matching companies.
+
     Args:
         icp: Dict containing:
             # PRIMARY - Parse and interpret this!
-            - prompt: str  
-              Example: "VP Sales and Heads of Revenue at Series A-C SaaS 
-                       companies in the US. Showing signals: researching 
-                       outbound tools, hiring SDRs, or evaluating competitors."
-            
+            - prompt: str
+              Example: "Series A-C SaaS companies in the US showing
+                       signals of hiring SDRs or evaluating outbound
+                       sales tools."
+
             # Structured fields (for reference/validation)
             - industry: str (e.g., "Software")
-            - sub_industry: str (e.g., "Enterprise Software")  
-            - target_roles: List[str] (e.g., ["VP of Sales", "Head of Revenue"])
+            - sub_industry: str (e.g., "Enterprise Software")
             - employee_count: str (e.g., "51-200")
             - company_stage: str (e.g., "Series A")
             - country: str (e.g., "United States")
             - intent_signals: List[str] (e.g., ["hiring SDRs", "evaluating CRM"])
-    
+
     Returns:
-        Lead dict matching LeadOutput schema, or None if no match found
+        Company dict matching the CompanyOutput schema, or None if no match found
     """
 ```
 
-**Important:** The `prompt` field is what real customers would type (e.g., "Who should we find for you?"). Your model should **parse and interpret** this natural language prompt to understand what's being asked, not just do direct database field lookups.
+Your model should **parse and interpret** the natural-language `prompt`, not just do direct field lookups. Contact enrichment (person, email, phone) is **out of scope** for Model Competition — fulfillment miners layer that on top.
 
-#### 2. Database Connection (DO NOT HARDCODE)
+#### 2. Return Schema (CompanyOutput) - STRICT
 
-Your model receives database credentials via environment variables injected by the validator:
+Your model must return a dict with **EXACTLY** these fields — no more, no less:
 
-```python
-# Config is injected into icp["_config"] at runtime
-config = icp.get("_config", {})
-supabase_url = config.get("SUPABASE_URL")
-supabase_key = config.get("SUPABASE_ANON_KEY")
-table_name = config.get("QUALIFICATION_LEADS_TABLE")
-
-# Create client
-from supabase import create_client
-client = create_client(supabase_url, supabase_key)
-
-# Query leads
-result = client.table(table_name).select("*").eq("industry", "Technology").execute()
-```
-
-**CRITICAL:** Never hardcode database URLs or API keys. The validator injects these at runtime.
-
-#### 3. Return Schema (LeadOutput) - STRICT
-
-Your model must return a dict with **EXACTLY** these 15 fields - no more, no less:
-
-> ⚠️ **CRITICAL:** Any extra fields = instant score 0. Models cannot fabricate person-level data (email, name, phone, etc.)
->
-> ⚠️ **DB VERIFICATION:** All lead fields (business, employee_count, role, industry, etc.) are verified against the database using `lead_id`. If any field has been modified from the database value, the lead scores 0 instantly.
+> ⚠️ **CRITICAL:** Any extra fields = instant score 0. Person-level fields (email, name, phone, linkedin_url) are not allowed in Model Competition.
 
 ```python
 {
-    # Lead ID (REQUIRED - the `id` column from the leads table)
-    "lead_id": 42,
-    
-    # Company info (ALL REQUIRED - must match database exactly)
+    # Company info (ALL REQUIRED)
     "business": "Stripe",
     "company_linkedin": "https://linkedin.com/company/stripe",
     "company_website": "https://stripe.com",
     "employee_count": "1001-5000",
-    
+
     # Industry info (ALL REQUIRED)
     "industry": "Financial Services",
     "sub_industry": "Payment Processing",
-    
-    # Location (ALL REQUIRED - NOT a combined "geography" field)
+
+    # Company HQ Location (ALL REQUIRED — NOT a combined "geography" field)
     "country": "United States",
-    "city": "San Francisco", 
+    "city": "San Francisco",
     "state": "California",
-    
-    # Role info (ALL REQUIRED)
-    "role": "VP of Engineering",
-    "role_type": "Engineer/Technical",
-    "seniority": "VP",  # Must be: "C-Suite", "VP", "Director", "Manager", "Individual Contributor"
-    
+
     # Intent signals (REQUIRED - list of one or more signals)
-    # IMPORTANT: `source` must match the URL's domain — see "Picking the right `source`" below.
-    # Tagging a PRNewswire/TechCrunch/TheBlock article as "company_website" auto-rejects it as fabricated.
+    # IMPORTANT: `source` must match the URL's domain.
+    # Tagging a PRNewswire/TechCrunch/TheBlock article as "company_website"
+    # auto-rejects it as fabricated.
     "intent_signals": [
         {
             "source": "linkedin",  # One of: linkedin, job_board, social_media, news, github, review_site, company_website, wikipedia, other
@@ -368,75 +204,22 @@ Your model must return a dict with **EXACTLY** these 15 fields - no more, no les
 }
 ```
 
-**Required Fields Summary (15 total):**
-
-| # | Field | Type | Example |
-|---|-------|------|---------|
-| 1 | `lead_id` | int | 42 |
-| 2 | `business` | str | "Stripe" |
-| 3 | `company_linkedin` | str | "https://linkedin.com/company/stripe" |
-| 4 | `company_website` | str | "https://stripe.com" |
-| 5 | `employee_count` | str | "1001-5000" |
-| 6 | `industry` | str | "Financial Services" |
-| 7 | `sub_industry` | str | "Payment Processing" |
-| 8 | `country` | str | "United States" |
-| 9 | `city` | str | "San Francisco" |
-| 10 | `state` | str | "California" |
-| 11 | `role` | str | "VP of Engineering" |
-| 12 | `role_type` | str | "Engineer/Technical" |
-| 13 | `seniority` | enum | "VP" |
-| 14 | `intent_signals` | list[object] | See above |
-
-Each intent signal object has 5 **required** fields: `source`, `description`, `url`, `date`, `snippet`.
-
-You can provide multiple intent signals per lead — each is scored independently and the best one is used.
+Each intent signal object has 5 **required** fields: `source`, `description`, `url`, `date`, `snippet`. You can provide multiple intent signals per company — each is scored independently and the best one is used.
 
 **NOT ALLOWED (instant score 0 if included):**
 - `email`, `full_name`, `first_name`, `last_name`, `phone`, `linkedin_url` (person-level PII)
+- `role`, `role_type`, `seniority` (person-level role data)
+- `lead_id` (Model Competition surfaces companies from the open web, not rows from a database)
 - `geography` (use `country`/`city`/`state` instead)
 - `company_size` (use `employee_count` instead)
 - `intent_signal` (singular — use `intent_signals` list instead)
 - **ANY other field not listed above**
 
-#### 4. Time & Cost Limits
+#### 3. Time & Cost Limits
 
 - **8 seconds** maximum per ICP evaluation
 - **$5.00 total** maximum for all 100 ICP evaluations
 - Models exceeding limits receive score penalties or failures
-
-### Test Database for Local Development
-
-To develop and test your qualification model locally, we provide a **public test database** with 50,000 sample leads. This allows you to build and debug your model before submitting it for evaluation.
-
-> **Note:** The test database intentionally includes some leads with bad data quality to test your model's robustness. A good model should filter out or handle these gracefully.
-
-**Test Database Connection:**
-```python
-SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-SUPABASE_ANON_KEY = "sb_publishable_YU7GBMSX-fwEsSH7MnhSBQ_l5ACuFVf"
-TABLE_NAME = "test_leads_for_miners"
-```
-
-**Test Database Schema:**
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | integer | Row identifier |
-| `business` | text | Company name |
-| `website` | text | Company website |
-| `employee_count` | text | Employee count range |
-| `role` | text | Contact's role/title |
-| `role_type` | text | Role classification (e.g., "Senior Professional") |
-| `industry` | text | Primary industry |
-| `sub_industry` | text | Sub-industry |
-| `city` | text | City |
-| `state` | text | State/Province |
-| `country` | text | Country |
-| `company_linkedin` | text | Company LinkedIn URL |
-| `description` | text | Company description |
-| `last_refreshed_at` | timestamp | When the row was last updated |
-
-**Note:** Personal information (email, name, personal LinkedIn) is NOT available - models find company+role matches, and can enrich contacts using external APIs.
 
 ### Expired ICP Sets (Debug Your Model)
 
@@ -453,10 +236,10 @@ resp = requests.get(url, headers=headers, params={"select": "*", "limit": "1"})
 icp_set = resp.json()[0]
 
 # Get a specific day's ICPs
-resp = requests.get(url, headers=headers, params={"select": "*", "set_id": "eq.20260311"})
+resp = requests.get(url, headers=headers, params={"select": "*", "set_id": "eq.20260513"})
 ```
 
-Each row contains `set_id`, `active_from`, `active_until`, and the full `icps` array (100 ICP prompts with industry, geography, target roles, intent signals, etc.). Active ICP sets are never exposed.
+Each row contains `set_id`, `active_from`, `active_until`, and the full `icps` array (100 ICP prompts with industry, geography, intent signals, etc.). Active ICP sets are never exposed.
 
 ### Quick-Start Model Template
 
@@ -465,42 +248,41 @@ Here's a minimal working model to get you started. Create a `qualify.py` file:
 ```python
 import os
 import httpx
-from supabase import create_client
 
 def find_leads(icp):
     config = icp.get("_config", {})
-    client = create_client(config["SUPABASE_URL"], config["SUPABASE_ANON_KEY"])
-    table = config["QUALIFICATION_LEADS_TABLE"]
-    
-    # Query leads matching the ICP industry
-    results = client.table(table).select("*").eq("industry", icp.get("industry", "")).limit(50).execute()
-    
-    if not results.data:
-        return None
-    
-    # Pick the best lead (your model should be much smarter here)
-    lead = results.data[0]
-    
+    proxy_url = config.get("PROXY_URL", "http://localhost:8001")
+
+    # Use the validator's proxy for paid APIs (no key needed — proxy injects)
+    response = httpx.post(
+        f"{proxy_url}/openrouter/chat/completions",
+        json={
+            "model": "openai/gpt-4o-mini",
+            "messages": [{
+                "role": "user",
+                "content": f"Find one real US-based company that matches: {icp.get('prompt', '')}",
+            }],
+        },
+        timeout=8.0,
+    )
+    # ... parse response, scrape candidate company, verify intent evidence ...
+
     return {
-        "lead_id": lead["id"],  # REQUIRED: the `id` column from the table
-        "business": lead["business"],
-        "company_linkedin": lead["company_linkedin"],
-        "company_website": lead["website"],
-        "employee_count": lead["employee_count"],
-        "industry": lead["industry"],
-        "sub_industry": lead["sub_industry"],
-        "country": lead["country"],
-        "city": lead["city"],
-        "state": lead["state"],
-        "role": lead["role"],
-        "role_type": lead["role_type"],
-        "seniority": "Manager",  # Infer from role_type
+        "business": "ExampleCo",
+        "company_linkedin": "https://linkedin.com/company/exampleco",
+        "company_website": "https://exampleco.com",
+        "employee_count": "51-200",
+        "industry": icp.get("industry", ""),
+        "sub_industry": icp.get("sub_industry", ""),
+        "country": "United States",
+        "city": "San Francisco",
+        "state": "California",
         "intent_signals": [{
             "source": "company_website",
-            "description": f"{lead['business']} is actively operating in {lead['industry']}",
-            "url": lead["website"] or f"https://linkedin.com/company/{lead['business'].lower().replace(' ', '-')}",
-            "date": "2026-02-01",
-            "snippet": lead.get("description", "")[:500] or "Company profile from database"
+            "description": "ExampleCo announced Series B funding",
+            "url": "https://exampleco.com/blog/series-b",
+            "date": "2026-04-12",
+            "snippet": "Today we're excited to announce our $30M Series B led by ..."
         }]
     }
 ```
@@ -518,26 +300,6 @@ your_model/
 
 **Size Limit:** Model tarball must be under **200KB**. Submissions exceeding this limit will be rejected.
 
-**Required Function:**
-```python
-def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Find a lead matching the ICP's natural language prompt.
-    
-    Config is injected in icp["_config"]:
-        - SUPABASE_URL, SUPABASE_ANON_KEY - Database credentials
-        - QUALIFICATION_LEADS_TABLE - Table name (use "test_leads_for_miners" for local testing)
-        - PROXY_URL - For paid API calls (e.g., "http://localhost:8001")
-    
-    Returns: Dict with lead_id + 14 fields + intent_signals list, or None
-    """
-    config = icp.get("_config", {})
-    supabase_url = config.get("SUPABASE_URL")
-    table_name = config.get("QUALIFICATION_LEADS_TABLE")
-    proxy_url = config.get("PROXY_URL")
-    # ... your logic ...
-```
-
 **Paid API Calls (via Proxy):**
 ```python
 # DON'T call APIs directly - use the proxy (no API key needed)
@@ -548,7 +310,7 @@ response = httpx.post(
 )  # Proxy injects API key server-side
 ```
 
-**Allowed Libraries (key ones):** `os`, `sys`, `json`, `re`, `datetime`, `time`, `math`, `random`, `string`, `collections`, `itertools`, `functools`, `typing`, `dataclasses`, `enum`, `uuid`, `hashlib`, `base64`, `copy`, `csv`, `io`, `logging`, `difflib`, `pathlib`, `asyncio`, `threading`, `concurrent`, `urllib`, `ssl`, `http`, `html`, `requests`, `httpx`, `aiohttp`, `supabase`, `postgrest`, `duckduckgo_search`, `openai`, `pandas`, `numpy`, `pydantic`, `fuzzywuzzy`, `rapidfuzz`, `thefuzz`, `Levenshtein`, `dateutil`, `bs4`, `lxml`, `html5lib`, `soupsieve`, `certifi`, `cryptography`, `jwt`
+**Allowed Libraries (key ones):** `os`, `sys`, `json`, `re`, `datetime`, `time`, `math`, `random`, `string`, `collections`, `itertools`, `functools`, `typing`, `dataclasses`, `enum`, `uuid`, `hashlib`, `base64`, `copy`, `csv`, `io`, `logging`, `difflib`, `pathlib`, `asyncio`, `threading`, `concurrent`, `urllib`, `ssl`, `http`, `html`, `requests`, `httpx`, `aiohttp`, `duckduckgo_search`, `openai`, `pandas`, `numpy`, `pydantic`, `fuzzywuzzy`, `rapidfuzz`, `thefuzz`, `Levenshtein`, `dateutil`, `bs4`, `lxml`, `html5lib`, `soupsieve`, `certifi`, `cryptography`, `jwt`
 
 Full allowlist: [`qualification/validator/sandbox_security.py`](qualification/validator/sandbox_security.py) `ALLOWED_LIBRARIES`
 
@@ -558,7 +320,7 @@ Full allowlist: [`qualification/validator/sandbox_security.py`](qualification/va
 
 > **Security:** Models are scanned on upload (gateway) AND at runtime (validator sandbox). Models that call APIs not on the allowlist are terminated after 10 blocked attempts. Obfuscation attempts are caught by the runtime sandbox. Hardcoded/gaming models are detected by LLM analysis before execution.
 
-#### 5. Prohibited Practices (Instant Ban)
+#### Prohibited Practices (Instant Ban)
 
 Models that manipulate quality signals will be **banned** and the hotkey blacklisted. Specifically:
 
@@ -575,14 +337,14 @@ Models that manipulate quality signals will be **banned** and the hotkey blackli
 - Return `None` when no genuine intent evidence exists for an ICP
 - Use only verbatim text extracted from real sources as descriptions
 - Set the date field to `null` if no verifiable date is found (the field is optional)
-- Respect LLM verification results — if the LLM says "no evidence," don't submit that lead
+- Respect LLM verification results — if the LLM says "no evidence," don't submit that company
 - Only search for intent signals that the ICP actually requested
 
 **Allowed APIs:**
 | Type | APIs |
 |------|------|
 | Free (direct) | DuckDuckGo, SEC EDGAR, Wayback Machine, GDELT, UK Companies House, Wikipedia, Wikidata |
-| Paid (via proxy) | OpenRouter, ScrapingDog, BuiltWith, Crunchbase, Desearch, Data Universe (Macrocosmos), NewsAPI, Jobs Data API (TheirStack) |
+| Paid (via proxy) | OpenRouter, ScrapingDog, BuiltWith, Crunchbase, Desearch, Data Universe (Macrocosmos), NewsAPI, Jobs Data API (TheirStack), Apify |
 
 ### Submitting Your Model
 
@@ -598,7 +360,7 @@ Model submission is handled through the gateway API. See the miner code for the 
 
 ## Fulfillment (Direct Client Requests)
 
-Fulfillment is a new incentive mechanism where miners compete directly on real client requests. Instead of sourcing leads into a general pool, miners respond to specific ICPs published as global tasks.
+Fulfillment is the second incentive mechanism: miners compete directly on real, paid client requests. Instead of surfacing companies, fulfillment miners deliver **fully enriched leads** — company, contact, role, verified email, and intent evidence — for a specific ICP.
 
 ### How It Works
 
@@ -632,7 +394,11 @@ When a client submits a request, miners receive an ICP with this structure:
   "geography": "United States",
   "country": "United States",
   "product_service": "outbound sales automation platform",
-  "intent_signals": ["hiring SDRs", "evaluating sales tools", "researching competitors"],
+  "intent_signals": [
+    "hiring SDRs",
+    {"text": "evaluating sales tools", "required": true, "is_scored": true},
+    {"text": "ships to Asia", "required": true, "is_scored": false}
+  ],
   "num_leads": 2
 }
 ```
@@ -640,7 +406,9 @@ When a client submits a request, miners receive an ICP with this structure:
 - `prompt` — Natural language description of the ideal lead. Your model should interpret this.
 - `target_roles` — Exact role titles the client wants. Your lead's `role` must match one of these (fuzzy matching is applied, e.g. "VP, Corporate Sales" matches "VP of Sales").
 - `target_seniority` — Required seniority level.
-- `intent_signals` — The types of buying signals the client cares about. Find real evidence for these.
+- `intent_signals` — The types of buying signals the client cares about. Each entry can be a plain string (default: optional, scored) or a structured object `{"text", "required", "is_scored"}`:
+  - `required=true` — the lead **must** produce verified evidence for this signal or it fails with `missing_required_intent_signal`.
+  - `is_scored=false` — binary pass/fail; verified evidence is required if the signal is also `required`, but the signal does not contribute to the numeric intent score.
 - `num_leads` — How many winning leads the client wants. Only the top N by score earn rewards.
 
 ### Fulfillment Lead Schema
@@ -692,7 +460,7 @@ Miners must submit leads with this exact structure via the commit-reveal endpoin
 - `city`/`state`/`country` — The **contact's** location (from their LinkedIn profile), not the company HQ
 - `company_hq_city`/`company_hq_state`/`company_hq_country` — The **company's** headquarters location
 - `industry`/`sub_industry` — Must match values from `validator_models/industry_taxonomy.py`
-- `description` — **Required**, min 30 characters. A free-form company description written by the miner. Fed to the validator's Stage 5 3-stage classification pipeline (`validator_models/stage5_verification.py::classify_company_industry`): an LLM compares it against the scraped website/LinkedIn content; if the LLM decides the two don't describe the same business, the lead is rejected with `stage1_invalid_description` before intent scoring runs. Same mechanism used by the sourcing flow.
+- `description` — **Required**, min 30 characters. A free-form company description written by the miner. Fed to the validator's Stage 5 3-stage classification pipeline (`validator_models/stage5_verification.py::classify_company_industry`): an LLM compares it against the scraped website/LinkedIn content; if the LLM decides the two don't describe the same business, the lead is rejected with `stage1_invalid_description` before intent scoring runs.
 - `role_type` — One of: `C-Level Executive`, `VP`, `Director`, `Manager`, `Sales`, `Marketing`, `Engineering`, `Product`, `Operations`, `Finance`, `HR`, `Legal`, `IT`, `Customer Success`, `Business Development`, `Data & Analytics`, `Design`, `Research`, `Supply Chain`, `Consulting`, `Other`
 - `seniority` — One of: `C-Suite`, `VP`, `Director`, `Manager`, `Individual Contributor`
 - `intent_signals` — At least one signal required. Each signal needs `source`, `description`, `url`, `date` (ISO format or null), and `snippet` (verbatim text from the URL)
@@ -754,7 +522,7 @@ The commit hash is computed from the lead JSON using the schema defined in `Lead
 |-------|---------------|------|
 | Tier 1 | Industry, sub-industry, role, seniority, country, employee count, duplicate company | Free |
 | Tier 2 | Email format, name-in-email, domain age, MX/SPF/DMARC, DNSBL, TrueList verification, LinkedIn person verification, company verification, reputation score | API calls |
-| Tier 3 | Each intent signal URL scraped, snippet overlap verified, LLM evaluates relevance, time decay applied, peak-weighted aggregation | LLM + scraping |
+| Tier 3 | Each intent signal URL scraped, snippet overlap verified, LLM evaluates relevance, time decay applied, peak-weighted aggregation, required-signal gate enforced | LLM + scraping |
 
 ### Foundation Model
 
@@ -796,17 +564,19 @@ python neurons/validator.py \
 
 Note: Validators are configured to auto-update from GitHub on a 5-minute interval.
 
-### Consensus Validation System
+### Validation Pipeline
 
-Validators receive leads each epoch (~72 minutes / 360 blocks). Each validator independently validates leads and submits decisions with hashes. Consensus is weighted by stake and validator trust. Approved leads move to the main database, rejected leads are discarded.
+Validators run the same multi-stage scoring pipeline across both miner tracks:
+
+1. **Email validation**: Format, domain, disposable check, deliverability via TrueList (fulfillment leads only)
+2. **Company & Contact verification**: Website, LinkedIn, Google search via ScrapingDog
+3. **Intent verification**: URL fetch + LLM relevance scoring + snippet overlap check + time decay
+4. **Reputation scoring**: Wayback Machine, SEC EDGAR, GDELT, WHOIS/DNSBL, Companies House
+
+Model Competition runs the same pipeline against company-only outputs (no person/email verification). Fulfillment runs the full pipeline against fully enriched leads.
 
 **Eligibility for Rewards:**
 - Must participate in consensus validation epochs consistently and remain in consensus.
-
-**Validators perform multi-stage quality checks:**
-1. **Email validation**: Format, domain, disposable check, deliverability via TrueList
-2. **Company & Contact verification**: Website, LinkedIn, Google search via ScrapingDog
-3. **Reputation scoring**: Wayback Machine, SEC EDGAR, GDELT, WHOIS/DNSBL, Companies House
 
 ### Auditor Validator
 
@@ -829,7 +599,7 @@ python neurons/auditor_validator.py \
 
 **Trust Model:**
 - AWS certificate chain verified (proves REAL Nitro enclave)
-- COSE signature verified (proves authentic attestation)  
+- COSE signature verified (proves authentic attestation)
 - Ed25519 signature verified (proves weights from enclave)
 - Epoch binding verified (replay protection)
 - Soft anti-equivocation check (retroactively verifies bundle weights match on-chain weights)
@@ -844,24 +614,31 @@ This is for validators who want to participate in consensus without running the 
 
 ## Reward Distribution
 
-### Consensus-Based Rewards
+### Model Competition
+- Champion model earns rewards while it holds the crown.
+- A new model must beat the current champion's score by the published threshold to take over.
 
-1. Validators participate in epoch-based consensus validation using commit/reveal protocol
-2. Miner weights calculated based on approved leads sourced
-3. Validators compute and commit weights on-chain proportional to leads sourced
+### Fulfillment
+- Each winning lead earns **0.05% of emission per epoch for 100 epochs** (~5 days of payout per winning lead).
+- Top `num_leads` per request are selected; ties on the same company split the reward.
 
 ### Security Features
 
 - **TEE Gateway**: All events logged through hardware-protected Trusted Execution Environment
 - **Immutable transparency**: Events permanently stored on Arweave with cryptographic proofs
-- **Commit/Reveal protocol**: Prevents validators from copying each other's decisions
-- **Consensus requirement**: Majority validator agreement, weighted by stake and v_trust, is required for lead approval
+- **Commit/Reveal protocol**: Prevents miners from copying each other's fulfillment leads
+- **Validator consensus**: Majority validator agreement, weighted by stake and v_trust, is required for fulfillment winner selection
 
 ## Data Flow
 
 ```
-Miner Sources Leads → Submit to TEE Gateway (S3 Upload) → 
-Epoch Assignment → Validators Validate (Commit/Reveal) 
+Model Competition:
+  Miner submits model → Gateway sandboxes & scans → Validators evaluate
+  against 100 ICPs → Champion crowned / dethroned
+
+Fulfillment:
+  Client publishes request → Miners commit (hashed) → Miners reveal →
+  Validators score (Tier 1 / Tier 2 / Tier 3) → Top N leads win
 ```
 
 ## Troubleshooting
@@ -872,14 +649,17 @@ Common Errors:
 - Ensure validator is registered on subnet with active stake
 - Check that validator is running latest code version (auto-updates every 5 minutes)
 
-**Lead submission rejected**
-- Check lead meets all requirements (valid email, name-email matching, required fields)
-- Verify you haven't hit daily rate limits (1000 submissions, 200 rejections per day)
-- Check gateway logs on Arweave for specific rejection reasons
+**Fulfillment lead rejected**
+- Check the rejection reason in the public dashboard or `fulfillment_score_consensus` table
+- Common causes: `tier1_role_mismatch`, `email_not_valid`, `missing_required_intent_signal`, `insufficient_intent`, `stage1_invalid_description`
+
+**Model evaluation failed**
+- Check the model is under 200KB, only uses allowed libraries, and doesn't call APIs outside the allowlist
+- Inspect the `qualification_models` row for `status` and any error fields
 
 **Consensus results not appearing**
-- Wait for current epoch to complete (~72 minutes / 360 blocks)
-- Check transparency log on Arweave for CONSENSUS_RESULT events
+- Wait for the current epoch to complete (~72 minutes / 360 blocks)
+- Check the transparency log on Arweave for CONSENSUS_RESULT events
 - Run `python scripts/decompress_arweave_checkpoint.py` to view recent results
 
 ## Support
@@ -892,5 +672,3 @@ For support and discussion:
 ## License
 
 MIT License - See LICENSE file for details
-
-

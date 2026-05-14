@@ -35,6 +35,7 @@ from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
 from gateway.utils.logger import log_event
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BITTENSOR_NETWORK
 from supabase import create_client, Client
+from postgrest.exceptions import APIError
 
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -470,11 +471,12 @@ async def submit_validation(event: ValidationEvent):
             print(f"   Validator stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
         else:
             # MAINNET: Normal operation - insert to validation_evidence_private
-            # Batch inserts in groups of 500 to stay within Supabase's 8s statement_timeout
-            # (single INSERT of 7000 rows takes ~12s → times out every time)
-            EVIDENCE_BATCH_SIZE = 500
+            # Batch inserts in groups of 200 to stay well under Supabase's 8s
+            # statement_timeout.  Previous size 500 was hitting the limit on
+            # busy epochs → APIError 57014 → uncaught → 500 to validator.
+            EVIDENCE_BATCH_SIZE = 200
+            total_stored = 0
             try:
-                total_stored = 0
                 for i in range(0, len(evidence_records), EVIDENCE_BATCH_SIZE):
                     batch = evidence_records[i:i + EVIDENCE_BATCH_SIZE]
                     await asyncio.wait_for(
@@ -487,11 +489,25 @@ async def submit_validation(event: ValidationEvent):
                 print(f"✅ Stored {total_stored} evidence blobs in private DB ({(total_stored + EVIDENCE_BATCH_SIZE - 1) // EVIDENCE_BATCH_SIZE} batches of {EVIDENCE_BATCH_SIZE})")
                 print(f"   Validator stake: {stake:.6f} τ, V-Trust: {v_trust:.6f}")
             except asyncio.TimeoutError:
-                print(f"❌ Supabase insert timed out after 30s (stored {total_stored}/{len(evidence_records)} so far)")
+                # Client-side wait_for timeout (30s)
+                print(f"❌ Supabase insert timed out client-side after 30s (stored {total_stored}/{len(evidence_records)})")
                 raise HTTPException(
                     status_code=504,
                     detail=f"Database timeout while storing evidence blobs ({total_stored}/{len(evidence_records)} stored) - please retry"
                 )
+            except APIError as e:
+                # Postgres-side statement_timeout (8s) → code 57014.
+                # Surface as 504 so the validator's retry path kicks in
+                # (was leaking out as uncaught 500 before this fix).
+                code = e.code if hasattr(e, "code") else (e.args[0].get("code") if e.args and isinstance(e.args[0], dict) else None)
+                if code == "57014":
+                    print(f"❌ Supabase statement_timeout during evidence insert (stored {total_stored}/{len(evidence_records)})")
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"Database timeout while storing evidence blobs ({total_stored}/{len(evidence_records)} stored) - please retry"
+                    )
+                # Other APIError shapes (auth, constraint, etc.) — let them propagate
+                raise
     
     except HTTPException:
         # Re-raise HTTPException (timeout or other HTTP errors) to fail the request

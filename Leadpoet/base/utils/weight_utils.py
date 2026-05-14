@@ -3,6 +3,9 @@ from typing import Tuple, List, Union, Any
 import bittensor
 from numpy import ndarray, dtype, floating, complexfloating
 
+# NumPy 2.x compatibility: ensure deprecated type aliases are not used
+# np.bool_ replaces np.bool, np.int_ replaces np.int, np.float64 replaces np.float
+
 U32_MAX = 4294967295
 U16_MAX = 65535
 
@@ -85,13 +88,13 @@ def convert_weights_and_uids_for_emit(
     bittensor.logging.debug(f"uids: {uids}")
     bittensor.logging.debug(f"non_zero_weight_uids: {non_zero_weight_uids}")
 
-    if np.min(weights) < 0:
+    if float(np.min(weights)) < 0:
         raise ValueError(
             "Passed weight is negative cannot exist on chain {}".format(
                 weights
             )
         )
-    if np.min(uids) < 0:
+    if float(np.min(uids)) < 0:
         raise ValueError(
             "Passed uid is negative cannot exist on chain {}".format(uids)
         )
@@ -106,6 +109,7 @@ def convert_weights_and_uids_for_emit(
         return [], []  # Nothing to set on chain.
     else:
         max_weight = float(np.max(weights))
+        # NumPy 2.x: explicit float() conversion recommended when using np scalars in arithmetic
         weights = [float(value) / max_weight for value in weights]  # max-upscale values (max_weight = 1).
         bittensor.logging.debug(
             f"setting on chain max: {max_weight} and weights: {weights}"
@@ -134,18 +138,18 @@ def process_weights_for_netuid(
     metagraph: "bittensor.metagraph" = None,
     exclude_quantile: int = 0,
 ) -> Union[
-    tuple[
-        ndarray[Any, dtype[Any]],
+    Tuple[
+        ndarray,
         Union[
             Union[
-                ndarray[Any, dtype[floating[Any]]],
-                ndarray[Any, dtype[complexfloating[Any, Any]]],
+                ndarray,
+                ndarray,
             ],
             Any,
         ],
     ],
-    tuple[ndarray[Any, dtype[Any]], ndarray],
-    tuple[Any, ndarray],
+    Tuple[ndarray, ndarray],
+    Tuple[Any, ndarray],
 ]:
     bittensor.logging.debug("process_weights_for_netuid()")
     bittensor.logging.debug("weights", weights)

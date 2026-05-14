@@ -32,7 +32,7 @@ class BaseValidatorNeuron(BaseNeuron):
         self.dendrite = bt.dendrite(wallet=self.wallet)
         bt.logging.info(f"Dendrite: {self.dendrite}")
         bt.logging.info("Building validation weights.")
-        self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
+        self.scores = np.zeros(self.metagraph.n, dtype=np.float32)  # np.float32 is stable in NumPy 2.x
         self.sync()
         if not self.config.neuron.axon_off:
             self.serve_axon()
@@ -129,7 +129,8 @@ class BaseValidatorNeuron(BaseNeuron):
         if np.isnan(self.scores).any():
             bt.logging.warning("Scores contain NaN values.")
         norm = np.linalg.norm(self.scores, ord=1, axis=0, keepdims=True)
-        if np.any(norm == 0) or np.isnan(norm).any():
+        # NumPy 2.x: np.any() and np.isnan() behaviour unchanged; explicit cast for safety
+        if bool(np.any(norm == 0)) or bool(np.isnan(norm).any()):
             norm = np.ones_like(norm)
         raw_weights = self.scores / norm
         bt.logging.debug("raw_weights", raw_weights)

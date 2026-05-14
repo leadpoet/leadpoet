@@ -65,11 +65,12 @@ from qualification.scoring.intent_signal_gate import judge_intent_signal
 from qualification.scoring.company_verification import verify_company_exists
 
 # Feature flag for the strict LLM judge (Layer 4 of intent_signal_gate).
-# Off by default — enable per environment after monitoring shows the
-# pre-check layers are stable.  When off, the gate's deterministic
-# Layers 1-3 still run inside verify_intent_signal.
+# On by default.  Set INTENT_GATE_STRICT_JUDGE_ENABLED=false to disable
+# the Layer 4 LLM judge; Layers 1-3 (anti-bot, structural URL/category,
+# freshness window, self-published bias) still run inside
+# verify_intent_signal regardless.
 INTENT_GATE_STRICT_JUDGE_ENABLED = (
-    os.getenv("INTENT_GATE_STRICT_JUDGE_ENABLED", "false").strip().lower()
+    os.getenv("INTENT_GATE_STRICT_JUDGE_ENABLED", "true").strip().lower()
     in ("true", "1", "yes", "on")
 )
 
@@ -893,10 +894,10 @@ Apply the scoring rules from your system message and return the JSON object."""
         return 0.0, confidence, date_status, content_found_date, -1
 
     # Layer 4 of the intent_signal_gate: strict LLM judge (Claude Sonnet 4.5).
-    # Gated by INTENT_GATE_STRICT_JUDGE_ENABLED so it can be rolled out
-    # gradually.  Only runs when the buyer specified intent_signals AND
-    # the page text from verify_intent_signal is in hand (cache hits
-    # leave the buffer empty — those results were validated previously).
+    # On by default; set INTENT_GATE_STRICT_JUDGE_ENABLED=false to bypass.
+    # Only runs when the buyer specified intent_signals AND the page text
+    # from verify_intent_signal is in hand (cache hits leave the buffer
+    # empty — those results were validated previously).
     if (
         INTENT_GATE_STRICT_JUDGE_ENABLED
         and icp_signals_list

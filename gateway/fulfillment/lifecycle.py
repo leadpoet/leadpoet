@@ -25,6 +25,10 @@ from gateway.fulfillment.config import (
     epochs_to_seconds,
 )
 from gateway.fulfillment.consensus import compute_fulfillment_consensus
+from gateway.fulfillment.deep_research import (
+    mark_fulfilled_for_deep_research,
+    sweep_pending_deep_research,
+)
 from gateway.models.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -518,6 +522,21 @@ async def _lifecycle_tick_inner(supabase) -> None:
                     f"chain reached quota)"
                 )
 
+                # Queue the post-fulfillment Deep Research QA pass. This
+                # writes deep_research_status='pending' on the same leaf
+                # row; the sweep at the top of the next lifecycle tick
+                # picks it up and spawns the OpenRouter analysis task.
+                # Best-effort: failures here don't roll back the
+                # fulfilled status, the dashboard just shows "queue
+                # failed" and the operator can manually re-run.
+                try:
+                    mark_fulfilled_for_deep_research(supabase, rid)
+                except Exception as _dr_err:
+                    print(
+                        f"   ⚠️  deep_research queue mark failed for "
+                        f"{rid[:8]}: {_dr_err}"
+                    )
+
                 ranked = sorted(
                     consensus_results,
                     key=lambda x: x.get("consensus_final_score", 0),
@@ -594,6 +613,19 @@ async def _lifecycle_tick_inner(supabase) -> None:
         await _expire_rewards(supabase)
     except Exception as e:
         print(f"❌ Reward expiry error: {e}")
+
+    # Step 5: deep research QA sweep
+    #
+    # Spawns at most 2 Perplexity Sonar Deep Research calls per tick
+    # for chains that have flipped to fulfilled but haven't yet been
+    # QA'd.  Tasks run as asyncio.create_task so this call returns
+    # immediately and the lifecycle tick is never blocked by a 30-90s
+    # LLM call.  See gateway/fulfillment/deep_research.py for the
+    # state machine, retry logic, and stranded-run recovery.
+    try:
+        await sweep_pending_deep_research(supabase, max_spawn_per_tick=2)
+    except Exception as e:
+        print(f"❌ Deep research sweep error: {e}")
 
 
 def _chain_held_state_for_recycle(supabase, request_id: str, current_num_leads: int) -> dict:

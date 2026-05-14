@@ -40,6 +40,7 @@ ONLY.  It must not import from or be coupled to fulfillment-side
 verification (Stage 4 person verification, etc.).
 """
 
+import os
 import re
 import logging
 from datetime import date, datetime
@@ -58,8 +59,19 @@ from qualification.scoring.pre_checks import run_company_zero_checks
 from qualification.scoring.intent_verification import (
     verify_intent_signal,
     openrouter_chat,
+    OPENROUTER_API_KEY,
 )
+from qualification.scoring.intent_signal_gate import judge_intent_signal
 from qualification.scoring.company_verification import verify_company_exists
+
+# Feature flag for the strict LLM judge (Layer 4 of intent_signal_gate).
+# Off by default — enable per environment after monitoring shows the
+# pre-check layers are stable.  When off, the gate's deterministic
+# Layers 1-3 still run inside verify_intent_signal.
+INTENT_GATE_STRICT_JUDGE_ENABLED = (
+    os.getenv("INTENT_GATE_STRICT_JUDGE_ENABLED", "false").strip().lower()
+    in ("true", "1", "yes", "on")
+)
 
 logger = logging.getLogger(__name__)
 
@@ -731,7 +743,13 @@ async def _score_single_intent_signal(
         signal satisfies, or ``-1`` if none. When ``icp.intent_signals``
         is empty, this is always ``-1``.
     """
-    # Verify the signal is real AND provides evidence of ICP fit
+    # Verify the signal is real AND provides evidence of ICP fit.
+    # ``page_text_buf`` captures the fetched page text so the strict LLM
+    # judge below can reuse it instead of re-fetching from ScrapingDog.
+    # Cache-hit branches inside verify_intent_signal leave the buffer
+    # empty; in that case the strict judge is skipped (the cached result
+    # was already validated in a prior run).
+    page_text_buf: list = []
     verified, confidence, reason, date_status, content_found_date = await verify_intent_signal(
         signal,
         icp_industry=icp.industry,
@@ -739,6 +757,7 @@ async def _score_single_intent_signal(
         company_name=company_name,
         company_website=company_website,
         api_key=api_key,
+        page_content_out=page_text_buf,
     )
 
     if not verified:
@@ -859,6 +878,51 @@ Apply the scoring rules from your system message and return the JSON object."""
     raw_score, matched_idx = _parse_intent_score_response(
         response, MAX_INTENT_SIGNAL_SCORE, len(icp_signals_list),
     )
+
+    # When the buyer specified expected intent_signals and this miner
+    # signal matched none of them, the signal cannot legitimately
+    # "fulfill" any ICP ask.  The scoring LLM still produces a tangential
+    # score (typically 10-35) for related-but-off-target signals; that
+    # partial credit was the failure mode in 91% of historical accepted
+    # leads.  Force the score to 0 when no buyer signal matches.
+    if icp_signals_list and matched_idx == -1:
+        logger.warning(
+            f"Intent signal scored {raw_score:.1f} but matched no buyer "
+            f"intent_signal (matched_idx=-1) — forcing score to 0"
+        )
+        return 0.0, confidence, date_status, content_found_date, -1
+
+    # Layer 4 of the intent_signal_gate: strict LLM judge (Claude Sonnet 4.5).
+    # Gated by INTENT_GATE_STRICT_JUDGE_ENABLED so it can be rolled out
+    # gradually.  Only runs when the buyer specified intent_signals AND
+    # the page text from verify_intent_signal is in hand (cache hits
+    # leave the buffer empty — those results were validated previously).
+    if (
+        INTENT_GATE_STRICT_JUDGE_ENABLED
+        and icp_signals_list
+        and 0 <= matched_idx < len(icp_signals_list)
+        and page_text_buf
+    ):
+        judge_key = api_key or OPENROUTER_API_KEY
+        try:
+            passes, judge_reason, _ = await judge_intent_signal(
+                company=company_name,
+                icp_signal=icp_signals_list[matched_idx],
+                description=signal.description or "",
+                url=signal.url,
+                page_content=page_text_buf[0],
+                openrouter_api_key=judge_key,
+            )
+        except Exception as e:
+            logger.error(f"Strict judge raised unexpectedly: {e}")
+            passes, judge_reason = False, f"judge exception: {str(e)[:120]}"
+        if not passes:
+            logger.warning(
+                f"❌ Strict LLM judge rejected signal "
+                f"(matched '{icp_signals_list[matched_idx][:60]}'): {judge_reason}"
+            )
+            return 0.0, confidence, date_status, content_found_date, matched_idx
+        logger.info(f"✓ Strict LLM judge passed: {judge_reason}")
 
     # Apply source-dependent date requirements
     if date_status == "no_date":

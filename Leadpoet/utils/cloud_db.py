@@ -2253,16 +2253,35 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
         
         # Check if gateway returned a message (e.g., "already submitted")
         message = result.get("message", "")
-        
-        if not leads and message:
-            # Gateway explicitly said why there are no leads
-            bt.logging.info(f"ℹ️  Gateway: {message}")
-            # Return special marker: None means "already processed, don't retry"
+
+        if not leads:
+            # 200 OK with empty leads means a *legitimate* empty queue for
+            # this epoch (e.g. EPOCH_INITIALIZATION assigned 0 leads — see
+            # gateway/api/epoch.py).  This is NOT an error and must NOT be
+            # retried: the validator's coordinator gates fulfillment Phase 2
+            # submission on _last_processed_epoch >= current_epoch, so
+            # retrying-forever-on-empty would also block fulfillment scores
+            # from ever being submitted to the gateway, causing the
+            # no_validators_timeout recycle loop observed in production.
+            #
+            # Returning (None, max) makes the validator treat this as
+            # "already processed / nothing to do" — it marks the epoch as
+            # processed and falls through to fulfillment work.  HTTP errors
+            # (timeout / 5xx / parse) still hit the except branches below
+            # and return ([], max) to trigger a real retry.
+            if message:
+                bt.logging.info(f"ℹ️  Gateway: {message}")
+            else:
+                bt.logging.info(
+                    f"ℹ️  Gateway returned 0 leads for epoch {epoch_id} "
+                    f"(empty queue) — marking epoch as processed; "
+                    f"fulfillment Phase 2 will unblock."
+                )
             return (None, max_leads_per_epoch)
-        
+
         bt.logging.info(f"✅ Fetched {len(leads)} leads for epoch {epoch_id} (max_leads_per_epoch={max_leads_per_epoch})")
         return (leads, max_leads_per_epoch)
-        
+
     except requests.exceptions.Timeout as e:
         # Timeout is common during epoch transitions (gateway processing epoch lifecycle)
         # This is NOT a fatal error - validator will retry automatically

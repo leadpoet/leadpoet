@@ -50,6 +50,11 @@ except ImportError:
     logging.warning("BeautifulSoup not installed - HTML parsing will be limited")
 
 from gateway.qualification.models import IntentSignal, IntentSignalSource
+from qualification.scoring.intent_signal_gate import (
+    check_antibot_wall,
+    check_evidence_freshness,
+    check_url_structural_validity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1170,6 +1175,7 @@ async def verify_intent_signal(
     company_name: Optional[str] = None,
     company_website: Optional[str] = None,
     api_key: str = "",
+    page_content_out: Optional[list] = None,
 ) -> Tuple[bool, int, str, str, Optional[str]]:
     """
     Verify an intent signal claim AND check for ICP evidence.
@@ -1230,6 +1236,25 @@ async def verify_intent_signal(
         logger.warning(f"❌ Source/URL mismatch: {mismatch_err}")
         return False, 0, mismatch_err, "fabricated", None
 
+    # PRE-CHECK (Layer 1 of the intent_signal_gate): structural URL.
+    # Rejects aggregator pages, employer templates, and repo metadata URLs
+    # that cannot carry intent evidence regardless of claim text.
+    structural_err = check_url_structural_validity(intent_signal.url)
+    if structural_err:
+        logger.warning(f"❌ Structural URL rejection: {structural_err}")
+        return False, 0, structural_err, "fabricated", None
+
+    # PRE-CHECK (Layer 2 of the intent_signal_gate): freshness window.
+    # Time-bound claims ("in the last few weeks", "in the past 6 months",
+    # etc.) must be backed by an article dated within that window.
+    freshness_err = check_evidence_freshness(
+        intent_signal.description,
+        intent_signal.date,
+    )
+    if freshness_err:
+        logger.warning(f"❌ Freshness rejection: {freshness_err}")
+        return False, 0, freshness_err, "fabricated", None
+
     # PRE-CHECK: If source is "company_website", the signal URL domain must match
     # the lead's actual company_website domain. A signal from prnewswire.com or
     # wvcapital.com is NOT the company's own website.
@@ -1256,9 +1281,17 @@ async def verify_intent_signal(
                 f"Use the correct source type (news, job_board, etc.) for third-party URLs."
             ), "fabricated", None
 
-    # Check cache first (include ICP in cache key if provided)
+    # Check cache first (include ICP in cache key if provided).
+    # The intent_signal_gate version stamp invalidates entries written before
+    # the gate's pre-checks shipped — those pages were validated under a
+    # weaker rule set and may now be rejectable.
     icp_cache_suffix = f"|{icp_industry}|{icp_criteria}" if icp_industry else ""
-    cache_key = compute_cache_key(intent_signal.url + icp_cache_suffix, source_str, intent_signal.date)
+    gate_version_suffix = "|gate=v1"
+    cache_key = compute_cache_key(
+        intent_signal.url + icp_cache_suffix + gate_version_suffix,
+        source_str,
+        intent_signal.date,
+    )
     cached = await get_cached_verification(cache_key)
     if cached:
         logger.info(f"Using cached verification: verified={cached.verification_result}")
@@ -1282,6 +1315,26 @@ async def verify_intent_signal(
     if not text or len(text.strip()) < 50:
         logger.warning(f"Insufficient content extracted from URL: {intent_signal.url}")
         return False, 0, "Insufficient content to verify claim", "fabricated", None
+
+    # PRE-CHECK (Layer 3 of the intent_signal_gate): anti-bot / login-wall.
+    # Catches Cloudflare challenges, LinkedIn login walls, and "page not
+    # found" bodies that pass the 50-char length check but carry no real
+    # evidence.  Only fires on short pages — long bodies are assumed real.
+    antibot_err = check_antibot_wall(text)
+    if antibot_err:
+        logger.warning(f"❌ Anti-bot wall rejection: {antibot_err}")
+        return False, 0, antibot_err, "fabricated", None
+
+    # Expose the freshly extracted page text to callers that asked for it
+    # (downstream gates such as the strict LLM judge in lead_scorer.py).
+    # Cache-hit branches above return before this point — that path is gated
+    # via the intent_signal_gate version stamp in the cache key, so toggling
+    # INTENT_GATE_STRICT_JUDGE_ENABLED invalidates pre-gate entries.
+    # We replace rather than append so callers reusing a buffer still see
+    # only this call's content.
+    if page_content_out is not None:
+        page_content_out.clear()
+        page_content_out.append(text)
 
     # ── URL-to-company check (BEFORE LLM — catch misattributed articles cheaply) ──
     # A model might find a great article about Company A and attribute it to Company B.

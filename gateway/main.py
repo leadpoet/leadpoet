@@ -42,6 +42,7 @@ from supabase import create_client, Client
 # NOTE: reveal router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means validators
 # submit hash+values in one request to /validate. No separate reveal phase needed.
 from gateway.api import epoch, validate, manifest, submit, attest, weights, attestation
+from gateway.api import role_translate
 
 # Import qualification router (Lead Qualification Agent Competition - Phase 10)
 from gateway.qualification.api.router import qualification_router
@@ -464,6 +465,7 @@ app.include_router(submit.router)
 app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)
 app.include_router(attestation.router)  # TEE attestation endpoint (/attestation/document, /attestation/pubkey)
 app.include_router(weights.router)  # Weights submission for auditor validators
+app.include_router(role_translate.router)  # POST /fulfillment/translate-role (DeepL-backed cache)
 
 # Lead Qualification Agent Competition API (Phase 10)
 app.include_router(qualification_router)

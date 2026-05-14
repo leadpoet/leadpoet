@@ -25,6 +25,7 @@ from gateway.utils.geo_normalize import (
     normalize_city,
     normalize_state,
 )
+from gateway.utils.role_translate import translate_to_english, is_configured
 
 APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
@@ -848,10 +849,20 @@ async def fulfillment_person_verification(
             ["role"],
         )
     role_match = actual_role.lower().strip() == lead_role.lower().strip()
+    role_for_llm = actual_role  # Apify role; may be replaced by translation below
+    if not role_match and is_configured():
+        # Apify returns LinkedIn role in the profile's locale ("Diretora de
+        # Tecnologia" for a Brazilian profile).  Ask the gateway to translate
+        # to English; on success, retry exact match before paying for the LLM.
+        translated = await translate_to_english(actual_role)
+        if translated and translated.lower().strip() != actual_role.lower().strip():
+            print(f"   🌐 Role translated via DeepL: '{actual_role}' → '{translated}'")
+            role_for_llm = translated
+            role_match = translated.lower().strip() == lead_role.lower().strip()
     if not role_match:
-        # LLM fallback for formatting differences
-        print(f"   🔍 Role exact mismatch, trying LLM: '{actual_role}' vs '{lead_role}'")
-        role_match = await _llm_role_match(actual_role, lead_role, actual_company, or_key)
+        # LLM fallback for formatting differences (e.g. "Sr Eng" vs "Senior Engineer")
+        print(f"   🔍 Role exact mismatch, trying LLM: '{role_for_llm}' vs '{lead_role}'")
+        role_match = await _llm_role_match(role_for_llm, lead_role, actual_company, or_key)
     if not role_match:
         print(f"   ❌ Role mismatch: Apify='{actual_role}' vs Lead='{lead_role}'")
         return False, _rejection(

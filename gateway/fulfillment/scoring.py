@@ -98,6 +98,7 @@ def _build_failure_detail(
     person_rejection: dict = None,
     signal_details: list = None,
     intent_final: float = 0.0,
+    missing_required_signals: list = None,
 ) -> str:
     """Build a human-readable failure detail for the public dashboard.
 
@@ -216,6 +217,23 @@ def _build_failure_detail(
                     else:
                         parts.append(f"Signal {i+1} ({src}): could not verify (confidence={conf})")
         return " — ".join(parts)
+
+    # Lead failed because a buyer-side intent_signal flagged
+    # ``required=True`` was not satisfied by any verified miner signal.
+    # We name the missing spec text(s) so miners and operators can see
+    # exactly which requirement(s) the lead missed without leaking
+    # other ICP context.
+    if r == "missing_required_intent_signal":
+        missing = missing_required_signals or []
+        if missing:
+            quoted = ", ".join(f'"{t}"' for t in missing)
+            return (
+                f"Lead missing required intent signal(s): {quoted}. "
+                f"Required signals must have at least one miner-supplied "
+                f"piece of evidence that the LLM matches to them AND "
+                f"that passes URL verification."
+            )
+        return "Lead missing required intent signal(s)"
 
     # --- Structural similarity ---
     if r == "structural_similarity_detected":
@@ -483,7 +501,13 @@ async def score_fulfillment_lead(
     # persist the miner-signal -> ICP-signal mapping alongside the aggregate
     # intent score. One dict per input miner signal, same order.
     signal_details: List[dict] = []
-    icp_intent_signals_list = list(icp_prompt.intent_signals or [])
+    # Structured buyer-side specs (text + required + is_scored). Indexed
+    # by position; ``matched_icp_signal_idx`` from the LLM points into
+    # this list. The shared lead_scorer LLM prompt receives the same
+    # list collapsed to ``List[str]`` via icp_prompt.intent_signals, so
+    # both views are positionally identical.
+    icp_signal_specs = list(icp.intent_signals or [])
+    icp_intent_signals_list = [s.text for s in icp_signal_specs]
 
     lead_label = f"{lead.full_name} @ {lead_output.business}"
     print(f"🔍 Tier 3 Intent Scoring: {lead_label} — {len(lead.intent_signals)} signal(s)")
@@ -510,6 +534,8 @@ async def score_fulfillment_lead(
                 "date_status": "duplicate_domain",
                 "matched_icp_signal_idx": -1,
                 "matched_icp_signal": None,
+                "matched_icp_signal_required": None,
+                "matched_icp_signal_is_scored": None,
             })
             continue
         seen_domains.add(domain)
@@ -536,16 +562,30 @@ async def score_fulfillment_lead(
         )
         print(f"   📉 After decay={after_decay:.1f}, decay_mult={decay_mult:.2f}")
 
+        # Pull the matched spec's flags so downstream surfaces (CSV,
+        # winning-leads UI, deep research prompt) know whether this
+        # miner signal is satisfying a required spec or a scored one.
+        matched_str = None
+        matched_required: Optional[bool] = None
+        matched_is_scored: Optional[bool] = None
+        if 0 <= matched_idx < len(icp_signal_specs):
+            spec = icp_signal_specs[matched_idx]
+            matched_str = spec.text
+            matched_required = spec.required
+            matched_is_scored = spec.is_scored
+
         signal_results.append({
             "after_decay": after_decay,
             "decay_mult": decay_mult,
             "confidence": confidence,
+            # Used by the post-loop aggregator to filter binary
+            # (is_scored=False) signals out of intent_signal_final.
+            # ``None`` means "no buyer spec matched" — that signal's
+            # score is already forced to 0 by lead_scorer's match-index
+            # gate, so it can't influence the aggregate either way.
+            "is_scored": matched_is_scored,
+            "matched_icp_signal_idx": int(matched_idx),
         })
-        matched_str = (
-            icp_intent_signals_list[matched_idx]
-            if 0 <= matched_idx < len(icp_intent_signals_list)
-            else None
-        )
         signal_details.append({
             "url": signal.url,
             "description": signal.description,
@@ -559,14 +599,49 @@ async def score_fulfillment_lead(
             "date_status": date_status,
             "matched_icp_signal_idx": int(matched_idx),
             "matched_icp_signal": matched_str,
+            "matched_icp_signal_required": matched_required,
+            "matched_icp_signal_is_scored": matched_is_scored,
         })
 
+    # ------------------------------------------------------------------
+    # Scored-vs-binary aggregation
+    # ------------------------------------------------------------------
+    # Only miner signals matched to an ``is_scored=True`` buyer spec
+    # contribute their after-decay score to intent_signal_final. Binary
+    # specs (``is_scored=False``) are pure pass/fail — they MUST be
+    # satisfied if marked ``required=True`` (enforced below), but their
+    # score is excluded from the numeric intent total.
+    #
+    # Two edge cases worth pinning down:
+    #   * matched_idx == -1: the lead_scorer's match-index gate has
+    #     already forced after_decay to 0, so including or excluding it
+    #     is moot. We include them here only when the buyer's
+    #     intent_signals list is empty (legacy "no specific signals
+    #     requested" path), in which case there are no specs to filter
+    #     against and all signals are treated as scored.
+    #   * Out-of-range matched_idx: defensive — treat as not-scored.
+    has_specs = len(icp_signal_specs) > 0
+    if has_specs:
+        scored_after_decay = [
+            r["after_decay"]
+            for r in signal_results
+            if r.get("is_scored") is True
+        ]
+    else:
+        # No buyer-side specs => no filtering possible; preserve legacy
+        # behaviour where every miner signal contributes.
+        scored_after_decay = [r["after_decay"] for r in signal_results]
+
     after_decay_scores = [r["after_decay"] for r in signal_results]
-    intent_signal_final = aggregate_intent_scores(after_decay_scores)
+    intent_signal_final = aggregate_intent_scores(scored_after_decay)
     intent_signal_final = min(intent_signal_final, 60.0)
 
-    print(f"   🎯 Intent final={intent_signal_final:.1f} (threshold={FULFILLMENT_MIN_INTENT_SCORE}), "
-          f"decay_scores={[f'{s:.1f}' for s in after_decay_scores]}")
+    print(
+        f"   🎯 Intent final={intent_signal_final:.1f} "
+        f"(threshold={FULFILLMENT_MIN_INTENT_SCORE}), "
+        f"scored_decay={[f'{s:.1f}' for s in scored_after_decay]}, "
+        f"all_decay={[f'{s:.1f}' for s in after_decay_scores]}"
+    )
 
     all_fabricated = bool(signal_results) and all(r["confidence"] == 0 for r in signal_results)
     if all_fabricated:
@@ -579,14 +654,71 @@ async def score_fulfillment_lead(
         person_verified=person_verified,
         company_verified=company_verified,
         rep_score=rep_score_val,
-        intent_signal_raw=max(after_decay_scores) if after_decay_scores else 0.0,
+        intent_signal_raw=max(scored_after_decay) if scored_after_decay else 0.0,
         intent_signal_final=intent_signal_final,
         intent_decay_multiplier=_avg([r["decay_mult"] for r in signal_results]),
         all_fabricated=all_fabricated,
         intent_signals_detail=signal_details,
     )
 
-    if intent_signal_final < FULFILLMENT_MIN_INTENT_SCORE:
+    # ------------------------------------------------------------------
+    # Required-signal gate
+    # ------------------------------------------------------------------
+    # For each buyer spec marked ``required=True``, the lead must
+    # produce at least one miner signal that:
+    #   (a) was matched to that spec by the LLM (matched_icp_signal_idx
+    #       equals the spec's index), AND
+    #   (b) actually verified — after_decay_score > 0. This rules out
+    #       signals where the URL didn't fetch, confidence was 0, or the
+    #       strict judge rejected the evidence as marketing copy.
+    #
+    # If any required spec is missing satisfying evidence the lead
+    # fails with ``missing_required_intent_signal`` regardless of the
+    # numeric intent total — required is a hard gate, not a weight.
+    required_indices = [
+        i for i, spec in enumerate(icp_signal_specs) if spec.required
+    ]
+    satisfied_required: Set[int] = set()
+    if required_indices:
+        for r in signal_results:
+            idx = r.get("matched_icp_signal_idx", -1)
+            if (
+                idx in required_indices
+                and float(r.get("after_decay", 0.0)) > 0
+            ):
+                satisfied_required.add(idx)
+    missing_required = [i for i in required_indices if i not in satisfied_required]
+
+    if missing_required:
+        missing_texts = [icp_signal_specs[i].text for i in missing_required]
+        print(
+            f"   ❌ Lead missing required intent signal(s): "
+            f"{missing_texts}"
+        )
+        return FulfillmentScoreResult(
+            **shared_fields,
+            final_score=0.0,
+            failure_reason="missing_required_intent_signal",
+            failure_detail=_build_failure_detail(
+                "missing_required_intent_signal",
+                signal_details=signal_details,
+                intent_final=intent_signal_final,
+                missing_required_signals=missing_texts,
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Threshold gate (only applies when at least one spec is scored)
+    # ------------------------------------------------------------------
+    # If every buyer-side spec is marked ``is_scored=False`` (an
+    # all-binary request), intent_signal_final is mechanically 0 and
+    # the threshold check would auto-fail every lead. Skip the floor
+    # in that case: the required check above is the only gate, and a
+    # lead that satisfied every required spec already qualifies.
+    any_scored_spec = (not has_specs) or any(
+        spec.is_scored for spec in icp_signal_specs
+    )
+    if any_scored_spec and intent_signal_final < FULFILLMENT_MIN_INTENT_SCORE:
         return FulfillmentScoreResult(
             **shared_fields,
             final_score=0.0,

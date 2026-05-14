@@ -7,7 +7,7 @@ deterministic equality comparisons.
 """
 
 import re
-from typing import List, Optional
+from typing import List, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 from gateway.qualification.models import (
@@ -17,6 +17,110 @@ from gateway.qualification.models import (
     LeadOutput,
     ICPPrompt,
 )
+
+
+# ---------------------------------------------------------------------------
+# IntentSignalSpec — structured form for buyer-side intent signals
+# ---------------------------------------------------------------------------
+
+class IntentSignalSpec(BaseModel):
+    """One buyer-side intent signal on a fulfillment request.
+
+    Was previously a bare ``str``. Promoted to a structured object so the
+    operator can mark individual signals as ``required`` (lead must
+    actually deliver evidence of this signal or it fails) and/or
+    ``is_scored`` (binary yes/no vs. weighted contribution to the
+    intent score).
+
+    Combinations and their effect on scoring (see scoring.py):
+
+      required=False, is_scored=True   (default; identical to legacy str)
+        Optional, weighted. Counts toward intent_signal_final.
+      required=True,  is_scored=True
+        Lead MUST have ≥1 verified miner signal matched to this spec,
+        AND its score contributes to intent_signal_final.
+      required=True,  is_scored=False
+        Lead MUST have ≥1 verified miner signal matched to this spec,
+        but the score is NOT added to intent_signal_final (binary gate).
+        Example: "Company ships to Asia" — yes/no, not graded.
+      required=False, is_scored=False
+        Allowed for completeness but operationally useless (no gate, no
+        score contribution). The admin UI/validator will still accept it
+        rather than special-casing.
+
+    Wire format on miner-visible /fulfillment/requests/active:
+      ``{"text": str, "required": bool, "is_scored": bool}``
+
+    Back-compat: ``FulfillmentICP.intent_signals`` accepts the legacy
+    ``List[str]`` form and coerces each entry to
+    ``IntentSignalSpec(text=s, required=False, is_scored=True)``.
+    Every existing icp_details JSON row in the DB therefore re-parses
+    cleanly with identical behaviour to before this change.
+    """
+
+    text: str = Field(..., min_length=1, max_length=350)
+    required: bool = Field(
+        default=False,
+        description=(
+            "If true, the lead MUST have at least one miner-supplied "
+            "intent signal that the LLM matches to this spec AND that "
+            "passes URL verification (after_decay_score > 0). Otherwise "
+            "the lead fails scoring with 'missing_required_intent_signal'."
+        ),
+    )
+    is_scored: bool = Field(
+        default=True,
+        description=(
+            "If true (default), miner signals credited to this spec "
+            "contribute their after-decay score to the lead's "
+            "intent_signal_final. If false, the spec is a binary yes/no: "
+            "miners must still produce verified evidence (counts toward "
+            "the required check), but the score is not added to the "
+            "intent total."
+        ),
+    )
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def _strip_text(cls, v) -> str:
+        if v is None:
+            raise ValueError("intent signal text cannot be null")
+        s = str(v).strip()
+        if not s:
+            raise ValueError("intent signal text cannot be empty")
+        return s
+
+
+def _coerce_intent_signal_spec(entry) -> IntentSignalSpec:
+    """Coerce one entry of the inbound ``intent_signals`` list into an
+    ``IntentSignalSpec``.
+
+    Accepts:
+      * ``str``                            → default flags
+      * ``IntentSignalSpec`` instance      → as-is
+      * ``dict`` with at least ``text``    → constructed via Pydantic
+      * ``None`` / empty                   → caller filters these out
+    """
+    if entry is None:
+        raise ValueError("intent signal entry cannot be null")
+    if isinstance(entry, IntentSignalSpec):
+        return entry
+    if isinstance(entry, str):
+        return IntentSignalSpec(text=entry)
+    if isinstance(entry, dict):
+        # Tolerate legacy dicts that may have been written with extra
+        # keys (e.g. heuristic parser drafts); Pydantic ignores unknown
+        # fields when model_config doesn't forbid them, but we pull the
+        # three we care about explicitly to keep the surface area tight.
+        return IntentSignalSpec(
+            text=entry.get("text", entry.get("signal", entry.get("name", ""))),
+            required=bool(entry.get("required", False)),
+            is_scored=bool(entry.get("is_scored", True)),
+        )
+    raise ValueError(
+        f"intent_signals entry must be str, dict, or IntentSignalSpec, "
+        f"got {type(entry).__name__}"
+    )
 try:
     from gateway.utils.industry_taxonomy import INDUSTRY_TAXONOMY
 except ImportError:
@@ -195,7 +299,14 @@ class FulfillmentICP(BaseModel):
     # in-flight legacy request and wedge the entire scoring pipeline.
     country: List[str] = Field(default_factory=list)
     product_service: str = ""
-    intent_signals: List[str] = Field(default_factory=list)
+    # Each spec is one buyer-side buying signal. Was previously
+    # ``List[str]``; promoted to a list of structured objects with
+    # per-signal ``required`` and ``is_scored`` flags. The validator
+    # below coerces a legacy ``List[str]`` (or list of dicts) on the
+    # way in, so every historical icp_details row still re-parses
+    # cleanly with default flags. See IntentSignalSpec docstring for
+    # the gate semantics per flag combination.
+    intent_signals: List[IntentSignalSpec] = Field(default_factory=list)
     # Companies whose leads must be rejected at Tier 1 for this request.
     # Populated either (a) explicitly by the client in the create payload
     # (client-provided list takes precedence) or (b) automatically by the
@@ -238,6 +349,48 @@ class FulfillmentICP(BaseModel):
     # explicitly in gateway/fulfillment/api.py::create_request rather than
     # via min_length on the field.
     company: str = Field(default="", exclude=True)
+
+    @field_validator("intent_signals", mode="before")
+    @classmethod
+    def normalize_intent_signals(cls, v) -> List[IntentSignalSpec]:
+        """Coerce ``intent_signals`` to ``List[IntentSignalSpec]``.
+
+        Accepts:
+          * ``None`` / ``""`` / ``[]``  → ``[]``
+          * ``List[str]``               → each str → default-flag spec
+                                          (handles every historical
+                                          ``icp_details`` row in the DB)
+          * ``List[dict]``              → each dict constructed via
+                                          ``_coerce_intent_signal_spec``;
+                                          missing flags default to
+                                          ``required=False, is_scored=True``
+          * ``List[IntentSignalSpec]``  → passed through
+          * Mixed list                  → each entry coerced
+            individually (operator can switch from legacy text-only
+            entries to flag-bearing dicts incrementally inside one
+            request).
+
+        Empty / null entries are silently dropped so a stray empty
+        textarea line in the admin UI doesn't crash the request.
+        """
+        if v is None or v == "" or v == []:
+            return []
+        if not isinstance(v, list):
+            raise ValueError(
+                f"intent_signals must be a list, got {type(v).__name__}"
+            )
+        out: List[IntentSignalSpec] = []
+        for entry in v:
+            # Skip stray blanks (admin textarea sometimes round-trips
+            # trailing newlines as empty strings).
+            if entry is None:
+                continue
+            if isinstance(entry, str) and not entry.strip():
+                continue
+            if isinstance(entry, dict) and not str(entry.get("text", "")).strip():
+                continue
+            out.append(_coerce_intent_signal_spec(entry))
+        return out
 
     @field_validator("excluded_companies", mode="before")
     @classmethod
@@ -516,6 +669,18 @@ class FulfillmentICP(BaseModel):
         # at least receive readable target context, even if their Tier 1
         # check still uses single-value equality.
         country_str = ", ".join(self.country) if self.country else ""
+        # ``ICPPrompt.intent_signals`` is the legacy ``List[str]`` shape
+        # that the shared lead_scorer's LLM prompt expects (the prompt
+        # renders BUYER'S EXPECTED INTENT SIGNALS as a numbered list and
+        # the LLM only needs the TEXT to score + match an index — it
+        # does NOT need the required/is_scored flags). We therefore
+        # project the structured specs down to plain text here.  The
+        # fulfillment scorer in scoring.py separately consults
+        # ``self.intent_signals`` (the structured specs) for the
+        # required-pass check and the scored-vs-binary aggregation,
+        # so the new flags ARE enforced — just not surfaced inside the
+        # per-signal LLM scoring prompt where they'd be irrelevant.
+        intent_signal_texts = [s.text for s in self.intent_signals]
         return ICPPrompt(
             icp_id=self.icp_id,
             prompt=self.prompt,
@@ -528,7 +693,7 @@ class FulfillmentICP(BaseModel):
             geography=self.geography,
             country=country_str,
             product_service=self.product_service,
-            intent_signals=self.intent_signals,
+            intent_signals=intent_signal_texts,
         )
 
 

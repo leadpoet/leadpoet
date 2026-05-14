@@ -372,7 +372,15 @@ async def create_request(
     company = icp.company
     icp.prompt = scrub_company_name(icp.prompt, company)
     icp.product_service = scrub_company_name(icp.product_service, company)
-    icp.intent_signals = [scrub_company_name(s, company) for s in icp.intent_signals]
+    # Each entry is now an IntentSignalSpec (text + required + is_scored).
+    # Scrub the company name out of the ``text`` field only — the flags
+    # don't carry text and are operator-set. Mutate in place via
+    # model_copy(update=...) so the validator's coercion runs once on
+    # ingest (above) and we don't re-create dicts here.
+    icp.intent_signals = [
+        spec.model_copy(update={"text": scrub_company_name(spec.text, company)})
+        for spec in icp.intent_signals
+    ]
     icp.target_roles = [scrub_company_name(s, company) for s in icp.target_roles]
 
     # Auto-expand target_roles into common variant spellings / near-

@@ -103,6 +103,42 @@ _REFUSAL_RE = re.compile(
 )
 
 
+def _format_intent_signals_for_icp_block(val: Any) -> str:
+    """Render ``icp.intent_signals`` for the LLM's ICP block.
+
+    Accepts the legacy ``List[str]`` shape and the new
+    ``List[IntentSignalSpec]`` shape (which arrives here as a list of
+    dicts because ``icp_details`` is JSONB-serialized before this code
+    runs). Renders each entry on its own line with [REQUIRED] and/or
+    [BINARY] tags so the client-facing intent_details prose is grounded
+    in which signals were hard requirements vs. nice-to-haves.
+    """
+    if not val:
+        return ""
+    if not isinstance(val, list):
+        return str(val)
+    rendered: List[str] = []
+    for entry in val:
+        if isinstance(entry, dict):
+            text = str(entry.get("text", "")).strip()
+            if not text:
+                continue
+            required = bool(entry.get("required", False))
+            is_scored = bool(entry.get("is_scored", True))
+            tags = []
+            if required:
+                tags.append("REQUIRED")
+            # Only mark the binary-gate case explicitly; "scored"
+            # is the default and would be noise on every line.
+            if not is_scored:
+                tags.append("BINARY")
+            suffix = f" [{', '.join(tags)}]" if tags else ""
+            rendered.append(f"{text}{suffix}")
+        else:
+            rendered.append(str(entry))
+    return "; ".join(rendered)
+
+
 def _format_icp_block(icp: Dict[str, Any]) -> str:
     """Render the ICP dict in a compact, LLM-friendly block."""
     if not icp:
@@ -127,6 +163,16 @@ def _format_icp_block(icp: Dict[str, Any]) -> str:
     for key, label in ordered_fields:
         val = icp.get(key)
         if val in (None, "", [], {}):
+            continue
+        # intent_signals is now structured (dicts with required /
+        # is_scored flags). Render with explicit tags so the LLM grounds
+        # its intent_details prose in the contract. Every other list
+        # field stays comma-joined for compactness.
+        if key == "intent_signals":
+            rendered = _format_intent_signals_for_icp_block(val)
+            if not rendered:
+                continue
+            lines.append(f"- {label}: {rendered}")
             continue
         if isinstance(val, list):
             val = ", ".join(str(v) for v in val)

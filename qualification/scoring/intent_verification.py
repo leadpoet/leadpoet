@@ -2775,8 +2775,101 @@ def extract_verification_content(html_or_json: str, source: str) -> str:
         except (json.JSONDecodeError, ValueError):
             pass
 
+    # Handle social_media responses. fetch_url_content routes by hostname to
+    # platform-specific ScrapingDog endpoints that return EITHER pre-formatted
+    # text blobs (Instagram/TikTok/YouTube, via our _format_* helpers) OR raw
+    # JSON (X/Twitter — no formatter on the fetch side). Both shapes feed back
+    # here as a single string. Without dedicated routing they fall to
+    # _extract_html_content, where BeautifulSoup finds no <body> tag and
+    # silently returns "" — burning the ScrapingDog credit and causing
+    # `confidence=0` / `date_status="fabricated"` on legitimate signals.
+    if source_lower == "social_media":
+        stripped = html_or_json.lstrip() if html_or_json else ""
+        if stripped.startswith("["):
+            # Pre-formatted blob: "[INSTAGRAM PROFILE]\n...", "[TIKTOK PROFILE]\n...",
+            # "[YOUTUBE VIDEO]\n...". The leading bracket can also be a JSON array,
+            # so try JSON parsing first; if it parses, treat as data, else as text.
+            try:
+                _ = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                return html_or_json[:CONTENT_MAX_LENGTH]
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                data = json.loads(stripped)
+                blob = _extract_x_content(data)
+                if blob:
+                    return blob[:CONTENT_MAX_LENGTH]
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # Fall through to HTML parser for Facebook/Reddit/Threads/etc.
+        # (these come from scrapingdog_generic which returns HTML).
+
     # Handle HTML content
     return _extract_html_content(html_or_json, source_lower)
+
+
+def _extract_x_content(data) -> str:
+    """Extract verifiable text from ScrapingDog X/Twitter JSON.
+
+    Handles both endpoints:
+      - X Profile API: top-level user fields (or wrapped under "user").
+        Keys: profile_name, profile_handle, description, location,
+              followers_count, statuses_count, verified.
+      - X Post API: top-level tweet fields + nested "user" object.
+        Keys: tweet, created_at, likes, retweets, quotes, views,
+              user.profile_name, user.profile_handle.
+
+    Returns "" if the payload doesn't look like either shape (caller then
+    falls through to other extractors or returns empty).
+    """
+    if not isinstance(data, dict):
+        return ""
+
+    # Post API: has a literal "tweet" string field at the top level.
+    tweet_text = data.get("tweet")
+    if isinstance(tweet_text, str) and tweet_text.strip():
+        parts = ["[X/TWITTER POST]"]
+        user = data.get("user") if isinstance(data.get("user"), dict) else {}
+        handle = user.get("profile_handle") or user.get("screen_name")
+        name = user.get("profile_name") or user.get("name")
+        if name or handle:
+            parts.append(f"Author: {name or ''} (@{handle or '?'})")
+        if data.get("created_at"):
+            parts.append(f"Posted: {data['created_at']}")
+        parts.append(f"Tweet: {tweet_text}")
+        for metric_key, label in (("likes", "Likes"), ("retweets", "Retweets"),
+                                  ("quotes", "Quotes"), ("views", "Views")):
+            v = data.get(metric_key)
+            if v:
+                parts.append(f"{label}: {v}")
+        return "\n".join(parts)
+
+    # Profile API: either top-level or wrapped under "user".
+    user = data.get("user") if isinstance(data.get("user"), dict) else data
+    handle = user.get("profile_handle") or user.get("screen_name") or user.get("username")
+    if not handle:
+        return ""
+
+    parts = ["[X/TWITTER PROFILE]", f"Handle: @{handle}"]
+    if user.get("profile_name") or user.get("name"):
+        parts.append(f"Display name: {user.get('profile_name') or user.get('name')}")
+    desc = user.get("description") or user.get("bio")
+    if desc:
+        parts.append(f"Bio: {desc}")
+    if user.get("location"):
+        parts.append(f"Location: {user['location']}")
+    if user.get("followers_count") is not None:
+        parts.append(f"Followers: {user['followers_count']}")
+    if user.get("following_count") is not None or user.get("friends_count") is not None:
+        parts.append(f"Following: {user.get('following_count') or user.get('friends_count')}")
+    if user.get("statuses_count") is not None:
+        parts.append(f"Total posts: {user['statuses_count']}")
+    verified = user.get("verified")
+    if verified is None:
+        verified = user.get("is_blue_verified")
+    if verified is not None:
+        parts.append(f"Verified: {bool(verified)}")
+    return "\n".join(parts)
 
 
 def _extract_linkedin_content(json_str: str) -> str:

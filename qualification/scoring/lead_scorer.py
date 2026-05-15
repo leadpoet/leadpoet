@@ -744,6 +744,30 @@ async def _score_single_intent_signal(
         signal satisfies, or ``-1`` if none. When ``icp.intent_signals``
         is empty, this is always ``-1``.
     """
+    # ── Gate 0: miner-asserted matched_icp_signal must be set and in range ──
+    # Each intent signal a miner submits MUST be tagged with the index of
+    # the client-listed signal that this evidence is meant to satisfy.  A
+    # value of -1 means the miner did not declare a target signal — we
+    # reject those at scoring time rather than letting them silently fall
+    # back to LLM-guessed matching.  Out-of-range values are also rejected
+    # (defends against off-by-one from miner code that doesn't read the
+    # request's icp_details list correctly).
+    icp_signals_for_gate = list(getattr(icp, "intent_signals", None) or [])
+    miner_asserted_idx = getattr(signal, "matched_icp_signal", -1)
+    if not isinstance(miner_asserted_idx, int) or miner_asserted_idx < 0:
+        logger.info(
+            f"Intent signal rejected: matched_icp_signal not set "
+            f"(value={miner_asserted_idx!r}).  Miner must declare which "
+            f"client intent signal this evidence proves."
+        )
+        return 0.0, 0, "fabricated", None, -1
+    if not icp_signals_for_gate or miner_asserted_idx >= len(icp_signals_for_gate):
+        logger.info(
+            f"Intent signal rejected: matched_icp_signal={miner_asserted_idx} "
+            f"out of range (request has {len(icp_signals_for_gate)} listed signals)."
+        )
+        return 0.0, 0, "fabricated", None, -1
+
     # Verify the signal is real AND provides evidence of ICP fit.
     # ``page_text_buf`` captures the fetched page text so the strict LLM
     # judge below can reuse it instead of re-fetching from ScrapingDog.

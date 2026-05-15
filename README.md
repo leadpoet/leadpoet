@@ -461,7 +461,7 @@ Miners must submit leads with this exact structure via the commit-reveal endpoin
 - `description` — **Required**, min 30 characters. A free-form company description written by the miner. Fed to the validator's Stage 5 3-stage classification pipeline (`validator_models/stage5_verification.py::classify_company_industry`): an LLM compares it against the scraped website/LinkedIn content; if the LLM decides the two don't describe the same business, the lead is rejected with `stage1_invalid_description` before intent scoring runs.
 - `role_type` — One of: `C-Level Executive`, `VP`, `Director`, `Manager`, `Sales`, `Marketing`, `Engineering`, `Product`, `Operations`, `Finance`, `HR`, `Legal`, `IT`, `Customer Success`, `Business Development`, `Data & Analytics`, `Design`, `Research`, `Supply Chain`, `Consulting`, `Other`
 - `seniority` — One of: `C-Suite`, `VP`, `Director`, `Manager`, `Individual Contributor`
-- `intent_signals` — At least one signal required. Each signal needs `source`, `description`, `url`, `date` (ISO format or null), and `snippet` (verbatim text from the URL)
+- `intent_signals` — At least one signal required. Each signal needs `source`, `description`, `url`, `date` (ISO format or null), `snippet` (verbatim text from the URL), and **`matched_icp_signal`** (REQUIRED: zero-based integer index into the request's `icp_details.intent_signals` list of the client-listed signal this evidence proves; signals with `-1` or out-of-range values are rejected at Tier 3 scoring)
 
 #### Picking the right `source` for each URL
 

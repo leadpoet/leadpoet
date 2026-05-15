@@ -991,6 +991,12 @@ async def _run_validator_intent_verification(
                 url=sig.get("url", ""),
                 date=sig.get("date"),
                 snippet=sig.get("snippet", sig.get("description", "")),
+                # REQUIRED on submission: zero-based index into the request's
+                # icp_details.intent_signals list of the client signal this
+                # evidence is meant to prove.  -1 default means "not set" and
+                # is rejected at Tier 3 scoring (see _score_single_intent_signal
+                # Gate 0).
+                matched_icp_signal=int(sig.get("matched_icp_signal", -1)),
             )
         except Exception as e:
             print(f"      Signal {idx+1}: ❌ invalid schema: {e}")

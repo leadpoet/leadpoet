@@ -212,6 +212,31 @@ class IntentSignal(BaseModel):
     url: str = Field(..., description="URL to the source of the intent signal")
     date: Optional[str] = Field(None, description="Date of the signal in ISO 8601 format (YYYY-MM-DD), or null if no verifiable date")
     snippet: str = Field(..., max_length=600, description="Relevant text snippet extracted from source URL")
+    # REQUIRED on miner submission: index into the request's
+    # icp_details.intent_signals list of the client-listed signal that THIS
+    # evidence is meant to satisfy.  The gateway's Tier 3 intent scorer
+    # rejects any signal with matched_icp_signal == -1 or out of range
+    # (see qualification/scoring/lead_scorer.py::_score_single_intent_signal).
+    #
+    # Model-level default is -1 (NOT strictly required at the Pydantic
+    # layer) for the same reason FulfillmentICP.company defaults to "" —
+    # historical icp_details / lead_data JSON in the DB has no such field
+    # and must continue to re-parse without crashing, otherwise validator-
+    # side ``FulfillmentLead(**lead_data)`` wedges every in-flight signal
+    # scoring cycle (see .cursor/rules/stress-test-protocol.mdc rule #3).
+    # Enforcement that the value is set (≥ 0 AND < len(icp.intent_signals))
+    # happens at scoring time, not at parse time.
+    matched_icp_signal: int = Field(
+        default=-1,
+        ge=-1,
+        description=(
+            "REQUIRED on miner submission. Zero-based index into the "
+            "fulfillment request's icp_details.intent_signals list of the "
+            "client-listed intent signal that this evidence is meant to "
+            "prove.  The gateway rejects intent signals with -1 or out-of-"
+            "range values at Tier 3 scoring time."
+        ),
+    )
 
     @field_validator('description')
     @classmethod

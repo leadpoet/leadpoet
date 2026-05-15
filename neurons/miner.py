@@ -830,6 +830,12 @@ class Miner(BaseMinerNeuron):
                         url=sig.get("url", ""),
                         date=sig.get("date"),
                         snippet=sig.get("snippet", "")[:1000],
+                        # REQUIRED on submission: miner must declare which
+                        # client-listed intent signal this evidence proves.
+                        # Pass through whatever the upstream miner model
+                        # produced; -1 default in the schema means "not set"
+                        # and is rejected at Tier 3 scoring time.
+                        matched_icp_signal=int(sig.get("matched_icp_signal", -1)),
                     ))
                 if not signals:
                     bt.logging.warning(f"Skipping lead {lead_dict.get('full_name')} — no intent signals")

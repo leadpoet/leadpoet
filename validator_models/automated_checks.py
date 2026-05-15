@@ -259,6 +259,24 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
             patterns.append(f"{first_normalized[0]}{last_normalized}")  # jdoe
             patterns.append(f"{last_normalized}{first_normalized[0]}")  # doej
 
+        # Multi-word last names: also try each surname token independently.
+        # Handles LATAM compound surnames ("García López") and married-name-with-
+        # maiden-middle ("Wendy Knowles Keifer" with email wkeifer@). Real-world
+        # emails almost always pick ONE surname token, not the smushed-together
+        # form. Without this, valid leads false-reject at Stage 0.
+        if " " in last_name.strip():
+            last_tokens = [
+                re.sub(r"[^a-z0-9]", "", tok)
+                for tok in last_name.lower().split()
+            ]
+            last_tokens = [t for t in last_tokens if len(t) >= MIN_NAME_MATCH_LENGTH]
+            for tok in last_tokens:
+                patterns.append(tok)                                # keifer
+                patterns.append(f"{first_normalized}{tok}")         # wendykeifer
+                if len(first_normalized) > 0:
+                    patterns.append(f"{first_normalized[0]}{tok}")  # wkeifer
+                    patterns.append(f"{tok}{first_normalized[0]}")  # keiferw
+
         # Check if any pattern appears in the normalized local part
         patterns = [p for p in patterns if p and len(p) >= MIN_NAME_MATCH_LENGTH]
         name_match = any(pattern in local_normalized for pattern in patterns)

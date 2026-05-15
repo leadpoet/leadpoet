@@ -1,7 +1,7 @@
 # ========================================================================
 # INDUSTRY TAXONOMY
 # ========================================================================
-# Dictionary keys = sub_industry (723 specific categories like "SaaS", "3D Printing")
+# Dictionary keys = sub_industry (848 specific categories like "SaaS", "3D Printing")
 # "industries" field = valid parent industries (50 broader categories like "Software", "Manufacturing")
 # "definition" field = description of what companies in this sub_industry do
 # ========================================================================
@@ -9,19 +9,47 @@
 INDUSTRY_TAXONOMY = {
     "3D Printing": {
         "industries": ['Manufacturing'],
-        "definition": "Companies that relate to the process of making 3D solid objects from a digital file."
+        "definition": "Companies that build hardware, software, or services for additive manufacturing — producing physical objects from digital models layer by layer."
     },
     "3D Technology": {
         "industries": ['Hardware', 'Software'],
         "definition": "Companies that provide a real-life 3D visual appearance which is displayed in print, in a computer, or in film or television."
     },
+    "3PL": {
+        "industries": ['Transportation'],
+        "definition": "Third-party logistics providers that handle warehousing, order fulfillment, freight management, and distribution on behalf of e-commerce brands and manufacturers."
+    },
     "A/B Testing": {
         "industries": ['Data and Analytics'],
-        "definition": "Companies that specialize in randomized experiments with two variants."
+        "definition": "Companies that build software for running randomized experiments — letting product, marketing, and engineering teams compare variants and measure conversion impact."
+    },
+    "ADAS Calibration": {
+        "industries": ['Transportation'],
+        "definition": "Auto-service companies that calibrate Advanced Driver Assistance System sensors — cameras, radars, lidars — after windshield replacement, collision repair, or sensor relocation."
+    },
+    "AEC": {
+        "industries": ['Real Estate', 'Science and Engineering'],
+        "definition": "Companies in the combined Architecture, Engineering, and Construction sector — including design firms, structural and civil engineers, general contractors, and integrated project-delivery teams."
+    },
+    "AI Agents": {
+        "industries": ['Artificial Intelligence', 'Software'],
+        "definition": "Companies that build autonomous or semi-autonomous AI systems that plan, reason, and act on behalf of users — including agentic frameworks, computer-use agents, and vertical agent applications."
+    },
+    "AI Infrastructure": {
+        "industries": ['Artificial Intelligence', 'Software', 'Hardware'],
+        "definition": "Companies that provide compute, model-serving, training infrastructure, vector databases, GPUs, or orchestration platforms for building and running AI applications."
+    },
+    "AI Safety": {
+        "industries": ['Artificial Intelligence', 'Privacy and Security'],
+        "definition": "Companies that build evaluations, red-teaming services, alignment research, content moderation, or policy infrastructure for safe deployment of AI systems."
+    },
+    "Account-Based Marketing": {
+        "industries": ['Sales and Marketing', 'Software'],
+        "definition": "Companies that build software or provide services for targeting marketing programs at specific high-value accounts — including ABM platforms, intent data, and orchestration tools."
     },
     "Accounting": {
         "industries": ['Financial Services', 'Professional Services'],
-        "definition": "Companies that relate to the action or process of keeping financial accounts."
+        "definition": "Companies that provide bookkeeping, financial-statement preparation, audit, tax, or advisory services to businesses and individuals."
     },
     "Ad Exchange": {
         "industries": ['Advertising'],
@@ -29,11 +57,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Ad Network": {
         "industries": ['Advertising'],
-        "definition": "Companies related to an online advertising network that connects advertisers to websites wanting to host ads."
+        "definition": "Operators of platforms that connect advertisers with publisher inventory across many websites or apps, aggregating reach and managing fill rate."
     },
     "Ad Retargeting": {
         "industries": ['Advertising'],
-        "definition": "Companies that focus on keeping an organization's brand in front of bounced traffic after they leave the website."
+        "definition": "Companies that build advertising technology for re-engaging visitors who left a website without converting, via display, social, or email retargeting campaigns."
     },
     "Ad Server": {
         "industries": ['Advertising'],
@@ -41,7 +69,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Ad Targeting": {
         "industries": ['Advertising'],
-        "definition": "Companies that deal with a way of placing ads based on demographics on the consumers' previous buying history or on behavior."
+        "definition": "Companies that build technology for placing ads based on user demographics, previous browsing or buying history, or other behavioral data."
+    },
+    "AdTech": {
+        "industries": ['Advertising', 'Software'],
+        "definition": "Software companies that build infrastructure, exchanges, demand-side and supply-side platforms, measurement, and verification tools for digital advertising."
     },
     "Advanced Materials": {
         "industries": ['Manufacturing', 'Science and Engineering'],
@@ -49,11 +81,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Adventure Travel": {
         "industries": ['Travel and Tourism'],
-        "definition": "Companies that focus on tourism and exploration with a certain degree of risk that may require special skills and physical exertion."
+        "definition": "Companies that organize or supply adventure-tourism experiences involving physical exertion, exploration, or risk — including guided trekking, climbing, rafting, and expedition operators."
     },
     "Advertising": {
         "industries": ['Advertising', 'Sales and Marketing'],
-        "definition": "Companies that are involved in creating and disseminating promotional messages to target audiences with the aim of influencing consumer behavior and driving sales through various channels, such as print, television, radio, digital platforms, and social media."
+        "definition": "Companies that create and place promotional content for brands across print, broadcast, digital, social, and out-of-home channels — including agencies, networks, exchanges, and ad-tech platforms."
     },
     "Advertising Platforms": {
         "industries": ['Advertising'],
@@ -65,7 +97,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Aerospace": {
         "industries": ['Science and Engineering'],
-        "definition": "Companies that deal with the research, design, manufacturing, operation, or maintenance of aircraft or spacecraft."
+        "definition": "Companies engaged in the research, design, manufacture, operation, or maintenance of aircraft and spacecraft."
+    },
+    "Aesthetics": {
+        "industries": ['Health Care'],
+        "definition": "Practices and providers focused on non-surgical cosmetic enhancement — injectables, energy-based devices, and skin rejuvenation."
     },
     "Affiliate Marketing": {
         "industries": ['Advertising', 'Sales and Marketing'],
@@ -89,11 +125,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Alumni": {
         "industries": ['Education'],
-        "definition": "Companies that focus on individuals and their former workplaces or schools."
+        "definition": "Companies that build software or provide services for connecting alumni networks of universities, schools, and former employers — including engagement, fundraising, and mentorship platforms."
     },
     "American Football": {
         "industries": ['Sports'],
-        "definition": "Companies that concern themselves with all related to the sport of American Football."
+        "definition": "Companies whose business centers on American Football — including leagues, teams, broadcasters, equipment manufacturers, and venue operators."
     },
     "Amusement Park and Arcade": {
         "industries": ['Travel and Tourism'],
@@ -113,19 +149,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Animal Feed": {
         "industries": ['Agriculture and Farming'],
-        "definition": "Companies that produce food for animals."
+        "definition": "Companies that produce, distribute, or sell feed for livestock, poultry, aquaculture, and other agricultural animals."
     },
     "Animation": {
         "industries": ['Media and Entertainment', 'Video'],
-        "definition": "Companies that produce animated media."
+        "definition": "Companies that produce animated content — 2D, 3D, motion-graphics, or VFX — for film, TV, streaming, advertising, gaming, or interactive media."
     },
     "App Discovery": {
         "industries": ['Apps', 'Sales and Marketing', 'Software'],
-        "definition": "Companies that deal with the identification and collection process through which applications are installed and used throughout an enterprise."
+        "definition": "Companies that build tools and platforms for helping users find new mobile or web applications — including app store optimization, search, and recommendation engines."
     },
     "App Marketing": {
         "industries": ['Sales and Marketing'],
         "definition": "Companies that focus on strategically interacting with users through an app."
+    },
+    "Applicant Tracking System": {
+        "industries": ['Software'],
+        "definition": "Companies that build software for managing the hiring funnel — job postings, candidate intake, screening, interview scheduling, offer, and onboarding handoff."
     },
     "Application Performance Management": {
         "industries": ['Data and Analytics', 'Software'],
@@ -141,7 +181,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Aquaculture": {
         "industries": ['Agriculture and Farming'],
-        "definition": "Companies that relate to the breeding, raising, and harvesting of fish, shellfish, and aquatic plants."
+        "definition": "Companies that breed, raise, and harvest fish, shellfish, or aquatic plants in controlled freshwater or marine environments."
     },
     "Architecture": {
         "industries": ['Real Estate'],
@@ -173,19 +213,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Auctions": {
         "industries": ['Commerce and Shopping'],
-        "definition": "Companies that facilitate the buying and selling of assets."
+        "definition": "Companies that operate auction houses, online auction platforms, or auction software — including art, collectibles, vehicle, real-estate, and B2B liquidation auctions."
     },
     "Audio": {
         "industries": ['Media and Entertainment', 'Music and Audio'],
-        "definition": "Companies that work in the sound industry."
+        "definition": "Companies that build audio hardware, software, content, or streaming services — including speakers, headphones, recording equipment, audio editing tools, and audio platforms."
     },
     "Audiobooks": {
         "industries": ['Media and Entertainment', 'Music and Audio'],
-        "definition": "Companies that produce an audio cassette or CD recording of a reading of a book."
+        "definition": "Companies that produce, distribute, or stream audiobooks — including audiobook publishers, narrator-studio production, listening apps, and audiobook subscription services."
     },
     "Augmented Reality": {
         "industries": ['Hardware', 'Software'],
         "definition": "Companies that develop technology which overlays a user's view of the real world with computer-generated images or sensations, thus combining the two environments."
+    },
+    "Auto Body Shop": {
+        "industries": ['Transportation'],
+        "definition": "Small to mid-sized facilities that perform cosmetic and structural vehicle-body repairs — including dent removal, paint refinishing, and panel replacement."
     },
     "Auto Insurance": {
         "industries": ['Financial Services'],
@@ -193,7 +237,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Automotive": {
         "industries": ['Transportation'],
-        "definition": "Companies related to the car industry."
+        "definition": "Companies that design, manufacture, sell, repair, or service motor vehicles, including OEMs, parts suppliers, dealerships, and aftermarket specialists."
     },
     "Autonomous Vehicles": {
         "industries": ['Transportation'],
@@ -203,17 +247,33 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Sales and Marketing'],
         "definition": "Companies whose business model focuses on selling their products and services to other businesses."
     },
+    "B2B Payments": {
+        "industries": ['Financial Services', 'Payments'],
+        "definition": "Companies that automate business-to-business payment flows — including accounts-payable software, virtual cards, ACH, wire automation, and trade-finance platforms."
+    },
     "B2C": {
         "industries": ['Sales and Marketing'],
         "definition": "Companies whose business model is selling products and services directly to consumers."
     },
+    "BIM": {
+        "industries": ['Software', 'Real Estate', 'Science and Engineering'],
+        "definition": "Building Information Modeling — software platforms and services for 3D-modeled, data-rich representations of buildings used across design, construction, and facility operations."
+    },
+    "BNPL": {
+        "industries": ['Financial Services', 'Payments'],
+        "definition": "Buy-Now-Pay-Later providers offering interest-free or short-term installment financing at checkout, integrated into merchant payment flows."
+    },
     "Baby": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that create goods for infants."
+        "definition": "Companies that design or sell products and services for infants and toddlers — including baby gear, apparel, food, toys, and developmental products."
+    },
+    "Background Check": {
+        "industries": ['Professional Services', 'Software'],
+        "definition": "Companies that verify employment, education, criminal, credit, and identity histories for hiring, tenant screening, and ongoing risk monitoring."
     },
     "Bakery": {
         "industries": ['Food and Beverage'],
-        "definition": "Places where baked goods are made or sold."
+        "definition": "Bakeries and bakery suppliers that produce or sell breads, pastries, cakes, and other baked goods — retail bakeries, wholesale bakeries, and bakery-tech platforms."
     },
     "Banking": {
         "industries": ['Financial Services', 'Lending and Investments'],
@@ -231,13 +291,21 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Energy'],
         "definition": "Companies that produce and research sources of electric power consisting of electrochemical cells with external connections for powering electrical devices."
     },
+    "Battery Storage": {
+        "industries": ['Sustainability', 'Energy'],
+        "definition": "Companies that develop, manufacture, deploy, or operate energy-storage systems for grid, commercial, and residential applications — including lithium-ion and next-generation chemistries."
+    },
     "Beauty": {
         "industries": ['Consumer Goods'],
         "definition": "Companies that produce substances or products used to enhance the appearance of a person's face or the fragrance and texture of the body."
     },
+    "Behavioral Health": {
+        "industries": ['Health Care'],
+        "definition": "Companies that deliver or build software for treating mental-health and substance-use disorders, often integrating clinical care with care management and population analytics."
+    },
     "Big Data": {
         "industries": ['Data and Analytics'],
-        "definition": "Companies that relate to the ways to analyze, systematically extract information from, or otherwise deal with data sets that are too large or complex to be dealt with by traditional data-processing application software."
+        "definition": "Companies that build platforms, pipelines, or services for ingesting, storing, processing, and analyzing data sets too large or complex for traditional databases."
     },
     "Billing": {
         "industries": ['Payments', 'Software'],
@@ -261,7 +329,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Biopharma": {
         "industries": ['Biotechnology', 'Health Care', 'Science and Engineering'],
-        "definition": "Companies involved in the development of pharmaceutical drugs based in whole or in part on biological sources such as sugars, proteins, nucleic acids, genetic material, living cells, or living tissues. Excludes companies that only develop drugs based on totally synthetic sources."
+        "definition": "Companies that develop pharmaceutical drugs using biological sources — including monoclonal antibodies, gene therapies, cell therapies, and other biologics produced via living systems."
     },
     "Biotechnology": {
         "industries": ['Biotechnology', 'Science and Engineering'],
@@ -269,11 +337,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Bitcoin": {
         "industries": ['Financial Services', 'Payments', 'Software'],
-        "definition": "Companies related to this specific type of cryptocurrency."
+        "definition": "Companies that build infrastructure, exchanges, custody, mining, payments, or financial products specifically tied to the Bitcoin protocol and asset."
     },
     "Blockchain": {
         "industries": ['Blockchain and Cryptocurrency'],
-        "definition": "Companies that relate to the system in which a record of transactions made in bitcoin or another cryptocurrency are maintained across several computers which are linked in a peer-to-peer network."
+        "definition": "Companies that build distributed-ledger protocols, consensus systems, smart-contract platforms, or developer infrastructure for decentralized applications."
     },
     "Blogging Platforms": {
         "industries": ['Content and Publishing', 'Media and Entertainment'],
@@ -283,13 +351,17 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Sports'],
         "definition": "Companies involved in the leisurely activity of traveling by boat, or the recreational use of a boat."
     },
+    "Body Care": {
+        "industries": ['Consumer Goods'],
+        "definition": "Companies that produce or sell topical products for full-body cleansing, moisturizing, and treatment — including lotions, body washes, scrubs, and body oils."
+    },
     "Brand Marketing": {
         "industries": ['Sales and Marketing'],
         "definition": "Companies that work in tandem with businesses to develop a long-term, strategic plan to boost a brand's recognition and reputation among consumers."
     },
     "Brewing": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies that make and sell beer."
+        "definition": "Companies that brew, distribute, or sell beer and adjacent malt beverages — including craft breweries, mass-market breweries, brewpubs, and brewing equipment makers."
     },
     "Broadcasting": {
         "industries": ['Media and Entertainment', 'Video'],
@@ -299,13 +371,17 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Software'],
         "definition": "Companies that develop a small software module for customizing a web browser."
     },
+    "Bug Bounty": {
+        "industries": ['Privacy and Security'],
+        "definition": "Companies that operate platforms or programs paying ethical hackers to find and report security vulnerabilities in clients applications and infrastructure."
+    },
     "Building Maintenance": {
         "industries": ['Real Estate'],
         "definition": "Companies that perform general repairs to buildings and preventative maintenance of systems."
     },
     "Building Material": {
         "industries": ['Real Estate', 'Manufacturing'],
-        "definition": "Companies that produce materials used for construction."
+        "definition": "Companies that manufacture or distribute construction materials — including lumber, concrete, steel, gypsum, insulation, roofing, and finishing products."
     },
     "Business Development": {
         "industries": ['Professional Services'],
@@ -321,11 +397,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Business Travel": {
         "industries": ['Travel and Tourism'],
-        "definition": "Companies related to travel taken for work or business purposes as opposed to other types of travel."
+        "definition": "Companies that arrange flights, hotels, ground transport, expense reporting, or duty-of-care services for employees traveling on business."
     },
     "CAD": {
         "industries": ['Design', 'Software'],
-        "definition": "Companies related to computer-aided design software used by architects, engineers, drafters, artists, and others to create precision drawings or technical illustrations."
+        "definition": "Companies that develop computer-aided design software used by architects, engineers, drafters, and product designers to create precision drawings and models."
+    },
+    "CI/CD": {
+        "industries": ['Software', 'Information Technology'],
+        "definition": "Companies that build continuous-integration and continuous-deployment tooling for automated building, testing, and shipping of software."
     },
     "CMS": {
         "industries": ['Information Technology', 'Software'],
@@ -347,21 +427,37 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Transportation'],
         "definition": "Companies that offer a peer-to-peer platform through which rental car seekers and private car owners can meet one other to do business."
     },
+    "Carbon Markets": {
+        "industries": ['Sustainability', 'Financial Services'],
+        "definition": "Companies that develop, verify, trade, or build software for carbon credits and offsets — including registries, ratings, marketplaces, and project developers."
+    },
+    "Carbon Removal": {
+        "industries": ['Sustainability', 'Science and Engineering'],
+        "definition": "Companies that capture and durably store atmospheric carbon dioxide — including direct-air-capture, enhanced-weathering, ocean-based, and biomass-carbon-removal technologies."
+    },
+    "Card Issuing": {
+        "industries": ['Financial Services', 'Payments'],
+        "definition": "Companies that provide APIs, infrastructure, and program management for issuing branded debit, credit, virtual, and prepaid cards."
+    },
     "Career Planning": {
         "industries": ['Professional Services'],
         "definition": "Companies involved in the process of helping consumers explore their interests and abilities, strategically plan their career goals, and create their future work success by designing learning and action plans to help them achieve their goals."
     },
+    "Cargo Insurance": {
+        "industries": ['Financial Services'],
+        "definition": "Insurers and brokers that cover goods in transit by land, sea, or air — including general cargo, project cargo, and specialty commodities."
+    },
     "Casino": {
         "industries": ['Travel and Tourism'],
-        "definition": "Public rooms or buildings where gambling games are played."
+        "definition": "Companies that operate gambling venues — including land-based casinos, online casinos, gaming resorts, and casino-management software."
     },
     "Casual Games": {
         "industries": ['Gaming'],
-        "definition": "Companies that result to produce wide, mass marketed games."
+        "definition": "Companies that develop or publish casual video games — short-session, easy-to-learn titles played on mobile, web, or console for mass audiences."
     },
     "Catering": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies that provide food service at a remote site."
+        "definition": "Companies that prepare and serve food at off-site events — including corporate catering, weddings, hospitality catering, and meal-program providers."
     },
     "Cause Marketing": {
         "industries": ['Sales and Marketing'],
@@ -369,7 +465,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Celebrity": {
         "industries": ['Media and Entertainment'],
-        "definition": "Companies that are endorsed or promoted by celebrities."
+        "definition": "Companies that manage, represent, or build platforms for celebrity talent — including talent agencies, public-relations firms, and creator-management studios."
+    },
+    "Charitable Foundation": {
+        "industries": ['Social Impact', 'Lending and Investments'],
+        "definition": "Endowed organizations and grant-making bodies that fund charitable, educational, research, or social-development programs through structured giving (e.g. Gates Foundation, Wellcome Trust)."
     },
     "Charity": {
         "industries": ['Social Impact'],
@@ -381,7 +481,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Chemical": {
         "industries": ['Science and Engineering'],
-        "definition": "Companies that produce industrial chemicals."
+        "definition": "Companies that manufacture or distribute industrial chemicals — including specialty chemicals, agrochemicals, polymers, and process intermediates for industrial and consumer applications."
     },
     "Chemical Engineering": {
         "industries": ['Science and Engineering'],
@@ -393,7 +493,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Children": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that cater towards children."
+        "definition": "Companies that develop, market, or sell products and services intended for children — including toys, apparel, education, entertainment, and child-care services."
     },
     "CivicTech": {
         "industries": ['Government and Military', 'Information Technology'],
@@ -401,7 +501,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Civil Engineering": {
         "industries": ['Science and Engineering'],
-        "definition": "Companies that handle the design, construction, and maintenance of physical and naturally built environments including, but not limited to public works such as roads, bridges, canals, dams, airports, sewerage systems, pipelines, structural components of building and railways."
+        "definition": "Companies that design, build, and maintain physical infrastructure — including roads, bridges, tunnels, dams, water systems, and other public-works structures."
     },
     "Classifieds": {
         "industries": ['Commerce and Shopping'],
@@ -413,7 +513,11 @@ INDUSTRY_TAXONOMY = {
     },
     "CleanTech": {
         "industries": ['Sustainability'],
-        "definition": "Companies that deal with any process, product, or service that reduces negative environmental impacts through significant energy sourcing or energy efficiency improvements, the sustainable use of resources, or environmental protection activities."
+        "definition": "Companies engaged in any process, product, or service that reduces negative environmental impacts through significant energy sourcing or energy efficiency improvements, the sustainable use of resources, or environmental protection activities."
+    },
+    "Climate Tech": {
+        "industries": ['Sustainability', 'Science and Engineering'],
+        "definition": "Companies that build technology to reduce greenhouse-gas emissions or adapt to climate change — including carbon removal, alternative energy, sustainable materials, and climate analytics."
     },
     "Clinical Trials": {
         "industries": ['Health Care'],
@@ -433,11 +537,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Cloud Management": {
         "industries": ['Information Technology', 'Internet Services', 'Software'],
-        "definition": "Companies that relate to the management of cloud computing products and services."
+        "definition": "Companies that build tools for provisioning, monitoring, securing, optimizing cost, or governing workloads across one or more cloud providers."
     },
     "Cloud Security": {
         "industries": ['Information Technology', 'Privacy and Security'],
         "definition": "Companies that protect data stored in cloud computing environments from theft, leakage, and deletion."
+    },
+    "Cloud Security Posture Management": {
+        "industries": ['Privacy and Security', 'Software'],
+        "definition": "Companies that build CSPM software to continuously assess cloud-environment configurations for security and compliance risks across multi-cloud deployments."
     },
     "Cloud Storage": {
         "industries": ['Internet Services'],
@@ -445,7 +553,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Coffee": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies related to producing or making products for coffee, as well as harvesting the beans themselves and brewing coffee."
+        "definition": "Companies that grow, roast, distribute, retail, or build equipment for coffee — including specialty roasters, café chains, and consumer-brand coffee products."
+    },
+    "Cold Chain Logistics": {
+        "industries": ['Transportation'],
+        "definition": "Specialized logistics providers that maintain temperature-controlled storage and transportation for perishable, pharmaceutical, or biological goods."
     },
     "Collaboration": {
         "industries": ['Collaboration'],
@@ -460,16 +572,24 @@ INDUSTRY_TAXONOMY = {
         "definition": "Companies that focus on sourcing and distributing limited edition products that consumers collect."
     },
     "Collection Agency": {
-        "industries": ['Administrative Services'],
-        "definition": "Companies that help other organizations collect money owed."
+        "industries": ['Administrative Services', 'Financial Services'],
+        "definition": "Companies that recover delinquent debt on behalf of original creditors or buy and collect overdue receivables themselves."
     },
     "College Recruiting": {
         "industries": ['Administrative Services', 'Education'],
         "definition": "Companies that focus on recruiting and hiring recent college and university graduates."
     },
+    "Collision Repair": {
+        "industries": ['Transportation'],
+        "definition": "Companies that repair vehicle damage from collisions — including body work, frame straightening, painting, and ADAS recalibration."
+    },
     "Comics": {
         "industries": ['Consumer Goods'],
-        "definition": "Companies that produce or relate to cartoon stories."
+        "definition": "Companies that publish, distribute, or sell comics, graphic novels, and webtoons — including print publishers, digital platforms, and licensing."
+    },
+    "Commercial Auto Insurance": {
+        "industries": ['Financial Services'],
+        "definition": "Insurers and brokers that underwrite policies covering vehicles used for business purposes — including delivery fleets, owner-operator trucks, and service vehicles."
     },
     "Commercial Insurance": {
         "industries": ['Financial Services'],
@@ -495,13 +615,17 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Community and Lifestyle'],
         "definition": "Companies that specialize in specific groups of people that have particular characteristics or interests in common."
     },
+    "Compensation Management": {
+        "industries": ['Software'],
+        "definition": "Companies that build software for benchmarking, planning, and administering employee pay — including salary, equity, bonus, and variable compensation programs."
+    },
     "Compliance": {
         "industries": ['Professional Services'],
         "definition": "Companies that ensure companies and employees follow the laws, regulations, standards, and ethical practices that apply to organizations."
     },
     "Computer": {
         "industries": ['Consumer Electronics', 'Hardware'],
-        "definition": "Companies associated with the core functionality of computers, including manufacturers or distributors of computers or computer parts, developers of operating systems, or computer repair. Excludes software companies or other companies which make use of computers in a general way."
+        "definition": "Companies that manufacture, distribute, or service computers and computer hardware — including desktops, laptops, workstations, and peripheral devices."
     },
     "Computer Vision": {
         "industries": ['Hardware', 'Software'],
@@ -513,7 +637,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Confectionery": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies that relate to the art of making confections, food items that are rich in sugar and carbs."
+        "definition": "Companies that produce, package, or sell candies, chocolates, and other sugar-based sweets for retail or wholesale distribution."
     },
     "Console Games": {
         "industries": ['Gaming'],
@@ -537,11 +661,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Consumer Goods": {
         "industries": ['Consumer Goods'],
-        "definition": "Companies that relate to items purchased by individuals for their own use, rather than items used by businesses."
+        "definition": "Companies that manufacture or sell products purchased by individuals for personal use, spanning categories such as food, personal care, household, apparel, and electronics."
     },
     "Consumer Lending": {
         "industries": ['Financial Services', 'Lending and Investments'],
-        "definition": "Companies that make loans to customers for business or personal use."
+        "definition": "Companies that originate loans to individuals — including credit-card issuers, installment lenders, BNPL providers, mortgage lenders, and consumer-lending platforms."
     },
     "Consumer Research": {
         "industries": ['Data and Analytics', 'Design'],
@@ -559,9 +683,13 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Information Technology', 'Software'],
         "definition": "Companies that record contacts' details and track their interaction with a business."
     },
+    "Container Orchestration": {
+        "industries": ['Software', 'Information Technology'],
+        "definition": "Companies that build platforms for deploying, scaling, and operating containerized workloads — including Kubernetes distributions, service meshes, and container runtimes."
+    },
     "Content": {
         "industries": ['Media and Entertainment'],
-        "definition": "Companies that deal with a platform in which consumers have direct access to whatever information producers wish to post."
+        "definition": "Companies engaged in a platform in which consumers have direct access to whatever information producers wish to post."
     },
     "Content Creators": {
         "industries": ['Media and Entertainment'],
@@ -585,15 +713,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Contests": {
         "industries": ['Gaming'],
-        "definition": "Companies that put on or facilitate events in which people compete."
+        "definition": "Companies that build or operate competition platforms — including online contests, hackathons, sweepstakes, prize platforms, and competitive challenge marketplaces."
     },
     "Continuing Education": {
         "industries": ['Education'],
         "definition": "Companies that provide education for adults after they have left the formal education system."
     },
+    "Conversion Rate Optimization": {
+        "industries": ['Sales and Marketing'],
+        "definition": "Agencies and software companies that improve conversion of website and app visitors via experimentation, personalization, heatmapping, and analytics."
+    },
     "Cooking": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies involved in the practice of making and preparing food."
+        "definition": "Companies that provide products, services, content, or platforms for cooking — including recipe apps, cookware brands, cooking-class platforms, and meal-kit services."
     },
     "Corporate Training": {
         "industries": ['Education'],
@@ -605,7 +737,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Cosmetic Surgery": {
         "industries": ['Health Care'],
-        "definition": "Companies that relate to a unique discipline of medicine focused on enhancing appearance through surgical and medical techniques."
+        "definition": "Medical practices and providers that perform elective surgical procedures to enhance or alter physical appearance."
     },
     "Cosmetics": {
         "industries": ['Consumer Goods'],
@@ -629,15 +761,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Creative Agency": {
         "industries": ['Content and Publishing', 'Media and Entertainment'],
-        "definition": "Companies that are dedicated to creating, planning, and handling advertising and other forms of promotion and marketing for its clients."
+        "definition": "Companies that plan, design, and execute creative work for brands — including advertising agencies, branding studios, and integrated creative shops."
+    },
+    "Creator Economy": {
+        "industries": ['Sales and Marketing', 'Community and Lifestyle', 'Software', 'Media and Entertainment'],
+        "definition": "Companies operating in the creator-driven monetization market — platforms, tools, agencies, and brands that enable individual creators and influencers to earn revenue from digital content, audiences, and direct-to-fan offerings."
     },
     "Credit": {
         "industries": ['Financial Services', 'Lending and Investments'],
-        "definition": "Companies involved in helping consumers or businesses borrow money."
+        "definition": "Companies that provide consumer or business credit products — including credit cards, lines of credit, credit reporting, scoring, and credit-management software."
     },
     "Credit Bureau": {
         "industries": ['Financial Services'],
-        "definition": "Companies that relate to the collection of information relating to the credit ratings of individuals."
+        "definition": "Companies that collect, maintain, and report credit history on consumers or businesses for use in lending, insurance, and tenancy decisions."
     },
     "Credit Cards": {
         "industries": ['Financial Services', 'Lending and Investments', 'Payments'],
@@ -645,7 +781,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Cricket": {
         "industries": ['Sports'],
-        "definition": "Companies related to the sport of cricket."
+        "definition": "Companies whose business centers on the sport of cricket — including leagues, clubs, broadcasters, equipment manufacturers, and venue operators."
     },
     "Crowdfunding": {
         "industries": ['Financial Services'],
@@ -659,6 +795,10 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Financial Services', 'Payments', 'Software'],
         "definition": "Companies that focus on developing, issuing, and managing digital currencies which enable financial transactions over a computer network without reliance on central authorities like governments or banks to manage or sustain them."
     },
+    "Customer Data Platform": {
+        "industries": ['Sales and Marketing', 'Software', 'Data and Analytics'],
+        "definition": "Companies that build CDP software to unify customer data from many sources into a single profile usable across marketing, sales, and service systems."
+    },
     "Customer Service": {
         "industries": ['Professional Services'],
         "definition": "Companies that help businesses provide assistance with or advice about their products to their customers."
@@ -669,7 +809,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Cycling": {
         "industries": ['Sports'],
-        "definition": "Companies that relate to the sport of bicycling."
+        "definition": "Companies whose business centers on the sport and activity of cycling — including bicycle and component manufacturers, apparel brands, race organizers, and cycling-tech platforms."
+    },
+    "DAO": {
+        "industries": ['Blockchain and Cryptocurrency'],
+        "definition": "Decentralized autonomous organizations governed by token-holder voting and smart-contract rules — includes treasury management, protocol governance, and on-chain coordination collectives."
+    },
+    "DEX": {
+        "industries": ['Blockchain and Cryptocurrency', 'Financial Services'],
+        "definition": "Decentralized exchanges that let users trade crypto assets via on-chain smart contracts without a centralized intermediary, including AMMs and orderbook DEXs."
     },
     "DIY": {
         "industries": ['Consumer Goods'],
@@ -685,31 +833,55 @@ INDUSTRY_TAXONOMY = {
     },
     "Darknet": {
         "industries": ['Internet Services'],
-        "definition": "Companies that relate to the encrypted online content that is not indexed by conventional search engines."
+        "definition": "Companies that build privacy-preserving networks, anonymization tools, or threat-intelligence services focused on the hidden web layer reachable only through specialized clients."
+    },
+    "Data Catalog": {
+        "industries": ['Data and Analytics', 'Software'],
+        "definition": "Companies that build software for organizing, governing, and discovering enterprise data assets — including metadata management, lineage, and access control."
     },
     "Data Center": {
         "industries": ['Hardware', 'Information Technology'],
-        "definition": "Companies that deal with a large group of networked computer servers, typically used by organizations for the remote storage, processing, or distribution of large amounts of data."
+        "definition": "Companies engaged in a large group of networked computer servers, typically used by organizations for the remote storage, processing, or distribution of large amounts of data."
     },
     "Data Center Automation": {
         "industries": ['Hardware', 'Information Technology', 'Software'],
         "definition": "Companies that focus on the process of managing and automating the workflow and processes of a data center facility."
     },
+    "Data Engineering": {
+        "industries": ['Data and Analytics', 'Software'],
+        "definition": "Companies that build tools, services, or consulting for moving, transforming, and modeling data at scale — including ETL, orchestration, and pipeline reliability."
+    },
     "Data Integration": {
         "industries": ['Data and Analytics', 'Information Technology', 'Software'],
         "definition": "Companies that specialize in providing a unified view of combined data from multiple sources or formats."
+    },
+    "Data Lake": {
+        "industries": ['Data and Analytics', 'Software'],
+        "definition": "Companies that build platforms for storing large volumes of raw and semi-structured data, with open table formats and downstream analytic and ML access."
     },
     "Data Mining": {
         "industries": ['Data and Analytics', 'Information Technology'],
         "definition": "Companies that work to extract information or discover patterns from large raw data sets in order to transform the information into a comprehensible structure for further use."
     },
+    "Data Observability": {
+        "industries": ['Data and Analytics', 'Software'],
+        "definition": "Companies that build software for monitoring data-pipeline reliability — detecting freshness, schema, volume, distribution, and quality issues in production data systems."
+    },
+    "Data Pipelines": {
+        "industries": ['Data and Analytics', 'Software'],
+        "definition": "Companies that build ELT, ETL, and streaming-data-pipeline tooling for ingesting and transforming data between sources and warehouses."
+    },
     "Data Storage": {
         "industries": ['Hardware', 'Software'],
-        "definition": "Companies that relate to the collection and retention of digital information."
+        "definition": "Companies that produce storage hardware, build cloud-storage services, or develop software for managing, archiving, and retrieving digital information at scale."
     },
     "Data Visualization": {
         "industries": ['Data and Analytics', 'Design', 'Information Technology', 'Software'],
-        "definition": "Companies that relate to the graphic representation of data and information."
+        "definition": "Companies that build software, libraries, or platforms for transforming structured data into interactive charts, dashboards, and graphical reports."
+    },
+    "Data Warehouse": {
+        "industries": ['Data and Analytics', 'Software'],
+        "definition": "Companies that build cloud or on-premise analytic data warehouses optimized for storing and querying structured data at scale."
     },
     "Database": {
         "industries": ['Data and Analytics', 'Software'],
@@ -719,33 +891,37 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Community and Lifestyle'],
         "definition": "Companies that provide specific mechanisms for online dating through the use of internet connected personal computers or mobile devices."
     },
+    "DeFi": {
+        "industries": ['Blockchain and Cryptocurrency', 'Financial Services'],
+        "definition": "Decentralized-finance companies that build lending, borrowing, trading, derivatives, or yield protocols operating on public blockchains via smart contracts."
+    },
     "Debit Cards": {
         "industries": ['Financial Services', 'Payments'],
         "definition": "Companies that produce payment cards which deduct money directly from a consumer's checking account to pay for a purchase."
     },
-    "Debt Collections": {
-        "industries": ['Administrative Services', 'Financial Services'],
-        "definition": "Companies that are in the business of recovering money owed on delinquent accounts."
-    },
     "Delivery": {
-        "industries": ['Administrative Services'],
-        "definition": "Companies that focus on delivering letters, packages, or ordered goods."
-    },
-    "Delivery Service": {
-        "industries": ['Transportation'],
-        "definition": "Companies that transport goods from a source location to a destination."
+        "industries": ['Administrative Services', 'Transportation'],
+        "definition": "Companies that deliver packages, letters, food, or goods — including courier services, parcel carriers, food-delivery platforms, and on-demand delivery operators."
     },
     "Dental": {
         "industries": ['Health Care'],
         "definition": "Companies that provide dental care services, products, or equipment, often including treatments, preventive care, and oral hygiene products."
     },
+    "Dermatology": {
+        "industries": ['Health Care'],
+        "definition": "Medical practices specializing in the diagnosis and treatment of skin, hair, and nail conditions, including both clinical and cosmetic dermatology."
+    },
     "Desktop Apps": {
         "industries": ['Software'],
         "definition": "Companies that develops software whose main use is as an application stored on your desktop."
     },
+    "DevOps": {
+        "industries": ['Software', 'Information Technology'],
+        "definition": "Companies that build tools or provide services for software-delivery automation — CI/CD, infrastructure-as-code, deployment, environment management, and developer productivity."
+    },
     "Developer APIs": {
         "industries": ['Software'],
-        "definition": "Companies that focus primarily on offering an API, which is a way for two or more software applications to communicate with each other using a set of common standards to facilitate a connection. Excludes companies that simply provide an API as one of their many services and companies that primarily provide other developer tools."
+        "definition": "Companies whose primary product is an API — software intermediaries that let third-party developers integrate functionality such as payments, messaging, data, identity, or machine learning into their own applications."
     },
     "Developer Platform": {
         "industries": ['Software'],
@@ -757,7 +933,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Diabetes": {
         "industries": ['Health Care'],
-        "definition": "Companies that concern themselves with the treatment and diagnosis of diabetes."
+        "definition": "Companies that develop drugs, devices, software, or services for preventing, diagnosing, monitoring, or treating diabetes — including CGM, insulin delivery, and digital-health platforms."
     },
     "Dietary Supplements": {
         "industries": ['Food and Beverage', 'Health Care'],
@@ -765,7 +941,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Digital Entertainment": {
         "industries": ['Media and Entertainment'],
-        "definition": "Companies that relate to entertainment media on electronic devices, such as video games, streaming videos, or online gambling."
+        "definition": "Companies that produce or distribute entertainment content delivered via electronic devices — including video games, streaming, digital comics, and online gambling."
     },
     "Digital Marketing": {
         "industries": ['Sales and Marketing'],
@@ -777,15 +953,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Digital Signage": {
         "industries": ['Sales and Marketing'],
-        "definition": "Companies related to technologies that enable playback of digital content on electronic displays or screens."
+        "definition": "Companies that produce display hardware, content-management software, or installation services for advertising and informational screens in public and commercial spaces."
+    },
+    "Digital Therapeutics": {
+        "industries": ['Health Care', 'Software'],
+        "definition": "Companies that develop evidence-based software-as-medicine to prevent, manage, or treat disease — often FDA-cleared and prescribed alongside or in place of drugs."
     },
     "Direct Marketing": {
         "industries": ['Sales and Marketing'],
         "definition": "Companies dealing with a promotional method that involves presenting information about a company, product or service to target customers, without the use of an advertising middleman."
     },
+    "Direct-to-Consumer": {
+        "industries": ['Commerce and Shopping', 'Consumer Goods'],
+        "definition": "Companies that sell branded consumer goods straight to end customers — bypassing wholesale and retail intermediaries — typically through their own e-commerce, social, and retail channels."
+    },
     "Distillery": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies that manufacture liquor."
+        "definition": "Companies that distill spirits — including whiskey, vodka, gin, rum, tequila, and other distilled alcoholic beverages, as both producers and brand operators."
     },
     "Diving": {
         "industries": ['Sports'],
@@ -805,7 +989,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Drone Management": {
         "industries": ['Hardware', 'Software'],
-        "definition": "Companies that manage unmanned air vehicles."
+        "definition": "Companies that build software for operating drone fleets — including flight planning, regulatory compliance, data capture, and enterprise drone operations."
     },
     "Drones": {
         "industries": ['Consumer Electronics', 'Consumer Goods', 'Hardware'],
@@ -829,11 +1013,19 @@ INDUSTRY_TAXONOMY = {
     },
     "EBooks": {
         "industries": ['Content and Publishing', 'Media and Entertainment'],
-        "definition": "Companies that relate to the production, sale, or consumption of book publications made available in digital form to be read on electronic devices."
+        "definition": "Companies that publish, distribute, sell, or build reading platforms for book content delivered in digital form to e-readers, tablets, or mobile devices."
+    },
+    "EV Charging": {
+        "industries": ['Transportation', 'Sustainability'],
+        "definition": "Companies that build, operate, or supply electric-vehicle charging infrastructure — including hardware manufacturers, network operators, and charging-management software."
     },
     "EdTech": {
         "industries": ['Education', 'Software'],
         "definition": "Companies that develop or focus on technological tools or software designed to enhance learning, whether in physical classroom, online, or blended settings."
+    },
+    "Edge Computing": {
+        "industries": ['Software', 'Information Technology', 'Hardware'],
+        "definition": "Companies that build hardware, software, or services for processing data near its source — at edge gateways, IoT devices, or regional micro-data-centers."
     },
     "Ediscovery": {
         "industries": ['Internet Services'],
@@ -847,21 +1039,17 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Education', 'Media and Entertainment'],
         "definition": "Companies that produce technologies, software products (i.e. video games, movies, or shows), and content aimed at learning through fun mediums."
     },
-    "Elder Care": {
-        "industries": ['Health Care'],
-        "definition": "Companies that provide or facilitate the care of elders."
-    },
     "Elderly": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that cater towards the elderly."
+        "definition": "Companies that develop or sell products and services targeted at older adults — including senior-care, mobility, hearing aids, and silver-economy brands."
     },
     "Electric Vehicle": {
         "industries": ['Transportation'],
-        "definition": "Companies that develop, research, or make products for electric vehicles."
+        "definition": "Companies that develop, manufacture, or supply electric vehicles and EV components — including passenger EVs, commercial EVs, batteries, drivetrains, and EV-specific infrastructure."
     },
     "Electrical Distribution": {
         "industries": ['Energy'],
-        "definition": "Companies that deliver electricity to customers."
+        "definition": "Companies that operate or supply the electricity distribution network — local power lines, transformers, and grid edge equipment that delivers electricity to customers."
     },
     "Electronic Design Automation (EDA)": {
         "industries": ['Hardware', 'Software'],
@@ -873,7 +1061,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Electronics": {
         "industries": ['Consumer Electronics', 'Hardware'],
-        "definition": "Companies that make or sell electronic instruments or devices."
+        "definition": "Companies that design, manufacture, or distribute electronic components, consumer devices, and industrial electronic systems."
     },
     "Email": {
         "industries": ['Information Technology', 'Internet Services', 'Messaging and Telecommunications'],
@@ -882,6 +1070,10 @@ INDUSTRY_TAXONOMY = {
     "Email Marketing": {
         "industries": ['Sales and Marketing'],
         "definition": "Companies that allow others to use email to promote products and/or services."
+    },
+    "Embedded Finance": {
+        "industries": ['Financial Services', 'Software'],
+        "definition": "Companies that provide APIs and infrastructure letting non-financial businesses embed banking, payments, lending, insurance, or investing into their own products."
     },
     "Embedded Software": {
         "industries": ['Software'],
@@ -893,7 +1085,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Emergency Medicine": {
         "industries": ['Health Care'],
-        "definition": "Companies that are dedicated to the diagnosis and treatment of unforeseen illness or injury."
+        "definition": "Medical practices, services, and software focused on the diagnosis and treatment of acute illness and traumatic injury in emergency settings."
     },
     "Emerging Markets": {
         "industries": ['Commerce and Shopping'],
@@ -903,13 +1095,17 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Administrative Services'],
         "definition": "Companies that provide diverse benefits, including financial, health, and welfare programs, along with perks, to enhance employee well-being and satisfaction."
     },
+    "Employee Experience": {
+        "industries": ['Software', 'Professional Services'],
+        "definition": "Companies that build software for measuring and improving the employee journey — engagement surveys, recognition, internal communications, and people analytics."
+    },
     "Employment": {
         "industries": ['Professional Services'],
         "definition": "Companies that match individuals seeking jobs with organizations looking to hire, facilitating the recruitment process."
     },
     "Energy": {
         "industries": ['Energy'],
-        "definition": "Companies that are related to the energy field."
+        "definition": "Companies that generate, transmit, distribute, store, or trade energy — including utilities, renewables, oil and gas, and energy software."
     },
     "Energy Efficiency": {
         "industries": ['Energy', 'Sustainability'],
@@ -917,7 +1113,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Energy Management": {
         "industries": ['Energy'],
-        "definition": "Companies that relate to monitoring energy production, consumption, distribution, or storage, whether in a building or for an organization, with goals often including environmental conservation and cost savings."
+        "definition": "Companies that build hardware, software, or services for monitoring and optimizing energy generation, distribution, consumption, and storage within buildings or grids."
     },
     "Energy Storage": {
         "industries": ['Energy'],
@@ -929,7 +1125,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Enterprise Resource Planning (ERP)": {
         "industries": ['Software'],
-        "definition": "Companies that relate to the integration of data from various core business processes in order to efficiently monitor and manage all these processes and associated resources in a single system."
+        "definition": "Companies that develop integrated software suites unifying finance, supply chain, HR, manufacturing, and other core business processes on a single platform."
     },
     "Enterprise Software": {
         "industries": ['Software'],
@@ -947,6 +1143,10 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Agriculture and Farming'],
         "definition": "Companies that offer products and services related to horse riding, including the sale of horses, riding gear, training, and horse care facilities."
     },
+    "Estate Agent": {
+        "industries": ['Real Estate'],
+        "definition": "UK-style real-estate agencies that broker the sale of residential or commercial properties, equivalent to US real-estate brokerages."
+    },
     "Ethereum": {
         "industries": ['Blockchain and Cryptocurrency'],
         "definition": "Companies that develop applications or services based on the Ethereum blockchain, focusing on smart contracts and decentralized applications."
@@ -961,19 +1161,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Events": {
         "industries": ['Events', 'Media and Entertainment'],
-        "definition": "Companies that are focused on the creation and development of large-scale events such as festivals and conferences."
+        "definition": "Companies that produce, host, or build software for large-scale events — including conferences, festivals, trade shows, and virtual experiences."
     },
     "Extermination Service": {
         "industries": ['Administrative Services'],
-        "definition": "Companies that destroy pests completely."
+        "definition": "Companies that provide pest-control services — eliminating insects, rodents, and other unwanted animals from residential, commercial, and agricultural properties."
     },
     "Eyewear": {
         "industries": ['Consumer Goods'],
-        "definition": "Companies that produce and sell eyewear."
+        "definition": "Companies that design, manufacture, or sell prescription glasses, sunglasses, contact lenses, and adjacent vision-correction or fashion eyewear products."
     },
     "Facebook": {
         "industries": ['Platforms'],
-        "definition": "Companies that work with or incorporate Facebook into their services."
+        "definition": "Companies whose primary product integrates with or builds on the Facebook/Meta platform — including Meta-ads tools, page-management software, and social-analytics products."
     },
     "Facial Recognition": {
         "industries": ['Data and Analytics', 'Software'],
@@ -989,7 +1189,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Family": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that are catered towards families."
+        "definition": "Companies that develop or sell products and services targeted at families with children — including family-friendly entertainment, child-care services, and household-focused brands."
+    },
+    "Family Medicine": {
+        "industries": ['Health Care'],
+        "definition": "Primary-care medical practices providing continuous and comprehensive health care for individuals and families across all ages."
     },
     "Fantasy Sports": {
         "industries": ['Gaming', 'Sports'],
@@ -1005,11 +1209,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Fashion": {
         "industries": ['Clothing and Apparel', 'Design'],
-        "definition": "Companies that design, produce, or sell apparel merchandise."
+        "definition": "Companies that design, produce, distribute, or retail apparel and accessories — including luxury, mass-market, fast-fashion, and direct-to-consumer brands."
     },
     "Fast-Moving Consumer Goods": {
         "industries": ['Consumer Goods', 'Real Estate'],
         "definition": "Companies that focus on products that are sold quickly and at a relatively low cost."
+    },
+    "Feature Flags": {
+        "industries": ['Software'],
+        "definition": "Companies that build software for controlled feature releases — runtime toggles, percentage rollouts, A/B targeting, and experimentation analytics."
     },
     "Ferry Service": {
         "industries": ['Transportation'],
@@ -1033,11 +1241,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Film": {
         "industries": ['Media and Entertainment', 'Video'],
-        "definition": "Companies that develop or deal with motion pictures / movies."
+        "definition": "Companies that produce, distribute, or supply services for motion pictures — including studios, production companies, post-production, and film financing."
     },
     "Film Distribution": {
         "industries": ['Media and Entertainment', 'Video'],
-        "definition": "Companies that distribute and market films."
+        "definition": "Companies that distribute films to theaters, streaming, broadcast, and home-video channels — including studio distribution arms and independent distributors."
     },
     "Film Production": {
         "industries": ['Media and Entertainment', 'Video'],
@@ -1061,7 +1269,7 @@ INDUSTRY_TAXONOMY = {
     },
     "First Aid": {
         "industries": ['Health Care'],
-        "definition": "Companies related to providing the delivery of initial medical emergency procedures using a limited amount of equipment to perform a primary assessment and intervention while awaiting arrival of emergency personnel."
+        "definition": "Companies that provide first-aid training, supplies, kits, or on-site emergency-response services for workplaces, schools, and public venues."
     },
     "Fitness": {
         "industries": ['Sports'],
@@ -1077,23 +1285,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Fleet Management": {
         "industries": ['Transportation'],
-        "definition": "Companies that are involved with a range of functions related to the operation of a set of vehicles used by a business, including but not limited to vehicle financing, maintenance, GPS tracking, safety, and driver monitoring."
+        "definition": "Companies that build software or provide services for operating commercial vehicle fleets — including telematics, dispatch, fuel, maintenance, and driver-compliance tools."
     },
     "Flowers": {
         "industries": ['Consumer Goods'],
-        "definition": "Companies that sell or relate to flowers."
+        "definition": "Companies that grow, distribute, sell, or arrange flowers — including florists, flower-delivery services, wholesale growers, and floral-design studios."
     },
     "Food Delivery": {
         "industries": ['Food and Beverage', 'Transportation'],
-        "definition": "Companies that focus on delivering food to individuals."
+        "definition": "Companies that deliver prepared meals from restaurants to consumers — including delivery marketplaces, restaurant-owned delivery, and ghost-kitchen operators."
     },
     "Food Processing": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies that turn fresh foods into food products."
+        "definition": "Companies that transform raw agricultural products into processed and packaged food — including milling, canning, freezing, fermenting, and prepared-food manufacturing."
     },
     "Food Trucks": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies that serve and prepare food in mobile locations."
+        "definition": "Companies that operate mobile food businesses — including individual food trucks, multi-truck brands, and food-truck management or marketplace software."
     },
     "Food and Beverage": {
         "industries": ['Food and Beverage'],
@@ -1107,9 +1315,17 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Energy', 'Natural Resources'],
         "definition": "Companies engaged in the extraction, production, refining, or selling of coal, oil, or natural gas."
     },
+    "Foundation Models": {
+        "industries": ['Artificial Intelligence', 'Software'],
+        "definition": "Companies that train or commercialize large, general-purpose AI models that serve as the base layer for downstream applications across modalities."
+    },
     "Foundries": {
         "industries": ['Manufacturing'],
-        "definition": "Companies that cast metal."
+        "definition": "Companies that cast metal — including iron, steel, aluminum, and specialty alloy foundries serving automotive, industrial, construction, and consumer-goods markets."
+    },
+    "Franchise": {
+        "industries": ['Commerce and Shopping', 'Community and Lifestyle'],
+        "definition": "Companies operating multi-unit franchise networks or providing franchise-specific services — franchisors selling rights to operate branded units, multi-unit franchisees, and franchise-management software."
     },
     "Fraud Detection": {
         "industries": ['Financial Services', 'Payments', 'Privacy and Security'],
@@ -1117,7 +1333,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Freelance": {
         "industries": ['Professional Services'],
-        "definition": "Companies that provide one-time services."
+        "definition": "Companies that build marketplaces, software, or services for freelancers and independent contractors — including freelance platforms, payment, contracting, and benefits."
     },
     "Freight Service": {
         "industries": ['Transportation'],
@@ -1125,11 +1341,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Fruit": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies that deal with or are related to the production of fruit."
+        "definition": "Companies that grow, distribute, process, or sell fresh and processed fruit — including orchards, fruit distributors, juice producers, and fruit-based consumer brands."
     },
     "Fuel": {
         "industries": ['Energy'],
-        "definition": "Companies that deal with petroleum, a naturally occurring liquid found beneath the earth's surface that can be refined into fuel."
+        "definition": "Companies engaged in petroleum, a naturally occurring liquid found beneath the earth's surface that can be refined into fuel."
     },
     "Fuel Cell": {
         "industries": ['Energy'],
@@ -1145,7 +1361,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Furniture": {
         "industries": ['Consumer Goods'],
-        "definition": "Companies that produce or sell furniture."
+        "definition": "Companies that design, manufacture, distribute, or sell furniture for residential, commercial, hospitality, and office uses."
     },
     "GPS": {
         "industries": ['Hardware', 'Navigation and Mapping'],
@@ -1165,11 +1381,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Gaming": {
         "industries": ['Gaming'],
-        "definition": "Companies that develop games."
+        "definition": "Companies that develop, publish, or operate video games and gaming services — including studios, publishers, esports organizations, and platforms for player engagement and monetization."
+    },
+    "Generative AI": {
+        "industries": ['Artificial Intelligence', 'Software'],
+        "definition": "Companies that build or deploy generative-AI models and applications — text, image, audio, video, code generation — including model labs, foundation-model platforms, and vertical generative tools."
     },
     "Genetics": {
         "industries": ['Biotechnology', 'Health Care'],
-        "definition": "Companies that relate to the branch of biology concerned with the study of genes, including but not limited to companies that do genetic research, sequencing, testing, therapy, or editing."
+        "definition": "Companies that conduct or commercialize research, sequencing, testing, therapy, or editing of genes and genomes for clinical, agricultural, or consumer applications."
     },
     "Geospatial": {
         "industries": ['Data and Analytics', 'Navigation and Mapping'],
@@ -1193,23 +1413,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Golf": {
         "industries": ['Sports'],
-        "definition": "Companies related to the sport of golf."
+        "definition": "Companies whose business centers on the sport of golf — including course operators, equipment manufacturers, apparel brands, instruction services, and tournament broadcasters."
     },
     "Google": {
         "industries": ['Platforms'],
-        "definition": "Companies that work with or incorporate Google into their services."
+        "definition": "Companies whose primary product builds on Google services — including Google Ads tools, Workspace integrations, Google Cloud partners, and SEO/SEM software for Google search."
     },
     "Google Glass": {
         "industries": ['Consumer Electronics', 'Hardware', 'Mobile', 'Platforms'],
-        "definition": "A brand of smart glasses developed and sold by Google."
+        "definition": "Augmented-reality and smart-eyewear hardware and software, originally pioneered by Google Glass and now spanning industrial, medical, and consumer AR-glasses products."
     },
     "GovTech": {
         "industries": ['Government and Military', 'Information Technology'],
-        "definition": "Companies that develop the operating system of government."
+        "definition": "Software companies that build technology for government agencies — including digital services, citizen engagement, regulatory compliance, procurement, and public-sector workflow tools."
     },
     "Government": {
         "industries": ['Government and Military'],
-        "definition": "Companies that are owned or controlled by a government to undertake commercial activities on its behalf."
+        "definition": "Government agencies, government-owned enterprises, and contractors that provide products or services primarily to public-sector buyers."
     },
     "Graphic Design": {
         "industries": ['Design'],
@@ -1229,35 +1449,59 @@ INDUSTRY_TAXONOMY = {
     },
     "Grocery": {
         "industries": ['Food and Beverage'],
-        "definition": "Retail shops that primarily sell food."
+        "definition": "Retailers that sell food and household staples — including supermarkets, neighborhood grocers, specialty food stores, and online grocery delivery services."
     },
     "Group Buying": {
         "industries": ['Commerce and Shopping'],
         "definition": "Companies that aggregate consumer demand to offer products or services at reduced prices, typically facilitated through online platforms where deals are activated once a minimum number of purchases is made."
     },
+    "Growth Marketing": {
+        "industries": ['Sales and Marketing'],
+        "definition": "Marketing agencies, consultancies, and software companies focused on data-driven, experiment-led growth — acquisition, activation, retention, referral, revenue optimization."
+    },
     "Guides": {
         "industries": ['Media and Entertainment'],
-        "definition": "Companies that provide guided assistance to users."
+        "definition": "Companies that provide guided experiences — tour guides, in-app product guides, expert-led learning, and concierge services."
+    },
+    "HR Tech": {
+        "industries": ['Software', 'Professional Services', 'Apps'],
+        "definition": "Software companies building tools for hiring, onboarding, performance management, learning, engagement, and people analytics."
+    },
+    "HVAC": {
+        "industries": ['Physical Infrastructure'],
+        "definition": "Companies that design, install, and service heating, ventilation, and air-conditioning systems for residential, commercial, and industrial buildings."
+    },
+    "Hair Care": {
+        "industries": ['Consumer Goods'],
+        "definition": "Companies that produce or sell products for cleansing, conditioning, styling, and treating hair — including shampoos, conditioners, color, and styling tools."
     },
     "Handmade": {
         "industries": ['Consumer Goods'],
-        "definition": "Companies that produce goods made by hand."
+        "definition": "Companies that produce or sell goods made by hand — including artisanal goods marketplaces, craft brands, and small-batch makers."
     },
     "Hardware": {
         "industries": ['Hardware'],
         "definition": "Companies that develop physical components of any computer or telecommunications system."
     },
+    "Headless Commerce": {
+        "industries": ['Commerce and Shopping', 'Software'],
+        "definition": "Companies that build commerce platforms decoupling the frontend storefront from backend commerce engines via APIs — enabling custom storefronts across web, mobile, and emerging channels."
+    },
     "Health Care": {
         "industries": ['Health Care'],
-        "definition": "Companies that relate to the overall improvement of health, including but not limited to the prevention, diagnosis, amelioration, or cure of disease, illness, injury, or other impairments."
+        "definition": "Companies that deliver, support, or finance medical services — including providers, payers, hospitals, clinics, devices, pharmaceuticals, and digital health platforms."
     },
     "Health Diagnostics": {
         "industries": ['Health Care'],
-        "definition": "Companies that deal with the process of determining which disease or condition explains a person's symptoms and signs."
+        "definition": "Companies engaged in the process of determining which disease or condition explains a person's symptoms and signs."
     },
     "Health Insurance": {
         "industries": ['Financial Services'],
         "definition": "Companies that offer a type of insurance coverage which pays for medical, surgical, and sometimes dental expenses by the insured."
+    },
+    "HealthTech": {
+        "industries": ['Health Care', 'Software'],
+        "definition": "Software, data, and platform companies building technology for the health-care industry — including patient engagement, clinical workflow, remote monitoring, and care coordination."
     },
     "Hedge Funds": {
         "industries": ['Financial Services', 'Lending and Investments'],
@@ -1265,15 +1509,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Higher Education": {
         "industries": ['Education'],
-        "definition": "Companies related to tertiary education leading to award of an academic degree."
+        "definition": "Companies that operate, support, or supply universities, colleges, and other institutions awarding post-secondary degrees and credentials."
     },
     "Hockey": {
         "industries": ['Sports'],
-        "definition": "Companies related to the sport of hockey."
+        "definition": "Companies whose business centers on the sport of hockey — including leagues, teams, broadcasters, equipment manufacturers, and rink operators."
     },
     "Home Decor": {
         "industries": ['Real Estate'],
-        "definition": "Companies that relate to tasks done by a home decorator or a person who is interested in decorating in a home."
+        "definition": "Companies that design, manufacture, or retail decorative furnishings, textiles, lighting, wall art, and accessories for residential interiors."
+    },
+    "Home Fragrance": {
+        "industries": ['Consumer Goods'],
+        "definition": "Companies that produce or sell scented products for residential use — including candles, diffusers, room sprays, and incense."
     },
     "Home Health Care": {
         "industries": ['Health Care'],
@@ -1281,7 +1529,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Home Improvement": {
         "industries": ['Real Estate'],
-        "definition": "Companies that relate to or provide services that help consumers or businesses improve their homes."
+        "definition": "Companies that sell tools, materials, fixtures, or services for residential renovation, repair, remodeling, and DIY projects."
     },
     "Home Renovation": {
         "industries": ['Real Estate'],
@@ -1293,7 +1541,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Home and Garden": {
         "industries": ['Real Estate'],
-        "definition": "Companies that provide services to a consumer's home and/or garden."
+        "definition": "Companies that supply products, services, or media for home interiors and gardens — including home-improvement retailers, lawn-and-garden brands, and home-and-garden media."
     },
     "Homeland Security": {
         "industries": ['Privacy and Security'],
@@ -1305,7 +1553,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Horticulture": {
         "industries": ['Agriculture and Farming'],
-        "definition": "Companies that revolve around plant cultivation for food, medicine, or aesthetics as opposed to crop or animal farming. It includes the cultivation of fruits, vegetables, nuts, seeds, herbs, sprouts, mushrooms, algae, flowers, seaweeds and non-food crops such as grass and ornamental trees and plants."
+        "definition": "Companies engaged in plant cultivation for food, medicine, or aesthetic use — including fruit, vegetable, herb, ornamental-plant, and nursery operators."
     },
     "Hospital": {
         "industries": ['Health Care'],
@@ -1321,7 +1569,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Housekeeping Service": {
         "industries": ['Administrative Services'],
-        "definition": "Companies related to the management of duties and chores involved in the running of a household."
+        "definition": "Companies that provide residential cleaning, laundry, and household-management services on a one-time, recurring, or live-in basis."
     },
     "Human Computer Interaction": {
         "industries": ['Design', 'Science and Engineering'],
@@ -1329,7 +1577,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Human Resources": {
         "industries": ['Administrative Services'],
-        "definition": "Companies that are related to the hiring, administration, and training of personnel."
+        "definition": "Companies that build software or provide services for hiring, employee administration, training, payroll, and benefits — covering full-cycle human-capital management."
     },
     "Humanitarian": {
         "industries": ['Community and Lifestyle'],
@@ -1337,11 +1585,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Hunting": {
         "industries": ['Sports'],
-        "definition": "Companies that relate to the activity of hunting wild animals or game especially for food or sport."
+        "definition": "Companies that sell firearms, ammunition, optics, apparel, or guided trips for the sport and activity of hunting wild game."
     },
     "Hydroponics": {
         "industries": ['Agriculture and Farming'],
-        "definition": "Companies that deal with the science of growing plants with alternatives to soil, including sand, gravel, or liquid, in combination with added nutrients."
+        "definition": "Companies engaged in the science of growing plants with alternatives to soil, including sand, gravel, or liquid, in combination with added nutrients."
     },
     "ISP": {
         "industries": ['Internet Services'],
@@ -1353,15 +1601,15 @@ INDUSTRY_TAXONOMY = {
     },
     "IT Management": {
         "industries": ['Information Technology'],
-        "definition": "Companies that relate to the ongoing management of the information technology resources of corporate customers."
+        "definition": "Companies that build software or provide services for managing enterprise IT — including asset tracking, service desk, monitoring, and IT operations."
     },
     "IaaS": {
         "industries": ['Software'],
         "definition": "Companies that offer cloud computing services in which customers rent or lease servers on-demand for computing and storage in the cloud."
     },
-    "Identity Management": {
-        "industries": ['Information Technology', 'Privacy and Security'],
-        "definition": "Companies that focus on the organizational process for identifying, authenticating, and authorizing individuals or groups of people to have access to applications, systems, or networks by associating user rights and restrictions with established identities."
+    "Identity and Access Management": {
+        "industries": ['Information Technology', 'Privacy and Security', 'Software'],
+        "definition": "Companies that build software for managing who can access what — single sign-on, multi-factor authentication, privileged access, and identity governance."
     },
     "Image Recognition": {
         "industries": ['Data and Analytics', 'Software'],
@@ -1369,7 +1617,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Impact Investing": {
         "industries": ['Financial Services', 'Lending and Investments'],
-        "definition": "Companies that relate to financial investments made into companies, organizations, or funds, with the goal of producing both a positive social or environmental effect and a financial return."
+        "definition": "Companies that invest capital with the explicit dual aim of generating financial return and measurable positive social or environmental outcomes."
     },
     "In-Flight Entertainment": {
         "industries": ['Media and Entertainment'],
@@ -1397,11 +1645,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Industrial Engineering": {
         "industries": ['Manufacturing', 'Science and Engineering'],
-        "definition": "Companies that deal with the design, improvement, and installation of integrated systems in the manufacturing and industrial processes."
+        "definition": "Companies engaged in the design, improvement, and installation of integrated systems in the manufacturing and industrial processes."
+    },
+    "Industrial IoT": {
+        "industries": ['Hardware', 'Manufacturing', 'Software'],
+        "definition": "Companies that build sensors, connectivity, and analytics for industrial assets — predictive maintenance, asset performance, process monitoring, and operational technology."
     },
     "Industrial Manufacturing": {
         "industries": ['Manufacturing'],
         "definition": "Companies that manufacture products intended for use in industrial machines OR companies that manufacture products at a large scale."
+    },
+    "Influencer Marketing": {
+        "industries": ['Sales and Marketing', 'Advertising', 'Software'],
+        "definition": "Companies that match brands with social-media creators for paid campaigns, manage talent rosters, or measure influencer-driven attribution across social platforms."
     },
     "Information Services": {
         "industries": ['Information Technology'],
@@ -1417,7 +1673,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Infrastructure": {
         "industries": ['Physical Infrastructure'],
-        "definition": "Companies that relate to public and private physical structures such as roads, railways, bridges, tunnels, water supply, sewers, electrical grids, and telecommunications."
+        "definition": "Companies that finance, build, operate, or maintain large-scale physical systems — roads, bridges, power grids, water networks, and telecommunications."
     },
     "Innovation Management": {
         "industries": ['Professional Services'],
@@ -1433,7 +1689,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Intellectual Property": {
         "industries": ['Professional Services'],
-        "definition": "Companies that deal with legal rights of owners of intangible creations of the human mind (e.g., music, art, designs, symbols, literature, etc.)."
+        "definition": "Companies engaged in legal rights of owners of intangible creations of the human mind (e.g., music, art, designs, symbols, literature, etc.)."
     },
     "Intelligent Systems": {
         "industries": ['Artificial Intelligence', 'Data and Analytics', 'Science and Engineering'],
@@ -1442,6 +1698,14 @@ INDUSTRY_TAXONOMY = {
     "Interior Design": {
         "industries": ['Design', 'Real Estate'],
         "definition": "Companies that provide products or services to plan, research, coordinate, or manage projects to develop or enhance the form and function of the interior of a building."
+    },
+    "Internal Medicine": {
+        "industries": ['Health Care'],
+        "definition": "Medical practices focused on the prevention, diagnosis, and management of adult diseases, including chronic and complex conditions."
+    },
+    "International Development": {
+        "industries": ['Social Impact', 'Government and Military'],
+        "definition": "Organizations that design and deliver multi-country programs to improve health, education, economic opportunity, governance, or infrastructure in developing regions."
     },
     "Internet": {
         "industries": ['Internet Services'],
@@ -1452,8 +1716,8 @@ INDUSTRY_TAXONOMY = {
         "definition": "Companies that provide a digital audio service transmitted by the internet."
     },
     "Internet of Things": {
-        "industries": ['Internet Services'],
-        "definition": "Companies that develop or support physical objects with sensors, processing ability, and other technologies that connect and exchange data with other devices via the internet or other communications networks."
+        "industries": ['Hardware', 'Internet Services', 'Software'],
+        "definition": "Companies that build connected-device hardware, embedded operating systems, IoT platforms, or device-management software for consumer, industrial, or commercial IoT deployments."
     },
     "Intrusion Detection": {
         "industries": ['Information Technology', 'Privacy and Security'],
@@ -1473,7 +1737,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Knowledge Management": {
         "industries": ['Administrative Services'],
-        "definition": "Companies related to the process of creating, sharing, using and managing the knowledge and information of an organization."
+        "definition": "Companies that build software for capturing, organizing, sharing, and retrieving institutional knowledge across teams and documents."
     },
     "LGBT": {
         "industries": ['Community and Lifestyle'],
@@ -1485,7 +1749,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Language Learning": {
         "industries": ['Education'],
-        "definition": "Companies that provide products or services to teach customers new languages."
+        "definition": "Companies that build products or provide services for teaching new languages — including consumer language-learning apps, online tutors, classroom curricula, and corporate-training platforms."
+    },
+    "Large Language Models": {
+        "industries": ['Artificial Intelligence', 'Software'],
+        "definition": "Companies that train, host, fine-tune, or deploy large language models — including foundation-model labs, inference platforms, and LLM-application platforms."
     },
     "Laser": {
         "industries": ['Hardware', 'Science and Engineering'],
@@ -1493,15 +1761,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Last Mile Transportation": {
         "industries": ['Transportation'],
-        "definition": "Companies that relate to the last leg of a journey that involves the movement of people and goods from a transportation hub to a final destination."
+        "definition": "Companies that handle the final leg of a delivery — from a local hub or fulfillment center to the end consumer — often using gig drivers or micro-fulfillment."
     },
     "Laundry and Dry-cleaning": {
         "industries": ['Clothing and Apparel'],
-        "definition": "Companies related to providing laundry and dry cleaning services for clothes and other textiles."
+        "definition": "Companies that operate or service commercial and consumer laundry, dry-cleaning, garment-care, and uniform-rental businesses."
     },
     "Law Enforcement": {
         "industries": ['Government and Military', 'Privacy and Security'],
-        "definition": "Companies related to the enforcement of laws by discovering, deterring, rehabilitating, or punishing people who violate the rules and norms governing that society."
+        "definition": "Companies that supply equipment, software, training, or analytics to police, sheriff, federal, and corrections agencies enforcing laws."
+    },
+    "Layer 2": {
+        "industries": ['Blockchain and Cryptocurrency', 'Software'],
+        "definition": "Companies that build scaling protocols sitting atop base blockchains — including rollups, sidechains, and other L2 networks that reduce fees and increase throughput."
     },
     "Lead Generation": {
         "industries": ['Sales and Marketing'],
@@ -1517,7 +1789,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Legal": {
         "industries": ['Professional Services'],
-        "definition": "Companies that are concerned with the law."
+        "definition": "Law firms, in-house legal departments, and legal-services providers — including litigation, transactional, regulatory, and intellectual-property practices."
     },
     "Legal Tech": {
         "industries": ['Professional Services'],
@@ -1529,7 +1801,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Lending": {
         "industries": ['Financial Services'],
-        "definition": "Companies that are primarily engaged in granting loans or offering products or platforms that facilitate third-party loans."
+        "definition": "Companies that originate loans or build platforms that facilitate consumer, small-business, or commercial lending — including direct lenders, marketplaces, and lending infrastructure."
+    },
+    "Letting Agent": {
+        "industries": ['Real Estate'],
+        "definition": "UK-style agencies that manage rental listings, tenant placement, and lease administration on behalf of residential or commercial landlords."
     },
     "Life Insurance": {
         "industries": ['Financial Services'],
@@ -1553,19 +1829,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Lingerie": {
         "industries": ['Clothing and Apparel', 'Consumer Goods'],
-        "definition": "Companies that produce people's undergarments."
+        "definition": "Companies that design, manufacture, or sell intimate apparel — including bras, panties, sleepwear, and shapewear for retail and direct-to-consumer markets."
     },
     "Linux": {
         "industries": ['Platforms', 'Software'],
-        "definition": "Companies related to the open source unix-like operating systems based on the Linux kernel."
+        "definition": "Companies that build, support, or sell products and services around the Linux operating system — including distributions, kernel work, and enterprise support."
+    },
+    "Liquid Staking": {
+        "industries": ['Blockchain and Cryptocurrency', 'Financial Services'],
+        "definition": "Companies that issue liquid representations of staked crypto assets, letting holders earn staking yield while keeping the asset usable in DeFi."
     },
     "Livestock": {
         "industries": ['Agriculture and Farming'],
-        "definition": "Companies that relate to the raising or harvesting of livestock."
+        "definition": "Companies that raise, breed, process, or supply equipment and inputs for cattle, swine, poultry, sheep, and other farmed animals."
     },
     "Local": {
         "industries": ['Sales and Marketing'],
-        "definition": "Companies that focus on customers in a particular town, city, or region (e.g., \\"
+        "definition": "Companies that focus on customers in a particular town, city, or region — including local-services marketplaces, geo-targeted advertising, and small-business platforms serving a defined geographic area."
     },
     "Local Advertising": {
         "industries": ['Advertising', 'Sales and Marketing'],
@@ -1573,7 +1853,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Local Business": {
         "industries": ['Sales and Marketing'],
-        "definition": "Companies that focus on customers in a particular town, city, or region (e.g., \\"
+        "definition": "Independent small businesses serving a single town, city, or region — including restaurants, shops, service providers, and other community-rooted brick-and-mortar or hyper-local operators."
     },
     "Local Shopping": {
         "industries": ['Commerce and Shopping'],
@@ -1586,6 +1866,10 @@ INDUSTRY_TAXONOMY = {
     "Logistics": {
         "industries": ['Transportation'],
         "definition": "Companies that plan, implement, and control the movement and storage of goods, services, or information within a supply chain and between the points of origin and consumption."
+    },
+    "Low-Code": {
+        "industries": ['Software'],
+        "definition": "Companies that build development platforms reducing the amount of hand-coded software needed for enterprise applications — typically with visual modeling and pre-built components."
     },
     "Loyalty Programs": {
         "industries": ['Sales and Marketing'],
@@ -1605,7 +1889,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Machinery Manufacturing": {
         "industries": ['Manufacturing'],
-        "definition": "Companies that specialize in creating manufacturing equipment."
+        "definition": "Companies that design, build, and supply industrial machinery and manufacturing equipment for production lines, factories, and infrastructure."
     },
     "Made to Order": {
         "industries": ['Commerce and Shopping'],
@@ -1627,13 +1911,21 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Navigation and Mapping'],
         "definition": "Companies that make maps, including companies related to surveying or gathering data for geopositioning with the purpose of making maps of location data or information."
     },
+    "MarTech": {
+        "industries": ['Sales and Marketing', 'Software'],
+        "definition": "Software companies that build tools for marketing teams — including campaign management, marketing automation, attribution, customer data, and content management."
+    },
+    "Marine Insurance": {
+        "industries": ['Financial Services'],
+        "definition": "Insurers and brokers specializing in coverage for ships, ocean freight, port operations, and maritime risk."
+    },
     "Marine Technology": {
         "industries": ['Science and Engineering'],
         "definition": "Companies that produce technologies for the safe use, exploitation, protection of, and intervention in the marine environment."
     },
     "Marine Transportation": {
         "industries": ['Transportation'],
-        "definition": "Companies related to the transport of people or goods via waterways."
+        "definition": "Companies that move passengers or freight by waterway — including shipping lines, ferries, port services, and ship management."
     },
     "Market Research": {
         "industries": ['Data and Analytics', 'Design'],
@@ -1641,15 +1933,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Marketing": {
         "industries": ['Sales and Marketing', 'Advertising'],
-        "definition": "Companies that help their clients promote their brand, products, or services; this includes advertising."
+        "definition": "Companies that promote brands, products, or services on behalf of clients — including agencies, software platforms, consultancies, and integrated marketing services."
     },
     "Marketing Automation": {
         "industries": ['Sales and Marketing', 'Software'],
-        "definition": "Companies related to a type of software that allows companies to target customers and generate sales leads, through automated marketing messages across channels including email, websites, social media, and text messages."
+        "definition": "Companies that build software for orchestrating multi-channel marketing campaigns — email, web, social, SMS — with workflows, segmentation, and analytics."
     },
     "Marketplace": {
         "industries": ['Commerce and Shopping'],
         "definition": "Companies that provide a physical location or an e-commerce website where multiple vendors gather to sell their products or services."
+    },
+    "Mechanical Contractor": {
+        "industries": ['Physical Infrastructure', 'Manufacturing'],
+        "definition": "Construction firms that install and service mechanical systems — HVAC, piping, plumbing, process control — in commercial, industrial, and institutional buildings."
     },
     "Mechanical Design": {
         "industries": ['Design', 'Hardware'],
@@ -1657,19 +1953,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Mechanical Engineering": {
         "industries": ['Science and Engineering'],
-        "definition": "Companies that design, develop, manufacture, and maintain mechanical systems and components, including engines, manufacturing systems, and any other collection of interconnected mechanical components or parts that work together to achieve a specific function or goal."
+        "definition": "Companies that design, develop, and manufacture mechanical systems and components — including engines, machinery, robotics, manufacturing equipment, and HVAC systems."
     },
     "Media and Entertainment": {
         "industries": ['Media and Entertainment'],
-        "definition": "Companies in one or more of a large variety of mass media sectors such as broadcast media (movies, radio, music, TV), digital media (internet, video games, podcasts), or print media (books, magazines), especially when designed for the purpose of entertainment."
+        "definition": "Companies that produce, distribute, or monetize media content across film, television, radio, music, gaming, publishing, and digital media platforms."
     },
     "Medical": {
         "industries": ['Health Care'],
-        "definition": "Companies that are related to the study or treatment of medical needs."
+        "definition": "Companies engaged in the study, diagnosis, or treatment of medical conditions — including physician practices, clinical-services firms, and medical-product manufacturers."
     },
     "Medical Device": {
         "industries": ['Health Care'],
         "definition": "Companies that produce or support the development of devices intended to be used for medical purposes, including but not limited to, the diagnosis, prevention, or treatment of a medical condition."
+    },
+    "Medical Spa": {
+        "industries": ['Health Care'],
+        "definition": "Outpatient facilities that combine licensed medical oversight with cosmetic aesthetic procedures such as injectables, lasers, body contouring, and skin treatments."
     },
     "Meeting Software": {
         "industries": ['Messaging and Telecommunications', 'Software'],
@@ -1677,7 +1977,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Men's": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that cater towards men."
+        "definition": "Companies focused on products, services, or content marketed primarily to men — including apparel, grooming, lifestyle, and men's-health brands."
+    },
+    "Men's Grooming": {
+        "industries": ['Consumer Goods'],
+        "definition": "Companies focused on grooming, skincare, shaving, and personal-care products marketed primarily to men."
+    },
+    "Mental Health": {
+        "industries": ['Health Care'],
+        "definition": "Companies that provide mental-health services or build technology for therapy, psychiatry, emotional-wellness coaching, and behavioral-health workforce platforms."
     },
     "Messaging": {
         "industries": ['Information Technology', 'Internet Services', 'Messaging and Telecommunications'],
@@ -1689,7 +1997,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Military": {
         "industries": ['Government and Military', 'Information Technology'],
-        "definition": "Companies that relate to the armed forces of a country, especially companies whose primary product or service has military applications."
+        "definition": "Companies whose primary products or services serve armed forces — including weapons systems, vehicles, electronics, training, and logistics support."
     },
     "Mineral": {
         "industries": ['Natural Resources'],
@@ -1697,7 +2005,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Mining": {
         "industries": ['Natural Resources'],
-        "definition": "Companies that deal with the extraction of valuable minerals or other geological materials from the earth."
+        "definition": "Companies engaged in the extraction of valuable minerals or other geological materials from the earth."
     },
     "Mining Technology": {
         "industries": ['Natural Resources'],
@@ -1705,11 +2013,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Mobile": {
         "industries": ['Mobile'],
-        "definition": "Companies that relate to transportable, technological devices that support wireless transmission of data, including but not limited to mobile communication, mobile hardware, and mobile software companies."
+        "definition": "Companies that build mobile hardware, operating systems, applications, or wireless infrastructure for smartphones, tablets, and other portable devices."
     },
     "Mobile Advertising": {
         "industries": ['Advertising', 'Sales and Marketing'],
-        "definition": "Companies that relate to advertising specialized for mobile platforms such as iOS and Android."
+        "definition": "Companies that build ad-tech platforms, networks, or measurement tools specifically targeting smartphones and tablets — iOS, Android, and mobile web."
     },
     "Mobile Apps": {
         "industries": ['Apps', 'Mobile', 'Software'],
@@ -1717,7 +2025,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Mobile Devices": {
         "industries": ['Consumer Electronics', 'Hardware', 'Mobile'],
-        "definition": "Companies that develop a portable computing device such as a smartphone or tablet. Includes companies who develop a related hardware product (i.e. a charger) or provide a related service (i.e. a third-party device marketplace). Excludes companies who develop mobile software."
+        "definition": "Companies that develop portable computing devices — smartphones, tablets, wearables — and the related hardware, software, and accessories."
     },
     "Mobile Payments": {
         "industries": ['Financial Services', 'Mobile', 'Payments', 'Software'],
@@ -1725,7 +2033,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Motion Capture": {
         "industries": ['Media and Entertainment', 'Video'],
-        "definition": "Companies related to recording patterns of movement of objects or people."
+        "definition": "Companies that build hardware, software, or services for recording the movement of people or objects to drive animation, sports analysis, or biomechanics research."
     },
     "Multi-level Marketing": {
         "industries": ['Sales and Marketing'],
@@ -1753,7 +2061,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Music Venues": {
         "industries": ['Media and Entertainment'],
-        "definition": "Locations used for a concert or musical performance."
+        "definition": "Companies that own or operate live-music venues — including concert halls, clubs, festivals, amphitheaters, and venue-management software."
     },
     "Musical Instruments": {
         "industries": ['Media and Entertainment', 'Music and Audio'],
@@ -1763,17 +2071,25 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Hardware'],
         "definition": "Companies that develop technologies to enable communication between two electronic devices over a distance of 4cm (1½ in) or less."
     },
+    "NFT": {
+        "industries": ['Blockchain and Cryptocurrency'],
+        "definition": "Companies that issue, trade, or build infrastructure for non-fungible tokens — digital ownership records on blockchains used for art, collectibles, gaming, and rights management."
+    },
+    "NGO": {
+        "industries": ['Social Impact'],
+        "definition": "Non-governmental organizations operating independently of government control to deliver humanitarian, development, advocacy, or community-service programs."
+    },
     "Nanotechnology": {
         "industries": ['Science and Engineering'],
         "definition": "Companies that research or produce applications with matter on an atomic or molecular scale, common in sciences such as molecular biology, and commercial applications like nanoelectronic devices."
     },
     "National Security": {
         "industries": ['Government and Military'],
-        "definition": "Companies that relate to the security and defense of a nation state, including its citizens, economy, and institutions which is regarded as a duty of government."
+        "definition": "Companies that supply technology, analytics, or services to defense, intelligence, and homeland-security agencies for protecting national interests."
     },
     "Natural Language Processing": {
         "industries": ['Artificial Intelligence', 'Data and Analytics', 'Software'],
-        "definition": "Companies that focus primarily on programming computers to process and analyze large amounts of natural language data, with the goal of training computers to \\"
+        "definition": "Companies that build natural-language-processing technology — programming computers to understand, generate, translate, and analyze human language for text and conversational applications."
     },
     "Natural Resources": {
         "industries": ['Natural Resources', 'Sustainability'],
@@ -1781,7 +2097,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Navigation": {
         "industries": ['Navigation and Mapping'],
-        "definition": "Companies that provide directional assistance."
+        "definition": "Companies that build mapping, routing, and turn-by-turn navigation products — including consumer navigation apps, automotive systems, fleet navigation, and indoor wayfinding."
+    },
+    "Neobank": {
+        "industries": ['Financial Services'],
+        "definition": "Digital-only consumer or business banks that operate without physical branches, typically built on modern banking-as-a-service infrastructure."
     },
     "Network Hardware": {
         "industries": ['Hardware'],
@@ -1793,7 +2113,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Neuroscience": {
         "industries": ['Biotechnology', 'Science and Engineering'],
-        "definition": "Companies that are related to the scientific study of the nervous system."
+        "definition": "Companies that conduct or commercialize research on the nervous system — including brain-computer interfaces, neuro-imaging, neurotherapeutics, and neuro-diagnostics."
     },
     "News": {
         "industries": ['Content and Publishing', 'Media and Entertainment'],
@@ -1801,7 +2121,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Nightclubs": {
         "industries": ['Events', 'Media and Entertainment'],
-        "definition": "Establishments for nighttime entertainment."
+        "definition": "Companies that own or operate nightclubs, bars, and late-night entertainment venues — including dance clubs, lounges, and event-driven nightlife concepts."
     },
     "Nightlife": {
         "industries": ['Events', 'Media and Entertainment'],
@@ -1809,7 +2129,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Nintendo": {
         "industries": ['Consumer Electronics', 'Hardware', 'Platforms'],
-        "definition": "Companies that work with or incorporate Nintendo into their services."
+        "definition": "Companies that develop games, accessories, or services for Nintendo platforms — including third-party publishers, peripheral makers, and Nintendo-focused content creators."
+    },
+    "No-Code": {
+        "industries": ['Software'],
+        "definition": "Companies that build visual development platforms letting non-engineers build internal tools, workflows, websites, and mobile apps without writing code."
     },
     "Non Profit": {
         "industries": ['Social Impact'],
@@ -1817,7 +2141,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Nuclear": {
         "industries": ['Science and Engineering'],
-        "definition": "Companies related to the research and applications of reactions caused by dividing the nucleus of an atom or joining it with another particle, especially related to generating power and developing weapons."
+        "definition": "Companies that operate reactors, mine and enrich fuel, build reactor components, or develop nuclear medicine, weapons, or fusion-research technology."
     },
     "Nursing and Residential Care": {
         "industries": ['Health Care'],
@@ -1825,19 +2149,31 @@ INDUSTRY_TAXONOMY = {
     },
     "Nutraceutical": {
         "industries": ['Health Care'],
-        "definition": "Companies that deal with producing foods that contain health-giving additives and purport to have medicinal benefits."
+        "definition": "Companies engaged in producing foods that contain health-giving additives and purport to have medicinal benefits."
     },
     "Nutrition": {
         "industries": ['Food and Beverage', 'Health Care'],
         "definition": "Companies that provide or obtain the nutrients necessary for health and growth."
     },
+    "Observability": {
+        "industries": ['Software', 'Information Technology'],
+        "definition": "Companies that build software for monitoring distributed systems — metrics, logs, traces, profiling — to detect, diagnose, and resolve production issues."
+    },
     "Office Administration": {
         "industries": ['Administrative Services'],
-        "definition": "Companies that deal with a set of day-to-day activities related to financial planning, record keeping and billing, personnel, physical distribution, and logistics within an organization."
+        "definition": "Companies engaged in a set of day-to-day activities related to financial planning, record keeping and billing, personnel, physical distribution, and logistics within an organization."
     },
     "Oil and Gas": {
         "industries": ['Energy', 'Natural Resources'],
         "definition": "Companies that engage in the exploration, production, refinement, and distribution of oil and gas."
+    },
+    "On-Chain Analytics": {
+        "industries": ['Blockchain and Cryptocurrency', 'Data and Analytics'],
+        "definition": "Companies that index, analyze, and provide intelligence on blockchain transactions, smart-contract activity, wallet behavior, and on-chain market data."
+    },
+    "Onboarding": {
+        "industries": ['Software'],
+        "definition": "Companies that build software for ramping new hires — paperwork automation, role-specific training, equipment provisioning, and first-90-day workflow management."
     },
     "Online Auctions": {
         "industries": ['Commerce and Shopping'],
@@ -1855,6 +2191,10 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Internet Services'],
         "definition": "Companies that provide a webpage, allowing users an entryway to a variety of information, tools, links, and more."
     },
+    "Open Banking": {
+        "industries": ['Financial Services', 'Software'],
+        "definition": "Companies that build APIs, aggregation, and payment-initiation services that securely connect consumer and business bank accounts to third-party applications."
+    },
     "Open Source": {
         "industries": ['Software'],
         "definition": "Companies that relate especially to software for which the source code is available to the general public for use or modification."
@@ -1865,11 +2205,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Optical Communication": {
         "industries": ['Hardware'],
-        "definition": "Companies that relate to any type of communication in which light is used to carry the signal to the remote end, instead of electrical current."
+        "definition": "Companies that build fiber-optic transceivers, switches, photonic components, or systems for carrying data via light."
+    },
+    "Oral Care": {
+        "industries": ['Consumer Goods', 'Health Care'],
+        "definition": "Companies that manufacture or sell products for dental and oral hygiene — including toothpaste, mouthwash, floss, and whitening systems."
     },
     "Organic": {
         "industries": ['Sustainability'],
-        "definition": "Companies that relate to products derived or related to living matter."
+        "definition": "Companies that produce, certify, distribute, or retail food and consumer goods grown or made without synthetic pesticides, fertilizers, or additives."
     },
     "Organic Food": {
         "industries": ['Food and Beverage'],
@@ -1889,7 +2233,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Outsourcing": {
         "industries": ['Professional Services'],
-        "definition": "Companies that are hired by other companies to perform work that the client could do internally, or facilitate the process of outsourcing by providing relevant products or services."
+        "definition": "Companies that perform work — IT, customer service, back-office, engineering, finance — on behalf of client organizations as a managed external service."
     },
     "PC Games": {
         "industries": ['Gaming'],
@@ -1905,7 +2249,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Paper Manufacturing": {
         "industries": ['Manufacturing'],
-        "definition": "Companies that are devoted to making paper from vegetable fibers."
+        "definition": "Companies that produce paper, paperboard, and pulp from wood, recycled fiber, or alternative feedstocks for printing, packaging, and tissue uses."
     },
     "Parenting": {
         "industries": ['Community and Lifestyle'],
@@ -1913,15 +2257,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Parking": {
         "industries": ['Transportation'],
-        "definition": "Companies that deal with the parking of a vehicle."
+        "definition": "Companies that operate parking facilities or build software for parking management, payments, reservations, and enforcement."
     },
     "Parks": {
         "industries": ['Travel and Tourism'],
-        "definition": "Companies that relate to large public green areas in a town used for recreation."
+        "definition": "Companies that operate, manage, supply, or service public parks, recreation areas, and green-space facilities."
     },
     "Payments": {
         "industries": ['Financial Services', 'Payments'],
         "definition": "Companies that manage and process financial transactions between two parties from various channels, such as credit cards, e-wallets, or cash cards."
+    },
+    "Payroll": {
+        "industries": ['Financial Services', 'Software'],
+        "definition": "Companies that process employee compensation, tax withholdings, benefits deductions, and statutory filings — either as software or as a managed service."
     },
     "Peer to Peer": {
         "industries": ['Collaboration'],
@@ -1931,6 +2279,10 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Information Technology', 'Privacy and Security'],
         "definition": "Companies that participate in the practice of testing a computer system, network, or web application to find security vulnerabilities that an attacker could exploit."
     },
+    "Performance Management": {
+        "industries": ['Software'],
+        "definition": "Companies that build software for setting goals, running performance reviews, providing continuous feedback, and tying compensation to performance."
+    },
     "Performing Arts": {
         "industries": ['Media and Entertainment'],
         "definition": "Companies that produce live presentations by actors, singers, dancers, musical groups, etc."
@@ -1939,13 +2291,17 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Sales and Marketing'],
         "definition": "Companies that aim to create and influence positive public perception of an individual."
     },
+    "Personal Care": {
+        "industries": ['Consumer Goods'],
+        "definition": "Companies that produce or sell consumer products used in everyday hygiene, grooming, and self-care routines — including soap, deodorant, oral care, and basic skincare."
+    },
     "Personal Finance": {
         "industries": ['Health Care'],
         "definition": "Companies that help individuals or families manage their money related to budgeting, saving, investing, and spending."
     },
     "Personal Health": {
         "industries": ['Health Care'],
-        "definition": "Companies that focus on the wellness of the individual."
+        "definition": "Companies that build consumer products or services for individual wellness — including fitness apps, nutrition tracking, sleep technology, and personal-health monitoring."
     },
     "Personalization": {
         "industries": ['Commerce and Shopping'],
@@ -1953,15 +2309,31 @@ INDUSTRY_TAXONOMY = {
     },
     "Pet": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that offer products or services designed for pet animals."
+        "definition": "Companies that build products or provide services for pet animals — including food, supplies, veterinary care, grooming, training, and pet-specific software (parent category)."
+    },
+    "Pet Care": {
+        "industries": ['Consumer Goods'],
+        "definition": "Companies that produce or sell products and services for pet wellness, grooming, training, and daily care, excluding food and veterinary services."
+    },
+    "Pet Food": {
+        "industries": ['Consumer Goods', 'Food and Beverage'],
+        "definition": "Companies that manufacture, distribute, or sell prepared food products for domestic pets — including dry, wet, raw, and specialty-diet formulations."
+    },
+    "Pet Supplements": {
+        "industries": ['Consumer Goods', 'Health Care'],
+        "definition": "Companies that develop and sell nutritional or therapeutic supplements designed for pets — including vitamins, joint support, and digestive aids."
     },
     "Pharmaceutical": {
         "industries": ['Health Care'],
         "definition": "Companies that specialize in the research, development, manufacturing, and distribution of medications and drugs for medical use."
     },
+    "Philanthropy": {
+        "industries": ['Social Impact'],
+        "definition": "Donor-advised funds, charitable trusts, and philanthropic advisory firms that mobilize private wealth toward social-impact causes."
+    },
     "Photo Editing": {
         "industries": ['Content and Publishing', 'Media and Entertainment'],
-        "definition": "Companies that offer products or services related to altering images."
+        "definition": "Companies that build software or provide services for editing, retouching, and enhancing photographs — including consumer photo apps and professional retouching services."
     },
     "Photo Sharing": {
         "industries": ['Content and Publishing', 'Media and Entertainment'],
@@ -1973,27 +2345,35 @@ INDUSTRY_TAXONOMY = {
     },
     "Physical Security": {
         "industries": ['Administrative Services', 'Privacy and Security'],
-        "definition": "Companies that deal with security measures that are designed to deny unauthorized access to facilities, equipment, and resources to protect personnel and property from damage or harm."
+        "definition": "Companies engaged in security measures that are designed to deny unauthorized access to facilities, equipment, and resources to protect personnel and property from damage or harm."
     },
     "Plastics and Rubber Manufacturing": {
         "industries": ['Manufacturing'],
         "definition": "Companies that make goods by processing plastics materials and raw rubber."
     },
+    "Platform Engineering": {
+        "industries": ['Software', 'Information Technology'],
+        "definition": "Companies that build internal-developer-platform tooling — self-service infrastructure, service catalogs, golden paths, and platform-as-a-product for engineering teams."
+    },
     "Playstation": {
         "industries": ['Consumer Electronics', 'Hardware', 'Platforms'],
-        "definition": "Companies that work with or incorporate Sony's Playstation into their services."
+        "definition": "Companies that develop games, accessories, or services for Sony's PlayStation platforms — including third-party publishers, peripheral makers, and PlayStation-focused content creators."
+    },
+    "Plumbing": {
+        "industries": ['Physical Infrastructure'],
+        "definition": "Companies that install and service water-supply, drainage, and gas-piping systems for residential, commercial, and industrial buildings."
     },
     "Podcast": {
         "industries": ['Media and Entertainment', 'Music and Audio'],
-        "definition": "Companies that relate to episodic series of digital audio or video files that a user can download to a personal device to listen to at a time of their choosing."
+        "definition": "Companies that produce, host, distribute, monetize, or build tools for podcasts — including networks, recording platforms, and ad-insertion services."
     },
     "Point of Sale": {
         "industries": ['Commerce and Shopping'],
-        "definition": "Companies that focus on systems designed to allow customers to make in-person payments for retail goods or services, typically consisting of components such as cash registers, barcode scanners, receipt printers, credit card readers, and customer-facing displays."
+        "definition": "Companies that build point-of-sale software and hardware for retailers, restaurants, and service businesses — including in-store payment terminals, integrated commerce, and SMB POS systems."
     },
     "Politics": {
         "industries": ['Government and Military'],
-        "definition": "Companies that relate to the set of activities associated with the governance of a country, state, or area."
+        "definition": "Companies that provide consulting, technology, polling, or advertising services to political campaigns, parties, advocacy groups, and government affairs teams."
     },
     "Pollution Control": {
         "industries": ['Sustainability'],
@@ -2001,19 +2381,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Ports and Harbors": {
         "industries": ['Transportation'],
-        "definition": "Companies related to the development of ports and harbors or companies whose primary business relates to transporting goods via ports and harbors."
+        "definition": "Companies that operate or service maritime ports — including terminal operations, stevedoring, customs brokerage, and port-management software."
     },
     "Power Grid": {
         "industries": ['Energy'],
-        "definition": "Companies involved with the development of a network, interconnected by transmission and distribution lines, for electricity delivery from producers to consumers"
+        "definition": "Companies involved with the development of a network — including transmission and distribution lines — for electricity delivery from producers to consumers."
     },
     "Precious Metals": {
         "industries": ['Natural Resources'],
-        "definition": "Companies that deal with rare, naturally occurring metals with a high economic value, such as gold, silver, and platinum."
+        "definition": "Companies engaged in rare, naturally occurring metals with a high economic value, such as gold, silver, and platinum."
+    },
+    "Precision Medicine": {
+        "industries": ['Health Care', 'Biotechnology'],
+        "definition": "Companies that tailor clinical care to individual genetic, environmental, and lifestyle profiles — including genomics, biomarker discovery, and targeted-therapy development."
     },
     "Prediction Markets": {
         "industries": ['Financial Services'],
-        "definition": "Companies that deal with exchange-traded markets created for the purpose of trading the outcome of events."
+        "definition": "Companies engaged in exchange-traded markets created for the purpose of trading the outcome of events."
     },
     "Predictive Analytics": {
         "industries": ['Artificial Intelligence', 'Data and Analytics', 'Software'],
@@ -2033,7 +2417,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Primary Education": {
         "industries": ['Education'],
-        "definition": "Companies that relate to the first stage of formal education."
+        "definition": "Companies that operate or supply schools, curriculum, software, or services for children in the early years of formal education."
     },
     "Printing": {
         "industries": ['Content and Publishing', 'Media and Entertainment'],
@@ -2053,7 +2437,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Procurement": {
         "industries": ['Transportation'],
-        "definition": "Companies related to discovering, agreeing to terms on, and purchasing goods, services, or other works, often with the use of a tendering or competitive bidding process."
+        "definition": "Companies that build software, marketplaces, or services for sourcing suppliers, running RFPs, managing contracts, and processing purchase orders."
     },
     "Product Design": {
         "industries": ['Design'],
@@ -2069,11 +2453,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Product Search": {
         "industries": ['Internet Services'],
-        "definition": "Companies that are dedicated to helping consumers find products that match a user's desired criteria."
+        "definition": "Companies that build search and discovery systems for products — including site-search, marketplace-search, and shopping-comparison engines."
+    },
+    "Product-Led Growth": {
+        "industries": ['Sales and Marketing', 'Software'],
+        "definition": "Companies that build software, tooling, or consulting around product-led-growth motions — self-serve onboarding, in-product expansion, and PLG analytics."
     },
     "Productivity Tools": {
         "industries": ['Software'],
-        "definition": "Companies that develop computer software programs which allow a user to produce information (i.e. documents, presentations, worksheets, databases, charts, graphs, digital paintings, electronic music and digital video). Also includes companies that produce software designed to help users make efficient use of their time (i.e. to-do lists, habit trackers, time trackers, distraction blockers, note-taking apps, etc.)"
+        "definition": "Companies that build software for creating documents, spreadsheets, presentations, diagrams, notes, or other knowledge work — including office suites, collaborative editors, and creator tools."
     },
     "Professional Networking": {
         "industries": ['Community and Lifestyle', 'Professional Services'],
@@ -2087,6 +2475,10 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Administrative Services'],
         "definition": "Companies that develop software to help with the planning and organization of a company's resources to move a specific task, event, or duty towards completion."
     },
+    "PropTech": {
+        "industries": ['Software', 'Real Estate', 'Data and Analytics'],
+        "definition": "Software and data companies serving the real-estate industry — including listings, valuation, leasing, transaction management, building operations, and tenant experience."
+    },
     "Property Development": {
         "industries": ['Real Estate'],
         "definition": "Companies that encompass activities ranging from the renovation and release of existing buildings, to the purchase of raw land and subsequent sale of developed land to others."
@@ -2099,25 +2491,29 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Real Estate'],
         "definition": "Companies that provide products or services related to the operation, control, maintenance, and oversight of real estate and physical property, often acting as an intermediary between property owner and tenant."
     },
+    "Psychiatry": {
+        "industries": ['Health Care'],
+        "definition": "Medical practices specializing in the diagnosis, treatment, and prevention of mental, emotional, and behavioral disorders."
+    },
     "Psychology": {
         "industries": ['Health Care'],
-        "definition": "Companies that deal with the scientific study of the human mind and its functions."
+        "definition": "Companies engaged in the scientific study of the human mind and its functions."
     },
     "Public Relations": {
         "industries": ['Sales and Marketing'],
-        "definition": "Companies that are hired to conceive, produce and manage un-paid messages to the public through the media on behalf of a client, with the intention of changing the public's actions by influencing their opinions."
+        "definition": "Companies that craft and place earned-media messaging, manage corporate reputation, and run media-relations programs for brands, executives, and organizations."
     },
     "Public Safety": {
         "industries": ['Government and Military'],
-        "definition": "Companies that are concerned with the welfare and protection of the general public."
+        "definition": "Companies that supply technology, equipment, or services to police, fire, EMS, emergency-management, and other agencies protecting the public."
     },
     "Public Transportation": {
         "industries": ['Transportation'],
-        "definition": "Companies affiliated with the operation of buses, trains, subways, and other forms of transit that charge set fares, run on fixed routes, and are available to the public. This could range from owning the buses, to inspecting the vehicles, to operating the stations."
+        "definition": "Companies that operate or supply public transit systems — buses, trains, subways, light rail, paratransit — typically charging fares and following fixed schedules and routes."
     },
     "Publishing": {
         "industries": ['Content and Publishing', 'Media and Entertainment'],
-        "definition": "Companies that will publish a writer's work."
+        "definition": "Companies that publish written content — including book publishers, magazine and newspaper publishers, digital media, and academic publishing."
     },
     "Q&A": {
         "industries": ['Community and Lifestyle'],
@@ -2157,7 +2553,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Reading Apps": {
         "industries": ['Apps', 'Software'],
-        "definition": "Companies that facilitate literature reading."
+        "definition": "Companies that build mobile or web applications for reading books, articles, or other long-form content — including e-readers, audiobook apps, and reading-focused subscription services."
     },
     "Real Estate": {
         "industries": ['Real Estate'],
@@ -2173,7 +2569,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Recreation": {
         "industries": ['Sports'],
-        "definition": "Companies engaged in leisure services, including but not limited to, tour operations, travel agencies, amusement parks, golf courses, gaming and fishing preserves, sport stadiums, sports teams, movie theaters, dance and theatrical companies, and recreational goods rentals."
+        "definition": "Companies that operate leisure and recreation businesses — including tour operators, travel agencies, amusement parks, sports facilities, and outdoor-recreation services."
     },
     "Recreational Vehicles": {
         "industries": ['Transportation'],
@@ -2182,6 +2578,10 @@ INDUSTRY_TAXONOMY = {
     "Recruiting": {
         "industries": ['Professional Services'],
         "definition": "Companies that provide products or services that facilitate the process of identifying, sourcing, screening, shortlisting, and interviewing candidates for jobs within an organization."
+    },
+    "Recruiting Software": {
+        "industries": ['Software'],
+        "definition": "Companies that build software for recruiters — sourcing, candidate engagement, CRM, scheduling, assessment, and hiring analytics."
     },
     "Recycling": {
         "industries": ['Sustainability'],
@@ -2193,15 +2593,27 @@ INDUSTRY_TAXONOMY = {
     },
     "Religion": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that are recognized on a subnational level by a state or province government and have a general belief in and worship of a superhuman controlling power, especially a personal God or gods."
+        "definition": "Religious institutions and the companies that supply software, content, or services to churches, synagogues, mosques, temples, and other faith communities."
+    },
+    "Relocation Services": {
+        "industries": ['Administrative Services', 'Professional Services'],
+        "definition": "Companies that coordinate employee or family relocations — including moving logistics, temporary housing, immigration, and home search."
+    },
+    "Remote Patient Monitoring": {
+        "industries": ['Health Care', 'Software'],
+        "definition": "Companies that use connected devices and software to track patient health metrics outside of clinical settings, enabling longitudinal care for chronic and post-acute conditions."
+    },
+    "Removals and Storage": {
+        "industries": ['Administrative Services'],
+        "definition": "Companies that provide household and commercial moving services — including packing, van hire, and short- or long-term self-storage."
     },
     "Renewable Energy": {
         "industries": ['Energy', 'Sustainability'],
-        "definition": "Companies that offer products or services related to the collection of energy from resources that are naturally replenished more quickly than they are consumed, including but not limited to, sunlight, wind, water movement, geothermal heat, and biomass."
+        "definition": "Companies that develop, manufacture, finance, or operate renewable-energy systems — including solar, wind, hydro, geothermal, and biomass."
     },
     "Rental": {
         "industries": ['Commerce and Shopping'],
-        "definition": "Companies involved with properties that are available for rent."
+        "definition": "Companies that operate rental businesses — including equipment rental, vehicle rental, residential and commercial property rental, and short-term rental platforms."
     },
     "Rental Property": {
         "industries": ['Real Estate'],
@@ -2209,7 +2621,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Reputation": {
         "industries": ['Information Technology'],
-        "definition": "Companies that deal with a company's overall reputation among its various stakeholders."
+        "definition": "Companies engaged in a company's overall reputation among its various stakeholders."
     },
     "Reservations": {
         "industries": ['Events', 'Media and Entertainment'],
@@ -2217,7 +2629,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Residential": {
         "industries": ['Real Estate'],
-        "definition": "Companies that relate to the consumer real estate process."
+        "definition": "Companies that serve the residential real-estate market — including builders, brokerages, property managers, and home-services providers."
     },
     "Resorts": {
         "industries": ['Travel and Tourism'],
@@ -2233,19 +2645,27 @@ INDUSTRY_TAXONOMY = {
     },
     "Retail Technology": {
         "industries": ['Commerce and Shopping', 'Hardware', 'Software'],
-        "definition": "Companies that create innovative technological solutions that enable retailers (brick-and-mortar, e-commerce, D2C, etc.) to increase sales, improve customer satisfaction, improve efficiency, and manage and optimize operations within the retail industry."
+        "definition": "Companies that build technology for retailers — including POS, inventory, omnichannel commerce, store operations, and analytics for brick-and-mortar, e-commerce, and DTC."
     },
     "Retirement": {
         "industries": ['Community and Lifestyle'],
         "definition": "Companies focused on or related to the action of leaving one's job and ceasing to work."
     },
+    "Revenue Operations": {
+        "industries": ['Sales and Marketing', 'Software'],
+        "definition": "Companies that build software or provide consulting to align marketing, sales, and customer-success operations under unified data, processes, and reporting."
+    },
+    "Reverse ETL": {
+        "industries": ['Data and Analytics', 'Software'],
+        "definition": "Companies that build tools to sync data from warehouses back into operational SaaS applications — sales tools, marketing automation, customer success."
+    },
     "Ride Sharing": {
         "industries": ['Transportation'],
-        "definition": "Companies that deal with providing passengers with a private vehicle driven by its owner either for free, or for a fee, especially as arranged by means of a website or app."
+        "definition": "Companies engaged in providing passengers with a private vehicle driven by its owner either for free, or for a fee, especially as arranged by means of a website or app."
     },
     "Risk Management": {
         "industries": ['Professional Services'],
-        "definition": "Companies that deal with the identification, evaluation, and prioritization of risks followed by coordinated and economical application of resources to minimize, monitor, and control the probability or impact of unfortunate events or to maximize the realization of opportunities."
+        "definition": "Companies that build software, provide consulting, or supply insurance products for identifying, evaluating, and mitigating financial, operational, regulatory, or strategic risks."
     },
     "Robotics": {
         "industries": ['Hardware', 'Science and Engineering', 'Software'],
@@ -2257,11 +2677,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Rugby": {
         "industries": ['Sports'],
-        "definition": "Companies that are focused on any aspect of Rugby from player health, to broadcasting, to clothes, to the field/stadium operations."
+        "definition": "Companies whose business centers on the sport of rugby — including leagues, clubs, broadcasters, equipment manufacturers, and venue operators."
     },
     "SEM": {
         "industries": ['Advertising', 'Internet Services', 'Sales and Marketing'],
-        "definition": "Companies that specialize in internet-based marketing related to the promotion of websites by increasing their visibility in search engine results pages (SERPs) through search engine optimization (SEO) and/or paid advertising. (SEM = Search Engine Marketing)"
+        "definition": "Companies that run paid-search marketing and search engine advertising — including agencies, software platforms, and bid-management tools for Google Ads, Bing Ads, and similar."
     },
     "SEO": {
         "industries": ['Internet Services', 'Sales and Marketing'],
@@ -2269,7 +2689,7 @@ INDUSTRY_TAXONOMY = {
     },
     "SMS": {
         "industries": ['Internet Services', 'Messaging and Telecommunications'],
-        "definition": "Companies related to the sending and receiving of text messages. (SMS = Short Messaging Service)."
+        "definition": "Companies that build platforms, APIs, or applications for sending, receiving, and analyzing short message service traffic at scale."
     },
     "SNS": {
         "industries": ['Software'],
@@ -2277,7 +2697,7 @@ INDUSTRY_TAXONOMY = {
     },
     "STEM Education": {
         "industries": ['Education', 'Science and Engineering'],
-        "definition": "Companies that deal with educating students in science, technology, engineering, and mathematics in interdisciplinary and applied approach."
+        "definition": "Companies engaged in educating students in science, technology, engineering, and mathematics in interdisciplinary and applied approach."
     },
     "SaaS": {
         "industries": ['Software'],
@@ -2285,7 +2705,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Sailing": {
         "industries": ['Sports'],
-        "definition": "Companies that relate to the sport or recreational activity of sailing."
+        "definition": "Companies whose business centers on sailing — including boat builders, marina operators, charter services, regatta organizers, and apparel brands."
     },
     "Sales": {
         "industries": ['Sales and Marketing'],
@@ -2294,6 +2714,18 @@ INDUSTRY_TAXONOMY = {
     "Sales Automation": {
         "industries": ['Information Technology', 'Sales and Marketing', 'Software'],
         "definition": "Companies that build software to automate and streamline manual, tedious, and time-consuming tasks in the sales process including e-mail reminders, inventory control, pricing, regular documentation, standard contracts, etc."
+    },
+    "Sales Enablement": {
+        "industries": ['Software', 'Sales and Marketing'],
+        "definition": "Companies that provide content management, training delivery, and analytics for sales organizations, equipping reps with the materials and skills needed to advance deals."
+    },
+    "Sales Engagement": {
+        "industries": ['Software', 'Sales and Marketing'],
+        "definition": "Software platforms that orchestrate outbound sales activities — email sequences, dialer integration, social touchpoints — and measure response, conversion, and rep productivity."
+    },
+    "Sales Training": {
+        "industries": ['Education', 'Sales and Marketing'],
+        "definition": "Companies that deliver coaching, workshops, and curriculum to sales teams to improve prospecting, discovery, negotiation, and closing performance."
     },
     "Same Day Delivery": {
         "industries": ['Transportation'],
@@ -2329,15 +2761,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Semantic Search": {
         "industries": ['Internet Services'],
-        "definition": "Companies related to improving search accuracy by understanding the searcher's intent and the contextual meaning of terms as they appear in the searchable dataspace, whether on the web or within a closed system, to generate more relevant results."
+        "definition": "Companies that build search systems using natural-language understanding and context to return results matching user intent rather than literal keyword matches."
     },
     "Semantic Web": {
         "industries": ['Internet Services'],
-        "definition": "Companies that deal with the file format genre semantic web that has the ultimate goal of making a machine understand internet data."
+        "definition": "Companies engaged in the file format genre semantic web that has the ultimate goal of making a machine understand internet data."
     },
     "Semiconductor": {
         "industries": ['Hardware', 'Science and Engineering'],
-        "definition": "Companies related to the researching and manufacturing of materials with electrical conducting properties that allow for alteration, enabling uses in various applications, including especially integrated circuits (also known as chips or microchips) for computers and other electronics."
+        "definition": "Companies that design or manufacture integrated circuits, memory, microcontrollers, and the equipment, materials, and EDA tools used to produce them."
+    },
+    "Senior Care": {
+        "industries": ['Health Care'],
+        "definition": "Companies that provide care, housing, or services to older adults — including home care, assisted living, hospice, memory care, and senior-focused tech."
     },
     "Sensor": {
         "industries": ['Hardware'],
@@ -2349,35 +2785,43 @@ INDUSTRY_TAXONOMY = {
     },
     "Shipping": {
         "industries": ['Transportation'],
-        "definition": "Companies that relate to the physical transportation of commodities and merchandise goods and cargo by land, air, or sea."
+        "definition": "Companies that move goods and cargo by land, sea, or air — including ocean carriers, freight forwarders, parcel carriers, and shipping software."
     },
     "Shipping Broker": {
         "industries": ['Transportation'],
-        "definition": "Companies that relate to agents employed in the buying and selling of ships."
+        "definition": "Companies that act as intermediaries arranging the purchase, sale, or chartering of ships and cargo space between owners and shippers."
     },
     "Shoes": {
         "industries": ['Clothing and Apparel', 'Consumer Goods'],
-        "definition": "Companies that focus on the production and selling of footwear."
+        "definition": "Companies that design, manufacture, or sell footwear — including athletic, casual, dress, and specialty shoes across direct-to-consumer, wholesale, and retail channels."
     },
     "Shopping": {
         "industries": ['Commerce and Shopping'],
-        "definition": "Companies that facilitate the process of a customer purchasing goods from stores, including those that provide services such as shopping intelligence, mystery shopping, customer experience, or products such as shopping carts or self-checkout machines. Does not include retail or online stores."
+        "definition": "Companies that operate or supply retail commerce — including stores, malls, e-commerce platforms, shopping intelligence, mystery-shopping, and customer-experience services."
     },
     "Shopping Mall": {
         "industries": ['Commerce and Shopping'],
-        "definition": "Companies related to shopping centers in which one or more buildings form a complex of shops with interconnecting walkways, usually indoors."
+        "definition": "Companies that develop, own, or operate shopping centers — including indoor malls, lifestyle centers, and outlet complexes."
     },
     "Simulation": {
         "industries": ['Software'],
         "definition": "Companies that create and utilize computer-based models to mimic real-world processes, systems, and environments."
     },
+    "Site Reliability Engineering": {
+        "industries": ['Software', 'Information Technology'],
+        "definition": "Companies that build software or services for operating production systems reliably at scale — including incident response, SLOs, error budgets, and chaos engineering."
+    },
     "Skiing": {
         "industries": ['Sports'],
-        "definition": "Companies related to the sport of skiing."
+        "definition": "Companies whose business centers on skiing and snow sports — including resort operators, equipment manufacturers, apparel brands, and instruction services."
     },
     "Skill Assessment": {
         "industries": ['Education'],
         "definition": "Companies that provide tests designed to help individuals or employers evaluate an individual's ability to perform particular tasks."
+    },
+    "Skin Care": {
+        "industries": ['Consumer Goods', 'Health Care'],
+        "definition": "Companies that develop and sell topical products for cleansing, moisturizing, treating, or protecting skin — including serums, creams, sunscreens, and acne treatments."
     },
     "Smart Building": {
         "industries": ['Real Estate'],
@@ -2385,7 +2829,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Smart Cities": {
         "industries": ['Real Estate'],
-        "definition": "Companies that offer products or services that enable local governments to use sensors and other types of data collection to track information about city operations (i.e. transportation, energy, or utilities) for the purpose of analyzing the data with the goal of enhancing the quality, efficiency, or cost-effectiveness of those operations."
+        "definition": "Companies that supply sensors, software, or analytics for monitoring and managing urban operations — transportation, energy, utilities, public safety, and infrastructure — to improve efficiency and quality of life."
+    },
+    "Smart Contracts": {
+        "industries": ['Blockchain and Cryptocurrency', 'Software'],
+        "definition": "Companies that develop self-executing on-chain programs, smart-contract languages, security tooling, or smart-contract auditing services."
     },
     "Smart Home": {
         "industries": ['Consumer Electronics', 'Real Estate'],
@@ -2393,19 +2841,19 @@ INDUSTRY_TAXONOMY = {
     },
     "Snack Food": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies that produce or sell snacks."
+        "definition": "Companies that produce, package, or sell shelf-stable snack products — including chips, crackers, bars, jerky, and other portion-sized eating occasions."
     },
     "Soccer": {
         "industries": ['Sports'],
-        "definition": "Companies that relate to the sport of soccer."
+        "definition": "Companies whose business centers on the sport of soccer — including leagues, clubs, broadcasters, equipment manufacturers, and venue operators."
     },
     "Social": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that are designed to address a social problem."
+        "definition": "Companies whose mission centers on addressing a social problem — including mission-driven businesses and social-enterprise platforms."
     },
     "Social Assistance": {
         "industries": ['Government and Military'],
-        "definition": "Companies that provide help to individuals and families."
+        "definition": "Companies and nonprofits that provide services to individuals and families in need — including food banks, housing assistance, family services, and case-management software."
     },
     "Social Bookmarking": {
         "industries": ['Content and Publishing'],
@@ -2417,7 +2865,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Social Entrepreneurship": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that relate to applying commercial strategies to maximize improvements in financial, social, and environmental well-being."
+        "definition": "Companies that pursue commercial models explicitly designed to generate measurable social or environmental impact alongside financial returns."
     },
     "Social Impact": {
         "industries": ['Social Impact'],
@@ -2429,11 +2877,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Social Media Advertising": {
         "industries": ['Advertising', 'Sales and Marketing'],
-        "definition": "Companies that place ads on social networking sites."
+        "definition": "Companies that build software or provide services for advertising on social platforms — including campaign management, creative production, and analytics for Meta, TikTok, LinkedIn, and X."
     },
     "Social Media Management": {
         "industries": ['Internet Services', 'Sales and Marketing'],
-        "definition": "Companies that deal with the process of creating, scheduling, analyzing, and engaging with content posted on social media platforms."
+        "definition": "Companies engaged in the process of creating, scheduling, analyzing, and engaging with content posted on social media platforms."
     },
     "Social Media Marketing": {
         "industries": ['Sales and Marketing'],
@@ -2449,11 +2897,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Social Recruiting": {
         "industries": ['Professional Services'],
-        "definition": "Companies related to the process of recruiting candidates through social media platforms including online forums, job boards, and blogs."
+        "definition": "Companies that build software or services for sourcing, engaging, and hiring candidates through social-media platforms, forums, and online communities."
     },
     "Social Shopping": {
         "industries": ['Commerce and Shopping'],
-        "definition": "Companies that deal with social networking services to share their latest purchases, wants, deals, etc."
+        "definition": "Companies engaged in social networking services to share their latest purchases, wants, deals, etc."
     },
     "Software": {
         "industries": ['Software'],
@@ -2463,13 +2911,13 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Science and Engineering', 'Software'],
         "definition": "Companies whose primary product or service deals with the design, development, testing, and maintenance of software applications."
     },
-    "Solar": {
+    "Solar Energy": {
         "industries": ['Energy', 'Natural Resources', 'Sustainability'],
-        "definition": "Companies that research, develop, engineer, manufacture, or install technologies to capture radiant light and heat from the sun as a source of renewable energy."
+        "definition": "Companies that manufacture solar panels and components, develop and operate solar projects, or build software and financing for residential, commercial, and utility solar."
     },
     "Space Travel": {
         "industries": ['Transportation'],
-        "definition": "Companies that deal with exploration beyond earth."
+        "definition": "Companies engaged in space exploration and transport — including launch vehicles, satellites, suborbital tourism, and crewed-space missions."
     },
     "Spam Filtering": {
         "industries": ['Information Technology'],
@@ -2481,7 +2929,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Sponsorship": {
         "industries": ['Sales and Marketing'],
-        "definition": "Companies that deal with a form of advertising in which companies pay to be associated with certain events."
+        "definition": "Companies engaged in a form of advertising in which companies pay to be associated with certain events."
     },
     "Sporting Goods": {
         "industries": ['Commerce and Shopping', 'Sports'],
@@ -2491,6 +2939,10 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Sports'],
         "definition": "Companies that are involved in producing, facilitating, promoting, or organizing any activity, experience, or business enterprise focused on sports."
     },
+    "Stablecoin": {
+        "industries": ['Blockchain and Cryptocurrency', 'Payments', 'Financial Services'],
+        "definition": "Companies that issue, custody, or build payment rails for fiat-pegged crypto tokens — including USD-, EUR-, and asset-backed stablecoins."
+    },
     "Staffing Agency": {
         "industries": ['Administrative Services'],
         "definition": "Companies that have employees who can be hired out for temporary or long-term work."
@@ -2498,6 +2950,10 @@ INDUSTRY_TAXONOMY = {
     "Stock Exchanges": {
         "industries": ['Financial Services', 'Lending and Investments'],
         "definition": "Companies that provide, support, or are dedicated to a centralized location where the shares of publicly traded companies are bought and sold."
+    },
+    "Subscription Commerce": {
+        "industries": ['Commerce and Shopping', 'Software'],
+        "definition": "Companies that operate subscription-based product or service businesses — including consumer subscription boxes — and the software platforms enabling recurring commerce."
     },
     "Supply Chain Management": {
         "industries": ['Transportation', 'Software', 'Information Technology'],
@@ -2513,7 +2969,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Swimming": {
         "industries": ['Sports'],
-        "definition": "Companies that deal with all things related to the sport of swimming."
+        "definition": "Companies whose business centers on the sport and activity of swimming — including pool operators, swim apparel and equipment makers, training programs, and competitive swimming organizations."
     },
     "TV": {
         "industries": ['Media and Entertainment', 'Video'],
@@ -2525,7 +2981,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Table Tennis": {
         "industries": ['Sports'],
-        "definition": "Companies deal with any aspect of ping-pong."
+        "definition": "Companies whose business centers on table tennis — including equipment manufacturers, leagues, broadcasters, and venue operators."
+    },
+    "Talent Acquisition": {
+        "industries": ['Software', 'Professional Services'],
+        "definition": "Companies that build software or provide services for sourcing, evaluating, and hiring candidates — including sourcing tools, assessment platforms, and recruitment-marketing software."
     },
     "Task Management": {
         "industries": ['Software'],
@@ -2537,7 +2997,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Tea": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies that are involved in, but not limited to, the sourcing, brewing, distribution of tea and also create products to aid in this process."
+        "definition": "Companies that source, blend, manufacture, distribute, or retail tea — including specialty tea brands, ready-to-drink tea beverages, and tea-shop chains."
     },
     "Technical Support": {
         "industries": ['Information Technology'],
@@ -2545,15 +3005,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Teenagers": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that are catered towards teenagers."
+        "definition": "Companies that develop or sell products and services targeted primarily at teenagers — including teen-focused apparel, entertainment, beauty, social, and lifestyle brands."
     },
     "Telecommunications": {
         "industries": ['Hardware'],
         "definition": "Companies that transmit information over wire, radio, optical, or other electromagnetic systems."
     },
+    "Telehealth": {
+        "industries": ['Health Care', 'Software'],
+        "definition": "Broad-category companies that use telecommunications technology to deliver health-care services, education, or administration remotely."
+    },
+    "Telemedicine": {
+        "industries": ['Health Care', 'Software'],
+        "definition": "Companies that deliver clinical care remotely via video, asynchronous messaging, or phone — including primary care, urgent care, mental health, and specialty telemedicine platforms."
+    },
     "Tennis": {
         "industries": ['Sports'],
-        "definition": "Companies involved in anything related to the sport of tennis."
+        "definition": "Companies whose business centers on the sport of tennis — including racket and apparel manufacturers, tour operators, clubs, broadcasters, and venue operators."
     },
     "Test and Measurement": {
         "industries": ['Data and Analytics'],
@@ -2561,27 +3029,27 @@ INDUSTRY_TAXONOMY = {
     },
     "Text Analytics": {
         "industries": ['Data and Analytics', 'Software'],
-        "definition": "Companies that deal with deriving high-quality information from text."
+        "definition": "Companies that build software for extracting structured insight from unstructured text — including sentiment analysis, entity extraction, topic modeling, and document understanding."
     },
     "Textbook": {
         "industries": ['Education'],
-        "definition": "Companies that deal with books used as a standard work for the study of a particular subject."
+        "definition": "Companies engaged in books used as a standard work for the study of a particular subject."
     },
     "Textiles": {
         "industries": ['Manufacturing'],
-        "definition": "Companies that deal with the production of cloth or woven fabric."
+        "definition": "Companies that produce, distribute, or finish cloth and woven fabrics — including yarn, weaving, dyeing, technical textiles, and finished-textile products."
     },
     "Theatre": {
         "industries": ['Media and Entertainment'],
-        "definition": "Companies related to plays, musicals or other theatrical events."
+        "definition": "Companies that produce, stage, license, or supply theatrical performances — including production companies, venues, ticketing platforms, and equipment suppliers."
     },
     "Therapeutics": {
         "industries": ['Health Care'],
-        "definition": "Companies that relate to treatments or therapy to help remediate health problems."
+        "definition": "Companies that develop, manufacture, or commercialize drugs, biologics, devices, or digital therapies that treat disease."
     },
     "Ticketing": {
         "industries": ['Events', 'Media and Entertainment'],
-        "definition": "Companies that deal with the production, selling, or management of tickets."
+        "definition": "Companies engaged in the production, selling, or management of tickets."
     },
     "Timber": {
         "industries": ['Natural Resources'],
@@ -2589,31 +3057,39 @@ INDUSTRY_TAXONOMY = {
     },
     "Timeshare": {
         "industries": ['Real Estate', 'Travel and Tourism'],
-        "definition": "Companies that deal with vacation properties with shared ownership."
+        "definition": "Companies that develop, operate, sell, or resell shared-ownership vacation properties — including timeshare resorts, fractional ownership, and timeshare exchange networks."
     },
     "Tizen": {
         "industries": ['Platforms'],
-        "definition": "Companies that deal with a Linux-based mobile operating system backed by the Linux Foundation but developed and used primarily by Samsung Electronics."
+        "definition": "Companies engaged in a Linux-based mobile operating system backed by the Linux Foundation but developed and used primarily by Samsung Electronics."
     },
     "Tobacco": {
         "industries": ['Consumer Goods', 'Food and Beverage'],
-        "definition": "Any company that is broadly connected to tobacco products, and/or are focused on the growing, processing, distributing, or selling of tobacco products (including accessories such as e-cigs or vapes)."
+        "definition": "Companies engaged in tobacco growing, processing, distribution, retail, or alternative-product development — including cigarettes, cigars, vaping, and reduced-risk nicotine products."
+    },
+    "Token Issuer": {
+        "industries": ['Blockchain and Cryptocurrency'],
+        "definition": "Foundations, labs entities, and DAOs that have launched a native cryptocurrency or governance token tied to a protocol, application, or community."
+    },
+    "Tokenization": {
+        "industries": ['Blockchain and Cryptocurrency', 'Financial Services'],
+        "definition": "Companies that represent real-world assets — real estate, equities, debt, commodities — as blockchain tokens for trading, settlement, or programmable ownership."
     },
     "Tour Operator": {
         "industries": ['Travel and Tourism'],
-        "definition": "Companies that deal with any type of tour."
+        "definition": "Companies that organize and sell guided travel experiences — including group tours, expedition trips, specialty tours, and tour-booking marketplaces."
     },
     "Tourism": {
         "industries": ['Travel and Tourism'],
-        "definition": "Companies related to the business of attracting, accommodating, entertaining, and educating short-term travelers. Tourism refers to short-term travel for any purpose, and tourism companies generally fall within the service industry and work to support tourists."
+        "definition": "Companies that attract, host, transport, or entertain travelers — including tour operators, hotels, attractions, destination marketing, and travel agencies."
     },
     "Toys": {
         "industries": ['Consumer Goods'],
-        "definition": "Companies that deal with toys."
+        "definition": "Companies that design, manufacture, or sell toys, games, dolls, plush, building sets, and adjacent play-and-learning products for children and collectors."
     },
     "Trade Shows": {
         "industries": ['Administrative Services'],
-        "definition": "Companies that deal with or are exhibitions at which businesses in a particular industry promote their products and services."
+        "definition": "Companies engaged in or are exhibitions at which businesses in a particular industry promote their products and services."
     },
     "Trading Platform": {
         "industries": ['Financial Services', 'Lending and Investments'],
@@ -2629,23 +3105,27 @@ INDUSTRY_TAXONOMY = {
     },
     "Translation Service": {
         "industries": ['Professional Services'],
-        "definition": "Companies that convert text from one language into another."
+        "definition": "Companies that translate text or speech between languages — including human translation agencies, machine-translation platforms, and localization services."
     },
     "Transportation": {
         "industries": ['Transportation'],
-        "definition": "Companies related to the movement of people, animals, or goods from one location to another."
+        "definition": "Companies that move people, goods, or animals between locations — including operators, infrastructure, logistics software, and mobility services."
     },
     "Travel": {
         "industries": ['Travel and Tourism'],
-        "definition": "Companies related to the movement of people between distant locations, whether for short or long-term periods, one-way or round-trip."
+        "definition": "Companies that arrange, book, or supply services for personal or business travel — including booking platforms, agencies, tour operators, and corporate travel managers."
     },
     "Travel Accommodations": {
         "industries": ['Travel and Tourism'],
-        "definition": "Companies that provide lodging in exchange for payment."
+        "definition": "Companies that provide lodging — including hotels, vacation rentals, hostels, serviced apartments, and short-term-rental platforms."
     },
     "Travel Agency": {
         "industries": ['Travel and Tourism'],
-        "definition": "Companies that related to making travel arrangements for travelers."
+        "definition": "Companies that book, plan, or sell travel arrangements on behalf of travelers — including online travel agencies, corporate travel managers, and traditional retail agencies."
+    },
+    "Treasury Management": {
+        "industries": ['Financial Services', 'Software'],
+        "definition": "Companies that build software or services for cash management, liquidity forecasting, bank-account reconciliation, FX hedging, and payment orchestration for corporate finance teams."
     },
     "Tutoring": {
         "industries": ['Education'],
@@ -2653,7 +3133,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Twitter": {
         "industries": ['Platforms'],
-        "definition": "Companies whose primarily role is dealing with Twitter."
+        "definition": "Companies whose primary product is built on the Twitter/X platform — including Twitter-data analytics, social-listening tools, and X-API integrations."
     },
     "UX Design": {
         "industries": ['Design'],
@@ -2669,7 +3149,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Universities": {
         "industries": ['Education'],
-        "definition": "Companies that provide or deal with higher education institutions."
+        "definition": "Companies that operate degree-granting institutions or supply software, content, and services to colleges and universities."
     },
     "Usability Testing": {
         "industries": ['Data and Analytics', 'Design'],
@@ -2677,11 +3157,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Vacation Rental": {
         "industries": ['Real Estate', 'Travel and Tourism'],
-        "definition": "Companies that deal with the reservations of lodging for short-term periods."
+        "definition": "Companies engaged in the reservations of lodging for short-term periods."
     },
     "Vending and Concessions": {
         "industries": ['Commerce and Shopping'],
-        "definition": "Companies that deal with providing food and beverage at events."
+        "definition": "Companies that operate vending machines, micro-markets, or concessions at venues — including office snacks, stadium concessions, and unattended retail."
     },
     "Venture Capital": {
         "industries": ['Financial Services', 'Lending and Investments'],
@@ -2693,7 +3173,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Veterinary": {
         "industries": ['Health Care'],
-        "definition": "Companies that are dedicated to the treatment of animals."
+        "definition": "Companies that provide veterinary medical services, sell veterinary pharmaceuticals and supplies, or build software for animal-health practices."
     },
     "Video": {
         "industries": ['Media and Entertainment', 'Video'],
@@ -2701,23 +3181,23 @@ INDUSTRY_TAXONOMY = {
     },
     "Video Advertising": {
         "industries": ['Advertising', 'Sales and Marketing'],
-        "definition": "Companies that deal with ads containing video."
+        "definition": "Companies that build platforms or supply services for video advertising — including CTV/OTT ad tech, in-stream video ads, programmatic video, and video creative."
     },
     "Video Chat": {
         "industries": ['Information Technology', 'Internet Services', 'Messaging and Telecommunications'],
-        "definition": "Companies involved in face-to-face conversation held over the internet by means of dedicated software."
+        "definition": "Companies that build software or hardware for one-to-one or small-group video calling over the internet — including consumer video-call apps and embedded video-chat APIs."
     },
     "Video Conferencing": {
         "industries": ['Hardware', 'Information Technology', 'Internet Services', 'Messaging and Telecommunications', 'Software'],
-        "definition": "Companies involved in face-to-face meetings held over the internet by means of dedicated software."
+        "definition": "Companies that build software or hardware for multi-party video meetings — including enterprise meeting platforms, conference-room systems, webinars, and meeting-AI tools."
     },
     "Video Editing": {
         "industries": ['Content and Publishing', 'Media and Entertainment', 'Video'],
-        "definition": "Companies that deal with the manipulation and arrangement of video shots."
+        "definition": "Companies that build software or provide services for editing video content — including post-production tools, AI video editors, and freelance video-editing services."
     },
     "Video Games": {
         "industries": ['Gaming'],
-        "definition": "Companies that develop games played electronically."
+        "definition": "Companies that develop or publish video games — across PC, console, mobile, and cloud-gaming platforms — including studios, publishers, and live-service operators."
     },
     "Video Streaming": {
         "industries": ['Content and Publishing', 'Media and Entertainment', 'Video'],
@@ -2729,7 +3209,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Virtual Assistant": {
         "industries": ['Software'],
-        "definition": "Companies that deal with offsite administrative support."
+        "definition": "Companies that provide remote administrative, executive, or specialized support staff to businesses — typically on a fractional or contract basis."
     },
     "Virtual Currency": {
         "industries": ['Financial Services', 'Payments', 'Software'],
@@ -2737,11 +3217,11 @@ INDUSTRY_TAXONOMY = {
     },
     "Virtual Desktop": {
         "industries": ['Software'],
-        "definition": "Companies that deal with computer operating systems that run virtually, as opposed to directly on the user's endpoint hardware."
+        "definition": "Companies engaged in computer operating systems that run virtually, as opposed to directly on the user's endpoint hardware."
     },
     "Virtual Goods": {
         "industries": ['Commerce and Shopping', 'Software'],
-        "definition": "Companies that deal with goods that only exist in the digital world."
+        "definition": "Companies that produce or sell digital items used inside applications and games — including in-game items, virtual currency, NFT goods, and metaverse assets."
     },
     "Virtual Reality": {
         "industries": ['Hardware', 'Software'],
@@ -2769,11 +3249,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Vocational Education": {
         "industries": ['Education'],
-        "definition": "Companies that prepare people to a skilled craft as an artisan, trade as a tradesperson, or work as a technician"
+        "definition": "Companies that prepare people for a skilled craft as an artisan, trade as a tradesperson, or work as a technician."
     },
     "Volleyball": {
         "industries": ['Sports'],
-        "definition": "Companies related to the sport of volleyball."
+        "definition": "Companies whose business centers on volleyball — including leagues, equipment manufacturers, apparel brands, and venue operators."
+    },
+    "Vulnerability Management": {
+        "industries": ['Privacy and Security', 'Software'],
+        "definition": "Companies that scan systems for security weaknesses, prioritize remediation, and track exposure across endpoints, cloud, applications, and networks."
     },
     "Warehousing": {
         "industries": ['Transportation'],
@@ -2785,15 +3269,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Water": {
         "industries": ['Natural Resources'],
-        "definition": "Companies related to the production, management, maintenance, or research of water."
+        "definition": "Companies that produce, treat, distribute, manage, or develop technology for fresh, waste, or process water across municipal, industrial, and consumer uses."
     },
     "Water Purification": {
         "industries": ['Sustainability'],
-        "definition": "Companies that deal with the process of removing undesirable chemicals, biological contaminants, suspended solids, and gasses from water."
+        "definition": "Companies engaged in the process of removing undesirable chemicals, biological contaminants, suspended solids, and gasses from water."
     },
     "Water Transportation": {
         "industries": ['Transportation'],
-        "definition": "Subsection of transportation. Companies that transport people or goods over water."
+        "definition": "Companies that move passengers or goods over water — including ferries, cruise lines, charter boats, and short-sea shipping operators."
     },
     "Wealth Management": {
         "industries": ['Financial Services'],
@@ -2803,21 +3287,13 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Consumer Electronics', 'Hardware'],
         "definition": "Companies that produce computing devices intended to be worn on the body."
     },
-    "Web3 Investor": {
-        "industries": ['Financial Services', 'Lending and Investments', 'Blockchain and Cryptocurrency'],
-        "definition": "Investment firms, venture capital funds, and hedge funds that focus specifically on blockchain, cryptocurrency, DeFi, NFTs, and other Web3 technologies. Includes crypto VCs, token funds, and Web3-focused angel investors."
-    },
-    "Web3 Fund": {
-        "industries": ['Financial Services', 'Lending and Investments', 'Blockchain and Cryptocurrency'],
-        "definition": "Investment funds (venture capital, hedge funds, token funds) that specialize in allocating capital to blockchain, cryptocurrency, DeFi, NFTs, and other Web3 projects and companies."
-    },
     "Web Apps": {
         "industries": ['Apps', 'Software'],
-        "definition": "Companies that develop a software app for use in web browsers."
+        "definition": "Companies that build software applications delivered through web browsers — including SaaS web apps, web-based productivity tools, and progressive web apps."
     },
     "Web Browsers": {
         "industries": ['Internet Services', 'Software'],
-        "definition": "Companies that develop applications used to access and view websites."
+        "definition": "Companies that develop web browsers — including major consumer browsers, specialty browsers (privacy-focused, productivity-focused), and browser-based enterprise platforms."
     },
     "Web Design": {
         "industries": ['Design'],
@@ -2831,13 +3307,21 @@ INDUSTRY_TAXONOMY = {
         "industries": ['Internet Services'],
         "definition": "Companies that provide the technologies (e.g., servers) and services (e.g., DNS and other configurations) required to maintain a website and make it accessible online."
     },
+    "Web3": {
+        "industries": ['Blockchain and Cryptocurrency', 'Software'],
+        "definition": "Companies building decentralized internet applications and infrastructure on blockchains — including wallets, identity, social, gaming, and developer platforms."
+    },
+    "Web3 Investor": {
+        "industries": ['Blockchain and Cryptocurrency', 'Financial Services', 'Lending and Investments'],
+        "definition": "Investment firms, venture capital funds, and hedge funds that focus specifically on blockchain, cryptocurrency, DeFi, NFTs, and other Web3 technologies. Includes crypto VCs, token funds, and Web3-focused angel investors."
+    },
     "WebOS": {
         "industries": ['Platforms'],
-        "definition": "Companies that run and produce WebOS, an LG-owned, Linux-based operating system"
+        "definition": "Companies that build, run, or supply applications for WebOS — an LG-owned, Linux-based operating system used in smart TVs and embedded devices."
     },
     "Wedding": {
         "industries": ['Community and Lifestyle', 'Events'],
-        "definition": "Companies that provide goods or services for weddings."
+        "definition": "Companies that provide products or services for weddings — including venues, planners, photographers, dress designers, florists, and wedding-specific marketplaces."
     },
     "Wellness": {
         "industries": ['Health Care'],
@@ -2849,7 +3333,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Wind Energy": {
         "industries": ['Energy', 'Natural Resources', 'Sustainability'],
-        "definition": "Companies that are part of the wind-making electricity process, from companies that build and maintain wind turbines to ones that store/distribute energy."
+        "definition": "Companies engaged in wind-power generation — including turbine manufacturers, project developers, operators, and wind-farm software providers."
     },
     "Windows": {
         "industries": ['Platforms'],
@@ -2861,7 +3345,7 @@ INDUSTRY_TAXONOMY = {
     },
     "Wine And Spirits": {
         "industries": ['Food and Beverage'],
-        "definition": "Companies related to alcoholic beverages that are distilled and fermented (excluding beer)."
+        "definition": "Companies that produce, distribute, or retail wine, distilled spirits, and related alcoholic beverages excluding beer."
     },
     "Winery": {
         "industries": ['Food and Beverage'],
@@ -2877,11 +3361,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Women's": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies that cater towards women."
+        "definition": "Companies focused on products, services, or content marketed primarily to women — including apparel, beauty, lifestyle, and women's-health brands."
     },
     "Wood Processing": {
         "industries": ['Manufacturing'],
         "definition": "Companies involved in the transformation of turning trees into paper, lumber, or any other wood product."
+    },
+    "Workforce Management": {
+        "industries": ['Software', 'Professional Services'],
+        "definition": "Software platforms that handle scheduling, time tracking, labor forecasting, and compliance for organizations managing hourly, frontline, or distributed teams."
     },
     "Xbox": {
         "industries": ['Consumer Electronics', 'Hardware', 'Platforms'],
@@ -2889,11 +3377,15 @@ INDUSTRY_TAXONOMY = {
     },
     "Young Adults": {
         "industries": ['Community and Lifestyle'],
-        "definition": "Companies focused on individuals in their teens and early twenties."
+        "definition": "Companies that develop or sell products and services targeted at individuals in their teens and early twenties — including young-adult apparel, entertainment, and lifestyle brands."
+    },
+    "Zero Trust": {
+        "industries": ['Privacy and Security'],
+        "definition": "Companies that build security architectures and products based on never-trust-always-verify principles — granular access control, continuous authentication, and microsegmentation."
     },
     "eSports": {
         "industries": ['Sports'],
-        "definition": "Companies related to multiplayer video games played in organized competitions, often for spectators and involving professional gamers."
+        "definition": "Companies that organize, broadcast, sponsor, or support competitive multiplayer video gaming — including tournaments, teams, streaming platforms, and team management."
     },
     "iOS": {
         "industries": ['Mobile', 'Platforms', 'Software'],

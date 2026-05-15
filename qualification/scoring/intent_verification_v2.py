@@ -18,7 +18,7 @@ independently swappable and individually testable:
   PROMPT 2 — Client-signal match.  Takes Prompt 1's ``confirmed_details``
     plus the SINGLE client-listed intent signal that the miner declared
     (via the new ``IntentSignal.matched_icp_signal`` index field) and
-    asks Claude Sonnet 4.5 whether the verified claim semantically
+    asks Claude Sonnet 4.7 whether the verified claim semantically
     satisfies THAT specific signal.  The miner already declared which
     signal they think they're proving, so Prompt 2 just decides yes/no
     for that one signal — not "match against all signals" (that's the
@@ -35,7 +35,7 @@ or vice versa).  Each model produces its own JSON object via its native
 Env vars:
   ``OPENROUTER_API_KEY`` (or ``FULFILLMENT_OPENROUTER_API_KEY``) — required
   ``INTENT_GROUNDING_MODEL`` (default: ``perplexity/sonar``)
-  ``INTENT_SIGNAL_MATCH_MODEL`` (default: ``anthropic/claude-sonnet-4.5``)
+  ``INTENT_SIGNAL_MATCH_MODEL`` (default: ``anthropic/claude-sonnet-4.7``)
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_GROUNDING_MODEL = os.environ.get("INTENT_GROUNDING_MODEL", "perplexity/sonar")
-DEFAULT_SIGNAL_MATCH_MODEL = os.environ.get("INTENT_SIGNAL_MATCH_MODEL", "anthropic/claude-sonnet-4.5")
+DEFAULT_SIGNAL_MATCH_MODEL = os.environ.get("INTENT_SIGNAL_MATCH_MODEL", "anthropic/claude-sonnet-4.7")
 TIMEOUT_SECONDS = 120
 
 

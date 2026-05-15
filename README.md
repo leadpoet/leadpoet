@@ -396,8 +396,8 @@ When a client submits a request, miners receive an ICP with this structure:
   "product_service": "outbound sales automation platform",
   "intent_signals": [
     "hiring SDRs",
-    {"text": "evaluating sales tools", "required": true, "is_scored": true},
-    {"text": "ships to Asia", "required": true, "is_scored": false}
+    {"text": "evaluating sales tools", "required": true},
+    {"text": "recent Series B or later", "required": false}
   ],
   "num_leads": 2
 }
@@ -406,9 +406,7 @@ When a client submits a request, miners receive an ICP with this structure:
 - `prompt` — Natural language description of the ideal lead. Your model should interpret this.
 - `target_roles` — Exact role titles the client wants. Your lead's `role` must match one of these (fuzzy matching is applied, e.g. "VP, Corporate Sales" matches "VP of Sales").
 - `target_seniority` — Required seniority level.
-- `intent_signals` — The types of buying signals the client cares about. Each entry can be a plain string (default: optional, scored) or a structured object `{"text", "required", "is_scored"}`:
-  - `required=true` — the lead **must** produce verified evidence for this signal or it fails with `missing_required_intent_signal`.
-  - `is_scored=false` — binary pass/fail; verified evidence is required if the signal is also `required`, but the signal does not contribute to the numeric intent score.
+- `intent_signals` — The types of buying signals the client cares about. Each entry can be a plain string (default: optional) or a structured object `{"text", "required"}`. All credited signals contribute to the intent score; when `required=true`, the lead **must** produce verified evidence for that signal or it fails with `missing_required_intent_signal`.
 - `num_leads` — How many winning leads the client wants. Only the top N by score earn rewards.
 
 ### Fulfillment Lead Schema

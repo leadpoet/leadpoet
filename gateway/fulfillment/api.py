@@ -372,7 +372,7 @@ async def create_request(
     company = icp.company
     icp.prompt = scrub_company_name(icp.prompt, company)
     icp.product_service = scrub_company_name(icp.product_service, company)
-    # Each entry is now an IntentSignalSpec (text + required + is_scored).
+    # Each entry is now an IntentSignalSpec (text + required).
     # Scrub the company name out of the ``text`` field only — the flags
     # don't carry text and are operator-set. Mutate in place via
     # model_copy(update=...) so the validator's coercion runs once on

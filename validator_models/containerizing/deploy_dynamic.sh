@@ -500,6 +500,9 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           -e TRUELIST_API_KEY="${TRUELIST_API_KEY:-}" \
           -e ZEROBOUNCE_API_KEY="${ZEROBOUNCE_API_KEY:-}" \
           -e FULFILLMENT_WEBSITE_TIMEOUT_S="${FULFILLMENT_WEBSITE_TIMEOUT_S:-30}" \
+          -e INTENT_VERIFIER_V2="${INTENT_VERIFIER_V2:-}" \
+          -e INTENT_GROUNDING_MODEL="${INTENT_GROUNDING_MODEL:-}" \
+          -e INTENT_SIGNAL_MATCH_MODEL="${INTENT_SIGNAL_MATCH_MODEL:-}" \
           $FF_PROXY_ARGS \
           leadpoet-validator:latest \
           --mode fulfillment_worker \

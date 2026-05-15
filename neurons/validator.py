@@ -3113,7 +3113,15 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             UID_ZERO = 0  # LeadPoet revenue UID
             EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
-            
+
+            # Read ff_enabled EARLY (used by the no-sourcing-data gates below)
+            # so the validator doesn't 100%-burn when sourcing is zeroed out but
+            # fulfillment requests were scored this epoch.  Historically these
+            # gates short-circuited whenever rolling_scores was empty, which
+            # broke once sourcing emissions were dropped to 0% (no incentive
+            # → no rolling_scores → 100% burn even with active fulfillment).
+            ff_enabled = os.environ.get("ENABLE_FULFILLMENT", "false").lower() == "true"
+
             # ═══════════════════════════════════════════════════════════════════
             # SOURCING EMISSIONS SYSTEM (Threshold-Based)
             # ═══════════════════════════════════════════════════════════════════
@@ -3185,9 +3193,15 @@ class Validator(BaseValidatorNeuron):
             # Check if we have ANYTHING to submit (current OR rolling)
             # If both are empty, submit 100% burn weights
             # ═══════════════════════════════════════════════════════════════════
-            if not miner_scores and not rolling_scores:
+            # Only short-circuit to 100% burn when BOTH sourcing tracks are empty
+            # AND fulfillment is disabled on this validator.  When ff_enabled is
+            # true we MUST proceed to the main distribution path even with empty
+            # sourcing data, otherwise fulfillment miners get nothing despite
+            # successfully scoring requests this epoch (the 95% fulfillment pool
+            # would silently burn).
+            if not miner_scores and not rolling_scores and not ff_enabled:
                 print(f"   ⚠️  No current epoch OR rolling epoch data for epoch {current_epoch}")
-                print(f"   🔥 Submitting 100% burn weights (first epoch or history cleared)...")
+                print(f"   🔥 Submitting 100% burn weights (sourcing-only validator, no data)...")
                 
                 try:
                     # Verify UID 0 is correct before burning
@@ -3279,7 +3293,8 @@ class Validator(BaseValidatorNeuron):
             # Fulfillment pool is ALWAYS reserved (75%). If fulfillment is disabled
             # on this validator, or no miners earned rewards this epoch, the unused
             # portion flows to burn — it does NOT redistribute back to sourcing.
-            ff_enabled = os.environ.get("ENABLE_FULFILLMENT", "false").lower() == "true"
+            # (ff_enabled is read once at the top of the function so the early
+            #  no-sourcing-data gates above can honor it; do not re-read here.)
             # MAX_SOURCING_SHARE is strictly 0% under the 2026-05-15 split:
             # 5% champion (reserved even when inactive — burns instead of
             # falling back to sourcing) + 95% fulfillment + 0% leaderboard =
@@ -3319,7 +3334,12 @@ class Validator(BaseValidatorNeuron):
                 except Exception as e:
                     print(f"   ⚠️  Skipping miner {hotkey[:10]}...: {e}")
             
-            if not hotkey_to_uid:
+            # Same logic as Gate A above: only short-circuit if fulfillment is
+            # disabled.  When ff_enabled=true the downstream code distributes
+            # the fulfillment pool using metagraph.hotkeys directly (it does
+            # not depend on hotkey_to_uid, which is sourcing-only), so an
+            # empty sourcing roster must NOT block fulfillment payouts.
+            if not hotkey_to_uid and not ff_enabled:
                 # FALLBACK: No valid miner UIDs found - submit burn weights
                 print(f"   ⚠️  No valid miner UIDs found")
                 print(f"      Miners have left the subnet or are not registered")
@@ -3469,13 +3489,21 @@ class Validator(BaseValidatorNeuron):
                     f"(safe fallback — full {effective_leaderboard_share*100:.2f}% to burn): {e}"
                 )
 
-            # Calculate total burn share
-            # Includes: threshold shortfall + deregistered miners + unused fulfillment pool +
-            # leaderboard slots that fell through (deregistered top-N or fewer than 3 winners)
+            # Calculate total burn share.
+            # Includes: threshold shortfall + deregistered miners + unused
+            # fulfillment pool + leaderboard fall-through + unallocated champion.
+            # The CHAMPION_SHARE bucket is RESERVED whether or not a champion
+            # is active — when inactive, the 5% must explicitly flow to burn
+            # so the weight vector still sums to 1.0.  Without unused_champion
+            # the totals collapsed to 0.95 and the weight-sum check at the
+            # bottom of this function failed (regression introduced in
+            # 322f287d when MAX_SOURCING_SHARE stopped absorbing the share).
             unused_sourcing_share = MAX_SOURCING_SHARE - effective_sourcing_share
+            unused_champion = CHAMPION_SHARE - effective_champion_share
             total_burn_share = (
                 BASE_BURN_SHARE
                 + unused_sourcing_share
+                + unused_champion
                 + dereg_burn
                 + unused_fulfillment
                 + leaderboard_burn
@@ -3485,6 +3513,7 @@ class Validator(BaseValidatorNeuron):
             leaderboard_paid = sum(leaderboard_per_uid.values())
             print(f"   📊 WEIGHT DISTRIBUTION:")
             print(f"      Unused sourcing:      {unused_sourcing_share*100:.2f}% (threshold shortfall)")
+            print(f"      Unused champion:      {unused_champion*100:.2f}% (no active champion)")
             print(f"      Unused fulfillment:   {unused_fulfillment*100:.2f}%")
             print(f"      Deregistered miners:  {dereg_burn*100:.2f}%")
             print(f"      Leaderboard burn:     {leaderboard_burn*100:.2f}%")

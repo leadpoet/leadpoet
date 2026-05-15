@@ -337,6 +337,34 @@ class FulfillmentICP(BaseModel):
     # via min_length on the field.
     company: str = Field(default="", exclude=True)
 
+    # Gateway-only (create_request): when True (default), ``target_roles`` is
+    # expanded via ``role_expander`` once before hashing. When False, the
+    # submitted list is stored verbatim so operators can pin an exact title
+    # set. Never serialized to ``icp_details`` / miners.
+    expand_target_roles: bool = Field(default=True, exclude=True)
+
+    @field_validator("expand_target_roles", mode="before")
+    @classmethod
+    def coerce_expand_target_roles(cls, v) -> bool:
+        if v is None or v == "":
+            return True
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)) and v in (0, 1):
+            return bool(v)
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if not s:
+                return True
+            if s in ("false", "0", "no", "off"):
+                return False
+            if s in ("true", "1", "yes", "on"):
+                return True
+        raise ValueError(
+            "expand_target_roles must be a boolean (or common string coercions "
+            "true/false/1/0)"
+        )
+
     @field_validator("intent_signals", mode="before")
     @classmethod
     def normalize_intent_signals(cls, v) -> List[IntentSignalSpec]:

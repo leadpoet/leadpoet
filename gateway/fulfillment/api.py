@@ -392,22 +392,30 @@ async def create_request(
     # every miner + validator sees the same canonical list for the
     # life of the request.  Failure of the LLM call leaves icp.target_roles
     # unchanged — the function is best-effort.
-    try:
-        from gateway.fulfillment.role_expander import expand_target_roles
-        expanded = await expand_target_roles(
-            icp.target_roles,
-            target_seniority=icp.target_seniority,
-        )
-        if expanded and len(expanded) > len(icp.target_roles):
-            logger.info(
-                f"create_request: expanded target_roles "
-                f"{len(icp.target_roles)} → {len(expanded)}"
+    #
+    # Operators may set ``expand_target_roles=False`` on the create payload
+    # to store the seed list verbatim (Field(exclude=True) — not in icp_details).
+    if icp.expand_target_roles:
+        try:
+            from gateway.fulfillment.role_expander import expand_target_roles
+            expanded = await expand_target_roles(
+                icp.target_roles,
+                target_seniority=icp.target_seniority,
             )
-            icp.target_roles = expanded
-    except Exception as e:
-        logger.warning(
-            f"create_request: target_roles expansion failed (keeping seeds): "
-            f"{type(e).__name__}: {e}"
+            if expanded and len(expanded) > len(icp.target_roles):
+                logger.info(
+                    f"create_request: expanded target_roles "
+                    f"{len(icp.target_roles)} → {len(expanded)}"
+                )
+                icp.target_roles = expanded
+        except Exception as e:
+            logger.warning(
+                f"create_request: target_roles expansion failed (keeping seeds): "
+                f"{type(e).__name__}: {e}"
+            )
+    else:
+        logger.info(
+            "create_request: expand_target_roles=False — storing target_roles verbatim"
         )
 
     # Auto-populate excluded_companies from the client's prior fulfilled

@@ -1033,9 +1033,17 @@ async def get_scoring_requests(
         print(f"   Returning {r['request_id'][:8]}... with {len(submissions)} submission(s), "
               f"{sum(len(s['leads']) for s in submissions)} total leads")
 
+        # Merge the top-level required_attributes column into icp_details so
+        # the validator's `FulfillmentICP(**icp_details)` reconstruction sees
+        # it. required_attributes is stored as a dedicated column (not inside
+        # icp_details JSONB), so omitting this merge meant Tier 2c never fired.
+        icp_payload = dict(r.get("icp_details", {}) or {})
+        if r.get("required_attributes"):
+            icp_payload["required_attributes"] = r["required_attributes"]
+
         out.append({
             "request_id": r["request_id"],
-            "icp": r.get("icp_details", {}),
+            "icp": icp_payload,
             "status": r["status"],
             "submissions": submissions,
         })

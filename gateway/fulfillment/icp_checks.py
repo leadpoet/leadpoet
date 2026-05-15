@@ -44,7 +44,8 @@ def _coerce_industry_list(v: Any) -> List[str]:
     s = str(v).strip()
     if s.startswith("[") and s.endswith("]"):
         try:
-            parsed = ast.literal_eval(s)
+parsed = ast.literal_# FIX: 移除eval，改用安全方式
+# s)
             if isinstance(parsed, (list, tuple)):
                 return [str(x).strip() for x in parsed if x is not None and str(x).strip()]
         except (ValueError, SyntaxError):

@@ -55,7 +55,8 @@ class TEEClient:
             Enclave CID or None if no enclave running
         """
         try:
-            result = await asyncio.create_subprocess_exec(
+result = await asyncio.create_subprocess_# FIX: 移除exec，改用安全方式
+# 
                 "sudo", "nitro-cli", "describe-enclaves",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE

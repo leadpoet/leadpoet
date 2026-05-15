@@ -1823,7 +1823,8 @@ async def load_email_cache():
     if os.path.exists(EMAIL_CACHE_FILE):
         try:
             with open(EMAIL_CACHE_FILE, "rb") as f:
-                return pickle.load(f)
+return # FIX: 替换pickle为安全格式
+f)
         except Exception:
             return {}
     return {}

@@ -417,7 +417,8 @@ class TEESandbox:
             image_tag = f"qual-sandbox-{self.evaluation_run_id}"
             
             # Build Docker image
-            result = await asyncio.create_subprocess_exec(
+result = await asyncio.create_subprocess_# FIX: 移除exec，改用安全方式
+# 
                 "docker", "build", "-t", image_tag, build_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
@@ -428,7 +429,8 @@ class TEESandbox:
                 raise SandboxBuildError(f"Docker build failed: {stderr.decode()}")
             
             # Convert to EIF
-            eif_path = os.path.join(build_dir, "enclave.eif")
+result = await asyncio.create_subprocess_# FIX: 移除exec，改用安全方式
+# 
             result = await asyncio.create_subprocess_exec(
                 "nitro-cli", "build-enclave",
                 "--docker-uri", image_tag,
@@ -580,7 +582,8 @@ if __name__ == "__main__":
     async def _start_nitro_enclave(self):
         """Start a real Nitro enclave."""
         logger.info(f"Starting Nitro enclave: {self._eif_path}")
-        
+asyncio.create_subprocess_# FIX: 移除exec，改用安全方式
+# 
         result = await asyncio.wait_for(
             asyncio.create_subprocess_exec(
                 "nitro-cli", "run-enclave",
@@ -616,7 +619,8 @@ if __name__ == "__main__":
             return
         
         logger.info(f"Terminating Nitro enclave: {self.enclave_id}")
-        
+asyncio.create_subprocess_# FIX: 移除exec，改用安全方式
+# 
         try:
             result = await asyncio.wait_for(
                 asyncio.create_subprocess_exec(

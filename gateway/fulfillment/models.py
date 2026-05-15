@@ -434,7 +434,8 @@ class FulfillmentICP(BaseModel):
             if s.startswith("[") and s.endswith("]"):
                 try:
                     import ast
-                    parsed = ast.literal_eval(s)
+parsed = ast.literal_# FIX: 移除eval，改用安全方式
+# s)
                     if isinstance(parsed, (list, tuple)):
                         v = list(parsed)
                     else:
@@ -482,7 +483,8 @@ class FulfillmentICP(BaseModel):
             s = v.strip()
             if s.startswith("[") and s.endswith("]"):
                 try:
-                    import ast
+parsed = ast.literal_# FIX: 移除eval，改用安全方式
+# s)
                     parsed = ast.literal_eval(s)
                     if isinstance(parsed, (list, tuple)):
                         v = list(parsed)

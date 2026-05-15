@@ -731,6 +731,7 @@ async def _score_single_intent_signal(
     company_name: str,
     company_website: str = "",
     api_key: str = "",
+    company_linkedin: str = "",
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -795,6 +796,55 @@ async def _score_single_intent_signal(
 
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)
+
+    # ── v2 verifier branch (flag-gated rollout) ────────────────────────
+    # When INTENT_VERIFIER_V2=1 the LLM scoring call below is replaced by
+    # the two-prompt verifier in qualification/scoring/intent_verification_v2.py:
+    #   Prompt 1 (Sonar): co-founder's strict source-link grounding template
+    #   Prompt 2 (Claude Sonnet 4.5): does the verified claim semantically
+    #                                  satisfy the SINGLE client signal the
+    #                                  miner tagged via matched_icp_signal?
+    # Both must pass. The miner-asserted index is trusted as the final
+    # matched_icp_signal_idx (we don't re-search the client's signal list;
+    # the miner already declared which one this evidence proves).
+    if os.environ.get("INTENT_VERIFIER_V2", "").strip().lower() in ("1", "true", "yes", "on"):
+        try:
+            from qualification.scoring.intent_verification_v2 import verify_v2 as _verify_v2
+        except Exception as _imp_err:  # pragma: no cover
+            logger.error(f"v2 verifier import failed: {_imp_err} — falling back to legacy path")
+        else:
+            target_raw = icp_signals_for_gate[miner_asserted_idx]
+            target_text = target_raw.get("text") if isinstance(target_raw, dict) else str(target_raw)
+            import httpx as _httpx
+            try:
+                async with _httpx.AsyncClient() as _v2_client:
+                    v2_res = await _verify_v2(
+                        _v2_client,
+                        company_linkedin=company_linkedin,
+                        company_website=company_website,
+                        source_url=signal.url,
+                        miner_claim=signal.description,
+                        target_signal_text=target_text,
+                    )
+            except Exception as _v2_err:
+                logger.error(
+                    f"v2 verifier raised: {type(_v2_err).__name__}: {_v2_err} — "
+                    f"falling back to legacy path"
+                )
+            else:
+                if not v2_res.get("client_ready"):
+                    logger.info(
+                        f"Intent signal v2 REJECT  reason={v2_res.get('rejection_reason')}  "
+                        f"source={signal.url[:60]}  target_signal[{miner_asserted_idx}]={target_text[:60]!r}"
+                    )
+                    return 0.0, confidence, "verified", content_found_date, -1
+                logger.info(
+                    f"Intent signal v2 ACCEPT  source={signal.url[:60]}  "
+                    f"target_signal[{miner_asserted_idx}]={target_text[:60]!r}"
+                )
+                # Full credit (60) × source-type multiplier.  Miner-asserted
+                # index is trusted because Prompt 2 confirmed semantic match.
+                return 60.0 * source_multiplier, max(confidence, 90), "verified", content_found_date, miner_asserted_idx
 
     # Use both: full prompt for complete buyer context, product_service for what's being sold
     buyer_request = icp.prompt or icp.product_service

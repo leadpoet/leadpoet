@@ -609,6 +609,10 @@ async def score_fulfillment_lead(
                 signal, icp_prompt, icp_criteria,
                 lead_output.business, lead_output.company_website,
                 api_key=api_key,
+                # company_linkedin only used by v2 verifier path (flag-gated
+                # by INTENT_VERIFIER_V2 inside _score_single_intent_signal);
+                # legacy path ignores it.
+                company_linkedin=getattr(lead_output, "company_linkedin", "") or "",
             )
             print(f"   📊 Raw score={score:.1f}, confidence={confidence}, "
                   f"date_status={date_status}, content_date={content_found_date}, "

@@ -5,6 +5,7 @@ import os
 import re
 import time
 import json
+import unicodedata
 from urllib.parse import urlparse
 from typing import Dict, Any, Tuple, List, Optional
 from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
@@ -56,6 +57,22 @@ MAX_REP_SCORE = 48  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) + C
 # ========================================================================
 # Stage 0: Basic Hardcoded Checks
 # ========================================================================
+
+def _ascii_fold(s: str) -> str:
+    """Lowercase, transliterate accents to ASCII, strip non-alphanumeric.
+
+    'García'  -> 'garcia'   (í decomposes to i + combining mark; Mn dropped)
+    'Núñez'   -> 'nunez'    (ñ -> n + combining tilde; Mn dropped)
+    'Müller'  -> 'muller'
+    'Lopez'   -> 'lopez'    (no diacritics, unchanged)
+
+    Used to normalize names + email local parts so accented surnames match
+    plain-ASCII email forms ("García López" -> matches "garcia@" or "lopez@").
+    """
+    decomposed = unicodedata.normalize("NFD", s.lower())
+    no_marks = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+    return re.sub(r"[^a-z0-9]", "", no_marks)
+
 
 async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
     """Check that all required fields are present and non-empty.
@@ -225,10 +242,12 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
         # Extract local part of email (before @)
         local_part = email.split("@")[0].lower() if "@" in email else email.lower()
 
-        # Normalize names for comparison (lowercase, remove special chars)
-        first_normalized = re.sub(r'[^a-z0-9]', '', first_name.lower())
-        last_normalized = re.sub(r'[^a-z0-9]', '', last_name.lower())
-        local_normalized = re.sub(r'[^a-z0-9]', '', local_part)
+        # Normalize names for comparison (lowercase, fold accents, strip non-alphanumeric).
+        # Accent folding: 'García' -> 'garcia' so accented LATAM/European surnames
+        # match their plain-ASCII email forms.
+        first_normalized = _ascii_fold(first_name)
+        last_normalized = _ascii_fold(last_name)
+        local_normalized = _ascii_fold(local_part)
 
         # Check if either first OR last name appears in email
         # Pattern matching: full name, first initial + last, last + first initial, etc.
@@ -265,10 +284,7 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
         # emails almost always pick ONE surname token, not the smushed-together
         # form. Without this, valid leads false-reject at Stage 0.
         if " " in last_name.strip():
-            last_tokens = [
-                re.sub(r"[^a-z0-9]", "", tok)
-                for tok in last_name.lower().split()
-            ]
+            last_tokens = [_ascii_fold(tok) for tok in last_name.split()]
             last_tokens = [t for t in last_tokens if len(t) >= MIN_NAME_MATCH_LENGTH]
             for tok in last_tokens:
                 patterns.append(tok)                                # keifer

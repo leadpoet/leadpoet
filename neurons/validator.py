@@ -3128,19 +3128,20 @@ class Validator(BaseValidatorNeuron):
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
             CHAMPION_SHARE = 0.05          # 5% to qualification model champion (when active)
-            FULFILLMENT_POOL_SHARE = 0.95  # 95% reserved for per-epoch fulfillment rewards
-            # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, ZEROED 2026-05-15.
-            # Previously carved 4% from the fulfillment pool for top-3 all-time
-            # winners (2.5 + 1.0 + 0.5).  Disabled because the team chose to
-            # concentrate emissions on per-epoch fulfillment (95%) and
-            # qualification champion (5%) only — sourcing miners get 0% and
-            # the leaderboard carve is rolled into the per-epoch fulfillment
-            # pool.  Per-share percentages kept as commented-out reference so
-            # the historical layout is recoverable.
-            LEADERBOARD_BONUS_SHARE = 0.0    # was 0.04 (2.5 + 1.0 + 0.5)
-            LEADERBOARD_TOP1_PCT     = 0.0   # was 0.025 (#1)
-            LEADERBOARD_TOP2_PCT     = 0.0   # was 0.010 (#2)
-            LEADERBOARD_TOP3_PCT     = 0.0   # was 0.005 (#3)
+            # FULFILLMENT-FLAVORED TOTAL = 95% (sourcing is zeroed, champion is 5%).
+            # That 95% is split into a per-epoch fulfillment pool and a top-3
+            # all-time leaderboard bonus.  The leaderboard is a permanent
+            # feature of the fulfillment track — it is NEVER toggled off; only
+            # the split ratio between per-epoch and lifetime is tunable here.
+            FULFILLMENT_POOL_SHARE = 0.91  # 91% reserved for per-epoch fulfillment rewards
+            # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, restored 2026-05-15
+            # after a brief misconfiguration.  Top-3 all-time fulfillment winners
+            # get this bonus on top of per-epoch payouts.  Carved from the 95%
+            # fulfillment-flavored total (95 = 91 per-epoch + 4 leaderboard).
+            LEADERBOARD_BONUS_SHARE = 0.04   # 4% total: 2.5 + 1.0 + 0.5
+            LEADERBOARD_TOP1_PCT     = 0.025 # 2.5% to all-time #1
+            LEADERBOARD_TOP2_PCT     = 0.010 # 1.0% to all-time #2
+            LEADERBOARD_TOP3_PCT     = 0.005 # 0.5% to all-time #3
             # MAX_SOURCING_SHARE is computed dynamically:
             #   No champion, no fulfillment → 100% to sourcing miners
             #   Both active → 20% sourcing, 5% champion, 71% fulfillment pool, 4% leaderboard bonus
@@ -3297,9 +3298,10 @@ class Validator(BaseValidatorNeuron):
             #  no-sourcing-data gates above can honor it; do not re-read here.)
             # MAX_SOURCING_SHARE is strictly 0% under the 2026-05-15 split:
             # 5% champion (reserved even when inactive — burns instead of
-            # falling back to sourcing) + 95% fulfillment + 0% leaderboard =
-            # 100%.  Sourcing miners get nothing; the qualification track
-            # incentive is concentrated entirely on the champion slot.
+            # falling back to sourcing) + 91% per-epoch fulfillment + 4%
+            # fulfillment leaderboard = 100%.  Sourcing miners get nothing;
+            # qualification incentive is concentrated on the champion slot,
+            # fulfillment incentive on per-epoch winners and the lifetime top-3.
             MAX_SOURCING_SHARE = (
                 1.0
                 - CHAMPION_SHARE

@@ -89,6 +89,20 @@ def _build_consensus_row(
             best_score_with_detail = ws["weight"]
             intent_signal_mapping = detail
 
+    # Attribute verification (Tier 2c): same "highest-weighted validator" rule
+    # as intent_signals_detail. Per-attribute results aren't trivially
+    # aggregable across validators (Sonar verdicts can differ on borderline
+    # calls), and for single-validator subnets this picks the only result.
+    attribute_verification = None
+    best_score_with_attr = -1.0
+    for ws in weighted_scores:
+        attr = ws.get("attribute_verification")
+        if not attr:
+            continue
+        if ws.get("weight", 0) > best_score_with_attr:
+            best_score_with_attr = ws["weight"]
+            attribute_verification = attr
+
     return {
         "request_id": request_id,
         "submission_id": submission_id,
@@ -104,6 +118,7 @@ def _build_consensus_row(
         "consensus_rep_score": round(rep_score, 2),
         "any_fabricated": any(ws.get("all_fabricated") for ws in weighted_scores),
         "intent_signal_mapping": intent_signal_mapping,
+        "attribute_verification": attribute_verification,
     }
 
 

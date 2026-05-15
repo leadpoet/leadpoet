@@ -32,6 +32,7 @@ from gateway.fulfillment.icp_checks import (
 )
 from validator_models.fulfillment_person_verification import fulfillment_person_verification
 from validator_models.fulfillment_company_verification import fulfillment_company_verification
+from validator_models.fulfillment_attribute_verification import verify_required_attributes
 from validator_models.checks_zerobounce import (
     zerobounce_validate,
     is_truelist_catch_all,
@@ -99,6 +100,7 @@ def _build_failure_detail(
     signal_details: list = None,
     intent_final: float = 0.0,
     missing_required_signals: list = None,
+    attribute_rejection: dict = None,
 ) -> str:
     """Build a human-readable failure detail for the public dashboard.
 
@@ -234,6 +236,16 @@ def _build_failure_detail(
                 f"that passes URL verification."
             )
         return "Lead missing required intent signal(s)"
+
+    # --- Required-attribute (Tier 2c) ---
+    if r == "required_attribute_failed":
+        if attribute_rejection:
+            msg = attribute_rejection.get("message", "")
+            if msg:
+                return msg
+        return "Lead failed one or more required-attribute checks"
+    if r == "attribute_verification_no_api_key":
+        return "Required-attribute verification unavailable (API key missing)"
 
     # --- Structural similarity ---
     if r == "structural_similarity_detected":
@@ -486,6 +498,55 @@ async def score_fulfillment_lead(
                 failure_detail=_build_failure_detail(verif_failure),
             )
 
+    # --- Tier 2c: Required-Attribute Verification (Sonar) ---
+    # Runs only when the buyer's ICP defines required_attributes. Each attribute
+    # is checked in parallel via Perplexity Sonar. Negative attributes
+    # ("Does not have X", "No Y in place") route through the positive-proxy
+    # path (search for the positive opposite). Fail-closed: any NO → REJECT.
+    # Contact-side prompts are enriched with the Apify-extracted LinkedIn data
+    # stashed on the lead dict by fulfillment_person_verification.
+    attribute_verification_result: Optional[dict] = None
+    if icp.required_attributes and (
+        icp.required_attributes.get("company") or icp.required_attributes.get("contact")
+    ):
+        apify_person_data = validator_dict.get("_apify_data")
+        print(
+            f"🔍 Tier 2c: Attribute verification — "
+            f"{len(icp.required_attributes.get('company', []))} company / "
+            f"{len(icp.required_attributes.get('contact', []))} contact attribute(s); "
+            f"apify_data={'present' if apify_person_data else 'absent'}"
+        )
+        attr_passed, attribute_verification_result = await verify_required_attributes(
+            lead=validator_dict,
+            required_attributes=icp.required_attributes,
+            apify_person_data=apify_person_data,
+            openrouter_key=openrouter_key,
+        )
+        decision = attribute_verification_result.get("decision", "REJECT")
+        counts = attribute_verification_result.get("counts", {})
+        print(
+            f"   📋 Tier 2c result: {decision} "
+            f"(YES={counts.get('yes', 0)}, NO={counts.get('no', 0)}, "
+            f"DEFERRED={counts.get('deferred', 0)}, "
+            f"elapsed={attribute_verification_result.get('elapsed_s', 0):.1f}s)"
+        )
+        if not attr_passed:
+            rejection = attribute_verification_result.get("rejection_reason") or {}
+            reason = rejection.get("check_name", "required_attribute_failed")
+            return FulfillmentScoreResult(
+                tier1_passed=True, tier2_passed=True,
+                email_verified=email_verified,
+                person_verified=person_verified,
+                company_verified=company_verified,
+                attribute_verification=attribute_verification_result,
+                rep_score=rep_score_val,
+                failure_reason=reason,
+                failure_detail=_build_failure_detail(
+                    reason,
+                    attribute_rejection=rejection,
+                ),
+            )
+
     # --- Tier 3: Intent Scoring ---
     api_key = get_fulfillment_api_key()
     from qualification.scoring.lead_scorer import (
@@ -613,6 +674,7 @@ async def score_fulfillment_lead(
         email_verified=email_verified,
         person_verified=person_verified,
         company_verified=company_verified,
+        attribute_verification=attribute_verification_result,
         rep_score=rep_score_val,
         intent_signal_raw=max(after_decay_scores) if after_decay_scores else 0.0,
         intent_signal_final=intent_signal_final,

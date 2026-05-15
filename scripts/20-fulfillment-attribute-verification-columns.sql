@@ -1,0 +1,112 @@
+-- Migration 20: add required-attribute verification columns
+--
+-- WHY:
+--   Tier 2c of the fulfillment scoring pipeline (between Stage 4 person
+--   verification and Tier 3 intent scoring) verifies a buyer-defined set of
+--   "required attributes" via Perplexity Sonar.  Buyers specify these in
+--   their ICP at request-creation time, two scope buckets:
+--     {
+--       "company": [
+--         "Is an importer or exporter",
+--         "Operates in manufacturing, retail, or wholesale"
+--       ],
+--       "contact": [
+--         "Is a W-2 employee",
+--         "Earns between $200,000 and $600,000"
+--       ]
+--     }
+--   Each attribute is verified independently:
+--     - Positive attributes  → COMPANY_PROMPT or CONTACT_PROMPT (Apify-enriched)
+--     - Negative attributes  → POSITIVE_PROXY_PROMPT (search for the positive
+--                              opposite; if found, the negative is false)
+--   Aggregation is fail-closed: any NO → REJECT the lead.  Pure YES → ACCEPT.
+--   Mix of YES + private-info-flagged YES → ACCEPT_WITH_DEFERRAL.
+--
+--   The verifier (`validator_models/fulfillment_attribute_verification.py`)
+--   is called from `gateway/fulfillment/scoring.py::score_fulfillment_lead`
+--   and `qualification/scoring/fulfillment_scorer.py` (validator-side).
+--
+-- THREE COLUMNS ADDED:
+--
+-- 1. fulfillment_requests.required_attributes (JSONB, nullable)
+--    Buyer's ICP definition (input to the gate).  NULL = no gate to apply
+--    (legacy requests without this key).  Default NULL keeps historical
+--    icp_details JSONB rows compatible.  The field is also re-published
+--    inside the `icp_details` JSONB blob that the gateway already exposes
+--    to miners via /fulfillment/requests/active (Pydantic serializes the
+--    `FulfillmentICP.required_attributes` field into `icp_details`).
+--    Storing it in BOTH the column and the existing JSONB blob is
+--    intentional — the column is the source of truth that the gateway
+--    can index/query against, while the icp_details JSONB is what miners
+--    actually consume.
+--
+-- 2. fulfillment_scores.attribute_verification (JSONB, nullable)
+--    Per-validator-per-lead verification result.  Shape:
+--      {
+--        "decision": "ACCEPT" | "REJECT" | "ACCEPT_WITH_DEFERRAL",
+--        "counts": {"yes": int, "no": int, "deferred": int},
+--        "per_attribute": [
+--          {
+--            "attribute_text":      str,
+--            "scope":               "company" | "contact",
+--            "is_negative":         bool,
+--            "verdict":             "YES" | "NO",
+--            "evidence":            str,
+--            "citations":           [str, ...],
+--            "reasoning":           str,
+--            "private_info_caveat": bool,
+--            "search_breadth":      int,
+--            "latency_s":           float,
+--            "_proxy_used":         bool
+--          }
+--        ],
+--        "model":      "perplexity/sonar-pro",
+--        "elapsed_s":  float,
+--        "timestamp":  ISO-8601 str,
+--        "rejection_reason": {...}   -- only present when decision = REJECT
+--      }
+--    NULL when the ICP carried no required_attributes (gate skipped) or
+--    the lead failed an earlier tier and never reached Tier 2c.
+--    Populated by the patch-loop in
+--    gateway/fulfillment/api.py::submit_scores because the
+--    fulfillment_upsert_scores RPC silently drops unknown columns
+--    (same RPC quirk that affects intent_signals_detail and
+--    failure_detail; same workaround used here).
+--
+-- 3. fulfillment_score_consensus.attribute_verification (JSONB, nullable)
+--    Post-consensus result.  Same shape as fulfillment_scores column.
+--    For multi-validator subnets the row carries the result from the
+--    highest-weighted validator (same "best validator wins" rule used
+--    for intent_signal_mapping — per-attribute Sonar verdicts are not
+--    trivially aggregable since they can differ on borderline calls).
+--    For single-validator subnets this degenerates to "the only result".
+--
+-- BACK-COMPAT:
+--   - All three columns are nullable with NULL default.
+--   - The Pydantic FulfillmentICP.required_attributes field has
+--     default_factory=dict, so historical icp_details JSONB rows
+--     re-parse cleanly when read back.
+--   - The Pydantic FulfillmentScoreResult.attribute_verification field
+--     defaults to None.
+--   - Every consensus reader uses safe .get(key, default) — no strict-key
+--     assertions exist that would break on missing values.
+--
+-- NO INDEXES YET:
+--   The buyer-facing dashboard doesn't have queries that filter on these
+--   columns today.  Add a partial GIN index on
+--   `automated_checks_data->'attribute_verification'->'decision'` later
+--   if and when dashboard queries demand it.
+--
+-- ROLLBACK:
+--   ALTER TABLE fulfillment_requests DROP COLUMN required_attributes;
+--   ALTER TABLE fulfillment_scores DROP COLUMN attribute_verification;
+--   ALTER TABLE fulfillment_score_consensus DROP COLUMN attribute_verification;
+
+ALTER TABLE fulfillment_requests
+    ADD COLUMN IF NOT EXISTS required_attributes JSONB;
+
+ALTER TABLE fulfillment_scores
+    ADD COLUMN IF NOT EXISTS attribute_verification JSONB;
+
+ALTER TABLE fulfillment_score_consensus
+    ADD COLUMN IF NOT EXISTS attribute_verification JSONB;

@@ -7,7 +7,7 @@ deterministic equality comparisons.
 """
 
 import re
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 from gateway.qualification.models import (
@@ -294,6 +294,16 @@ class FulfillmentICP(BaseModel):
     # historical icp_details row still re-parses cleanly with the
     # default ``required=False``.
     intent_signals: List[IntentSignalSpec] = Field(default_factory=list)
+    # Buyer-side required attributes verified at Tier 2c (post person/company
+    # verification, pre intent scoring).  Two scope buckets so the verifier
+    # knows whether each attribute is about the COMPANY (verified via Sonar
+    # search over web sources) or the CONTACT (verified via Sonar over the
+    # Apify-extracted LinkedIn data).  Shape:
+    #     {"company": ["Is an importer or exporter", ...],
+    #      "contact": ["Is a W-2 employee", ...]}
+    # Default empty dict ensures historical ``icp_details`` rows without this
+    # key re-parse cleanly with Pydantic 2 (missing key → default applied).
+    required_attributes: Dict[str, List[str]] = Field(default_factory=dict)
     # Companies whose leads must be rejected at Tier 1 for this request.
     # Populated either (a) explicitly by the client in the create payload
     # (client-provided list takes precedence) or (b) automatically by the
@@ -894,6 +904,15 @@ class FulfillmentScoreResult(BaseModel):
     email_verified: bool = False
     person_verified: bool = False
     company_verified: bool = False
+    # Tier 2c required-attribute verification result.  Shape (when populated):
+    #   {"decision": "ACCEPT" | "REJECT" | "ACCEPT_WITH_DEFERRAL",
+    #    "counts": {"yes": int, "no": int, "deferred": int},
+    #    "per_attribute": [...],
+    #    "model": str, "elapsed_s": float, "timestamp": str,
+    #    "rejection_reason": {...}  # only present when REJECT}
+    # ``None`` when the lead failed an earlier tier or the ICP carried no
+    # required_attributes (gate skipped).
+    attribute_verification: Optional[dict] = None
     rep_score: float = 0.0
     intent_signal_raw: float = 0.0
     intent_signal_final: float = 0.0

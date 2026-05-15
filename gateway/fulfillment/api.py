@@ -1095,6 +1095,12 @@ async def submit_scores(
             patch_fields["intent_signals_detail"] = s["intent_signals_detail"]
         if s.get("failure_detail"):
             patch_fields["failure_detail"] = s["failure_detail"]
+        # Tier 2c attribute-verification blob is also dropped by the RPC for
+        # the same reason intent_signals_detail is (column added after RPC
+        # signature was frozen).  Re-patch it directly so per-validator
+        # per-lead attribute results are persisted for consensus + audit.
+        if s.get("attribute_verification") is not None:
+            patch_fields["attribute_verification"] = s["attribute_verification"]
         if not patch_fields:
             continue
         lid = s.get("lead_id")

@@ -884,6 +884,10 @@ async def fulfillment_person_verification(
     )
     lead["gse_search_count"] = len(q1_results)
     lead["llm_confidence"] = "apify"
+    # Stash the full Apify profile so Tier 2c (attribute verification) can
+    # build a contact-side prompt without re-fetching.  Carries headline,
+    # summary, experience[], education[], currentPosition[], location, etc.
+    lead["_apify_data"] = apify_data
 
     print(f"   ✅ Stage 4 PASSED: {full_name} @ {actual_company} as {actual_role}")
     return True, None

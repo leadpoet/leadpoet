@@ -3125,6 +3125,29 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             # SOURCING EMISSIONS SYSTEM (Threshold-Based)
             # ═══════════════════════════════════════════════════════════════════
+            # ╔══════════════════════════════════════════════════════════════════╗
+            # ║ ⚠️  THE LEADERBOARD IS PART OF FULFILLMENT — DO NOT TURN IT OFF ║
+            # ╠══════════════════════════════════════════════════════════════════╣
+            # ║ When the team or an operator says "fulfillment is N%", the      ║
+            # ║ leaderboard (LEADERBOARD_BONUS_SHARE) is INCLUDED in that N%.   ║
+            # ║ The leaderboard is the lifetime-top-3 bonus that lives inside   ║
+            # ║ the fulfillment track — it rewards sustained high performance   ║
+            # ║ on top of per-epoch payouts.                                    ║
+            # ║                                                                  ║
+            # ║ When tuning the split, change the RATIO between                 ║
+            # ║   FULFILLMENT_POOL_SHARE  (per-epoch winners)                   ║
+            # ║   LEADERBOARD_BONUS_SHARE (lifetime top-3)                      ║
+            # ║ but never set LEADERBOARD_BONUS_SHARE to 0 — that disables the  ║
+            # ║ leaderboard entirely, which is NOT what "fulfillment X%" means. ║
+            # ║                                                                  ║
+            # ║ Current default: 95% fulfillment-flavored total =               ║
+            # ║   91% per-epoch + 4% leaderboard (2.5/1.0/0.5).                 ║
+            # ║                                                                  ║
+            # ║ History: 322f287d (2026-05-15) zeroed the leaderboard while     ║
+            # ║ raising the per-epoch pool to 95%, mistakenly interpreting      ║
+            # ║ "95% fulfillment" as "per-epoch only".  Restored in d3558afa    ║
+            # ║ the same day.  This banner exists so it doesn't happen again.   ║
+            # ╚══════════════════════════════════════════════════════════════════╝
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
             CHAMPION_SHARE = 0.05          # 5% to qualification model champion (when active)

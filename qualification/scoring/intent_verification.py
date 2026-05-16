@@ -2811,26 +2811,30 @@ def extract_verification_content(html_or_json: str, source: str) -> str:
 def _extract_x_content(data) -> str:
     """Extract verifiable text from ScrapingDog X/Twitter JSON.
 
-    Handles both endpoints:
-      - X Profile API: top-level user fields (or wrapped under "user").
-        Keys: profile_name, profile_handle, description, location,
-              followers_count, statuses_count, verified.
-      - X Post API: top-level tweet fields + nested "user" object.
-        Keys: tweet, created_at, likes, retweets, quotes, views,
-              user.profile_name, user.profile_handle.
+    Verified against live ScrapingDog responses 2026-05-15:
 
-    Returns "" if the payload doesn't look like either shape (caller then
-    falls through to other extractors or returns empty).
+      X POST API (/x/post) — top-level "tweet" string + nested "user":
+        {tweet, full_tweet, created_at, likes, retweets, quotes, views,
+         user: {profile_name, profile_handle (no @), description,
+                followers_count, following_count, statuses_count, verified,
+                is_blue_verified, location, ...}}
+
+      X PROFILE API (/x/profile) — top-level "profile" wrapper:
+        {profile: {name, username ("@xxx"), description, location,
+                   website, verified, is_blue_verified,
+                   stats: {followers, following, tweets, ...}}}
+
+    Returns "" if the payload matches neither shape (caller falls through).
     """
     if not isinstance(data, dict):
         return ""
 
-    # Post API: has a literal "tweet" string field at the top level.
-    tweet_text = data.get("tweet")
+    # POST API: top-level "tweet" string is the marker.
+    tweet_text = data.get("tweet") or data.get("full_tweet")
     if isinstance(tweet_text, str) and tweet_text.strip():
         parts = ["[X/TWITTER POST]"]
         user = data.get("user") if isinstance(data.get("user"), dict) else {}
-        handle = user.get("profile_handle") or user.get("screen_name")
+        handle = (user.get("profile_handle") or user.get("screen_name") or "").lstrip("@")
         name = user.get("profile_name") or user.get("name")
         if name or handle:
             parts.append(f"Author: {name or ''} (@{handle or '?'})")
@@ -2844,29 +2848,63 @@ def _extract_x_content(data) -> str:
                 parts.append(f"{label}: {v}")
         return "\n".join(parts)
 
-    # Profile API: either top-level or wrapped under "user".
-    user = data.get("user") if isinstance(data.get("user"), dict) else data
-    handle = user.get("profile_handle") or user.get("screen_name") or user.get("username")
+    # PROFILE API: wrapped under "profile" (current ScrapingDog shape).
+    # Also accept legacy "user" wrap or top-level (older docs / alt responses).
+    profile = (
+        data.get("profile") if isinstance(data.get("profile"), dict)
+        else (data.get("user") if isinstance(data.get("user"), dict) else data)
+    )
+    if not isinstance(profile, dict):
+        return ""
+
+    # Handle/username may carry an "@" prefix (Profile API) or not (others).
+    handle = (
+        profile.get("username")
+        or profile.get("profile_handle")
+        or profile.get("screen_name")
+    )
+    if handle:
+        handle = str(handle).lstrip("@")
     if not handle:
         return ""
 
     parts = ["[X/TWITTER PROFILE]", f"Handle: @{handle}"]
-    if user.get("profile_name") or user.get("name"):
-        parts.append(f"Display name: {user.get('profile_name') or user.get('name')}")
-    desc = user.get("description") or user.get("bio")
+    display_name = profile.get("name") or profile.get("profile_name")
+    if display_name:
+        parts.append(f"Display name: {display_name}")
+    desc = profile.get("description") or profile.get("bio")
     if desc:
         parts.append(f"Bio: {desc}")
-    if user.get("location"):
-        parts.append(f"Location: {user['location']}")
-    if user.get("followers_count") is not None:
-        parts.append(f"Followers: {user['followers_count']}")
-    if user.get("following_count") is not None or user.get("friends_count") is not None:
-        parts.append(f"Following: {user.get('following_count') or user.get('friends_count')}")
-    if user.get("statuses_count") is not None:
-        parts.append(f"Total posts: {user['statuses_count']}")
-    verified = user.get("verified")
+    if profile.get("location"):
+        parts.append(f"Location: {profile['location']}")
+    website = profile.get("website") or profile.get("url")
+    if website:
+        parts.append(f"Website: {website}")
+
+    # Stats may be nested under "stats" (Profile API) or flat (Post API's user obj).
+    stats = profile.get("stats") if isinstance(profile.get("stats"), dict) else profile
+    followers = (
+        stats.get("followers") or stats.get("followers_count")
+        or profile.get("followers_count")
+    )
+    if followers is not None:
+        parts.append(f"Followers: {followers}")
+    following = (
+        stats.get("following") or stats.get("following_count")
+        or profile.get("following_count") or profile.get("friends_count")
+    )
+    if following is not None:
+        parts.append(f"Following: {following}")
+    tweets = (
+        stats.get("tweets") or stats.get("statuses_count")
+        or profile.get("statuses_count")
+    )
+    if tweets is not None:
+        parts.append(f"Total posts: {tweets}")
+
+    verified = profile.get("verified")
     if verified is None:
-        verified = user.get("is_blue_verified")
+        verified = profile.get("is_blue_verified")
     if verified is not None:
         parts.append(f"Verified: {bool(verified)}")
     return "\n".join(parts)

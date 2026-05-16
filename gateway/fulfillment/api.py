@@ -889,7 +889,7 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
         raise HTTPException(400, detail="Already revealed")
 
     req_resp = supabase.table("fulfillment_requests") \
-        .select("window_end, reveal_window_end") \
+        .select("window_end, reveal_window_end, icp_details") \
         .eq("request_id", reveal.request_id) \
         .execute()
     if not req_resp.data:
@@ -905,6 +905,17 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
     if now > reveal_end_dt:
         raise HTTPException(400, detail="Reveal window expired")
 
+    # ------------------------------------------------------------------
+    # Determine how many client intent-signal slots this request has, so
+    # we can validate each miner-submitted IntentSignal.matched_icp_signal
+    # below.  The miner MUST tag every intent signal with a zero-based
+    # index into this list — leads with any signal failing that contract
+    # are rejected at reveal time and never reach scoring.
+    # ------------------------------------------------------------------
+    icp_details = req.get("icp_details") or {}
+    client_intent_signals = icp_details.get("intent_signals") or []
+    num_client_intent_signals = len(client_intent_signals)
+
     committed_hashes: list = submission["lead_hashes"]
     if len(reveal.leads) != len(committed_hashes):
         raise HTTPException(422, detail=(
@@ -913,6 +924,7 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
 
     lead_data_list = []
     mismatched = []
+    matched_icp_invalid = []
     for i, lead in enumerate(reveal.leads):
         lead_dict = lead.model_dump(mode="json")
         committed_hash = committed_hashes[i]["hash"]
@@ -922,15 +934,73 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
                 "lead_id": committed_hashes[i]["lead_id"],
             })
             continue
+
+        # --------------------------------------------------------------
+        # GATEWAY-LEVEL MATCHED_ICP_SIGNAL ENFORCEMENT
+        # Every intent signal on a lead must declare which client-listed
+        # intent signal it proves.  -1 (default) or an out-of-range index
+        # means the miner has not adapted to the matched_icp_signal contract
+        # — drop the lead with an explicit error rather than silently
+        # zero-scoring it downstream.
+        # --------------------------------------------------------------
+        bad_signal_indexes = []
+        for sig_idx, sig in enumerate(lead.intent_signals):
+            mapped = getattr(sig, "matched_icp_signal", -1)
+            if (
+                not isinstance(mapped, int)
+                or mapped < 0
+                or mapped >= num_client_intent_signals
+            ):
+                bad_signal_indexes.append({
+                    "signal_index": sig_idx,
+                    "matched_icp_signal": mapped,
+                    "reason": (
+                        "missing_or_negative"
+                        if (not isinstance(mapped, int) or mapped < 0)
+                        else "out_of_range"
+                    ),
+                })
+        if bad_signal_indexes:
+            matched_icp_invalid.append({
+                "index": i,
+                "lead_id": committed_hashes[i]["lead_id"],
+                "num_client_intent_signals": num_client_intent_signals,
+                "bad_signals": bad_signal_indexes,
+            })
+            continue
+
         lead_data_list.append({
             "lead_id": committed_hashes[i]["lead_id"],
             "data": lead_dict,
         })
 
     if not lead_data_list:
+        if matched_icp_invalid and not mismatched:
+            if num_client_intent_signals == 0:
+                valid_range_msg = (
+                    "this request has no client-defined intent signals to "
+                    "match against — contact the operator"
+                )
+            else:
+                valid_range_msg = (
+                    f"every intent signal must set matched_icp_signal to a "
+                    f"valid index in [0, {num_client_intent_signals - 1}]"
+                )
+            raise HTTPException(
+                400,
+                detail=(
+                    f"All {len(reveal.leads)} lead(s) rejected: {valid_range_msg}. "
+                    f"Update your miner code to populate matched_icp_signal on every "
+                    f"IntentSignal."
+                ),
+            )
         raise HTTPException(
             400,
-            detail=f"All {len(reveal.leads)} lead(s) failed hash verification",
+            detail=(
+                f"All {len(reveal.leads)} lead(s) rejected: "
+                f"{len(mismatched)} failed hash verification, "
+                f"{len(matched_icp_invalid)} failed matched_icp_signal validation"
+            ),
         )
 
     supabase.table("fulfillment_submissions").update({
@@ -942,19 +1012,22 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
     print(f"✅ REVEAL stored: request={reveal.request_id[:8]}... "
           f"sub={reveal.submission_id[:8]}... miner={reveal.miner_hotkey[:8]}... "
           f"leads={len(lead_data_list)}/{len(reveal.leads)} revealed=True"
-          + (f" (dropped {len(mismatched)} mismatched)" if mismatched else ""))
+          + (f" (dropped {len(mismatched)} mismatched)" if mismatched else "")
+          + (f" (dropped {len(matched_icp_invalid)} matched_icp_invalid)" if matched_icp_invalid else ""))
 
     _log_event(EventType.FULFILLMENT_REVEAL, reveal.miner_hotkey, {
         "request_id": reveal.request_id,
         "miner_hotkey": reveal.miner_hotkey,
         "reveal_timestamp": now.isoformat(),
         "mismatched_indices": [m["index"] for m in mismatched],
+        "matched_icp_invalid_indices": [m["index"] for m in matched_icp_invalid],
     })
 
     return {
         "status": "revealed",
         "num_leads": len(lead_data_list),
         "mismatched": mismatched,
+        "matched_icp_invalid": matched_icp_invalid,
     }
 
 

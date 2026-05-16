@@ -1713,12 +1713,37 @@ async def scrapingdog_linkedin(url: str) -> str:
         url_type = "company"
     elif "/posts/" in url or "/feed/" in url or "/pulse/" in url:
         url_type = "profile"
+        # Try /in/<handle> or /company/<handle> embedded in the URL first
+        # (some Perplexity-rewritten URLs keep them).
         link_id_match = re.search(r'/in/([^/?]+)', url) or re.search(r'/company/([^/?]+)', url)
+        if not link_id_match:
+            # Common LinkedIn post URL shape:
+            #   linkedin.com/posts/<author-handle>_<activity-slug>-activity-<id>
+            # The author handle is everything between `/posts/` and the first
+            # `_` (or `/`, `?` as backup terminators).
+            link_id_match = re.search(r'/posts/([^_/?]+)', url)
         if link_id_match:
-            link_id = link_id_match.group(1)
-        else:
-            logger.warning(f"LinkedIn post URL without identifiable author, falling back: {url[:80]}")
-            return await scrapingdog_generic(url)
+            link_id_override = link_id_match.group(1)
+            api_url = "https://api.scrapingdog.com/linkedin"
+            params = {
+                "api_key": SCRAPINGDOG_API_KEY,
+                "type": url_type,
+                "linkId": link_id_override,
+            }
+            async with httpx.AsyncClient() as client:
+                response = await client.get(api_url, params=params, timeout=DEFAULT_TIMEOUT)
+                if response.status_code == 200:
+                    return json.dumps(response.json())
+                # ScrapingDog returns 404 / empty when the handle is actually
+                # a COMPANY page (we assumed profile).  Retry once with
+                # type=company before falling back to the generic scraper.
+                if response.status_code in (404, 400):
+                    params["type"] = "company"
+                    response2 = await client.get(api_url, params=params, timeout=DEFAULT_TIMEOUT)
+                    if response2.status_code == 200:
+                        return json.dumps(response2.json())
+        logger.warning(f"LinkedIn post URL: scrapingdog profile+company both failed, falling back: {url[:80]}")
+        return await scrapingdog_generic(url)
     else:
         url_type = "company"
     

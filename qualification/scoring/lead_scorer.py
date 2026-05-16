@@ -797,6 +797,87 @@ async def _score_single_intent_signal(
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)
 
+    # ── single-call verifier branch ────────────────────────────────────
+    # When INTENT_VERIFIER_SINGLE_CALL=1, the scoring call is handled by
+    # qualification/scoring/intent_verification_single_call.py:
+    #   1. Scrape the supplied URL (Scrapingdog hardened, Exa fallback).
+    #   2. Deterministic check: company name must appear in scraped text
+    #      (otherwise → wrong_entity without calling the LLM).
+    #   3. One sonar:online LLM call — scraped content is primary evidence,
+    #      web search adds corroboration.
+    #   4. Guardrail: when the scrape succeeded, the supplied URL must be
+    #      cited as evidence; extra :online URLs alongside it are allowed.
+    #
+    # IMPORTANT: When this flag is on, the single-call verifier is the ONLY
+    # path that can score an intent signal.  If it raises, errors out, or
+    # its import fails, the signal is rejected (score 0) — we deliberately
+    # do NOT fall through to the v2 or legacy paths below.  This is to
+    # guarantee that production behaviour matches what was validated offline,
+    # rather than silently degrading to an older verifier on transient errors.
+    # The v2 / legacy code below remains in the file as opt-in fallbacks via
+    # their own env flags (for emergency rollback by flipping flags), but
+    # they are unreachable while INTENT_VERIFIER_SINGLE_CALL is on.
+    if os.environ.get("INTENT_VERIFIER_SINGLE_CALL", "").strip().lower() in ("1", "true", "yes", "on"):
+        from qualification.scoring.intent_verification_single_call import (
+            verify_single_call,
+        )
+        target_signal_raw = icp_signals_for_gate[miner_asserted_idx]
+        target_signal_text = (
+            target_signal_raw.get("text")
+            if isinstance(target_signal_raw, dict)
+            else str(target_signal_raw)
+        )
+        import httpx
+        try:
+            async with httpx.AsyncClient() as http_client:
+                single_call_result = await verify_single_call(
+                    http_client,
+                    company_name=company_name,
+                    company_linkedin=company_linkedin,
+                    company_website=company_website,
+                    source_url=signal.url,
+                    miner_claim=signal.description,
+                    target_signal_text=target_signal_text,
+                )
+        except Exception as single_call_error:
+            # Any unhandled exception inside the verifier is fail-closed:
+            # reject the signal rather than silently degrade to v2 / legacy.
+            logger.error(
+                "single-call verifier raised: %s: %s — "
+                "rejecting signal (no fallback)  source=%s",
+                type(single_call_error).__name__, single_call_error,
+                signal.url[:60],
+            )
+            return 0.0, confidence, "verified", content_found_date, -1
+
+        scrape_stage = (single_call_result.get("scrape") or {}).get("stage")
+        if not single_call_result.get("client_ready"):
+            logger.info(
+                "Intent signal single-call REJECT  reason=%s  "
+                "scrape_stage=%s  source=%s  target[%d]=%r",
+                single_call_result.get("rejection_reason"),
+                scrape_stage, signal.url[:60],
+                miner_asserted_idx, target_signal_text[:60],
+            )
+            return 0.0, confidence, "verified", content_found_date, -1
+        logger.info(
+            "Intent signal single-call ACCEPT  scrape_stage=%s  "
+            "source=%s  target[%d]=%r",
+            scrape_stage, signal.url[:60],
+            miner_asserted_idx, target_signal_text[:60],
+        )
+        # Award full credit (60) × source-type multiplier.  The miner-
+        # asserted matched_icp_signal index is trusted because the
+        # verifier confirmed the scraped page (or its web-search
+        # fallback) actually proves this specific client signal.
+        return (
+            60.0 * source_multiplier,
+            max(confidence, 90),
+            "verified",
+            content_found_date,
+            miner_asserted_idx,
+        )
+
     # ── v2 verifier branch (flag-gated rollout) ────────────────────────
     # When INTENT_VERIFIER_V2=1 the LLM scoring call below is replaced by
     # the two-prompt verifier in qualification/scoring/intent_verification_v2.py:

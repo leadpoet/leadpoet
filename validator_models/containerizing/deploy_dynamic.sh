@@ -314,6 +314,9 @@ start_container() {
       -e INTENT_VERIFIER_V2="${INTENT_VERIFIER_V2:-}" \
       -e INTENT_GROUNDING_MODEL="${INTENT_GROUNDING_MODEL:-}" \
       -e INTENT_SIGNAL_MATCH_MODEL="${INTENT_SIGNAL_MATCH_MODEL:-}" \
+      -e INTENT_VERIFIER_SINGLE_CALL="${INTENT_VERIFIER_SINGLE_CALL:-}" \
+      -e INTENT_SINGLE_CALL_MODEL="${INTENT_SINGLE_CALL_MODEL:-}" \
+      -e EXA_API_KEY="${EXA_API_KEY:-}" \
       -e DESEARCH_API_KEY="${DESEARCH_API_KEY:-}" \
       -e BUILTWITH_API_KEY="${BUILTWITH_API_KEY:-}" \
       -e QUALIFICATION_LEADS_TABLE="${QUALIFICATION_LEADS_TABLE:-test_leads_for_miners}" \
@@ -516,6 +519,9 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           -e INTENT_VERIFIER_V2="${INTENT_VERIFIER_V2:-}" \
           -e INTENT_GROUNDING_MODEL="${INTENT_GROUNDING_MODEL:-}" \
           -e INTENT_SIGNAL_MATCH_MODEL="${INTENT_SIGNAL_MATCH_MODEL:-}" \
+          -e INTENT_VERIFIER_SINGLE_CALL="${INTENT_VERIFIER_SINGLE_CALL:-}" \
+          -e INTENT_SINGLE_CALL_MODEL="${INTENT_SINGLE_CALL_MODEL:-}" \
+          -e EXA_API_KEY="${EXA_API_KEY:-}" \
           $FF_PROXY_ARGS \
           leadpoet-validator:latest \
           --mode fulfillment_worker \

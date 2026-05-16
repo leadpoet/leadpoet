@@ -131,3 +131,6 @@ neurons/.pending_equivocation_check.json
 
 # Validator logs (local testing)
 validator_logs.txt
+
+# Cloned external repo — burn->vault goal; remove when integration is done
+treasury-contract/

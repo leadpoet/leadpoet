@@ -3111,8 +3111,20 @@ class Validator(BaseValidatorNeuron):
             # ═══════════════════════════════════════════════════════════════════
             # Constants for weight distribution
             # ═══════════════════════════════════════════════════════════════════
-            UID_ZERO = 0  # LeadPoet revenue UID
-            EXPECTED_UID_ZERO_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
+            # Burn-target UID + expected-owner hotkey.  Default to UID 0 /
+            # LeadPoet operator hotkey for backward compatibility; override
+            # to the TreasuryVault's UID and hotkey by setting
+            # BURN_TARGET_UID and EXPECTED_BURN_TARGET_HOTKEY env vars
+            # (governance migration — see
+            # .cursor/rules/treasury-vault-goal.mdc).  The safety check
+            # below verifies the configured UID is actually owned by the
+            # configured hotkey, so a misconfigured env var refuses to
+            # submit weights rather than misrouting emissions.
+            BURN_TARGET_UID = int(os.environ.get("BURN_TARGET_UID", "0"))
+            EXPECTED_BURN_TARGET_HOTKEY = os.environ.get(
+                "EXPECTED_BURN_TARGET_HOTKEY",
+                "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+            )
 
             # Read ff_enabled EARLY (used by the no-sourcing-data gates below)
             # so the validator doesn't 100%-burn when sourcing is zeroed out but
@@ -3228,16 +3240,19 @@ class Validator(BaseValidatorNeuron):
                 print(f"   🔥 Submitting 100% burn weights (sourcing-only validator, no data)...")
                 
                 try:
-                    # Verify UID 0 is correct before burning
-                    actual_uid0_hotkey = self.metagraph.hotkeys[UID_ZERO]
-                    if actual_uid0_hotkey != EXPECTED_UID_ZERO_HOTKEY:
-                        print(f"   ❌ CRITICAL ERROR: UID 0 ownership changed!")
+                    # Verify the configured burn-target UID is owned by the
+                    # expected hotkey before sending all-burn weights.
+                    actual_burn_hotkey = self.metagraph.hotkeys[BURN_TARGET_UID]
+                    if actual_burn_hotkey != EXPECTED_BURN_TARGET_HOTKEY:
+                        print(f"   ❌ CRITICAL ERROR: BURN_TARGET_UID={BURN_TARGET_UID} ownership changed!")
+                        print(f"      Expected: {EXPECTED_BURN_TARGET_HOTKEY[:20]}...")
+                        print(f"      Actual:   {actual_burn_hotkey[:20]}...")
                         return False
                     
                     result = self.subtensor.set_weights(
                         netuid=self.config.netuid,
                         wallet=self.wallet,
-                        uids=[UID_ZERO],
+                        uids=[BURN_TARGET_UID],
                         weights=[1.0],
                         wait_for_finalization=True
                     )
@@ -3268,14 +3283,17 @@ class Validator(BaseValidatorNeuron):
             print(f"   Sourcing floor threshold: {SOURCING_FLOOR_THRESHOLD:,}")
             print()
             
-            # CRITICAL: Verify UID 0 is the expected LeadPoet hotkey (safety check)
+            # CRITICAL: Verify the configured burn-target UID is owned by
+            # the expected hotkey (safety check — refuses to misroute
+            # emissions if BURN_TARGET_UID / EXPECTED_BURN_TARGET_HOTKEY
+            # are misconfigured or the on-chain UID owner has changed).
             try:
-                actual_uid0_hotkey = self.metagraph.hotkeys[UID_ZERO]
-                if actual_uid0_hotkey != EXPECTED_UID_ZERO_HOTKEY:
-                    print(f"   ❌ CRITICAL ERROR: UID 0 ownership changed!")
-                    print(f"      Expected: {EXPECTED_UID_ZERO_HOTKEY[:20]}...")
-                    print(f"      Actual:   {actual_uid0_hotkey[:20]}...")
-                    print(f"      Revenue would go to WRONG address - aborting weight submission")
+                actual_burn_hotkey = self.metagraph.hotkeys[BURN_TARGET_UID]
+                if actual_burn_hotkey != EXPECTED_BURN_TARGET_HOTKEY:
+                    print(f"   ❌ CRITICAL ERROR: BURN_TARGET_UID={BURN_TARGET_UID} ownership changed!")
+                    print(f"      Expected: {EXPECTED_BURN_TARGET_HOTKEY[:20]}...")
+                    print(f"      Actual:   {actual_burn_hotkey[:20]}...")
+                    print(f"      Burn would go to WRONG address - aborting weight submission")
                     return False
             except Exception as e:
                 print(f"   ❌ Error verifying UID 0 ownership: {e}")
@@ -3373,7 +3391,7 @@ class Validator(BaseValidatorNeuron):
                 result = self.subtensor.set_weights(
                     netuid=self.config.netuid,
                     wallet=self.wallet,
-                    uids=[UID_ZERO],
+                    uids=[BURN_TARGET_UID],
                     weights=[1.0],
                     wait_for_finalization=True
                 )
@@ -3556,7 +3574,7 @@ class Validator(BaseValidatorNeuron):
             uid_weights = {}
             
             # UID 0 gets total burn share
-            uid_weights[UID_ZERO] = total_burn_share
+            uid_weights[BURN_TARGET_UID] = total_burn_share
             
             # Champion gets their share (if registered)
             if effective_champion_share > 0 and champion_uid is not None:
@@ -3577,7 +3595,7 @@ class Validator(BaseValidatorNeuron):
                         ff_registered += 1
                         print(f"   🎯 Fulfillment (UID {ff_uid}): {ff_pct*100:.4f}%")
                     else:
-                        uid_weights[UID_ZERO] = uid_weights.get(UID_ZERO, 0) + ff_pct
+                        uid_weights[BURN_TARGET_UID] = uid_weights.get(BURN_TARGET_UID, 0) + ff_pct
                         print(f"   🎯 Fulfillment ({ff_hotkey[:12]}...): {ff_pct*100:.4f}% → BURN (deregistered)")
 
             # Leaderboard top-3 bonuses (independent of per-epoch fulfillment rewards)
@@ -3598,7 +3616,7 @@ class Validator(BaseValidatorNeuron):
             if registered_rolling_total < MIN_TOTAL_REP_FOR_DISTRIBUTION:
                 print(f"      ⚠️  Total rep ({registered_rolling_total:,}) below minimum ({MIN_TOTAL_REP_FOR_DISTRIBUTION})")
                 print(f"      → Burning sourcing share to prevent division instability")
-                uid_weights[UID_ZERO] += effective_sourcing_to_miners
+                uid_weights[BURN_TARGET_UID] += effective_sourcing_to_miners
             else:
                 # Distribute to registered miners by rep score proportion
                 for hotkey, rep_score in registered_rolling_scores.items():
@@ -3625,7 +3643,7 @@ class Validator(BaseValidatorNeuron):
             print(f"   Final weights (should sum to 1.0):")
             for uid in sorted(final_uids):
                 weight = uid_weights[uid]
-                if uid == UID_ZERO:
+                if uid == BURN_TARGET_UID:
                     print(f"      UID {uid} (Burn): {weight*100:.2f}%")
                 else:
                     print(f"      UID {uid}: {weight*100:.2f}%")

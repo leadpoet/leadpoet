@@ -45,7 +45,7 @@ from qualification.scoring.pre_checks import (
     ValidationResult,
 )
 
-from qualification.scoring.intent_verification import (
+from qualification.scoring.verification_helpers import (
     verify_intent_signal,
     fetch_url_content,
     scrapingdog_linkedin,

@@ -199,7 +199,7 @@ class IntentSignal(BaseModel):
          (description ≤ 350, snippet ≤ 600) tightened from prior values
          to reduce the room for crafted attacks.
 
-      2. **LLM-call defenses** (in ``qualification/scoring/intent_verification.py``
+      2. **LLM-call defenses** (in ``qualification/scoring/verification_helpers.py``
          and ``lead_scorer.py``): system/user message separation, neutral
          ``<<<MINER_*>>>`` delimited blocks, and strict JSON Schema
          response_format on every LLM call.  Even if a subtler injection

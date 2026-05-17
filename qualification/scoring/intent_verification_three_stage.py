@@ -22,8 +22,7 @@ What the pipeline does, in order:
     - otherwise                                       -> review (escalate)
 
   STAGE 2 — only when Stage 1 returns 'review'. SD-primary + Exa-fallback per
-  supplied URL. Imported from intent_verification_single_call.py so we get the
-  full hardening:
+  supplied URL with the full hardening:
     * JS_HEAVY_HOSTS -> dynamic=true + wait=5000
     * ANTI_BOT_HOSTS -> premium=true + stealth_mode=true
     * 3x retry with exponential backoff
@@ -63,19 +62,206 @@ import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, urlunsplit
 
 import httpx
 
-from qualification.scoring.intent_verification_single_call import (
-    MAX_SCRAPED_CHARS,
-    _get_openrouter_key,
-    _normalize_url,
-    _scrape_exa,
-    _scrape_sd_hardened,
-    company_in_scrape,
-)
-
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Scraping config (host hardening profiles)
+# ─────────────────────────────────────────────────────────────────────
+MAX_SCRAPED_CHARS = 60_000
+SCRAPE_TIMEOUT = 60
+
+JS_HEAVY_HOSTS = (
+    "indeed.com", "builtin.com", "linkedin.com", "glassdoor.com",
+    "ziprecruiter.com", "lever.co", "greenhouse.io",
+)
+ANTI_BOT_HOSTS = (
+    "forbes.com", "bloomberg.com", "reuters.com", "wsj.com",
+    "ft.com", "finance.yahoo.com",
+)
+ANTI_BOT_MARKERS = [
+    "checking your browser", "captcha", "verify you are human",
+    "ddos protection", "challenge-platform", "access denied",
+    "security check",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Deterministic helpers
+# ─────────────────────────────────────────────────────────────────────
+def _host(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _looks_textual(content: str) -> bool:
+    if not content:
+        return False
+    sample = content[:2000]
+    printable = sum(1 for c in sample if c.isprintable() or c in "\n\r\t")
+    return printable / max(len(sample), 1) > 0.85
+
+
+def _has_anti_bot_marker(content: str) -> bool:
+    low = (content or "")[:5000].lower()
+    return any(m in low for m in ANTI_BOT_MARKERS)
+
+
+def _normalize_url(url: str) -> str:
+    try:
+        parsed = urlparse((url or "").strip())
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        path = parsed.path.rstrip("/") if parsed.path != "/" else ""
+        return urlunsplit(
+            (parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.query, "")
+        )
+    except Exception:
+        return url or ""
+
+
+def company_in_scrape(company_name: str, scraped_text: str) -> bool:
+    """True iff the company name (or its base form with common legal/structural
+    suffixes stripped) appears as a whole word in the scraped text
+    (case-insensitive).  Word-boundary regex prevents false positives on
+    incidental occurrences of short common-word company names."""
+    if not company_name or not scraped_text:
+        return False
+    text_lower = scraped_text.lower()
+    target = company_name.lower().strip()
+    if re.search(rf"\b{re.escape(target)}\b", text_lower):
+        return True
+    base = re.sub(
+        r"\b(inc|llc|ltd|corp|company|technologies?|holdings?|group)\b\.?",
+        "", target,
+    ).strip()
+    if base and base != target:
+        return bool(re.search(rf"\b{re.escape(base)}\b", text_lower))
+    return False
+
+
+def _get_openrouter_key() -> str:
+    return (
+        os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("FULFILLMENT_OPENROUTER_API_KEY")
+        or os.environ.get("OPENROUTER_KEY")
+        or ""
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Scraping — SD primary (host-aware hardened) + Exa fallback
+# ─────────────────────────────────────────────────────────────────────
+async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
+    """Direct Scrapingdog /scrape call with host-specific hardening (dynamic
+    rendering for JS-heavy hosts, premium proxy + stealth for anti-bot hosts)
+    and 3x retry with exponential backoff.  After anti-bot retry, re-validates
+    length, textuality, and absence of challenge markers."""
+    api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
+        "QUALIFICATION_SCRAPINGDOG_API_KEY"
+    )
+    if not api_key:
+        return {"ok": False, "stage": "no_sd_key", "content": "", "error": "missing key"}
+
+    host = _host(url)
+    params = {"api_key": api_key, "url": url, "format": "markdown"}
+    if any(h in host for h in JS_HEAVY_HOSTS):
+        params["dynamic"] = "true"
+        params["wait"] = "5000"
+    if any(h in host for h in ANTI_BOT_HOSTS):
+        params["premium"] = "true"
+        params["stealth_mode"] = "true"
+
+    content = None
+    last_err = None
+    async with httpx.AsyncClient() as cli:
+        for i in range(3):
+            try:
+                r = await cli.get(
+                    "https://api.scrapingdog.com/scrape",
+                    params=params, timeout=SCRAPE_TIMEOUT,
+                )
+                if r.status_code == 200:
+                    content = r.text
+                    if content and len(content.strip()) > 300:
+                        break
+                else:
+                    last_err = f"HTTP {r.status_code}"
+            except Exception as e:
+                last_err = f"{type(e).__name__}"
+            await asyncio.sleep(2 ** i)
+
+    if not content or len(content) < 300:
+        return {"ok": False, "stage": "fetch_failed",
+                "content": "", "error": last_err or "empty"}
+    if not _looks_textual(content):
+        return {"ok": False, "stage": "binary_blob",
+                "content": "", "error": "non_textual_content"}
+    if _has_anti_bot_marker(content):
+        params["premium"] = "true"
+        params["stealth_mode"] = "true"
+        try:
+            async with httpx.AsyncClient() as cli:
+                r = await cli.get(
+                    "https://api.scrapingdog.com/scrape",
+                    params=params, timeout=SCRAPE_TIMEOUT,
+                )
+                content = r.text
+        except Exception as e:
+            return {"ok": False, "stage": "anti_bot_retry_failed",
+                    "content": "", "error": str(e)[:120]}
+        if not content or len(content) < 300:
+            return {"ok": False, "stage": "anti_bot_retry_thin",
+                    "content": "", "error": f"retry returned {len(content or '')} chars"}
+        if not _looks_textual(content):
+            return {"ok": False, "stage": "anti_bot_retry_binary",
+                    "content": "", "error": "non_textual_content_after_retry"}
+        if _has_anti_bot_marker(content):
+            return {"ok": False, "stage": "anti_bot_blocked",
+                    "content": "", "error": "challenge_persisted"}
+    return {"ok": True, "stage": "sd_scraped",
+            "content": content[:MAX_SCRAPED_CHARS], "error": None}
+
+
+async def _scrape_exa(url: str) -> Dict[str, Any]:
+    """Exa Contents API fallback for URLs Scrapingdog cannot crack."""
+    api_key = os.environ.get("EXA_API_KEY")
+    if not api_key:
+        return {"ok": False, "stage": "no_exa_key",
+                "content": "", "error": "missing key"}
+    payload = {"ids": [url], "text": {"maxCharacters": MAX_SCRAPED_CHARS},
+               "maxAgeHours": 0}
+    try:
+        async with httpx.AsyncClient() as cli:
+            r = await cli.post(
+                "https://api.exa.ai/contents",
+                headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                json=payload, timeout=SCRAPE_TIMEOUT,
+            )
+            if r.status_code != 200:
+                return {"ok": False, "stage": "exa_http_error",
+                        "content": "", "error": f"HTTP {r.status_code}"}
+            data = r.json()
+    except Exception as e:
+        return {"ok": False, "stage": "exa_failed",
+                "content": "", "error": f"{type(e).__name__}: {str(e)[:80]}"}
+
+    results = data.get("results") or []
+    if not results:
+        return {"ok": False, "stage": "exa_no_results",
+                "content": "",
+                "error": (json.dumps(data.get("statuses") or [])[:120])}
+    text = (results[0].get("text") or "")[:MAX_SCRAPED_CHARS]
+    if len(text) < 300:
+        return {"ok": False, "stage": "exa_thin",
+                "content": text, "error": "<300 chars"}
+    return {"ok": True, "stage": "exa_scraped", "content": text, "error": None}
 
 
 # ─────────────────────────────────────────────────────────────────────

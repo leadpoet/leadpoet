@@ -55,7 +55,7 @@ For each ICP, the validator runs ``score_company`` in
 
 Fabricated intent signals (signals whose URL doesn't contain the
 claim, hardcoded dates, dup domains) zero the entire score.  See
-``qualification/scoring/intent_verification.py`` for the exact rules.
+``qualification/scoring/verification_helpers.py`` for the exact rules.
 """
 
 from __future__ import annotations

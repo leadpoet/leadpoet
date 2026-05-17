@@ -124,8 +124,8 @@ from gateway.qualification.models import (
     IntentSignalSource,
     ICPPrompt,
 )
-import qualification.scoring.intent_verification as _intent_verif_module
-from qualification.scoring.intent_verification import (
+import qualification.scoring.verification_helpers as _intent_verif_module
+from qualification.scoring.verification_helpers import (
     fetch_url_content,
     extract_verification_content,
     check_company_in_content,
@@ -942,7 +942,7 @@ async def _run_validator_intent_verification(
 
     For each signal, constructs a ``ValidatorIntentSignal`` and runs it through
     ``_score_single_intent_signal`` (which internally calls ``verify_intent_signal``
-    from ``qualification/scoring/intent_verification.py``) and then applies
+    from ``qualification/scoring/verification_helpers.py``) and then applies
     time-decay via ``_apply_signal_time_decay``.  Finally aggregates using the
     same peak-weighted function the gateway uses.
 

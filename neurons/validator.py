@@ -3142,50 +3142,60 @@ class Validator(BaseValidatorNeuron):
             # ╠══════════════════════════════════════════════════════════════════╣
             # ║ When the team or an operator says "fulfillment is N%", the      ║
             # ║ leaderboard (LEADERBOARD_BONUS_SHARE) is INCLUDED in that N%.   ║
-            # ║ The leaderboard is the lifetime-top-3 bonus that lives inside   ║
+            # ║ The leaderboard is the WEEKLY top-3 bonus that lives inside     ║
             # ║ the fulfillment track — it rewards sustained high performance   ║
             # ║ on top of per-epoch payouts.                                    ║
             # ║                                                                  ║
+            # ║ Window: rolling 7-day window resetting every Monday 00:00 UTC.  ║
+            # ║ The gateway endpoint /fulfillment/leaderboard filters by        ║
+            # ║ fulfillment_score_consensus.computed_at >= last_monday_00z.     ║
+            # ║                                                                  ║
             # ║ When tuning the split, change the RATIO between                 ║
             # ║   FULFILLMENT_POOL_SHARE  (per-epoch winners)                   ║
-            # ║   LEADERBOARD_BONUS_SHARE (lifetime top-3)                      ║
+            # ║   LEADERBOARD_BONUS_SHARE (weekly top-3)                        ║
             # ║ but never set LEADERBOARD_BONUS_SHARE to 0 — that disables the  ║
             # ║ leaderboard entirely, which is NOT what "fulfillment X%" means. ║
             # ║                                                                  ║
             # ║ Current default: 95% fulfillment-flavored total =               ║
-            # ║   91% per-epoch + 4% leaderboard (2.5/1.0/0.5).                 ║
+            # ║   85.5% per-epoch + 9.5% leaderboard (5 / 3 / 1.5).             ║
             # ║                                                                  ║
             # ║ History: 322f287d (2026-05-15) zeroed the leaderboard while     ║
             # ║ raising the per-epoch pool to 95%, mistakenly interpreting      ║
             # ║ "95% fulfillment" as "per-epoch only".  Restored in d3558afa    ║
             # ║ the same day.  This banner exists so it doesn't happen again.   ║
+            # ║ 2026-05-17: leaderboard bumped 4% → 9.5% AND switched from      ║
+            # ║ all-time to weekly (Monday 00:00 UTC reset).                    ║
             # ╚══════════════════════════════════════════════════════════════════╝
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
             CHAMPION_SHARE = 0.05          # 5% to qualification model champion (when active)
             # FULFILLMENT-FLAVORED TOTAL = 95% (sourcing is zeroed, champion is 5%).
             # That 95% is split into a per-epoch fulfillment pool and a top-3
-            # all-time leaderboard bonus.  The leaderboard is a permanent
+            # weekly leaderboard bonus.  The leaderboard is a permanent
             # feature of the fulfillment track — it is NEVER toggled off; only
-            # the split ratio between per-epoch and lifetime is tunable here.
-            FULFILLMENT_POOL_SHARE = 0.91  # 91% reserved for per-epoch fulfillment rewards
-            # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, restored 2026-05-15
-            # after a brief misconfiguration.  Top-3 all-time fulfillment winners
-            # get this bonus on top of per-epoch payouts.  Carved from the 95%
-            # fulfillment-flavored total (95 = 91 per-epoch + 4 leaderboard).
-            LEADERBOARD_BONUS_SHARE = 0.04   # 4% total: 2.5 + 1.0 + 0.5
-            LEADERBOARD_TOP1_PCT     = 0.025 # 2.5% to all-time #1
-            LEADERBOARD_TOP2_PCT     = 0.010 # 1.0% to all-time #2
-            LEADERBOARD_TOP3_PCT     = 0.005 # 0.5% to all-time #3
+            # the split ratio between per-epoch and weekly is tunable here.
+            FULFILLMENT_POOL_SHARE = 0.855 # 85.5% reserved for per-epoch fulfillment rewards
+            # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, restored 2026-05-15,
+            # bumped to 9.5% + switched to weekly window on 2026-05-17.
+            # Top-3 WEEKLY fulfillment winners (Mon 00:00 UTC reset) get this bonus
+            # on top of per-epoch payouts.  Carved from the 95% fulfillment-flavored
+            # total (95 = 85.5 per-epoch + 9.5 leaderboard).
+            LEADERBOARD_BONUS_SHARE = 0.095  # 9.5% total: 5 + 3 + 1.5
+            LEADERBOARD_TOP1_PCT     = 0.05  # 5.0% to weekly #1
+            LEADERBOARD_TOP2_PCT     = 0.03  # 3.0% to weekly #2
+            LEADERBOARD_TOP3_PCT     = 0.015 # 1.5% to weekly #3
             # MAX_SOURCING_SHARE is computed dynamically:
             #   No champion, no fulfillment → 100% to sourcing miners
-            #   Both active → 20% sourcing, 5% champion, 71% fulfillment pool, 4% leaderboard bonus
+            #   Both active → 0% sourcing, 5% champion, 85.5% fulfillment pool, 9.5% leaderboard bonus
             # Updated 2026-04-27: shifted 15 points from sourcing → fulfillment
             # to incentivize miners to focus on the (more validator-cost-
             # intensive) fulfillment work.  Prior allocation was 35/5/60.
             # Updated 2026-04-30: introduced 4% all-time leaderboard bonus
             # carved from fulfillment pool (75 → 71 + 4).  Total fulfillment-
             # flavored allocation unchanged at 75%.
+            # Updated 2026-05-17: leaderboard 4% → 9.5% AND switched from
+            # all-time to weekly (Monday 00:00 UTC reset).  Fulfillment pool
+            # 91% → 85.5%; 95% fulfillment-flavored total preserved.
             
             # CONFIGURABLE THRESHOLD: Approved leads needed in 30 epochs for full sourcing share
             # If network produces >= this many leads, full share is distributed
@@ -3337,12 +3347,12 @@ class Validator(BaseValidatorNeuron):
             # portion flows to burn — it does NOT redistribute back to sourcing.
             # (ff_enabled is read once at the top of the function so the early
             #  no-sourcing-data gates above can honor it; do not re-read here.)
-            # MAX_SOURCING_SHARE is strictly 0% under the 2026-05-15 split:
+            # MAX_SOURCING_SHARE is strictly 0% under the 2026-05-17 split:
             # 5% champion (reserved even when inactive — burns instead of
-            # falling back to sourcing) + 91% per-epoch fulfillment + 4%
+            # falling back to sourcing) + 85.5% per-epoch fulfillment + 9.5%
             # fulfillment leaderboard = 100%.  Sourcing miners get nothing;
             # qualification incentive is concentrated on the champion slot,
-            # fulfillment incentive on per-epoch winners and the lifetime top-3.
+            # fulfillment incentive on per-epoch winners and the weekly top-3.
             MAX_SOURCING_SHARE = (
                 1.0
                 - CHAMPION_SHARE
@@ -3471,11 +3481,13 @@ class Validator(BaseValidatorNeuron):
                 print(f"      Fulfillment emission error (safe fallback — full pool to burn): {e}")
 
             # ════════════════════════════════════════════════════════════════
-            # FULFILLMENT LEADERBOARD BONUS (top-3 all-time fulfillment winners)
+            # FULFILLMENT LEADERBOARD BONUS (top-3 weekly fulfillment winners,
+            # Monday 00:00 UTC reset — windowing is handled gateway-side in
+            # GET /fulfillment/leaderboard).
             # Same safe-fallback pattern as fulfillment_share: any error here
             # zeros the bonus and the full LEADERBOARD_BONUS_SHARE flows to
             # burn — never silently redistributes to other allocations.
-            # Each rank's slot is independent: a deregistered #1 burns 2.5%
+            # Each rank's slot is independent: a deregistered #1 burns 5%
             # but #2 and #3 still pay out, etc.
             # ════════════════════════════════════════════════════════════════
             leaderboard_per_uid: dict = {}      # {uid: pct_to_award}
@@ -3483,7 +3495,7 @@ class Validator(BaseValidatorNeuron):
             # burn (mirroring how the fulfillment pool burns when disabled).
             # When ff is enabled, the burn starts at 0 and grows for any
             # rank slot that falls through (deregistered top-N or fewer than
-            # 3 lifetime winners).
+            # 3 weekly winners).
             leaderboard_burn = 0.0 if ff_enabled else LEADERBOARD_BONUS_SHARE
             try:
                 if ff_enabled and effective_leaderboard_share > 0:
@@ -3494,7 +3506,7 @@ class Validator(BaseValidatorNeuron):
                         LEADERBOARD_TOP2_PCT,
                         LEADERBOARD_TOP3_PCT,
                     ]
-                    print(f"      Leaderboard top-3 (all-time fulfillment wins):")
+                    print(f"      Leaderboard top-3 (this week's fulfillment wins — Mon 00:00 UTC reset):")
                     for rank_idx, rank_pct in enumerate(rank_pcts):
                         if rank_idx >= len(leaders):
                             # No miner at this rank — bonus burns

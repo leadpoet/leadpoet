@@ -1306,15 +1306,35 @@ async def get_active_rewards(current_epoch: int):
 
 
 # ---------------------------------------------------------------
-# GET /fulfillment/leaderboard  — top fulfillment miners by lifetime wins
+# GET /fulfillment/leaderboard  — top fulfillment miners this week
 # ---------------------------------------------------------------
+def _current_week_start_utc() -> datetime:
+    """Return the most recent Monday 00:00:00 UTC.
+
+    The leaderboard window resets every Monday 00:00 UTC.  Python's
+    ``datetime.weekday()`` returns Mon=0..Sun=6, so subtracting that
+    many days from today's 00:00 UTC always lands on the current
+    week's Monday — including the edge case where ``now`` is exactly
+    Monday 00:00 (days_since_monday = 0, window_start = today 00:00,
+    so the window restarts at the boundary instant).
+    """
+    now = datetime.now(timezone.utc)
+    today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return today_midnight - timedelta(days=now.weekday())
+
+
 @fulfillment_router.get("/leaderboard")
 async def get_fulfillment_leaderboard(limit: int = 3):
-    """Return top fulfillment miners ranked by all-time `is_winner` count.
+    """Return top fulfillment miners ranked by `is_winner` count this week.
+
+    Window: rolling 7-day window resetting every Monday 00:00 UTC.
+    Computed from ``fulfillment_score_consensus.computed_at`` —
+    any winning row whose ``computed_at`` is on or after the current
+    week's Monday-midnight-UTC is counted.
 
     Used by the validator each weight-set cycle to identify the top-3
-    miners eligible for the lifetime leaderboard emission bonus
-    (LEADERBOARD_BONUS_SHARE in neurons/validator.py — split 2.5/1/0.5%
+    miners eligible for the weekly leaderboard emission bonus
+    (LEADERBOARD_BONUS_SHARE in neurons/validator.py — split 5 / 3 / 1.5%
     across rank 1, 2, 3).  Also intended to power a public dashboard.
 
     Banned hotkeys are filtered out — we don't surface or pay them.
@@ -1331,7 +1351,9 @@ async def get_fulfillment_leaderboard(limit: int = 3):
             {"rank": 1, "miner_hotkey": "5...", "wins": 87, "total_reward_pct": 4.32},
             ...
           ],
-          "computed_at": "2026-04-30T03:14:00Z",
+          "computed_at": "2026-05-17T03:14:00Z",
+          "period_start": "2026-05-12T00:00:00+00:00",
+          "period_end": "2026-05-17T03:14:00+00:00",
           "total_unique_winners": 12
         }
     """
@@ -1342,11 +1364,18 @@ async def get_fulfillment_leaderboard(limit: int = 3):
 
     supabase = _get_supabase()
 
-    # Fetch all winning consensus rows (typical scale: low thousands —
-    # cheap.  If this ever balloons we move to a materialized view).
+    # Weekly window: only count rows whose consensus computed_at is on or
+    # after the current week's Monday 00:00 UTC.  Schema confirmed: the
+    # `computed_at` column exists on fulfillment_score_consensus and is
+    # written by the lifecycle when the row is created (see
+    # gateway/fulfillment/lifecycle.py and scripts/investigate_intent_details.py).
+    week_start = _current_week_start_utc()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
     resp = supabase.table("fulfillment_score_consensus") \
         .select("miner_hotkey, reward_pct") \
         .eq("is_winner", True) \
+        .gte("computed_at", week_start.isoformat()) \
         .execute()
 
     # Banned hotkeys to exclude
@@ -1389,7 +1418,9 @@ async def get_fulfillment_leaderboard(limit: int = 3):
 
     return {
         "leaderboard": leaderboard,
-        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "computed_at": now_iso,
+        "period_start": week_start.isoformat(),
+        "period_end": now_iso,
         "total_unique_winners": len(per_miner),
     }
 

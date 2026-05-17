@@ -2661,14 +2661,18 @@ def gateway_submit_fulfillment_scores(
 
 
 def gateway_get_fulfillment_leaderboard(wallet: bt.wallet, limit: int = 3) -> List[Dict]:
-    """Fetch the top-N fulfillment miners ranked by lifetime wins.
+    """Fetch the top-N fulfillment miners ranked by wins THIS WEEK.
+
+    Window: rolling 7-day window resetting every Monday 00:00 UTC.
+    Server-side filtering on fulfillment_score_consensus.computed_at.
 
     Mirrors gateway_get_all_fulfillment_rewards' retry/backoff pattern.
     Used by the validator each set_weights cycle to allocate the
-    LEADERBOARD_BONUS_SHARE (2.5% / 1% / 0.5% to ranks 1/2/3).  Banned
+    LEADERBOARD_BONUS_SHARE (5% / 3% / 1.5% to ranks 1/2/3).  Banned
     hotkeys are filtered server-side; an empty leaderboard list is a
-    legitimate response (e.g., very early subnet life with no winners
-    yet) and the caller should burn the entire bonus pool in that case.
+    legitimate response (e.g., a fresh week with no winners yet, or
+    very early subnet life) and the caller should burn the entire
+    bonus pool in that case.
 
     Args:
         wallet: validator wallet (unused for this endpoint, kept for

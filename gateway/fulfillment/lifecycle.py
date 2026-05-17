@@ -313,7 +313,7 @@ async def _lifecycle_tick_inner(supabase) -> None:
 
     # Step 2: commit_closed -> scoring or recycled (past reveal_window_end)
     closed_past_reveal = supabase.table("fulfillment_requests") \
-        .select("request_id, icp_details, num_leads, reveal_window_end, internal_label, company") \
+        .select("request_id, icp_details, num_leads, reveal_window_end, internal_label, company, required_attributes") \
         .eq("status", "commit_closed") \
         .lt("reveal_window_end", now_iso) \
         .execute()
@@ -372,7 +372,7 @@ async def _lifecycle_tick_inner(supabase) -> None:
 
     # Step 3: consensus aggregation for scoring requests
     scoring_requests = supabase.table("fulfillment_requests") \
-        .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company") \
+        .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes") \
         .eq("status", "scoring") \
         .execute()
 
@@ -1373,7 +1373,7 @@ def _recycle_request(
             else original_request["num_leads"]
         )
 
-        supabase.table("fulfillment_requests").insert({
+        successor_row = {
             "request_id": new_id,
             "request_hash": "",
             "icp_details": successor_icp,
@@ -1385,7 +1385,14 @@ def _recycle_request(
             "reveal_window_end": None,
             "status": "pending",
             "created_by": "recycled",
-        }).execute()
+        }
+        # required_attributes is a dedicated column (not inside icp_details).
+        # Carry it from the predecessor so Tier 2c attribute verification
+        # keeps firing across the entire chain; otherwise every recycle
+        # silently drops the gate.
+        if original_request.get("required_attributes"):
+            successor_row["required_attributes"] = original_request["required_attributes"]
+        supabase.table("fulfillment_requests").insert(successor_row).execute()
         successor_inserted = True
 
         claim = supabase.table("fulfillment_requests").update({

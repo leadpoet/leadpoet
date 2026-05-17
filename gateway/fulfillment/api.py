@@ -474,15 +474,20 @@ async def create_request(
     # `internal_label` column (fall-through retry below).
     if icp.internal_label:
         row["internal_label"] = icp.internal_label
+    # required_attributes lives in a dedicated DB column (not inside icp_details).
+    # Persist it on the initial insert so Tier 2c attribute verification can run
+    # — otherwise the column stays null and the gate is silently skipped.
+    if icp.required_attributes:
+        row["required_attributes"] = icp.required_attributes
     try:
         supabase.table("fulfillment_requests").insert(row).execute()
     except Exception as e:
         # If a newly-added column doesn't exist on this deployment yet,
         # retry without it so request creation never hard-blocks on schema
-        # drift.  Handles both `internal_label` and `company`.
+        # drift.  Handles `internal_label`, `company`, and `required_attributes`.
         err = str(e)
         retried = False
-        for missing in ("internal_label", "company"):
+        for missing in ("internal_label", "company", "required_attributes"):
             if missing in err and missing in row:
                 row.pop(missing, None)
                 retried = True

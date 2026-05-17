@@ -59,6 +59,7 @@ from qualification.scoring.pre_checks import run_company_zero_checks
 from qualification.scoring.verification_helpers import (
     is_generic_intent_description,
     check_future_date,
+    openrouter_chat,
 )
 from qualification.scoring.intent_signal_gate import judge_intent_signal
 from qualification.scoring.company_verification import verify_company_exists

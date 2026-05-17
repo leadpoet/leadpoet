@@ -56,7 +56,10 @@ from gateway.qualification.models import (
     CompanyOutput,
 )
 from qualification.scoring.pre_checks import run_company_zero_checks
-from qualification.scoring.verification_helpers import verify_intent_signal
+from qualification.scoring.verification_helpers import (
+    is_generic_intent_description,
+    check_future_date,
+)
 from qualification.scoring.intent_signal_gate import judge_intent_signal
 from qualification.scoring.company_verification import verify_company_exists
 
@@ -765,30 +768,37 @@ async def _score_single_intent_signal(
         )
         return 0.0, 0, "fabricated", None, -1
 
-    # Verify the signal is real AND provides evidence of ICP fit.
-    # ``page_text_buf`` captures the fetched page text so the strict LLM
-    # judge below can reuse it instead of re-fetching from ScrapingDog.
-    # Cache-hit branches inside verify_intent_signal leave the buffer
-    # empty; in that case the strict judge is skipped (the cached result
-    # was already validated in a prior run).
-    page_text_buf: list = []
-    verified, confidence, reason, date_status, content_found_date = await verify_intent_signal(
-        signal,
-        icp_industry=icp.industry,
-        icp_criteria=icp_criteria,
-        company_name=company_name,
-        company_website=company_website,
-        api_key=api_key,
-        page_content_out=page_text_buf,
-    )
+    # ── Cheap pre-checks BEFORE the three-stage LLM pipeline ────────────
+    # These are deterministic rejects that don't require URL fetching:
+    #   1. Generic / templated descriptions (cached blocklist patterns)
+    #   2. "other" source type with a too-short description
+    #   3. Future-dated signals (obviously fabricated)
+    #
+    # We intentionally do NOT call the older verify_intent_signal() Layer-1
+    # gate here.  That function fetches via Scrapingdog only (no Exa
+    # fallback), so on anti-bot / JS-heavy URLs it returns False and would
+    # short-circuit the entire scoring before three-stage gets a chance to
+    # use its SD + Exa fallback to crack the same URL.  Skipping the
+    # Layer-1 fetch means three-stage is the sole content-aware verifier,
+    # and its Exa fallback now reaches the URLs that need it most.
+    confidence = 0
+    content_found_date: Optional[str] = None
+    date_status = "verified"
 
-    if not verified:
-        logger.info(f"Intent signal not verified: {reason}")
-        return 0.0, confidence, date_status, content_found_date, -1
-
-    # Get source as string
-    source_str = signal.source.value if hasattr(signal.source, 'value') else str(signal.source)
+    source_str = signal.source.value if hasattr(signal.source, "value") else str(signal.source)
     source_lower = source_str.lower()
+
+    is_generic, generic_reason = is_generic_intent_description(signal.description or "")
+    if is_generic:
+        logger.warning(f"Intent signal rejected: generic/templated — {generic_reason}")
+        return 0.0, 5, "fabricated", None, -1
+    if source_lower == "other" and len(signal.description or "") < 100:
+        logger.warning("Intent signal rejected: 'other' source with short description")
+        return 0.0, 10, "fabricated", None, -1
+    future_err = check_future_date(signal.date)
+    if future_err:
+        logger.warning(f"Intent signal rejected: future date — {future_err}")
+        return 0.0, 0, "fabricated", None, -1
 
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)

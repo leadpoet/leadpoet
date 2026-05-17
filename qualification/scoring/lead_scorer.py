@@ -797,6 +797,92 @@ async def _score_single_intent_signal(
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)
 
+    # ── three-stage verifier branch ────────────────────────────────────
+    # When INTENT_VERIFIER_THREE_STAGE=1, the scoring call is handled by
+    # qualification/scoring/intent_verification_three_stage.py:
+    #   STAGE 1: perplexity/sonar verifies with its own native web search
+    #            (no pre-scraping). approve / reject -> STOP.
+    #   STAGE 2: on review, SD (hardened) -> Exa fallback per supplied URL
+    #            extracts the actual page content.
+    #   STAGE 3: perplexity/sonar-pro re-judges with the extracted content
+    #            as the only allowed evidence, per the standalone pipeline's
+    #            strict prompt.
+    # Same prompts, models, JSON schema, guardrails, and decision rule as
+    # Intent_check/pipeline_sonar_exa_contents.py.  The only change versus
+    # the standalone .py is Stage 2's scraping (SD primary + Exa fallback)
+    # so JS-heavy and anti-bot hosts (Indeed/BuiltIn/LinkedIn/etc.) render
+    # properly instead of returning thin Exa text.
+    #
+    # Production binary mapping: approve -> accept; reject -> reject;
+    # review -> reject by default (set INTENT_VERIFIER_REVIEW_AS_ACCEPT=on
+    # to flip review to accept).
+    #
+    # Fail-closed: any unhandled exception inside the verifier rejects the
+    # signal (no fall-through to single-call / v2 / legacy).
+    if os.environ.get("INTENT_VERIFIER_THREE_STAGE", "").strip().lower() in ("1", "true", "yes", "on"):
+        from qualification.scoring.intent_verification_three_stage import (
+            verify_three_stage,
+        )
+        target_signal_raw = icp_signals_for_gate[miner_asserted_idx]
+        target_signal_text = (
+            target_signal_raw.get("text")
+            if isinstance(target_signal_raw, dict)
+            else str(target_signal_raw)
+        )
+        import httpx
+        try:
+            async with httpx.AsyncClient() as http_client:
+                three_stage_result = await verify_three_stage(
+                    http_client,
+                    company_name=company_name,
+                    company_linkedin=company_linkedin,
+                    company_website=company_website,
+                    source_url=signal.url,
+                    miner_claim=signal.description,
+                    target_signal_text=target_signal_text,
+                )
+        except Exception as three_stage_error:
+            logger.error(
+                "three-stage verifier raised: %s: %s — "
+                "rejecting signal (no fallback)  source=%s",
+                type(three_stage_error).__name__, three_stage_error,
+                signal.url[:60],
+            )
+            return 0.0, confidence, "verified", content_found_date, -1
+
+        s1_status = (three_stage_result.get("stage1") or {}).get("status")
+        s3_status = (three_stage_result.get("stage3") or {}).get("status")
+        scrape_summary = three_stage_result.get("scrape") or {}
+        pipeline_decision = three_stage_result.get("decision")
+        if not three_stage_result.get("client_ready"):
+            logger.info(
+                "Intent signal three-stage REJECT  reason=%s  "
+                "decision=%s  s1_status=%s  s3_status=%s  "
+                "scrape_results=%s  source=%s  target[%d]=%r",
+                three_stage_result.get("rejection_reason"),
+                pipeline_decision, s1_status, s3_status,
+                scrape_summary.get("result_count"),
+                signal.url[:60],
+                miner_asserted_idx, target_signal_text[:60],
+            )
+            return 0.0, confidence, "verified", content_found_date, -1
+        logger.info(
+            "Intent signal three-stage ACCEPT  decision=%s  "
+            "s1_status=%s  s3_status=%s  scrape_results=%s  "
+            "source=%s  target[%d]=%r",
+            pipeline_decision, s1_status, s3_status,
+            scrape_summary.get("result_count"),
+            signal.url[:60],
+            miner_asserted_idx, target_signal_text[:60],
+        )
+        return (
+            60.0 * source_multiplier,
+            max(confidence, 90),
+            "verified",
+            content_found_date,
+            miner_asserted_idx,
+        )
+
     # ── single-call verifier branch ────────────────────────────────────
     # When INTENT_VERIFIER_SINGLE_CALL=1, the scoring call is handled by
     # qualification/scoring/intent_verification_single_call.py:

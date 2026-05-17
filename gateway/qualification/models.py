@@ -106,14 +106,52 @@ class Seniority(str, Enum):
         if normalized in lookup:
             return lookup[normalized]
         aliases = {
+            # C-Suite ----------------------------------------------------------
             "c_suite": cls.C_SUITE, "csuite": cls.C_SUITE, "c suite": cls.C_SUITE,
+            "cxo": cls.C_SUITE, "chief": cls.C_SUITE,
+            "ceo": cls.C_SUITE, "cfo": cls.C_SUITE, "cto": cls.C_SUITE,
+            "coo": cls.C_SUITE, "cmo": cls.C_SUITE, "cro": cls.C_SUITE,
+            "chro": cls.C_SUITE, "cpo": cls.C_SUITE, "cso": cls.C_SUITE,
+            "ciso": cls.C_SUITE, "cdo": cls.C_SUITE,
+            "president": cls.C_SUITE, "vice chairman": cls.C_SUITE,
             "exec": cls.C_SUITE, "executive": cls.C_SUITE,
             "owner": cls.C_SUITE, "founder": cls.C_SUITE, "co-founder": cls.C_SUITE,
-            "co_founder": cls.C_SUITE, "cofounder": cls.C_SUITE, "proprietor": cls.C_SUITE,
+            "co_founder": cls.C_SUITE, "cofounder": cls.C_SUITE,
+            "proprietor": cls.C_SUITE, "partner": cls.C_SUITE,
+            # VP ---------------------------------------------------------------
             "vice president": cls.VP, "vice_president": cls.VP,
+            "svp": cls.VP, "evp": cls.VP, "avp": cls.VP,
+            # Director ---------------------------------------------------------
             "dir": cls.DIRECTOR,
+            "senior director": cls.DIRECTOR, "senior_director": cls.DIRECTOR,
+            "sr director": cls.DIRECTOR, "sr_director": cls.DIRECTOR,
+            "sr. director": cls.DIRECTOR,
+            "head": cls.DIRECTOR, "head of": cls.DIRECTOR,
+            "principal": cls.DIRECTOR,  # Principal Engineer/Consultant ~ director-equivalent
+            # Manager ----------------------------------------------------------
             "mgr": cls.MANAGER,
-            "ic": cls.INDIVIDUAL_CONTRIBUTOR, "individual_contributor": cls.INDIVIDUAL_CONTRIBUTOR,
+            "senior": cls.MANAGER,  # legacy mapping preserved from to_lead_output
+            "senior manager": cls.MANAGER, "senior_manager": cls.MANAGER,
+            "sr manager": cls.MANAGER, "sr_manager": cls.MANAGER,
+            "sr. manager": cls.MANAGER,
+            "lead": cls.MANAGER,  # Team Lead / Engineering Lead — usually people-mgr
+            "team lead": cls.MANAGER, "team_lead": cls.MANAGER,
+            "supervisor": cls.MANAGER,
+            # Individual Contributor ------------------------------------------
+            "ic": cls.INDIVIDUAL_CONTRIBUTOR,
+            "individual_contributor": cls.INDIVIDUAL_CONTRIBUTOR,
+            "individual contributor": cls.INDIVIDUAL_CONTRIBUTOR,
+            "staff": cls.INDIVIDUAL_CONTRIBUTOR,  # Staff Engineer = high IC
+            "junior": cls.INDIVIDUAL_CONTRIBUTOR, "jr": cls.INDIVIDUAL_CONTRIBUTOR,
+            "associate": cls.INDIVIDUAL_CONTRIBUTOR,
+            "engineer": cls.INDIVIDUAL_CONTRIBUTOR,
+            "analyst": cls.INDIVIDUAL_CONTRIBUTOR,
+            "specialist": cls.INDIVIDUAL_CONTRIBUTOR,
+            "coordinator": cls.INDIVIDUAL_CONTRIBUTOR,
+            "contributor": cls.INDIVIDUAL_CONTRIBUTOR,
+            "entry": cls.INDIVIDUAL_CONTRIBUTOR,
+            "entry level": cls.INDIVIDUAL_CONTRIBUTOR,
+            "entry_level": cls.INDIVIDUAL_CONTRIBUTOR,
         }
         return aliases.get(normalized)
 

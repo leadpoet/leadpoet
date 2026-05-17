@@ -9608,9 +9608,45 @@ def run_dedicated_fulfillment_worker(config):
                             "results": [r.model_dump() for r in results],
                         })
                     except Exception as e:
-                        print(f"   ❌ Scoring failed for miner {miner_hk[:8]}: {e}")
+                        # Whole-batch crash: surface a failure record for every
+                        # lead in the submission so the gateway can move the
+                        # request through consensus (denied) instead of waiting
+                        # for the ~3h scoring timeout at 0/1 validators.
+                        # Per-lead crashes should already be caught inside
+                        # score_fulfillment_batch; this is defense-in-depth for
+                        # higher-level failures (e.g., ICP parse, network).
+                        err_type = type(e).__name__
+                        err_msg = str(e)
+                        print(f"   ❌ Scoring failed for miner {miner_hk[:8]}: {err_type}: {err_msg}")
                         import traceback
                         traceback.print_exc()
+                        failure_results = []
+                        for idx, raw_lead in enumerate(leads_raw):
+                            lid = lead_ids[idx] if idx < len(lead_ids) else ""
+                            failure_results.append({
+                                "lead_id": lid,
+                                "tier1_passed": False,
+                                "tier2_passed": False,
+                                "email_verified": False,
+                                "person_verified": False,
+                                "company_verified": False,
+                                "attribute_verification": None,
+                                "rep_score": 0.0,
+                                "intent_signal_raw": 0.0,
+                                "intent_signal_final": 0.0,
+                                "intent_decay_multiplier": 0.0,
+                                "final_score": 0.0,
+                                "all_fabricated": False,
+                                "failure_reason": "scorer_crashed",
+                                "failure_detail": f"{err_type}: {err_msg[:300]}",
+                                "intent_signals_detail": [],
+                            })
+                        all_results.append({
+                            "miner_hotkey": miner_hk,
+                            "submission_id": sub_id,
+                            "lead_ids": lead_ids,
+                            "results": failure_results,
+                        })
 
                 with open(results_file, 'w') as f:
                     json.dump({

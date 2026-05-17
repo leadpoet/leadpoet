@@ -768,10 +768,34 @@ async def score_fulfillment_batch(
     results: List[FulfillmentScoreResult] = []
     for lead in leads:
         per_lead = email_results_map.get(lead.email.lower())
-        result = await score_fulfillment_lead(
-            lead, icp, seen_companies, email_result=per_lead,
-            use_apify=use_apify,
-        )
+        try:
+            result = await score_fulfillment_lead(
+                lead, icp, seen_companies, email_result=per_lead,
+                use_apify=use_apify,
+            )
+        except Exception as e:
+            # Per-lead guard: one bad lead (e.g., LeadOutput Pydantic enum
+            # rejection on an unknown seniority value, or any other crash
+            # inside score_fulfillment_lead) must NOT take down the whole
+            # batch.  Surface as a failed lead with a clear failure_reason
+            # so the validator's results file stays complete and the
+            # request reaches consensus on its remaining leads.
+            err_type = type(e).__name__
+            err_msg = str(e)
+            # Detect the most common case so dashboards group it cleanly.
+            reason = "invalid_seniority" if "Seniority" in err_msg or "seniority" in err_msg \
+                else "scorer_crashed"
+            logger.warning(
+                f"score_fulfillment_lead crashed for {getattr(lead, 'full_name', '?')!r}"
+                f" @ {getattr(lead, 'business', '?')!r}: {err_type}: {err_msg[:300]}"
+            )
+            result = FulfillmentScoreResult(
+                lead_id=getattr(lead, "lead_id", "") or "",
+                tier1_passed=False,
+                tier2_passed=False,
+                failure_reason=reason,
+                failure_detail=f"{err_type}: {err_msg[:300]}",
+            )
         results.append(result)
 
     # Structural similarity detection on leads that passed all tiers

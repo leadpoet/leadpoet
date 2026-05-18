@@ -38,10 +38,34 @@ def hash_data(data: str) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
+# Fields that are present on the gateway-side FulfillmentLead model but
+# must NOT participate in the commit-reveal hash. They're either:
+#   - reveal-time-only metadata (miner-cited evidence about a lead)
+#   - server-added fields with defaults that older miner code doesn't emit
+# Including them in the hash breaks backward compatibility for any miner
+# running pre-deploy code, because pydantic auto-fills the default at
+# parse time and the canonical_json then disagrees with the miner's
+# original (no-such-key) JSON. Once a field is in this set it can never
+# be removed without bumping HASH_SCHEMA_VERSION.
+_HASH_EXCLUDED_FIELDS = frozenset({
+    # Added 2026-05-18 (commit 188bc8f0). Optional per-attribute miner-cited
+    # evidence; supplied at reveal time, not part of lead identity. Including
+    # it in the hash made every pre-deploy miner fail commit-reveal because
+    # pydantic auto-fills `attribute_evidence: []` on parse.
+    "attribute_evidence",
+})
+
+
 def hash_lead(lead_data: dict, schema_version: int = HASH_SCHEMA_VERSION) -> str:
-    """Hash a complete lead dict (including PII) for commit-reveal binding."""
+    """Hash a complete lead dict (including PII) for commit-reveal binding.
+
+    Strips fields in _HASH_EXCLUDED_FIELDS before hashing so the hash
+    captures lead IDENTITY, not server-side metadata or reveal-only
+    fields that older miner code doesn't emit.
+    """
     _check_json_native(lead_data)
-    return hash_data(f"v{schema_version}:" + canonical_json(lead_data))
+    hashable = {k: v for k, v in lead_data.items() if k not in _HASH_EXCLUDED_FIELDS}
+    return hash_data(f"v{schema_version}:" + canonical_json(hashable))
 
 
 def hash_request(icp_details: dict) -> str:

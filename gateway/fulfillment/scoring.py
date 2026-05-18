@@ -612,7 +612,7 @@ async def score_fulfillment_lead(
             rejection = attribute_verification_result.get("rejection_reason") or {}
             reason = rejection.get("check_name", "required_attribute_failed")
             return FulfillmentScoreResult(
-                tier1_passed=True, tier2_passed=True,
+                tier1_passed=True, tier2_passed=False,
                 email_verified=email_verified,
                 person_verified=person_verified,
                 company_verified=company_verified,

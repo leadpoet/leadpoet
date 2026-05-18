@@ -4460,28 +4460,32 @@ class Validator(BaseValidatorNeuron):
         fulfillment_proxies = detect_fulfillment_proxies()
         num_workers = len(fulfillment_proxies) if fulfillment_proxies else 0
 
-        # Track epochs where we already distributed and collected
-        if not hasattr(self, '_ff_distributed_epochs'):
-            self._ff_distributed_epochs = set()
-        if not hasattr(self, '_ff_collected_epochs'):
-            self._ff_collected_epochs = set()
-
         # ═══════════════════════════════════════════════════════════════════
         # PHASE 1: DISTRIBUTE — fetch scoring-ready reveals, write work files
         # No sourcing gate — distribute as early as possible so workers
         # can score in parallel with sourcing validation.
+        #
+        # 2026-05-18: dispatch gate is now per-(epoch, request_id) instead
+        # of per-epoch.  Previously a single-epoch lock made the validator
+        # ignore any request that became scoring-ready AFTER its first
+        # dispatch tick — observed: Adedeji 5 + Bruce Callahan 5 sat in
+        # `scoring` for 27+ minutes mid-epoch because their reveal windows
+        # closed after the validator had already locked epoch 22801.
+        # The new check is "does a work file already exist for (epoch,
+        # request_id)?" so each new scoring-ready request enters dispatch
+        # on the next 30s polling tick, regardless of where in the epoch
+        # we are.  Per-request dedup is intrinsic via the work-file path.
         # ═══════════════════════════════════════════════════════════════════
-        if current_epoch not in self._ff_distributed_epochs:
+        if True:  # always enter — per-request filter below replaces the old per-epoch gate
             try:
                 from Leadpoet.utils.cloud_db import gateway_get_fulfillment_reveals
 
                 # Reveals fetch may raise RuntimeError after exhausting its
-                # 5 retries.  Catch it here and return from Phase 1 WITHOUT
-                # adding the epoch to ``_ff_distributed_epochs``, so the
-                # next main-loop iteration retries the fetch.  A true empty
-                # response (gateway replies with {"requests": []}) is NOT
-                # an error and falls through the normal "no scoring-ready
-                # requests" branch below.
+                # 5 retries.  Catch it here and return from Phase 1 cleanly
+                # so the next 30s polling tick retries the fetch.  A true
+                # empty response (gateway replies with {"requests": []}) is
+                # NOT an error and falls through the normal "no scoring-
+                # ready requests" branch below.
                 try:
                     data = gateway_get_fulfillment_reveals(self.wallet)
                 except RuntimeError as e:
@@ -4496,6 +4500,28 @@ class Validator(BaseValidatorNeuron):
 
                 scoring_requests = [r for r in active_requests
                                     if r.get("status") == "scoring" and r.get("submissions")]
+
+                # Skip any request that we've already written a work file
+                # for in this epoch.  The work file's existence IS the
+                # dispatch lock — once a worker has picked it up (or even
+                # just received the JSON), this request is "in flight" and
+                # must not be re-dispatched (would double-score on the
+                # same lead set).  When Phase 2 finishes submitting scores
+                # for it, the file is deleted (see line ~4697); after that
+                # the gateway should no longer return this request_id in
+                # /fulfillment/reveals, so this filter naturally stops
+                # matching it.
+                if scoring_requests:
+                    def _has_work_file(rid: str) -> bool:
+                        return bool(list(
+                            weights_dir.glob(
+                                f"fulfillment_worker_*_work_{current_epoch}_{rid}.json"
+                            )
+                        ))
+                    scoring_requests = [
+                        r for r in scoring_requests
+                        if not _has_work_file(r.get("request_id", ""))
+                    ]
 
                 if scoring_requests:
                     # Option A parallelization: 1 request per worker container.
@@ -4530,7 +4556,6 @@ class Validator(BaseValidatorNeuron):
                             print(f"   📝 Worker {worker_id} → request {request_id[:8]} "
                                   f"({len(submissions)} submission(s))")
 
-                        self._ff_distributed_epochs.add(current_epoch)
                         print(f"   ⏳ Work distributed to {len(requests_to_process)} worker(s)")
                     else:
                         # ── Inline mode (no containers) — process sequentially ──
@@ -4564,9 +4589,6 @@ class Validator(BaseValidatorNeuron):
                                 except Exception as e:
                                     print(f"   ❌ Inline scoring failed for {miner_hk[:8]}: {e}")
 
-                        self._ff_distributed_epochs.add(current_epoch)
-                        self._ff_collected_epochs.add(current_epoch)
-
             except ImportError as e:
                 if not getattr(self, "_fulfillment_import_warned", False):
                     bt.logging.warning(f"Fulfillment imports unavailable: {e}")
@@ -4579,7 +4601,7 @@ class Validator(BaseValidatorNeuron):
         # Same gate as qualification: _last_processed_epoch >= current_epoch
         # If workers aren't done yet, return silently (try again next iteration).
         # ═══════════════════════════════════════════════════════════════════
-        if num_workers == 0 or current_epoch in self._ff_collected_epochs:
+        if num_workers == 0:
             return
 
         last_processed = getattr(self, '_last_processed_epoch', -1)
@@ -4614,13 +4636,12 @@ class Validator(BaseValidatorNeuron):
 
             # Track whether ALL work files for this epoch submitted cleanly.
             # If any one of them has even a single failed gateway submit, we
-            # keep its work+results files on disk and skip adding this epoch
-            # to ``_ff_collected_epochs``, so the next iteration re-enters
-            # this block and retries just the failed submits (scoring is not
-            # re-run — the results_file already exists with the computed
-            # scores).  The gateway's /fulfillment/score endpoint upserts on
-            # (request_id, validator_hotkey, lead_id), so duplicate retries
-            # are idempotent.
+            # keep its work+results files on disk so the next Phase 2 tick
+            # re-enters this block and retries just the failed submits
+            # (scoring is not re-run — the results_file already exists with
+            # the computed scores).  The gateway's /fulfillment/score
+            # endpoint upserts on (request_id, validator_hotkey, lead_id),
+            # so duplicate retries are idempotent.
             any_submit_failed = False
 
             for work_file in sorted(all_work_files):
@@ -4688,10 +4709,11 @@ class Validator(BaseValidatorNeuron):
                               f"— keeping files, will retry next iteration")
 
                 # Clean up files only if every submit in this work file
-                # succeeded.  Otherwise keep them; Phase 1 will NOT re-dispatch
-                # (current_epoch is already in ``_ff_distributed_epochs``),
-                # and Phase 2 will re-enter this block because the epoch is
-                # not in ``_ff_collected_epochs``.
+                # succeeded.  Otherwise keep them; Phase 1's per-request
+                # work-file check (see top of this function) prevents
+                # re-dispatch while the file is still on disk, and the
+                # next Phase 2 tick re-enters this block to retry just
+                # the failed submits.
                 if worker_all_ok:
                     try:
                         os.remove(work_file)
@@ -4702,14 +4724,15 @@ class Validator(BaseValidatorNeuron):
                     any_submit_failed = True
                     print(f"   ⏸  Kept {work_file.name} for retry")
 
-            # Gate epoch-level collection on full success across every work
-            # file.  If any work file had a failure, leave this epoch OUT of
-            # _ff_collected_epochs so the next iteration re-runs this block.
+            # File-system state is now the source of truth for per-request
+            # collection: successful submits delete the work+results pair,
+            # so the next Phase 2 tick's glob finds nothing for that request.
+            # Failed submits keep the files, so the next tick re-enters this
+            # block and retries just those.  No epoch-level memo needed.
             if not any_submit_failed:
-                self._ff_collected_epochs.add(current_epoch)
                 print(f"{'='*60}\n")
             else:
-                print(f"   ⏸  Epoch {current_epoch} NOT marked collected — "
+                print(f"   ⏸  Epoch {current_epoch} NOT fully collected — "
                       f"some submits failed, will retry next iteration")
                 print(f"{'='*60}\n")
 

@@ -1764,15 +1764,59 @@ class Validator(BaseValidatorNeuron):
                         thread_loop.close()
                         return
 
+                    # Heartbeat path — updated at the end of every tick.
+                    # External watchdog (or operator) can check the file
+                    # mtime; stale >2min ⇒ polling thread is wedged.
+                    # See validator_models/containerizing for the in-container
+                    # mount point — this dir is bind-mounted to the host.
+                    _ff_heartbeat = Path("validator_weights") / "ff_poll_heartbeat"
+
+                    async def _safe_block_read(timeout: float = 15.0):
+                        """Read ``thread_subtensor.block`` with a hard timeout.
+
+                        Observed 2026-05-18 00:55–02:43 UTC: this property
+                        access (a Bittensor RPC over websocket) hung for
+                        1h47min with no exception and no log output,
+                        silently wedging the whole FF dispatch pipeline.
+                        The 300s ``asyncio.wait_for`` below only guards
+                        ``process_fulfillment_workflow`` — it does NOT
+                        cover the block read, so a hang here freezes the
+                        loop indefinitely.
+
+                        ``asyncio.to_thread`` runs the blocking call on a
+                        worker thread; ``asyncio.wait_for`` caps the wait
+                        at ``timeout`` seconds.  If the timeout fires, the
+                        underlying worker thread leaks (Python threads
+                        can't be cancelled), but the polling loop
+                        continues with ``current_block=None``.  A leaked
+                        worker beats a wedged validator.
+                        """
+                        try:
+                            return await asyncio.wait_for(
+                                asyncio.to_thread(lambda: thread_subtensor.block),
+                                timeout=timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            return None
+
                     async def _poll():
+                        consec_block_timeouts = 0
                         while not self.should_exit:
                             try:
-                                current_block = thread_subtensor.block
+                                current_block = await _safe_block_read(timeout=15.0)
                             except Exception as e:
                                 print(f"⚠️  Fulfillment tick: block query failed: {e}")
                                 current_block = None
 
-                            if current_block is not None:
+                            if current_block is None:
+                                consec_block_timeouts += 1
+                                print(
+                                    f"⚠️  Fulfillment tick: block read returned None "
+                                    f"(timeout or error) — skipping tick "
+                                    f"(consecutive timeouts: {consec_block_timeouts})"
+                                )
+                            else:
+                                consec_block_timeouts = 0
                                 try:
                                     await asyncio.wait_for(
                                         self.process_fulfillment_workflow(
@@ -1787,6 +1831,16 @@ class Validator(BaseValidatorNeuron):
                                     )
                                 except Exception as e:
                                     print(f"⚠️  Fulfillment tick error (non-fatal): {e}")
+
+                            # Heartbeat written on every iteration — including
+                            # block-timeout iterations — so file mtime proves
+                            # "thread reached end of tick".  Stale mtime is the
+                            # ONLY external signal that the thread has wedged.
+                            try:
+                                _ff_heartbeat.parent.mkdir(parents=True, exist_ok=True)
+                                _ff_heartbeat.write_text(str(int(time.time())))
+                            except Exception as e:
+                                print(f"⚠️  Fulfillment heartbeat write failed (non-fatal): {e}")
 
                             try:
                                 await asyncio.sleep(30)
@@ -1842,6 +1896,38 @@ class Validator(BaseValidatorNeuron):
                     # every 30s on a separate thread + event loop so it
                     # can't be starved by this main loop's sync sourcing
                     # work (DNS / HEAD / scrape calls).
+                    #
+                    # Watchdog: the polling thread writes a heartbeat file
+                    # at the end of every tick.  We check its mtime once
+                    # per main-loop iteration; stale >120s ⇒ thread is
+                    # wedged (e.g. subtensor RPC hang).  We log loudly so
+                    # CloudWatch alerts trigger; we do NOT auto-restart the
+                    # thread here (Python threads can't be killed cleanly,
+                    # so recreating a thread while the old one may still
+                    # hold sockets risks double-submission).  Operator
+                    # action: restart the validator-main container.
+                    try:
+                        hb_path = Path("validator_weights") / "ff_poll_heartbeat"
+                        if (
+                            fulfillment_polling_thread is not None
+                            and hb_path.exists()
+                        ):
+                            stale_s = time.time() - int(hb_path.read_text().strip())
+                            if stale_s > 120 and not getattr(self, "_ff_stale_alerted", False):
+                                print(
+                                    f"🚨 Fulfillment polling thread heartbeat stale "
+                                    f"({stale_s:.0f}s old) — thread is likely wedged. "
+                                    f"Restart leadpoet-validator-main container to recover."
+                                )
+                                self._ff_stale_alerted = True
+                            elif stale_s <= 120 and getattr(self, "_ff_stale_alerted", False):
+                                print(
+                                    f"✅ Fulfillment polling thread heartbeat recovered "
+                                    f"({stale_s:.0f}s old)"
+                                )
+                                self._ff_stale_alerted = False
+                    except Exception as e:
+                        bt.logging.debug(f"FF heartbeat check error (non-fatal): {e}")
 
                     # ════════════════════════════════════════════════════════════
                     # QUALIFICATION MODEL EVALUATION (polls gateway for miner models)

@@ -577,11 +577,28 @@ async def score_fulfillment_lead(
             f"{len(icp.required_attributes.get('contact', []))} contact attribute(s); "
             f"apify_data={'present' if apify_person_data else 'absent'}"
         )
+        # Forward miner-supplied evidence URLs into Tier 2c — two channels,
+        # both optional:
+        #   1. intent_signal_urls — broad lead-level URLs from
+        #      lead.intent_signals[*].url (Tier 3 evidence; may overlap
+        #      with Tier 2c attribute statements).
+        #   2. attribute_evidence  — narrow per-attribute URLs the miner
+        #      explicitly tied to specific required_attribute indexes.
+        #      Pre-fetched via Scrapingdog inside the verifier so anti-bot
+        #      pages (LinkedIn, paywalled news) can still be read.
+        # FulfillmentLead.to_validator_dict() strips intent_signals AND will
+        # likewise omit attribute_evidence from validator_dict — pull them
+        # straight off the original FulfillmentLead object.
+        intent_signal_urls = [
+            sig.url for sig in (lead.intent_signals or []) if getattr(sig, "url", "")
+        ]
         attr_passed, attribute_verification_result = await verify_required_attributes(
             lead=validator_dict,
             required_attributes=icp.required_attributes,
             apify_person_data=apify_person_data,
             openrouter_key=openrouter_key,
+            intent_signal_urls=intent_signal_urls,
+            attribute_evidence=list(lead.attribute_evidence or []),
         )
         decision = attribute_verification_result.get("decision", "REJECT")
         counts = attribute_verification_result.get("counts", {})

@@ -713,6 +713,20 @@ async def get_active_requests(miner_hotkey: str = ""):
         icp["countries"] = company_country_list
         icp["geography"] = company_region
 
+        # Merge the top-level required_attributes column into the miner-
+        # facing icp payload. required_attributes is stored as a dedicated
+        # DB column (not inside icp_details JSONB), so without this merge
+        # miners never see which attributes the buyer requires — yet the
+        # validator's Tier 2c gate (verify_required_attributes) DOES read
+        # them from this same column and rejects leads that fail with
+        # ``required_attribute_failed``.  The reveals endpoint at
+        # ``/fulfillment/scoring`` performs the equivalent merge (see
+        # ~L1158); mirroring it here keeps the miner-visible ICP shape
+        # identical to what the scorer sees, so miners can pre-filter on
+        # the buyer's requirements instead of submitting blind.
+        if r.get("required_attributes"):
+            icp["required_attributes"] = r["required_attributes"]
+
         requests_out.append({
             "request_id": r["request_id"],
             "icp": icp,

@@ -109,6 +109,90 @@ def _coerce_intent_signal_spec(entry) -> IntentSignalSpec:
         f"intent_signals entry must be str, dict, or IntentSignalSpec, "
         f"got {type(entry).__name__}"
     )
+# ---------------------------------------------------------------------------
+# AttributeEvidence — optional per-required_attribute miner evidence URL
+# ---------------------------------------------------------------------------
+
+class AttributeEvidence(BaseModel):
+    """One miner-supplied URL of evidence for a specific ``required_attributes``
+    entry on the request's ICP.
+
+    Conceptually parallel to ``IntentSignal``: both pin a URL to a specific
+    buyer-side requirement that the miner believes their lead satisfies.
+    ``IntentSignal`` proves buying intent (Tier 3); ``AttributeEvidence``
+    proves a Tier 2c required-attribute statement (e.g. "Has an active
+    outbound sales motion").  Submitting AttributeEvidence is OPTIONAL —
+    miners that don't supply any still go through the same Tier 2c gate
+    with Sonar performing free-form web search (just less accurate on
+    anti-bot URLs).
+
+    Wire shape::
+
+        {
+          "scope":   "company" | "contact",
+          "index":   0,                            # 0-based into ICP required_attributes[scope]
+          "url":     "https://acme.com/case-studies/enterprise",
+          "snippet": "Our enterprise tier starts at $250K ARR..."   # OPTIONAL
+        }
+
+    Note: snippet is optional.  If provided AND the cited URL is fetched
+    successfully, the validator does a deterministic substring check —
+    snippet must appear (case-insensitive, fuzzy whitespace) in the fetched
+    content, otherwise it is flagged as fabricated and the verification
+    forces verdict NO without a Sonar call (saves cost on obvious fakes).
+
+    PROMPT-INJECTION DEFENSE
+    ------------------------
+    The ``snippet`` field is interpolated into LLM prompts at verification
+    time, so it runs through the same ``_scan_for_prompt_injection`` regex
+    set as ``IntentSignal.snippet`` (imported below from
+    ``gateway.qualification.models``).  URL goes through the same URL
+    validator pattern (must be http(s)://, normalized).
+    """
+    scope: str = Field(..., description='"company" or "contact" — which side of required_attributes this evidence supports')
+    index: int = Field(..., ge=0, description="0-based index into the ICP's required_attributes[scope] list")
+    url: str = Field(..., description="URL where the miner found this evidence (must be http(s)://)")
+    snippet: str = Field(default="", max_length=600, description="OPTIONAL excerpt from the URL supporting the attribute")
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("company", "contact"):
+            raise ValueError(f"scope must be 'company' or 'contact', got: {v!r}")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Normalise + reject non-http(s) URLs.  Same strict shape as
+        IntentSignal.url uses, but inlined here so we don't depend on
+        Pydantic-internal field_validator dispatch at call time."""
+        return _validate_url_local(v)
+
+    @field_validator("snippet")
+    @classmethod
+    def validate_snippet_no_injection(cls, v: str) -> str:
+        from gateway.qualification.models import _scan_for_prompt_injection
+        if v:
+            _scan_for_prompt_injection(v, "attribute_evidence.snippet")
+        return v
+
+
+def _validate_url_local(v: str) -> str:
+    """Minimal http(s)-only URL normaliser — used only if IntentSignal's
+    validator is unavailable at import time (defensive fallback)."""
+    from urllib.parse import urlparse, urlunparse
+    s = (v or "").strip()
+    if not s:
+        raise ValueError("url cannot be empty")
+    parsed = urlparse(s)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"url must be http(s):// with a host, got: {v!r}")
+    return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(),
+                       parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
 try:
     from gateway.utils.industry_taxonomy import INDUSTRY_TAXONOMY
 except ImportError:
@@ -849,6 +933,25 @@ class FulfillmentLead(BaseModel):
 
     # Intent
     intent_signals: List[IntentSignal] = Field(..., min_length=1)
+
+    # Per-attribute miner-supplied evidence URLs (OPTIONAL, 2026-05-18).
+    # Mirrors the intent_signals pattern but for Tier 2c
+    # (``required_attributes``).  Each entry pins one URL (+ optional
+    # snippet) to a specific (scope, index) in the request's
+    # ``required_attributes`` map.  At scoring time the validator
+    # pre-fetches the URL via Scrapingdog (anti-bot capable) and embeds
+    # the page content directly into the Sonar prompt as MINER EVIDENCE
+    # FOR THIS STATEMENT — drastically improving YES-rate for legitimate
+    # leads on anti-bot URLs (LinkedIn jobs, paywalled news) that Sonar
+    # cannot reach on its own.  Snippets that don't appear in the
+    # fetched content are flagged as fabrication and force NO.  Defaults
+    # to an empty list so every existing miner template parses cleanly
+    # without modification; entries are only consulted at Tier 2c and
+    # only for company-scope attributes (CONTACT_PROMPT already gets the
+    # Apify LinkedIn block as direct evidence).  Out-of-range (scope,
+    # index) entries are silently dropped at scoring time; the lead is
+    # not rejected for sending extras the ICP doesn't have slots for.
+    attribute_evidence: List["AttributeEvidence"] = Field(default_factory=list)
 
     @field_validator("industry")
     @classmethod

@@ -122,16 +122,31 @@ def _build_failure_detail(
         sen = lead_output.seniority.value if hasattr(lead_output.seniority, "value") else str(lead_output.seniority)
         return f"Submitted seniority '{sen}' does not match target seniority"
     if r == "country_mismatch" and lead:
-        if icp and icp.country:
-            targets = icp.country if isinstance(icp.country, list) else [icp.country]
+        # "country_mismatch" is the company-side label (kept for back-compat
+        # with dashboards filtering on this exact string).  The 2026-05-18
+        # split-region rename introduced contact_country_mismatch as a
+        # separate value for the contact-side variant.
+        if icp and icp.company_country:
+            targets = icp.company_country
             target_str = ", ".join(str(c) for c in targets if c)
             if target_str:
                 label = "country" if len(targets) == 1 else "countries"
                 return (
-                    f"Submitted country '{lead.company_hq_country}' does not "
-                    f"match target {label}: {target_str}"
+                    f"Submitted company HQ country '{lead.company_hq_country}' "
+                    f"does not match target {label}: {target_str}"
                 )
-        return f"Submitted country '{lead.company_hq_country}' does not match target country"
+        return f"Submitted company HQ country '{lead.company_hq_country}' does not match target country"
+    if r == "contact_country_mismatch" and lead:
+        if icp and icp.contact_country:
+            targets = icp.contact_country
+            target_str = ", ".join(str(c) for c in targets if c)
+            if target_str:
+                label = "country" if len(targets) == 1 else "countries"
+                return (
+                    f"Submitted contact country '{lead.country}' "
+                    f"does not match target {label}: {target_str}"
+                )
+        return f"Submitted contact country '{lead.country}' does not match target contact country"
     if r == "employee_count_mismatch" and lead:
         return f"Submitted employee count '{lead.employee_count}' does not match target range"
     if r == "company_excluded":
@@ -142,10 +157,18 @@ def _build_failure_detail(
         return "Missing required field: company name"
     if r == "invalid_hq_location" and lead:
         return f"Submitted HQ '{lead.company_hq_city}, {lead.company_hq_state}, {lead.company_hq_country}' is not a valid location"
+    if r == "invalid_contact_location" and lead:
+        return f"Submitted contact location '{lead.city}, {lead.state}, {lead.country}' is not a valid location"
     if r == "geography_mismatch" and lead:
         return f"Submitted HQ '{lead.company_hq_city}, {lead.company_hq_state}, {lead.company_hq_country}' is not within target geography"
+    if r == "contact_geography_mismatch" and lead:
+        return f"Submitted contact location '{lead.city}, {lead.state}, {lead.country}' is not within target contact region"
     if r == "geography_missing":
-        return "No HQ location submitted but ICP requires specific geography"
+        return "No company HQ location submitted but ICP requires specific company region"
+    if r == "company_location_missing":
+        return "No company HQ data submitted but ICP requires specific company country/region"
+    if r == "contact_location_missing":
+        return "No contact location submitted but ICP requires specific contact country/region"
 
     # --- Email ---
     if r.startswith("email_"):
@@ -310,24 +333,26 @@ async def score_fulfillment_lead(
             )
         print(f"   ✅ Tier 1.5: Sub-industry semantic match: '{lead.sub_industry}' → '{matched_sub}'")
 
-    # Call 2: Location validation + geography match (when ICP has specific geography)
-    # Skip when geography is just naming a country already in icp.country
-    # (Tier 1 country gate handles that). icp.country is List[str] post the
-    # multi-country change.
-    icp_geo = (icp.geography or "").strip()
-    _countries = icp.country if isinstance(icp.country, list) else ([icp.country] if icp.country else [])
-    icp_countries_norm = {(c or "").strip().lower() for c in _countries if c}
-    if icp_geo and icp_geo.lower() not in icp_countries_norm:
-        # Pre-check: if miner submitted no location at all, reject before LLM
+    # ── Tier 1.5a — COMPANY region (LLM) ───────────────────────────────
+    # Skip when company_region is empty OR when it's just naming a country
+    # already covered by the Tier 1a company_country gate (so we don't pay
+    # for an LLM call to re-verify what the cheap gate already proved).
+    icp_company_geo = (icp.company_region or "").strip()
+    icp_company_countries_norm = {
+        (c or "").strip().lower() for c in icp.company_country if c
+    }
+    if icp_company_geo and icp_company_geo.lower() not in icp_company_countries_norm:
+        # Pre-check: miner submitted no company HQ data at all → reject
+        # before paying for an LLM call.
         if not lead.company_hq_city and not lead.company_hq_state and not lead.company_hq_country:
             return FulfillmentScoreResult(
                 tier1_passed=False,
                 failure_reason="geography_missing",
-                failure_detail="No HQ location submitted but ICP requires specific geography",
+                failure_detail="No HQ location submitted but ICP requires specific company region",
             )
         loc_valid, geo_match = await validate_lead_geography(
             lead.company_hq_city, lead.company_hq_state, lead.company_hq_country,
-            icp.geography,
+            icp.company_region,
         )
         if not loc_valid:
             return FulfillmentScoreResult(
@@ -339,9 +364,45 @@ async def score_fulfillment_lead(
             return FulfillmentScoreResult(
                 tier1_passed=False,
                 failure_reason="geography_mismatch",
-                failure_detail=f"Submitted HQ '{lead.company_hq_city}, {lead.company_hq_state}, {lead.company_hq_country}' is not within target geography",
+                failure_detail=f"Submitted HQ '{lead.company_hq_city}, {lead.company_hq_state}, {lead.company_hq_country}' is not within target company region '{icp.company_region}'",
             )
-        print(f"   ✅ Tier 1.5: Geography match: '{lead.company_hq_city}, {lead.company_hq_state}' within '{icp.geography}'")
+        print(f"   ✅ Tier 1.5a: Company region match: '{lead.company_hq_city}, {lead.company_hq_state}' within '{icp.company_region}'")
+
+    # ── Tier 1.5b — CONTACT region (LLM) ───────────────────────────────
+    # Symmetric to 1.5a but reads the PERSON-level location triple.
+    # Most buyers won't set contact_region; only person-targeting ICPs
+    # (e.g. Adedeji 5: "people in NJ or PA") will trigger this gate.
+    # When both 1.5a and 1.5b are set the cost is 2 LLM calls per lead
+    # at this stage, but only if the lead passed both Tier 1 country
+    # gates and made it this far.
+    icp_contact_geo = (icp.contact_region or "").strip()
+    icp_contact_countries_norm = {
+        (c or "").strip().lower() for c in icp.contact_country if c
+    }
+    if icp_contact_geo and icp_contact_geo.lower() not in icp_contact_countries_norm:
+        if not lead.city and not lead.state and not lead.country:
+            return FulfillmentScoreResult(
+                tier1_passed=False,
+                failure_reason="contact_location_missing",
+                failure_detail="No contact location submitted but ICP requires specific contact region",
+            )
+        loc_valid, geo_match = await validate_lead_geography(
+            lead.city, lead.state, lead.country,
+            icp.contact_region,
+        )
+        if not loc_valid:
+            return FulfillmentScoreResult(
+                tier1_passed=False,
+                failure_reason="invalid_contact_location",
+                failure_detail=f"Submitted contact location '{lead.city}, {lead.state}, {lead.country}' is not a valid location",
+            )
+        if not geo_match:
+            return FulfillmentScoreResult(
+                tier1_passed=False,
+                failure_reason="contact_geography_mismatch",
+                failure_detail=f"Submitted contact location '{lead.city}, {lead.state}, {lead.country}' is not within target contact region '{icp.contact_region}'",
+            )
+        print(f"   ✅ Tier 1.5b: Contact region match: '{lead.city}, {lead.state}' within '{icp.contact_region}'")
 
     # Build a mutable dict that validator check functions can annotate in-place
     # (they add domain_age_days, has_mx, gse_search_count, etc.)

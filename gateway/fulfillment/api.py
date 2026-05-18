@@ -446,6 +446,24 @@ async def create_request(
     # model_dump() excludes `internal_label` and `company` (both Field(exclude=True))
     # so neither lands in icp_details (which is what miners see).
     icp_dict = icp.model_dump(mode="json")
+
+    # ── TRANSITION COMPAT (2026-05-18 split-region rename) ─────────────
+    # The new FulfillmentICP model emits ``company_country`` / ``company_region``
+    # (no legacy ``country`` / ``geography`` keys).  A validator still running
+    # pre-rename code would read this row's icp_details, find NEITHER the old
+    # nor the new keys it knows about, and silently bypass the country gate
+    # (Pydantic ``extra='ignore'`` swallows the unknown ``company_*`` keys).
+    # To stay forward-compatible during the rolling deploy, also emit the
+    # legacy keys here.  Old validators read them as before; new validators
+    # have a @model_validator(mode='before') that prefers the new keys.
+    #
+    # Remove this block once all validators are confirmed on post-2026-05-18
+    # code (after Phase 2 of scripts/23-split-region-migration.sql runs).
+    if icp.company_country:
+        icp_dict["country"] = list(icp.company_country)
+    if icp.company_region:
+        icp_dict["geography"] = icp.company_region
+
     req_hash = hash_request(icp_dict)
 
     # New requests enter the queue as `pending`: no commit timer yet.
@@ -650,29 +668,50 @@ async def get_active_requests(miner_hotkey: str = ""):
         icp["sub_industry"] = ", ".join(sub_list)
         icp["sub_industries"] = sub_list
 
-        # Country: same dual-shape treatment as industry/sub_industry.
-        # ``country`` is now a list internally but legacy miners parsed it
-        # as a single string.  Expose:
-        #   - ``country``    : comma-joined string (back-compat).  For
-        #                      multi-country ICPs this WILL contain commas
-        #                      (e.g. ``"Brazil, Argentina, Colombia"``);
-        #                      legacy miners doing exact-match comparisons
-        #                      should migrate to the list below.
-        #   - ``countries``  : authoritative list.  This is what the
-        #                      validator's Tier 1 gate uses (set-membership
-        #                      with alias normalization), so any miner that
-        #                      wants their leads to pass the country check
-        #                      MUST verify lead.company_hq_country against
-        #                      this list.  Empty list = "any country".
-        country_val = icp.get("country")
-        if isinstance(country_val, list):
-            country_list = [s for s in country_val if isinstance(s, str) and s]
-        elif isinstance(country_val, str) and country_val:
-            country_list = [country_val]
-        else:
-            country_list = []
-        icp["country"] = ", ".join(country_list)
-        icp["countries"] = country_list
+        # ── Location fields exposed to miners ──────────────────────────
+        # 2026-05-18: split into company_* / contact_* per-side filters.
+        # Miners need both shapes (str + list) for back-compat: legacy
+        # miners read ``country`` as a comma-joined string, while modern
+        # ones consume the authoritative list.  We expose:
+        #
+        #   - ``company_country``  : List[str]   (authoritative — Tier 1a gate)
+        #   - ``company_region``   : str         (Tier 1.5a LLM gate target)
+        #   - ``contact_country``  : List[str]   (Tier 1b gate; usually empty)
+        #   - ``contact_region``   : str         (Tier 1.5b LLM gate; usually empty)
+        #
+        # PLUS legacy aliases for miners that haven't migrated:
+        #   - ``country``    : comma-joined company_country (was: same)
+        #   - ``countries``  : list, same as company_country (was: same)
+        #   - ``geography``  : company_region (was: same)
+        #
+        # The legacy aliases will be removed once all miner code has
+        # migrated; keeping them now means existing miners don't break.
+        def _to_list(v):
+            if isinstance(v, list):
+                return [s for s in v if isinstance(s, str) and s]
+            if isinstance(v, str) and v:
+                return [v]
+            return []
+        company_country_list = _to_list(icp.get("company_country"))
+        contact_country_list = _to_list(icp.get("contact_country"))
+        company_region = icp.get("company_region") or ""
+        contact_region = icp.get("contact_region") or ""
+        # If neither new nor legacy is populated, fall back to the legacy
+        # ``country`` / ``geography`` keys for icp_details rows that
+        # haven't been touched by the model_validator yet (defensive).
+        if not company_country_list:
+            company_country_list = _to_list(icp.get("country") or icp.get("countries"))
+        if not company_region:
+            company_region = icp.get("geography") or ""
+        # Set authoritative new keys
+        icp["company_country"] = company_country_list
+        icp["company_region"]  = company_region
+        icp["contact_country"] = contact_country_list
+        icp["contact_region"]  = contact_region
+        # Maintain legacy aliases (company-side meaning)
+        icp["country"]   = ", ".join(company_country_list)
+        icp["countries"] = company_country_list
+        icp["geography"] = company_region
 
         requests_out.append({
             "request_id": r["request_id"],

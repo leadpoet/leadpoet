@@ -261,16 +261,38 @@ def tier1_check(
         except Exception:
             return "seniority_mismatch"
 
-    # Multi-country support: ``icp.country`` is a ``List[str]`` (the field
-    # validator coerces legacy single-string values to ``[str]``).  An empty
-    # list means "any country accepted" and skips the check.  Otherwise the
-    # lead's HQ country must match ANY listed target after alias
-    # normalization (so "US" / "USA" / "United States" all collide).
-    if icp.country and lead.company_hq_country:
-        targets = icp.country if isinstance(icp.country, list) else [icp.country]
+    # Tier 1a — COMPANY country gate.  ``icp.company_country`` is a
+    # ``List[str]`` (the field validator coerces legacy single-string
+    # values).  An empty list = "any company country accepted" → check
+    # skipped.  Otherwise lead.company_hq_country must match ANY listed
+    # target after alias normalization (US / USA / United States all
+    # collide via gateway/utils/geo_normalize).
+    #
+    # Fail-closed when the buyer specified company_country but the lead
+    # didn't carry a company HQ country: the missing data prevents any
+    # meaningful verification, so reject.  (Previously the check was
+    # skipped silently when lead.company_hq_country was empty, letting
+    # half-populated leads slip through.)
+    if icp.company_country:
+        if not lead.company_hq_country:
+            return "company_location_missing"
+        targets = icp.company_country
         target_set = {_normalize_country(c) for c in targets if c}
         if target_set and _normalize_country(lead.company_hq_country) not in target_set:
             return "country_mismatch"
+
+    # Tier 1b — CONTACT country gate.  Symmetric to 1a but reads the
+    # PERSON-level country from the lead (``lead.country`` — set by the
+    # miner from LinkedIn ``location`` parsing).  Most buyers won't set
+    # this; only person-targeting ICPs (e.g. Adedeji 5's retirement-IUL
+    # campaign) need it.
+    if icp.contact_country:
+        if not lead.country:
+            return "contact_location_missing"
+        targets = icp.contact_country
+        target_set = {_normalize_country(c) for c in targets if c}
+        if target_set and _normalize_country(lead.country) not in target_set:
+            return "contact_country_mismatch"
 
     if icp.employee_count and lead.employee_count:
         allowed = icp.employee_count if isinstance(icp.employee_count, list) else [icp.employee_count]

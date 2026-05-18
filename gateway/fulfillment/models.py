@@ -7,8 +7,8 @@ deterministic equality comparisons.
 """
 
 import re
-from typing import Dict, List, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+from typing import Any, Dict, List, Optional, Union
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from gateway.qualification.models import (
     IntentSignal,
@@ -268,24 +268,46 @@ class FulfillmentICP(BaseModel):
     # range (see range_string_to_buckets).
     employee_count: List[str] = Field(default_factory=list)
     company_stage: str = ""
-    geography: str = ""
-    # List of target countries the client will accept.  A single client ICP
-    # frequently spans multiple countries (e.g. LATAM = 12 countries,
-    # Nordics = 5, "Western Europe" = ~10), so this is a list and the Tier 1
-    # gate accepts a lead matching ANY listed country (set membership, with
-    # alias normalization through _normalize_country in scoring.py).
+    # ──────────────────────────────────────────────────────────────────────
+    # LOCATION FIELDS (split company / contact, 2026-05-18)
+    # ──────────────────────────────────────────────────────────────────────
+    # Every B2B buyer cares about WHERE either the company or the contact
+    # (or both) is located.  Previously this was a single pair of fields
+    # — ``country`` + ``geography`` — implicitly matched against the
+    # company HQ.  That left no way to express person-targeting criteria
+    # (e.g. Adedeji 5: "people in NJ or PA", regardless of where their
+    # employer is HQ'd), forcing buyers to duplicate the constraint inside
+    # ``required_attributes.contact[]`` — which routes through a more
+    # expensive Sonar attribute-verification path AND requires miners to
+    # supply source URLs.
     #
-    # Empty list = "any country accepted" (Tier 1 country check skipped
-    # entirely, same as the legacy ``country=""`` default).
+    # New schema: 4 independent optional fields.  Each is checked against
+    # the corresponding triple on the FulfillmentLead:
+    #   ``company_country``  → checked against ``lead.company_hq_country``
+    #   ``company_region``   → checked against ``lead.company_hq_{city,state,country}``
+    #   ``contact_country``  → checked against ``lead.country``
+    #   ``contact_region``   → checked against ``lead.{city,state,country}``
     #
-    # The field validator below accepts BOTH a list and a single string —
-    # the single-string form is required for back-compat with historical
-    # icp_details JSON in the DB (every fulfillment_requests row created
-    # before this column became multi-valued has ``"country": "United States"``
-    # or similar).  Without that coercion, validator-side
-    # ``FulfillmentICP(**icp_details)`` re-parses would crash on every
-    # in-flight legacy request and wedge the entire scoring pipeline.
-    country: List[str] = Field(default_factory=list)
+    # Unset (None / []) = that side is not checked.  Set = hard filter at
+    # Tier 1 (country) or Tier 1.5 (region, LLM-verified via Sonar).  If a
+    # buyer sets BOTH the company and contact side, both must pass (AND
+    # semantics).  See scoring.py::score_fulfillment_lead for the gate
+    # order (company country → contact country → company region → contact
+    # region, cheapest first).
+    #
+    # BACK-COMPAT: legacy icp_details JSON rows have ``country`` and
+    # ``geography`` keys that meant "company side".  A
+    # ``@model_validator(mode='before')`` (defined below) renames those
+    # keys in-place at parse time so legacy rows continue to work without
+    # a DB migration.  After this commit the canonical names are
+    # ``company_country`` / ``company_region``; the legacy names are NOT
+    # exposed as Pydantic fields, so any code path that previously read
+    # ``icp.country`` or ``icp.geography`` will raise AttributeError and
+    # must be updated (the grep is small — see commit message).
+    company_country: List[str] = Field(default_factory=list)
+    company_region:  str       = ""
+    contact_country: List[str] = Field(default_factory=list)
+    contact_region:  str       = ""
     product_service: str = ""
     # Each spec is one buyer-side buying signal. Was previously
     # ``List[str]``; promoted to a list of structured objects with a
@@ -562,10 +584,48 @@ class FulfillmentICP(BaseModel):
             out.append(s)
         return out
 
-    @field_validator("country", mode="before")
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_location_keys(cls, data: Any) -> Any:
+        """Rename legacy ``country`` / ``geography`` keys → ``company_country``
+        / ``company_region`` at parse time.
+
+        Historical icp_details JSON in the DB stores location filters under
+        the names ``country`` and ``geography``, which implicitly meant
+        "company side".  This validator rewrites those keys to the new
+        canonical names before Pydantic field validation, so:
+
+          * In-flight legacy DB rows continue to re-parse without a
+            schema-migration SQL.
+          * Any client (Python or HTTP) that posts a payload using the old
+            keys keeps working — gateway logs a single warning per parse
+            so we can spot non-migrated clients in production.
+
+        If BOTH the legacy and new key are present, the new key wins (so
+        a deliberate migration to the new schema isn't silently clobbered
+        by a leftover legacy field).
+
+        Idempotent: re-running on already-migrated data is a no-op.
+        """
+        if not isinstance(data, dict):
+            return data
+        renames = [("country", "company_country"), ("geography", "company_region")]
+        for legacy_key, new_key in renames:
+            if legacy_key in data:
+                if new_key in data and data.get(new_key):
+                    # New key already populated — drop the legacy one
+                    data.pop(legacy_key, None)
+                else:
+                    data[new_key] = data.pop(legacy_key)
+        return data
+
+    @field_validator("company_country", "contact_country", mode="before")
     @classmethod
     def validate_country(cls, v) -> List[str]:
-        """Coerce ``country`` to ``List[str]``.
+        """Coerce country fields to ``List[str]``.
+
+        Applied to both ``company_country`` and ``contact_country`` because
+        they have identical shape requirements.
 
         Accepts:
           * ``None`` / ``""`` / ``[]``      -> ``[]`` (Tier 1 country check
@@ -695,7 +755,14 @@ class FulfillmentICP(BaseModel):
         # we do for industry / sub_industry above so downstream consumers
         # at least receive readable target context, even if their Tier 1
         # check still uses single-value equality.
-        country_str = ", ".join(self.country) if self.country else ""
+        #
+        # Fulfillment now has 4-way location fields (company_/contact_)
+        # but ICPPrompt's legacy single-pair shape can only carry one.
+        # The company side is the historical meaning of these fields, so
+        # we pass company_country / company_region — preserving downstream
+        # qualification scoring behavior.  Contact-side fields are
+        # fulfillment-exclusive and not surfaced to qualification.
+        country_str = ", ".join(self.company_country) if self.company_country else ""
         # ``ICPPrompt.intent_signals`` is the legacy ``List[str]`` shape
         # that the shared lead_scorer's LLM prompt expects (the prompt
         # renders BUYER'S EXPECTED INTENT SIGNALS as a numbered list and
@@ -717,7 +784,7 @@ class FulfillmentICP(BaseModel):
             target_seniority=self.target_seniority,
             employee_count=ec_str,
             company_stage=self.company_stage,
-            geography=self.geography,
+            geography=self.company_region,
             country=country_str,
             product_service=self.product_service,
             intent_signals=intent_signal_texts,

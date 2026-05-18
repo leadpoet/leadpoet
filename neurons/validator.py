@@ -9807,6 +9807,60 @@ def run_dedicated_fulfillment_worker(config):
                             "results": failure_results,
                         })
 
+                # ────────────────────────────────────────────────────────
+                # Reconciliation: ensure submission_results has an entry for
+                # EVERY submission in the work file. Otherwise revealed leads
+                # silently disappear from the scoring path — observed
+                # 2026-05-18 on 88.5% of the "AWAITING VALIDATION 716"
+                # backlog (650 leads, 88 submissions, 77+ miners affected).
+                # Causes: (a) submission had leads but `if not leads_raw:
+                # continue` skipped it with no failure record, (b)
+                # score_miner_submission returned an empty list, (c) worker
+                # died between submissions before reaching this point.
+                # Without a per-submission record Phase 2 emits no scores
+                # for that miner's leads and consensus drops them silently.
+                # ────────────────────────────────────────────────────────
+                produced_subs = {ar["submission_id"] for ar in all_results}
+                for sub in submissions:
+                    sub_id = sub.get("submission_id", "")
+                    if not sub_id or sub_id in produced_subs:
+                        continue
+                    miner_hk = sub.get("miner_hotkey", "")
+                    leads_raw = sub.get("leads", []) or []
+                    lead_ids = sub.get("lead_ids", []) or []
+                    print(f"   ⚠️ Reconciliation: submission {sub_id[:8]} (miner {miner_hk[:8]}, {len(lead_ids)} leads) produced no result — emitting worker_skipped failures")
+                    skipped_results = []
+                    for idx, lid in enumerate(lead_ids):
+                        skipped_results.append({
+                            "lead_id": lid,
+                            "tier1_passed": False,
+                            "tier2_passed": False,
+                            "email_verified": False,
+                            "person_verified": False,
+                            "company_verified": False,
+                            "attribute_verification": None,
+                            "rep_score": 0.0,
+                            "intent_signal_raw": 0.0,
+                            "intent_signal_final": 0.0,
+                            "intent_decay_multiplier": 0.0,
+                            "final_score": 0.0,
+                            "all_fabricated": False,
+                            "failure_reason": "worker_skipped",
+                            "failure_detail": (
+                                "Worker did not produce a score for this submission "
+                                "(empty leads_raw, empty score_miner_submission output, "
+                                "or worker died mid-loop). Surfaced so consensus can "
+                                "write a row instead of dropping the lead silently."
+                            ),
+                            "intent_signals_detail": [],
+                        })
+                    all_results.append({
+                        "miner_hotkey": miner_hk,
+                        "submission_id": sub_id,
+                        "lead_ids": lead_ids,
+                        "results": skipped_results,
+                    })
+
                 with open(results_file, 'w') as f:
                     json.dump({
                         "epoch": current_epoch,

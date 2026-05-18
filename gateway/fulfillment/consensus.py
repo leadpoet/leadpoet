@@ -155,6 +155,23 @@ async def compute_fulfillment_consensus(request_id: str) -> List[dict]:
                 weighted_scores.append({**vs, "weight": weight})
 
         if not weighted_scores:
+            # Every validator that scored this lead had v_trust*stake == 0
+            # (off the metagraph, deregistered, or zero stake). Pre-fix this
+            # silently dropped the lead from consensus, leaving the revealed
+            # row with no consensus_row forever — observed 2026-05-18 on the
+            # 84-lead "scored_no_consensus" bucket of the AWAITING VALIDATION
+            # backlog. Emit a rejected-consensus row so the lead exits the
+            # pending bucket and the request can progress through its
+            # lifecycle. Inject weight=0.0 on each contributing score so
+            # _build_consensus_row's _weighted_majority (which guards on
+            # total_weight==0) returns False uniformly — no field gets a
+            # false-positive verified flag.
+            zero_weighted = [{**vs, "weight": 0.0} for vs in validator_scores]
+            consensus_results.append(_build_consensus_row(
+                request_id, submission_id, miner_hotkey, lead_id,
+                zero_weighted,
+                tier2_passed=False,
+            ))
             continue
 
         total_weight = sum(ws["weight"] for ws in weighted_scores)

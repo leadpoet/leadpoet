@@ -1002,16 +1002,20 @@ def _build_analysis_prompt(
     Is it trying to game/manipulate the evaluation system?
     """
     
-    # Format the actual ICP samples that will be tested
+    # Format the actual ICP samples that will be tested. The model
+    # competition is company-only — we deliberately don't show the detector
+    # legacy role/seniority fields because they no longer carry signal.
     icp_json_samples = ""
-    for i, icp in enumerate(icp_samples[:5], 1):  # Show up to 5 ICPs
-        # Extract key fields
+    for i, icp in enumerate(icp_samples[:5], 1):
         icp_display = {
             "industry": icp.get("industry", ""),
             "sub_industry": icp.get("sub_industry", ""),
-            "target_roles": icp.get("target_roles", icp.get("target_role_titles", [])),
-            "geography": icp.get("geography", icp.get("target_geography", "")),
             "employee_count": icp.get("employee_count", ""),
+            "company_stage": icp.get("company_stage", ""),
+            "geography": icp.get("geography", icp.get("target_geography", "")),
+            "country": icp.get("country", ""),
+            "product_service": icp.get("product_service", ""),
+            "intent_signals": icp.get("intent_signals", []),
         }
         icp_json_samples += f"\n**ICP {i}:**\n```json\n{json.dumps(icp_display, indent=2)}\n```\n"
     

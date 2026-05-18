@@ -2052,7 +2052,8 @@ def run_qualification_submission_flow(wallet, config, netuid: int):
             print(f"      Retry credits available: {credits_remaining}")
     
     print("")
-    print("   Your model will be evaluated by validators against 100 ICPs.")
+    print("   Your model will be evaluated by validators against 25 ICPs")
+    print("   (one per industry, company-only).")
     print("   Check your model status at:")
     print(f"   {QUALIFICATION_GATEWAY_URL}/qualification/model/{result.get('model_id')}/status")
     print("")

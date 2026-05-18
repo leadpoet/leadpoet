@@ -31,11 +31,14 @@ class QualificationConfig:
     # =========================================================================
     # ICP Configuration
     # =========================================================================
-    TOTAL_ICPS: int = 100  # Total ICPs per evaluation set
+    # As of May 2026, the daily ICP set is 25 prompts — one per industry across
+    # 25 distinct industries. Total budget stays at $7/run, so per-lead cost
+    # rises 4× (from $0.07 to $0.28) and per-lead time scales the same way.
+    TOTAL_ICPS: int = 25  # Total ICPs per evaluation set (one per industry)
     LEADS_PER_ICP: int = 1  # Leads model must return per ICP
-    SCREENING_1_ICPS: int = 5  # ICPs in screening 1 (quick filter)
-    SCREENING_2_ICPS: int = 20  # ICPs in screening 2 (deeper filter)
-    FINAL_BENCHMARK_ICPS: int = 75  # ICPs in final benchmark
+    SCREENING_1_ICPS: int = 2  # ICPs in screening 1 (quick filter)
+    SCREENING_2_ICPS: int = 5  # ICPs in screening 2 (deeper filter)
+    FINAL_BENCHMARK_ICPS: int = 18  # ICPs in final benchmark (2 + 5 + 18 = 25)
     
     # =========================================================================
     # Evaluation Set Rotation
@@ -45,10 +48,12 @@ class QualificationConfig:
     # =========================================================================
     # Cost/Time Limits (per-lead base values - totals are computed dynamically)
     # =========================================================================
-    MAX_COST_PER_LEAD_USD: float = 0.07  # $0.07 average per lead (total = leads × $0.07)
-    MAX_TIME_PER_LEAD_SECONDS: float = 45.0  # 45s average per lead (total = leads × 45s)
-    RUNNING_MODEL_TIMEOUT_SECONDS: int = 80  # 80s HARD max per single lead - if exceeded, INSTANT FAIL
-    TOTAL_EVALUATION_TIMEOUT_MINUTES: int = 180  # 3 hour absolute max (safety net, 100 leads × 90s = 150min)
+    # Scaled 4× from the previous 100-ICP regime so the total evaluation
+    # envelope is unchanged: 25 × $0.28 = $7 and 25 × 180s = 4500s.
+    MAX_COST_PER_LEAD_USD: float = 0.28  # $0.28 average per lead (25 × $0.28 = $7.00 total)
+    MAX_TIME_PER_LEAD_SECONDS: float = 180.0  # 180s average per lead (25 × 180s = 4500s total)
+    RUNNING_MODEL_TIMEOUT_SECONDS: int = 320  # 320s HARD max per single lead - if exceeded, INSTANT FAIL
+    TOTAL_EVALUATION_TIMEOUT_MINUTES: int = 180  # 3 hour absolute max (safety net, 25 leads × 320s = 8000s ≈ 133min)
     
     # =========================================================================
     # Screening Thresholds
@@ -130,13 +135,13 @@ class QualificationConfig:
     # =========================================================================
     # NEW SYSTEM: No penalty if within budget, small penalty for high variability
     #
-    # - NO penalty if cost ≤ MAX_COST_PER_LEAD_USD ($0.07)
-    # - NO penalty if time ≤ MAX_TIME_PER_LEAD_SECONDS (45s)
-    # - 5-point penalty if cost > 2× MAX_COST_PER_LEAD_USD ($0.14)
-    # - 5-point penalty if time > 2× MAX_TIME_PER_LEAD_SECONDS (90s)
+    # - NO penalty if cost ≤ MAX_COST_PER_LEAD_USD ($0.28)
+    # - NO penalty if time ≤ MAX_TIME_PER_LEAD_SECONDS (180s)
+    # - 5-point penalty if cost > 2× MAX_COST_PER_LEAD_USD ($0.56)
+    # - 5-point penalty if time > 2× MAX_TIME_PER_LEAD_SECONDS (360s)
     #
     # These thresholds are DYNAMIC: if you change MAX_COST_PER_LEAD_USD from
-    # $0.07 to $0.14, the penalty threshold automatically becomes $0.28.
+    # $0.28 to $0.50, the penalty threshold automatically becomes $1.00.
     # =========================================================================
     VARIABILITY_PENALTY_POINTS: int = 5  # Points deducted for high-variability leads
     COST_VARIABILITY_THRESHOLD_MULTIPLIER: float = 2.0  # Penalty if cost > 2× average
@@ -303,19 +308,19 @@ class QualificationConfig:
         """
         return cls(
             # ICP Configuration
-            TOTAL_ICPS=int(os.getenv("QUAL_TOTAL_ICPS", 100)),
+            TOTAL_ICPS=int(os.getenv("QUAL_TOTAL_ICPS", 25)),
             LEADS_PER_ICP=int(os.getenv("QUAL_LEADS_PER_ICP", 1)),
-            SCREENING_1_ICPS=int(os.getenv("QUAL_SCREENING_1_ICPS", 5)),
-            SCREENING_2_ICPS=int(os.getenv("QUAL_SCREENING_2_ICPS", 20)),
-            FINAL_BENCHMARK_ICPS=int(os.getenv("QUAL_FINAL_BENCHMARK_ICPS", 75)),
+            SCREENING_1_ICPS=int(os.getenv("QUAL_SCREENING_1_ICPS", 2)),
+            SCREENING_2_ICPS=int(os.getenv("QUAL_SCREENING_2_ICPS", 5)),
+            FINAL_BENCHMARK_ICPS=int(os.getenv("QUAL_FINAL_BENCHMARK_ICPS", 18)),
             
             # Evaluation Set Rotation
             EVALUATION_SET_ROTATION_EPOCHS=int(os.getenv("QUAL_EVALUATION_SET_ROTATION_EPOCHS", 20)),
             
             # Cost/Time Limits (per-lead base values)
-            MAX_COST_PER_LEAD_USD=float(os.getenv("QUAL_MAX_COST_PER_LEAD_USD", 0.07)),
-            MAX_TIME_PER_LEAD_SECONDS=float(os.getenv("QUAL_MAX_TIME_PER_LEAD_SECONDS", 45.0)),
-            RUNNING_MODEL_TIMEOUT_SECONDS=int(os.getenv("QUAL_RUNNING_MODEL_TIMEOUT_SECONDS", 90)),
+            MAX_COST_PER_LEAD_USD=float(os.getenv("QUAL_MAX_COST_PER_LEAD_USD", 0.28)),
+            MAX_TIME_PER_LEAD_SECONDS=float(os.getenv("QUAL_MAX_TIME_PER_LEAD_SECONDS", 180.0)),
+            RUNNING_MODEL_TIMEOUT_SECONDS=int(os.getenv("QUAL_RUNNING_MODEL_TIMEOUT_SECONDS", 320)),
             TOTAL_EVALUATION_TIMEOUT_MINUTES=int(os.getenv("QUAL_TOTAL_EVALUATION_TIMEOUT_MINUTES", 180)),
             
             # Screening Thresholds
@@ -401,7 +406,7 @@ class QualificationConfig:
         Total leads the model must produce.
         
         Examples:
-            100 ICPs × 1 lead each = 100 leads
+            25 ICPs × 1 lead each = 25 leads (current default)
             50 ICPs × 1 lead each = 50 leads
             25 ICPs × 2 leads each = 50 leads
         """
@@ -414,9 +419,9 @@ class QualificationConfig:
         Formula: total_leads × MAX_COST_PER_LEAD_USD
         
         Examples:
-            100 leads × $0.07 = $7.00
-            50 leads × $0.07 = $3.50
-            200 leads × $0.07 = $14.00
+            25 leads × $0.28 = $7.00 (current default)
+            50 leads × $0.28 = $14.00
+            25 leads × $0.50 = $12.50
         """
         return self.get_total_leads() * self.MAX_COST_PER_LEAD_USD
     
@@ -427,9 +432,9 @@ class QualificationConfig:
         Formula: total_leads × MAX_TIME_PER_LEAD_SECONDS
         
         Examples:
-            100 leads × 15s = 1500s
-            50 leads × 15s = 750s
-            200 leads × 15s = 3000s
+            25 leads × 180s = 4500s (current default, ≈75 min)
+            50 leads × 180s = 9000s
+            25 leads × 90s  = 2250s
         """
         return self.get_total_leads() * self.MAX_TIME_PER_LEAD_SECONDS
     
@@ -450,8 +455,8 @@ class QualificationConfig:
         Formula: MAX_COST_PER_LEAD_USD × COST_VARIABILITY_THRESHOLD_MULTIPLIER
         
         Examples:
-            $0.07 × 2.0 = $0.14 (penalty if cost > $0.14 per lead)
-            $0.14 × 2.0 = $0.28 (penalty if cost > $0.28 per lead)
+            $0.28 × 2.0 = $0.56 (penalty if cost > $0.56 per lead — current default)
+            $0.07 × 2.0 = $0.14 (legacy 100-ICP regime)
         """
         return self.MAX_COST_PER_LEAD_USD * self.COST_VARIABILITY_THRESHOLD_MULTIPLIER
     
@@ -462,8 +467,8 @@ class QualificationConfig:
         Formula: MAX_TIME_PER_LEAD_SECONDS × TIME_VARIABILITY_THRESHOLD_MULTIPLIER
         
         Examples:
-            15s × 2.0 = 30s (penalty if time > 30s per lead)
-            10s × 2.0 = 20s (penalty if time > 20s per lead)
+            180s × 2.0 = 360s (penalty if time > 360s per lead — current default)
+            45s × 2.0 = 90s (legacy 100-ICP regime)
         """
         return self.MAX_TIME_PER_LEAD_SECONDS * self.TIME_VARIABILITY_THRESHOLD_MULTIPLIER
 

@@ -217,8 +217,8 @@ Each intent signal object has 5 **required** fields: `source`, `description`, `u
 
 #### 3. Time & Cost Limits
 
-- **8 seconds** maximum per ICP evaluation
-- **$5.00 total** maximum for all 100 ICP evaluations
+- **180 seconds** average per ICP evaluation (320s hard cap per ICP)
+- **$7.00 total** maximum for all 25 ICP evaluations (~$0.28 per ICP)
 - Models exceeding limits receive score penalties or failures
 
 ### Expired ICP Sets (Debug Your Model)
@@ -239,7 +239,7 @@ icp_set = resp.json()[0]
 resp = requests.get(url, headers=headers, params={"select": "*", "set_id": "eq.20260513"})
 ```
 
-Each row contains `set_id`, `active_from`, `active_until`, and the full `icps` array (100 ICP prompts with industry, geography, intent signals, etc.). Active ICP sets are never exposed.
+Each row contains `set_id`, `active_from`, `active_until`, and the full `icps` array (25 ICP prompts — one per industry, with sub-industry, geography, employee count, company stage, product/service, and intent signals; company-only, no roles or contact fields). Active ICP sets are never exposed.
 
 ### Quick-Start Model Template
 
@@ -632,7 +632,7 @@ This is for validators who want to participate in consensus without running the 
 ```
 Model Competition:
   Miner submits model → Gateway sandboxes & scans → Validators evaluate
-  against 100 ICPs → Champion crowned / dethroned
+  against 25 ICPs (one per industry) → Champion crowned / dethroned
 
 Fulfillment:
   Client publishes request → Miners commit (hashed) → Miners reveal →

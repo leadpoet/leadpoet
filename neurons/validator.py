@@ -5471,8 +5471,8 @@ class Validator(BaseValidatorNeuron):
             # Calculate final coverage-weighted score.
             # Divide by total ICPs (not just scored ones) so failures pull the
             # average down. Legacy formula divided by leads_scored which had no
-            # coverage penalty — a model that scored only 1/100 ICPs at 100 pts
-            # would get 100/100 even though it failed 99% of client demand.
+            # coverage penalty — a model that scored only 1/25 ICPs at 100 pts
+            # would get 100/100 even though it failed 96% of client demand.
             raw_avg_score = total_score / len(runs) if len(runs) > 0 else 0.0
             
             # ═══════════════════════════════════════════════════════════════════

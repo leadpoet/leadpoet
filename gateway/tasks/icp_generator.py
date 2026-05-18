@@ -11,12 +11,19 @@ CRITICAL DESIGN:
 4. ICP hash is logged to transparency_log for verifiability
 
 GENERATION PROCESS:
-1. Generate 100 ICPs distributed across industries
+1. Generate 25 ICPs — one per industry across 25 distinct industries
 2. Use LLM to create realistic, varied prompts
 3. Compute ICP set hash
 4. Store in database
 5. Log to transparency_log
 6. Activate the new set
+
+COMPANY-MODE ONLY (May 2026+):
+The qualification model competition is single-path company-mode. Models
+return a CompanyOutput keyed off industry / sub-industry / size / geography
+/ stage / intent_signals. ICP prompts no longer carry target_roles or
+target_seniority — anything role-shaped is legacy from the contact-mode
+era and is intentionally absent from generated sets.
 """
 
 import os
@@ -48,126 +55,160 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Configuration
 # =============================================================================
 
-# Industry distribution for 100 ICPs
-# CRITICAL: These are from gateway/utils/industry_taxonomy.py (source of truth)
-# Model queries use .lower() for case-insensitive matching with the leads database
+# Industry distribution for 25 ICPs — exactly one ICP per industry.
+# CRITICAL: Every entry MUST exist in gateway/utils/industry_taxonomy.py
+# (source of truth). Model queries use .lower() for case-insensitive
+# matching with the leads database.
+#
+# The list is intentionally wide and B2B-friendly: it spans tech, regulated
+# verticals, physical/industrial, consumer, and capital markets so a single
+# day's benchmark exercises model generalization rather than rewarding
+# overfitting to two or three industries.
 INDUSTRY_DISTRIBUTION = {
-    "Software": 15,                    # From taxonomy
-    "Information Technology": 15,       # From taxonomy  
-    "Health Care": 10,                  # From taxonomy
-    "Biotechnology": 10,                # From taxonomy
-    "Financial Services": 15,           # From taxonomy
-    "Manufacturing": 10,                # From taxonomy
-    "Commerce and Shopping": 10,        # From taxonomy (lowercase 'and')
-    "Professional Services": 10,        # From taxonomy
-    "Data and Analytics": 5,            # From taxonomy (lowercase 'and')
+    "Software": 1,
+    "Information Technology": 1,
+    "Artificial Intelligence": 1,
+    "Hardware": 1,
+    "Data and Analytics": 1,
+    "Privacy and Security": 1,
+    "Health Care": 1,
+    "Biotechnology": 1,
+    "Financial Services": 1,
+    "Lending and Investments": 1,
+    "Payments": 1,
+    "Manufacturing": 1,
+    "Commerce and Shopping": 1,
+    "Professional Services": 1,
+    "Advertising": 1,
+    "Sales and Marketing": 1,
+    "Real Estate": 1,
+    "Energy": 1,
+    "Education": 1,
+    "Transportation": 1,
+    "Media and Entertainment": 1,
+    "Food and Beverage": 1,
+    "Sustainability": 1,
+    "Gaming": 1,
+    "Travel and Tourism": 1,
 }
+# Sanity check at import time so a regression in the list is loud, not silent.
+assert len(INDUSTRY_DISTRIBUTION) == 25 and sum(INDUSTRY_DISTRIBUTION.values()) == 25, (
+    "INDUSTRY_DISTRIBUTION must be exactly 25 distinct industries with 1 ICP each"
+)
 
 # Sub-industries per industry
 # CRITICAL: These MUST match values in gateway/utils/industry_taxonomy.py
-# The taxonomy has 723 sub-industries - we select relevant ones per industry
+# The taxonomy has 723 sub-industries - we select relevant ones per industry.
+# Each of the 25 industries in INDUSTRY_DISTRIBUTION must appear here.
 SUB_INDUSTRIES = {
     "Software": [
-        # From taxonomy: companies that develop software products
         "SaaS", "Enterprise Software", "Developer Tools", "Developer Platform",
-        "Developer APIs", "Cloud Computing", "Machine Learning", "Artificial Intelligence",
-        "CRM", "Marketing Automation", "Productivity Tools", "Collaboration"
+        "Developer APIs", "Cloud Computing", "Machine Learning",
+        "CRM", "Marketing Automation", "Productivity Tools", "Collaboration",
     ],
     "Information Technology": [
-        # From taxonomy: IT services and infrastructure
         "IT Infrastructure", "IT Management", "Cloud Computing", "Cloud Management",
-        "Cyber Security", "Network Security", "Information Services", "Technical Support",
-        "CivicTech", "GovTech", "Business Information Systems"
+        "Cyber Security", "Network Security", "Information Services",
+        "Technical Support", "Business Information Systems",
     ],
-    "Health Care": [
-        # From taxonomy: healthcare services and technology
-        "Health Diagnostics", "Medical Device", "Electronic Health Record (EHR)",
-        "mHealth", "Wellness", "Pharmaceutical", "Clinical Trials", "Hospital",
-        "Nursing and Residential Care", "Home Health Care", "Therapeutics"
+    "Artificial Intelligence": [
+        "Machine Learning", "Natural Language Processing", "Predictive Analytics",
+        "Artificial Intelligence",
     ],
-    "Biotechnology": [
-        # From taxonomy: biotech and life sciences
-        "Biopharma", "Bioinformatics", "Life Science", "Genetics", "Neuroscience",
-        "Clinical Trials", "Pharmaceutical", "Biometrics"
-    ],
-    "Financial Services": [
-        # From taxonomy: financial services companies
-        "Banking", "Insurance", "Asset Management", "Payments", "Wealth Management",
-        "FinTech", "InsurTech", "Credit", "Commercial Lending", "Consumer Lending",
-        "Trading Platform", "Venture Capital", "Hedge Funds"
-    ],
-    "Manufacturing": [
-        # From taxonomy: manufacturing companies
-        "Industrial Manufacturing", "Industrial Engineering", "Machinery Manufacturing",
-        "Aerospace", "Automotive", "Electronics", "Semiconductor", "3D Printing",
-        "Plastics and Rubber Manufacturing", "Paper Manufacturing", "Textiles"
-    ],
-    "Commerce and Shopping": [
-        # From taxonomy: commerce and retail
-        "E-Commerce", "E-Commerce Platforms", "Retail", "Retail Technology",
-        "Marketplace", "Wholesale", "Point of Sale", "Personalization",
-        "Price Comparison", "Social Shopping", "Local Shopping"
-    ],
-    "Professional Services": [
-        # From taxonomy: professional services
-        "Consulting", "Management Consulting", "Legal", "Legal Tech", "Accounting",
-        "Recruiting", "Staffing Agency", "Compliance", "Risk Management",
-        "Business Development", "Quality Assurance"
+    "Hardware": [
+        "Semiconductor", "Electronics", "Consumer Electronics", "Robotics",
+        "Industrial Engineering", "3D Printing", "IoT", "Wearables",
     ],
     "Data and Analytics": [
-        # From taxonomy: data and analytics
         "Business Intelligence", "Analytics", "Big Data", "Data Integration",
         "Data Mining", "Data Visualization", "Predictive Analytics",
-        "Consumer Research", "Market Research"
-    ]
-}
-
-# Target roles by industry
-TARGET_ROLES = {
-    "Software": [
-        "VP of Engineering", "CTO", "VP of Product", "Head of DevOps",
-        "VP of Sales", "Chief Revenue Officer", "VP of Marketing",
-        "Engineering Director", "Product Director", "Head of Data"
+        "Consumer Research", "Market Research",
     ],
-    "Information Technology": [
-        "CTO", "VP of Engineering", "IT Director", "Head of Infrastructure",
-        "VP Technology", "Chief Digital Officer", "Head of Cloud",
-        "VP IT Operations", "Director of Engineering"
+    "Privacy and Security": [
+        "Cyber Security", "Network Security", "Identity Management",
+        "Fraud Detection", "Cloud Security", "DevSecOps",
     ],
     "Health Care": [
-        "Chief Medical Officer", "VP Clinical Operations", "CTO",
-        "VP of R&D", "VP Regulatory Affairs", "VP Medical Affairs",
-        "Head of Patient Services", "Chief Nursing Officer"
+        "Health Diagnostics", "Medical Device", "Electronic Health Record (EHR)",
+        "mHealth", "Wellness", "Pharmaceutical", "Clinical Trials", "Hospital",
+        "Nursing and Residential Care", "Home Health Care", "Therapeutics",
     ],
     "Biotechnology": [
-        "Chief Scientific Officer", "VP of R&D", "Chief Medical Officer",
-        "Head of Clinical Trials", "VP Regulatory Affairs",
-        "Director of Research", "VP Drug Discovery"
+        "Biopharma", "Bioinformatics", "Life Science", "Genetics", "Neuroscience",
+        "Clinical Trials", "Pharmaceutical", "Biometrics",
     ],
     "Financial Services": [
-        "Chief Risk Officer", "VP Compliance", "CTO", "CFO",
-        "Head of Trading", "VP Operations", "Chief Data Officer",
-        "Head of Digital Transformation", "VP Strategy"
+        "Banking", "Insurance", "Asset Management", "Wealth Management",
+        "FinTech", "InsurTech", "Credit", "Commercial Lending", "Consumer Lending",
+        "Trading Platform", "Hedge Funds",
+    ],
+    "Lending and Investments": [
+        "Venture Capital", "Private Equity", "Hedge Funds", "Asset Management",
+        "Commercial Lending", "Consumer Lending", "Credit",
+    ],
+    "Payments": [
+        "Payments", "Mobile Payments", "Billing", "Subscription Service",
+        "Point of Sale", "FinTech",
     ],
     "Manufacturing": [
-        "VP of Operations", "Plant Manager", "Supply Chain Director",
-        "VP of Engineering", "Quality Director", "COO",
-        "Head of Production", "VP Procurement"
+        "Industrial Manufacturing", "Industrial Engineering", "Machinery Manufacturing",
+        "Aerospace", "Automotive", "Electronics", "Semiconductor", "3D Printing",
+        "Plastics and Rubber Manufacturing", "Paper Manufacturing", "Textiles",
     ],
     "Commerce and Shopping": [
-        "VP of E-commerce", "Chief Digital Officer", "VP Marketing",
-        "Head of Merchandising", "VP Supply Chain", "Chief Customer Officer",
-        "VP Store Operations", "Head of Growth"
+        "E-Commerce", "E-Commerce Platforms", "Retail", "Retail Technology",
+        "Marketplace", "Wholesale", "Point of Sale", "Personalization",
+        "Price Comparison", "Social Shopping", "Local Shopping",
     ],
     "Professional Services": [
-        "Managing Partner", "COO", "VP of Client Services",
-        "Head of Business Development", "Chief Strategy Officer",
-        "VP Operations", "Practice Lead", "VP Talent"
+        "Consulting", "Management Consulting", "Legal", "Legal Tech", "Accounting",
+        "Recruiting", "Staffing Agency", "Compliance", "Risk Management",
+        "Business Development", "Quality Assurance",
     ],
-    "Data and Analytics": [
-        "Chief Data Officer", "VP of Data Science", "Head of Analytics",
-        "VP Data Engineering", "Director of BI", "Head of Data Platform"
-    ]
+    "Advertising": [
+        "Advertising", "Ad Network", "Ad Exchange", "Ad Retargeting",
+        "Ad Server", "Affiliate Marketing",
+    ],
+    "Sales and Marketing": [
+        "Marketing Automation", "CRM", "Lead Generation", "Email Marketing",
+        "SEO", "Content Marketing", "Sales Automation",
+    ],
+    "Real Estate": [
+        "PropTech", "Commercial Real Estate", "Residential", "Real Estate Investment",
+        "Property Management", "Construction",
+    ],
+    "Energy": [
+        "Renewable Energy", "Solar", "Wind Energy", "Energy Storage",
+        "Energy Management", "Oil and Gas", "Electric Utilities",
+    ],
+    "Education": [
+        "EdTech", "E-Learning", "Higher Education", "K-12 Education",
+        "Corporate Training", "Tutoring",
+    ],
+    "Transportation": [
+        "Logistics", "Last Mile Transportation", "Freight Service", "Fleet Management",
+        "Public Transportation", "Ride Sharing", "Shipping",
+    ],
+    "Media and Entertainment": [
+        "Video Streaming", "Music Streaming", "Podcasting", "Film",
+        "Digital Media", "Broadcasting",
+    ],
+    "Food and Beverage": [
+        "Restaurants", "Food Delivery", "Food Processing", "Beverages",
+        "Coffee", "Brewing",
+    ],
+    "Sustainability": [
+        "CleanTech", "Recycling", "Sustainability", "Waste Management",
+        "Environmental Engineering", "Green Building",
+    ],
+    "Gaming": [
+        "Video Games", "Mobile Games", "Console Games", "PC Games",
+        "Game Development", "Esports",
+    ],
+    "Travel and Tourism": [
+        "Travel", "Travel Accommodations", "Hospitality", "Tour Operator",
+        "Travel Agency", "Vacation Rental",
+    ],
 }
 
 # Company sizes
@@ -240,53 +281,118 @@ GEOGRAPHIES = [
 ]
 
 # Products/Services by industry (what the miner's model should help sell)
+# One entry per industry in INDUSTRY_DISTRIBUTION.
 PRODUCTS_BY_INDUSTRY = {
     "Software": [
         "CRM software", "DevOps platform", "Cloud security solution",
         "Data analytics tool", "AI/ML platform", "Marketing automation",
         "HR management system", "Project management software",
-        "Customer success platform", "API management tool"
+        "Customer success platform", "API management tool",
     ],
     "Information Technology": [
         "Cloud migration services", "IT infrastructure", "Managed services",
         "Security solutions", "Network optimization", "System integration",
-        "IT support platform", "DevOps automation"
+        "IT support platform", "DevOps automation",
     ],
-    "Health Care": [
-        "Electronic health records", "Telemedicine platform", "Patient engagement app",
-        "Clinical decision support", "Medical imaging AI", "Compliance software",
-        "Revenue cycle management", "Care coordination platform"
+    "Artificial Intelligence": [
+        "ML training platform", "LLM observability suite", "Computer vision API",
+        "AI agent orchestration", "Vector database",
     ],
-    "Biotechnology": [
-        "Clinical trial management system", "Lab information system",
-        "Drug discovery platform", "Genomics analysis tool",
-        "Regulatory submission software", "Research data management"
-    ],
-    "Financial Services": [
-        "Risk management platform", "Regulatory compliance tool",
-        "Trading platform", "Fraud detection system", "Payment processing",
-        "Wealth management software", "Credit scoring AI", "KYC solution"
-    ],
-    "Manufacturing": [
-        "ERP system", "Supply chain management", "Quality management software",
-        "Industrial IoT platform", "Predictive maintenance", "Inventory optimization",
-        "Production planning tool", "Supplier management system"
-    ],
-    "Commerce and Shopping": [
-        "E-commerce platform", "Inventory management", "Customer data platform",
-        "Personalization engine", "Shipping optimization", "POS system",
-        "Loyalty program software", "Returns management"
-    ],
-    "Professional Services": [
-        "Practice management software", "Time tracking tool", "CRM for services",
-        "Knowledge management", "Resource planning", "Proposal automation",
-        "Client portal", "Billing and invoicing"
+    "Hardware": [
+        "Industrial IoT platform", "Edge compute appliance", "Hardware testing software",
+        "PCB design tooling", "Robotics SDK",
     ],
     "Data and Analytics": [
         "Business intelligence platform", "Data visualization tool",
         "Analytics dashboard", "Data pipeline tool", "Predictive analytics",
-        "Customer analytics platform", "Data quality software"
-    ]
+        "Customer analytics platform", "Data quality software",
+    ],
+    "Privacy and Security": [
+        "SIEM platform", "Endpoint detection and response", "Identity governance suite",
+        "Cloud security posture management", "Fraud detection system",
+    ],
+    "Health Care": [
+        "Electronic health records", "Telemedicine platform", "Patient engagement app",
+        "Clinical decision support", "Medical imaging AI", "Compliance software",
+        "Revenue cycle management", "Care coordination platform",
+    ],
+    "Biotechnology": [
+        "Clinical trial management system", "Lab information system",
+        "Drug discovery platform", "Genomics analysis tool",
+        "Regulatory submission software", "Research data management",
+    ],
+    "Financial Services": [
+        "Risk management platform", "Regulatory compliance tool",
+        "Trading platform", "Fraud detection system", "Payment processing",
+        "Wealth management software", "Credit scoring AI", "KYC solution",
+    ],
+    "Lending and Investments": [
+        "Portfolio management platform", "Underwriting automation",
+        "Investor reporting software", "Deal flow CRM", "Loan origination system",
+    ],
+    "Payments": [
+        "Payments orchestration platform", "Subscription billing", "Embedded payments API",
+        "PoS terminals", "Cross-border payments rails",
+    ],
+    "Manufacturing": [
+        "ERP system", "Supply chain management", "Quality management software",
+        "Industrial IoT platform", "Predictive maintenance", "Inventory optimization",
+        "Production planning tool", "Supplier management system",
+    ],
+    "Commerce and Shopping": [
+        "E-commerce platform", "Inventory management", "Customer data platform",
+        "Personalization engine", "Shipping optimization", "POS system",
+        "Loyalty program software", "Returns management",
+    ],
+    "Professional Services": [
+        "Practice management software", "Time tracking tool", "CRM for services",
+        "Knowledge management", "Resource planning", "Proposal automation",
+        "Client portal", "Billing and invoicing",
+    ],
+    "Advertising": [
+        "Programmatic ad platform", "Attribution analytics", "Creative testing suite",
+        "Influencer marketing platform", "Ad fraud detection",
+    ],
+    "Sales and Marketing": [
+        "Outbound sales platform", "Marketing automation", "Lead enrichment API",
+        "Conversation intelligence software", "ABM platform",
+    ],
+    "Real Estate": [
+        "Property management software", "Real estate CRM", "Construction management platform",
+        "Tenant experience app", "PropTech marketplace",
+    ],
+    "Energy": [
+        "Grid management software", "Energy storage controls", "Carbon accounting platform",
+        "Renewables monitoring suite", "Smart meter analytics",
+    ],
+    "Education": [
+        "LMS platform", "Student information system", "Online course platform",
+        "Tutoring marketplace", "Workforce learning software",
+    ],
+    "Transportation": [
+        "Fleet management software", "Last-mile logistics platform",
+        "Freight visibility platform", "Route optimization software", "Telematics suite",
+    ],
+    "Media and Entertainment": [
+        "OTT streaming platform", "Audience analytics", "Content monetization tools",
+        "Live production software", "Rights management platform",
+    ],
+    "Food and Beverage": [
+        "Restaurant POS suite", "Food supply chain platform", "Online ordering platform",
+        "Inventory management for restaurants", "Beverage distribution software",
+    ],
+    "Sustainability": [
+        "ESG reporting platform", "Waste tracking software", "Carbon accounting platform",
+        "Energy efficiency analytics", "Sustainable sourcing platform",
+    ],
+    "Gaming": [
+        "Game analytics platform", "Live-ops tooling", "User acquisition platform",
+        "Anti-cheat service", "Game engine middleware",
+    ],
+    "Travel and Tourism": [
+        "Booking management platform", "Revenue management software",
+        "Travel CRM", "Property management system for hotels", "Trip planning software",
+    ],
 }
 
 # Intent signals / additional context
@@ -312,18 +418,24 @@ INTENT_SIGNALS = [
 
 async def generate_icps_with_openrouter(
     set_id: int,
-    total_icps: int = 100
+    total_icps: int = 25
 ) -> tuple:
     """
-    Generate 100 ICP prompts using OpenRouter LLM (o3-mini).
-    
+    Generate ICP prompts using OpenRouter LLM (o3-mini).
+
     This creates varied, human-like prompts that read as if typed by
-    real sales/marketing professionals looking for leads.
-    
+    real sales/marketing professionals looking for companies to sell into.
+
+    COMPANY-MODE ONLY: Each ICP describes a company profile (industry,
+    size, geography, stage, intent signals, product context). Prompts
+    MUST NOT specify job titles, seniority, or any contact-level role.
+    The model competition no longer scores contact-level data — anything
+    role-shaped is legacy and intentionally absent.
+
     Args:
         set_id: Set identifier (YYYYMMDD format) for ICP naming
-        total_icps: Number of ICPs to generate (default 100)
-    
+        total_icps: Number of ICPs to generate (default 25, one per industry)
+
     Returns:
         Tuple of (icps_list, industry_distribution, icp_set_hash)
         or None if LLM generation fails (falls back to template-based)
@@ -331,13 +443,11 @@ async def generate_icps_with_openrouter(
     if not OPENROUTER_API_KEY:
         logger.warning("OPENROUTER_API_KEY not set, falling back to template-based generation")
         return None
-    
-    # Load industry taxonomy to ensure we use valid sub-industries
+
     from gateway.utils.industry_taxonomy import INDUSTRY_TAXONOMY
-    
-    # Get all valid industries and sub-industries
+
     all_industries = list(INDUSTRY_DISTRIBUTION.keys())
-    
+
     # Build comprehensive industry->sub_industry mapping from taxonomy
     taxonomy_sub_industries = {}
     for sub_ind, data in INDUSTRY_TAXONOMY.items():
@@ -345,134 +455,118 @@ async def generate_icps_with_openrouter(
             if ind not in taxonomy_sub_industries:
                 taxonomy_sub_industries[ind] = []
             taxonomy_sub_industries[ind].append(sub_ind)
-    
-    # Build the COMPREHENSIVE prompt for the LLM
-    # This prompt must be EXTREMELY detailed to get human-like, varied outputs
-    system_prompt = """You are generating search queries that real B2B salespeople would type into a lead-finding tool.
 
-CRITICAL: These must sound like REAL HUMANS typing, NOT templates. Imagine a salesperson quickly typing what they need.
+    # Build the COMPREHENSIVE prompt for the LLM
+    # This prompt must be EXTREMELY detailed to get human-like, varied outputs.
+    system_prompt = """You are generating search queries that real B2B salespeople would type into a tool that surfaces TARGET COMPANIES (accounts) — not individual contacts.
+
+CRITICAL: These must sound like REAL HUMANS typing, NOT templates. Imagine a salesperson quickly typing the kind of company they want to reach.
 
 ABSOLUTE RULES:
-1. NEVER start with "Who should we target" or "Who should we find for you" - these are robotic
-2. NEVER use the same sentence pattern more than 5 times across all 100 prompts
-3. Each prompt should feel like a different person typed it
+1. The prompt describes a COMPANY profile only. NEVER mention job titles, seniority levels, decision-maker names, or any contact-level role (no "VP of X", "CTO", "Director", "Head of Y", "C-Suite", "buyers", etc.). Talk about the COMPANY: industry, size, stage, location, what they make/sell, what signals they're showing.
+2. NEVER start with "Who should we target" or "Who should we find for you" — these are robotic.
+3. NEVER use the same sentence pattern more than 2-3 times across the set.
+4. Each prompt should feel like a different person typed it.
 
-MANDATORY FIRST-PERSON VOICE (distribute evenly, ~20 each category):
+MANDATORY VOICE MIX (spread evenly across the set):
 
-CATEGORY A - Direct requests (first person):
-- "I need VP of Sales contacts at SaaS companies, Series B, hiring SDRs right now"
-- "I'm looking for CFOs at biotech startups that just closed funding rounds"
-- "I want to reach out to CIOs at healthcare systems in Texas"
+CATEGORY A — Direct first-person requests:
+- "I need a list of Series B fintech companies in NYC that are scaling card issuing this year."
+- "I'm looking for 50-200 person AI startups on the west coast that recently raised a round."
 
-CATEGORY B - Casual/conversational:
-- "yo can you pull some CTOs at fintech startups in NYC"
-- "hey need some sales leaders at ecommerce companies, west coast"
-- "gonna need a list of marketing VPs at B2B software companies"
+CATEGORY B — Casual / conversational:
+- "yo can you pull mid-market e-commerce companies in texas that just launched a new SKU"
+- "hey gonna need biotech startups in boston working on gene therapy, ideally post-series A"
 
-CATEGORY C - Shorthand/telegraphic (no full sentences):
-- "VP eng series B saas california hiring"
-- "CFO biotech boston recently funded"
-- "CTO devtools startups 50-200 employees"
+CATEGORY C — Shorthand / telegraphic:
+- "series B saas companies SF 50-200 hiring fast"
+- "fintech startups NYC just raised, payments focus"
 
-CATEGORY D - Question format (genuine questions):
-- "who handles procurement at manufacturing companies in Ohio?"
-- "what's the best title to target for selling HR software?"
-- "anyone know who buys cybersecurity at mid-market companies?"
+CATEGORY D — Question format:
+- "what are the fastest-growing manufacturing companies in ohio doing digital transformation?"
+- "anyone tracking renewable energy startups expanding into europe?"
 
-CATEGORY E - Descriptive/specific requests:
-- "Looking for VP of Engineering at cloud computing companies with 200-500 employees in the US, ideally they've posted about hiring challenges on LinkedIn"
-- "Searching for Chief Medical Officers at digital health startups that raised Series A in the last 6 months"
-
-REAL HUMAN EXAMPLES TO EMULATE:
-- "I need to find heads of IT at hospitals in California. They should be actively evaluating new EHR systems."
-- "can you get me a list of VPs of Sales at SaaS companies? series B or later, 100-500 employees, US based"
-- "looking for fintech CFOs, specifically at payments companies, ideally ones that just raised"
-- "VP Supply Chain at manufacturing - midwest region, companies doing digital transformation"
-- "CISO or VP Security contacts at companies 1000+ employees. financial services preferred"
-- "startup CTOs in the AI/ML space, seed to series A, SF bay area"
-- "i need procurement heads at large retailers, the ones who buy supply chain software"
-- "sales ops leaders at b2b saas - director level or above, companies using salesforce"
-
-THINGS THAT MAKE PROMPTS FEEL FAKE (AVOID):
-- "Who should we target for our X?" - TOO ROBOTIC
-- "Who should we find for you?" - TOO ROBOTIC  
-- "Find decision makers in X sector" - TOO TEMPLATED
-- "Ideal buyer: X at Y companies" - TOO STRUCTURED
-- Starting every prompt the same way
-- Always using the exact same structure
+CATEGORY E — Descriptive / detailed:
+- "Looking for cloud security companies, 200-500 employees, US-based, ideally ones that have posted publicly about evaluating new vendors in the last 90 days."
+- "Searching for digital health companies that closed Series A in the last 6 months and are actively running clinical pilots."
 
 VARIATION TECHNIQUES:
-- Some prompts are 1 line, others are 2-3 sentences
-- Some mention specific products, others don't
-- Some have typos: "eng" "cos" "ppl" "b2b" "saas"
+- Some prompts are 1 line, others 2-3 sentences
+- Some mention specific products/categories, others stay broader
+- Some use industry shorthand: "saas", "fintech", "biotech"
 - Some are very specific, others are vague
 - Mix formal ("I am seeking") with casual ("yo need")
+
+THINGS THAT MAKE PROMPTS FAKE OR WRONG (AVOID):
+- "Who should we target" / "Who should we find for you" — TOO ROBOTIC
+- "Find decision makers in X sector" — BANNED (talks about people, not companies)
+- "Ideal buyer: X at Y companies" — BANNED (talks about people)
+- ANY job title, seniority, or contact-level descriptor — BANNED
+- Starting every prompt the same way
 
 Your output must be valid JSON."""
 
     # Build the detailed user prompt with distribution requirements
-    user_prompt = f"""Generate exactly {total_icps} ICP prompts distributed across these industries:
+    user_prompt = f"""Generate exactly {total_icps} ICP prompts — ONE PER INDUSTRY across these industries:
 
-INDUSTRY DISTRIBUTION (must match exactly):
+INDUSTRY DISTRIBUTION (must match exactly, exactly one ICP per industry):
 """
     for industry, count in INDUSTRY_DISTRIBUTION.items():
         sub_inds = taxonomy_sub_industries.get(industry, SUB_INDUSTRIES.get(industry, ["General"]))[:15]
+        products = PRODUCTS_BY_INDUSTRY.get(industry, ["Software solution"])[:5]
         user_prompt += f"""
-{industry}: {count} prompts
+{industry}: {count} prompt
   Valid sub-industries to use: {', '.join(sub_inds)}
-  Example roles: {', '.join(TARGET_ROLES.get(industry, ['Manager'])[:5])}
+  Example products the buyer might be selling INTO this industry: {', '.join(products)}
 """
 
     user_prompt += f"""
 
-CRITICAL REMINDER - BANNED PHRASES (DO NOT USE):
-- "Who should we target" - BANNED
-- "Who should we find for you" - BANNED
-- "Find decision makers in" - BANNED (use at most 3 times)
-- "Ideal buyer:" - BANNED
-- Any robotic template language - BANNED
+CRITICAL REMINDER - BANNED CONTENT (DO NOT INCLUDE):
+- ANY job title, seniority, role, or contact-level descriptor (no "VP of X", "CTO", "Director", "Head of Y", "decision-makers", "buyers", "C-suite", "executives", "leaders", etc.).
+- "Who should we target" — BANNED
+- "Who should we find for you" — BANNED
+- "Find decision makers in" — BANNED (refers to people)
+- "Ideal buyer:" — BANNED
+- Any robotic template language — BANNED
 
-REQUIRED STARTER DISTRIBUTION (enforce strictly):
-- 20 prompts starting with "I need..." or "I'm looking for..." or "I want..."
-- 20 prompts starting casually: "yo", "hey", "gonna need", "can you get me"
-- 20 prompts in shorthand/telegraphic style (no full sentences): "VP eng saas series B california"
-- 20 prompts as questions: "who handles...", "what's the best...", "anyone know..."
-- 20 prompts starting with "Looking for..." or "Searching for..." (but varied structure after)
+REQUIRED STARTER DISTRIBUTION (enforce strictly across the {total_icps} prompts):
+- ~5 starting with "I need..." / "I'm looking for..." / "I want..."
+- ~5 casual: "yo", "hey", "gonna need", "can you pull"
+- ~5 shorthand/telegraphic
+- ~5 questions: "what are...", "anyone know...", "which ..."
+- ~5 starting with "Looking for..." / "Searching for..."
 
-EXAMPLE PROMPTS THAT SOUND HUMAN:
+EXAMPLE COMPANY-LEVEL PROMPTS THAT SOUND HUMAN:
 
 For Software:
-- "I need VP of Engineering contacts at SaaS startups, Series A-B, west coast. Bonus if they're hiring."
-- "yo can you pull CTOs at devtools companies? 50-200 employees, recently raised"
-- "VP eng series B saas SF hiring engineers"
+- "I need Series A-B SaaS companies on the west coast that are visibly scaling their devops footprint right now."
+- "yo can you pull devtools companies 50-200 people, recently raised? we sell developer infra"
 
 For Financial Services:
-- "I'm looking for VP of Compliance and VP of Strategy at Credit Companies. Series B, 200-500 employees in the US. Ideally they've raised funding recently."
-- "CFOs at fintech startups that just closed rounds - NYC or boston"
-- "who handles risk management purchasing at banks? VP level?"
+- "Looking for fintech companies between Series A and Series C in the US that just closed a round in payments or lending."
+- "what mid-market banks are publicly modernizing their core systems in 2026?"
 
 For Healthcare:
-- "I need to find Chief Medical Officers at digital health companies. They should be actively looking at new platforms."
-- "healthcare IT buyers - CIO or VP level, hospital systems, evaluating EHR"
-- "CMO contacts telemedicine startups series A"
+- "digital health companies that started clinical pilots in the last 90 days. 50-500 employees, US."
+- "I want hospital systems or health systems in california that are actively evaluating new EHR tooling."
 
 For Manufacturing:
-- "heads of supply chain at manufacturing plants in ohio and michigan. companies doing digital transformation"
-- "I want VP of Operations contacts at industrial companies, 1000+ employees, midwest"
-- "plant managers automotive suppliers hiring"
+- "industrial manufacturers in the midwest doing a digital transformation push, ideally 1000+ employees."
+- "anyone tracking automotive suppliers in ohio/michigan that are publicly announcing factory expansions?"
 
 GEOGRAPHIES TO USE:
-US States (98 prompts): Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, DC, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, Wyoming
+US States (most prompts): Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, DC, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, Wyoming
 
-UAE (exactly 2 prompts): Dubai and Abu Dhabi. These 2 prompts MUST be Financial Services industry and investor-focused (e.g., "looking for sovereign wealth fund investors in Dubai", "need contacts at PE firms or family offices in Abu Dhabi looking to invest in US tech"). The target roles for these should be investor/fund manager types.
+UAE (optional, AT MOST 1 prompt — and only if the industry naturally fits, e.g. Financial Services or Lending and Investments): Dubai or Abu Dhabi. If used, write it as a company-level investor or capital-markets ICP (e.g. "looking for sovereign wealth funds or family offices in Abu Dhabi deploying into US growth equity"). Do NOT name people.
 
-IMPORTANT: Do NOT include any other international geographies besides Dubai and Abu Dhabi. 98 US + 2 UAE = 100 total.
+IMPORTANT: Do NOT include any international geographies besides Dubai/Abu Dhabi. The remaining prompts MUST use US states.
 
 COMPANY SIZES: 10-50, 50-200, 200-500, 500-1000, 1000-5000, 5000+
 COMPANY STAGES: Seed, Series A, Series B, Series C+, Private Equity, Public
 
-PRODUCTS/SERVICES TO MENTION NATURALLY:
-- Software: CRM, DevOps, Cloud security, AI/ML platforms, HR software
+PRODUCTS/SERVICES (what the SELLER is offering — mention naturally where useful):
+- Software: CRM, DevOps, Cloud security, AI/ML platforms
 - IT: Cloud services, Managed IT, Cybersecurity
 - Healthcare: EHR systems, Telemedicine, Patient engagement
 - Biotech: Lab software, Clinical trial management
@@ -481,43 +575,43 @@ PRODUCTS/SERVICES TO MENTION NATURALLY:
 - Commerce: E-commerce platforms, Inventory management
 - Professional Services: Practice management, Billing software
 - Data: BI tools, Analytics platforms
+(See the per-industry product list above for more.)
 
-INTENT SIGNALS TO WEAVE IN:
+INTENT SIGNALS TO WEAVE IN (COMPANY-level — events the COMPANY did, not anything about people):
 - Recently raised funding / just closed a round
-- Hiring for specific roles
-- Spoke at conference / published content
-- Recent leadership change
-- Expanding to new markets
-- Digital transformation / evaluating new solutions
-- Posted on LinkedIn about challenges
+- Expanding to new markets or new geographies
+- Launched or announced a new product/feature
+- Public commentary about digital transformation / evaluating new vendors
+- Recent factory / facility / store opening
+- New regulatory or compliance pressure
+- Acquired another company / acquired by another company
 
-OUTPUT FORMAT - Return a JSON object with "icps" array containing exactly 100 objects:
+OUTPUT FORMAT — Return a JSON object with "icps" array containing exactly {total_icps} objects, one per industry. Do NOT include target_roles, target_seniority, role_types, or any role/seniority field; the schema is company-only.
 {{
   "icps": [
     {{
       "icp_id": "icp_{set_id}_001",
-      "prompt": "I need VP of Engineering at SaaS startups, Series B, west coast. They should be hiring engineers.",
+      "prompt": "I need Series B SaaS startups on the west coast that are actively scaling their devops footprint.",
       "industry": "Software",
       "sub_industry": "SaaS",
-      "target_roles": ["VP of Engineering"],
       "employee_count": "50-200",
       "company_stage": "Series B",
       "geography": "United States, California",
       "country": "United States",
       "product_service": "DevOps platform",
-      "intent_signals": ["Hiring for specific roles"]
+      "intent_signals": ["Recently raised funding"]
     }},
     ...
   ]
 }}
 
-FINAL CHECK - Before outputting, verify:
-1. NO prompt starts with "Who should we target" or "Who should we find"
-2. NO prompt uses "Find decision makers in X sector" more than 3 times
-3. Prompts use 5 different starting styles distributed evenly
-4. Each prompt sounds like a different human typed it
-5. Exactly 98 prompts use US geographies and exactly 2 use UAE (Dubai, Abu Dhabi) — no other international locations
-6. The 2 UAE prompts MUST be Financial Services / investor-focused"""
+FINAL CHECK — Before outputting, verify:
+1. NO prompt contains a job title, seniority level, "decision-makers", "buyers", "executives", or any contact-level descriptor.
+2. NO prompt starts with "Who should we target" or "Who should we find".
+3. There are exactly {total_icps} prompts, one per industry listed above.
+4. Each prompt sounds like a different human typed it.
+5. Prompts use US states (and at most 1 UAE entry under Financial Services / Lending and Investments).
+6. No icp object has a target_roles, target_seniority, or role_types field."""
 
     try:
         logger.info(f"Calling OpenRouter {OPENROUTER_MODEL} to generate {total_icps} ICPs...")
@@ -538,7 +632,7 @@ FINAL CHECK - Before outputting, verify:
                         {"role": "user", "content": user_prompt}
                     ],
                     "temperature": 0.9,  # Higher temperature for more variety
-                    "max_tokens": 32000,  # Need space for 100 ICPs
+                    "max_tokens": 16000,  # Generous headroom for 25 ICPs
                     "response_format": {"type": "json_object"}
                 }
             )
@@ -610,23 +704,16 @@ FINAL CHECK - Before outputting, verify:
             
             # Count distribution
             actual_distribution[industry_normalized] += 1
-            
-            # Build normalized ICP
-            target_roles = icp.get("target_roles", [])
-            if isinstance(target_roles, str):
-                target_roles = [target_roles]
-            if not target_roles:
-                target_roles = ["Manager"]
-            
+
             intent_signals = icp.get("intent_signals", [])
             if isinstance(intent_signals, str):
                 intent_signals = [intent_signals]
             if not intent_signals:
                 intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))
                 logger.warning(f"ICP {icp_id} had empty intent_signals from LLM, assigned fallback: {intent_signals}")
-            
+
             geography = icp.get("geography", "United States, California")
-            
+
             # Allow US and UAE only; override anything else
             if geography and "United Arab Emirates" in geography:
                 country = "United Arab Emirates"
@@ -636,27 +723,35 @@ FINAL CHECK - Before outputting, verify:
                 logger.warning(f"ICP {icp_id} has non-US/UAE geography '{geography}', overriding to California")
                 geography = "United States, California"
                 country = "United States"
-            
+
+            # COMPANY-MODE ONLY: do NOT carry forward target_roles or
+            # target_seniority — they are legacy contact-mode fields. We
+            # populate them as empty defaults to satisfy any older miner
+            # code that still reads them via dict.get(), but no real role
+            # data flows through.
             validated_icp = {
                 "icp_id": icp_id,
                 "prompt": prompt,
                 "industry": industry_normalized,
                 "sub_industry": icp.get("sub_industry", SUB_INDUSTRIES.get(industry_normalized, ["General"])[0]),
-                "target_roles": target_roles,
-                "target_seniority": _get_seniority_from_role(target_roles[0]) if target_roles else "Director",
+                "target_roles": [],
+                "target_seniority": "",
                 "employee_count": icp.get("employee_count", "50-200"),
                 "company_stage": icp.get("company_stage", "Series A"),
                 "geography": geography,
                 "country": country,
                 "product_service": icp.get("product_service", "Software solution"),
                 "intent_signals": intent_signals,
-                "buyer_description": prompt  # Legacy field
+                "buyer_description": prompt  # Legacy alias of prompt
             }
-            
+
             validated_icps.append(validated_icp)
-        
-        if len(validated_icps) < 90:
-            logger.error(f"Only {len(validated_icps)} valid ICPs (expected ~100), falling back to template")
+
+        # Set is exactly 25; allow some slack but anything significantly
+        # short of expected count is a bad generation and we fall back.
+        min_acceptable = max(int(total_icps * 0.9), total_icps - 2)
+        if len(validated_icps) < min_acceptable:
+            logger.error(f"Only {len(validated_icps)} valid ICPs (expected ~{total_icps}), falling back to template")
             return None
         
         # If we got fewer than 100, that's OK - the distribution is approximate
@@ -687,178 +782,137 @@ def generate_single_icp(
     seed: Optional[int] = None
 ) -> Dict[str, Any]:
     """
-    Generate a single ICP with a NATURAL LANGUAGE PROMPT.
-    
-    The prompt is what real customers would type to describe who they're looking for.
-    Models must INTERPRET this prompt to find matching leads.
-    
+    Generate a single COMPANY-LEVEL ICP with a natural language prompt.
+
+    The prompt is what real B2B salespeople would type to describe the
+    KIND OF COMPANY (account) they want to reach — no contact-level
+    descriptors. Models must interpret this prompt to surface matching
+    companies and verify at least one intent signal.
+
     Args:
         icp_id: Unique identifier for this ICP
         industry: Industry category
         seed: Optional random seed for reproducibility
-    
+
     Returns:
-        Dict containing the ICP definition with a natural language prompt
+        Dict containing the ICP definition with a natural language prompt.
+        ``target_roles`` and ``target_seniority`` are kept as empty defaults
+        for backward compatibility with older miner code that may dict.get
+        them, but they are not populated with real data.
     """
     if seed is not None:
         random.seed(seed)
-    
+
     sub_industries = SUB_INDUSTRIES.get(industry, ["General"])
-    roles = TARGET_ROLES.get(industry, ["Manager"])
     products = PRODUCTS_BY_INDUSTRY.get(industry, ["Software solution"])
-    
-    # Randomly select parameters
+
     sub_industry = random.choice(sub_industries)
-    target_roles = random.sample(roles, min(random.randint(1, 3), len(roles)))  # 1-3 roles
     employee_count_range = random.choice(COMPANY_SIZES)
     company_stage = random.choice(COMPANY_STAGES)
     geography = random.choice(GEOGRAPHIES)
     product = random.choice(products)
-    intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))  # 1-2 signals
-    
-    # =================================================================
-    # BUILD NATURAL LANGUAGE PROMPT
-    # =================================================================
-    # This is what real customers would type - the model must interpret it!
-    # Example: "VP Sales and Heads of Revenue at Series A-C SaaS companies 
-    #           in the US. Showing signals: researching outbound tools, 
-    #           hiring SDRs, or evaluating competitors."
-    # =================================================================
-    
-    # Format roles naturally
-    if len(target_roles) == 1:
-        roles_text = target_roles[0]
-    elif len(target_roles) == 2:
-        roles_text = f"{target_roles[0]} and {target_roles[1]}"
-    else:
-        roles_text = f"{', '.join(target_roles[:-1])}, and {target_roles[-1]}"
-    
-    # Format company stage naturally
+    intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))
+
+    # Stage phrasing
     if company_stage in ["Seed", "Series A", "Series B"]:
         stage_text = f"early-stage ({company_stage})"
     elif company_stage in ["Series C+", "Private Equity"]:
         stage_text = f"growth-stage ({company_stage})"
     else:  # Public
         stage_text = "enterprise/public"
-    
-    # Format geography naturally
+
     country = geography.split(",")[0].strip()
-    
-    # Format employee count naturally
     size_text = f"with {employee_count_range} employees"
-    
-    # Format intent signals naturally
     signals_text = " or ".join([s.lower() for s in intent_signals])
-    
-    # Build the prompt - varied templates for diversity
+
+    # COMPANY-only prompt templates — never mention people, titles, or
+    # seniority. The miner returns a company, not a contact.
     prompt_templates = [
-        # Template 1: Role-focused
-        f"{roles_text} at {stage_text} {sub_industry} companies {size_text} in {country}. "
-        f"Showing signals: {signals_text}. Looking to sell {product}.",
-        
-        # Template 2: Industry-focused
-        f"Find decision makers in {sub_industry} ({industry} sector). Target: {roles_text} "
-        f"at {stage_text} companies {size_text} based in {country}. "
+        f"I need {stage_text} {sub_industry} companies {size_text} in {country}. "
+        f"Showing signals: {signals_text}. We sell {product}.",
+
+        f"Looking for {sub_industry} ({industry}) companies "
+        f"at {stage_text}, {size_text}, based in {country}. "
         f"Intent indicators: {signals_text}.",
-        
-        # Template 3: Product-focused
-        f"Who should we target for our {product}? Ideal buyer: {roles_text} "
-        f"at {sub_industry} companies ({company_stage}, {employee_count_range} employees) in {country}. "
-        f"Look for companies that are {signals_text}.",
-        
-        # Template 4: Concise
-        f"{roles_text} at {company_stage} {sub_industry} companies in {country} "
+
+        f"Searching for {sub_industry} companies "
+        f"({company_stage}, {employee_count_range} employees) in {country} "
+        f"that are {signals_text}. Selling {product}.",
+
+        f"{company_stage} {sub_industry} companies in {country} "
         f"({employee_count_range} employees). Signals: {signals_text}.",
-        
-        # Template 5: Question format (like UI screenshot)
-        f"Who should we find for you? {roles_text} at {stage_text} {sub_industry} "
-        f"companies in {country}. Showing signals: {signals_text}."
+
+        f"What {stage_text} {sub_industry} companies in {country} "
+        f"are {signals_text}? We're selling {product}.",
     ]
-    
-    # Pick a random template
+
     prompt = random.choice(prompt_templates)
-    
+
     return {
         "icp_id": icp_id,
-        # PRIMARY FIELD - models should interpret this prompt
         "prompt": prompt,
-        # Structured fields for reference/validation (but models should use prompt)
         "industry": industry,
         "sub_industry": sub_industry,
-        "target_roles": target_roles,  # Now a list
-        "target_seniority": _get_seniority_from_role(target_roles[0]),
+        # Legacy fields — kept as empty defaults so older miner code that
+        # dict.gets them doesn't crash. The competition is company-only.
+        "target_roles": [],
+        "target_seniority": "",
         "employee_count": employee_count_range,
         "company_stage": company_stage,
         "geography": geography,
-        "country": country,  # Extracted for convenience
+        "country": country,
         "product_service": product,
-        "intent_signals": intent_signals,  # Now a list
-        # Legacy field for backward compatibility
-        "buyer_description": prompt,
+        "intent_signals": intent_signals,
+        "buyer_description": prompt,  # Legacy alias of prompt
     }
-
-
-def _get_seniority_from_role(role: str) -> str:
-    """Map role to seniority level."""
-    role_lower = role.lower()
-    if any(x in role_lower for x in ["chief", "cto", "cfo", "coo", "cmo", "cro", "cso"]):
-        return "C-Suite"
-    elif any(x in role_lower for x in ["vp", "vice president"]):
-        return "VP"
-    elif "director" in role_lower or "head" in role_lower:
-        return "Director"
-    elif "manager" in role_lower or "lead" in role_lower:
-        return "Manager"
-    else:
-        return "Director"  # Default
 
 
 def generate_icp_set(
     set_id: int,
-    total_icps: int = 100,
+    total_icps: int = 25,
     base_seed: Optional[int] = None
 ) -> tuple:
     """
-    Generate a complete ICP set with industry distribution.
-    
+    Generate a complete ICP set — one ICP per industry across the 25 distinct
+    industries in ``INDUSTRY_DISTRIBUTION``.
+
     Args:
         set_id: Set identifier (YYYYMMDD format)
-        total_icps: Number of ICPs to generate (default 100)
+        total_icps: Number of ICPs to generate (default 25, one per industry).
+            Currently informational — the actual count comes from
+            ``INDUSTRY_DISTRIBUTION`` which is the source of truth for the
+            industry list.
         base_seed: Base seed for reproducibility
-    
+
     Returns:
         Tuple of (icps_list, industry_distribution, icp_set_hash)
     """
     icps = []
     icp_counter = 1
-    actual_distribution = {}
-    
-    # Generate ICPs according to distribution
+    actual_distribution: Dict[str, int] = {}
+
     for industry, count in INDUSTRY_DISTRIBUTION.items():
         actual_distribution[industry] = count
-        
-        for i in range(count):
+
+        for _ in range(count):
             icp_id = f"icp_{set_id}_{icp_counter:03d}"
-            
-            # Use deterministic seed if provided
+
             seed = None
             if base_seed is not None:
                 seed = base_seed + icp_counter
-            
+
             icp = generate_single_icp(icp_id, industry, seed)
             icps.append(icp)
             icp_counter += 1
-    
-    # Shuffle to mix industries (but deterministically if seeded)
+
     if base_seed is not None:
         random.seed(base_seed)
     random.shuffle(icps)
-    
-    # Compute hash
+
     icp_set_hash = compute_icp_set_hash(icps)
-    
+
     logger.info(f"Generated {len(icps)} ICPs for set {set_id}, hash={icp_set_hash[:16]}...")
-    
+
     return icps, actual_distribution, icp_set_hash
 
 
@@ -1050,14 +1104,17 @@ async def generate_and_activate_icp_set(
 ) -> Optional[int]:
     """
     Generate and activate a new ICP set using OpenRouter LLM.
-    
-    Uses OpenRouter LLM (o3-mini) for varied, human-like prompts.
+
+    Uses OpenRouter LLM (o3-mini) for varied, human-like company-level prompts.
     NO FALLBACK - if OpenRouter fails, returns None and the system will
     automatically retry on the next gateway restart or rotation check.
-    
+
+    Generates exactly ``len(INDUSTRY_DISTRIBUTION)`` ICPs (currently 25, one
+    per industry).
+
     Args:
         for_date: Optional date to generate for (defaults to today UTC)
-    
+
     Returns:
         set_id if successful, None otherwise
     """
@@ -1092,9 +1149,10 @@ async def generate_and_activate_icp_set(
         logger.error("   Set OPENROUTER_API_KEY environment variable and restart gateway.")
         return None
     
-    logger.info("Generating ICPs with OpenRouter LLM...")
+    target_count = len(INDUSTRY_DISTRIBUTION)
+    logger.info(f"Generating ICPs with OpenRouter LLM (target {target_count} ICPs, one per industry)...")
     try:
-        result = await generate_icps_with_openrouter(set_id, total_icps=100)
+        result = await generate_icps_with_openrouter(set_id, total_icps=target_count)
         if not result:
             logger.error("❌ OpenRouter returned None - will retry on next check/restart")
             return None

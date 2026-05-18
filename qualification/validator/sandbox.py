@@ -1012,8 +1012,14 @@ if __name__ == "__main__":
         if prompt:
             logger.info(f"Running qualify(icp) with PROMPT: {prompt[:100]}...")
         else:
-            logger.info(f"Running qualify(icp) with ICP: industry={icp_data.get('industry')}, "
-                       f"roles={icp_data.get('target_roles', ['Unknown'])}")
+            # Company-only competition: log the company-level descriptors,
+            # not legacy role fields.
+            logger.info(
+                f"Running qualify(icp) with ICP: industry={icp_data.get('industry')}, "
+                f"sub_industry={icp_data.get('sub_industry')}, "
+                f"employee_count={icp_data.get('employee_count')}, "
+                f"country={icp_data.get('country')}"
+            )
         
         # =================================================================
         # EXECUTE MODEL (in thread pool to avoid blocking the event loop)

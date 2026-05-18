@@ -4512,12 +4512,37 @@ class Validator(BaseValidatorNeuron):
                 # /fulfillment/reveals, so this filter naturally stops
                 # matching it.
                 if scoring_requests:
+                    # Cross-epoch dispatch lock: a work file for this request
+                    # from ANY recent epoch counts as "in flight". Previously
+                    # this filter was epoch-scoped, so when an epoch boundary
+                    # crossed while the worker was still scoring (Tier 2c on
+                    # attribute-heavy ICPs commonly runs 30–60 min for a
+                    # 45-lead request), Phase 1 saw no current-epoch work
+                    # file and re-dispatched, doubling Sonar load. Observed
+                    # 2026-05-18: the slowest three requests (cae0a90d,
+                    # 0d613519, 8cc8c084) sat at 133–155 min reveal→score
+                    # vs a 19-min median, with clean cliffs at 70 and 140
+                    # min (= 1 and 2 epoch crossings). 200 orphan work files
+                    # going back ~28 days on worker 1 are the long tail of
+                    # this — workers that died mid-scoring on epoch N, got
+                    # re-dispatched on N+1, but the N file was never GC'd.
+                    #
+                    # Files older than _FF_WORK_FILE_TTL_SEC are treated as
+                    # dead workers and ignored — Phase 1 may safely
+                    # re-dispatch through them, and Phase 2 below skips them
+                    # too. 80 min covers one epoch + a 10% buffer.
+                    _FF_WORK_FILE_TTL_SEC = 80 * 60
+                    _now_ts = time.time()
                     def _has_work_file(rid: str) -> bool:
-                        return bool(list(
-                            weights_dir.glob(
-                                f"fulfillment_worker_*_work_{current_epoch}_{rid}.json"
-                            )
-                        ))
+                        for wf in weights_dir.glob(
+                            f"fulfillment_worker_*_work_*_{rid}.json"
+                        ):
+                            try:
+                                if (_now_ts - wf.stat().st_mtime) < _FF_WORK_FILE_TTL_SEC:
+                                    return True
+                            except FileNotFoundError:
+                                continue
+                        return False
                     scoring_requests = [
                         r for r in scoring_requests
                         if not _has_work_file(r.get("request_id", ""))
@@ -4610,8 +4635,21 @@ class Validator(BaseValidatorNeuron):
 
         # Multi-request parallelization: each worker may have a
         # per-request work file: fulfillment_worker_{wid}_work_{epoch}_{reqid}.json
-        work_pattern = f"fulfillment_worker_*_work_{current_epoch}_*.json"
-        all_work_files = list(weights_dir.glob(work_pattern))
+        #
+        # Phase 2 globs ALL recent epochs (not just current) so that work
+        # which started in epoch N and completed in N+1 still gets its
+        # scores submitted, instead of being orphaned + re-dispatched.
+        # Cross-epoch globbing is paired with the dispatch-side cross-epoch
+        # lock above so we don't process a file Phase 1 is concurrently
+        # considering for re-dispatch. mtime TTL guards against ancient
+        # zombie files (200 such orphans observed on worker 1 going back
+        # 28 days from dead-mid-scoring workers).
+        _FF_RESULTS_TTL_SEC = 6 * 3600  # 6h — generous; real lag was ≤155 min
+        _now_ts = time.time()
+        all_work_files = [
+            wf for wf in weights_dir.glob("fulfillment_worker_*_work_*_*.json")
+            if (_now_ts - wf.stat().st_mtime) < _FF_RESULTS_TTL_SEC
+        ]
         if not all_work_files:
             return
 
@@ -4619,9 +4657,15 @@ class Validator(BaseValidatorNeuron):
         def _results_path_for(work_file: Path) -> Path:
             return work_file.parent / work_file.name.replace("_work_", "_results_", 1)
 
-        pending = [wf for wf in all_work_files if not _results_path_for(wf).exists()]
-        if pending:
-            return  # some workers still scoring — try again next iteration
+        # Per-file independence: process whichever (work, results) pairs are
+        # ready right now. The old "if pending: return" gate blocked the
+        # entire batch until every work file had a matching results file —
+        # safe under the prior single-epoch glob (whole batch shared one
+        # epoch's life cycle) but starves submissions now that the glob
+        # spans epochs (a single slow zombie blocked otherwise-ready ones).
+        ready = [wf for wf in all_work_files if _results_path_for(wf).exists()]
+        if not ready:
+            return
 
         # ── All workers done — aggregate and submit to gateway ──
         try:
@@ -4631,23 +4675,17 @@ class Validator(BaseValidatorNeuron):
 
             print(f"\n{'='*60}")
             print(f"📊 FULFILLMENT: Collecting worker results (epoch {current_epoch}, "
-                  f"{len(all_work_files)} request-worker pair(s))")
+                  f"{len(ready)}/{len(all_work_files)} ready)")
             print(f"{'='*60}")
 
-            # Track whether ALL work files for this epoch submitted cleanly.
-            # If any one of them has even a single failed gateway submit, we
-            # keep its work+results files on disk so the next Phase 2 tick
-            # re-enters this block and retries just the failed submits
-            # (scoring is not re-run — the results_file already exists with
-            # the computed scores).  The gateway's /fulfillment/score
-            # endpoint upserts on (request_id, validator_hotkey, lead_id),
-            # so duplicate retries are idempotent.
+            # Per-work-file: a failed gateway submit keeps that pair on disk
+            # so the next Phase 2 tick retries just it. /fulfillment/score
+            # upserts on (request_id, validator_hotkey, lead_id), so duplicate
+            # retries are idempotent.
             any_submit_failed = False
 
-            for work_file in sorted(all_work_files):
+            for work_file in sorted(ready):
                 results_file = _results_path_for(work_file)
-                if not results_file.exists():
-                    continue
 
                 # Parse worker id from filename for logging
                 try:

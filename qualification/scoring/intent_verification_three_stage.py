@@ -368,10 +368,21 @@ def _lead_profile(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _visible_signal(row: Dict[str, Any]) -> Dict[str, Any]:
+    # Surface BOTH the miner's free-text claim AND the buyer's ICP signal so
+    # the LLM can check semantic alignment between them.  Without
+    # target_icp_signal in the prompt, the verifier only judged "does the URL
+    # support what the miner wrote?" — a miner could submit a true-but-
+    # orthogonal claim (e.g. "Artisan offers an AI BDR product") and get
+    # approved even though it doesn't satisfy the actual ICP signal ("Company
+    # has active job postings for SDR/BDR roles"). Observed 2026-05-18 on
+    # multiple winners. Including target_icp_signal lets the prompt rules
+    # below enforce: the claim must semantically address the ICP signal AND
+    # the URL must support the claim.
     return {
         "id": str(row.get("id") or "signal-1"),
         "signal_type": row.get("signal_type") or "unknown",
-        "claim": row.get("claim") or "",
+        "miner_claim": row.get("claim") or "",
+        "target_icp_signal": row.get("_target_signal_text") or "",
         "claimed_source_urls": row.get("claimed_source_urls") or [],
     }
 
@@ -386,19 +397,39 @@ Lead profile:
 Intent signal to verify:
 {json.dumps(signal, indent=2)}
 
-Rules:
-- Treat the lead profile as context, not proof.
-- Anchor company identity to company website and company LinkedIn.
-- If source URL(s) are provided, use source_grounded mode.
-- In source_grounded mode, validate only against exact supplied source URL(s).
-- Do not use alternate URLs, same-domain pages, cached pages, search results, or replacement URLs as support.
-- Independent search may only flag contradiction, stale data, or wrong-entity issues.
-- If no source URL is provided, use discovery mode and search credible sources.
-- supported: exact evidence directly supports the claim and entity match.
-- partially_supported: exact evidence supports only part of the claim.
-- contradicted: exact evidence or stronger current evidence clearly contradicts the claim.
+Two-part verification — BOTH must hold for `supported`:
+
+  PART A: Does `miner_claim` semantically satisfy `target_icp_signal`?
+    The miner asserts their evidence proves the buyer's target_icp_signal.
+    First check whether the miner_claim, even if true, would actually mean
+    the target_icp_signal is satisfied.
+      * "Company X offers product Y" is NOT the same as "Company X hires for
+        role Y". Selling an AI BDR is the opposite signal of hiring BDRs.
+      * "Company X had a funding round" is NOT the same as "Company X is
+        hiring sales roles" unless the URL specifically ties the funding to
+        sales-team expansion.
+      * "Company X has a careers page" is NOT the same as "Company X has
+        open positions for {{role}}".
+    If miner_claim does not semantically map to target_icp_signal, return
+    wrong_entity (the claim is about a different thing) regardless of how
+    well the URL supports the claim.
+
+  PART B: Does the supplied source URL support `miner_claim`?
+    - Treat the lead profile as context, not proof.
+    - Anchor company identity to company website and company LinkedIn.
+    - If source URL(s) are provided, use source_grounded mode.
+    - In source_grounded mode, validate only against exact supplied source URL(s).
+    - Do not use alternate URLs, same-domain pages, cached pages, search results, or replacement URLs as support.
+    - Independent search may only flag contradiction, stale data, or wrong-entity issues.
+    - If no source URL is provided, use discovery mode and search credible sources.
+
+Signal status decision:
+- supported: PART A holds AND exact evidence directly supports miner_claim AND entity match.
+- partially_supported: PART A holds AND exact evidence supports only part of miner_claim.
+- contradicted: exact evidence or stronger current evidence clearly contradicts miner_claim.
 - unable_to_verify: evidence is missing, inaccessible, ambiguous, stale, or insufficient.
-- wrong_entity: evidence is about a different company/person.
+- wrong_entity: PART A fails (miner_claim does not semantically address target_icp_signal),
+                OR evidence is about a different company/person.
 
 Return only schema-valid JSON."""
 
@@ -425,13 +456,26 @@ def _build_final_judge_prompt(
 {chr(10).join(blocks)}
 
 Final judge rules:
+- Re-apply the PART A check from above BEFORE judging content support: if
+  miner_claim does not semantically map to target_icp_signal, return
+  wrong_entity regardless of what the extracted content shows. Do not let a
+  factually-true but orthogonal claim pass just because the URL supports it.
 - Use only the exact source extraction above as supporting evidence.
-- If exact extracted content directly supports the claim, return supported.
-- If it supports only part of the claim, return partially_supported.
+- Page titles, navigation menus, headers, and breadcrumbs are NOT evidence.
+  Only specific factual claims in the page BODY count.
+- If the body contains explicit negation about the claim ("0 open positions",
+  "no longer open", "not currently hiring", "position has been removed",
+  "page not found", "404", "the job you are looking for is no longer"),
+  return contradicted regardless of titles, headers, or partial context.
+- If exact extracted content directly supports miner_claim AND PART A holds,
+  return supported.
+- If extracted content supports only part of miner_claim AND PART A holds,
+  return partially_supported.
 - If extraction failed or content is insufficient, return unable_to_verify.
-- If content contradicts the claim, return contradicted.
+- If content contradicts miner_claim, return contradicted.
 - If content is about another company/person, return wrong_entity.
-- evidence_urls_used must contain only exact supplied source URLs whose extracted content supports or contradicts the claim."""
+- evidence_urls_used must contain only exact supplied source URLs whose
+  extracted content supports or contradicts the claim."""
 
 
 # ─────────────────────────────────────────────────────────────────────

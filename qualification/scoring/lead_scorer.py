@@ -801,6 +801,44 @@ async def _score_single_intent_signal(
         logger.warning(f"Intent signal rejected: future date — {future_err}")
         return 0.0, 0, "fabricated", None, -1
 
+    # ── Self-contradicting evidence guard ────────────────────────────────
+    # The three-stage verifier's Stage 1 (Sonar with native web search)
+    # makes an "approve" decision based on broad web searches for the
+    # target signal — not the miner's specific URL. That means a miner can
+    # submit a dead/closed-job URL ("Remote Jobs at Conversica · 0 Open
+    # Positions", "The job you are looking for is no longer open") and
+    # Stage 1 still approves because Sonar found OTHER references to job
+    # postings on the company elsewhere. Observed 2026-05-19 on multiple
+    # winning leads.
+    #
+    # Belt-and-suspenders: if the miner's own snippet/description text
+    # contains an explicit negation phrase relative to the claim, reject
+    # the signal regardless of the LLM verdict. The miner is literally
+    # telling us the evidence URL doesn't support the claim.
+    _NEGATION_PATTERNS = (
+        r"\b0\s+(open|available|current|listed|active)\b",
+        r"\bno\s+(open|current|active|listed|available)\s+(position|opening|job|hire|role)",
+        r"\bno\s+longer\s+(open|available|accepting|listed|active)\b",
+        r"\bnot\s+(currently|available|accepting|open|listed|hiring)\b",
+        r"\bjob\s+(no\s+longer|is\s+(no\s+longer|not)\s+(open|available))",
+        r"\b(page|posting|position)\s+(not\s+found|no\s+longer\s+exists|expired|removed)\b",
+        r"\bunable\s+to\s+(verify|find|access|locate)\b",
+        r"\bno\s+evidence\b",
+        r"\b404\b",
+    )
+    _negation_re = re.compile("|".join(_NEGATION_PATTERNS), re.IGNORECASE)
+    _evidence_text = " ".join(filter(None, [
+        signal.description or "", signal.snippet or "",
+    ]))
+    _neg_match = _negation_re.search(_evidence_text)
+    if _neg_match:
+        logger.warning(
+            f"Intent signal rejected: miner's own description/snippet "
+            f"contains a negation phrase ({_neg_match.group(0)!r}) — "
+            f"evidence URL appears to NOT support the claim"
+        )
+        return 0.0, 0, "fabricated", None, -1
+
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)
 

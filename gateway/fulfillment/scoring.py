@@ -12,6 +12,8 @@ import os
 import re
 from typing import Dict, List, Optional, Set, Tuple
 
+import httpx
+
 from gateway.fulfillment.config import (
     get_fulfillment_api_key,
     FULFILLMENT_MIN_INTENT_SCORE,
@@ -404,6 +406,48 @@ async def score_fulfillment_lead(
             )
         print(f"   ✅ Tier 1.5b: Contact region match: '{lead.city}, {lead.state}' within '{icp.contact_region}'")
 
+    # ── Tier 1.7 — INTENT DESCRIPTION PRE-CHECK ────────────────────────
+    # Cheap Gemini gate.  For each miner-submitted intent signal, asks
+    # "does the claim semantically match the ICP signal it was mapped to,
+    # accepting source/url as evidence for any venue qualifier?".
+    # If ALL signals fail, the lead has no plausibly valid intent — reject
+    # before paying Tier 2 (~$0.05-0.10) + Tier 3 (~$0.05/signal) costs.
+    # Signals that fail individually are tagged on ``precheck_verdicts``
+    # so the Tier 3 loop below can skip the expensive three-stage call.
+    # Fail-OPEN on any error (see intent_precheck._call_openrouter).
+    precheck_verdicts: List[bool] = [True] * len(lead.intent_signals)
+    if os.environ.get("INTENT_PRECHECK_ENABLED", "false").lower() == "true" \
+            and lead.intent_signals:
+        from qualification.scoring.intent_precheck import precheck_lead_signals
+        icp_signal_texts = [s.text for s in (icp.intent_signals or [])]
+        try:
+            async with httpx.AsyncClient() as _precheck_http:
+                precheck_verdicts = await precheck_lead_signals(
+                    _precheck_http,
+                    lead_signals=lead.intent_signals,
+                    icp_intent_signal_texts=icp_signal_texts,
+                )
+        except Exception as e:
+            logger.warning(
+                "Tier 1.7 pre-check raised %s: %s — fail-open (all signals pass)",
+                type(e).__name__, e,
+            )
+            precheck_verdicts = [True] * len(lead.intent_signals)
+
+        if not any(precheck_verdicts):
+            return FulfillmentScoreResult(
+                tier1_passed=True,
+                tier2_passed=False,
+                failure_reason="intent_precheck_no_match",
+                failure_detail=(
+                    f"None of the {len(lead.intent_signals)} miner-submitted "
+                    f"intent signal(s) semantically match their mapped ICP "
+                    f"signal (per Gemini pre-check)."
+                ),
+            )
+        passed = sum(1 for v in precheck_verdicts if v)
+        print(f"   ✅ Tier 1.7: Intent pre-check {passed}/{len(precheck_verdicts)} signal(s) passed")
+
     # Build a mutable dict that validator check functions can annotate in-place
     # (they add domain_age_days, has_mx, gse_search_count, etc.)
     validator_dict = lead.to_validator_dict()
@@ -677,6 +721,27 @@ async def score_fulfillment_lead(
             })
             continue
         seen_domains.add(domain)
+
+        if idx < len(precheck_verdicts) and not precheck_verdicts[idx]:
+            print(f"   ⏭️  Signal {idx+1} rejected by Tier 1.7 — skipping three-stage")
+            signal_results.append({"after_decay": 0.0, "decay_mult": 1.0, "confidence": 0,
+                                   "matched_icp_signal_idx": -1})
+            signal_details.append({
+                "url": signal.url,
+                "description": signal.description,
+                "snippet": signal.snippet,
+                "date": str(signal.date) if signal.date else None,
+                "source": source_str,
+                "raw_score": 0.0,
+                "after_decay_score": 0.0,
+                "decay_multiplier": 1.0,
+                "confidence": 0,
+                "date_status": "precheck_rejected",
+                "matched_icp_signal_idx": -1,
+                "matched_icp_signal": None,
+                "matched_icp_signal_required": None,
+            })
+            continue
 
         matched_idx = -1
         try:

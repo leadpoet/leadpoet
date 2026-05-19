@@ -122,7 +122,7 @@ Miners submit **qualification models** — AI/ML models that surface in-market c
 
 1. **Miner builds a model** that takes an ICP and returns a single best-matching company plus verifiable intent evidence
 2. **Miner submits the model** to the gateway (as a tarball) with a TAO payment
-3. **Validators evaluate the model** by running it against 100 fresh ICPs
+3. **Validators evaluate the model** by running it against 25 fresh ICPs (one per industry)
 4. **Model is scored** on ICP fit, intent-signal quality, cost, and runtime
 5. **Champion model** holds the crown and earns rewards until dethroned
 
@@ -370,10 +370,11 @@ Fulfillment is the second incentive mechanism: miners compete directly on real, 
 
 3. **Reveal Window (15 minutes after commit closes)** — Miners reveal the actual lead data corresponding to their committed hashes. Hashes must match or the submission is rejected.
 
-4. **Validator Scoring** — Validators score every revealed lead through a three-tier pipeline:
-   - **Tier 1 (ICP Fit)** — Industry, sub-industry, role, seniority, employee count, country must match the request
-   - **Tier 2 (Data Accuracy)** — Email verification (TrueList), LinkedIn/person verification (ScrapingDog), company verification, reputation score
-   - **Tier 3 (Intent Scoring)** — Each intent signal URL is fetched and verified. An LLM evaluates relevance. Signals are scored and aggregated with time decay. Minimum threshold: 5.0
+4. **Validator Scoring** — Validators score every revealed lead through a multi-tier pipeline:
+   - **Tier 1 (ICP Fit)** — Industry, sub-industry, role, seniority, employee count, company/contact country must match the request
+   - **Tier 2 (Data Accuracy)** — Email verification (TrueList + ZeroBounce fallback), LinkedIn/person verification (ScrapingDog), company verification, reputation score
+   - **Tier 2c (Required Attributes)** — Each `required_attributes` entry verified via Sonar web search (optionally grounded in miner-supplied `attribute_evidence` URLs)
+   - **Tier 3 (Intent Scoring)** — Each intent signal URL is fetched and verified. An LLM evaluates relevance and that each signal maps to the ICP entry the miner claims (`matched_icp_signal`). Signals are scored and aggregated with time decay. Minimum threshold: 5.0
 
 5. **Winner Selection & Rewards** — Leads are ranked by score, deduplicated by company. The top `num_leads` (as requested by the client) are selected as winners. Each winning lead earns **0.05% of emission per epoch for 100 epochs** (about 5 days of payout per lead). Ties on the same company split the reward. The longer runway is intentional: a single winning lead keeps a miner earning emission for ~5 days, protecting active miners from de-registration during low-volume windows.
 
@@ -384,29 +385,40 @@ When a client submits a request, miners receive an ICP with this structure:
 ```json
 {
   "prompt": "VP of Sales and Heads of Revenue at Series A-C SaaS companies in the US showing signals of evaluating outbound sales tools, hiring SDRs, or researching competitors.",
-  "industry": "Software",
-  "sub_industry": "SaaS",
+  "industry": ["Software"],
+  "sub_industry": ["SaaS", "Sales Automation"],
   "target_role_types": ["Sales", "Business Development"],
   "target_roles": ["VP of Sales", "Head of Revenue", "Director of Sales"],
   "target_seniority": "VP",
-  "employee_count": "50-500",
+  "employee_count": ["51-200", "201-500"],
   "company_stage": "Series A",
-  "geography": "United States",
-  "country": "United States",
+  "company_country": ["United States"],
+  "company_region": "",
+  "contact_country": ["United States"],
+  "contact_region": "California or Texas",
   "product_service": "outbound sales automation platform",
   "intent_signals": [
     "hiring SDRs",
     {"text": "evaluating sales tools", "required": true},
     {"text": "recent Series B or later", "required": false}
   ],
+  "required_attributes": {
+    "company": ["Has an active outbound sales motion"],
+    "contact": ["Is a W-2 employee with hiring authority"]
+  },
+  "excluded_companies": ["AcmeCorp", "Competitor Inc"],
   "num_leads": 2
 }
 ```
 
 - `prompt` — Natural language description of the ideal lead. Your model should interpret this.
+- `industry` / `sub_industry` / `employee_count` — Multi-valued. A lead matching ANY listed value passes Tier 1. Use canonical buckets for `employee_count` (`0-1`, `2-10`, `11-50`, `51-200`, `201-500`, `501-1,000`, `1,001-5,000`, `5,001-10,000`, `10,001+`).
+- `company_country` / `company_region` — Filters on the lead's HQ. `contact_country` / `contact_region` — filters on the contact's own location (LinkedIn profile). Either side empty = not checked. Legacy `country` / `geography` keys still accepted (treated as company-side).
 - `target_roles` — Exact role titles the client wants. Your lead's `role` must match one of these (fuzzy matching is applied, e.g. "VP, Corporate Sales" matches "VP of Sales").
 - `target_seniority` — Required seniority level.
-- `intent_signals` — The types of buying signals the client cares about. Each entry can be a plain string (default: optional) or a structured object `{"text", "required"}`. All credited signals contribute to the intent score; when `required=true`, the lead **must** produce verified evidence for that signal or it fails with `missing_required_intent_signal`.
+- `intent_signals` — Buying signals the client cares about. Each entry can be a plain string (default: optional) or a structured object `{"text", "required"}`. All credited signals contribute to the intent score; when `required=true`, the lead **must** produce verified evidence for that signal or it fails with `missing_required_intent_signal`.
+- `required_attributes` — Buyer-side gate-keeping statements verified at Tier 2c. Two scopes: `company` (verified via Sonar web search) and `contact` (verified against the Apify LinkedIn data). A lead must satisfy every listed attribute for its scope or it fails with `required_attribute_failed`.
+- `excluded_companies` — Companies the client doesn't want re-pitched. Hard-rejected at Tier 1 (case-insensitive `business` match). Pre-filter your search to avoid wasted work.
 - `num_leads` — How many winning leads the client wants. Only the top N by score earn rewards.
 
 ### Fulfillment Lead Schema
@@ -448,7 +460,17 @@ Miners must submit leads with this exact structure via the commit-reveal endpoin
       "description": "Company Inc hiring Sales Development Representatives",
       "url": "https://jobs.lever.co/company/abc123",
       "date": null,
-      "snippet": "Sales Development Representative - Full Time. We are looking for driven SDRs to join our growing sales team."
+      "snippet": "Sales Development Representative - Full Time. We are looking for driven SDRs to join our growing sales team.",
+      "matched_icp_signal": 0
+    }
+  ],
+
+  "attribute_evidence": [
+    {
+      "scope": "company",
+      "index": 0,
+      "url": "https://company.com/blog/scaling-outbound",
+      "snippet": "we've grown our SDR team from 4 to 14 reps over the past 6 months"
     }
   ]
 }
@@ -457,11 +479,12 @@ Miners must submit leads with this exact structure via the commit-reveal endpoin
 **Key fields:**
 - `city`/`state`/`country` — The **contact's** location (from their LinkedIn profile), not the company HQ
 - `company_hq_city`/`company_hq_state`/`company_hq_country` — The **company's** headquarters location
-- `industry`/`sub_industry` — Must match values from `validator_models/industry_taxonomy.py`
+- `industry`/`sub_industry` — Must match values from `gateway/utils/industry_taxonomy.py` (canonical) — `validator_models/industry_taxonomy.py` is a mirrored fallback
 - `description` — **Required**, min 30 characters. A free-form company description written by the miner. Fed to the validator's Stage 5 3-stage classification pipeline (`validator_models/stage5_verification.py::classify_company_industry`): an LLM compares it against the scraped website/LinkedIn content; if the LLM decides the two don't describe the same business, the lead is rejected with `stage1_invalid_description` before intent scoring runs.
 - `role_type` — One of: `C-Level Executive`, `VP`, `Director`, `Manager`, `Sales`, `Marketing`, `Engineering`, `Product`, `Operations`, `Finance`, `HR`, `Legal`, `IT`, `Customer Success`, `Business Development`, `Data & Analytics`, `Design`, `Research`, `Supply Chain`, `Consulting`, `Other`
 - `seniority` — One of: `C-Suite`, `VP`, `Director`, `Manager`, `Individual Contributor`
 - `intent_signals` — At least one signal required. Each signal needs `source`, `description`, `url`, `date` (ISO format or null), `snippet` (verbatim text from the URL), and **`matched_icp_signal`** (REQUIRED: zero-based integer index into the request's `icp_details.intent_signals` list of the client-listed signal this evidence proves; signals with `-1` or out-of-range values are rejected at Tier 3 scoring)
+- `attribute_evidence` — OPTIONAL. Each entry pins a `(scope, index)` pair from the request's `required_attributes` to a `url` (and optional verbatim `snippet`). Supplying these lets the Tier 2c verifier read the URL directly via ScrapingDog instead of falling back to free-form Sonar search — strongly recommended for anti-bot URLs (LinkedIn jobs, paywalled news). Snippets that don't appear in the fetched page are flagged as fabricated and force a NO verdict.
 
 #### Picking the right `source` for each URL
 
@@ -518,9 +541,10 @@ The commit hash is computed from the lead JSON using the schema defined in `Lead
 
 | Stage | What's Checked | Cost |
 |-------|---------------|------|
-| Tier 1 | Industry, sub-industry, role, seniority, country, employee count, duplicate company | Free |
-| Tier 2 | Email format, name-in-email, domain age, MX/SPF/DMARC, DNSBL, TrueList verification, LinkedIn person verification, company verification, reputation score | API calls |
-| Tier 3 | Each intent signal URL scraped, snippet overlap verified, LLM evaluates relevance, time decay applied, peak-weighted aggregation, required-signal gate enforced | LLM + scraping |
+| Tier 1 | Industry, sub-industry, role, seniority, company/contact country, employee count, duplicate company, `excluded_companies` | Free |
+| Tier 2 | Email format, name-in-email, domain age, MX/SPF/DMARC, DNSBL, TrueList + ZeroBounce verification, LinkedIn person verification, company verification, reputation score | API calls |
+| Tier 2c | Each `required_attributes` statement verified via Sonar web search, optionally grounded in miner-supplied `attribute_evidence` URLs | LLM + scraping |
+| Tier 3 | Each intent signal URL scraped, snippet overlap verified, LLM evaluates relevance + `matched_icp_signal` mapping, time decay applied, peak-weighted aggregation, required-signal gate enforced | LLM + scraping |
 
 ### Foundation Model
 
@@ -620,6 +644,14 @@ This is for validators who want to participate in consensus without running the 
 - Each winning lead earns **0.05% of emission per epoch for 100 epochs** (~5 days of payout per winning lead).
 - Top `num_leads` per request are selected; ties on the same company split the reward.
 
+### Weekly Leaderboard
+- A separate **9.5%** of miner emission funds a weekly leaderboard for total fulfillment wins.
+- **#1 → 5.0%**, **#2 → 3.0%**, **#3 → 1.5%** of total emission.
+- Resets every Monday at 00:00 UTC. Empty leaderboard slots burn to the treasury.
+
+### Emission Split (Current)
+- 0% sourcing · **5% model-competition champion** · **85.5% fulfillment per-epoch pool** · **9.5% weekly leaderboard**.
+
 ### Security Features
 
 - **TEE Gateway**: All events logged through hardware-protected Trusted Execution Environment
@@ -649,7 +681,7 @@ Common Errors:
 
 **Fulfillment lead rejected**
 - Check the rejection reason in the public dashboard or `fulfillment_score_consensus` table
-- Common causes: `tier1_role_mismatch`, `email_not_valid`, `missing_required_intent_signal`, `insufficient_intent`, `stage1_invalid_description`
+- Common causes: `tier1_role_mismatch`, `email_not_valid`, `company_geography_mismatch`, `contact_geography_mismatch`, `required_attribute_failed`, `missing_required_intent_signal`, `insufficient_intent`, `stage1_invalid_description`
 
 **Model evaluation failed**
 - Check the model is under 200KB, only uses allowed libraries, and doesn't call APIs outside the allowlist

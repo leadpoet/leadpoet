@@ -97,7 +97,7 @@ COMPANY:
   Name: {company_name}
   Website: {company_website}
   LinkedIn: {company_linkedin}
-{attribute_evidence_block}{intent_signal_hints_block}
+{verified_description_block}{attribute_evidence_block}{intent_signal_hints_block}
 STATEMENT TO VERIFY:
   "{attribute_text}"
 
@@ -115,7 +115,11 @@ REASONING: <one sentence explaining why you reached this verdict>
 
 Decision rules:
 - You MUST answer YES or NO. Do not answer UNCERTAIN.
-- Answer YES iff you have explicit public evidence the statement is true about THIS specific company.
+- Answer YES iff the statement is supported by public evidence about THIS company.
+  Direct evidence is best; one-step inference from the company's stated industry,
+  size, or output category is also sufficient (see INFERENCE RULE).
+- The VERIFIED COMPANY DESCRIPTION above (when present) is authoritative gateway-side
+  context — treat it as fact unless contradicted by stronger primary sources.
 - Otherwise → NO.
 
 FABRICATION CHECK (only when MINER-CITED EVIDENCE is present above):
@@ -154,12 +158,25 @@ OR-LIST RULE:
 
 INFERENCE RULE (one-step inference is ALLOWED):
 - You MAY conclude YES from one logical step on explicit, public, non-strategic facts.
-- Examples of allowed inference:
-    "Sells products in 100+ countries"             → YES on "is exporter / ships internationally"
-    "Operating airline" or "Operates trucking"     → YES on "has frontline / non-desk workforce"
-    "Manufactures and distributes physical goods"  → YES on "operates in manufacturing"
-    "Lists 3 office addresses on contact page"     → YES on "has 1-10 fixed locations"
-    "Family-owned and operated"                    → YES on "independently owned"
+- Industry-to-output / industry-to-operation inferences ARE allowed because operational
+  volume and routine outputs are RARELY stated explicitly by companies on public sources.
+  The company's STATED INDUSTRY + a reasonable size signal (employee count, office count,
+  named clients, years operating) is sufficient evidence:
+    "Industry: Advertising / Marketing / Creative Services"  → YES on "produces high volumes of creative assets (images, video, decks, campaign files)"
+    "Industry: Publishing / Media production"                → YES on "produces high volumes of editorial / video / audio content"
+    "Industry: Architecture / Engineering / Design"          → YES on "produces drawings, CAD files, plans, deliverables"
+    "Industry: Law / Legal Services"                         → YES on "produces high volumes of legal documents, briefs, contracts"
+    "Industry: Software / SaaS with 50+ employees"           → YES on "has active outbound sales team"
+    "Software vendor with named enterprise clients"          → YES on "sells high-ACV B2B product"
+    "Operating airline / trucking / shipping"                → YES on "has frontline / non-desk workforce"
+    "Manufactures and distributes physical goods"            → YES on "operates in manufacturing"
+    "Sells products in 100+ countries"                       → YES on "is exporter / ships internationally"
+    "Lists 3 office addresses on contact page"               → YES on "has 1-10 fixed locations"
+    "Family-owned and operated"                              → YES on "independently owned"
+- The KEY question for any quantitative / volume / operational-motion statement is:
+  does the company's stated industry NECESSARILY entail that activity as a core
+  business function?  If yes, treat as a single-step inference and answer YES.
+  If no (e.g. accounting firm and "produces creative assets") answer NO.
 - You may NOT infer from:
     · strategic / internal claims (e.g. "operates sales-led GTM motion", "is product-led")
     · absence of evidence (silence ≠ disproof for positive attributes)
@@ -217,7 +234,7 @@ from public sources. Instead, search aggressively for evidence of the POSITIVE O
 
 {subject_type_upper}:
 {subject_block}
-{attribute_evidence_block}{intent_signal_hints_block}
+{verified_description_block}{attribute_evidence_block}{intent_signal_hints_block}
 ORIGINAL NEGATIVE STATEMENT (treat as a hypothesis to test):
   "{attribute_text}"
 
@@ -320,6 +337,37 @@ def is_negative_attribute(text: str) -> bool:
 # blow up the company-side context window.  Per-attribute MINER-CITED
 # EVIDENCE has its own separate cap (see _MAX_ATTRIBUTE_EVIDENCE_PER_ATTR).
 _MAX_INTENT_HINT_URLS = 10
+
+
+def build_verified_description_block(lead: dict) -> str:
+    """Render Tier 2b's Sonar+Gemini-verified company description + LinkedIn
+    industry as gateway-trusted context for the Sonar attribute verifier.
+
+    Tier 2b (validator_models.fulfillment_company_verification) writes:
+      lead["_company_refined_description"] = enriched     # Sonar enrichment
+      lead["stage5_extracted_industry"]   = sd_industry   # LinkedIn industry
+
+    Passing these into Tier 2c saves a redundant web search and gives Sonar
+    pre-vetted context for industry-to-output one-step inferences (see
+    INFERENCE RULE in COMPANY_PROMPT).
+
+    This block is NOT miner-supplied — the gateway has already validated it
+    before Tier 2c runs.  It is rendered as authoritative context (no
+    FABRICATION CHECK / PROMPT-INJECTION DEFENSE needed).  An empty result
+    means Tier 2b did not run / did not produce a description; the prompt
+    falls back to its old shape and Sonar discovers the company from
+    scratch via its own web search.
+    """
+    desc = (lead.get("_company_refined_description") or "").strip()
+    industry = (lead.get("stage5_extracted_industry") or "").strip()
+    if not desc and not industry:
+        return ""
+    return (
+        "\nVERIFIED COMPANY DESCRIPTION (gateway-trusted context, NOT miner-supplied "
+        "— derived from Sonar+Gemini verification at Tier 2b):\n"
+        f"  Industry: {industry or '(not extracted)'}\n"
+        f"  Description: \"{desc or '(not generated)'}\"\n"
+    )
 
 
 def build_intent_signal_hints_block(urls: Optional[List[str]]) -> str:
@@ -814,6 +862,7 @@ async def _verify_one_attribute(
     api_key: str,
     intent_signal_hints_block: str = "",       # broad lead-level URLs from intent_signals
     attribute_evidence_block: str = "",        # narrow per-attribute URLs from attribute_evidence
+    verified_description_block: str = "",      # Tier 2b's verified company description (company scope only)
     snippet_mismatch_flagged: bool = False,    # True iff snippet-mismatch detector caught fabrication
 ) -> Dict[str, Any]:
     """Verify one attribute. Routes to positive prompt or proxy prompt based on
@@ -840,6 +889,7 @@ async def _verify_one_attribute(
             # evidence, so neither broad nor narrow hints are needed.
             hints_for_proxy = ""
             cited_for_proxy = ""
+            description_for_proxy = ""
         else:
             subject_block = (
                 f"  Name: {identity.get('company_name', '(unknown)')}\n"
@@ -848,10 +898,12 @@ async def _verify_one_attribute(
             )
             hints_for_proxy = intent_signal_hints_block
             cited_for_proxy = attribute_evidence_block
+            description_for_proxy = verified_description_block
         prompt = POSITIVE_PROXY_PROMPT.format(
             subject_type=subject_type,
             subject_type_upper=subject_type_upper,
             subject_block=subject_block,
+            verified_description_block=description_for_proxy,
             attribute_evidence_block=cited_for_proxy,
             intent_signal_hints_block=hints_for_proxy,
             attribute_text=attribute_text,
@@ -868,6 +920,7 @@ async def _verify_one_attribute(
             company_name=identity.get("company_name", "(unknown)"),
             company_website=identity.get("company_website", "(unknown)"),
             company_linkedin=identity.get("company_linkedin", "(unknown)"),
+            verified_description_block=verified_description_block,
             attribute_evidence_block=attribute_evidence_block,
             intent_signal_hints_block=intent_signal_hints_block,
             attribute_text=attribute_text,
@@ -1020,6 +1073,7 @@ async def verify_required_attributes(
     identity = _build_identity(lead)
     apify_block = build_apify_contact_block(apify_person_data, identity["contact_description"])
     intent_signal_hints_block = build_intent_signal_hints_block(intent_signal_urls)
+    verified_description_block = build_verified_description_block(lead)
 
     # ── Index attribute_evidence by (scope, index) ────────────────────────
     # We only consult company-scope entries here (contact prompt already has
@@ -1088,6 +1142,7 @@ async def verify_required_attributes(
                 session, sem, a, "company", identity, apify_block, key,
                 intent_signal_hints_block=intent_signal_hints_block,
                 attribute_evidence_block=per_attr_evidence_block.get(i, ""),
+                verified_description_block=verified_description_block,
                 snippet_mismatch_flagged=per_attr_snippet_mismatch.get(i, False),
             )
             for i, a in enumerate(company_attrs)
@@ -1096,6 +1151,7 @@ async def verify_required_attributes(
                 session, sem, a, "contact", identity, apify_block, key,
                 intent_signal_hints_block="",      # contact prompt uses apify_block
                 attribute_evidence_block="",        # contact scope ignores per-attribute evidence
+                verified_description_block="",      # contact prompt targets a person, not the company
                 snippet_mismatch_flagged=False,
             )
             for a in contact_attrs

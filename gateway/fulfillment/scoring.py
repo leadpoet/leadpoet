@@ -418,9 +418,9 @@ async def score_fulfillment_lead(
     precheck_verdicts: List[bool] = [True] * len(lead.intent_signals)
     if os.environ.get("INTENT_PRECHECK_ENABLED", "false").lower() == "true" \
             and lead.intent_signals:
-        from qualification.scoring.intent_precheck import precheck_lead_signals
-        icp_signal_texts = [s.text for s in (icp.intent_signals or [])]
         try:
+            from qualification.scoring.intent_precheck import precheck_lead_signals
+            icp_signal_texts = [s.text for s in (icp.intent_signals or [])]
             async with httpx.AsyncClient() as _precheck_http:
                 precheck_verdicts = await precheck_lead_signals(
                     _precheck_http,

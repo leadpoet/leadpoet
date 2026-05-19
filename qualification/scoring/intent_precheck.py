@@ -44,10 +44,31 @@ logger = logging.getLogger(__name__)
 # Config (env-overridable to match three-stage verifier conventions)
 # ─────────────────────────────────────────────────────────────────────
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-MODEL = os.environ.get("INTENT_PRECHECK_MODEL", "google/gemini-2.5-flash-lite")
-TIMEOUT_SECONDS = int(os.environ.get("INTENT_PRECHECK_TIMEOUT_S", "30"))
-NUM_RETRIES = int(os.environ.get("INTENT_PRECHECK_RETRIES", "3"))
-CONCURRENCY = int(os.environ.get("INTENT_PRECHECK_CONCURRENCY", "8"))
+
+
+def _env_int(name: str, default: int) -> int:
+    """``int(os.environ.get(name, default))`` crashes when the env var is set
+    to an empty string — which is exactly how the container deploy script
+    passes optional overrides (``-e VAR="${VAR:-}"``).  Use ``or default``
+    after stripping so empty / whitespace / missing all collapse to default."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_str(name: str, default: str) -> str:
+    raw = (os.environ.get(name) or "").strip()
+    return raw or default
+
+
+MODEL = _env_str("INTENT_PRECHECK_MODEL", "google/gemini-2.5-flash-lite")
+TIMEOUT_SECONDS = _env_int("INTENT_PRECHECK_TIMEOUT_S", 30)
+NUM_RETRIES = _env_int("INTENT_PRECHECK_RETRIES", 3)
+CONCURRENCY = _env_int("INTENT_PRECHECK_CONCURRENCY", 8)
 
 _SYS_MESSAGE = "You are a strict B2B intent-signal semantic-match judge. Return JSON only."
 

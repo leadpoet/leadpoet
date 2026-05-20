@@ -1321,15 +1321,34 @@ def _recycle_request(
         client_company = (original_request.get("company") or "").strip()
         if client_company:
             try:
-                from gateway.fulfillment.api import _load_previously_delivered_companies
+                from gateway.fulfillment.api import (
+                    _load_previously_delivered_companies,
+                    _load_in_flight_held_companies,
+                )
+                # 1) Fulfilled-history exclusions (existing behavior).
                 refreshed = _load_previously_delivered_companies(supabase, client_company)
-                if refreshed:
+                # 2) Cross-chain in-flight held exclusions (new — closes the
+                #    CTO-flagged gap where two concurrent chains for the same
+                #    client could each hold and deliver the same company).
+                #    Skip this chain itself (identified by internal_label);
+                #    its own held set is merged below via the held_companies
+                #    parameter.  If internal_label is empty, no chain skip
+                #    is applied — the helper still excludes only OTHER
+                #    requests' held rows because this chain's predecessor
+                #    request_ids are already covered by the held_companies
+                #    parameter that's about to merge.
+                own_label = (original_request.get("internal_label") or "").strip()
+                cross_chain_held = _load_in_flight_held_companies(
+                    supabase, client_company,
+                    exclude_internal_label=(own_label or None),
+                )
+                if refreshed or cross_chain_held:
                     # Merge with whatever was already there so a client-
                     # supplied exclusion is never silently dropped on recycle.
                     prior = successor_icp.get("excluded_companies") or []
                     seen = {str(x).strip().lower() for x in prior if str(x).strip()}
                     merged = list(prior)
-                    for biz in refreshed:
+                    for biz in (*refreshed, *cross_chain_held):
                         if biz.strip().lower() not in seen:
                             merged.append(biz)
                             seen.add(biz.strip().lower())

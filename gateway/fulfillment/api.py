@@ -10,7 +10,7 @@ import base64
 import time as _time
 from uuid import uuid4
 from datetime import datetime, timezone, timedelta
-from typing import List
+from typing import List, Optional
 
 from dateutil.parser import isoparse as _isoparse
 from fastapi import APIRouter, Header, HTTPException
@@ -85,6 +85,132 @@ def _miner_submission_cap(num_leads: int) -> int:
         return 0
     cap = math.ceil(num_leads * FULFILLMENT_MINER_SUBMISSION_MULTIPLIER)
     return max(cap, num_leads)
+
+
+# Statuses where a chain is still "in flight" — leads from these rows
+# might still be delivered to the client.  Used by
+# ``_load_in_flight_held_companies`` to scope the cross-chain held-lead
+# scan.  Excludes terminal states (``fulfilled``, ``recycled``, ``expired``).
+_IN_FLIGHT_REQUEST_STATES: List[str] = [
+    "open",
+    "continued_open",
+    "pending",
+    "commit_closed",
+    "scoring",
+    "partially_fulfilled",
+]
+
+
+def _load_in_flight_held_companies(
+    supabase,
+    client_company: str,
+    exclude_internal_label: Optional[str] = None,
+) -> List[str]:
+    """Cross-chain dedup: pull every company currently held
+    (``is_chain_held=TRUE``) on another open chain for the same client.
+
+    Closes the gap raised by the CTO: when a client has two chains in
+    flight at the same time (different ``internal_label``), the second
+    chain's ``excluded_companies`` snapshot doesn't see leads already
+    held in the first chain — so the same company can be held and
+    delivered twice.
+
+    "In flight" = ``status`` in :data:`_IN_FLIGHT_REQUEST_STATES`
+    (everything except ``fulfilled`` / ``recycled`` / ``expired``).
+
+    ``exclude_internal_label`` skips the chain whose recycle is in
+    progress (or the chain being created); its own held-lead set is
+    already merged via ``_resolve_chain_topk``'s held_companies output.
+    If unset / empty, no chain-level exclusion is applied — every
+    in-flight held lead for this client is returned (use this on
+    create_request, where no chain to exclude exists yet).
+    """
+    if not client_company or not client_company.strip():
+        return []
+
+    # Step 1: find every in-flight request for this client, excluding
+    # the current chain by internal_label when one is supplied.
+    try:
+        req_resp = supabase.table("fulfillment_requests") \
+            .select("request_id,internal_label") \
+            .ilike("company", client_company.strip()) \
+            .in_("status", _IN_FLIGHT_REQUEST_STATES) \
+            .execute()
+    except Exception as e:
+        logger.warning(
+            f"_load_in_flight_held_companies: failed to fetch in-flight "
+            f"requests for {client_company!r}: {type(e).__name__}: {e}"
+        )
+        return []
+
+    label_to_skip = (exclude_internal_label or "").strip()
+    other_chain_ids = [
+        r["request_id"] for r in (req_resp.data or [])
+        if not label_to_skip
+        or (r.get("internal_label") or "").strip() != label_to_skip
+    ]
+    if not other_chain_ids:
+        return []
+
+    # Step 2: find every is_chain_held=TRUE consensus row in those
+    # other-chain request rows.
+    try:
+        cons_resp = supabase.table("fulfillment_score_consensus") \
+            .select("submission_id,lead_id") \
+            .in_("request_id", other_chain_ids) \
+            .eq("is_chain_held", True) \
+            .execute()
+        held_keys = [
+            (r["submission_id"], r["lead_id"])
+            for r in (cons_resp.data or [])
+        ]
+    except Exception as e:
+        logger.warning(
+            f"_load_in_flight_held_companies: failed to fetch chain-held "
+            f"consensus rows: {type(e).__name__}: {e}"
+        )
+        return []
+
+    if not held_keys:
+        return []
+
+    # Step 3: pull lead_data for those submissions and extract each
+    # held lead's ``business`` field.  Same shape as
+    # ``_load_previously_delivered_companies``.
+    submission_ids = list({sid for sid, _ in held_keys})
+    try:
+        subs_resp = supabase.table("fulfillment_submissions") \
+            .select("submission_id,lead_data") \
+            .in_("submission_id", submission_ids) \
+            .execute()
+    except Exception as e:
+        logger.warning(
+            f"_load_in_flight_held_companies: failed to fetch submissions "
+            f"for held leads: {type(e).__name__}: {e}"
+        )
+        return []
+
+    lead_company: dict = {}
+    for row in (subs_resp.data or []):
+        sid = row.get("submission_id")
+        for entry in (row.get("lead_data") or []):
+            lid = entry.get("lead_id")
+            biz = (entry.get("data") or {}).get("business") or ""
+            if sid and lid and biz:
+                lead_company[(sid, lid)] = biz.strip()
+
+    seen: set = set()
+    out: List[str] = []
+    for key in held_keys:
+        biz = lead_company.get(key)
+        if not biz:
+            continue
+        norm = biz.lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(biz)
+    return out
 
 
 def _load_previously_delivered_companies(supabase, client_company: str) -> List[str]:
@@ -428,13 +554,32 @@ async def create_request(
     # received them), so they should remain eligible for the new batch.
     if not icp.excluded_companies:
         try:
-            icp.excluded_companies = _load_previously_delivered_companies(
-                supabase, company
+            delivered = _load_previously_delivered_companies(supabase, company)
+            # Cross-chain dedup: also exclude any company currently held
+            # (``is_chain_held=TRUE``) on another open chain for the same
+            # client.  Without this, two concurrent chains can both hold
+            # and deliver the same company.  ``exclude_internal_label`` is
+            # this new chain's own label so the helper doesn't try to scan
+            # for held rows under a request_id that doesn't exist yet
+            # (defensive — the brand-new chain has no consensus rows on
+            # create anyway).
+            in_flight = _load_in_flight_held_companies(
+                supabase, company,
+                exclude_internal_label=(icp.internal_label or None),
             )
+            seen = {b.strip().lower() for b in delivered if b.strip()}
+            merged = list(delivered)
+            for biz in in_flight:
+                if biz.strip().lower() not in seen:
+                    merged.append(biz)
+                    seen.add(biz.strip().lower())
+            icp.excluded_companies = merged
             if icp.excluded_companies:
                 logger.info(
                     f"create_request: auto-populated excluded_companies for "
-                    f"company={company!r}: {len(icp.excluded_companies)} entries"
+                    f"company={company!r}: {len(delivered)} delivered + "
+                    f"{len(in_flight)} cross-chain held = "
+                    f"{len(icp.excluded_companies)} total"
                 )
         except Exception as e:
             logger.warning(

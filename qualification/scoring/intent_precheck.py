@@ -24,6 +24,12 @@ limit would reject every lead in flight; that's worse than briefly
 letting the cheap gate be a no-op.
 
 Activated via the INTENT_PRECHECK_ENABLED env flag (default off).
+
+A separate free deterministic URL pre-filter (no LLM cost) runs INSIDE
+this module before the Gemini call, gated by INTENT_URL_PREFILTER_ENABLED.  It
+catches the obvious bare-LinkedIn-company-page class of bad URLs on
+hiring and funding claims without spending any LLM call.  See
+``_check_url_pre_filter`` below.
 """
 from __future__ import annotations
 
@@ -34,6 +40,7 @@ import os
 import re
 from datetime import date
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -71,6 +78,132 @@ NUM_RETRIES = _env_int("INTENT_PRECHECK_RETRIES", 3)
 CONCURRENCY = _env_int("INTENT_PRECHECK_CONCURRENCY", 8)
 
 _SYS_MESSAGE = "You are a strict B2B intent-signal semantic-match judge. Return JSON only."
+
+
+# ─────────────────────────────────────────────────────────────────────
+# URL pre-filter (free deterministic check, runs BEFORE the LLM substance
+# check inside precheck_lead_signals._one()).  Only fires for HIRING and
+# FUNDING claims, where the URL itself can deterministically be classified
+# as inadequate evidence.  Other claim types (geography, product launch,
+# leadership posts, etc.) skip this check entirely — they go straight to
+# the LLM substance check.
+#
+# Returns 'reject' (skip LLM, fail signal) or 'pass' (defer to LLM).
+# NEVER returns 'accept' — substance check still runs on every 'pass'.
+#
+# Why: bare LinkedIn company pages (e.g. linkedin.com/company/<slug>) do
+# not show job listings — they sit on a separate /jobs subpage — so the
+# client cannot verify a hiring claim by clicking the URL.  Same for
+# funding claims citing a bare company profile.  Catch these without
+# paying for an LLM call.
+#
+# Activated via INTENT_URL_PREFILTER_ENABLED env flag (default off).
+# ─────────────────────────────────────────────────────────────────────
+
+URL_PREFILTER_ENABLED = (
+    os.environ.get("INTENT_URL_PREFILTER_ENABLED", "false").strip().lower() == "true"
+)
+
+_HIRING_RE = re.compile(
+    r"\b("
+    r"hir(?:e|es|ing|ed)|"
+    r"recruit(?:s|ing|er|ers|ed|ment)?|"
+    r"job\s+(?:post(?:s|ing|ings)?|listing(?:s)?|opening(?:s)?|vacanc(?:y|ies))|"
+    r"open\s+(?:position(?:s)?|role(?:s)?|vacanc(?:y|ies))|"
+    r"vacanc(?:y|ies)|"
+    r"career\s+opportunit(?:y|ies)|"
+    r"actively\s+(?:hiring|recruiting)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_FUNDING_RE = re.compile(
+    r"\b("
+    r"series\s+[a-fz]\b|"
+    r"seed\s+(?:funding|round)|"
+    r"raised\s+\$|"
+    r"closed\s+(?:a\s+)?(?:series|seed|growth|pre-?ipo)|"
+    r"funding\s+round|"
+    r"secured\s+\$|"
+    r"announced\s+(?:a\s+)?(?:series|seed|funding)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# LinkedIn URL patterns.  All match against the lower-cased URL path.
+_LINKEDIN_JOBS_PREFIX = "/jobs"                       # any /jobs/* path = listing or search
+_LINKEDIN_COMPANY_JOBS_RE = re.compile(r"^/company/[^/]+/jobs")  # /company/<slug>/jobs subpage
+_LINKEDIN_BARE_COMPANY_RE = re.compile(r"^/company/[^/]+/?$")    # bare /company/<slug> (no further path)
+_LINKEDIN_PERSONAL_PREFIX = "/in/"                    # /in/<slug> personal profile
+
+
+def _classify_claim_type(target_text: str, claim_text: str) -> Optional[str]:
+    """Returns 'HIRING' | 'FUNDING' | None.  Checks both the target ICP
+    signal text and the miner's own claim text; returns the first match."""
+    blob = (target_text or "") + " " + (claim_text or "")
+    if _HIRING_RE.search(blob):
+        return "HIRING"
+    if _FUNDING_RE.search(blob):
+        return "FUNDING"
+    return None
+
+
+def _check_url_pre_filter(url: str, claim_type: str) -> Tuple[str, str]:
+    """Free deterministic URL evidence check.
+
+    Args:
+        url: the miner's submitted URL for this signal.
+        claim_type: 'HIRING' or 'FUNDING' (caller must pre-classify; for any
+                    other claim type, do not call this function — the gate
+                    does not apply).
+
+    Returns:
+        ('reject', short_reason)  — URL is obviously inadequate evidence;
+                                    skip the LLM substance check and fail
+                                    this signal.
+        ('pass',   short_reason)  — defer to the LLM substance check; this
+                                    function never says 'accept'.
+    """
+    if not url:
+        return ("reject", "empty_url")
+
+    parsed = urlparse(url.lower())
+    host = parsed.hostname or ""
+    path = parsed.path or ""
+
+    if claim_type == "HIRING":
+        if "linkedin.com" in host:
+            # Acceptable LinkedIn URLs for hiring evidence:
+            #   /jobs/*                       — specific listings, search, collections
+            #   /company/<slug>/jobs[/...]    — company-scoped jobs listing index
+            if path.startswith(_LINKEDIN_JOBS_PREFIX):
+                return ("pass", "linkedin_jobs_path")
+            if _LINKEDIN_COMPANY_JOBS_RE.match(path):
+                return ("pass", "linkedin_company_jobs_subpage")
+            # Everything else on LinkedIn lacks visible job evidence:
+            # bare /company/<slug>, /company/<slug>/{about,people,life,
+            # insights,posts,videos,products,...}, /in/<slug>, /posts/<id>,
+            # /pulse/<slug>, /feed/*, /showcase/*, etc.
+            return ("reject", "bare_linkedin_no_job_evidence")
+        # Non-LinkedIn URLs — let the LLM substance check decide.
+        return ("pass", "non_linkedin_defer")
+
+    if claim_type == "FUNDING":
+        if "linkedin.com" in host:
+            if _LINKEDIN_BARE_COMPANY_RE.match(path):
+                return ("reject", "bare_linkedin_company_for_funding")
+            if path.startswith(_LINKEDIN_PERSONAL_PREFIX):
+                return ("reject", "linkedin_personal_profile")
+            # Other LinkedIn paths (/posts, /jobs subpages, /pulse) might
+            # legitimately host a funding article share — defer to LLM.
+            return ("pass", "linkedin_other_defer")
+        # Non-LinkedIn URLs (TechCrunch, PRNewswire, Crunchbase, company
+        # /press/news pages, even bare homepages) — defer to LLM, which
+        # can read content to judge whether the round is on the page.
+        return ("pass", "non_linkedin_defer")
+
+    # Unknown claim type — caller shouldn't reach here, but be safe.
+    return ("pass", "unknown_claim_type")
 
 
 def _get_openrouter_key() -> str:
@@ -335,6 +468,23 @@ async def precheck_lead_signals(
             miner_claim = getattr(signal, "description", "") or ""
             miner_url   = getattr(signal, "url", "") or ""
             target_text = icp_texts[matched_idx] or ""
+
+            # ── Free deterministic URL pre-filter (runs BEFORE LLM call) ──
+            # Catches the obvious bad URL cases (bare LinkedIn company pages
+            # for hiring/funding claims) without spending an LLM call.  For
+            # non-hiring/funding claims OR ambiguous URLs, defers to the
+            # substance LLM check below.  Activated via INTENT_URL_PREFILTER_ENABLED.
+            if URL_PREFILTER_ENABLED:
+                claim_type = _classify_claim_type(target_text, miner_claim)
+                if claim_type:
+                    pre_verdict, pre_reason = _check_url_pre_filter(miner_url, claim_type)
+                    if pre_verdict == "reject":
+                        logger.info(
+                            "Intent pre-check signal[%d] REJECT (url-pre-filter)  "
+                            "claim_type=%s  url_class=%s  url=%r",
+                            idx, claim_type, pre_reason, miner_url[:120],
+                        )
+                        return idx, False, f"url_pre_filter_reject({claim_type.lower()}/{pre_reason})"
 
             async with sem:
                 parsed, err = await _call_openrouter(

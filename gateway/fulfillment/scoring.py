@@ -525,7 +525,7 @@ async def score_fulfillment_lead(
         if not s5_passed:
             reason = s5_rejection.get("check_name", "fulfillment_company_failed") if s5_rejection else "fulfillment_company_failed"
             return FulfillmentScoreResult(
-                tier1_passed=True, tier2_passed=True,
+                tier1_passed=True, tier2_passed=False,
                 email_verified=email_verified,
                 failure_reason=reason,
                 failure_detail=_build_failure_detail(reason, s5_rejection=s5_rejection),
@@ -550,7 +550,7 @@ async def score_fulfillment_lead(
             else:
                 reason = rejection_reason.get("check_name", "fulfillment_person_verification_failed") if rejection_reason else "fulfillment_person_verification_failed"
                 return FulfillmentScoreResult(
-                    tier1_passed=True, tier2_passed=True,
+                    tier1_passed=True, tier2_passed=False,
                     email_verified=email_verified,
                     company_verified=company_verified,
                     failure_reason=reason,
@@ -565,7 +565,7 @@ async def score_fulfillment_lead(
             )
             if verif_failure:
                 return FulfillmentScoreResult(
-                    tier1_passed=True, tier2_passed=True,
+                    tier1_passed=True, tier2_passed=False,
                     email_verified=email_verified,
                     company_verified=company_verified,
                     failure_reason=verif_failure,
@@ -594,7 +594,7 @@ async def score_fulfillment_lead(
 
         if verif_failure:
             return FulfillmentScoreResult(
-                tier1_passed=True, tier2_passed=True,
+                tier1_passed=True, tier2_passed=False,
                 email_verified=email_verified,
                 person_verified=person_verified,
                 company_verified=company_verified,

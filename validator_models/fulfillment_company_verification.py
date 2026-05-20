@@ -818,6 +818,18 @@ async def fulfillment_company_verification(
     print(f"   ✅ Company name match: {sd_name}")
 
     # ---- 2. Employee count match ----
+    # KNOWN GAP (Bruce Callahan 5 audit, 2026-05-20): this check matches
+    # claimed vs whichever LinkedIn slug the miner submitted.  If the
+    # miner supplies a subsidiary / regional slug whose LinkedIn bucket
+    # happens to match the claimed band, the gate passes even when the
+    # parent entity (the brand the buyer thinks they're getting) is
+    # orders of magnitude larger.  Observed: BBSI / Barrett Business
+    # Services — actual ~130k employees, miner-supplied slug returned
+    # 501-1000, claim "501-1000", all gates passed.  Real fix needs
+    # entity canonicalization (detect parent company → re-fetch parent's
+    # LinkedIn size, take the larger; or query a second source like
+    # ZoomInfo / RocketReach and require both within 2 buckets of
+    # claimed).  Not done here — needs design + test data.
     claimed_employee_count = lead.get("employee_count", "")
     sd_size = sd_data.get("company_size", "")
     # Strip " employees" suffix if present

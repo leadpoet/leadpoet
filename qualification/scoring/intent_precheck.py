@@ -137,14 +137,33 @@ _LINKEDIN_BARE_COMPANY_RE = re.compile(r"^/company/[^/]+/?$")    # bare /company
 _LINKEDIN_PERSONAL_PREFIX = "/in/"                    # /in/<slug> personal profile
 
 
-def _classify_claim_type(target_text: str, claim_text: str) -> Optional[str]:
-    """Returns 'HIRING' | 'FUNDING' | None.  Checks both the target ICP
-    signal text and the miner's own claim text; returns the first match."""
-    blob = (target_text or "") + " " + (claim_text or "")
-    if _HIRING_RE.search(blob):
-        return "HIRING"
-    if _FUNDING_RE.search(blob):
+def _classify_target_type(target_text: str) -> Optional[str]:
+    """Classify the TARGET ICP signal topic from target text only.
+
+    Returns 'HIRING' | 'FUNDING' | None.  Used to pick which URL pre-filter
+    rules apply.  Deliberately ignores the miner's claim text — the target
+    is the source of truth for what topic the buyer is asking about.
+    """
+    t = target_text or ""
+    if _FUNDING_RE.search(t):
         return "FUNDING"
+    if _HIRING_RE.search(t):
+        return "HIRING"
+    return None
+
+
+def _classify_claim_evidence_type(claim_text: str) -> Optional[str]:
+    """Classify the CLAIM (miner-supplied evidence) topic from claim text only.
+
+    Returns 'HIRING' | 'FUNDING' | None.  Used to detect topic-mismatch
+    rejects: if the target is FUNDING but the claim text matches HIRING,
+    the evidence is for the wrong topic regardless of any URL.
+    """
+    c = claim_text or ""
+    if _FUNDING_RE.search(c):
+        return "FUNDING"
+    if _HIRING_RE.search(c):
+        return "HIRING"
     return None
 
 
@@ -469,22 +488,48 @@ async def precheck_lead_signals(
             miner_url   = getattr(signal, "url", "") or ""
             target_text = icp_texts[matched_idx] or ""
 
-            # ── Free deterministic URL pre-filter (runs BEFORE LLM call) ──
-            # Catches the obvious bad URL cases (bare LinkedIn company pages
-            # for hiring/funding claims) without spending an LLM call.  For
-            # non-hiring/funding claims OR ambiguous URLs, defers to the
-            # substance LLM check below.  Activated via INTENT_URL_PREFILTER_ENABLED.
+            # ── Free deterministic gates (run BEFORE LLM call) ──
+            # 1) TOPIC-MISMATCH: if the TARGET asks for one topic (e.g.
+            #    FUNDING) and the miner's CLAIM text matches a different
+            #    topic (e.g. HIRING — a job posting attached to a funding
+            #    target), the evidence is for the wrong category.  Reject
+            #    deterministically without paying for an LLM call.  Either
+            #    side being None (no clear topic) skips this check.
+            # 2) URL pre-filter: applies the LinkedIn-jobs/bare-company
+            #    rules using the TARGET type only.  Previously this used a
+            #    mixed target+claim classifier, which let HIRING URL rules
+            #    fire on FUNDING targets when the claim happened to
+            #    mention hiring (observed: BBSI's San Jose Design Engineer
+            #    job post attached to a federal-funding ICP signal).
+            # Both activated via INTENT_URL_PREFILTER_ENABLED.
             if URL_PREFILTER_ENABLED:
-                claim_type = _classify_claim_type(target_text, miner_claim)
-                if claim_type:
-                    pre_verdict, pre_reason = _check_url_pre_filter(miner_url, claim_type)
+                target_type = _classify_target_type(target_text)
+                claim_evidence_type = _classify_claim_evidence_type(miner_claim)
+
+                if (
+                    target_type
+                    and claim_evidence_type
+                    and target_type != claim_evidence_type
+                ):
+                    logger.info(
+                        "Intent pre-check signal[%d] REJECT (topic-mismatch)  "
+                        "target_type=%s  claim_type=%s  url=%r",
+                        idx, target_type, claim_evidence_type, miner_url[:120],
+                    )
+                    return idx, False, (
+                        f"topic_mismatch(target={target_type.lower()},"
+                        f"claim={claim_evidence_type.lower()})"
+                    )
+
+                if target_type:
+                    pre_verdict, pre_reason = _check_url_pre_filter(miner_url, target_type)
                     if pre_verdict == "reject":
                         logger.info(
                             "Intent pre-check signal[%d] REJECT (url-pre-filter)  "
-                            "claim_type=%s  url_class=%s  url=%r",
-                            idx, claim_type, pre_reason, miner_url[:120],
+                            "target_type=%s  url_class=%s  url=%r",
+                            idx, target_type, pre_reason, miner_url[:120],
                         )
-                        return idx, False, f"url_pre_filter_reject({claim_type.lower()}/{pre_reason})"
+                        return idx, False, f"url_pre_filter_reject({target_type.lower()}/{pre_reason})"
 
             async with sem:
                 parsed, err = await _call_openrouter(

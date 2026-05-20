@@ -991,17 +991,7 @@ _SOURCE_DOMAIN_ALLOWLIST: Dict[str, frozenset] = {
         "theregister.com", "infoworld.com", "computerworld.com",
         "geekwire.com", "fastcompany.com", "inc.com",
         "hbr.org", "owler.com",
-        # Added 2026-05-20 — data-driven from production submissions audit.
-        # thesaasnews.com: 99 submissions of distinct funding-round articles,
-        # functionally equivalent to PR Newswire (curated, no UGC).
-        # theblock.co: 48 submissions, established crypto-news outlet
-        # (founded 2018, editorial team).
         "thesaasnews.com", "theblock.co",
-        # Removed 2026-05-20 — confirmed via direct site fetch + audit:
-        #   intellectia.ai → AI-powered trading PRODUCT site, not news.
-        #     4 production hits, 0% pass rate — gameable + low credibility.
-        #   getlatka.com → SaaS company directory with CEO-confirmed revenue
-        #     data, NOT news articles.  2 production hits, 0% pass rate.
     }),
     "social_media": frozenset({
         "twitter.com", "x.com",

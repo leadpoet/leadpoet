@@ -320,6 +320,40 @@ async def score_fulfillment_lead(
             failure_detail=_build_failure_detail(t1_failure, lead=lead, lead_output=lead_output, icp=icp),
         )
 
+    # ── Tier 1 → Tier 1.5 BRIDGE: Bare-LinkedIn-company-page hard gate ──
+    # If ANY of the lead's intent evidence URLs is a bare
+    # ``linkedin.com/company/<slug>`` page, reject the WHOLE lead before
+    # paying for any LLM call (Tier 1.5 sub-industry / Tier 1.5a-b region,
+    # Tier 1.7 substance, Tier 2 Sonar verification, Tier 3 URL verifier).
+    #
+    # Stricter than the per-signal rejection at Tier 1.7: a single bare
+    # slug fails the whole lead, so miners cannot pad one legit URL with
+    # bare-slug filler to slip past the "all signals failed" check.
+    #
+    # Production audit 2026-05-21 found 71% of intent URLs on the Mexican
+    # Dropbox construction chain were bare slugs masquerading as evidence;
+    # multiple HELDs at score 15-60 on that chain were backed by these
+    # URLs.  Gated by INTENT_URL_PREFILTER_ENABLED (already true in
+    # production) so it can be turned off in lockstep with the per-signal
+    # gate if ever needed.
+    if (
+        os.environ.get("INTENT_URL_PREFILTER_ENABLED", "false").lower() == "true"
+        and lead.intent_signals
+    ):
+        from qualification.scoring.intent_precheck import lead_has_bare_linkedin_intent_url
+        bare_slug_url = lead_has_bare_linkedin_intent_url(lead.intent_signals)
+        if bare_slug_url:
+            return FulfillmentScoreResult(
+                tier1_passed=True,
+                tier2_passed=False,
+                failure_reason="intent_evidence_bare_linkedin_company_page",
+                failure_detail=(
+                    f"At least one miner-supplied intent evidence URL is a "
+                    f"bare LinkedIn company page (no jobs / posts / news / "
+                    f"event-specific content): {bare_slug_url}"
+                ),
+            )
+
     # --- Tier 1.5: LLM-based checks (sub-industry semantic + location) ---
     # Call 1: Sub-industry semantic match (only if Tier 1 exact+containment failed)
     if t1_failure == "sub_industry_needs_llm":

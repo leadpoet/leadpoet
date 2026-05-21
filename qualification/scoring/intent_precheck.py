@@ -168,6 +168,46 @@ def _classify_claim_evidence_type(claim_text: str) -> Optional[str]:
     return None
 
 
+def lead_has_bare_linkedin_intent_url(intent_signals) -> Optional[str]:
+    """Return the first bare-LinkedIn-company-page URL found in any of
+    the lead's intent signals, or None if none are present.
+
+    A bare ``linkedin.com/company/<slug>`` is a static company profile —
+    no jobs, no posts, no event-specific content — so it cannot
+    substantively back ANY intent claim regardless of topic.  Used as a
+    deterministic pre-Tier-1.5 lead-level gate: if a miner included
+    EVEN ONE such URL among the lead's intent evidence, the entire
+    lead is rejected before any LLM call (Tier 1.5 sub-industry, Tier
+    1.7 substance, Tier 2 company verification, Tier 3 URL verifier).
+
+    Production audit 2026-05-21 found 71% of intent URLs on the Mexican
+    Dropbox construction chain were bare LinkedIn slugs.
+
+    Stricter than ``_check_intent_url_evidence_quality``'s per-signal
+    rejection: this gate fails the WHOLE lead on a single bare slug, so
+    a miner cannot pad a single legit URL with bare-slug filler to slip
+    a lead through Tier 1.7's "all signals failed" check.
+
+    Args:
+        intent_signals: iterable of IntentSignal-shaped objects (duck-typed
+                        — each must expose a ``url`` attribute).
+
+    Returns:
+        The URL string of the first bare-company-page slug found, OR None
+        if no such URL exists in the lead's intent signals.
+    """
+    for sig in (intent_signals or []):
+        url = getattr(sig, "url", "") or ""
+        if not url:
+            continue
+        parsed = urlparse(url.lower())
+        host = parsed.hostname or ""
+        path = parsed.path or ""
+        if "linkedin.com" in host and _LINKEDIN_BARE_COMPANY_PAGE_RE.match(path):
+            return url
+    return None
+
+
 def _check_intent_url_evidence_quality(
     url: str,
     target_type: Optional[str],

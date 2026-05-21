@@ -25,11 +25,12 @@ letting the cheap gate be a no-op.
 
 Activated via the INTENT_PRECHECK_ENABLED env flag (default off).
 
-A separate free deterministic URL pre-filter (no LLM cost) runs INSIDE
-this module before the Gemini call, gated by INTENT_URL_PREFILTER_ENABLED.  It
-catches the obvious bare-LinkedIn-company-page class of bad URLs on
-hiring and funding claims without spending any LLM call.  See
-``_check_url_pre_filter`` below.
+A separate free deterministic URL-evidence-quality gate (no LLM cost) runs
+INSIDE this module before the Gemini call, gated by
+INTENT_URL_PREFILTER_ENABLED.  It catches the obvious bare-LinkedIn-
+company-page class of bad URLs on every claim type (not just hiring/
+funding), plus target-type-specific LinkedIn rules.  See
+``_check_intent_url_evidence_quality`` below.
 """
 from __future__ import annotations
 

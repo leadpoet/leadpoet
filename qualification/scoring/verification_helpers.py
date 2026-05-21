@@ -992,6 +992,27 @@ _SOURCE_DOMAIN_ALLOWLIST: Dict[str, frozenset] = {
         "geekwire.com", "fastcompany.com", "inc.com",
         "hbr.org", "owler.com",
         "thesaasnews.com", "theblock.co",
+        # Non-English business / economic outlets — added 2026-05-20 after
+        # miner-flagged gap on Colombia / Mexico / France ICPs.  Each
+        # deep-verified as a real, established business or general-news
+        # outlet with substantive economic coverage (not aggregator or
+        # content farm).  Subdomain variants (cincodias.elpais.com, etc.)
+        # pass automatically via the existing endswith(".<domain>") suffix
+        # match in _domain_matches_allowlist.
+        # Spanish (Spain)
+        "elpais.com", "expansion.com", "elmundo.es",
+        # Spanish (Mexico)
+        "eluniversal.com.mx", "expansion.mx", "elfinanciero.com.mx", "milenio.com",
+        # Spanish (Colombia)
+        "semana.com", "eltiempo.com", "larepublica.co", "portafolio.co",
+        # French
+        "lemonde.fr", "lefigaro.fr", "lesechos.fr", "latribune.fr", "challenges.fr",
+        # Portuguese (Brazil)
+        "valor.globo.com", "folha.uol.com.br", "estadao.com.br", "exame.com",
+        # German
+        "handelsblatt.com", "faz.net", "sueddeutsche.de", "manager-magazin.de",
+        # Asian (English-language regional dailies)
+        "japantimes.co.jp", "scmp.com", "straitstimes.com", "business-standard.com",
     }),
     "social_media": frozenset({
         "twitter.com", "x.com",

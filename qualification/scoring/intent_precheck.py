@@ -133,8 +133,8 @@ _FUNDING_RE = re.compile(
 # LinkedIn URL patterns.  All match against the lower-cased URL path.
 _LINKEDIN_JOBS_PREFIX = "/jobs"                       # any /jobs/* path = listing or search
 _LINKEDIN_COMPANY_JOBS_RE = re.compile(r"^/company/[^/]+/jobs")  # /company/<slug>/jobs subpage
-_LINKEDIN_BARE_COMPANY_RE = re.compile(r"^/company/[^/]+/?$")    # bare /company/<slug> (no further path)
-_LINKEDIN_PERSONAL_PREFIX = "/in/"                    # /in/<slug> personal profile
+_LINKEDIN_BARE_COMPANY_PAGE_RE = re.compile(r"^/company/[^/]+/?$")  # bare /company/<slug> — static profile, no event-specific evidence
+_LINKEDIN_PERSONAL_PROFILE_PREFIX = "/in/"            # /in/<slug> personal profile
 
 
 def _classify_target_type(target_text: str) -> Optional[str]:
@@ -167,19 +167,42 @@ def _classify_claim_evidence_type(claim_text: str) -> Optional[str]:
     return None
 
 
-def _check_url_pre_filter(url: str, claim_type: str) -> Tuple[str, str]:
-    """Free deterministic URL evidence check.
+def _check_intent_url_evidence_quality(
+    url: str,
+    target_type: Optional[str],
+) -> Tuple[str, str]:
+    """Free deterministic URL evidence quality check.
+
+    Runs two layers, both deterministic and zero-cost:
+
+    1) UNIVERSAL rules (apply regardless of ``target_type``)
+       - empty URL → reject
+       - bare LinkedIn company page (``linkedin.com/company/<slug>``)
+         → reject.  A bare company page is a static profile — no jobs,
+         no posts, no event-specific evidence — so it cannot
+         substantively back ANY intent claim, regardless of topic.
+         Production audit (2026-05-21): 71% of intent URLs on the Mexican
+         construction chain and 42% on the Spanish creatives chain were
+         bare LinkedIn slugs masquerading as evidence.
+
+    2) TARGET-TYPE-SPECIFIC LinkedIn rules (only when ``target_type`` is set)
+       - HIRING target: require /jobs/* or /company/<slug>/jobs path;
+         any other LinkedIn path lacks visible hiring evidence → reject.
+       - FUNDING target: reject personal profiles (/in/<slug>) — a
+         personal page doesn't substantiate company-level funding events.
+
+    For any URL not caught by either layer, returns ``('pass', reason)`` so
+    the LLM substance check downstream remains authoritative.
 
     Args:
         url: the miner's submitted URL for this signal.
-        claim_type: 'HIRING' or 'FUNDING' (caller must pre-classify; for any
-                    other claim type, do not call this function — the gate
-                    does not apply).
+        target_type: 'HIRING' | 'FUNDING' | None.  None disables the
+                     target-specific layer; the universal layer always
+                     applies.
 
     Returns:
-        ('reject', short_reason)  — URL is obviously inadequate evidence;
-                                    skip the LLM substance check and fail
-                                    this signal.
+        ('reject', short_reason)  — URL is inadequate evidence; skip the
+                                    LLM substance check and fail this signal.
         ('pass',   short_reason)  — defer to the LLM substance check; this
                                     function never says 'accept'.
     """
@@ -190,7 +213,14 @@ def _check_url_pre_filter(url: str, claim_type: str) -> Tuple[str, str]:
     host = parsed.hostname or ""
     path = parsed.path or ""
 
-    if claim_type == "HIRING":
+    # ── Layer 1 (UNIVERSAL): bare LinkedIn company pages have no
+    # event-specific content regardless of what the miner is claiming.
+    if "linkedin.com" in host and _LINKEDIN_BARE_COMPANY_PAGE_RE.match(path):
+        return ("reject", "bare_linkedin_company_page")
+
+    # ── Layer 2 (TARGET-TYPE-SPECIFIC): only fires when target topic
+    # is known.  No target_type → skip and let the LLM handle it.
+    if target_type == "HIRING":
         if "linkedin.com" in host:
             # Acceptable LinkedIn URLs for hiring evidence:
             #   /jobs/*                       — specific listings, search, collections
@@ -199,20 +229,18 @@ def _check_url_pre_filter(url: str, claim_type: str) -> Tuple[str, str]:
                 return ("pass", "linkedin_jobs_path")
             if _LINKEDIN_COMPANY_JOBS_RE.match(path):
                 return ("pass", "linkedin_company_jobs_subpage")
-            # Everything else on LinkedIn lacks visible job evidence:
-            # bare /company/<slug>, /company/<slug>/{about,people,life,
-            # insights,posts,videos,products,...}, /in/<slug>, /posts/<id>,
-            # /pulse/<slug>, /feed/*, /showcase/*, etc.
-            return ("reject", "bare_linkedin_no_job_evidence")
-        # Non-LinkedIn URLs — let the LLM substance check decide.
+            # Everything else on LinkedIn lacks visible job evidence for
+            # a hiring claim (bare /company/<slug> already rejected above;
+            # /company/<slug>/{about,people,life,...}, /in/<slug>,
+            # /posts/<id>, /pulse/<slug>, /feed/*, /showcase/*, etc.).
+            return ("reject", "linkedin_no_visible_job_evidence")
+        # Non-LinkedIn URLs for hiring claims — defer to LLM.
         return ("pass", "non_linkedin_defer")
 
-    if claim_type == "FUNDING":
+    if target_type == "FUNDING":
         if "linkedin.com" in host:
-            if _LINKEDIN_BARE_COMPANY_RE.match(path):
-                return ("reject", "bare_linkedin_company_for_funding")
-            if path.startswith(_LINKEDIN_PERSONAL_PREFIX):
-                return ("reject", "linkedin_personal_profile")
+            if path.startswith(_LINKEDIN_PERSONAL_PROFILE_PREFIX):
+                return ("reject", "linkedin_personal_profile_for_funding_claim")
             # Other LinkedIn paths (/posts, /jobs subpages, /pulse) might
             # legitimately host a funding article share — defer to LLM.
             return ("pass", "linkedin_other_defer")
@@ -221,8 +249,8 @@ def _check_url_pre_filter(url: str, claim_type: str) -> Tuple[str, str]:
         # can read content to judge whether the round is on the page.
         return ("pass", "non_linkedin_defer")
 
-    # Unknown claim type — caller shouldn't reach here, but be safe.
-    return ("pass", "unknown_claim_type")
+    # No target_type — universal layer passed, no further rules to apply.
+    return ("pass", "universal_passed_no_target_specific_rules")
 
 
 def _get_openrouter_key() -> str:
@@ -495,13 +523,14 @@ async def precheck_lead_signals(
             #    target), the evidence is for the wrong category.  Reject
             #    deterministically without paying for an LLM call.  Either
             #    side being None (no clear topic) skips this check.
-            # 2) URL pre-filter: applies the LinkedIn-jobs/bare-company
-            #    rules using the TARGET type only.  Previously this used a
-            #    mixed target+claim classifier, which let HIRING URL rules
-            #    fire on FUNDING targets when the claim happened to
-            #    mention hiring (observed: BBSI's San Jose Design Engineer
-            #    job post attached to a federal-funding ICP signal).
-            # Both activated via INTENT_URL_PREFILTER_ENABLED.
+            # 2) URL evidence quality: always runs the UNIVERSAL layer
+            #    (bare LinkedIn company page → reject regardless of target
+            #    topic).  Production audit 2026-05-21 found 71% of intent
+            #    URLs on the Mexican construction chain were bare
+            #    LinkedIn slugs — substantively zero-evidence.  The
+            #    TARGET-TYPE-SPECIFIC layer (HIRING / FUNDING rules)
+            #    additionally fires only when target_type is known.
+            # Both gates activated via INTENT_URL_PREFILTER_ENABLED.
             if URL_PREFILTER_ENABLED:
                 target_type = _classify_target_type(target_text)
                 claim_evidence_type = _classify_claim_evidence_type(miner_claim)
@@ -521,15 +550,19 @@ async def precheck_lead_signals(
                         f"claim={claim_evidence_type.lower()})"
                     )
 
-                if target_type:
-                    pre_verdict, pre_reason = _check_url_pre_filter(miner_url, target_type)
-                    if pre_verdict == "reject":
-                        logger.info(
-                            "Intent pre-check signal[%d] REJECT (url-pre-filter)  "
-                            "target_type=%s  url_class=%s  url=%r",
-                            idx, target_type, pre_reason, miner_url[:120],
-                        )
-                        return idx, False, f"url_pre_filter_reject({target_type.lower()}/{pre_reason})"
+                # Always invoke the URL quality check — the universal
+                # layer fires regardless of target_type, the
+                # target-specific layer is a no-op when target_type is None.
+                pre_verdict, pre_reason = _check_intent_url_evidence_quality(
+                    miner_url, target_type,
+                )
+                if pre_verdict == "reject":
+                    logger.info(
+                        "Intent pre-check signal[%d] REJECT (url-evidence-quality)  "
+                        "target_type=%s  reason=%s  url=%r",
+                        idx, target_type or "none", pre_reason, miner_url[:120],
+                    )
+                    return idx, False, f"url_evidence_quality_reject({pre_reason})"
 
             async with sem:
                 parsed, err = await _call_openrouter(

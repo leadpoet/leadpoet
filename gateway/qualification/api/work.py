@@ -1675,7 +1675,7 @@ async def get_current_champion() -> Optional[Dict[str, Any]]:
         if result.data:
             champion = result.data[0]
             # Calculate avg cost/time per lead. The lead count comes from the
-            # current evaluation config (currently 25 ICPs × 1 lead/ICP = 25).
+            # current evaluation config (currently 20 ICPs × up to 5 leads/ICP = 100).
             total_cost = champion.get("evaluation_cost_usd") or 0
             total_time = champion.get("evaluation_time_seconds") or 0
             num_leads = CONFIG.get_total_leads()

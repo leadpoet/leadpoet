@@ -120,10 +120,10 @@ Miners submit **qualification models** — AI/ML models that surface in-market c
 
 ### How It Works
 
-1. **Miner builds a model** that takes an ICP and returns a single best-matching company plus verifiable intent evidence
-2. **Miner submits the model** to the gateway (as a tarball) with a TAO payment
-3. **Validators evaluate the model** by running it against 25 fresh ICPs (one per industry)
-4. **Model is scored** on ICP fit, intent-signal quality, cost, and runtime
+1. **Miner builds a model** that takes an ICP and returns **up to 5 best-matching companies** plus verifiable intent evidence for each
+2. **Miner submits the model** to the gateway (as a tarball) with a $10 TAO payment
+3. **Validators evaluate the model** by running it against 20 fresh ICPs (one per industry)
+4. **Model is scored** per-ICP as the sum of valid-company scores divided by 5 — so more valid companies per ICP = higher per-ICP score (1 perfect company = 20/100, 5 perfect = 100/100)
 5. **Champion model** holds the crown and earns rewards until dethroned
 
 ### Model Requirements
@@ -135,9 +135,9 @@ Your model must follow these **strict requirements**:
 Your model must expose a function named `find_leads` (or `qualify` for backwards compatibility):
 
 ```python
-def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def find_leads(icp: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Find the best-fit company from the open web for the given ICP.
+    Find up to 5 best-fit companies from the open web for the given ICP.
 
     CRITICAL: The 'prompt' field contains a NATURAL LANGUAGE description
     that your model must INTERPRET to find matching companies.
@@ -159,7 +159,16 @@ def find_leads(icp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             - intent_signals: List[str] (e.g., ["hiring SDRs", "evaluating CRM"])
 
     Returns:
-        Company dict matching the CompanyOutput schema, or None if no match found
+        List of UP TO 5 company dicts matching the CompanyOutput schema.
+        Each entry MUST be a distinct, real company; duplicates within a
+        single call are silently deduped by the validator. Returning fewer
+        than 5 is allowed — your per-ICP score scales linearly with the
+        number of VALID companies you return:
+            1 perfect company  ->  20/100 on that ICP
+            2 perfect companies -> 40/100
+            5 perfect companies -> 100/100
+        Legacy single-dict return (one company) is still accepted for
+        backwards compatibility but caps your per-ICP score at 20/100.
     """
 ```
 
@@ -217,8 +226,9 @@ Each intent signal object has 5 **required** fields: `source`, `description`, `u
 
 #### 3. Time & Cost Limits
 
-- **180 seconds** average per ICP evaluation (320s hard cap per ICP)
-- **$7.00 total** maximum for all 25 ICP evaluations (~$0.28 per ICP)
+- **320s hard cap per ICP call** (one call returns up to 5 companies); ~64s amortized per company
+- **$10.00 total** maximum for all 20 ICP evaluations (~$0.50 per ICP, $0.10 amortized per company)
+- Cost / time variability penalty (5 pts) applies if amortized per-company cost > $0.20 or amortized time > 128s
 - Models exceeding limits receive score penalties or failures
 
 ### Expired ICP Sets (Debug Your Model)
@@ -239,7 +249,7 @@ icp_set = resp.json()[0]
 resp = requests.get(url, headers=headers, params={"select": "*", "set_id": "eq.20260513"})
 ```
 
-Each row contains `set_id`, `active_from`, `active_until`, and the full `icps` array (25 ICP prompts — one per industry, with sub-industry, geography, employee count, company stage, product/service, and intent signals; company-only, no roles or contact fields). Active ICP sets are never exposed.
+Each row contains `set_id`, `active_from`, `active_until`, and the full `icps` array (20 ICP prompts — one per industry, with sub-industry, geography, employee count, company stage, product/service, and intent signals; company-only, no roles or contact fields). Active ICP sets are never exposed.
 
 ### Quick-Start Model Template
 
@@ -260,14 +270,16 @@ def find_leads(icp):
             "model": "openai/gpt-4o-mini",
             "messages": [{
                 "role": "user",
-                "content": f"Find one real US-based company that matches: {icp.get('prompt', '')}",
+                "content": f"Find up to 5 real US-based companies that match: {icp.get('prompt', '')}",
             }],
         },
         timeout=8.0,
     )
-    # ... parse response, scrape candidate company, verify intent evidence ...
+    # ... parse response, scrape each candidate company, verify intent evidence ...
 
-    return {
+    # Return UP TO 5 companies; each must independently satisfy the
+    # CompanyOutput schema. More valid companies = higher per-ICP score.
+    return [{
         "business": "ExampleCo",
         "company_linkedin": "https://linkedin.com/company/exampleco",
         "company_website": "https://exampleco.com",
@@ -284,10 +296,10 @@ def find_leads(icp):
             "date": "2026-04-12",
             "snippet": "Today we're excited to announce our $30M Series B led by ..."
         }]
-    }
+    }]  # ← LIST of up to 5 such company dicts
 ```
 
-This is a **starting point** — competitive models should have sophisticated ICP parsing, multi-source intent discovery, and intelligent candidate ranking.
+This is a **starting point** — competitive models should have sophisticated ICP parsing, multi-source intent discovery, intelligent candidate ranking, and return as many distinct verified companies per ICP as possible (up to 5) to maximize per-ICP score.
 
 ### Model Requirements (Quick Reference)
 
@@ -664,7 +676,7 @@ This is for validators who want to participate in consensus without running the 
 ```
 Model Competition:
   Miner submits model → Gateway sandboxes & scans → Validators evaluate
-  against 25 ICPs (one per industry) → Champion crowned / dethroned
+  against 20 ICPs (one per industry, up to 5 companies each) → Champion crowned / dethroned
 
 Fulfillment:
   Client publishes request → Miners commit (hashed) → Miners reveal →

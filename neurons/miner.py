@@ -1309,7 +1309,7 @@ class Miner(BaseMinerNeuron):
 # =============================================================================
 
 QUALIFICATION_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
-QUALIFICATION_SUBMISSION_COST_USD = float(os.environ.get("QUALIFICATION_SUBMISSION_COST_USD", "7.0"))  # $7 submission cost
+QUALIFICATION_SUBMISSION_COST_USD = float(os.environ.get("QUALIFICATION_SUBMISSION_COST_USD", "10.0"))  # $10 submission cost
 
 # =============================================================================
 # LeadPoet Payment Wallet - COLDKEY addresses
@@ -2052,7 +2052,7 @@ def run_qualification_submission_flow(wallet, config, netuid: int):
             print(f"      Retry credits available: {credits_remaining}")
     
     print("")
-    print("   Your model will be evaluated by validators against 25 ICPs")
+    print("   Your model will be evaluated by validators against 20 ICPs (up to 5 companies per ICP)")
     print("   (one per industry, company-only).")
     print("   Check your model status at:")
     print(f"   {QUALIFICATION_GATEWAY_URL}/qualification/model/{result.get('model_id')}/status")

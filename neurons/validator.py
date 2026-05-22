@@ -5300,46 +5300,104 @@ class Validator(BaseValidatorNeuron):
                         # Accumulate total cost for $5 hard stop
                         total_evaluation_cost += run_cost
 
-                        # Parse model output.  The sandbox places the model's
-                        # return value under ``result["lead"]`` for historical
-                        # reasons (the wire key was never renamed); the dict
-                        # under that key MUST validate as a CompanyOutput.
-                        lead_data = result.get("lead") if isinstance(result, dict) else None
+                        # Parse model output.  As of May 2026 v2 the contract
+                        # is: find_leads(icp) -> List[Dict] of UP TO
+                        # LEADS_PER_ICP companies (default 5).  Legacy single-
+                        # dict return is still accepted for backwards compat.
+                        # The wire key is still ``result["lead"]`` for
+                        # historical reasons.
+                        raw_payload = result.get("lead") if isinstance(result, dict) else None
                         error_msg = result.get("error") if isinstance(result, dict) else None
 
-                        company: Optional[CompanyOutput] = None
-                        parse_error: Optional[str] = None
-                        if lead_data:
-                            try:
-                                company = CompanyOutput(**lead_data)
-                            except Exception as parse_exc:
-                                parse_error = (
-                                    f"Model returned invalid CompanyOutput: "
-                                    f"{str(parse_exc)[:200]}"
-                                )
+                        # Normalize to a list of dicts, capped at LEADS_PER_ICP.
+                        leads_per_icp = QUALIFICATION_CONFIG.LEADS_PER_ICP
+                        if isinstance(raw_payload, list):
+                            raw_companies = raw_payload[:leads_per_icp]
+                        elif isinstance(raw_payload, dict):
+                            raw_companies = [raw_payload]
+                        else:
+                            raw_companies = []
 
-                        if parse_error:
-                            scores = LeadScoreBreakdown(
-                                icp_fit=0, decision_maker=0, intent_signal_raw=0,
-                                time_decay_multiplier=1.0, intent_signal_final=0,
-                                cost_penalty=0, time_penalty=0, final_score=0,
-                                failure_reason=parse_error,
-                            )
-                        elif company is not None:
-                            scores = await score_company(
-                                company=company,
+                        # Amortize cost/time across the actually-returned
+                        # companies so the variability-penalty threshold
+                        # (per-LEAD) compares apples to apples.
+                        n_returned = max(len(raw_companies), 1)
+                        amortized_cost = run_cost / n_returned
+                        amortized_time = run_time / n_returned
+
+                        per_company_breakdowns: list = []
+                        company: Optional[CompanyOutput] = None  # representative
+                        best_scores: Optional[LeadScoreBreakdown] = None
+                        for c_idx, c_dict in enumerate(raw_companies):
+                            try:
+                                c = CompanyOutput(**c_dict)
+                            except Exception as parse_exc:
+                                per_company_breakdowns.append(LeadScoreBreakdown(
+                                    icp_fit=0, decision_maker=0, intent_signal_raw=0,
+                                    time_decay_multiplier=1.0, intent_signal_final=0,
+                                    cost_penalty=0, time_penalty=0, final_score=0,
+                                    failure_reason=(
+                                        f"Invalid CompanyOutput (entry {c_idx}): "
+                                        f"{str(parse_exc)[:160]}"
+                                    ),
+                                ))
+                                continue
+                            c_scores = await score_company(
+                                company=c,
                                 icp=icp,
-                                run_cost_usd=run_cost,
-                                run_time_seconds=run_time,
+                                run_cost_usd=amortized_cost,
+                                run_time_seconds=amortized_time,
                                 seen_companies=seen_companies,
                             )
-                        else:
+                            per_company_breakdowns.append(c_scores)
+                            if best_scores is None or c_scores.final_score > best_scores.final_score:
+                                best_scores = c_scores
+                                company = c
+
+                        # ICP-level final score: sum of per-company scores,
+                        # normalized by LEADS_PER_ICP so a perfectly-filled ICP
+                        # (5 valid companies × 100) caps at 100 and a single
+                        # perfect company yields 20.  This preserves the
+                        # existing MINIMUM_CHAMPION_SCORE / DETHRONING thresholds
+                        # and gives a linear reward for returning more valid
+                        # companies on the same ICP.
+                        if not per_company_breakdowns:
                             failure_reason = error_msg if error_msg else "No company returned"
                             scores = LeadScoreBreakdown(
                                 icp_fit=0, decision_maker=0, intent_signal_raw=0,
                                 time_decay_multiplier=1.0, intent_signal_final=0,
                                 cost_penalty=0, time_penalty=0, final_score=0,
                                 failure_reason=failure_reason,
+                            )
+                        else:
+                            per_icp_score = (
+                                sum(b.final_score for b in per_company_breakdowns)
+                                / max(leads_per_icp, 1)
+                            )
+                            # Surface the BEST company's breakdown but override
+                            # final_score with the aggregated value.  Carry the
+                            # first non-empty failure_reason if the ICP scored 0
+                            # so the existing fabrication / pre-check telemetry
+                            # keeps working.
+                            base = best_scores if best_scores is not None else per_company_breakdowns[0]
+                            agg_failure = None
+                            if per_icp_score == 0:
+                                for b in per_company_breakdowns:
+                                    if b.failure_reason:
+                                        agg_failure = b.failure_reason
+                                        break
+                                if not agg_failure:
+                                    agg_failure = error_msg or "All returned companies scored 0"
+                            scores = LeadScoreBreakdown(
+                                icp_fit=base.icp_fit,
+                                decision_maker=base.decision_maker,
+                                intent_signal_raw=base.intent_signal_raw,
+                                time_decay_multiplier=base.time_decay_multiplier,
+                                intent_signal_final=base.intent_signal_final,
+                                cost_penalty=base.cost_penalty,
+                                time_penalty=base.time_penalty,
+                                final_score=per_icp_score,
+                                failure_reason=agg_failure,
                             )
 
                         # Report results.  The reporter calls ``.model_dump()``
@@ -5509,8 +5567,10 @@ class Validator(BaseValidatorNeuron):
             # Calculate final coverage-weighted score.
             # Divide by total ICPs (not just scored ones) so failures pull the
             # average down. Legacy formula divided by leads_scored which had no
-            # coverage penalty — a model that scored only 1/25 ICPs at 100 pts
-            # would get 100/100 even though it failed 96% of client demand.
+            # coverage penalty — a model that scored only 1/20 ICPs at 100 pts
+            # would get 100/100 even though it failed 95% of client demand.
+            # Note: each per-ICP score is already normalized (sum/LEADS_PER_ICP)
+            # so the 0..100 range carries over from the 1-per-ICP regime.
             raw_avg_score = total_score / len(runs) if len(runs) > 0 else 0.0
             
             # ═══════════════════════════════════════════════════════════════════
@@ -9295,40 +9355,56 @@ def run_dedicated_qualification_worker(config):
                                 run_cost = sandbox.get_run_cost() if hasattr(sandbox, 'get_run_cost') else 0.01
                                 total_cost += run_cost
 
-                                # Parse result.  Wire payload key is still ``lead``
-                                # for historical reasons; the dict MUST validate as
-                                # CompanyOutput.
-                                lead_data = result.get("lead") if isinstance(result, dict) else None
+                                # Parse result.  As of May 2026 v2 the contract
+                                # is: find_leads(icp) -> List[Dict] of UP TO
+                                # LEADS_PER_ICP companies.  Legacy single-dict
+                                # return is still accepted.  Wire payload key
+                                # remains ``result["lead"]``.
+                                raw_payload = result.get("lead") if isinstance(result, dict) else None
                                 error_msg = result.get("error") if isinstance(result, dict) else None
-                                company: Optional[CompanyOutput] = None
-                                parse_error: Optional[str] = None
-                                if lead_data:
-                                    try:
-                                        company = CompanyOutput(**lead_data)
-                                    except Exception as parse_exc:
-                                        parse_error = (
-                                            f"Model returned invalid CompanyOutput: "
-                                            f"{str(parse_exc)[:200]}"
-                                        )
 
-                                if parse_error:
-                                    scores = LeadScoreBreakdown(
-                                        icp_fit=0, decision_maker=0, intent_signal_raw=0,
-                                        time_decay_multiplier=1.0, intent_signal_final=0,
-                                        cost_penalty=0, time_penalty=0, final_score=0,
-                                        failure_reason=parse_error,
-                                    )
-                                    score = 0.0
-                                elif company is not None:
-                                    scores = await score_company(
-                                        company=company,
+                                leads_per_icp_w = QUAL_CONFIG.LEADS_PER_ICP
+                                if isinstance(raw_payload, list):
+                                    raw_companies = raw_payload[:leads_per_icp_w]
+                                elif isinstance(raw_payload, dict):
+                                    raw_companies = [raw_payload]
+                                else:
+                                    raw_companies = []
+
+                                n_returned = max(len(raw_companies), 1)
+                                amortized_cost = run_cost / n_returned
+                                amortized_time = run_time / n_returned
+
+                                per_company_breakdowns_w: list = []
+                                company: Optional[CompanyOutput] = None  # representative
+                                best_scores_w: Optional[LeadScoreBreakdown] = None
+                                for c_idx, c_dict in enumerate(raw_companies):
+                                    try:
+                                        c = CompanyOutput(**c_dict)
+                                    except Exception as parse_exc:
+                                        per_company_breakdowns_w.append(LeadScoreBreakdown(
+                                            icp_fit=0, decision_maker=0, intent_signal_raw=0,
+                                            time_decay_multiplier=1.0, intent_signal_final=0,
+                                            cost_penalty=0, time_penalty=0, final_score=0,
+                                            failure_reason=(
+                                                f"Invalid CompanyOutput (entry {c_idx}): "
+                                                f"{str(parse_exc)[:160]}"
+                                            ),
+                                        ))
+                                        continue
+                                    c_scores = await score_company(
+                                        company=c,
                                         icp=icp,
-                                        run_cost_usd=run_cost,
-                                        run_time_seconds=run_time,
+                                        run_cost_usd=amortized_cost,
+                                        run_time_seconds=amortized_time,
                                         seen_companies=seen_companies,
                                     )
-                                    score = scores.final_score
-                                else:
+                                    per_company_breakdowns_w.append(c_scores)
+                                    if best_scores_w is None or c_scores.final_score > best_scores_w.final_score:
+                                        best_scores_w = c_scores
+                                        company = c
+
+                                if not per_company_breakdowns_w:
                                     failure_reason = error_msg if error_msg else "No company returned"
                                     scores = LeadScoreBreakdown(
                                         icp_fit=0, decision_maker=0, intent_signal_raw=0,
@@ -9337,6 +9413,34 @@ def run_dedicated_qualification_worker(config):
                                         failure_reason=failure_reason,
                                     )
                                     score = 0.0
+                                else:
+                                    # Per-ICP score: sum / LEADS_PER_ICP (keeps 0..100 range
+                                    # and linearly rewards more valid companies; see Path 1).
+                                    per_icp_score = (
+                                        sum(b.final_score for b in per_company_breakdowns_w)
+                                        / max(leads_per_icp_w, 1)
+                                    )
+                                    base = best_scores_w if best_scores_w is not None else per_company_breakdowns_w[0]
+                                    agg_failure = None
+                                    if per_icp_score == 0:
+                                        for b in per_company_breakdowns_w:
+                                            if b.failure_reason:
+                                                agg_failure = b.failure_reason
+                                                break
+                                        if not agg_failure:
+                                            agg_failure = error_msg or "All returned companies scored 0"
+                                    scores = LeadScoreBreakdown(
+                                        icp_fit=base.icp_fit,
+                                        decision_maker=base.decision_maker,
+                                        intent_signal_raw=base.intent_signal_raw,
+                                        time_decay_multiplier=base.time_decay_multiplier,
+                                        intent_signal_final=base.intent_signal_final,
+                                        cost_penalty=base.cost_penalty,
+                                        time_penalty=base.time_penalty,
+                                        final_score=per_icp_score,
+                                        failure_reason=agg_failure,
+                                    )
+                                    score = per_icp_score
 
                                 # Accumulate
                                 total_score += score

@@ -11,7 +11,7 @@ CRITICAL DESIGN:
 4. ICP hash is logged to transparency_log for verifiability
 
 GENERATION PROCESS:
-1. Generate 25 ICPs — one per industry across 25 distinct industries
+1. Generate 20 ICPs — one per industry across 20 distinct industries
 2. Use LLM to create realistic, varied prompts
 3. Compute ICP set hash
 4. Store in database
@@ -55,7 +55,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Configuration
 # =============================================================================
 
-# Industry distribution for 25 ICPs — exactly one ICP per industry.
+# Industry distribution for 20 ICPs — exactly one ICP per industry.
 # CRITICAL: Every entry MUST exist in gateway/utils/industry_taxonomy.py
 # (source of truth). Model queries use .lower() for case-insensitive
 # matching with the leads database.
@@ -85,21 +85,16 @@ INDUSTRY_DISTRIBUTION = {
     "Energy": 1,
     "Education": 1,
     "Transportation": 1,
-    "Media and Entertainment": 1,
-    "Food and Beverage": 1,
-    "Sustainability": 1,
-    "Gaming": 1,
-    "Travel and Tourism": 1,
 }
 # Sanity check at import time so a regression in the list is loud, not silent.
-assert len(INDUSTRY_DISTRIBUTION) == 25 and sum(INDUSTRY_DISTRIBUTION.values()) == 25, (
-    "INDUSTRY_DISTRIBUTION must be exactly 25 distinct industries with 1 ICP each"
+assert len(INDUSTRY_DISTRIBUTION) == 20 and sum(INDUSTRY_DISTRIBUTION.values()) == 20, (
+    "INDUSTRY_DISTRIBUTION must be exactly 20 distinct industries with 1 ICP each"
 )
 
 # Sub-industries per industry
 # CRITICAL: These MUST match values in gateway/utils/industry_taxonomy.py
 # The taxonomy has 723 sub-industries - we select relevant ones per industry.
-# Each of the 25 industries in INDUSTRY_DISTRIBUTION must appear here.
+# Each of the 20 industries in INDUSTRY_DISTRIBUTION must appear here.
 SUB_INDUSTRIES = {
     "Software": [
         "SaaS", "Enterprise Software", "Developer Tools", "Developer Platform",
@@ -188,26 +183,6 @@ SUB_INDUSTRIES = {
     "Transportation": [
         "Logistics", "Last Mile Transportation", "Freight Service", "Fleet Management",
         "Public Transportation", "Ride Sharing", "Shipping",
-    ],
-    "Media and Entertainment": [
-        "Video Streaming", "Music Streaming", "Podcasting", "Film",
-        "Digital Media", "Broadcasting",
-    ],
-    "Food and Beverage": [
-        "Restaurants", "Food Delivery", "Food Processing", "Beverages",
-        "Coffee", "Brewing",
-    ],
-    "Sustainability": [
-        "CleanTech", "Recycling", "Sustainability", "Waste Management",
-        "Environmental Engineering", "Green Building",
-    ],
-    "Gaming": [
-        "Video Games", "Mobile Games", "Console Games", "PC Games",
-        "Game Development", "Esports",
-    ],
-    "Travel and Tourism": [
-        "Travel", "Travel Accommodations", "Hospitality", "Tour Operator",
-        "Travel Agency", "Vacation Rental",
     ],
 }
 
@@ -373,26 +348,6 @@ PRODUCTS_BY_INDUSTRY = {
         "Fleet management software", "Last-mile logistics platform",
         "Freight visibility platform", "Route optimization software", "Telematics suite",
     ],
-    "Media and Entertainment": [
-        "OTT streaming platform", "Audience analytics", "Content monetization tools",
-        "Live production software", "Rights management platform",
-    ],
-    "Food and Beverage": [
-        "Restaurant POS suite", "Food supply chain platform", "Online ordering platform",
-        "Inventory management for restaurants", "Beverage distribution software",
-    ],
-    "Sustainability": [
-        "ESG reporting platform", "Waste tracking software", "Carbon accounting platform",
-        "Energy efficiency analytics", "Sustainable sourcing platform",
-    ],
-    "Gaming": [
-        "Game analytics platform", "Live-ops tooling", "User acquisition platform",
-        "Anti-cheat service", "Game engine middleware",
-    ],
-    "Travel and Tourism": [
-        "Booking management platform", "Revenue management software",
-        "Travel CRM", "Property management system for hotels", "Trip planning software",
-    ],
 }
 
 # Intent signals / additional context
@@ -418,7 +373,7 @@ INTENT_SIGNALS = [
 
 async def generate_icps_with_openrouter(
     set_id: int,
-    total_icps: int = 25
+    total_icps: int = 20
 ) -> tuple:
     """
     Generate ICP prompts using OpenRouter LLM (o3-mini).
@@ -434,7 +389,7 @@ async def generate_icps_with_openrouter(
 
     Args:
         set_id: Set identifier (YYYYMMDD format) for ICP naming
-        total_icps: Number of ICPs to generate (default 25, one per industry)
+        total_icps: Number of ICPs to generate (default 20, one per industry)
 
     Returns:
         Tuple of (icps_list, industry_distribution, icp_set_hash)
@@ -632,7 +587,7 @@ FINAL CHECK — Before outputting, verify:
                         {"role": "user", "content": user_prompt}
                     ],
                     "temperature": 0.9,  # Higher temperature for more variety
-                    "max_tokens": 16000,  # Generous headroom for 25 ICPs
+                    "max_tokens": 16000,  # Generous headroom for 20 ICPs
                     "response_format": {"type": "json_object"}
                 }
             )
@@ -869,16 +824,16 @@ def generate_single_icp(
 
 def generate_icp_set(
     set_id: int,
-    total_icps: int = 25,
+    total_icps: int = 20,
     base_seed: Optional[int] = None
 ) -> tuple:
     """
-    Generate a complete ICP set — one ICP per industry across the 25 distinct
+    Generate a complete ICP set — one ICP per industry across the 20 distinct
     industries in ``INDUSTRY_DISTRIBUTION``.
 
     Args:
         set_id: Set identifier (YYYYMMDD format)
-        total_icps: Number of ICPs to generate (default 25, one per industry).
+        total_icps: Number of ICPs to generate (default 20, one per industry).
             Currently informational — the actual count comes from
             ``INDUSTRY_DISTRIBUTION`` which is the source of truth for the
             industry list.

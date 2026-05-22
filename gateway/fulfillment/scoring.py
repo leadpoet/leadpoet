@@ -35,11 +35,6 @@ from gateway.fulfillment.icp_checks import (
 from validator_models.fulfillment_person_verification import fulfillment_person_verification
 from validator_models.fulfillment_company_verification import fulfillment_company_verification
 from validator_models.fulfillment_attribute_verification import verify_required_attributes
-from validator_models.checks_zerobounce import (
-    zerobounce_validate,
-    is_truelist_catch_all,
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -503,37 +498,13 @@ async def score_fulfillment_lead(
 
     if scrapingdog_key:
         # --- Email check (from batch result, no API call) ---
-        # Path: TrueList batch email_ok               → pass
-        #       TrueList batch accept_all/ok_for_all  → ZeroBounce fallback
-        #         ZeroBounce status == "valid"        → pass (catch-all bypassed)
-        #         anything else                        → keep TrueList reject
-        #       any other TrueList status              → reject as before
+        # Path: TrueList batch email_ok  → pass
+        #       anything else            → reject (catch-all treated same as invalid)
         email_verified = False
         if email_result:
             batch_status = email_result.get("status", "unknown")
             if batch_status == "email_ok":
                 email_verified = True
-            elif is_truelist_catch_all(batch_status):
-                zb_result = await zerobounce_validate(lead.email)
-                zb_status = zb_result.get("status", "error")
-                zb_sub = zb_result.get("sub_status", "")
-                if zb_result.get("valid"):
-                    print(
-                        f"   📧 Email catch-all ({batch_status}) — ZeroBounce confirmed valid "
-                        f"(sub_status={zb_sub or 'n/a'}); bypassing TrueList catch-all reject"
-                    )
-                    email_verified = True
-                else:
-                    print(
-                        f"   📧 Email catch-all ({batch_status}) — ZeroBounce did not confirm "
-                        f"(zb_status={zb_status}, sub={zb_sub or 'n/a'}); keeping reject"
-                    )
-                    _email_reason = f"email_{batch_status}_zb_{zb_status}"
-                    return FulfillmentScoreResult(
-                        tier1_passed=True, tier2_passed=False,
-                        failure_reason=_email_reason,
-                        failure_detail=_build_failure_detail(_email_reason),
-                    )
             else:
                 _email_reason = f"email_{batch_status}"
                 return FulfillmentScoreResult(

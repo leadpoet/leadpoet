@@ -137,16 +137,21 @@ _LINKEDIN_COMPANY_JOBS_RE = re.compile(r"^/company/[^/]+/jobs")  # /company/<slu
 _LINKEDIN_BARE_COMPANY_PAGE_RE = re.compile(r"^/company/[^/]+/?$")  # bare /company/<slug> — static profile, no event-specific evidence
 _LINKEDIN_PERSONAL_PROFILE_PREFIX = "/in/"            # /in/<slug> personal profile
 
-# Generic company-feed subpages: /company/<slug>/{posts,about,life,people,insights}
-# These are aggregated feeds or static info pages — none point at a specific
-# dated event, so they can't substantively back any intent claim.  LinkedIn
-# serves SPECIFIC posts at /posts/<id> or /feed/update/urn:li:activity:<id>
-# (different path entirely), so excluding /company/<slug>/posts cannot
-# accidentally reject a specific-post URL.  /company/<slug>/jobs is
-# DELIBERATELY NOT in this set — the jobs subpage shows visible current
-# listings and IS used by the HIRING claim-type-specific rule.
+# Generic company-feed subpages: /company/<slug>/{posts,life,people,insights}
+# These are aggregated feeds or generic listing pages — none point at a
+# specific dated event, so they can't substantively back any intent claim.
+# LinkedIn serves SPECIFIC posts at /posts/<id> or
+# /feed/update/urn:li:activity:<id> (different path entirely), so excluding
+# /company/<slug>/posts cannot accidentally reject a specific-post URL.
+#
+# DELIBERATELY NOT in this set:
+#   /company/<slug>/jobs   — visible current job listings; used by HIRING rule
+#   /company/<slug>/about  — static company info (industry, HQ, size,
+#                            description, specialties) that CAN substantiate
+#                            static-fact intent signals (e.g., "company
+#                            description mentions X", "size is 500-1000").
 _LINKEDIN_COMPANY_GENERIC_FEED_RE = re.compile(
-    r"^/company/[^/]+/(posts|about|life|people|insights)(?:/|$)"
+    r"^/company/[^/]+/(posts|life|people|insights)(?:/|$)"
 )
 
 
@@ -191,15 +196,18 @@ def lead_has_unverifiable_linkedin_intent_url(intent_signals) -> Optional[Tuple[
          A static profile — no posts, no jobs, no news — useless as evidence.
 
       2. Generic company feed pages:
-         ``linkedin.com/company/<slug>/{posts,about,life,people,insights}``
-         These are aggregated feeds or static info pages — a claim about
-         a specific dated event (e.g., a 2023-11-30 LinkedIn post) is not
-         verifiable by clicking a feed URL, since the feed only surfaces
-         recent items, may have moved older posts off the visible window,
-         or the specific post may have been deleted.  LinkedIn serves
-         SPECIFIC posts at ``/posts/<id>`` or
+         ``linkedin.com/company/<slug>/{posts,life,people,insights}``
+         These are aggregated feeds or generic listing pages — a claim
+         about a specific dated event (e.g., a 2023-11-30 LinkedIn post)
+         is not verifiable by clicking a feed URL, since the feed only
+         surfaces recent items, may have moved older posts off the
+         visible window, or the specific post may have been deleted.
+         LinkedIn serves SPECIFIC posts at ``/posts/<id>`` or
          ``/feed/update/urn:li:activity:<id>`` (different path entirely)
-         — those remain acceptable.
+         — those remain acceptable.  ``/company/<slug>/about`` is also
+         acceptable — it shows static company info (industry, HQ, size,
+         description, specialties) that CAN substantiate static-fact
+         intent signals.
 
     Used as a deterministic pre-Tier-1.5 lead-level hard gate: if a miner
     included EVEN ONE such URL among the lead's intent evidence, the

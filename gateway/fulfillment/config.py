@@ -29,24 +29,25 @@ BLOCK_TIME_SECONDS = 12
 #               miner earning emission for ~5 days, so miners with even
 #               one win in a low-volume window don't get pushed off the
 #               subnet by the daily de-reg sweep.  Co-founder call.
-#   2026-05-22: 0.0005 → 0.002 (4× lift; per epoch 0.05% → 0.2%; total per
-#               lead 5% → 20% over the 100-epoch runway).  At any epoch the
-#               validator caps SUM(active reward_pct) at fulfillment_pool
-#               (neurons/validator.py::_get_fulfillment_emission_share lines
-#               3134–3139), so this 4× bump only translates to higher
-#               miner payouts during LOW-VOLUME periods — when only one or
-#               two leads are paying out simultaneously and the raw_total
-#               is below the pool ceiling.  In high-volume periods the
-#               proportional normalization absorbs the bump and per-miner
-#               payouts are unchanged.  Goal: stronger de-reg protection
-#               for miners with sparse wins, without inflating payouts
+#   2026-05-22: 0.0005 → 0.001 (true 2× lift; per epoch 0.05% → 0.1%;
+#               total per lead 5% → 10% over the 100-epoch runway).  At
+#               any epoch the validator caps SUM(active reward_pct) at
+#               fulfillment_pool (neurons/validator.py::
+#               _get_fulfillment_emission_share lines 3134–3139), so this
+#               2× bump only translates to higher miner payouts during
+#               LOW-VOLUME periods — when only one or two leads are
+#               paying out simultaneously and the raw_total is below the
+#               pool ceiling.  In high-volume periods the proportional
+#               normalization absorbs the bump and per-miner payouts
+#               are unchanged.  Goal: stronger de-reg protection for
+#               miners with sparse wins, without inflating payouts
 #               during busy periods.
 # Existing reward rows stay at their original (reward_pct, reward_expires_epoch)
 # until expiry; only newly-fulfilled leads use the new rate AND new runway,
 # so the rollover is gradual.  Old rows pay at their original 0.0005/epoch
 # claim size for the remainder of their 100-epoch window (~5 days), at
-# which point all live rows are paying the new 0.002 rate.
-Z_PERCENT = float(os.getenv("FULFILLMENT_Z_PERCENT", "0.002"))
+# which point all live rows are paying the new 0.001 rate.
+Z_PERCENT = float(os.getenv("FULFILLMENT_Z_PERCENT", "0.001"))
 L_EPOCHS = int(os.getenv("FULFILLMENT_L_EPOCHS", "100"))
 FULFILLMENT_MAX_CONCURRENT_SOURCES = int(os.getenv("FULFILLMENT_MAX_CONCURRENT_SOURCES", "2"))
 FULFILLMENT_OPENROUTER_API_KEY = os.getenv("FULFILLMENT_OPENROUTER_API_KEY", "")

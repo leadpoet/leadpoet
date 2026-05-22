@@ -666,12 +666,19 @@ def _walk_chain_predecessors(supabase, request_id: str) -> list:
     has its successor_request_id field set to the next generation's id.
     Walks backwards from the given request, finding the row whose
     ``successor_request_id`` equals the current id, and repeats until the
-    chain root (no predecessor pointing at us).  Bounded to 50 generations
-    as a safety against pathological loops in malformed data.
+    chain root (no predecessor pointing at us).  Bounded to 1000 generations
+    as a safety against pathological loops in malformed data — the prior
+    cap of 50 was too tight (Daniel iMove 10 ran 98 generations and the
+    walk silently stopped 48 generations short of the true root, causing
+    ``_chain_target_num_leads`` to return the wrong target → chain
+    incorrectly marked ``fulfilled`` with partial delivery; also caused
+    ``_load_chain_held_winners`` to lose prior-generation held leads from
+    the chain's view).  1000 is well above any realistic chain length while
+    still guarding against runaway loops.
     """
     chain: list = []
     cur = request_id
-    for _ in range(50):
+    for _ in range(1000):
         pred = supabase.table("fulfillment_requests") \
             .select("request_id") \
             .eq("successor_request_id", cur) \

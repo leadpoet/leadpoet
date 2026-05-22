@@ -317,35 +317,47 @@ async def score_fulfillment_lead(
 
     # ── Tier 1 → Tier 1.5 BRIDGE: Bare-LinkedIn-company-page hard gate ──
     # If ANY of the lead's intent evidence URLs is a bare
-    # ``linkedin.com/company/<slug>`` page, reject the WHOLE lead before
-    # paying for any LLM call (Tier 1.5 sub-industry / Tier 1.5a-b region,
-    # Tier 1.7 substance, Tier 2 Sonar verification, Tier 3 URL verifier).
+    # ``linkedin.com/company/<slug>`` page OR a generic company feed page
+    # (``/posts``, ``/about``, ``/life``, ``/people``, ``/insights``),
+    # reject the WHOLE lead before paying for any LLM call (Tier 1.5 sub-
+    # industry / Tier 1.5a-b region, Tier 1.7 substance, Tier 2 Sonar
+    # verification, Tier 3 URL verifier).
     #
-    # Stricter than the per-signal rejection at Tier 1.7: a single bare
-    # slug fails the whole lead, so miners cannot pad one legit URL with
-    # bare-slug filler to slip past the "all signals failed" check.
+    # Stricter than the per-signal rejection at Tier 1.7: a single
+    # unverifiable URL fails the whole lead, so miners cannot pad one
+    # legit URL with filler to slip past the "all signals failed" check.
     #
-    # Production audit 2026-05-21 found 71% of intent URLs on the Mexican
-    # Dropbox construction chain were bare slugs masquerading as evidence;
-    # multiple HELDs at score 15-60 on that chain were backed by these
-    # URLs.  Gated by INTENT_URL_PREFILTER_ENABLED (already true in
-    # production) so it can be turned off in lockstep with the per-signal
-    # gate if ever needed.
+    # Production audits found this is an actively-exploited loophole:
+    #   - 2026-05-21: 71% of intent URLs on the Mexican Dropbox
+    #     construction chain were bare LinkedIn slugs.
+    #   - 2026-05-22: lead delivered on Daniel iMove 10 with intent URL
+    #     ``/company/crowncabs/posts`` (generic posts feed) — the post the
+    #     claim text described was not findable by clicking the URL.
+    #
+    # LinkedIn serves SPECIFIC posts at ``/posts/<id>`` or
+    # ``/feed/update/urn:li:activity:<id>`` (different path entirely) —
+    # those keep passing because they ARE verifiable.
+    # ``/company/<slug>/jobs`` also keeps passing — it's the acceptable
+    # HIRING evidence path.
+    #
+    # Gated by INTENT_URL_PREFILTER_ENABLED (already true in production).
     if (
         os.environ.get("INTENT_URL_PREFILTER_ENABLED", "false").lower() == "true"
         and lead.intent_signals
     ):
-        from qualification.scoring.intent_precheck import lead_has_bare_linkedin_intent_url
-        bare_slug_url = lead_has_bare_linkedin_intent_url(lead.intent_signals)
-        if bare_slug_url:
+        from qualification.scoring.intent_precheck import lead_has_unverifiable_linkedin_intent_url
+        bad = lead_has_unverifiable_linkedin_intent_url(lead.intent_signals)
+        if bad:
+            bad_url, bad_reason = bad
             return FulfillmentScoreResult(
                 tier1_passed=True,
                 tier2_passed=False,
-                failure_reason="intent_evidence_bare_linkedin_company_page",
+                failure_reason=f"intent_evidence_{bad_reason}",
                 failure_detail=(
-                    f"At least one miner-supplied intent evidence URL is a "
-                    f"bare LinkedIn company page (no jobs / posts / news / "
-                    f"event-specific content): {bare_slug_url}"
+                    f"At least one miner-supplied intent evidence URL is an "
+                    f"unverifiable LinkedIn page (no jobs / specific post / "
+                    f"news / event-specific content): {bad_url} "
+                    f"[reason: {bad_reason}]"
                 ),
             )
 

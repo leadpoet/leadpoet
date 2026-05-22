@@ -137,6 +137,18 @@ _LINKEDIN_COMPANY_JOBS_RE = re.compile(r"^/company/[^/]+/jobs")  # /company/<slu
 _LINKEDIN_BARE_COMPANY_PAGE_RE = re.compile(r"^/company/[^/]+/?$")  # bare /company/<slug> — static profile, no event-specific evidence
 _LINKEDIN_PERSONAL_PROFILE_PREFIX = "/in/"            # /in/<slug> personal profile
 
+# Generic company-feed subpages: /company/<slug>/{posts,about,life,people,insights}
+# These are aggregated feeds or static info pages — none point at a specific
+# dated event, so they can't substantively back any intent claim.  LinkedIn
+# serves SPECIFIC posts at /posts/<id> or /feed/update/urn:li:activity:<id>
+# (different path entirely), so excluding /company/<slug>/posts cannot
+# accidentally reject a specific-post URL.  /company/<slug>/jobs is
+# DELIBERATELY NOT in this set — the jobs subpage shows visible current
+# listings and IS used by the HIRING claim-type-specific rule.
+_LINKEDIN_COMPANY_GENERIC_FEED_RE = re.compile(
+    r"^/company/[^/]+/(posts|about|life|people|insights)(?:/|$)"
+)
+
 
 def _classify_target_type(target_text: str) -> Optional[str]:
     """Classify the TARGET ICP signal topic from target text only.
@@ -168,33 +180,44 @@ def _classify_claim_evidence_type(claim_text: str) -> Optional[str]:
     return None
 
 
-def lead_has_bare_linkedin_intent_url(intent_signals) -> Optional[str]:
-    """Return the first bare-LinkedIn-company-page URL found in any of
-    the lead's intent signals, or None if none are present.
+def lead_has_unverifiable_linkedin_intent_url(intent_signals) -> Optional[Tuple[str, str]]:
+    """Return ``(url, reason)`` for the first unverifiable LinkedIn URL found
+    in any of the lead's intent signals, or None if all URLs are OK.
 
-    A bare ``linkedin.com/company/<slug>`` is a static company profile —
-    no jobs, no posts, no event-specific content — so it cannot
-    substantively back ANY intent claim regardless of topic.  Used as a
-    deterministic pre-Tier-1.5 lead-level gate: if a miner included
-    EVEN ONE such URL among the lead's intent evidence, the entire
-    lead is rejected before any LLM call (Tier 1.5 sub-industry, Tier
-    1.7 substance, Tier 2 company verification, Tier 3 URL verifier).
+    "Unverifiable" means a LinkedIn URL that does NOT point at a specific
+    dated event and therefore cannot substantively back any intent claim:
 
-    Production audit 2026-05-21 found 71% of intent URLs on the Mexican
-    Dropbox construction chain were bare LinkedIn slugs.
+      1. Bare company profile: ``linkedin.com/company/<slug>``
+         A static profile — no posts, no jobs, no news — useless as evidence.
 
-    Stricter than ``_check_intent_url_evidence_quality``'s per-signal
-    rejection: this gate fails the WHOLE lead on a single bare slug, so
-    a miner cannot pad a single legit URL with bare-slug filler to slip
-    a lead through Tier 1.7's "all signals failed" check.
+      2. Generic company feed pages:
+         ``linkedin.com/company/<slug>/{posts,about,life,people,insights}``
+         These are aggregated feeds or static info pages — a claim about
+         a specific dated event (e.g., a 2023-11-30 LinkedIn post) is not
+         verifiable by clicking a feed URL, since the feed only surfaces
+         recent items, may have moved older posts off the visible window,
+         or the specific post may have been deleted.  LinkedIn serves
+         SPECIFIC posts at ``/posts/<id>`` or
+         ``/feed/update/urn:li:activity:<id>`` (different path entirely)
+         — those remain acceptable.
+
+    Used as a deterministic pre-Tier-1.5 lead-level hard gate: if a miner
+    included EVEN ONE such URL among the lead's intent evidence, the
+    entire lead is rejected before any LLM call (Tier 1.5, Tier 1.7
+    substance, Tier 2, Tier 3).  Stricter than the per-signal check —
+    a single unverifiable URL fails the whole lead, closing the
+    "pad-with-one-legit-URL" loophole.
 
     Args:
         intent_signals: iterable of IntentSignal-shaped objects (duck-typed
                         — each must expose a ``url`` attribute).
 
     Returns:
-        The URL string of the first bare-company-page slug found, OR None
-        if no such URL exists in the lead's intent signals.
+        ``(offending_url, reason_short_name)`` for the first match, where
+        reason is one of:
+          * "bare_linkedin_company_page"
+          * "linkedin_company_generic_feed_page"
+        OR None if no unverifiable URLs are present.
     """
     for sig in (intent_signals or []):
         url = getattr(sig, "url", "") or ""
@@ -203,9 +226,24 @@ def lead_has_bare_linkedin_intent_url(intent_signals) -> Optional[str]:
         parsed = urlparse(url.lower())
         host = parsed.hostname or ""
         path = parsed.path or ""
-        if "linkedin.com" in host and _LINKEDIN_BARE_COMPANY_PAGE_RE.match(path):
-            return url
+        if "linkedin.com" not in host:
+            continue
+        if _LINKEDIN_BARE_COMPANY_PAGE_RE.match(path):
+            return (url, "bare_linkedin_company_page")
+        if _LINKEDIN_COMPANY_GENERIC_FEED_RE.match(path):
+            return (url, "linkedin_company_generic_feed_page")
     return None
+
+
+# Backward-compatible alias for the prior, narrower function name.
+# Existing imports in gateway/fulfillment/scoring.py reference this name;
+# keeping it as a thin wrapper avoids touching the call site.  Returns only
+# the URL (drops the reason) so the existing signature is preserved.  New
+# callers should prefer ``lead_has_unverifiable_linkedin_intent_url`` to get
+# the (url, reason) tuple.
+def lead_has_bare_linkedin_intent_url(intent_signals) -> Optional[str]:
+    result = lead_has_unverifiable_linkedin_intent_url(intent_signals)
+    return result[0] if result else None
 
 
 def _check_intent_url_evidence_quality(
@@ -254,10 +292,23 @@ def _check_intent_url_evidence_quality(
     host = parsed.hostname or ""
     path = parsed.path or ""
 
-    # ── Layer 1 (UNIVERSAL): bare LinkedIn company pages have no
-    # event-specific content regardless of what the miner is claiming.
-    if "linkedin.com" in host and _LINKEDIN_BARE_COMPANY_PAGE_RE.match(path):
-        return ("reject", "bare_linkedin_company_page")
+    # ── Layer 1 (UNIVERSAL): LinkedIn URLs that don't point at a specific
+    # verifiable item.  Two shapes are rejected here regardless of claim
+    # topic:
+    #   - bare /company/<slug>             — static profile, no events
+    #   - generic /company/<slug>/{posts,about,life,people,insights}
+    #                                       — aggregated feed or static
+    #                                       info page, doesn't substantiate
+    #                                       any specific dated claim.
+    # LinkedIn serves specific posts at /posts/<id> or
+    # /feed/update/urn:li:activity:<id> — those keep passing because they
+    # ARE verifiable.  /company/<slug>/jobs also keeps passing — it's the
+    # acceptable HIRING evidence path.
+    if "linkedin.com" in host:
+        if _LINKEDIN_BARE_COMPANY_PAGE_RE.match(path):
+            return ("reject", "bare_linkedin_company_page")
+        if _LINKEDIN_COMPANY_GENERIC_FEED_RE.match(path):
+            return ("reject", "linkedin_company_generic_feed_page")
 
     # ── Layer 2 (TARGET-TYPE-SPECIFIC): only fires when target topic
     # is known.  No target_type → skip and let the LLM handle it.

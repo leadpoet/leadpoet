@@ -71,7 +71,20 @@ class QualificationConfig:
     # =========================================================================
     CHAMPION_DETHRONING_THRESHOLD_POINTS: float = _DEFAULT_CHAMPION_DETHRONING_THRESHOLD_POINTS
     MIN_CHAMPION_DURATION_EPOCHS: int = 1  # Minimum epochs as champion before can be dethroned
-    MINIMUM_CHAMPION_SCORE: float = 30.0  # Minimum score to become/remain champion (out of 100)
+    # Lowered 30.0 → 20.0 on 2026-05-22 alongside the v2 model competition
+    # (20 ICPs × up-to-5 companies per ICP, sum/5 normalization).
+    # Rationale: an updated model with the SAME per-company efficacy as a
+    # prior 25-ICP champion scores ~30 in principle (per-ICP score is
+    # scale-invariant under 5 companies × q / 5 = 1 × q), but the
+    # ~3× tighter per-company cost ($0.10 vs $0.28) and time (64s vs 180s)
+    # budgets mean cost/time variability penalties (5 pts each) typically
+    # shave 5–10 points off the realistic final.  Setting the bar at 20
+    # lets a same-efficacy updated model clear comfortably after penalty
+    # noise, while still filtering out legacy 1-company miners whose best
+    # case is 20/100 (a single 100-quality company per ICP, which nobody
+    # has historically achieved — the production max was 36.76 in the old
+    # regime).
+    MINIMUM_CHAMPION_SCORE: float = 20.0  # Minimum score to become/remain champion (out of 100)
     
     # =========================================================================
     # Champion Rebenchmark Timing (UTC)

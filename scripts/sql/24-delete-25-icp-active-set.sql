@@ -34,6 +34,7 @@ BEGIN;
 DO $$
 DECLARE
     r RECORD;
+    industry_count_dist INTEGER;
 BEGIN
     FOR r IN
         SELECT
@@ -41,14 +42,28 @@ BEGIN
             is_active,
             active_from,
             active_until,
-            jsonb_array_length(COALESCE(industry_distribution, '{}'::jsonb)) AS industry_count_dist,
-            jsonb_array_length(icps)                                         AS icp_count
+            industry_distribution,
+            jsonb_array_length(icps) AS icp_count
         FROM qualification_private_icp_sets
         WHERE is_active = TRUE
     LOOP
+        -- industry_distribution is a jsonb OBJECT ({"Software": 1, ...}),
+        -- not an array.  Count its keys defensively; handle null / wrong
+        -- shape without crashing.
+        IF r.industry_distribution IS NULL THEN
+            industry_count_dist := -1;  -- sentinel: missing column
+        ELSIF jsonb_typeof(r.industry_distribution) = 'object' THEN
+            SELECT count(*)::int INTO industry_count_dist
+            FROM jsonb_object_keys(r.industry_distribution);
+        ELSIF jsonb_typeof(r.industry_distribution) = 'array' THEN
+            industry_count_dist := jsonb_array_length(r.industry_distribution);
+        ELSE
+            industry_count_dist := -2;  -- sentinel: unexpected shape
+        END IF;
+
         RAISE NOTICE
             'About to delete: set_id=%, active_from=%, active_until=%, icp_count=%, industry_keys_in_distribution=%',
-            r.set_id, r.active_from, r.active_until, r.icp_count, r.industry_count_dist;
+            r.set_id, r.active_from, r.active_until, r.icp_count, industry_count_dist;
     END LOOP;
 END $$;
 
@@ -69,6 +84,7 @@ WHERE is_active = TRUE;
 
 DELETE FROM qualification_private_icp_sets
 WHERE active_from > NOW()
+  AND jsonb_typeof(icps) = 'array'
   AND jsonb_array_length(icps) <> 20;
 
 COMMIT;

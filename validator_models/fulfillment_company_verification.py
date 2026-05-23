@@ -56,7 +56,9 @@ _ENRICH_PROMPT = (
     'LinkedIn Description: "{linkedin_description}"\n'
     'LinkedIn Industry: "{linkedin_industry}"\n\n'
     'Search the web for additional details about their products, services, '
-    'and target market. Provide a 2-3 sentence description.'
+    'and target market. Provide a 2-3 sentence description IN ENGLISH '
+    '(translate any source content from Spanish, French, Portuguese, '
+    'German, or any other language into clear professional English).'
 )
 
 _VALIDATE_MATCH_PROMPT = (

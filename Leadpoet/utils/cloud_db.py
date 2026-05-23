@@ -2661,10 +2661,10 @@ def gateway_submit_fulfillment_scores(
 
 
 def gateway_get_fulfillment_leaderboard(wallet: bt.wallet, limit: int = 3) -> List[Dict]:
-    """Fetch the top-N fulfillment miners ranked by wins THIS WEEK.
+    """Fetch the top-N fulfillment miners ranked by wins in the last 140 epochs.
 
-    Window: rolling 7-day window resetting every Monday 00:00 UTC.
-    Server-side filtering on fulfillment_score_consensus.computed_at.
+    Window: rolling 140-epoch window (~7.0 days) anchored to current wall-clock
+    time.  Server-side filtering on fulfillment_score_consensus.computed_at.
 
     Mirrors gateway_get_all_fulfillment_rewards' retry/backoff pattern.
     Used by the validator each set_weights cycle to allocate the

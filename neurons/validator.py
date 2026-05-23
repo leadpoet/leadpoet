@@ -3232,7 +3232,7 @@ class Validator(BaseValidatorNeuron):
             # ║ the fulfillment track — it rewards sustained high performance   ║
             # ║ on top of per-epoch payouts.                                    ║
             # ║                                                                  ║
-            # ║ Window: rolling 7-day window resetting every Monday 00:00 UTC.  ║
+            # ║ Window: rolling 140-epoch window (~7.0 days) from now.          ║
             # ║ The gateway endpoint /fulfillment/leaderboard filters by        ║
             # ║ fulfillment_score_consensus.computed_at >= last_monday_00z.     ║
             # ║                                                                  ║
@@ -3250,7 +3250,7 @@ class Validator(BaseValidatorNeuron):
             # ║ "95% fulfillment" as "per-epoch only".  Restored in d3558afa    ║
             # ║ the same day.  This banner exists so it doesn't happen again.   ║
             # ║ 2026-05-17: leaderboard bumped 4% → 9.5% AND switched from      ║
-            # ║ all-time to weekly (Monday 00:00 UTC reset).                    ║
+            # ║ all-time to rolling 140-epoch window (~7 days, gateway-side).   ║
             # ╚══════════════════════════════════════════════════════════════════╝
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
@@ -3262,8 +3262,9 @@ class Validator(BaseValidatorNeuron):
             # the split ratio between per-epoch and weekly is tunable here.
             FULFILLMENT_POOL_SHARE = 0.855 # 85.5% reserved for per-epoch fulfillment rewards
             # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, restored 2026-05-15,
-            # bumped to 9.5% + switched to weekly window on 2026-05-17.
-            # Top-3 WEEKLY fulfillment winners (Mon 00:00 UTC reset) get this bonus
+            # bumped to 9.5% + switched to rolling window on 2026-05-17, changed
+            # from Monday-reset to rolling 140-epoch (~7 day) window on 2026-05-23.
+            # Top-3 fulfillment winners in the last 140 epochs get this bonus
             # on top of per-epoch payouts.  Carved from the 95% fulfillment-flavored
             # total (95 = 85.5 per-epoch + 9.5 leaderboard).
             LEADERBOARD_BONUS_SHARE = 0.095  # 9.5% total: 5 + 3 + 1.5
@@ -3280,7 +3281,8 @@ class Validator(BaseValidatorNeuron):
             # carved from fulfillment pool (75 → 71 + 4).  Total fulfillment-
             # flavored allocation unchanged at 75%.
             # Updated 2026-05-17: leaderboard 4% → 9.5% AND switched from
-            # all-time to weekly (Monday 00:00 UTC reset).  Fulfillment pool
+            # all-time to rolling window.  Updated 2026-05-23: window changed
+            # from Monday-reset to rolling 140 epochs (~7 days).  Fulfillment pool
             # 91% → 85.5%; 95% fulfillment-flavored total preserved.
             
             # CONFIGURABLE THRESHOLD: Approved leads needed in 30 epochs for full sourcing share
@@ -3567,8 +3569,8 @@ class Validator(BaseValidatorNeuron):
                 print(f"      Fulfillment emission error (safe fallback — full pool to burn): {e}")
 
             # ════════════════════════════════════════════════════════════════
-            # FULFILLMENT LEADERBOARD BONUS (top-3 weekly fulfillment winners,
-            # Monday 00:00 UTC reset — windowing is handled gateway-side in
+            # FULFILLMENT LEADERBOARD BONUS (top-3 fulfillment winners in the
+            # rolling 140-epoch window — windowing is handled gateway-side in
             # GET /fulfillment/leaderboard).
             # Same safe-fallback pattern as fulfillment_share: any error here
             # zeros the bonus and the full LEADERBOARD_BONUS_SHARE flows to
@@ -3592,7 +3594,7 @@ class Validator(BaseValidatorNeuron):
                         LEADERBOARD_TOP2_PCT,
                         LEADERBOARD_TOP3_PCT,
                     ]
-                    print(f"      Leaderboard top-3 (this week's fulfillment wins — Mon 00:00 UTC reset):")
+                    print(f"      Leaderboard top-3 (rolling 140-epoch window fulfillment wins):")
                     for rank_idx, rank_pct in enumerate(rank_pcts):
                         if rank_idx >= len(leaders):
                             # No miner at this rank — bonus burns

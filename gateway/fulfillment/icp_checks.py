@@ -10,10 +10,13 @@ to reject obvious mismatches early and save API cost.
 
 import ast
 import asyncio
+import json
 import logging
 import os
 import re
-from typing import Any, List, Optional, Set, Tuple
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
@@ -21,6 +24,62 @@ from gateway.fulfillment.models import FulfillmentLead, FulfillmentICP
 from gateway.qualification.models import LeadOutput
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Industry equivalence map — Tier 1 fallback for parent-industry synonyms
+# ─────────────────────────────────────────────────────────────────────
+# Loaded once from gateway/utils/industry_equivalence.json.  Each class is a
+# set of parent industries treated as equivalent for the Tier 1 industry-match
+# check.  Behavior is purely additive: if the direct membership check
+# (``lead.industry in icp.industry``) already passes, this map is never
+# consulted.  If the direct check fails, the equivalence map gets a chance.
+# JSON missing or malformed → empty map → no behavior change vs. pre-change.
+# ─────────────────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=1)
+def _load_industry_equivalence_map() -> Dict[str, Set[str]]:
+    """Build ``{industry: set_of_equivalent_industries}`` from the JSON.
+
+    An industry MAY appear in multiple equivalence classes; the per-industry
+    set is the UNION of all classes containing it.  This intentionally avoids
+    transitive matching across classes: if Software is in class1 with Apps
+    AND class2 with Privacy/Security, Apps still does NOT auto-match
+    Privacy/Security (only Software does).  Each class is self-contained.
+
+    Returns:
+        ``{}`` if JSON file missing or malformed (silent fail-open — the
+        layer is additive, never load-bearing).  Otherwise the lookup map.
+    """
+    path = Path(__file__).resolve().parent.parent / "utils" / "industry_equivalence.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning(f"industry_equivalence.json malformed: {e} — falling back to empty map")
+        return {}
+    out: Dict[str, Set[str]] = {}
+    for cls in data.get("equivalence_classes", []):
+        members = set(cls)
+        for m in cls:
+            out.setdefault(m, set()).update(members)
+    return out
+
+
+def _industry_in_equivalence_class(lead_industry: str, allowed_industries: List[str]) -> bool:
+    """Return True if ``lead_industry`` shares an equivalence class with any
+    of ``allowed_industries``.  Used as Tier 1 fallback AFTER the direct
+    membership check fails.  Empty equivalence map → always False.
+    """
+    if not lead_industry or not allowed_industries:
+        return False
+    equiv = _load_industry_equivalence_map()
+    lead_class = equiv.get(lead_industry)
+    if not lead_class:
+        return False
+    return any(ai in lead_class for ai in allowed_industries)
 
 
 def _coerce_industry_list(v: Any) -> List[str]:
@@ -220,7 +279,13 @@ def tier1_check(
     allowed_inds = _coerce_industry_list(icp.industry)
     if allowed_inds:
         if lead.industry not in allowed_inds:
-            return "industry_mismatch"
+            # Fallback: industry equivalence map (e.g., Software ≈ IT, Real
+            # Estate ≈ Physical Infrastructure).  See
+            # gateway/utils/industry_equivalence.json.  Purely additive — if
+            # JSON missing or no class matches, behaves exactly as the
+            # original hard check.
+            if not _industry_in_equivalence_class(lead.industry, allowed_inds):
+                return "industry_mismatch"
 
     allowed_subs = _coerce_industry_list(icp.sub_industry)
     if allowed_subs:

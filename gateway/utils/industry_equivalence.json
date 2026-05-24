@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "description": "Industry equivalence classes for Tier 1 industry-match fallback. A lead's industry passes the ICP industry check if it's either in the ICP's allowed list OR in the SAME equivalence class as any allowed industry. Construction is NOT listed — it's a sub-industry already mapped to 'Real Estate' parent in INDUSTRY_TAXONOMY, so a lead with industry='Real Estate' + sub_industry='Construction' already matches without any equivalence rule. These classes only apply at the parent-industry level. Each class is bidirectional and an industry MAY appear in multiple classes (transitive matches are intentional, e.g., Software ≈ IT also makes Software ≈ Security via the second class).",
+  "equivalence_classes": [
+    ["Software", "Information Technology", "Apps", "Platforms"],
+    ["Software", "Privacy and Security"],
+    ["Sales and Marketing", "Advertising"],
+    ["Financial Services", "Lending and Investments", "Payments"],
+    ["Media and Entertainment", "Content and Publishing", "Video", "Music and Audio"],
+    ["Hardware", "Consumer Electronics"],
+    ["Real Estate", "Physical Infrastructure"],
+    ["Manufacturing", "Consumer Goods", "Clothing and Apparel"],
+    ["Health Care", "Biotechnology"],
+    ["Transportation", "Navigation and Mapping"],
+    ["Energy", "Natural Resources", "Sustainability"],
+    ["Artificial Intelligence", "Data and Analytics"],
+    ["Messaging and Telecommunications", "Internet Services"],
+    ["Professional Services", "Administrative Services"],
+    ["Gaming", "Media and Entertainment"]
+  ]
+}

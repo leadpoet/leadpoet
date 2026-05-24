@@ -509,9 +509,12 @@ async def score_fulfillment_lead(
     openrouter_key = os.environ.get("OPENROUTER_KEY", "")
 
     if scrapingdog_key:
-        # --- Email check (from batch result, no API call) ---
-        # Path: TrueList batch email_ok  → pass
-        #       anything else            → reject (catch-all treated same as invalid)
+        # --- Email check (precomputed from two-stage TrueList inline) ---
+        # Path: thorough → enhanced retry on inconclusive verdicts
+        #       (unknown / unknown_error / timeout / error / failed_greylisted).
+        #       email_ok → pass.  Anything else, including catch-all
+        #       (accept_all) and failed_no_mailbox → reject.
+        # See _run_batch_email_verification below for the full pipeline.
         email_verified = False
         if email_result:
             batch_status = email_result.get("status", "unknown")
@@ -919,10 +922,12 @@ async def score_fulfillment_batch(
     icp: FulfillmentICP,
     use_apify: bool = False,
 ) -> List[FulfillmentScoreResult]:
-    """Score a batch of fulfillment leads with batch email verification."""
+    """Score a batch of fulfillment leads with two-stage email verification."""
     seen_companies: Set[str] = set()
 
-    # Run batch email verification up-front so individual leads get results
+    # Verify every email up-front via TrueList inline (thorough → enhanced
+    # retry on inconclusive verdicts) so each per-lead scorer just reads
+    # the precomputed status — no API calls in the per-lead hot path.
     email_results_map = await _run_batch_email_verification(leads)
 
     results: List[FulfillmentScoreResult] = []
@@ -993,26 +998,77 @@ async def score_fulfillment_batch(
 async def _run_batch_email_verification(
     leads: List[FulfillmentLead],
 ) -> Dict[str, dict]:
-    """Verify all emails in the batch via TrueList inline API.
+    """Two-stage TrueList inline verification for fulfillment leads.
 
-    Returns a mapping of ``email (lowercase) -> result dict``.
-    Each result dict contains at minimum ``status``, ``passed``, and
-    ``rejection_reason`` keys compatible with ``run_stage4_5_repscore``.
+    Stage 1: ``validation_strategy="thorough"`` on every email.  Empirically
+    matches the default strategy on known-good emails (10/10 pass rate on
+    a confirmed-winner sample), and rescues some emails the default
+    leaves as ``unknown_error``.
 
-    On failure the returned dict is empty, causing each lead to
-    individually fail with ``email_verification_unavailable`` rather
-    than crashing the entire validator scoring loop.
+    Stage 2: For any email that came back with an inconclusive verdict
+    (``unknown`` / ``unknown_error`` / ``timeout`` / ``error`` /
+    ``failed_greylisted`` — i.e. the ``needs_retry`` set inside
+    ``verify_emails_inline``), retry with
+    ``validation_strategy="enhanced"``.  Enhanced uses extra credits
+    only for these surgical retries, not blanket-applied.
+
+    Anything that ends Stage 2 as ``email_ok`` passes.  Any definitive
+    non-``email_ok`` verdict (``failed_no_mailbox``, ``accept_all``,
+    persistent ``unknown_error``, etc.) is rejected by the calling
+    scorer in ``score_fulfillment_lead``.
+
+    Returns a mapping of ``email (lowercase) -> result dict``.  On
+    Stage-1 failure the returned dict is empty so each lead individually
+    fails with ``email_verification_unavailable`` rather than crashing
+    the validator scoring loop.  A Stage-2 failure is non-fatal and
+    leaves Stage-1 verdicts in place.
+
+    Renaming note: the function is still called ``_run_batch_email_verification``
+    because it batches per-LEAD email lookups for the validator's batch
+    pipeline — not because it uses TrueList's batch API.  TrueList batch
+    was never used here; the v2 fulfillment flow is inline-only.
     """
     emails = list({lead.email.lower() for lead in leads if lead.email})
     if not emails:
         return {}
 
+    from validator_models.checks_email import verify_emails_inline
+
     try:
-        from validator_models.checks_email import verify_emails_inline
-        return await verify_emails_inline(emails)
+        stage1_results = await verify_emails_inline(
+            emails, validation_strategy="thorough"
+        )
     except Exception as e:
-        logger.error(f"Batch email verification failed: {e}")
+        logger.error(f"Stage 1 (thorough) email verification failed: {e}")
         return {}
+
+    inconclusive = {
+        "unknown", "unknown_error", "timeout", "error", "failed_greylisted",
+    }
+    retry_emails = [
+        e for e in emails
+        if e not in stage1_results
+        or stage1_results[e].get("status") in inconclusive
+        or stage1_results[e].get("needs_retry")
+    ]
+
+    if retry_emails:
+        logger.info(
+            f"Stage 2 (enhanced): retrying {len(retry_emails)}/{len(emails)} "
+            f"inconclusive emails"
+        )
+        try:
+            stage2_results = await verify_emails_inline(
+                retry_emails, validation_strategy="enhanced"
+            )
+            stage1_results.update(stage2_results)
+        except Exception as e:
+            logger.warning(
+                f"Stage 2 (enhanced) email verification failed: {e} — "
+                f"falling back to Stage 1 verdicts for {len(retry_emails)} emails"
+            )
+
+    return stage1_results
 
 
 async def _run_fulfillment_stage0_2(

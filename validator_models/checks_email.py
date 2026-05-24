@@ -1378,22 +1378,32 @@ async def submit_and_poll_truelist(emails: List[str]) -> Tuple[str, Dict[str, di
     return batch_id, results
 
 
-async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
+async def verify_emails_inline(
+    emails: List[str],
+    validation_strategy: Optional[str] = None,
+) -> Dict[str, dict]:
     """
     Verify emails using TrueList's INLINE verification API (not batch).
 
-    This is a FALLBACK for emails that TrueList's batch API silently drops.
-    Some enterprise domains (spglobal.com, jacobs.com, etc.) work with inline
-    verification but not batch verification.
+    This is the primary verification path for the fulfillment pipeline
+    (called from gateway/fulfillment/scoring.py::_run_batch_email_verification
+    as a two-stage thorough → enhanced flow) and the inline FALLBACK for the
+    sourcing pipeline when TrueList's batch API silently drops emails.
 
     Rate limit: 10 requests/second per TrueList docs.
-    Each request can verify up to 3 emails.
+    Each request can verify up to 3 emails (space-separated).
 
     Args:
-        emails: List of email addresses to verify
+        emails: List of email addresses to verify.
+        validation_strategy: Optional TrueList inline strategy
+            ("quick" / "accurate" / "thorough" / "enhanced").  When ``None``
+            (default), the request omits the parameter and TrueList applies
+            its server-side default — this preserves prior behavior for the
+            sourcing inline-fallback call sites.  Fulfillment uses
+            "thorough" on the first pass and "enhanced" on retries.
 
     Returns:
-        Dict mapping email -> result dict with status, passed, needs_retry
+        Dict mapping email -> result dict with status, passed, needs_retry.
     """
     if not TRUELIST_API_KEY:
         print("   ⚠️ TRUELIST_API_KEY not configured for inline verification")
@@ -1407,7 +1417,8 @@ async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
     PASS_STATUSES = {"email_ok"}  # Only email_ok passes - accept_all is rejected
     RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error", "failed_greylisted"}
 
-    print(f"   🔍 Inline verification for {len(emails)} emails (TrueList batch fallback)...")
+    strategy_label = validation_strategy or "default"
+    print(f"   🔍 Inline verification ({strategy_label}) for {len(emails)} emails...")
     import time as _time
     _start = _time.time()
 
@@ -1418,6 +1429,8 @@ async def verify_emails_inline(emails: List[str]) -> Dict[str, dict]:
                 email_param = " ".join(batch)
 
                 url = f"https://api.truelist.io/api/v1/verify_inline?email={email_param}"
+                if validation_strategy:
+                    url += f"&validation_strategy={validation_strategy}"
 
                 try:
                     async with session.post(url, headers=headers, timeout=35, proxy=HTTP_PROXY_URL) as response:

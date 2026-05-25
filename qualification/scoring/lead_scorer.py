@@ -591,6 +591,8 @@ def _apply_signal_time_decay(
         parsed_date = None
 
     if parsed_date is None:
+        if source_lower in SOURCES_DATE_NOT_REQUIRED:
+            return raw_score, 1.0
         return 0.0, 0.0
 
     age_months = calculate_age_months(parsed_date)

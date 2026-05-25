@@ -942,7 +942,8 @@ async def fulfillment_person_verification(
     lead["stage4_extracted_role"] = actual_role
     lead["location_verified"] = True
     lead["location_method"] = "sd_scraper" if sd_profile else "apify"
-    parsed = apify_data.get("location", {}).get("parsed", {})
+    loc_field = apify_data.get("location") or {}
+    parsed = (loc_field.get("parsed") if isinstance(loc_field, dict) else None) or {}
     lead["stage4_extracted_location"] = (
         f"{parsed.get('city', '')}, {parsed.get('state', '')}, {parsed.get('country', '')}"
     )

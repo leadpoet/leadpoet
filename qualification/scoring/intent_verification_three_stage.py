@@ -89,41 +89,15 @@ ANTI_BOT_MARKERS = [
     "security check",
 ]
 
-# Per-host config overrides discovered empirically (test_per_platform_optimal.py
-# 2026-05-25).  These override the default JS_HEAVY / ANTI_BOT profiles.  Keys
-# match against the URL host via 'in' substring (so "ziprecruiter.com" matches
-# any subdomain).  Each value is a dict of ScrapingDog /scrape params.  None
-# means "do not pass these params" (e.g. some hosts break under dynamic=true).
-#
-# Empty dict {} means "plain — no rendering params".  Used for hosts where:
-#   - Server already returns the full body in HTML (builtin.com)
-#   - dynamic=true triggers an HTTP 500/504 (glassdoor — confirmed)
 HOST_SCRAPE_CONFIG = {
-    # Real-world tested: longer wait + premium needed to get job body
     "ziprecruiter.com": {"dynamic": "true", "wait": "15000",
                          "premium": "true", "stealth_mode": "true"},
-    # Real-world tested: needs >=10s wait; 15s recommended for stability since
-    # wellfound's rendering is variable (sometimes returns shell-only at 10s).
     "wellfound.com":    {"dynamic": "true", "wait": "15000"},
-    # Real-world tested: dynamic=true returns HTTP 500/504; plain works fine
     "glassdoor.com":    {},
-    # Real-world tested: plain returns full job body in 9s; dynamic adds 9s
-    # latency with no benefit
     "builtin.com":      {},
-    # Lever's existing config (dynamic_5s) is already optimal — keep default
 }
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Job-body-in-scrape gate
-# ─────────────────────────────────────────────────────────────────────
-# When a miner cites a job-board URL but ScrapingDog returns only the React
-# shell (no rendered job body), Stage 3 sees thin content and returns
-# `unable_to_verify` — which under INTENT_VERIFIER_REVIEW_AS_ACCEPT=on would
-# wrongly approve.  To close this FP gap, we hard-reject (no review path)
-# when the URL is on a known job board AND none of the body-anchor phrases
-# below appear in the scraped content.  LinkedIn URLs that successfully used
-# /linkedinjobs are exempt (their meta is structured, not phrase-based).
 JOB_BOARD_HOSTS = (
     "indeed.com", "builtin.com", "builtinnyc.com",
     "lever.co", "wellfound.com", "ziprecruiter.com",
@@ -139,15 +113,11 @@ JOB_BODY_ANCHORS = (
     "we’re looking for",
     "apply now", "apply for this job", "submit application",
     "job description",
-    # LinkedIn synthesized envelope fields from _scrape_linkedin_job
     "job_position:", "job_description",
 )
 
 
 def _looks_like_job_body(text: str) -> bool:
-    """True if scraped text contains at least one job-posting body anchor.
-    Used to gate auto-approval on hosts where the scrape sometimes returns
-    only the page shell."""
     if not text:
         return False
     low = text.lower()
@@ -241,8 +211,6 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
     host = _host(url)
     params = {"api_key": api_key, "url": url, "format": "markdown"}
 
-    # Per-host override beats the JS_HEAVY / ANTI_BOT defaults.  Each override
-    # was tuned against a real URL — see HOST_SCRAPE_CONFIG comment.
     override = next(
         (cfg for h, cfg in HOST_SCRAPE_CONFIG.items() if h in host),
         None,
@@ -282,11 +250,6 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
     if not _looks_textual(content):
         return {"ok": False, "stage": "binary_blob",
                 "content": "", "error": "non_textual_content"}
-    # Anti-bot retry: only attempt premium+stealth escalation if we DIDN'T
-    # already have a per-host override.  Empirically (test 2026-05-25) the
-    # tuned overrides (e.g. wellfound dynamic_10s) already get a good result;
-    # adding premium on top causes HTTP 500 on those hosts.  For default
-    # JS_HEAVY/ANTI_BOT paths we still escalate as before.
     if _has_anti_bot_marker(content) and override is None:
         params["premium"] = "true"
         params["stealth_mode"] = "true"
@@ -349,20 +312,12 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# LinkedIn-aware routing — purpose-built ScrapingDog endpoints
+# LinkedIn-aware routing
 # ─────────────────────────────────────────────────────────────────────
-# LinkedIn job URL shapes we see:
-#   /jobs/view/4347020266/
-#   /jobs/view/people-analyst-at-kinamic-4347020266/
-#   /jobs/view/people-analyst-at-kinamic-4347020266?...
-# The trailing run of digits is the job_id ScrapingDog's /linkedinjobs needs.
 _LINKEDIN_JOB_ID_RE = re.compile(
     r"linkedin\.com/jobs/view/(?:[^/?#]*-)?(\d+)", re.IGNORECASE,
 )
 
-# Anything matching this in jobs_status (or job_description leading line) means
-# the posting is terminally closed.  We treat closed as deterministic reject —
-# no LLM needed.
 _LINKEDIN_JOB_CLOSED_RE = re.compile(
     r"(?i)\b("
     r"no longer accepting applications?"
@@ -376,13 +331,10 @@ _LINKEDIN_JOB_CLOSED_RE = re.compile(
     r")\b"
 )
 
-# "6 months ago", "1 year ago", "2 weeks ago", etc.  Used to compute the
-# posting age deterministically from /linkedinjobs's job_posting_time field.
 _LINKEDIN_REL_DATE_RE = re.compile(
     r"(?i)(\d+)\s+(year|month|week|day|hour|minute)s?\s+ago"
 )
 
-# Cap (months) for fresh job postings.  Anything older → stale reject.
 LINKEDIN_JOB_MAX_AGE_MONTHS = 6
 
 
@@ -412,18 +364,6 @@ def _parse_relative_age_to_months(s: str) -> Optional[float]:
 
 
 async def _scrape_linkedin_job(url: str) -> Dict[str, Any]:
-    """ScrapingDog's purpose-built /linkedinjobs endpoint. Returns the same
-    {ok, stage, content, error} envelope as _scrape_sd_hardened so it slots
-    into the fetch loop transparently.
-
-    Why dedicated endpoint vs generic /scrape:
-      - generic /scrape on linkedin.com fails ~all the time even with
-        dynamic + premium + stealth (LinkedIn anti-bot)
-      - /linkedinjobs returns structured JSON first try at ~1/10th the cost
-      - exposes jobs_status (e.g. "No longer accepting applications") and
-        job_posting_time as discrete fields → the closed-state + 6-month
-        rules in _build_final_judge_prompt fire deterministically
-    """
     api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
         "QUALIFICATION_SCRAPINGDOG_API_KEY"
     )
@@ -458,9 +398,6 @@ async def _scrape_linkedin_job(url: str) -> Dict[str, Any]:
         return {"ok": False, "stage": "linkedin_jobs_empty",
                 "content": "", "error": "no job fields in response"}
 
-    # Synthesize a text envelope the Stage 3 judge can read.  Lead with
-    # jobs_status and posted_at so the closed-state + 6-month timeline rules
-    # have plain-text anchors to key off.
     parts: List[str] = []
     jobs_status = data.get("jobs_status")
     if jobs_status:
@@ -484,9 +421,6 @@ async def _scrape_linkedin_job(url: str) -> Dict[str, Any]:
         return {"ok": False, "stage": "linkedin_jobs_thin",
                 "content": text, "error": "<50 chars"}
 
-    # Deterministic flags — derived directly from the structured API fields,
-    # not from LLM judgment.  Downstream uses these to short-circuit before
-    # invoking the Stage 3 sonar-pro judge.
     is_closed = bool(jobs_status and _LINKEDIN_JOB_CLOSED_RE.search(jobs_status))
     months_ago = _parse_relative_age_to_months(posted or "")
     is_stale = (
@@ -754,9 +688,6 @@ async def _fetch_sd_then_exa(
         if not url:
             continue
 
-        # LinkedIn jobs URLs → purpose-built /linkedinjobs endpoint first.
-        # Cheaper (~5 vs ~50 credits), more reliable (LinkedIn blocks generic
-        # /scrape), and returns structured fields including jobs_status.
         if _extract_linkedin_job_id(url):
             lij = await _scrape_linkedin_job(url)
             if lij.get("ok") and lij.get("content"):
@@ -771,8 +702,6 @@ async def _fetch_sd_then_exa(
                     "meta": lij.get("meta") or {},
                 })
                 continue
-            # /linkedinjobs failed — fall through to generic SD → Exa,
-            # but record why we bailed off the dedicated path.
             statuses.append({
                 "url": url, "source": "scrapingdog_linkedinjobs_fallback",
                 "linkedinjobs_stage": lij.get("stage"),
@@ -1099,12 +1028,6 @@ async def verify_three_stage(
                 },
             }
 
-    # ── PRE-STAGE-3: deterministic LinkedIn-job closed/stale gate ─
-    # /linkedinjobs returns jobs_status + job_posting_time as structured
-    # fields.  When the API itself reports the posting is closed (e.g.
-    # "No longer accepting applications") or older than the freshness cap,
-    # we reject without spending a sonar-pro call — there is no judgment
-    # call to make.
     for res in (contents.get("results") or []):
         meta = res.get("meta") or {}
         if meta.get("kind") != "linkedin_job":
@@ -1156,19 +1079,6 @@ async def verify_three_stage(
                 },
             }
 
-    # ── PRE-STAGE-3: job-body-in-scrape gate ───────────────────────
-    # For miner-cited job-board URLs whose scrape returned only shell content
-    # (no rendered job body), Stage 3 would see thin content and return
-    # `unable_to_verify` → reviewable → auto-approve if review_as_accept=on.
-    # That's a FP path for closed/stale postings whose closed-state phrase
-    # never made it into the scraped text.  Hard-reject here so the env flag
-    # cannot leak through.
-    #
-    # Exemptions:
-    #   - LinkedIn URLs that successfully used /linkedinjobs (meta.kind set):
-    #     their structured envelope is reliable even when phrase anchors miss.
-    #   - Non-job-board URLs (news, funding, social, etc.): job body anchors
-    #     don't apply.
     has_linkedin_structured = any(
         (r.get("meta") or {}).get("kind") == "linkedin_job"
         for r in (contents.get("results") or [])

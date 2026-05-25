@@ -82,10 +82,17 @@ _LOCATION_PROMPT = (
     'LinkedIn shows: "{li_location}"\n\n'
     'Step 1: Is the miner\'s claimed location a real, valid place? '
     'If the city+state+country combination does not exist, return {{"valid": false, "match": false}}.\n'
-    'Step 2: If valid, does it match the LinkedIn location?\n'
-    '- The miner may have submitted partial location (only country, or state+country, '
-    'or city+state+country). Match only the fields the miner provided.\n'
+    'Step 2: Specificity check — the miner MUST be at least as specific as LinkedIn.\n'
+    '- If LinkedIn shows a city (e.g. "San Luis, Argentina") but the miner only provided '
+    'a country (no city, no state), return {{"valid": true, "match": false}}.\n'
+    '- If LinkedIn shows a state (e.g. "California, USA") but the miner only provided '
+    'a country, return {{"valid": true, "match": false}}.\n'
+    '- Miner is allowed to be MORE specific than LinkedIn, not less.\n'
+    'Step 3: If specificity is OK, does it actually match the LinkedIn location?\n'
+    '- Match only the fields the miner provided.\n'
     '- For non-US locations, state is not required to match — only city and country.\n'
+    '- The miner\'s city must correspond to a real city in that country, not '
+    'simply the country name repeated.\n'
     'Return JSON only: {{"valid": true/false, "match": true/false}}'
 )
 
@@ -292,6 +299,11 @@ def _rule_based_location_match(m_city: str, m_state: str, m_country: str,
     """
     Rule-based location match. Miner may have partial fields.
     Match only what the miner submitted.
+
+    City/state are matched against the NON-country portion of li_location
+    (everything except the last comma-separated part) so a miner who passes
+    the country name as their city/state cannot pass via substring re-use.
+    The country itself is matched against the full string.
     """
     if not li_location:
         return None
@@ -299,62 +311,89 @@ def _rule_based_location_match(m_city: str, m_state: str, m_country: str,
     li_lower = li_location.lower()
     li_stripped = _strip_diacritics(li_lower)
 
-    # Normalize miner's country
+    parts = [p.strip() for p in li_location.split(",") if p.strip()]
+    if len(parts) > 1:
+        non_country_li = ", ".join(parts[:-1]).lower()
+    else:
+        non_country_li = ""
+    non_country_stripped = _strip_diacritics(non_country_li)
+
     m_country_norm = normalize_country(m_country).lower() if m_country else ""
 
-    # Check country
     if m_country_norm:
-        # Try both normalized and raw in LinkedIn string
         country_in_li = (
             m_country_norm in li_lower
             or m_country_norm in li_stripped
             or m_country.lower() in li_lower
         )
-        # Also try country code aliases
         if not country_in_li:
             for alias, canonical in COUNTRY_ALIASES.items():
                 if canonical == m_country_norm and alias in li_lower:
                     country_in_li = True
                     break
         if not country_in_li:
-            return None  # Let LLM try
+            return None
 
-    # Check state (if provided)
     if m_state:
+        if not non_country_li:
+            return None
         m_state_norm = normalize_state(m_state, m_country).lower()
         state_in_li = (
-            m_state_norm in li_lower
-            or m_state.lower() in li_lower
-            or _strip_diacritics(m_state.lower()) in li_stripped
+            m_state_norm in non_country_li
+            or m_state.lower() in non_country_li
+            or _strip_diacritics(m_state.lower()) in non_country_stripped
         )
         if not state_in_li:
-            return None  # Let LLM try
+            return None
 
-    # Check city (if provided)
     if m_city:
+        if not non_country_li:
+            return None
         m_city_norm = normalize_city(m_city, m_country).lower()
         city_in_li = (
-            m_city_norm in li_lower
-            or m_city.lower() in li_lower
-            or _strip_diacritics(m_city.lower()) in li_stripped
+            m_city_norm in non_country_li
+            or m_city.lower() in non_country_li
+            or _strip_diacritics(m_city.lower()) in non_country_stripped
         )
         if not city_in_li:
-            return None  # Let LLM try
+            return None
 
-    # All provided fields found
     return True
+
+
+def _location_specificity_gate(m_city: str, m_state: str, m_country: str,
+                                li_location: str) -> Optional[bool]:
+    """Reject when miner's specificity is below LinkedIn's.
+
+    Returns False (reject) if miner provided fewer location parts than
+    LinkedIn shows (i.e. miner could have been more specific but wasn't).
+    Returns None to let the regular match logic run.
+
+    Comma-separated parts count as the specificity proxy:
+      LI "San Luis, Argentina" = 2 parts (city + country)
+      LI "Argentina" = 1 part (country only)
+    Miner specificity = number of non-empty fields among city/state/country.
+    """
+    if not li_location:
+        return None
+
+    miner_n = sum(1 for v in (m_city, m_state, m_country) if (v or "").strip())
+    li_n = len([p for p in li_location.split(",") if p.strip()])
+
+    if miner_n < li_n:
+        return False
+    return None
 
 
 async def _llm_location_check(
     m_city: str, m_state: str, m_country: str,
     li_location: str, openrouter_key: str,
 ) -> bool:
-    """Location check: rule-based first, LLM fallback. Partial match supported."""
-    # Rule-based first
-    rule = _rule_based_location_match(m_city, m_state, m_country, li_location)
-    if rule is not None:
-        print(f"   📍 Location {'✅' if rule else '❌'} (rule-based)")
-        return rule
+    """Location check: specificity gate (deterministic), then LLM."""
+    gate = _location_specificity_gate(m_city, m_state, m_country, li_location)
+    if gate is False:
+        print(f"   📍 Location ❌ (miner less specific than LinkedIn)")
+        return False
 
     if not openrouter_key:
         print("   ⚠️ No OpenRouter key for location LLM")
@@ -563,6 +602,7 @@ def _find_first_current_experience(apify_data: dict, lead_company: str = "") -> 
             "position": exp_role,
             "companyName": (exp.get("companyName") or "").strip(),
             "companyLinkedinUrl": exp.get("companyLinkedinUrl") or exp.get("company_url") or "",
+            "location": (exp.get("location") or "").strip(),
             "_role_source": "experience",
         }
         current_entries.append(entry)
@@ -578,6 +618,70 @@ def _find_first_current_experience(apify_data: dict, lead_company: str = "") -> 
 
     # No company match — return first current entry
     return current_entries[0]
+
+
+def _best_li_location(apify_data: dict, current_position: Optional[dict],
+                       lead_company: str = "") -> str:
+    """Build the LinkedIn location string.
+
+    Title/headline location is the source of truth. The current job's
+    experience location is used ONLY to fill in fields that are missing
+    in the title (e.g. headline has just country, experience adds city).
+
+    Country conflict between title and experience → trust the title.
+    If neither source has any location data → returns "".
+    """
+    loc_field = apify_data.get("location") or {}
+    parsed = (loc_field.get("parsed") if isinstance(loc_field, dict) else None) or {}
+    h_city = (parsed.get("city") or "").strip()
+    h_state = (parsed.get("state") or "").strip()
+    h_country = (parsed.get("country") or "").strip()
+
+    # If the title already has city + country, that's the canonical answer.
+    if h_city and h_country:
+        return ", ".join(p for p in (h_city, h_state, h_country) if p)
+
+    # Otherwise look for an experience location to fill gaps. Prefer the
+    # passed-in current_position; fall back to the first Present experience
+    # with a location string.
+    exp_loc = ""
+    if current_position:
+        exp_loc = (current_position.get("location") or "").strip()
+    if not exp_loc:
+        for exp in apify_data.get("experience", []) or []:
+            end = exp.get("endDate") or {}
+            if end.get("text") != "Present":
+                continue
+            cand = (exp.get("location") or "").strip()
+            if cand:
+                exp_loc = cand
+                break
+
+    if not exp_loc:
+        # No enrichment available — return whatever the title has (may be "")
+        return ", ".join(p for p in (h_city, h_state, h_country) if p)
+
+    exp_parts = [p.strip() for p in exp_loc.split(",") if p.strip()]
+    if not exp_parts:
+        return ", ".join(p for p in (h_city, h_state, h_country) if p)
+
+    if len(exp_parts) == 1:
+        e_city, e_state, e_country = "", "", exp_parts[0]
+    elif len(exp_parts) == 2:
+        e_city, e_state, e_country = exp_parts[0], "", exp_parts[1]
+    else:
+        e_city = exp_parts[0]
+        e_state = exp_parts[-2]
+        e_country = exp_parts[-1]
+
+    # Country conflict between title and experience → trust the title.
+    if h_country and e_country and h_country.strip().lower() != e_country.strip().lower():
+        return ", ".join(p for p in (h_city, h_state, h_country) if p)
+
+    merged_city = h_city or e_city
+    merged_state = h_state or e_state
+    merged_country = h_country or e_country
+    return ", ".join(p for p in (merged_city, merged_state, merged_country) if p)
 
 
 def _find_role_in_experience(apify_data: dict, company_name: str) -> Optional[dict]:
@@ -700,30 +804,7 @@ async def fulfillment_person_verification(
             )
 
     # ==================================================================
-    # Step 3: Location check (only if ScrapingDog scraper was called)
-    # SD person scraper has reliable fullName + location fields.
-    # Company/role are unreliable from SD — Apify handles those in Step 5.
-    # ==================================================================
-    if sd_profile:
-        m_city = lead.get("city", "")
-        m_state = lead.get("state", "")
-        m_country = lead.get("country", "")
-        li_location = (sd_profile.get("location") or "")
-
-        if m_city or m_state or m_country:
-            print(f"   🔍 Step 3: Location check — miner='{m_city}, {m_state}, {m_country}' vs SD='{li_location}'")
-            loc_match = await _llm_location_check(m_city, m_state, m_country, li_location, or_key)
-            if not loc_match:
-                return False, _rejection(
-                    "fulfillment_person_location_mismatch",
-                    f"Location mismatch: miner '{m_city}, {m_state}, {m_country}' vs LinkedIn '{li_location}'",
-                    ["city", "state", "country"],
-                )
-        else:
-            print(f"   ⚠️ Step 3: No location provided by miner — skipping")
-
-    # ==================================================================
-    # Step 5: Apify — role + company URL + (location & company if Q1 path)
+    # Step 5: Apify — role + company URL + location (always)
     # ==================================================================
     print(f"   🔍 Step 5: Apify fetch for verification")
     apify_data = await _fetch_apify_profile(linkedin_url, token)
@@ -799,45 +880,28 @@ async def fulfillment_person_verification(
         )
     print(f"   ✅ Company name match: {actual_company}")
 
-    # --- Location match (from Apify only if Q1 path — SD already checked) ---
-    if not sd_profile:
-        m_city = lead.get("city", "")
-        m_state = lead.get("state", "")
-        m_country = lead.get("country", "")
+    # --- Location match (always from Apify, title-primary + experience enrichment) ---
+    m_city = lead.get("city", "")
+    m_state = lead.get("state", "")
+    m_country = lead.get("country", "")
 
-        if m_city or m_state or m_country:
-            parsed = apify_data.get("location", {}).get("parsed") or {}
-            a_city = parsed.get("city", "") or ""
-            a_state = parsed.get("state", "") or ""
-            a_country = parsed.get("country", "") or ""
-            if not a_city and not a_state and not a_country:
-                print(f"   ❌ No location on Apify profile")
-                return False, _rejection(
-                    "fulfillment_person_no_location",
-                    "No location found on LinkedIn profile",
-                    ["city", "state", "country"],
-                )
-            apify_loc = f"{a_city}, {a_state}, {a_country}".strip(", ")
-            print(f"   🔍 Location check — miner='{m_city}, {m_state}, {m_country}' vs Apify='{apify_loc}'")
-
-            # US: rule-based first, LLM fallback
-            m_country_norm = normalize_country(m_country).lower()
-            if m_country_norm == "united states":
-                rule = _us_location_match(m_city, m_state, m_country, a_city, a_state, a_country)
-                if rule is not None:
-                    loc_match = rule
-                    print(f"   📍 Location {'✅' if loc_match else '❌'} (rule-based US)")
-                else:
-                    loc_match = await _llm_location_check(m_city, m_state, m_country, apify_loc, or_key)
-            else:
-                # Non-US: LLM only
-                loc_match = await _llm_location_check(m_city, m_state, m_country, apify_loc, or_key)
-            if not loc_match:
-                return False, _rejection(
-                    "fulfillment_person_location_mismatch",
-                    f"Location mismatch: miner '{m_city}, {m_state}, {m_country}' vs Apify '{apify_loc}'",
-                    ["city", "state", "country"],
-                )
+    if m_city or m_state or m_country:
+        apify_loc = _best_li_location(apify_data, pos, lead_company)
+        if not apify_loc:
+            print(f"   ❌ No location on Apify profile")
+            return False, _rejection(
+                "fulfillment_person_no_location",
+                "No location found on LinkedIn profile (headline empty and no current-experience location)",
+                ["city", "state", "country"],
+            )
+        print(f"   🔍 Location check — miner='{m_city}, {m_state}, {m_country}' vs LinkedIn='{apify_loc}'")
+        loc_match = await _llm_location_check(m_city, m_state, m_country, apify_loc, or_key)
+        if not loc_match:
+            return False, _rejection(
+                "fulfillment_person_location_mismatch",
+                f"Location mismatch: miner '{m_city}, {m_state}, {m_country}' vs LinkedIn '{apify_loc}'",
+                ["city", "state", "country"],
+            )
 
     # --- Role match (exact first, LLM fallback) ---
     lead_role = lead.get("role", "")

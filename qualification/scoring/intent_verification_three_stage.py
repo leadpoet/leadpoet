@@ -76,7 +76,7 @@ MAX_SCRAPED_CHARS = 60_000
 SCRAPE_TIMEOUT = 60
 
 JS_HEAVY_HOSTS = (
-    "indeed.com", "builtin.com", "linkedin.com", "glassdoor.com",
+    "indeed.com", "builtin.com", "linkedin.com",
     "ziprecruiter.com", "lever.co", "greenhouse.io",
 )
 ANTI_BOT_HOSTS = (
@@ -88,6 +88,75 @@ ANTI_BOT_MARKERS = [
     "ddos protection", "challenge-platform", "access denied",
     "security check",
 ]
+
+# Per-host config overrides discovered empirically (test_per_platform_optimal.py
+# 2026-05-25).  These override the default JS_HEAVY / ANTI_BOT profiles.  Keys
+# match against the URL host via 'in' substring (so "ziprecruiter.com" matches
+# any subdomain).  Each value is a dict of ScrapingDog /scrape params.  None
+# means "do not pass these params" (e.g. some hosts break under dynamic=true).
+#
+# Empty dict {} means "plain — no rendering params".  Used for hosts where:
+#   - Server already returns the full body in HTML (builtin.com)
+#   - dynamic=true triggers an HTTP 500/504 (glassdoor — confirmed)
+HOST_SCRAPE_CONFIG = {
+    # Real-world tested: longer wait + premium needed to get job body
+    "ziprecruiter.com": {"dynamic": "true", "wait": "15000",
+                         "premium": "true", "stealth_mode": "true"},
+    # Real-world tested: needs >=10s wait; 15s recommended for stability since
+    # wellfound's rendering is variable (sometimes returns shell-only at 10s).
+    "wellfound.com":    {"dynamic": "true", "wait": "15000"},
+    # Real-world tested: dynamic=true returns HTTP 500/504; plain works fine
+    "glassdoor.com":    {},
+    # Real-world tested: plain returns full job body in 9s; dynamic adds 9s
+    # latency with no benefit
+    "builtin.com":      {},
+    # Lever's existing config (dynamic_5s) is already optimal — keep default
+}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Job-body-in-scrape gate
+# ─────────────────────────────────────────────────────────────────────
+# When a miner cites a job-board URL but ScrapingDog returns only the React
+# shell (no rendered job body), Stage 3 sees thin content and returns
+# `unable_to_verify` — which under INTENT_VERIFIER_REVIEW_AS_ACCEPT=on would
+# wrongly approve.  To close this FP gap, we hard-reject (no review path)
+# when the URL is on a known job board AND none of the body-anchor phrases
+# below appear in the scraped content.  LinkedIn URLs that successfully used
+# /linkedinjobs are exempt (their meta is structured, not phrase-based).
+JOB_BOARD_HOSTS = (
+    "indeed.com", "builtin.com", "builtinnyc.com",
+    "lever.co", "wellfound.com", "ziprecruiter.com",
+    "greenhouse.io", "glassdoor.com",
+    "startup.jobs", "remoterocketship.com", "salesjobs.com",
+    "myworkdayjobs.com",
+)
+JOB_BODY_ANCHORS = (
+    "responsibilities", "qualifications", "requirements",
+    "about the role", "about the position", "about this role",
+    "what you'll do", "what you will do", "what you’ll do",
+    "we are looking for", "we're looking for", "we are seeking",
+    "we’re looking for",
+    "apply now", "apply for this job", "submit application",
+    "job description",
+    # LinkedIn synthesized envelope fields from _scrape_linkedin_job
+    "job_position:", "job_description",
+)
+
+
+def _looks_like_job_body(text: str) -> bool:
+    """True if scraped text contains at least one job-posting body anchor.
+    Used to gate auto-approval on hosts where the scrape sometimes returns
+    only the page shell."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(a in low for a in JOB_BODY_ANCHORS)
+
+
+def _is_job_board_url(url: str) -> bool:
+    host = _host(url)
+    return any(h in host for h in JOB_BOARD_HOSTS)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -171,12 +240,22 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
 
     host = _host(url)
     params = {"api_key": api_key, "url": url, "format": "markdown"}
-    if any(h in host for h in JS_HEAVY_HOSTS):
-        params["dynamic"] = "true"
-        params["wait"] = "5000"
-    if any(h in host for h in ANTI_BOT_HOSTS):
-        params["premium"] = "true"
-        params["stealth_mode"] = "true"
+
+    # Per-host override beats the JS_HEAVY / ANTI_BOT defaults.  Each override
+    # was tuned against a real URL — see HOST_SCRAPE_CONFIG comment.
+    override = next(
+        (cfg for h, cfg in HOST_SCRAPE_CONFIG.items() if h in host),
+        None,
+    )
+    if override is not None:
+        params.update(override)
+    else:
+        if any(h in host for h in JS_HEAVY_HOSTS):
+            params["dynamic"] = "true"
+            params["wait"] = "5000"
+        if any(h in host for h in ANTI_BOT_HOSTS):
+            params["premium"] = "true"
+            params["stealth_mode"] = "true"
 
     content = None
     last_err = None
@@ -203,7 +282,12 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
     if not _looks_textual(content):
         return {"ok": False, "stage": "binary_blob",
                 "content": "", "error": "non_textual_content"}
-    if _has_anti_bot_marker(content):
+    # Anti-bot retry: only attempt premium+stealth escalation if we DIDN'T
+    # already have a per-host override.  Empirically (test 2026-05-25) the
+    # tuned overrides (e.g. wellfound dynamic_10s) already get a good result;
+    # adding premium on top causes HTTP 500 on those hosts.  For default
+    # JS_HEAVY/ANTI_BOT paths we still escalate as before.
+    if _has_anti_bot_marker(content) and override is None:
         params["premium"] = "true"
         params["stealth_mode"] = "true"
         try:
@@ -262,6 +346,167 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
         return {"ok": False, "stage": "exa_thin",
                 "content": text, "error": "<300 chars"}
     return {"ok": True, "stage": "exa_scraped", "content": text, "error": None}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# LinkedIn-aware routing — purpose-built ScrapingDog endpoints
+# ─────────────────────────────────────────────────────────────────────
+# LinkedIn job URL shapes we see:
+#   /jobs/view/4347020266/
+#   /jobs/view/people-analyst-at-kinamic-4347020266/
+#   /jobs/view/people-analyst-at-kinamic-4347020266?...
+# The trailing run of digits is the job_id ScrapingDog's /linkedinjobs needs.
+_LINKEDIN_JOB_ID_RE = re.compile(
+    r"linkedin\.com/jobs/view/(?:[^/?#]*-)?(\d+)", re.IGNORECASE,
+)
+
+# Anything matching this in jobs_status (or job_description leading line) means
+# the posting is terminally closed.  We treat closed as deterministic reject —
+# no LLM needed.
+_LINKEDIN_JOB_CLOSED_RE = re.compile(
+    r"(?i)\b("
+    r"no longer accepting applications?"
+    r"|no longer accepting"
+    r"|applications? (?:are )?closed"
+    r"|this job is closed"
+    r"|position (?:has been )?filled"
+    r"|we are no longer hiring"
+    r"|job is no longer available"
+    r"|expired"
+    r")\b"
+)
+
+# "6 months ago", "1 year ago", "2 weeks ago", etc.  Used to compute the
+# posting age deterministically from /linkedinjobs's job_posting_time field.
+_LINKEDIN_REL_DATE_RE = re.compile(
+    r"(?i)(\d+)\s+(year|month|week|day|hour|minute)s?\s+ago"
+)
+
+# Cap (months) for fresh job postings.  Anything older → stale reject.
+LINKEDIN_JOB_MAX_AGE_MONTHS = 6
+
+
+def _extract_linkedin_job_id(url: str) -> Optional[str]:
+    m = _LINKEDIN_JOB_ID_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def _parse_relative_age_to_months(s: str) -> Optional[float]:
+    """Convert 'N <unit> ago' → months (float).  Returns None if unrecognized."""
+    if not s:
+        return None
+    m = _LINKEDIN_REL_DATE_RE.search(s)
+    if not m:
+        return None
+    n = int(m.group(1))
+    unit = m.group(2).lower()
+    if unit == "year":
+        return n * 12.0
+    if unit == "month":
+        return float(n)
+    if unit == "week":
+        return n / 4.345
+    if unit in ("day", "hour", "minute"):
+        return n / 30.0 if unit == "day" else 0.0
+    return None
+
+
+async def _scrape_linkedin_job(url: str) -> Dict[str, Any]:
+    """ScrapingDog's purpose-built /linkedinjobs endpoint. Returns the same
+    {ok, stage, content, error} envelope as _scrape_sd_hardened so it slots
+    into the fetch loop transparently.
+
+    Why dedicated endpoint vs generic /scrape:
+      - generic /scrape on linkedin.com fails ~all the time even with
+        dynamic + premium + stealth (LinkedIn anti-bot)
+      - /linkedinjobs returns structured JSON first try at ~1/10th the cost
+      - exposes jobs_status (e.g. "No longer accepting applications") and
+        job_posting_time as discrete fields → the closed-state + 6-month
+        rules in _build_final_judge_prompt fire deterministically
+    """
+    api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
+        "QUALIFICATION_SCRAPINGDOG_API_KEY"
+    )
+    if not api_key:
+        return {"ok": False, "stage": "no_sd_key",
+                "content": "", "error": "missing key"}
+    job_id = _extract_linkedin_job_id(url)
+    if not job_id:
+        return {"ok": False, "stage": "linkedin_jobs_no_id",
+                "content": "", "error": "could not extract job_id"}
+    try:
+        async with httpx.AsyncClient() as cli:
+            r = await cli.get(
+                "https://api.scrapingdog.com/linkedinjobs",
+                params={"api_key": api_key, "job_id": job_id},
+                timeout=SCRAPE_TIMEOUT,
+            )
+    except Exception as e:
+        return {"ok": False, "stage": "linkedin_jobs_failed",
+                "content": "", "error": f"{type(e).__name__}: {str(e)[:120]}"}
+    if r.status_code != 200:
+        return {"ok": False, "stage": "linkedin_jobs_http_error",
+                "content": "", "error": f"HTTP {r.status_code}"}
+    try:
+        data = r.json()
+    except Exception as e:
+        return {"ok": False, "stage": "linkedin_jobs_parse_error",
+                "content": "", "error": f"{type(e).__name__}"}
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict) or not data.get("job_position"):
+        return {"ok": False, "stage": "linkedin_jobs_empty",
+                "content": "", "error": "no job fields in response"}
+
+    # Synthesize a text envelope the Stage 3 judge can read.  Lead with
+    # jobs_status and posted_at so the closed-state + 6-month timeline rules
+    # have plain-text anchors to key off.
+    parts: List[str] = []
+    jobs_status = data.get("jobs_status")
+    if jobs_status:
+        parts.append(f"jobs_status: {jobs_status}")
+    posted = data.get("job_posting_time")
+    if posted:
+        parts.append(f"posted: {posted}")
+    for key in ("job_position", "company_name", "job_location",
+                "Employment_type", "Seniority_level", "Industries",
+                "number_of_applicants", "base_pay"):
+        v = data.get(key)
+        if v:
+            parts.append(f"{key}: {v}")
+    desc = data.get("job_description") or ""
+    if desc:
+        parts.append("")
+        parts.append(desc)
+
+    text = "\n".join(parts)[:MAX_SCRAPED_CHARS]
+    if len(text) < 50:
+        return {"ok": False, "stage": "linkedin_jobs_thin",
+                "content": text, "error": "<50 chars"}
+
+    # Deterministic flags — derived directly from the structured API fields,
+    # not from LLM judgment.  Downstream uses these to short-circuit before
+    # invoking the Stage 3 sonar-pro judge.
+    is_closed = bool(jobs_status and _LINKEDIN_JOB_CLOSED_RE.search(jobs_status))
+    months_ago = _parse_relative_age_to_months(posted or "")
+    is_stale = (
+        months_ago is not None and months_ago > LINKEDIN_JOB_MAX_AGE_MONTHS
+    )
+
+    return {
+        "ok": True,
+        "stage": "linkedin_jobs_scraped",
+        "content": text,
+        "error": None,
+        "meta": {
+            "kind": "linkedin_job",
+            "jobs_status": jobs_status,
+            "posted_raw": posted,
+            "months_ago": months_ago,
+            "is_closed": is_closed,
+            "is_stale": is_stale,
+        },
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -464,9 +709,23 @@ Final judge rules:
 - Page titles, navigation menus, headers, and breadcrumbs are NOT evidence.
   Only specific factual claims in the page BODY count.
 - If the body contains explicit negation about the claim ("0 open positions",
-  "no longer open", "not currently hiring", "position has been removed",
-  "page not found", "404", "the job you are looking for is no longer"),
+  "no longer open", "no longer accepting applications", "not currently hiring",
+  "position has been removed", "page not found", "404",
+  "the job you are looking for is no longer"),
   return contradicted regardless of titles, headers, or partial context.
+- Job-posting freshness rule: when the claim is about an active/open job
+  posting (hiring signal), the source MUST show that posting is still open.
+  Treat any of these closed-state phrases as contradicted — even if other
+  parts of the page still describe the role:
+    "no longer accepting applications", "applications are closed",
+    "this job is closed", "position filled", "we are no longer hiring",
+    "job is no longer available", "expired".
+- Job-posting timeline rule: if the source body shows a posting age (e.g.
+  "Posted 7 months ago", "8 months ago", "Posted on 2024-09-12", "Hace 1 año")
+  AND that age is > 6 months from today, return contradicted (stale_posting).
+  Job-board sidebars and "similar jobs" timestamps do NOT count — only the
+  posting age of the ACTUAL job being verified.  If no posting age is
+  visible on the page, do NOT penalize on staleness; judge content only.
 - If exact extracted content directly supports miner_claim AND PART A holds,
   return supported.
 - If extracted content supports only part of miner_claim AND PART A holds,
@@ -494,6 +753,32 @@ async def _fetch_sd_then_exa(
     for url in (urls or [])[:3]:
         if not url:
             continue
+
+        # LinkedIn jobs URLs → purpose-built /linkedinjobs endpoint first.
+        # Cheaper (~5 vs ~50 credits), more reliable (LinkedIn blocks generic
+        # /scrape), and returns structured fields including jobs_status.
+        if _extract_linkedin_job_id(url):
+            lij = await _scrape_linkedin_job(url)
+            if lij.get("ok") and lij.get("content"):
+                results.append({
+                    "url": url, "title": "",
+                    "text": lij["content"][:max_chars],
+                    "meta": lij.get("meta") or {},
+                })
+                statuses.append({
+                    "url": url, "source": "scrapingdog_linkedinjobs",
+                    "stage": lij.get("stage"),
+                    "meta": lij.get("meta") or {},
+                })
+                continue
+            # /linkedinjobs failed — fall through to generic SD → Exa,
+            # but record why we bailed off the dedicated path.
+            statuses.append({
+                "url": url, "source": "scrapingdog_linkedinjobs_fallback",
+                "linkedinjobs_stage": lij.get("stage"),
+                "linkedinjobs_error": lij.get("error"),
+            })
+
         sd = await _scrape_sd_hardened(url)
         if sd.get("ok") and sd.get("content"):
             results.append({
@@ -809,6 +1094,110 @@ async def verify_three_stage(
                         "verification_mode": "source_grounded",
                         "entity_match_reason":
                             "company name absent in fetched content",
+                        "confidence": "high",
+                    }],
+                },
+            }
+
+    # ── PRE-STAGE-3: deterministic LinkedIn-job closed/stale gate ─
+    # /linkedinjobs returns jobs_status + job_posting_time as structured
+    # fields.  When the API itself reports the posting is closed (e.g.
+    # "No longer accepting applications") or older than the freshness cap,
+    # we reject without spending a sonar-pro call — there is no judgment
+    # call to make.
+    for res in (contents.get("results") or []):
+        meta = res.get("meta") or {}
+        if meta.get("kind") != "linkedin_job":
+            continue
+        if meta.get("is_closed"):
+            return {
+                "client_ready": False,
+                "decision": "reject",
+                "rejection_reason": "linkedin_job_closed",
+                "stage1": stage1_info,
+                "scrape": {"statuses": contents.get("statuses") or [],
+                           "result_count": len(contents.get("results") or [])},
+                "stage3": None,
+                "company_check": company_check,
+                "verdict": {
+                    "signal_evaluations": [{
+                        "signal_status": "contradicted",
+                        "verification_mode": "source_grounded",
+                        "entity_match_reason": (
+                            f"LinkedIn /linkedinjobs API reports posting is "
+                            f"closed; jobs_status={meta.get('jobs_status')!r}"
+                        ),
+                        "confidence": "high",
+                    }],
+                },
+            }
+        if meta.get("is_stale"):
+            return {
+                "client_ready": False,
+                "decision": "reject",
+                "rejection_reason": "linkedin_job_stale",
+                "stage1": stage1_info,
+                "scrape": {"statuses": contents.get("statuses") or [],
+                           "result_count": len(contents.get("results") or [])},
+                "stage3": None,
+                "company_check": company_check,
+                "verdict": {
+                    "signal_evaluations": [{
+                        "signal_status": "contradicted",
+                        "verification_mode": "source_grounded",
+                        "entity_match_reason": (
+                            f"LinkedIn posting age {meta.get('months_ago'):.1f}"
+                            f" months exceeds {LINKEDIN_JOB_MAX_AGE_MONTHS}"
+                            f"-month freshness cap "
+                            f"(posted: {meta.get('posted_raw')!r})"
+                        ),
+                        "confidence": "high",
+                    }],
+                },
+            }
+
+    # ── PRE-STAGE-3: job-body-in-scrape gate ───────────────────────
+    # For miner-cited job-board URLs whose scrape returned only shell content
+    # (no rendered job body), Stage 3 would see thin content and return
+    # `unable_to_verify` → reviewable → auto-approve if review_as_accept=on.
+    # That's a FP path for closed/stale postings whose closed-state phrase
+    # never made it into the scraped text.  Hard-reject here so the env flag
+    # cannot leak through.
+    #
+    # Exemptions:
+    #   - LinkedIn URLs that successfully used /linkedinjobs (meta.kind set):
+    #     their structured envelope is reliable even when phrase anchors miss.
+    #   - Non-job-board URLs (news, funding, social, etc.): job body anchors
+    #     don't apply.
+    has_linkedin_structured = any(
+        (r.get("meta") or {}).get("kind") == "linkedin_job"
+        for r in (contents.get("results") or [])
+    )
+    is_job_board = any(
+        _is_job_board_url(u) for u in (row.get("claimed_source_urls") or [])
+    )
+    if is_job_board and not has_linkedin_structured:
+        combined_for_gate = "\n".join(
+            (r.get("text") or "") for r in (contents.get("results") or [])
+        )
+        if not _looks_like_job_body(combined_for_gate):
+            return {
+                "client_ready": False,
+                "decision": "reject",
+                "rejection_reason": "job_body_not_in_fetched_content",
+                "stage1": stage1_info,
+                "scrape": {"statuses": contents.get("statuses") or [],
+                           "result_count": len(contents.get("results") or [])},
+                "stage3": None,
+                "company_check": company_check,
+                "verdict": {
+                    "signal_evaluations": [{
+                        "signal_status": "unable_to_verify",
+                        "verification_mode": "source_grounded",
+                        "entity_match_reason": (
+                            "scrape returned shell-only content for a "
+                            "job-board URL — no job body anchors found"
+                        ),
                         "confidence": "high",
                     }],
                 },

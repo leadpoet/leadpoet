@@ -61,6 +61,7 @@ import json
 import logging
 import os
 import re
+from datetime import date
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urlunsplit
 
@@ -648,10 +649,13 @@ def _build_final_judge_prompt(
             "NO CONTENT. STATUSES:\n"
             + json.dumps(contents.get("statuses") or [], indent=2)
         ]
+    today_str = date.today().isoformat()
     return f"""{_build_verification_prompt(row)}
 
 {source_name} exact supplied source extraction:
 {chr(10).join(blocks)}
+
+Today's date: {today_str}
 
 Final judge rules:
 - Re-apply the PART A check from above BEFORE judging content support: if
@@ -676,9 +680,10 @@ Final judge rules:
 - Job-posting timeline rule: when the claim is about active/current hiring
   (e.g. "is hiring", "actively recruiting", "open positions for X"), if the
   source body shows a posting age (e.g. "Posted 7 months ago", "Posted on
-  2024-09-12") AND that age is > 6 months from today, return contradicted
-  (stale_posting). Job-board sidebars and "similar jobs" timestamps do NOT
-  count — only the posting age of the ACTUAL job being verified.
+  YYYY-MM-DD") AND that age is > 6 months relative to "Today's date" above,
+  return contradicted (stale_posting). Job-board sidebars and "similar
+  jobs" timestamps do NOT count — only the posting age of the ACTUAL job
+  being verified.
   For non-hiring claims (e.g. funding announcements, expansion signals,
   product launches, acquisitions, tech-stack inferences from job
   requirements), do NOT penalize on age — older or closed job postings can

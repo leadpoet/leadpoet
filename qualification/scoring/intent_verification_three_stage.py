@@ -337,6 +337,25 @@ _LINKEDIN_REL_DATE_RE = re.compile(
 
 LINKEDIN_JOB_MAX_AGE_MONTHS = 6
 
+_ACTIVE_HIRING_INTENT_RE = re.compile(
+    r"(?i)\b("
+    r"hiring|recruiting|recruits"
+    r"|open\s+(?:position|role|vacancy|job)s?"
+    r"|active\s+job\s+post(?:ing)?s?"
+    r"|actively\s+seek|currently\s+seek"
+    r")\b"
+)
+
+
+def _is_active_hiring_claim(miner_claim: str, target_signal_text: str) -> bool:
+    """True if the miner's claim or the ICP intent signal is about active/
+    current hiring. Used to scope the LinkedIn freshness/staleness gates
+    so they don't block legitimate non-hiring claims (funding announcements,
+    expansion signals, product launches, etc.) that can still be proven by
+    closed or older job postings."""
+    combined = f"{miner_claim or ''} {target_signal_text or ''}"
+    return bool(_ACTIVE_HIRING_INTENT_RE.search(combined))
+
 
 def _extract_linkedin_job_id(url: str) -> Optional[str]:
     m = _LINKEDIN_JOB_ID_RE.search(url or "")
@@ -654,12 +673,17 @@ Final judge rules:
     "no longer accepting applications", "applications are closed",
     "this job is closed", "position filled", "we are no longer hiring",
     "job is no longer available", "expired".
-- Job-posting timeline rule: if the source body shows a posting age (e.g.
-  "Posted 7 months ago", "8 months ago", "Posted on 2024-09-12", "Hace 1 año")
-  AND that age is > 6 months from today, return contradicted (stale_posting).
-  Job-board sidebars and "similar jobs" timestamps do NOT count — only the
-  posting age of the ACTUAL job being verified.  If no posting age is
-  visible on the page, do NOT penalize on staleness; judge content only.
+- Job-posting timeline rule: when the claim is about active/current hiring
+  (e.g. "is hiring", "actively recruiting", "open positions for X"), if the
+  source body shows a posting age (e.g. "Posted 7 months ago", "Posted on
+  2024-09-12") AND that age is > 6 months from today, return contradicted
+  (stale_posting). Job-board sidebars and "similar jobs" timestamps do NOT
+  count — only the posting age of the ACTUAL job being verified.
+  For non-hiring claims (e.g. funding announcements, expansion signals,
+  product launches, acquisitions, tech-stack inferences from job
+  requirements), do NOT penalize on age — older or closed job postings can
+  still validate those factual claims.  If no posting age is visible on the
+  page, do NOT penalize on staleness; judge content only.
 - If exact extracted content directly supports miner_claim AND PART A holds,
   return supported.
 - If extracted content supports only part of miner_claim AND PART A holds,
@@ -1028,9 +1052,15 @@ async def verify_three_stage(
                 },
             }
 
+    is_hiring_claim = _is_active_hiring_claim(
+        row.get("claim") or "",
+        row.get("_target_signal_text") or "",
+    )
     for res in (contents.get("results") or []):
         meta = res.get("meta") or {}
         if meta.get("kind") != "linkedin_job":
+            continue
+        if not is_hiring_claim:
             continue
         if meta.get("is_closed"):
             return {

@@ -217,6 +217,41 @@ def _normalize_role_tokens(role: str) -> set:
     return tokens | expanded
 
 
+_NON_ENGLISH_ROLE_RE = re.compile(
+    r"[Ͱ-Ͽ"
+    r"Ѐ-ӿ"
+    r"֐-׿"
+    r"؀-ۿ"
+    r"　-ヿ"
+    r"一-鿿"
+    r"가-힯]"
+    r"|[áéíóúñçãõâêîôûäëïöüàèìòùýÁÉÍÓÚÑÇÃÕÂÊÎÔÛÄËÏÖÜÀÈÌÒÙÝ"
+    r"ßæøåłąęćśźżńÆØÅŁŚŹŻŃœŒ]"
+    r"|\b("
+    r"de|la|el|los|las|para|por|con|sin|y|o|ou|et|ed|"
+    r"do|da|dos|das|com|sem|"
+    r"du|le|les|des|avec|sans|"
+    r"der|die|das|und|mit|ohne|"
+    r"di|della|delle|degli|"
+    r"van|den|het|en|"
+    r"comercial|mercadeo|ventas|gerente|jefe|presidente|"
+    r"ingeniero|desarrollo|desarrollador|tecnologia|"
+    r"coordinador|vicepresidente|encargado|auxiliar|asistente|"
+    r"analista|subdirector|"
+    r"diretor|diretora|desenvolvimento|atendimento|programador|coordenador|"
+    r"directeur|directrice|gestion|ingenieur|developpement|coordinateur|"
+    r"direttore|sviluppo|gestione|responsabile|coordinatore|sottodirettore"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_definitely_english(text: str) -> bool:
+    if not text:
+        return True
+    return not _NON_ENGLISH_ROLE_RE.search(text)
+
+
 def _fuzzy_role_match(lead_role: str, target_roles: list) -> bool:
     """Check if lead_role is a fuzzy match for any target role."""
     if not lead_role or not target_roles:
@@ -309,9 +344,12 @@ def tier1_check(
     if icp.target_role_types and lead.role_type not in icp.target_role_types:
         return "role_type_mismatch"
 
-    if icp.target_roles and lead.role not in icp.target_roles:
-        if not _fuzzy_role_match(lead.role, icp.target_roles):
-            return "role_mismatch"
+    if icp.target_roles:
+        if not _looks_definitely_english(lead.role or ""):
+            return "role_not_english"
+        if lead.role not in icp.target_roles:
+            if not _fuzzy_role_match(lead.role, icp.target_roles):
+                return "role_mismatch"
 
     if icp.target_seniority:
         try:

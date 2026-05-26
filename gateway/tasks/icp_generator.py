@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # This prevents miners from overfitting to hardcoded templates
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "openai/o3-mini"  # High context window, good reasoning
+OPENROUTER_MODEL = "perplexity/sonar-pro"  # Real-time web search → realism-grounded ICPs
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # =============================================================================
@@ -253,6 +253,17 @@ GEOGRAPHIES = [
     # === UAE (investor-focused ICPs only) ===
     "United Arab Emirates, Dubai",
     "United Arab Emirates, Abu Dhabi",
+    # === Multi-region / country-wide values (PREFER these for broader supply) ===
+    # State-level ICPs frequently hit empty intersections in practice (e.g. a
+    # specific industry + stage + state combination often has 0-2 real companies).
+    # Regional and country-wide values let the model find real targets while
+    # still respecting the buyer's geographic intent.
+    "United States",
+    "United States, West Coast",
+    "United States, Northeast",
+    "United States, Midwest",
+    "United States, South",
+    "United States, Southwest",
 ]
 
 # Products/Services by industry (what the miner's model should help sell)
@@ -350,18 +361,31 @@ PRODUCTS_BY_INDUSTRY = {
     ],
 }
 
-# Intent signals / additional context
+# Intent signals — ordered by verifiability (most-evidence-grounded first).
+# Generators sample-weighted toward the top: funding, product-launch, expansion,
+# leadership-change, and acquisition all produce dated press releases that
+# L5/L6 can ground with a verbatim proof_quote. Vague editorial signals
+# ("digital transformation commentary", "evaluating vendors") rarely yield
+# a single dated event and routinely fail verification — they are kept here
+# but the LLM prompt steers away from them.
 INTENT_SIGNALS = [
-    "Recently raised funding and expanding team",
-    "Hiring for senior engineering or sales roles",
-    "Company mentioned in industry news for growth",
-    "Executive spoke at industry conference",
-    "Company blog discusses digital transformation",
-    "Evaluating new vendors or platforms",
-    "Announced new market expansion",
+    # ---- Highly verifiable (dated events with press coverage) ----
+    "Recently raised funding",
+    "Just closed a round",
+    "Launched or announced a new product",
+    "Expanded to new markets",
+    "Acquired another company",
     "Recent leadership change",
-    "Launched or announced a new product line",
-    "Posted on LinkedIn about upcoming initiatives"
+    "Achieved regulatory clearance or certification",
+    "Announced a strategic partnership",
+    # ---- Moderately verifiable (specific but harder to date) ----
+    "Hiring for senior engineering or sales roles",
+    "Recent factory / facility / store opening",
+    # ---- Lower verifiability (editorial / commentary) ----
+    "Public commentary about digital transformation",
+    "New regulatory or compliance pressure",
+    "Evaluating new vendors or platforms",
+    "Executive spoke at industry conference",
 ]
 
 
@@ -411,162 +435,121 @@ async def generate_icps_with_openrouter(
                 taxonomy_sub_industries[ind] = []
             taxonomy_sub_industries[ind].append(sub_ind)
 
-    # Build the COMPREHENSIVE prompt for the LLM
-    # This prompt must be EXTREMELY detailed to get human-like, varied outputs.
-    system_prompt = """You are generating search queries that real B2B salespeople would type into a tool that surfaces TARGET COMPANIES (accounts) — not individual contacts.
+    # Sonar-realism prompt — single-shot generation with web-grounded verification.
+    # Every ICP must include `verified_example_company` (the real company Sonar
+    # found while verifying supply), proving the combination is non-empty.
+    system_prompt = """You are generating B2B sales-targeting ICPs (Ideal Customer Profiles) for a benchmark. You have real-time web access — USE IT.
 
-CRITICAL: These must sound like REAL HUMANS typing, NOT templates. Imagine a salesperson quickly typing the kind of company they want to reach.
+YOUR JOB
+Generate exactly 20 ICPs, one per industry from the distribution list. Each ICP must describe a real, currently-existing target market that a salesperson could actually go prospect.
 
-ABSOLUTE RULES:
-1. The prompt describes a COMPANY profile only. NEVER mention job titles, seniority levels, decision-maker names, or any contact-level role (no "VP of X", "CTO", "Director", "Head of Y", "C-Suite", "buyers", etc.). Talk about the COMPANY: industry, size, stage, location, what they make/sell, what signals they're showing.
-2. NEVER start with "Who should we target" or "Who should we find for you" — these are robotic.
-3. NEVER use the same sentence pattern more than 2-3 times across the set.
-4. Each prompt should feel like a different person typed it.
+THE ONE RULE THAT MATTERS MOST — REALISM
+Before outputting any ICP, mentally verify: "Can I name at least ONE real, currently-operating company that satisfies ALL the criteria of this ICP — with verifiable recent activity matching the intent signal?"
 
-MANDATORY VOICE MIX (spread evenly across the set):
+If you cannot name a specific real company that fits, the ICP is INVALID. Broaden one of the constraints (geography, stage, employee band, sub-industry) until you CAN name at least one real company. Do not output an unrealistic combination under any circumstances.
 
-CATEGORY A — Direct first-person requests:
-- "I need a list of Series B fintech companies in NYC that are scaling card issuing this year."
-- "I'm looking for 50-200 person AI startups on the west coast that recently raised a round."
+To enforce this, every ICP MUST include a `verified_example_company` field naming the real company you found while verifying. This is not optional. If you cannot fill this field with a real company, you must rewrite the ICP with broader constraints until you can.
 
-CATEGORY B — Casual / conversational:
-- "yo can you pull mid-market e-commerce companies in texas that just launched a new SKU"
-- "hey gonna need biotech startups in boston working on gene therapy, ideally post-series A"
+DO NOT generate ICPs where:
+- The industry × stage × geography intersection has zero real companies you can name
+- The intent signal doesn't fit the industry shape (Consulting firms don't "launch products"; Industrial Manufacturers don't have SaaS-style product launches; Real Estate firms do deals, not product launches)
+- The stage doesn't match the intent (Seed companies don't acquire other companies; Series A startups don't make big-name strategic partnerships)
+- The geography is so narrow that no real candidates exist
+- The product/service is so specific that the buyer's universe collapses (use broad categories, not single named tools)
 
-CATEGORY C — Shorthand / telegraphic:
-- "series B saas companies SF 50-200 hiring fast"
-- "fintech startups NYC just raised, payments focus"
+PROMPT VOICE
+Each ICP's `prompt` field should sound like a different real salesperson typed it. Mix tones across the 20 prompts:
+- Direct first-person ("I need", "I'm looking for")
+- Casual ("yo can you pull", "hey, gonna need")
+- Shorthand / telegraphic
+- Question format ("what AI companies in...", "anyone tracking...")
+- Descriptive / detailed ("Searching for...")
 
-CATEGORY D — Question format:
-- "what are the fastest-growing manufacturing companies in ohio doing digital transformation?"
-- "anyone tracking renewable energy startups expanding into europe?"
+Never use job titles, seniority levels, "decision-makers", "executives", or any contact-level descriptor. Company-only.
 
-CATEGORY E — Descriptive / detailed:
-- "Looking for cloud security companies, 200-500 employees, US-based, ideally ones that have posted publicly about evaluating new vendors in the last 90 days."
-- "Searching for digital health companies that closed Series A in the last 6 months and are actively running clinical pilots."
+CONSTRAINT LISTS (use ONLY these values)
 
-VARIATION TECHNIQUES:
-- Some prompts are 1 line, others 2-3 sentences
-- Some mention specific products/categories, others stay broader
-- Some use industry shorthand: "saas", "fintech", "biotech"
-- Some are very specific, others are vague
-- Mix formal ("I am seeking") with casual ("yo need")
+ALLOWED INDUSTRIES (exactly one ICP per industry, in this order):
+Software, Information Technology, Artificial Intelligence, Hardware, Data and Analytics, Privacy and Security, Health Care, Biotechnology, Financial Services, Lending and Investments, Payments, Manufacturing, Commerce and Shopping, Professional Services, Advertising, Sales and Marketing, Real Estate, Energy, Education, Transportation
 
-THINGS THAT MAKE PROMPTS FAKE OR WRONG (AVOID):
-- "Who should we target" / "Who should we find for you" — TOO ROBOTIC
-- "Find decision makers in X sector" — BANNED (talks about people, not companies)
-- "Ideal buyer: X at Y companies" — BANNED (talks about people)
-- ANY job title, seniority, or contact-level descriptor — BANNED
-- Starting every prompt the same way
-
-Your output must be valid JSON."""
-
-    # Build the detailed user prompt with distribution requirements
-    user_prompt = f"""Generate exactly {total_icps} ICP prompts — ONE PER INDUSTRY across these industries:
-
-INDUSTRY DISTRIBUTION (must match exactly, exactly one ICP per industry):
-"""
-    for industry, count in INDUSTRY_DISTRIBUTION.items():
-        sub_inds = taxonomy_sub_industries.get(industry, SUB_INDUSTRIES.get(industry, ["General"]))[:15]
-        products = PRODUCTS_BY_INDUSTRY.get(industry, ["Software solution"])[:5]
-        user_prompt += f"""
-{industry}: {count} prompt
-  Valid sub-industries to use: {', '.join(sub_inds)}
-  Example products the buyer might be selling INTO this industry: {', '.join(products)}
-"""
-
-    user_prompt += f"""
-
-CRITICAL REMINDER - BANNED CONTENT (DO NOT INCLUDE):
-- ANY job title, seniority, role, or contact-level descriptor (no "VP of X", "CTO", "Director", "Head of Y", "decision-makers", "buyers", "C-suite", "executives", "leaders", etc.).
-- "Who should we target" — BANNED
-- "Who should we find for you" — BANNED
-- "Find decision makers in" — BANNED (refers to people)
-- "Ideal buyer:" — BANNED
-- Any robotic template language — BANNED
-
-REQUIRED STARTER DISTRIBUTION (enforce strictly across the {total_icps} prompts):
-- ~5 starting with "I need..." / "I'm looking for..." / "I want..."
-- ~5 casual: "yo", "hey", "gonna need", "can you pull"
-- ~5 shorthand/telegraphic
-- ~5 questions: "what are...", "anyone know...", "which ..."
-- ~5 starting with "Looking for..." / "Searching for..."
-
-EXAMPLE COMPANY-LEVEL PROMPTS THAT SOUND HUMAN:
-
-For Software:
-- "I need Series A-B SaaS companies on the west coast that are visibly scaling their devops footprint right now."
-- "yo can you pull devtools companies 50-200 people, recently raised? we sell developer infra"
-
-For Financial Services:
-- "Looking for fintech companies between Series A and Series C in the US that just closed a round in payments or lending."
-- "what mid-market banks are publicly modernizing their core systems in 2026?"
-
-For Healthcare:
-- "digital health companies that started clinical pilots in the last 90 days. 50-500 employees, US."
-- "I want hospital systems or health systems in california that are actively evaluating new EHR tooling."
-
-For Manufacturing:
-- "industrial manufacturers in the midwest doing a digital transformation push, ideally 1000+ employees."
-- "anyone tracking automotive suppliers in ohio/michigan that are publicly announcing factory expansions?"
-
-GEOGRAPHIES TO USE:
-US States (most prompts): Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, DC, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, Wyoming
-
-UAE (optional, AT MOST 1 prompt — and only if the industry naturally fits, e.g. Financial Services or Lending and Investments): Dubai or Abu Dhabi. If used, write it as a company-level investor or capital-markets ICP (e.g. "looking for sovereign wealth funds or family offices in Abu Dhabi deploying into US growth equity"). Do NOT name people.
-
-IMPORTANT: Do NOT include any international geographies besides Dubai/Abu Dhabi. The remaining prompts MUST use US states.
-
-COMPANY SIZES: 10-50, 50-200, 200-500, 500-1000, 1000-5000, 5000+
-COMPANY STAGES: Seed, Series A, Series B, Series C+, Private Equity, Public
-
-PRODUCTS/SERVICES (what the SELLER is offering — mention naturally where useful):
-- Software: CRM, DevOps, Cloud security, AI/ML platforms
-- IT: Cloud services, Managed IT, Cybersecurity
-- Healthcare: EHR systems, Telemedicine, Patient engagement
-- Biotech: Lab software, Clinical trial management
-- Financial: Risk management, Compliance, Trading platforms
-- Manufacturing: ERP, Supply chain, Industrial IoT
-- Commerce: E-commerce platforms, Inventory management
-- Professional Services: Practice management, Billing software
-- Data: BI tools, Analytics platforms
-(See the per-industry product list above for more.)
-
-INTENT SIGNALS TO WEAVE IN (COMPANY-level — events the COMPANY did, not anything about people):
-- Recently raised funding / just closed a round
-- Expanding to new markets or new geographies
-- Launched or announced a new product/feature
-- Public commentary about digital transformation / evaluating new vendors
+ALLOWED INTENT SIGNALS (pick 1-2 per ICP; pair naturally with the industry):
+- Recently raised funding
+- Just closed a round
+- Launched or announced a new product
+- Expanded to new markets
+- Acquired another company
+- Recent leadership change
+- Achieved regulatory clearance or certification
+- Announced a strategic partnership
+- Hiring for senior engineering or sales roles
 - Recent factory / facility / store opening
-- New regulatory or compliance pressure
-- Acquired another company / acquired by another company
 
-OUTPUT FORMAT — Return a JSON object with "icps" array containing exactly {total_icps} objects, one per industry. Do NOT include target_roles, target_seniority, role_types, or any role/seniority field; the schema is company-only.
+ALLOWED COMPANY STAGES: Seed, Series A, Series B, Series C+, Private Equity, Public
+
+STAGE DISTRIBUTION — SPREAD EVENLY ACROSS STAGES:
+The benchmark needs to test miner performance at ALL stages, not just late-stage companies. Skewing toward Series C+/Public (because those have the most PR coverage) makes the benchmark too easy and fails to test the harder verification cases.
+
+Target distribution across the 20 ICPs (approximate, ±2 per bucket is fine):
+- Seed: 2-3 ICPs
+- Series A: 4-5 ICPs
+- Series B: 4-5 ICPs
+- Series C+: 3-4 ICPs
+- Private Equity: 1-2 ICPs
+- Public: 2-3 ICPs
+
+Do NOT cluster on later stages just because they're easier to verify. The realism rule still applies (every ICP must have a real `verified_example_company`), but Seed and Series A startups exist with verifiable funding announcements — find them.
+
+ALLOWED EMPLOYEE BANDS: 10-50, 50-200, 200-500, 500-1000, 1000-5000, 5000+
+(Prefer 50-500 or 200-1000 for broader coverage.)
+
+ALLOWED GEOGRAPHIES — STRONGLY PREFER BROAD VALUES:
+- "United States" (whole country — use this for ~50% of ICPs)
+- "United States, West Coast" / "Northeast" / "Midwest" / "South" / "Southwest" (use for ~40%)
+- "United States, <State>" only when the industry has a known concentration there (~10%)
+- "United Arab Emirates, Dubai" or "United Arab Emirates, Abu Dhabi" — at most 1 ICP, only when financial services / lending naturally fits
+
+INDUSTRY × INTENT PAIRING (Sonar should naturally honor these):
+- Service industries (Consulting, Legal, Accounting, Recruiting) → leadership change, hiring, expansion, acquisition, partnership — NOT product launch
+- Real Estate / Commercial Real Estate / PropTech → acquisition, expansion, leadership change, funding, facility opening — NOT product launch
+- Industrial Manufacturing → acquisition, expansion, partnership, facility opening, hiring — NOT SaaS-style product launches
+- Tech / SaaS / AI / Hardware / Biotech / Payments / FinTech / Cyber / Health → all intents work
+- Banking / large traditional finance → leadership change, acquisition, regulatory clearance, partnership
+
+STAGE × INTENT PAIRING:
+- "Acquired another company" → REQUIRES Series B or later
+- "Announced a strategic partnership" → REQUIRES Series B or later
+- "Recent factory / facility / store opening" → REQUIRES Series A or later
+- All other intent × stage combinations are valid
+
+OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
+
 {{
   "icps": [
     {{
       "icp_id": "icp_{set_id}_001",
-      "prompt": "I need Series B SaaS startups on the west coast that are actively scaling their devops footprint.",
-      "industry": "Software",
-      "sub_industry": "SaaS",
-      "employee_count": "50-200",
-      "company_stage": "Series B",
-      "geography": "United States, California",
+      "prompt": "<one-sentence salesperson-voice description>",
+      "industry": "<from industry list, in order>",
+      "sub_industry": "<natural sub-industry>",
+      "geography": "<from allowed geographies, prefer broad>",
       "country": "United States",
-      "product_service": "DevOps platform",
-      "intent_signals": ["Recently raised funding"]
-    }},
-    ...
+      "employee_count": "<from allowed bands>",
+      "company_stage": "<from allowed stages>",
+      "product_service": "<broad category — NOT a single named tool>",
+      "intent_signals": ["<1 or 2 from allowed intent list>"],
+      "verified_example_company": "<MANDATORY: the real company name you found while verifying this ICP>"
+    }}
   ]
 }}
 
-FINAL CHECK — Before outputting, verify:
-1. NO prompt contains a job title, seniority level, "decision-makers", "buyers", "executives", or any contact-level descriptor.
-2. NO prompt starts with "Who should we target" or "Who should we find".
-3. There are exactly {total_icps} prompts, one per industry listed above.
-4. Each prompt sounds like a different human typed it.
-5. Prompts use US states (and at most 1 UAE entry under Financial Services / Lending and Investments).
-6. No icp object has a target_roles, target_seniority, or role_types field."""
+FINAL CHECK before output (for every ICP):
+1. Is `verified_example_company` a real, currently-operating company? If not, REWRITE with broader constraints.
+2. Does the named example company actually match ALL the ICP's stated criteria? If not, REWRITE.
+3. Does the intent signal fit the industry's shape?
+4. Is the geography broad enough that real candidates exist?
+5. Are there exactly 20 ICPs, one per industry in the listed order?
+6. No job titles, no seniority, no contact-level descriptors in the prompts?"""
+
+    user_prompt = f"""Generate 20 ICPs for set_id={set_id}. Follow every instruction in the system message exactly. Output JSON only, no commentary."""
 
     try:
         logger.info(f"Calling OpenRouter {OPENROUTER_MODEL} to generate {total_icps} ICPs...")
@@ -586,9 +569,12 @@ FINAL CHECK — Before outputting, verify:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "temperature": 0.9,  # Higher temperature for more variety
-                    "max_tokens": 16000,  # Generous headroom for 20 ICPs
-                    "response_format": {"type": "json_object"}
+                    # Sonar drifts from JSON format at higher temperatures;
+                    # 0.7 keeps it grounded while still varying voice across the 20.
+                    "temperature": 0.7,
+                    "max_tokens": 16000,
+                    # Perplexity Sonar does NOT accept `response_format: json_object`;
+                    # the prompt explicitly demands JSON-only output instead.
                 }
             )
         
@@ -603,6 +589,24 @@ FINAL CHECK — Before outputting, verify:
             logger.error("OpenRouter returned empty content")
             return None
         
+        # Strip Sonar-style markdown fences and surrounding prose if present.
+        # Sonar often returns ```json ... ``` blocks despite the prompt.
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            # Drop the opening fence (optionally "```json")
+            stripped = stripped.split("\n", 1)[1] if "\n" in stripped else stripped[3:]
+            # Drop the closing fence
+            if "```" in stripped:
+                stripped = stripped.rsplit("```", 1)[0]
+            stripped = stripped.strip()
+        # Last-resort: extract the first {...} JSON object substring
+        if not stripped.startswith("{"):
+            obrace = stripped.find("{")
+            cbrace = stripped.rfind("}")
+            if obrace >= 0 and cbrace > obrace:
+                stripped = stripped[obrace : cbrace + 1]
+        content = stripped
+
         # Parse the JSON response
         try:
             # Handle if the model wrapped in a key
@@ -667,16 +671,22 @@ FINAL CHECK — Before outputting, verify:
                 intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))
                 logger.warning(f"ICP {icp_id} had empty intent_signals from LLM, assigned fallback: {intent_signals}")
 
-            geography = icp.get("geography", "United States, California")
+            # Default to whole-US (broadest supply) when the LLM omits geography.
+            # State-level defaults (e.g. "United States, California") narrow the
+            # intersection unnecessarily and cause downstream empty markets.
+            geography = icp.get("geography", "United States")
 
-            # Allow US and UAE only; override anything else
+            # Allow US and UAE only; override anything else to whole-US.
             if geography and "United Arab Emirates" in geography:
                 country = "United Arab Emirates"
             elif geography and "United States" in geography:
                 country = "United States"
             else:
-                logger.warning(f"ICP {icp_id} has non-US/UAE geography '{geography}', overriding to California")
-                geography = "United States, California"
+                logger.warning(
+                    f"ICP {icp_id} has non-US/UAE geography {geography!r}, "
+                    f"overriding to 'United States' (whole-country, broad supply)"
+                )
+                geography = "United States"
                 country = "United States"
 
             # COMPANY-MODE ONLY: do NOT carry forward target_roles or
@@ -684,6 +694,19 @@ FINAL CHECK — Before outputting, verify:
             # populate them as empty defaults to satisfy any older miner
             # code that still reads them via dict.get(), but no real role
             # data flows through.
+            # Capture the verified example company (Sonar's supply receipt) — the
+            # whole point of using Sonar is that this field is non-empty, proving
+            # the ICP has real-world supply. If empty, log a warning but keep
+            # the ICP (fail-open — Sonar sometimes omits the field even when
+            # it found one).
+            verified_example = (icp.get("verified_example_company") or "").strip()
+            if not verified_example:
+                logger.warning(
+                    f"ICP {icp_id} has empty verified_example_company — Sonar "
+                    f"may not have grounded the supply check for this combo "
+                    f"(industry={industry_normalized})"
+                )
+
             validated_icp = {
                 "icp_id": icp_id,
                 "prompt": prompt,
@@ -697,7 +720,8 @@ FINAL CHECK — Before outputting, verify:
                 "country": country,
                 "product_service": icp.get("product_service", "Software solution"),
                 "intent_signals": intent_signals,
-                "buyer_description": prompt  # Legacy alias of prompt
+                "buyer_description": prompt,                  # Legacy alias of prompt
+                "verified_example_company": verified_example, # Sonar's supply receipt
             }
 
             validated_icps.append(validated_icp)

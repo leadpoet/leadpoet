@@ -74,6 +74,27 @@ def _ascii_fold(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", no_marks)
 
 
+def _extract_email_domain(url_or_email: str) -> str:
+    """Extract bare domain from a URL or email string.
+
+    'https://www.example.com/path'  -> 'example.com'
+    'WWW.Example.COM'               -> 'example.com'
+    'foo@example.com'               -> 'example.com'
+    ''                              -> ''
+    """
+    if not url_or_email:
+        return ""
+    s = url_or_email.strip().lower()
+    if "@" in s:
+        s = s.rsplit("@", 1)[1]
+    if "://" in s:
+        s = s.split("://", 1)[1]
+    s = s.split("/", 1)[0].split("?", 1)[0]
+    if s.startswith("www."):
+        s = s[4:]
+    return s
+
+
 async def check_required_fields(lead: dict) -> Tuple[bool, dict]:
     """Check that all required fields are present and non-empty.
 
@@ -329,6 +350,38 @@ async def check_name_email_match(lead: dict) -> Tuple[bool, dict]:
                         if name_prefix == local_normalized or name_prefix in local_normalized:
                             name_match = True
                             break
+
+        # Strategy 3: small-company initials exception.
+        # Companies <=200 employees often use 2-char first-initial + last-initial
+        # patterns (e.g. ae@artera.io for Andre Esteva). Strategies 1 & 2 hit the
+        # 3-char floor and false-reject these. We only relax when the email is on
+        # the company's primary domain — downstream email deliverability and
+        # person verification then confirm the pairing.
+        if not name_match and first_normalized and last_normalized:
+            try:
+                emp_range = parse_employee_count(get_employee_count(lead))
+                emp_max = emp_range[1] if emp_range else None
+                company_domain = _extract_email_domain(get_website(lead))
+                email_domain = _extract_email_domain(email)
+
+                is_small_company = emp_max is not None and emp_max <= 200
+                domain_matches = bool(company_domain) and email_domain == company_domain
+                is_initials_local = (
+                    len(local_normalized) == 2 and local_normalized.isalpha()
+                )
+                initials_match = is_initials_local and local_normalized in {
+                    f"{first_normalized[0]}{last_normalized[0]}",
+                    f"{last_normalized[0]}{first_normalized[0]}",
+                }
+
+                if is_small_company and domain_matches and initials_match:
+                    name_match = True
+                    print(
+                        f"   ✅ Stage 0 (small-co initials): {email} @ {get_company(lead)} "
+                        f"- accepted (emp_max={emp_max}, domain={company_domain})"
+                    )
+            except Exception:
+                pass
 
         if not name_match:
             rejection_reason = {

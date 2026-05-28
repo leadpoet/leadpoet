@@ -61,29 +61,52 @@ MAX_CONCURRENCY = 8
 # qualification/scoring/intent_verification_three_stage.py so behaviour stays
 # consistent across the two Sonar-based verifiers.
 SD_URL = "https://api.scrapingdog.com/scrape"
-SD_TIMEOUT_S = 30                  # per-fetch
+SD_TIMEOUT_S = 30                  # per-fetch (legacy default — superseded by
+                                   # per-tier timeouts below for the cascade)
 SD_MAX_CONTENT_CHARS = 4_000       # truncate fetched HTML/markdown before
                                    # embedding in the prompt (4 KB per cited
                                    # URL, capped further at the prompt level).
-SD_RETRY_DELAYS_S = (1, 2)         # cheap 3-shot retry (1× + 2 backoffs)
+SD_RETRY_DELAYS_S = (1, 2)         # legacy retry (unused by new cascade)
 
-# Hosts that need Scrapingdog's premium proxy + stealth mode (otherwise they
-# 403 or serve a captcha).  Miners cite these often (LinkedIn job postings,
-# Glassdoor reviews, paywalled news), so they're worth the extra cost.
-_SD_ANTI_BOT_HOSTS = (
-    "linkedin.com", "indeed.com", "glassdoor.com", "ziprecruiter.com",
-    "builtin.com", "lever.co", "greenhouse.io",
-    "forbes.com", "bloomberg.com", "reuters.com", "wsj.com",
-    "ft.com", "finance.yahoo.com",
+# Content-driven escalation tiers — same cascade used by intent verifier.
+# Cheap tier first; escalate only when response is inadequate (HTTP failure /
+# empty body / anti-bot marker / JS-shell shape). NO host list.
+_SD_TIERS = (
+    ("baseline",        {}),
+    ("dynamic_render",  {"dynamic": "true", "wait": "5000"}),
+    ("premium_stealth", {"premium": "true", "stealth_mode": "true"}),
+    ("full_combined",   {"dynamic": "true", "wait": "8000",
+                         "premium": "true", "stealth_mode": "true"}),
 )
+_SD_TIER_TIMEOUT = {
+    "baseline":        20,
+    "dynamic_render":  30,
+    "premium_stealth": 30,
+    "full_combined":   45,
+}
 
-# Heuristic markers that the page we got back is an anti-bot interstitial
-# rather than the real content.  If we see one, treat the fetch as failed
-# (fall through to URL-only mode, log the miss).
+# Anti-bot / challenge / login-wall / parked-page markers — same as the
+# intent-verifier set, kept locally so this module is self-contained.
 _SD_CHALLENGE_MARKERS = (
     "checking your browser", "captcha", "verify you are human",
     "ddos protection", "challenge-platform", "access denied",
-    "security check",
+    "security check", "just a moment", "verifying you are human",
+    "enable javascript", "please enable js",
+    "sign in to linkedin", "sign in to see", "sign in to join",
+    "sign in to view", "sign in to continue",
+    "page can't be found", "this page doesn't exist",
+)
+
+# JS-shell hydration markers — pages returning 200 with a SPA skeleton that
+# needs dynamic=true to actually render the article body.
+_SD_HYDRATION_MARKERS = (
+    "__NEXT_DATA__", "window.__INITIAL_STATE__", "__APOLLO_STATE__",
+    "__NUXT__", "window.__PRELOADED_STATE__",
+)
+import re as _re_sd
+_SD_SPA_ROOT_RE = _re_sd.compile(
+    r'<div id="(root|__next|app|__nuxt)"[^>]*></div>',
+    _re_sd.IGNORECASE,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -569,18 +592,85 @@ def _sd_looks_like_challenge(content: str) -> bool:
     return any(m in head for m in _SD_CHALLENGE_MARKERS)
 
 
+def _sd_looks_like_js_shell(body: str) -> bool:
+    """Page is a JS framework shell whose content hasn't hydrated.
+    Mirrors qualification.scoring.intent_verification_three_stage._looks_like_js_shell.
+    """
+    if not body:
+        return False
+    if len(body) < 3000:
+        return True
+    if _SD_SPA_ROOT_RE.search(body):
+        return True
+    if any(m in body for m in _SD_HYDRATION_MARKERS):
+        text_only = _re_sd.sub(r"<[^>]+>", " ", body)
+        text_only = _re_sd.sub(r"\s+", " ", text_only).strip()
+        if len(text_only) < 500:
+            return True
+        if len(text_only) / max(len(body), 1) < 0.02:
+            return True
+    return False
+
+
+def _sd_evaluate(status_code: int, body: str) -> str:
+    """Classify a Scrapingdog response. 'ok' or a label that triggers escalation."""
+    if status_code == 404:
+        return "http_404"
+    if status_code != 200:
+        return f"http_{status_code}"
+    if not body or len(body.strip()) < 200:
+        return "body_too_short"
+    if _sd_looks_like_challenge(body):
+        return "anti_bot_marker"
+    if _sd_looks_like_js_shell(body):
+        return "js_shell"
+    return "ok"
+
+
+async def _wayback_fetch(session: aiohttp.ClientSession, url: str) -> Tuple[bool, str, str]:
+    """Wayback Machine snapshot fallback for URLs Scrapingdog tiers exhaust."""
+    try:
+        avail_url = f"http://archive.org/wayback/available?url={url}"
+        async with session.get(avail_url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status != 200:
+                return False, "", f"wayback_avail_http_{r.status}"
+            data = await r.json(content_type=None)
+        snap = (data.get("archived_snapshots") or {}).get("closest") or {}
+        snap_url = snap.get("url") or ""
+        if not snap_url:
+            return False, "", "wayback_no_snapshot"
+        async with session.get(snap_url, timeout=aiohttp.ClientTimeout(total=20)) as r:
+            if r.status != 200:
+                return False, "", f"wayback_http_{r.status}"
+            text = await r.text()
+        if not text or len(text) < 500:
+            return False, "", "wayback_too_short"
+        return True, text[:SD_MAX_CONTENT_CHARS], ""
+    except asyncio.TimeoutError:
+        return False, "", "wayback_timeout"
+    except Exception as e:
+        return False, "", f"wayback_{type(e).__name__}"
+
+
 async def fetch_url_via_scrapingdog(
     session: aiohttp.ClientSession,
     url: str,
 ) -> Tuple[bool, str, str]:
-    """Fetch one miner-cited URL via Scrapingdog.
+    """Fetch one miner-cited URL via Scrapingdog with content-driven
+    escalation + Wayback fallback.
+
+    Cascades through four Scrapingdog tiers, escalating only when the
+    response is inadequate (HTTP failure / empty body / anti-bot marker /
+    JS-shell shape). When all tiers exhaust, falls back to a Wayback
+    Machine snapshot. NO hardcoded host list — every URL goes through the
+    same cascade.
 
     Returns ``(ok, content, error)`` where:
-      * ``ok=True``  → ``content`` is the page text (markdown-formatted by SD),
-        truncated to ``SD_MAX_CONTENT_CHARS``.
-      * ``ok=False`` → ``content=""``, ``error`` describes the failure reason
-        ("no_sd_key" | "fetch_failed" | "challenge_page" | "binary_blob" |
-        "http_<code>" | "<ExceptionName>").
+      * ``ok=True``  → ``content`` is the page text (truncated to SD_MAX_CONTENT_CHARS).
+        ``error`` reports which tier succeeded ("sd:baseline", "sd:dynamic_render",
+        "sd:premium_stealth", "sd:full_combined", or "wayback").
+      * ``ok=False`` → ``content=""``, ``error`` describes the verdict from the
+        last attempted tier ("genuine_404" | "all_tiers_exhausted:<label>").
 
     Fail-OPEN by contract: callers should treat any False return as "no
     fetched content available; pass the bare URL through to Sonar".  We
@@ -592,52 +682,46 @@ async def fetch_url_via_scrapingdog(
     if not url:
         return False, "", "empty_url"
 
-    host = _sd_host(url)
-    use_premium = any(h in host for h in _SD_ANTI_BOT_HOSTS)
-    params = {
-        "api_key": SCRAPINGDOG_KEY,
-        "url": url,
-        "format": "markdown",
-    }
-    if use_premium:
-        params["premium"] = "true"
-        params["stealth_mode"] = "true"
-        params["dynamic"] = "true"
-        params["wait"] = "5000"
-
-    last_err = "unknown"
-    for attempt, delay in enumerate((0.0, *SD_RETRY_DELAYS_S)):
-        if delay:
-            await asyncio.sleep(delay)
+    last_verdict = "no_tier_attempted"
+    for tier_name, extra in _SD_TIERS:
+        params = {
+            "api_key": SCRAPINGDOG_KEY,
+            "url": url,
+            "format": "markdown",
+            **extra,
+        }
+        tier_timeout = _SD_TIER_TIMEOUT.get(tier_name, SD_TIMEOUT_S)
         try:
             async with session.get(
-                SD_URL, params=params, timeout=aiohttp.ClientTimeout(total=SD_TIMEOUT_S),
+                SD_URL, params=params,
+                timeout=aiohttp.ClientTimeout(total=tier_timeout),
             ) as resp:
-                if resp.status != 200:
-                    last_err = f"http_{resp.status}"
-                    continue
                 text = await resp.text()
-                if not text or len(text.strip()) < 200:
-                    last_err = "fetch_failed"
-                    continue
-                if _sd_looks_like_challenge(text):
-                    last_err = "challenge_page"
-                    continue
-                # Looks legit.  Truncate before returning so the prompt
-                # never balloons past the per-URL cap.
-                return True, text[:SD_MAX_CONTENT_CHARS], ""
+                verdict = _sd_evaluate(resp.status, text)
+                last_verdict = verdict
+                if verdict == "ok":
+                    return True, text[:SD_MAX_CONTENT_CHARS], f"sd:{tier_name}"
+                # If the origin returns 404 even after dynamic-render, the URL
+                # is genuinely dead — escalating to premium won't help.
+                if verdict == "http_404" and tier_name == "dynamic_render":
+                    return False, "", "genuine_404"
         except asyncio.TimeoutError:
-            last_err = "timeout"
+            last_verdict = f"timeout:{tier_name}"
         except Exception as e:
-            last_err = type(e).__name__
+            last_verdict = f"exception:{type(e).__name__}"
 
-    # Out of retries — log once and fall through.  Caller will use the
-    # bare URL as the only evidence Sonar gets.
+    # All Scrapingdog tiers exhausted. Try Wayback Machine for a cached
+    # snapshot — stale evidence is far better than zero evidence when the
+    # downstream LLM is going to default to "fabrication" without content.
+    wb_ok, wb_content, wb_err = await _wayback_fetch(session, url)
+    if wb_ok:
+        return True, wb_content, "wayback"
+
     _sd_logger.warning(
-        "SD fetch failed url=%s host=%s reason=%s",
-        url[:200], host, last_err,
+        "SD+Wayback fetch failed url=%s reason=%s wb=%s",
+        url[:200], last_verdict, wb_err,
     )
-    return False, "", last_err
+    return False, "", f"all_tiers_exhausted:{last_verdict}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

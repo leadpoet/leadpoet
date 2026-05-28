@@ -22,13 +22,15 @@ What the pipeline does, in order:
     - otherwise                                       -> review (escalate)
 
   STAGE 2 — only when Stage 1 returns 'review'. SD-primary + Exa-fallback per
-  supplied URL with the full hardening:
-    * JS_HEAVY_HOSTS -> dynamic=true + wait=5000
-    * ANTI_BOT_HOSTS -> premium=true + stealth_mode=true
-    * 3x retry with exponential backoff
-    * anti-bot marker detection + premium escalation
-    * length sanity check after retry
-    * binary blob detection
+  supplied URL. Content-driven progressive escalation (NO hardcoded host
+  list):
+    * Tier 1 (baseline)        — cheap default call
+    * Tier 2 (dynamic+wait)    — escalate when body is empty/short/JS-shell
+    * Tier 3 (premium+stealth) — escalate when anti-bot markers detected
+    * Tier 4 (full combined)   — last resort: dynamic + premium + stealth
+    * Wayback Machine snapshot — final fallback when all tiers exhaust
+    * Per-tier timeout caps + structural detectors (HTTP status, body length,
+      anti-bot markers, JS-shell hydration shape)
     * Exa fallback per URL when SD fails
 
   Optional pre-LLM company-name check (after Stage 2, before Stage 3):
@@ -71,31 +73,52 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Scraping config (host hardening profiles)
+# Scraping config — content-driven progressive escalation (NO host lists)
 # ─────────────────────────────────────────────────────────────────────
 MAX_SCRAPED_CHARS = 60_000
 SCRAPE_TIMEOUT = 60
 
-JS_HEAVY_HOSTS = (
-    "indeed.com", "builtin.com", "linkedin.com",
-    "ziprecruiter.com", "lever.co", "greenhouse.io",
-)
-ANTI_BOT_HOSTS = (
-    "forbes.com", "bloomberg.com", "reuters.com", "wsj.com",
-    "ft.com", "finance.yahoo.com",
-)
+# Anti-bot / login-wall / parked-page text markers. When found in a short
+# response body, indicates the scraper hit a challenge page instead of real
+# content — escalate to a stronger tier.
 ANTI_BOT_MARKERS = [
     "checking your browser", "captcha", "verify you are human",
     "ddos protection", "challenge-platform", "access denied",
-    "security check",
+    "security check", "just a moment", "verifying you are human",
+    "enable javascript", "please enable js",
+    "sign in to (linkedin|see|join|view|continue)",
+    "page can.?t be found", "403\\s*forbidden", "404\\s*not found",
 ]
+_ANTI_BOT_RE = re.compile("|".join(ANTI_BOT_MARKERS), re.IGNORECASE)
 
-HOST_SCRAPE_CONFIG = {
-    "ziprecruiter.com": {"dynamic": "true", "wait": "15000",
-                         "premium": "true", "stealth_mode": "true"},
-    "wellfound.com":    {"dynamic": "true", "wait": "15000"},
-    "glassdoor.com":    {},
-    "builtin.com":      {},
+# Hydration / SPA markers — pages that are JS-rendered and need
+# dynamic=true to actually fetch the article body.
+_HYDRATION_MARKERS = (
+    "__NEXT_DATA__", "window.__INITIAL_STATE__", "__APOLLO_STATE__",
+    "__NUXT__", "window.__PRELOADED_STATE__",
+)
+_SPA_ROOT_RE = re.compile(
+    r'<div id="(root|__next|app|__nuxt)"[^>]*></div>',
+    re.IGNORECASE,
+)
+
+# ScrapingDog escalation tiers. Each fired only when the previous tier's
+# response was inadequate (HTTP fail, empty body, anti-bot marker, JS shell).
+# NO host list — every URL gets the same cascade.
+_SD_TIERS = (
+    ("baseline",        {}),
+    ("dynamic_render",  {"dynamic": "true", "wait": "5000"}),
+    ("premium_stealth", {"premium": "true", "stealth_mode": "true"}),
+    ("full_combined",   {"dynamic": "true", "wait": "8000",
+                         "premium": "true", "stealth_mode": "true"}),
+)
+# Per-tier timeout (seconds) — cheap tiers should fail fast so we can
+# escalate quickly when content is missing.
+_SD_TIER_TIMEOUT = {
+    "baseline":        25,
+    "dynamic_render":  40,
+    "premium_stealth": 40,
+    "full_combined":   55,
 }
 
 
@@ -149,8 +172,58 @@ def _looks_textual(content: str) -> bool:
 
 
 def _has_anti_bot_marker(content: str) -> bool:
-    low = (content or "")[:5000].lower()
-    return any(m in low for m in ANTI_BOT_MARKERS)
+    if not content:
+        return False
+    return bool(_ANTI_BOT_RE.search(content[:5000]))
+
+
+def _looks_like_js_shell(body: str) -> bool:
+    """Heuristic: page is a JS framework shell whose content hasn't hydrated.
+    True positives → escalate to a dynamic-render tier.
+
+    Signals:
+      - very short total length (< 3000 chars)
+      - empty SPA root container present (`<div id="root"></div>`)
+      - hydration markers present but visible-text density tiny (< 2% of HTML)
+    """
+    if not body:
+        return False
+    if len(body) < 3000:
+        return True
+    if _SPA_ROOT_RE.search(body):
+        return True
+    if any(m in body for m in _HYDRATION_MARKERS):
+        text_only = re.sub(r"<[^>]+>", " ", body)
+        text_only = re.sub(r"\s+", " ", text_only).strip()
+        if len(text_only) < 500:
+            return True
+        if len(text_only) / max(len(body), 1) < 0.02:
+            return True
+    return False
+
+
+def _evaluate_sd_response(status_code: int, body: str) -> str:
+    """Classify a ScrapingDog response. Returns 'ok' or a short failure label.
+
+    Failure labels drive escalation: js_shell / anti_bot_marker / body_too_short
+    → retry with a stronger tier. http_404 → likely genuine dead URL, but try
+    one render tier in case it's a JS-rendered page.
+    """
+    if status_code == 404:
+        return "http_404"
+    if status_code >= 500:
+        return f"http_{status_code}"
+    if status_code != 200:
+        return f"http_{status_code}"
+    if not body or len(body) < 500:
+        return "body_too_short"
+    if _has_anti_bot_marker(body):
+        return "anti_bot_marker"
+    if _looks_like_js_shell(body):
+        return "js_shell"
+    if not _looks_textual(body):
+        return "non_textual"
+    return "ok"
 
 
 def _normalize_url(url: str) -> str:
@@ -198,83 +271,109 @@ def _get_openrouter_key() -> str:
 # ─────────────────────────────────────────────────────────────────────
 # Scraping — SD primary (host-aware hardened) + Exa fallback
 # ─────────────────────────────────────────────────────────────────────
+async def _try_wayback(url: str) -> Dict[str, Any]:
+    """Final-fallback: Wayback Machine snapshot of the URL.
+
+    Tradeoff: snapshots may be 6-12 months stale, but a stale snapshot is
+    far better evidence than nothing when ScrapingDog tiers all fail. Used
+    only when every direct fetch tier comes back inadequate.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cli:
+            avail = await cli.get(
+                f"http://archive.org/wayback/available?url={url}",
+            )
+            data = avail.json()
+            snap = (data.get("archived_snapshots") or {}).get("closest") or {}
+            if not snap.get("url"):
+                return {"ok": False, "stage": "wayback_no_snapshot",
+                        "content": "", "error": "no archived snapshot"}
+            r = await cli.get(snap["url"])
+            if r.status_code != 200:
+                return {"ok": False, "stage": "wayback_http_error",
+                        "content": "", "error": f"HTTP {r.status_code}"}
+            body = r.text or ""
+            if len(body) < 500:
+                return {"ok": False, "stage": "wayback_too_short",
+                        "content": "", "error": f"len={len(body)}"}
+            return {"ok": True, "stage": "wayback",
+                    "content": body[:MAX_SCRAPED_CHARS], "error": None}
+    except Exception as e:
+        return {"ok": False, "stage": "wayback_exception",
+                "content": "", "error": f"{type(e).__name__}: {str(e)[:80]}"}
+
+
 async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
-    """Direct Scrapingdog /scrape call with host-specific hardening (dynamic
-    rendering for JS-heavy hosts, premium proxy + stealth for anti-bot hosts)
-    and 3x retry with exponential backoff.  After anti-bot retry, re-validates
-    length, textuality, and absence of challenge markers."""
+    """Content-driven progressive escalation.
+
+    Starts with the cheapest ScrapingDog call (baseline) and escalates only
+    when the response is inadequate (HTTP failure / empty body / anti-bot
+    marker / JS shell shape). When all ScrapingDog tiers exhaust, falls back
+    to a Wayback Machine snapshot. NO hardcoded host list — every URL goes
+    through the same cascade.
+
+    Returns the original {ok, stage, content, error} contract so callers in
+    verify_three_stage and the attribute-verification path work unchanged.
+    A new 'stage_history' key carries the per-tier verdicts for telemetry.
+    """
     api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
         "QUALIFICATION_SCRAPINGDOG_API_KEY"
     )
     if not api_key:
-        return {"ok": False, "stage": "no_sd_key", "content": "", "error": "missing key"}
+        return {"ok": False, "stage": "no_sd_key",
+                "content": "", "error": "missing key"}
 
-    host = _host(url)
-    params = {"api_key": api_key, "url": url, "format": "markdown"}
+    base_params = {"api_key": api_key, "url": url, "format": "markdown"}
+    history: List[tuple] = []
+    last_status: Optional[int] = None
+    last_verdict: str = "no_tier_attempted"
 
-    override = next(
-        (cfg for h, cfg in HOST_SCRAPE_CONFIG.items() if h in host),
-        None,
-    )
-    if override is not None:
-        params.update(override)
-    else:
-        if any(h in host for h in JS_HEAVY_HOSTS):
-            params["dynamic"] = "true"
-            params["wait"] = "5000"
-        if any(h in host for h in ANTI_BOT_HOSTS):
-            params["premium"] = "true"
-            params["stealth_mode"] = "true"
-
-    content = None
-    last_err = None
     async with httpx.AsyncClient() as cli:
-        for i in range(3):
+        for tier_name, extra in _SD_TIERS:
+            tier_timeout = _SD_TIER_TIMEOUT.get(tier_name, SCRAPE_TIMEOUT)
+            params = {**base_params, **extra}
             try:
                 r = await cli.get(
                     "https://api.scrapingdog.com/scrape",
-                    params=params, timeout=SCRAPE_TIMEOUT,
+                    params=params, timeout=tier_timeout,
                 )
-                if r.status_code == 200:
-                    content = r.text
-                    if content and len(content.strip()) > 300:
-                        break
-                else:
-                    last_err = f"HTTP {r.status_code}"
+                body = r.text or ""
+                verdict = _evaluate_sd_response(r.status_code, body)
+                history.append((tier_name, verdict))
+                last_status = r.status_code
+                last_verdict = verdict
+                if verdict == "ok":
+                    return {"ok": True, "stage": f"sd:{tier_name}",
+                            "content": body[:MAX_SCRAPED_CHARS],
+                            "error": None, "stage_history": history}
+                # If origin returned 404 even after dynamic rendering, the URL
+                # is genuinely dead — escalating to premium proxies won't help.
+                if verdict == "http_404" and tier_name == "dynamic_render":
+                    break
             except Exception as e:
-                last_err = f"{type(e).__name__}"
-            await asyncio.sleep(2 ** i)
+                history.append((tier_name, f"exception:{type(e).__name__}"))
+                last_verdict = f"exception:{type(e).__name__}"
+                continue
 
-    if not content or len(content) < 300:
-        return {"ok": False, "stage": "fetch_failed",
-                "content": "", "error": last_err or "empty"}
-    if not _looks_textual(content):
-        return {"ok": False, "stage": "binary_blob",
-                "content": "", "error": "non_textual_content"}
-    if _has_anti_bot_marker(content) and override is None:
-        params["premium"] = "true"
-        params["stealth_mode"] = "true"
-        try:
-            async with httpx.AsyncClient() as cli:
-                r = await cli.get(
-                    "https://api.scrapingdog.com/scrape",
-                    params=params, timeout=SCRAPE_TIMEOUT,
-                )
-                content = r.text
-        except Exception as e:
-            return {"ok": False, "stage": "anti_bot_retry_failed",
-                    "content": "", "error": str(e)[:120]}
-        if not content or len(content) < 300:
-            return {"ok": False, "stage": "anti_bot_retry_thin",
-                    "content": "", "error": f"retry returned {len(content or '')} chars"}
-        if not _looks_textual(content):
-            return {"ok": False, "stage": "anti_bot_retry_binary",
-                    "content": "", "error": "non_textual_content_after_retry"}
-        if _has_anti_bot_marker(content):
-            return {"ok": False, "stage": "anti_bot_blocked",
-                    "content": "", "error": "challenge_persisted"}
-    return {"ok": True, "stage": "sd_scraped",
-            "content": content[:MAX_SCRAPED_CHARS], "error": None}
+    # All ScrapingDog tiers exhausted. Try Wayback as the final source of
+    # content — stale snapshot is better than nothing for evidence verification.
+    if last_verdict != "http_404" or last_status != 404:
+        wb = await _try_wayback(url)
+        history.append(("wayback", wb["stage"]))
+        if wb["ok"]:
+            return {"ok": True, "stage": "wayback",
+                    "content": wb["content"], "error": None,
+                    "stage_history": history}
+
+    # Genuine unfetchable. Caller should treat this as "verifier infrastructure
+    # could not reach the URL" — NOT as miner fabrication.
+    fail_label = (
+        "genuine_404" if last_verdict == "http_404"
+        else f"all_tiers_exhausted:{last_verdict}"
+    )
+    return {"ok": False, "stage": fail_label,
+            "content": "", "error": last_verdict,
+            "stage_history": history}
 
 
 async def _scrape_exa(url: str) -> Dict[str, Any]:

@@ -1,0 +1,70 @@
+{
+  "summary": {
+    "n": 3,
+    "answered": 1,
+    "abstained": 2,
+    "correct": 1,
+    "precision_pct": 100.0,
+    "false_positives": 0,
+    "total_cost_usd": 0.8372999999999999
+  },
+  "results": [
+    {
+      "icp_id": "funding_ai_2026",
+      "verdict": "abstain",
+      "correct": false,
+      "false_positive": false,
+      "answered_company": null,
+      "overall_confidence": 0,
+      "abstention_reason": "L2.5 triage rejected all",
+      "cost_usd": 0.0917,
+      "latency_s": 33.4,
+      "expected_one_of": [
+        "Anthropic",
+        "OpenAI",
+        "xAI",
+        "Mistral AI",
+        "Cohere"
+      ]
+    },
+    {
+      "icp_id": "launch_ai_2026",
+      "verdict": "abstain",
+      "correct": false,
+      "false_positive": false,
+      "answered_company": null,
+      "overall_confidence": 0,
+      "abstention_reason": "best score 72 < 80",
+      "cost_usd": 0.2938,
+      "latency_s": 87.1,
+      "expected_one_of": [
+        "Anthropic",
+        "OpenAI",
+        "Google DeepMind"
+      ]
+    },
+    {
+      "icp_id": "leadership_change_tech",
+      "verdict": "answered",
+      "correct": true,
+      "false_positive": false,
+      "answered_company": "Workday",
+      "overall_confidence": 96,
+      "abstention_reason": null,
+      "cost_usd": 0.4518,
+      "latency_s": 95.7,
+      "expected_one_of": [
+        "OpenAI",
+        "Microsoft",
+        "Salesforce",
+        "Slack",
+        "ServiceNow",
+        "Oracle",
+        "SAP",
+        "IBM",
+        "Workday",
+        "Adobe"
+      ]
+    }
+  ]
+}

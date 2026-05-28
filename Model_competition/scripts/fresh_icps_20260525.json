@@ -1,0 +1,362 @@
+[
+  {
+    "icp_id": "icp_20260525_001",
+    "prompt": "I need US-based B2B software companies around Series B that just launched a major new product and are scaling fast.",
+    "industry": "Software",
+    "sub_industry": "B2B SaaS",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "50-200",
+    "company_stage": "Series B",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Subscription business software platforms",
+    "intent_signals": [
+      "Launched or announced a new product"
+    ],
+    "buyer_description": "I need US-based B2B software companies around Series B that just launched a major new product and are scaling fast.",
+    "verified_example_company": "Linear"
+  },
+  {
+    "icp_id": "icp_20260525_002",
+    "prompt": "Searching for IT services providers in the US Midwest that recently expanded into new regional markets.",
+    "industry": "Information Technology",
+    "sub_industry": "IT Services and Consulting",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "200-500",
+    "company_stage": "Series C+",
+    "geography": "United States, Midwest",
+    "country": "United States",
+    "product_service": "Managed IT and cloud infrastructure services",
+    "intent_signals": [
+      "Expanded to new markets"
+    ],
+    "buyer_description": "Searching for IT services providers in the US Midwest that recently expanded into new regional markets.",
+    "verified_example_company": "Plex Systems"
+  },
+  {
+    "icp_id": "icp_20260525_003",
+    "prompt": "what AI startups in the US that just raised a Seed round to build applied AI platforms for enterprises?",
+    "industry": "Artificial Intelligence",
+    "sub_industry": "Applied AI Platforms",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "10-50",
+    "company_stage": "Seed",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "AI model-powered workflow and automation platforms",
+    "intent_signals": [
+      "Recently raised funding"
+    ],
+    "buyer_description": "what AI startups in the US that just raised a Seed round to build applied AI platforms for enterprises?",
+    "verified_example_company": "Lakera"
+  },
+  {
+    "icp_id": "icp_20260525_004",
+    "prompt": "yo can you pull US West Coast hardware companies at Series A that recently opened a new production or R&D facility?",
+    "industry": "Hardware",
+    "sub_industry": "Electronics and Devices",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "50-200",
+    "company_stage": "Series A",
+    "geography": "United States, West Coast",
+    "country": "United States",
+    "product_service": "Connected devices and embedded hardware platforms",
+    "intent_signals": [
+      "Recent factory / facility / store opening"
+    ],
+    "buyer_description": "yo can you pull US West Coast hardware companies at Series A that recently opened a new production or R&D facility?",
+    "verified_example_company": "Framework Computer"
+  },
+  {
+    "icp_id": "icp_20260525_005",
+    "prompt": "I\u2019m looking for US-based data and analytics startups around Series A that just closed a funding round to grow their analytics platform.",
+    "industry": "Data and Analytics",
+    "sub_industry": "Analytics Platforms",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "50-200",
+    "company_stage": "Series A",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Cloud-native data analytics and observability platforms",
+    "intent_signals": [
+      "Just closed a round"
+    ],
+    "buyer_description": "I\u2019m looking for US-based data and analytics startups around Series A that just closed a funding round to grow their analytics platform.",
+    "verified_example_company": "Metaplane"
+  },
+  {
+    "icp_id": "icp_20260525_006",
+    "prompt": "Need US cybersecurity scale-ups that recently announced a strategic technology partnership to broaden their security offering.",
+    "industry": "Privacy and Security",
+    "sub_industry": "Cybersecurity",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "200-500",
+    "company_stage": "Series C+",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Cloud and network security platforms",
+    "intent_signals": [
+      "Announced a strategic partnership"
+    ],
+    "buyer_description": "Need US cybersecurity scale-ups that recently announced a strategic technology partnership to broaden their security offering.",
+    "verified_example_company": "CrowdStrike"
+  },
+  {
+    "icp_id": "icp_20260525_007",
+    "prompt": "hey, gonna need US healthcare provider groups that are opening new facilities or clinics in the South.",
+    "industry": "Health Care",
+    "sub_industry": "Provider Networks and Clinics",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "500-1000",
+    "company_stage": "Private Equity",
+    "geography": "United States, South",
+    "country": "United States",
+    "product_service": "Multi-location healthcare delivery services",
+    "intent_signals": [
+      "Recent factory / facility / store opening"
+    ],
+    "buyer_description": "hey, gonna need US healthcare provider groups that are opening new facilities or clinics in the South.",
+    "verified_example_company": "Fast Pace Health"
+  },
+  {
+    "icp_id": "icp_20260525_008",
+    "prompt": "Looking for US biotech firms at Series B that recently achieved regulatory clearance for a new therapy or diagnostic.",
+    "industry": "Biotechnology",
+    "sub_industry": "Therapeutics and Diagnostics",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "50-200",
+    "company_stage": "Series B",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Biologic and molecular diagnostic products",
+    "intent_signals": [
+      "Achieved regulatory clearance or certification"
+    ],
+    "buyer_description": "Looking for US biotech firms at Series B that recently achieved regulatory clearance for a new therapy or diagnostic.",
+    "verified_example_company": "Karius"
+  },
+  {
+    "icp_id": "icp_20260525_009",
+    "prompt": "Pull public US financial services firms that recently announced a major acquisition to expand their platform.",
+    "industry": "Financial Services",
+    "sub_industry": "Digital Financial Platforms",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "5000+",
+    "company_stage": "Public",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Consumer and business financial platforms",
+    "intent_signals": [
+      "Acquired another company"
+    ],
+    "buyer_description": "Pull public US financial services firms that recently announced a major acquisition to expand their platform.",
+    "verified_example_company": "SoFi Technologies"
+  },
+  {
+    "icp_id": "icp_20260525_010",
+    "prompt": "anyone tracking lending and investment fintechs in the US that just closed a Series A to scale their platform?",
+    "industry": "Lending and Investments",
+    "sub_industry": "Fintech Lending Platforms",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "50-200",
+    "company_stage": "Series A",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Digital lending and investment platforms",
+    "intent_signals": [
+      "Just closed a round"
+    ],
+    "buyer_description": "anyone tracking lending and investment fintechs in the US that just closed a Series A to scale their platform?",
+    "verified_example_company": "Raft"
+  },
+  {
+    "icp_id": "icp_20260525_011",
+    "prompt": "I need US payments companies at Series B or later that recently launched a new payments product or feature.",
+    "industry": "Payments",
+    "sub_industry": "Payment Processing",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "200-500",
+    "company_stage": "Series B",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Online and in-person payment processing platforms",
+    "intent_signals": [
+      "Launched or announced a new product"
+    ],
+    "buyer_description": "I need US payments companies at Series B or later that recently launched a new payments product or feature.",
+    "verified_example_company": "Melio Payments"
+  },
+  {
+    "icp_id": "icp_20260525_012",
+    "prompt": "Looking for US manufacturing firms that are Series C+ and have recently opened a new factory or production facility.",
+    "industry": "Manufacturing",
+    "sub_industry": "Industrial Manufacturing",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "1000-5000",
+    "company_stage": "Series C+",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Industrial and consumer goods manufacturing",
+    "intent_signals": [
+      "Recent factory / facility / store opening"
+    ],
+    "buyer_description": "Looking for US manufacturing firms that are Series C+ and have recently opened a new factory or production facility.",
+    "verified_example_company": "Rivian Automotive"
+  },
+  {
+    "icp_id": "icp_20260525_013",
+    "prompt": "yo pull US commerce and shopping brands that are public and expanding to new physical or online markets.",
+    "industry": "Commerce and Shopping",
+    "sub_industry": "Omnichannel Retail and E-commerce",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "5000+",
+    "company_stage": "Public",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Retail and direct-to-consumer commerce operations",
+    "intent_signals": [
+      "Expanded to new markets"
+    ],
+    "buyer_description": "yo pull US commerce and shopping brands that are public and expanding to new physical or online markets.",
+    "verified_example_company": "Warby Parker"
+  },
+  {
+    "icp_id": "icp_20260525_014",
+    "prompt": "Searching for US-based professional services firms in the Northeast that recently announced a leadership change.",
+    "industry": "Professional Services",
+    "sub_industry": "Management Consulting and Advisory",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "200-500",
+    "company_stage": "Private Equity",
+    "geography": "United States, Northeast",
+    "country": "United States",
+    "product_service": "Consulting and advisory services",
+    "intent_signals": [
+      "Recent leadership change"
+    ],
+    "buyer_description": "Searching for US-based professional services firms in the Northeast that recently announced a leadership change.",
+    "verified_example_company": "AlixPartners"
+  },
+  {
+    "icp_id": "icp_20260525_015",
+    "prompt": "Need US advertising technology companies at Series B that recently announced a strategic partnership with a major media or tech platform.",
+    "industry": "Advertising",
+    "sub_industry": "Adtech Platforms",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "50-200",
+    "company_stage": "Series B",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Digital advertising and measurement platforms",
+    "intent_signals": [
+      "Announced a strategic partnership"
+    ],
+    "buyer_description": "Need US advertising technology companies at Series B that recently announced a strategic partnership with a major media or tech platform.",
+    "verified_example_company": "The Trade Desk"
+  },
+  {
+    "icp_id": "icp_20260525_016",
+    "prompt": "hey, I\u2019m looking for US-based sales and marketing SaaS companies around Series A that just launched a new go-to-market product.",
+    "industry": "Sales and Marketing",
+    "sub_industry": "Sales and Marketing Technology",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "50-200",
+    "company_stage": "Series A",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Sales engagement and marketing automation platforms",
+    "intent_signals": [
+      "Launched or announced a new product"
+    ],
+    "buyer_description": "hey, I\u2019m looking for US-based sales and marketing SaaS companies around Series A that just launched a new go-to-market product.",
+    "verified_example_company": "Mutiny"
+  },
+  {
+    "icp_id": "icp_20260525_017",
+    "prompt": "Looking for US real estate operators that are Series C+ or public and have recently acquired another company or large portfolio.",
+    "industry": "Real Estate",
+    "sub_industry": "Commercial and Residential Real Estate Operators",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "1000-5000",
+    "company_stage": "Series C+",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Real estate ownership, development, and management services",
+    "intent_signals": [
+      "Acquired another company"
+    ],
+    "buyer_description": "Looking for US real estate operators that are Series C+ or public and have recently acquired another company or large portfolio.",
+    "verified_example_company": "Invitation Homes"
+  },
+  {
+    "icp_id": "icp_20260525_018",
+    "prompt": "what US energy companies in the Southwest are public and expanding into new renewable energy markets?",
+    "industry": "Energy",
+    "sub_industry": "Renewable Energy Generation",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "1000-5000",
+    "company_stage": "Public",
+    "geography": "United States, Southwest",
+    "country": "United States",
+    "product_service": "Utility-scale renewable energy projects",
+    "intent_signals": [
+      "Expanded to new markets"
+    ],
+    "buyer_description": "what US energy companies in the Southwest are public and expanding into new renewable energy markets?",
+    "verified_example_company": "NextEra Energy"
+  },
+  {
+    "icp_id": "icp_20260525_019",
+    "prompt": "I need US EdTech startups at Seed or early Series A that recently raised funding to grow their digital learning platforms.",
+    "industry": "Education",
+    "sub_industry": "Education Technology",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "10-50",
+    "company_stage": "Seed",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Online learning and education management platforms",
+    "intent_signals": [
+      "Recently raised funding"
+    ],
+    "buyer_description": "I need US EdTech startups at Seed or early Series A that recently raised funding to grow their digital learning platforms.",
+    "verified_example_company": "Prisms of Reality"
+  },
+  {
+    "icp_id": "icp_20260525_020",
+    "prompt": "Pull US transportation and logistics tech firms that are Series B and opening new logistics centers or facilities.",
+    "industry": "Transportation",
+    "sub_industry": "Logistics and Mobility Technology",
+    "target_roles": [],
+    "target_seniority": "",
+    "employee_count": "200-500",
+    "company_stage": "Series B",
+    "geography": "United States",
+    "country": "United States",
+    "product_service": "Technology-enabled logistics and mobility services",
+    "intent_signals": [
+      "Recent factory / facility / store opening"
+    ],
+    "buyer_description": "Pull US transportation and logistics tech firms that are Series B and opening new logistics centers or facilities.",
+    "verified_example_company": "Flexport"
+  }
+]

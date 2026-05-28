@@ -1,0 +1,25 @@
+# Runtime cache (sqlite + per-call response caches) — 100M+ on disk
+cache/
+
+# Test/scoring intermediate outputs — useful to inspect locally, not to commit
+scripts/prod_score_results_*.jsonl
+scripts/test_*_results_*.jsonl
+scripts/apify_company_*.json
+
+# Per-debug-session throwaway scripts (debug_, perfect_, find_all_, dump_,
+# trace_, run_single, run_agency, test_) — kept locally for re-use across
+# iterations but not committed to the model repo.
+scripts/debug_*.py
+scripts/dump_*.py
+scripts/find_all_*.py
+scripts/perfect_*.py
+scripts/run_agency_icp*.py
+scripts/run_single.py
+scripts/trace_*.py
+scripts/test_*.py
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

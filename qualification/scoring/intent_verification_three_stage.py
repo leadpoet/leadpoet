@@ -88,6 +88,15 @@ ANTI_BOT_MARKERS = [
     "enable javascript", "please enable js",
     "sign in to (linkedin|see|join|view|continue)",
     "page can.?t be found", "403\\s*forbidden", "404\\s*not found",
+    # Facebook-specific failure / dead-content markers — surface when Exa
+    # renders an FB URL and the post has been deleted, restricted, or the
+    # URL was fabricated. Without these, FB's "content not available" page
+    # leaks through as if it were a successful scrape.
+    "this content isn't available",
+    "this content is no longer available",
+    "content isn't available right now",
+    "log in to facebook",
+    "log in or sign up.+facebook",
 ]
 _ANTI_BOT_RE = re.compile("|".join(ANTI_BOT_MARKERS), re.IGNORECASE)
 
@@ -224,6 +233,86 @@ def _evaluate_sd_response(status_code: int, body: str) -> str:
     if not _looks_textual(body):
         return "non_textual"
     return "ok"
+
+
+# Social-media post URL routing — ScrapingDog's specialized endpoints return
+# clean structured post data instead of the JS shell the generic /scrape
+# returns. Without these, FB/LinkedIn/X post URLs leak through as 60KB of
+# page chrome (login walls, scripts) that look like a successful scrape.
+_X_POST_RE = re.compile(r"(?:x|twitter)\.com/[^/?#]+/status/(\d+)", re.IGNORECASE)
+_LINKEDIN_POST_RE = re.compile(r"linkedin\.com/posts/[^?#]*activity[-:](\d+)", re.IGNORECASE)
+_FB_POST_RE = re.compile(r"facebook\.com/[^/?#]+/posts/", re.IGNORECASE)
+
+
+async def _scrape_x_post(url: str) -> Dict[str, Any]:
+    """SD specialized X (Twitter) post endpoint. Returns clean post text."""
+    m = _X_POST_RE.search(url)
+    if not m:
+        return {"ok": False, "stage": "x_no_id", "content": "", "error": "tweetId not found in URL"}
+    tweet_id = m.group(1)
+    api_key = os.environ.get("SCRAPINGDOG_API_KEY")
+    if not api_key:
+        return {"ok": False, "stage": "no_sd_key", "content": "", "error": "SCRAPINGDOG_API_KEY missing"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as cli:
+            r = await cli.get(
+                "https://api.scrapingdog.com/x/post",
+                params={"api_key": api_key, "tweetId": tweet_id},
+            )
+        if r.status_code != 200:
+            return {"ok": False, "stage": f"x_http_{r.status_code}", "content": "", "error": r.text[:200]}
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        body = data.get("full_tweet") or data.get("tweet") or ""
+        if not body:
+            return {"ok": False, "stage": "x_empty", "content": "", "error": "no tweet body in response"}
+        user = data.get("user") or {}
+        # Synthesize a content block that the downstream verifier can parse like normal scraped text.
+        synth = (
+            f"X Post by {user.get('name', 'unknown')} (@{user.get('screen_name', '')}) "
+            f"on {data.get('created_at', '')}\n\n{body}"
+        )
+        return {"ok": True, "stage": "sd:x_post", "content": synth, "error": ""}
+    except Exception as e:
+        return {"ok": False, "stage": "x_exception", "content": "", "error": f"{type(e).__name__}: {e}"}
+
+
+async def _scrape_linkedin_post(url: str) -> Dict[str, Any]:
+    """SD specialized LinkedIn post endpoint. Returns clean post text."""
+    m = _LINKEDIN_POST_RE.search(url)
+    if not m:
+        return {"ok": False, "stage": "linkedin_post_no_id", "content": "", "error": "activity id not found in URL"}
+    activity_id = m.group(1)
+    api_key = os.environ.get("SCRAPINGDOG_API_KEY")
+    if not api_key:
+        return {"ok": False, "stage": "no_sd_key", "content": "", "error": "SCRAPINGDOG_API_KEY missing"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as cli:
+            r = await cli.get(
+                "https://api.scrapingdog.com/profile/post",
+                params={"api_key": api_key, "id": activity_id},
+            )
+        if r.status_code != 200:
+            return {"ok": False, "stage": f"linkedin_post_http_{r.status_code}", "content": "", "error": r.text[:200]}
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        post = data.get("post_results") or {}
+        # The SD endpoint stores the actual post body under several non-obvious
+        # locations depending on activity type — check in priority order.
+        body = (
+            post.get("post_text")
+            or post.get("text")
+            or post.get("content")
+            or (post.get("related_post") or {}).get("text")
+            or (post.get("related_post") or {}).get("post_text")
+            or ""
+        )
+        author = (post.get("author") or {}).get("name", "unknown")
+        date = post.get("activity_date", "")
+        if not body:
+            return {"ok": False, "stage": "linkedin_post_empty", "content": "", "error": "no post body in response"}
+        synth = f"LinkedIn Post by {author} on {date}\n\n{body}"
+        return {"ok": True, "stage": "sd:linkedin_post", "content": synth, "error": ""}
+    except Exception as e:
+        return {"ok": False, "stage": "linkedin_post_exception", "content": "", "error": f"{type(e).__name__}: {e}"}
 
 
 def _normalize_url(url: str) -> str:
@@ -835,6 +924,56 @@ async def _fetch_sd_then_exa(
                 "linkedinjobs_stage": lij.get("stage"),
                 "linkedinjobs_error": lij.get("error"),
             })
+
+        # X (Twitter) post → SD specialized /x/post endpoint. Generic /scrape
+        # returns the SPA shell; the specialized endpoint returns clean post text.
+        if _X_POST_RE.search(url):
+            xp = await _scrape_x_post(url)
+            if xp.get("ok") and xp.get("content"):
+                results.append({
+                    "url": url, "title": "",
+                    "text": xp["content"][:max_chars],
+                })
+                statuses.append({"url": url, "source": "scrapingdog_x_post", "stage": xp.get("stage")})
+                continue
+            statuses.append({
+                "url": url, "source": "scrapingdog_x_post_failed",
+                "x_post_stage": xp.get("stage"), "x_post_error": xp.get("error"),
+            })
+
+        # LinkedIn post → SD specialized /profile/post endpoint.
+        if _LINKEDIN_POST_RE.search(url):
+            lp = await _scrape_linkedin_post(url)
+            if lp.get("ok") and lp.get("content"):
+                results.append({
+                    "url": url, "title": "",
+                    "text": lp["content"][:max_chars],
+                })
+                statuses.append({"url": url, "source": "scrapingdog_linkedin_post", "stage": lp.get("stage")})
+                continue
+            statuses.append({
+                "url": url, "source": "scrapingdog_linkedin_post_failed",
+                "linkedin_post_stage": lp.get("stage"), "linkedin_post_error": lp.get("error"),
+            })
+
+        # Facebook post → skip SD generic (returns the JS shell that fools the
+        # scraper into thinking it succeeded). Go straight to Exa, which renders
+        # the page and exposes FB's "content not available" error for dead URLs.
+        if _FB_POST_RE.search(url):
+            exa = await _scrape_exa(url)
+            if exa.get("ok") and exa.get("content") and not _has_anti_bot_marker(exa["content"]):
+                results.append({
+                    "url": url, "title": "",
+                    "text": exa["content"][:max_chars],
+                })
+                statuses.append({"url": url, "source": "exa_fb_route", "stage": exa.get("stage")})
+                continue
+            statuses.append({
+                "url": url, "source": "fb_unscrapable",
+                "exa_stage": exa.get("stage"), "exa_error": exa.get("error"),
+                "reason": "FB URL: Exa returned anti-bot/error page or empty",
+            })
+            continue
 
         sd = await _scrape_sd_hardened(url)
         if sd.get("ok") and sd.get("content"):

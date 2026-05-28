@@ -3242,8 +3242,8 @@ class Validator(BaseValidatorNeuron):
             # ║ but never set LEADERBOARD_BONUS_SHARE to 0 — that disables the  ║
             # ║ leaderboard entirely, which is NOT what "fulfillment X%" means. ║
             # ║                                                                  ║
-            # ║ Current default: 95% fulfillment-flavored total =               ║
-            # ║   85.5% per-epoch + 9.5% leaderboard (5 / 3 / 1.5).             ║
+            # ║ Current default: 90% fulfillment-flavored total =               ║
+            # ║   80.5% per-epoch + 9.5% leaderboard (5 / 3 / 1.5).             ║
             # ║                                                                  ║
             # ║ History: 322f287d (2026-05-15) zeroed the leaderboard while     ║
             # ║ raising the per-epoch pool to 95%, mistakenly interpreting      ║
@@ -3251,29 +3251,31 @@ class Validator(BaseValidatorNeuron):
             # ║ the same day.  This banner exists so it doesn't happen again.   ║
             # ║ 2026-05-17: leaderboard bumped 4% → 9.5% AND switched from      ║
             # ║ all-time to rolling 140-epoch window (~7 days, gateway-side).   ║
+            # ║ 2026-05-28: champion 5% → 10% (carved from fulfillment pool     ║
+            # ║ 85.5% → 80.5%); leaderboard 9.5% unchanged.                     ║
             # ╚══════════════════════════════════════════════════════════════════╝
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
-            CHAMPION_SHARE = 0.05          # 5% to qualification model champion (when active)
-            # FULFILLMENT-FLAVORED TOTAL = 95% (sourcing is zeroed, champion is 5%).
-            # That 95% is split into a per-epoch fulfillment pool and a top-3
-            # weekly leaderboard bonus.  The leaderboard is a permanent
+            CHAMPION_SHARE = 0.10          # 10% to qualification model champion (when active)
+            # FULFILLMENT-FLAVORED TOTAL = 90% (sourcing is zeroed, champion is 10%).
+            # That 90% is split into a per-epoch fulfillment pool and a top-3
+            # rolling-window leaderboard bonus.  The leaderboard is a permanent
             # feature of the fulfillment track — it is NEVER toggled off; only
             # the split ratio between per-epoch and weekly is tunable here.
-            FULFILLMENT_POOL_SHARE = 0.855 # 85.5% reserved for per-epoch fulfillment rewards
+            FULFILLMENT_POOL_SHARE = 0.805 # 80.5% reserved for per-epoch fulfillment rewards
             # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, restored 2026-05-15,
             # bumped to 9.5% + switched to rolling window on 2026-05-17, changed
             # from Monday-reset to rolling 140-epoch (~7 day) window on 2026-05-23.
             # Top-3 fulfillment winners in the last 140 epochs get this bonus
-            # on top of per-epoch payouts.  Carved from the 95% fulfillment-flavored
-            # total (95 = 85.5 per-epoch + 9.5 leaderboard).
+            # on top of per-epoch payouts.  Carved from the 90% fulfillment-flavored
+            # total (90 = 80.5 per-epoch + 9.5 leaderboard).
             LEADERBOARD_BONUS_SHARE = 0.095  # 9.5% total: 5 + 3 + 1.5
             LEADERBOARD_TOP1_PCT     = 0.05  # 5.0% to weekly #1
             LEADERBOARD_TOP2_PCT     = 0.03  # 3.0% to weekly #2
             LEADERBOARD_TOP3_PCT     = 0.015 # 1.5% to weekly #3
             # MAX_SOURCING_SHARE is computed dynamically:
             #   No champion, no fulfillment → 100% to sourcing miners
-            #   Both active → 0% sourcing, 5% champion, 85.5% fulfillment pool, 9.5% leaderboard bonus
+            #   Both active → 0% sourcing, 10% champion, 80.5% fulfillment pool, 9.5% leaderboard bonus
             # Updated 2026-04-27: shifted 15 points from sourcing → fulfillment
             # to incentivize miners to focus on the (more validator-cost-
             # intensive) fulfillment work.  Prior allocation was 35/5/60.
@@ -3284,6 +3286,9 @@ class Validator(BaseValidatorNeuron):
             # all-time to rolling window.  Updated 2026-05-23: window changed
             # from Monday-reset to rolling 140 epochs (~7 days).  Fulfillment pool
             # 91% → 85.5%; 95% fulfillment-flavored total preserved.
+            # Updated 2026-05-28: champion 5% → 10% (model competition bump);
+            # fulfillment pool 85.5% → 80.5%.  Leaderboard 9.5% unchanged.
+            # Fulfillment-flavored total now 90% (= 80.5 + 9.5).
             
             # CONFIGURABLE THRESHOLD: Approved leads needed in 30 epochs for full sourcing share
             # If network produces >= this many leads, full share is distributed
@@ -3331,7 +3336,7 @@ class Validator(BaseValidatorNeuron):
             # AND fulfillment is disabled on this validator.  When ff_enabled is
             # true we MUST proceed to the main distribution path even with empty
             # sourcing data, otherwise fulfillment miners get nothing despite
-            # successfully scoring requests this epoch (the 95% fulfillment pool
+            # successfully scoring requests this epoch (the 90% fulfillment pool
             # would silently burn).
             if not miner_scores and not rolling_scores and not ff_enabled:
                 print(f"   ⚠️  No current epoch OR rolling epoch data for epoch {current_epoch}")
@@ -3435,9 +3440,9 @@ class Validator(BaseValidatorNeuron):
             # portion flows to burn — it does NOT redistribute back to sourcing.
             # (ff_enabled is read once at the top of the function so the early
             #  no-sourcing-data gates above can honor it; do not re-read here.)
-            # MAX_SOURCING_SHARE is strictly 0% under the 2026-05-17 split:
-            # 5% champion (reserved even when inactive — burns instead of
-            # falling back to sourcing) + 85.5% per-epoch fulfillment + 9.5%
+            # MAX_SOURCING_SHARE is strictly 0% under the 2026-05-28 split:
+            # 10% champion (reserved even when inactive — burns instead of
+            # falling back to sourcing) + 80.5% per-epoch fulfillment + 9.5%
             # fulfillment leaderboard = 100%.  Sourcing miners get nothing;
             # qualification incentive is concentrated on the champion slot,
             # fulfillment incentive on per-epoch winners and the weekly top-3.

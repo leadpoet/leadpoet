@@ -3,25 +3,25 @@ Qualification System: Emissions Distribution
 
 Phase 6.2 from tasks10.md
 
-This module handles the distribution of 5% of subnet emissions to the
+This module handles the distribution of 10% of subnet emissions to the
 current champion of the Lead Qualification Agent competition.
 
 Emissions Flow:
 1. Called at end of each Bittensor epoch
 2. Get current champion from champion selection
 3. Verify champion's hotkey is still registered on subnet
-4. If valid champion → distribute 5% emissions
+4. If valid champion → distribute 10% emissions
 5. If no champion or unregistered → burn emissions
 6. Log EMISSIONS_DISTRIBUTED event to transparency log
 
-CRITICAL: This is NEW emissions logic for qualification (5% allocation).
+CRITICAL: This is NEW emissions logic for qualification (10% allocation).
 Do NOT modify any existing emissions or weight submission code in
 `neurons/validator.py`. The qualification emissions are handled
 separately from the main subnet emissions mechanism.
 
 Note: Actual emission distribution happens via weight updates in the
 validator. This module handles the logic and logging - the actual
-weight vector update that allocates 5% to the champion is done
+weight vector update that allocates 10% to the champion is done
 during the validator's weight submission.
 """
 

@@ -662,7 +662,7 @@ This is for validators who want to participate in consensus without running the 
 - Rolling 140-epoch window (~7 days). Empty leaderboard slots burn to the treasury.
 
 ### Emission Split (Current)
-- 0% sourcing · **5% model-competition champion** · **85.5% fulfillment per-epoch pool** · **9.5% weekly leaderboard**.
+- 0% sourcing · **10% model-competition champion** · **80.5% fulfillment per-epoch pool** · **9.5% weekly leaderboard**.
 
 ### Security Features
 

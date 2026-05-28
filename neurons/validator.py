@@ -9904,6 +9904,29 @@ def run_dedicated_fulfillment_worker(config):
                 print(f"   ⚠️ {len(pending) - 1} additional pending work file(s) will be processed next iteration")
             print(f"{'='*70}")
 
+            # Lease renewal: prevent Phase 1's TTL-bounded dispatch lock from
+            # expiring while this worker is still actively scoring. Without
+            # this, attribute-heavy ICPs running >80 min would age past the
+            # _FF_WORK_FILE_TTL_SEC cliff, Phase 1 would re-dispatch the
+            # same request, and the worker would double-score. Observed
+            # 2026-05-28 on request e1bd5ae5: orphan work file from epoch
+            # 23014 was being processed by worker 1 when at exactly 80 min
+            # (22:30), Phase 1 saw the lock release and re-dispatched
+            # e1bd5ae5 with my new fan-out across workers 1-4. We refresh
+            # mtime every 30 min — leaves 50-min headroom under 80-min TTL.
+            async def _refresh_lease():
+                while True:
+                    await asyncio.sleep(30 * 60)
+                    try:
+                        work_file.touch()
+                        print(f"   🔄 Worker {fid}: lease renewed on {work_file.name}")
+                    except FileNotFoundError:
+                        return  # results submitted; file already cleaned up
+                    except Exception as ex:
+                        print(f"   ⚠️ Worker {fid}: lease renewal failed: {ex}")
+
+            lease_task = asyncio.create_task(_refresh_lease())
+
             try:
                 with open(work_file, 'r') as f:
                     work_data = json.load(f)
@@ -10071,6 +10094,13 @@ def run_dedicated_fulfillment_worker(config):
                         "timestamp": time.time(),
                     }, f, indent=2)
                 self._completed_epochs.add(current_epoch)
+            finally:
+                # Stop lease renewal — scoring is over (success or failure).
+                lease_task.cancel()
+                try:
+                    await lease_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         async def run_loop(self):
             """Main loop for dedicated fulfillment worker."""

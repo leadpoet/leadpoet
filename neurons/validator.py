@@ -4565,16 +4565,68 @@ class Validator(BaseValidatorNeuron):
                           f"(of {len(scoring_requests)} total; max parallel = {max(num_workers, 1)})")
 
                     if num_workers > 0:
-                        # ── Container mode: 1 request per worker ──
-                        for req_idx, req in enumerate(requests_to_process):
-                            worker_id = req_idx + 1  # 1-indexed
-                            request_id = req.get("request_id", "")
-                            icp_details = req.get("icp", {})
-                            submissions = req.get("submissions", [])
+                        # ── Container mode: distribute work across workers ──
+                        #
+                        # Original design assigned 1 request per worker. When
+                        # fewer requests than workers were ready (common with
+                        # low client volume), workers 2..N idled while worker
+                        # 1 serially scored every submission of the only
+                        # request. Observed 2026-05-28: 1 request with 4
+                        # submissions × 9-36 leads each stacked on worker 1,
+                        # 9 other workers idle — reveal→consensus lag >34 min
+                        # while 90% of compute was unused.
+                        #
+                        # Fix: when spare worker capacity exists, fan out
+                        # SUBMISSIONS within a request across the spare
+                        # workers. Each worker writes its own work + results
+                        # file; the work file's `submissions` key holds only
+                        # that worker's subset. Phase 2 aggregates per file,
+                        # and gateway scores upsert on (request_id,
+                        # validator_hotkey, lead_id), so multiple per-worker
+                        # submits for the same request_id don't conflict.
+                        assignments = []  # (worker_id, request_id, icp, [subs])
 
-                            if not submissions:
-                                continue
+                        if len(requests_to_process) >= num_workers:
+                            # Plenty of requests — keep original 1-per-worker
+                            # mapping (avoids unnecessary cross-request work
+                            # file proliferation when load is balanced).
+                            for req_idx, req in enumerate(requests_to_process):
+                                worker_id = req_idx + 1
+                                request_id = req.get("request_id", "")
+                                icp_details = req.get("icp", {})
+                                submissions = req.get("submissions", [])
+                                if not submissions:
+                                    continue
+                                assignments.append(
+                                    (worker_id, request_id, icp_details, submissions)
+                                )
+                        else:
+                            # Fewer requests than workers — flatten submissions
+                            # and round-robin them across workers, then group
+                            # by (worker, request) so each work file still
+                            # encodes exactly one request_id.
+                            flat = []
+                            for req in requests_to_process:
+                                request_id = req.get("request_id", "")
+                                icp_details = req.get("icp", {})
+                                for sub in req.get("submissions", []):
+                                    flat.append((request_id, icp_details, sub))
 
+                            by_worker = {}
+                            for idx, (request_id, icp_details, sub) in enumerate(flat):
+                                worker_id = (idx % num_workers) + 1
+                                by_req = by_worker.setdefault(worker_id, {})
+                                if request_id not in by_req:
+                                    by_req[request_id] = (icp_details, [])
+                                by_req[request_id][1].append(sub)
+
+                            for worker_id, by_req in by_worker.items():
+                                for request_id, (icp_details, subs) in by_req.items():
+                                    assignments.append(
+                                        (worker_id, request_id, icp_details, subs)
+                                    )
+
+                        for worker_id, request_id, icp_details, submissions in assignments:
                             # request_id is a UUID — safe for filenames
                             work_file = weights_dir / f"fulfillment_worker_{worker_id}_work_{current_epoch}_{request_id}.json"
                             with open(work_file, 'w') as f:
@@ -4588,7 +4640,9 @@ class Validator(BaseValidatorNeuron):
                             print(f"   📝 Worker {worker_id} → request {request_id[:8]} "
                                   f"({len(submissions)} submission(s))")
 
-                        print(f"   ⏳ Work distributed to {len(requests_to_process)} worker(s)")
+                        unique_workers = len({a[0] for a in assignments})
+                        print(f"   ⏳ Work distributed to {unique_workers} worker(s) "
+                              f"({len(assignments)} work file(s))")
                     else:
                         # ── Inline mode (no containers) — process sequentially ──
                         from qualification.scoring.fulfillment_scorer import (

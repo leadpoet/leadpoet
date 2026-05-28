@@ -9856,10 +9856,28 @@ def run_dedicated_fulfillment_worker(config):
             fid = self.config.neuron.fulfillment_container_id
             weights_dir = Path("validator_weights")
 
-            # Prefer the new per-request layout; fall back to legacy.
-            candidates = sorted(weights_dir.glob(
-                f"fulfillment_worker_{fid}_work_{current_epoch}_*.json"
-            ))
+            # Cross-epoch glob: pick up THIS worker's files from any recent
+            # epoch, bounded by the same TTL Phase 1 uses for its dispatch
+            # lock. Single-epoch globbing was the bug — when an epoch flipped
+            # mid-scoring (Tier 2c attribute-heavy ICPs run 30-60 min and
+            # an epoch is ~70 min), the worker stopped seeing its own
+            # in-flight file while Phase 1's cross-epoch lock kept refusing
+            # to re-dispatch. Result: file orphaned for the full 80-min TTL,
+            # request stuck. Observed 2026-05-28 with request e1bd5ae5:
+            # file fulfillment_worker_1_work_23014_e1bd5ae5...json sat for
+            # 34+ min while worker 1 in epoch 23015 globbed only 23015
+            # files and missed it.
+            _FF_WORK_FILE_TTL_SEC = 80 * 60
+            _now_ts = time.time()
+            candidates = sorted(
+                wf for wf in weights_dir.glob(
+                    f"fulfillment_worker_{fid}_work_*_*.json"
+                )
+                if (_now_ts - wf.stat().st_mtime) < _FF_WORK_FILE_TTL_SEC
+            )
+            # Legacy (pre-per-request layout) — name has no request_id
+            # suffix, so the cross-epoch glob above wouldn't match it.
+            # Keep scoped to current epoch for backward-compat probing.
             legacy = weights_dir / f"fulfillment_worker_{fid}_work_{current_epoch}.json"
             if legacy.exists():
                 candidates.append(legacy)

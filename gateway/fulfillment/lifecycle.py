@@ -451,6 +451,35 @@ async def _lifecycle_tick_inner(supabase) -> None:
                     f"{len(unique_validators)}/{FULFILLMENT_MIN_VALIDATORS} validators — proceeding"
                 )
 
+            # Skip re-aggregation when no new validator scores have arrived
+            # since the last consensus pass.  Heavy work (compute_consensus +
+            # chain top-K + DB writes) runs synchronously and blocks the
+            # asyncio event loop — leaving it out when nothing changed keeps
+            # the gateway's /health endpoint responsive between ticks.
+            #
+            # Only fires for already-partially_fulfilled rows; for fresh
+            # `scoring` rows the consensus pass MUST run (no prior pass to
+            # compare against).
+            if r.get("status") == "partially_fulfilled":
+                latest_consensus_resp = supabase.table("fulfillment_score_consensus") \
+                    .select("computed_at") \
+                    .eq("request_id", rid) \
+                    .order("computed_at", desc=True) \
+                    .limit(1).execute()
+                latest_score_resp = supabase.table("fulfillment_scores") \
+                    .select("scored_at") \
+                    .eq("request_id", rid) \
+                    .order("scored_at", desc=True) \
+                    .limit(1).execute()
+                if latest_consensus_resp.data and latest_score_resp.data:
+                    last_consensus_at = latest_consensus_resp.data[0].get("computed_at") or ""
+                    last_scored_at = latest_score_resp.data[0].get("scored_at") or ""
+                    if last_scored_at <= last_consensus_at:
+                        # No new scores since the last aggregation — skip.
+                        # This is the common case for re-aggregation passes
+                        # on stable partially_fulfilled chains.
+                        continue
+
             consensus_results = await compute_fulfillment_consensus(rid)
             if not consensus_results:
                 print(

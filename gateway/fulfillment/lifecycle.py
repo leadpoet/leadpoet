@@ -370,10 +370,37 @@ async def _lifecycle_tick_inner(supabase) -> None:
                 held_companies=chain_state["held_companies"],
             )
 
-    # Step 3: consensus aggregation for scoring requests
+    # Step 3: consensus aggregation for scoring requests + recently-transitioned
+    # partially_fulfilled requests (within the consensus timeout window).
+    #
+    # Why include partially_fulfilled: FULFILLMENT_MIN_VALIDATORS defaults to 1,
+    # so the first validator's submission triggers compute_fulfillment_consensus()
+    # below, which decides chain top-K and transitions the request to a terminal
+    # status (fulfilled / partially_fulfilled / recycled).  Without including
+    # partially_fulfilled here, late-arriving validator scores would land in
+    # fulfillment_scores but never make it into fulfillment_score_consensus —
+    # they'd be silently dropped, and any winners those validators saw would
+    # not be reflected in the chain-held set.
+    #
+    # Safety:
+    #   * fulfillment_upsert_consensus is idempotent (upsert keyed on
+    #     (request_id, submission_id, lead_id)) — re-running on the same data
+    #     is a no-op.
+    #   * _resolve_chain_topk re-resolves chain-held flags across the entire
+    #     chain on every call — if late scores produce new winners, they
+    #     correctly displace lower-scoring held leads.
+    #   * Time-bounded to FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES past
+    #     reveal_window_end so we don't re-aggregate ancient requests forever.
+    #   * fulfilled and recycled are NOT included — fulfilled would risk
+    #     double-paying via a second _finalize_chain_rewards; recycled is a
+    #     separate (and rarer) failure mode handled in a follow-up.
+    rerun_window_start = (
+        now - timedelta(minutes=FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES)
+    ).isoformat()
     scoring_requests = supabase.table("fulfillment_requests") \
-        .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes") \
-        .eq("status", "scoring") \
+        .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes, status") \
+        .in_("status", ["scoring", "partially_fulfilled"]) \
+        .gte("reveal_window_end", rerun_window_start) \
         .execute()
 
     if scoring_requests.data:
@@ -497,6 +524,14 @@ async def _lifecycle_tick_inner(supabase) -> None:
                 f"displaced {displaced_count} from prior generations)"
             )
 
+            # Track whether this is a re-aggregation pass on an already-
+            # partially_fulfilled request (Step 3 now picks those up so late
+            # validator scores can be folded in).  Used below to skip the
+            # recycle branch when nothing materially changed — otherwise the
+            # existing recycle would insert + claim-loss + delete an orphan
+            # successor every tick.
+            was_partially_fulfilled = r.get("status") == "partially_fulfilled"
+
             if held_count >= chain_target:
                 # ────────────────────────────────────────────────────────
                 # FULFILLED: chain reached full quota.  Distribute rewards
@@ -505,6 +540,14 @@ async def _lifecycle_tick_inner(supabase) -> None:
                 # original generation, but reward_pct/expires_epoch is
                 # written via calculate_lead_rewards keyed on
                 # (request_id, submission_id, lead_id)).
+                #
+                # Re-aggregation path: if was_partially_fulfilled, the
+                # successor was already created during the original
+                # partial-fulfill recycle.  We mark the predecessor as
+                # fulfilled and distribute rewards normally; the existing
+                # successor will naturally terminate when its own scoring
+                # cycle runs (chain top-K sees the chain quota already met
+                # via the predecessor's held leads).
                 # ────────────────────────────────────────────────────────
                 winner_lead_ids = await _finalize_chain_rewards(
                     rid, topk, chain["tied_groups"],
@@ -538,51 +581,85 @@ async def _lifecycle_tick_inner(supabase) -> None:
                 print(f"\n   Winners: {len(winner_lead_ids)}/{chain_target} leads")
                 print(f"{'='*60}\n")
             elif held_count > 0:
-                # ────────────────────────────────────────────────────────
-                # PARTIALLY_FULFILLED: chain produced some held leads but
-                # didn't hit the quota.  Successor inherits the in-flight
-                # held set (held companies become excluded_companies) and
-                # asks miners only for the remaining quota.  No rewards
-                # distributed yet; held leads sit in DB with
-                # is_chain_held=TRUE and earn $0 until the chain
-                # eventually reaches `fulfilled`.
-                # ────────────────────────────────────────────────────────
-                remaining = chain_target - held_count
-                print(
-                    f"   📈 {rid[:8]}... -> partially_fulfilled "
-                    f"({held_count}/{chain_target} held, "
-                    f"recycling for {remaining} more)"
-                )
-                _recycle_request(
-                    supabase, r, now, now_iso,
-                    terminal_status="partially_fulfilled",
-                    successor_status_target="continued_open",
-                    successor_num_leads=remaining,
-                    held_companies=topk_companies,
-                    reason=(
-                        f"chain_partial_{held_count}_of_{chain_target}"
-                    ),
-                )
+                if was_partially_fulfilled:
+                    # ────────────────────────────────────────────────────
+                    # RE-AGGREGATION on an already-partially_fulfilled
+                    # request: the successor was created the first time we
+                    # transitioned here.  Re-aggregation may have updated
+                    # consensus rows and is_chain_held flags (handled by
+                    # _resolve_chain_topk above), but we MUST NOT recycle
+                    # again — that would orphan-insert + cleanup-delete a
+                    # successor every tick.  Leave status as
+                    # partially_fulfilled and let the existing successor
+                    # continue its own lifecycle.
+                    # ────────────────────────────────────────────────────
+                    print(
+                        f"   🔄 {rid[:8]}... re-aggregated "
+                        f"({held_count}/{chain_target} held, "
+                        f"still partially_fulfilled; successor unchanged)"
+                    )
+                else:
+                    # ────────────────────────────────────────────────────
+                    # PARTIALLY_FULFILLED: chain produced some held leads
+                    # but didn't hit the quota.  Successor inherits the
+                    # in-flight held set (held companies become
+                    # excluded_companies) and asks miners only for the
+                    # remaining quota.  No rewards distributed yet; held
+                    # leads sit in DB with is_chain_held=TRUE and earn $0
+                    # until the chain eventually reaches `fulfilled`.
+                    # ────────────────────────────────────────────────────
+                    remaining = chain_target - held_count
+                    print(
+                        f"   📈 {rid[:8]}... -> partially_fulfilled "
+                        f"({held_count}/{chain_target} held, "
+                        f"recycling for {remaining} more)"
+                    )
+                    _recycle_request(
+                        supabase, r, now, now_iso,
+                        terminal_status="partially_fulfilled",
+                        successor_status_target="continued_open",
+                        successor_num_leads=remaining,
+                        held_companies=topk_companies,
+                        reason=(
+                            f"chain_partial_{held_count}_of_{chain_target}"
+                        ),
+                    )
             else:
-                # ────────────────────────────────────────────────────────
-                # RECYCLED: chain produced ZERO held leads this cycle and
-                # has no held leads from prior generations either (or
-                # they all just got knocked out).  Treat this like the
-                # legacy "no useful work" recycle — successor is a fresh
-                # `open` request asking for the full quota again.
-                # ────────────────────────────────────────────────────────
-                print(
-                    f"   ♻️  {rid[:8]}... -> recycled "
-                    f"(0 held, target {chain_target}) — fresh start"
-                )
-                _recycle_request(
-                    supabase, r, now, now_iso,
-                    terminal_status="recycled",
-                    successor_status_target="open",
-                    successor_num_leads=chain_target,
-                    held_companies=[],
-                    reason=f"empty_chain_topk_target_{chain_target}",
-                )
+                if was_partially_fulfilled:
+                    # ────────────────────────────────────────────────────
+                    # RE-AGGREGATION wiped out all held leads (very rare
+                    # edge case — would require late scores that displace
+                    # every prior winner).  Do NOT re-recycle as
+                    # `recycled` — that would conflict with the existing
+                    # `partially_fulfilled` successor and orphan-cycle.
+                    # Leave status as-is and let the existing successor
+                    # take over the chain's remaining quota.
+                    # ────────────────────────────────────────────────────
+                    print(
+                        f"   🔄 {rid[:8]}... re-aggregated to 0 held "
+                        f"(was partially_fulfilled; leaving status, "
+                        f"existing successor continues)"
+                    )
+                else:
+                    # ────────────────────────────────────────────────────
+                    # RECYCLED: chain produced ZERO held leads this cycle
+                    # and has no held leads from prior generations either
+                    # (or they all just got knocked out).  Treat this like
+                    # the legacy "no useful work" recycle — successor is a
+                    # fresh `open` request asking for the full quota again.
+                    # ────────────────────────────────────────────────────
+                    print(
+                        f"   ♻️  {rid[:8]}... -> recycled "
+                        f"(0 held, target {chain_target}) — fresh start"
+                    )
+                    _recycle_request(
+                        supabase, r, now, now_iso,
+                        terminal_status="recycled",
+                        successor_status_target="open",
+                        successor_num_leads=chain_target,
+                        held_companies=[],
+                        reason=f"empty_chain_topk_target_{chain_target}",
+                    )
 
         except Exception as e:
             print(f"   ❌ Error in consensus for {rid[:8]}...: {e}")

@@ -398,7 +398,7 @@ async def _lifecycle_tick_inner(supabase) -> None:
         now - timedelta(minutes=FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES)
     ).isoformat()
     scoring_requests = supabase.table("fulfillment_requests") \
-        .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes, status") \
+        .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes, status, successor_request_id") \
         .in_("status", ["scoring", "partially_fulfilled"]) \
         .gte("reveal_window_end", rerun_window_start) \
         .execute()
@@ -589,6 +589,56 @@ async def _lifecycle_tick_inner(supabase) -> None:
                     f"({len(winner_lead_ids)}/{chain_target} winners; "
                     f"chain reached quota)"
                 )
+
+                # Orphan-successor cleanup. dff0407d's design documented
+                # that the successor "naturally terminates when its own
+                # scoring cycle runs (chain top-K sees the chain quota
+                # already met)" — but that only fires if the successor
+                # has received submissions. An empty successor sits in
+                # continued_open until its own window expires (~70 min of
+                # phantom open-chain visibility, during which miners
+                # waste work submitting to it). Observed 2026-05-29: 5
+                # Stan chain head 300c9867 stuck in continued_open after
+                # predecessor 22e05fd0 flipped to fulfilled via late-
+                # score re-aggregation 2 minutes after the original
+                # partial-fulfill recycle.
+                #
+                # Proactively recycle the orphan successor here if it has
+                # 0 submissions. Active successors (any submissions) are
+                # left alone — Pranav's chain-top-K reconciliation in
+                # _resolve_chain_topk handles them correctly on their
+                # next scoring cycle. The status guard
+                # status=continued_open ensures we never clobber a
+                # successor that has advanced.
+                if was_partially_fulfilled:
+                    succ_id = r.get("successor_request_id")
+                    if succ_id:
+                        try:
+                            count_resp = supabase.table(
+                                "fulfillment_submissions"
+                            ).select(
+                                "submission_id", count="exact", head=True,
+                            ).eq("request_id", succ_id).execute()
+                            if (count_resp.count or 0) == 0:
+                                upd = supabase.table(
+                                    "fulfillment_requests"
+                                ).update({
+                                    "status": "recycled",
+                                }).eq("request_id", succ_id) \
+                                  .eq("status", "continued_open") \
+                                  .execute()
+                                if upd.data:
+                                    print(
+                                        f"   🧹 cancelled empty orphan "
+                                        f"successor {str(succ_id)[:8]}... "
+                                        f"(parent fulfilled via "
+                                        f"re-aggregation, 0 submissions)"
+                                    )
+                        except Exception as e:
+                            print(
+                                f"   ⚠️ orphan-successor cleanup failed "
+                                f"for {str(succ_id)[:8]}: {e}"
+                            )
 
                 ranked = sorted(
                     consensus_results,

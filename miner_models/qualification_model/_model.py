@@ -341,6 +341,71 @@ def _domain_from_website_url(website: str) -> str:
     return host.lower().lstrip(".").removeprefix("www.")
 
 
+# Host substring → IntentSignalSource enum value.  Picks the source the
+# production scorer will multiply by the highest weight (linkedin/job_board/
+# github=1.0 > news=0.9 > company_website=0.85 > other=0.5).
+_HOST_SOURCE_HINTS = (
+    # Most specific patterns first.
+    ("linkedin.com/jobs", "job_board"),
+    ("linkedin.com/posts", "linkedin"),
+    ("linkedin.com", "linkedin"),
+    ("indeed.com", "job_board"),
+    ("glassdoor.com", "job_board"),
+    ("greenhouse.io", "job_board"),
+    ("lever.co", "job_board"),
+    ("ashbyhq.com", "job_board"),
+    ("workable.com", "job_board"),
+    ("github.com", "github"),
+    ("g2.com", "review_site"),
+    ("trustpilot.com", "review_site"),
+    ("capterra.com", "review_site"),
+    ("wikipedia.org", "wikipedia"),
+    ("twitter.com", "social_media"),
+    ("x.com", "social_media"),
+    ("facebook.com", "social_media"),
+    ("businesswire.com", "news"),
+    ("prnewswire.com", "news"),
+    ("globenewswire.com", "news"),
+    ("techcrunch.com", "news"),
+    ("reuters.com", "news"),
+    ("bloomberg.com", "news"),
+    ("venturebeat.com", "news"),
+    ("axios.com", "news"),
+    ("wsj.com", "news"),
+    ("ft.com", "news"),
+    ("forbes.com", "news"),
+    ("cnbc.com", "news"),
+)
+
+
+def _classify_intent_signal_source(signal_url: str, company_website: str) -> str:
+    """Map the signal URL host to the IntentSignalSource enum value that the
+    production scorer applies the highest weight to.  Falls back to
+    'company_website' when the host matches the company domain, else 'news'
+    for unrecognized 3rd-party hosts (slightly higher weight than 'other').
+    """
+    if not signal_url:
+        return "company_website"
+    try:
+        parsed = urlparse(signal_url)
+        host = (parsed.hostname or "").lower().removeprefix("www.")
+        path = (parsed.path or "").lower()
+    except Exception:
+        return "company_website"
+    if not host:
+        return "company_website"
+    # Match against host+path so "linkedin.com/jobs" beats "linkedin.com".
+    haystack = host + path
+    for hint, src in _HOST_SOURCE_HINTS:
+        if hint in haystack:
+            return src
+    company_host = _domain_from_website_url(company_website)
+    if company_host and (host == company_host or host.endswith("." + company_host)):
+        return "company_website"
+    # Unknown 3rd-party domain — prefer 'news' (0.9 multiplier) over 'other' (0.5).
+    return "news"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DISCOVERY — event-first via Exa news + extraction.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,10 +479,12 @@ async def discover_events_via_news(
         return []
 
     # Extract (company, date, headline) per article via strict LLM filter.
-    extracts = await asyncio.gather(*[
-        extract_event_from_article(client, art, intent) for art in articles
-    ])
-    events = [e for e in extracts if e]
+    # return_exceptions=True so one bad extraction call doesn't lose all.
+    extracts = await asyncio.gather(
+        *[extract_event_from_article(client, art, intent) for art in articles],
+        return_exceptions=True,
+    )
+    events = [e for e in extracts if e and not isinstance(e, BaseException)]
     log(f"  [discovery] {len(events)} events after intent-strict filtering")
     return events
 
@@ -558,16 +625,29 @@ async def discover_events(client: httpx.AsyncClient, icp: dict) -> list[dict]:
     events: list[dict] = []
     seen: set[str] = set()
 
-    # Branch A — Exa news (proven highest pass rate)
-    for ev in await discover_events_via_news(client, icp, n_articles=10):
+    # Branch A — Exa news (proven highest pass rate). If the entire branch
+    # crashes (Exa down, OpenRouter 5xx, etc.) we still try Branch B below.
+    try:
+        exa_events = await discover_events_via_news(client, icp, n_articles=10)
+    except Exception as _exc:
+        log(f"  [discovery] Exa branch raised {type(_exc).__name__}; continuing")
+        exa_events = []
+    for ev in exa_events:
         key = (ev.get("company") or "").lower().strip()
         if key and key not in seen:
             seen.add(key)
             events.append(ev)
     log(f"  [discovery] Exa branch yielded {len(events)} events")
 
-    # Branch B — Sonar exclusion-driven, supplements rather than replaces
-    for ev in await discover_events_via_sonar(client, icp, seen_companies=seen, n=10, n_passes=3):
+    # Branch B — Sonar exclusion-driven, supplements rather than replaces.
+    try:
+        sonar_events = await discover_events_via_sonar(
+            client, icp, seen_companies=seen, n=10, n_passes=3,
+        )
+    except Exception as _exc:
+        log(f"  [discovery] Sonar branch raised {type(_exc).__name__}; continuing")
+        sonar_events = []
+    for ev in sonar_events:
         key = (ev.get("company") or "").lower().strip()
         if key and key not in seen:
             seen.add(key)
@@ -715,7 +795,7 @@ async def verify_and_score_lead(
         "state": "",
         "description": (description or f"{event.get('company')} is a company.")[:500],
         "intent_signals": [{
-            "source": "company_website",
+            "source": _classify_intent_signal_source(url, website),
             "description": (event.get("headline") or "")[:350],
             "url": url,
             "date": event.get("date"),
@@ -742,14 +822,19 @@ async def verify_and_score_lead(
         product_service=icp.get("product_service") or "",
         intent_signals=icp["intent_signals"],
     )
-    breakdown = await score_company(
-        company=prod_company,
-        icp=prod_icp,
-        run_cost_usd=0.50,
-        run_time_seconds=60,
-        seen_companies=set(),
-        force_fail_reason=None,
-    )
+    try:
+        breakdown = await score_company(
+            company=prod_company,
+            icp=prod_icp,
+            run_cost_usd=0.50,
+            run_time_seconds=60,
+            seen_companies=set(),
+            force_fail_reason=None,
+        )
+    except Exception:
+        # score_company exceptions (network blip, LLM error, etc.) must not
+        # propagate — one bad scoring call shouldn't kill the whole ICP.
+        return None
     return {
         "company": event.get("company"),
         "url": url,
@@ -786,21 +871,36 @@ async def qualify_icp(client: httpx.AsyncClient, icp: dict) -> list[dict]:
         return []
 
     # Anchor lookup first — we need each company's domain for site-biased
-    # URL search in the next step.
-    anchors_per_event = await asyncio.gather(*[
-        lookup_company_anchors(
-            client,
-            ev.get("company") or "",
-            icp_industry=icp.get("industry", ""),
-            icp_sub_industry=icp.get("sub_industry", ""),
-        )
-        for ev in events
-    ])
+    # URL search in the next step. return_exceptions so a failed lookup
+    # falls back to empty anchors rather than killing the ICP.
+    anchors_raw = await asyncio.gather(
+        *[
+            lookup_company_anchors(
+                client,
+                ev.get("company") or "",
+                icp_industry=icp.get("industry", ""),
+                icp_sub_industry=icp.get("sub_industry", ""),
+            )
+            for ev in events
+        ],
+        return_exceptions=True,
+    )
+    anchors_per_event = [
+        a if not isinstance(a, BaseException) else ("", "", "")
+        for a in anchors_raw
+    ]
     # Per-event URL search
-    urls_per_event = await asyncio.gather(*[
-        search_urls_for_event(client, ev, anch[0], n_per_query=3)
-        for ev, anch in zip(events, anchors_per_event)
-    ])
+    urls_raw = await asyncio.gather(
+        *[
+            search_urls_for_event(client, ev, anch[0], n_per_query=3)
+            for ev, anch in zip(events, anchors_per_event)
+        ],
+        return_exceptions=True,
+    )
+    urls_per_event = [
+        u if not isinstance(u, BaseException) else []
+        for u in urls_raw
+    ]
 
     # Flatten to (event, url, anchors) tuples
     pairs: list[tuple[dict, str, tuple[str, str, str]]] = []
@@ -818,14 +918,18 @@ async def qualify_icp(client: httpx.AsyncClient, icp: dict) -> list[dict]:
         async with verify_sem:
             return await verify_and_score_lead(client, ev, url, anch, icp)
 
-    results = await asyncio.gather(*[
-        _verify_one(ev, url, anch) for (ev, url, anch) in pairs
-    ])
+    # return_exceptions=True so one task crash doesn't cancel siblings —
+    # the validator must not see us return [] for an ICP just because one
+    # of N verifier calls hit an edge case.
+    results = await asyncio.gather(
+        *[_verify_one(ev, url, anch) for (ev, url, anch) in pairs],
+        return_exceptions=True,
+    )
 
     # Dedupe by company name; keep the highest-scoring URL per company.
     by_company: dict[str, dict] = {}
     for r in results:
-        if r is None:
+        if r is None or isinstance(r, BaseException):
             continue
         key = (r["company"] or "").lower()
         if key not in by_company or r["score"] > by_company[key]["score"]:

@@ -52,8 +52,24 @@ def qualify(icp: Dict[str, Any]) -> List[Dict[str, Any]]:
         List of 0 to MAX_LEADS_PER_ICP CompanyOutput dicts, sorted by
         internal score desc. Empty list = honest abstention (no
         candidates verified for this ICP).
+
+    Defensive: returns ``[]`` rather than raising on malformed ICP input
+    (missing required fields). The validator must not crash on us.
     """
-    return asyncio.run(_qualify_async(icp))
+    # Validate input shape — return [] (abstain) rather than raise.
+    if not isinstance(icp, dict):
+        return []
+    intent_signals = icp.get("intent_signals") or []
+    if not isinstance(intent_signals, list) or not intent_signals:
+        return []
+    if not (icp.get("industry") or icp.get("icp_id")):
+        return []
+
+    try:
+        return asyncio.run(_qualify_async(icp))
+    except Exception:
+        # Anything that escaped the per-call error handling — abstain.
+        return []
 
 
 async def _qualify_async(icp: Dict[str, Any]) -> List[Dict[str, Any]]:

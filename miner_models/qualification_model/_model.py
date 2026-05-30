@@ -204,19 +204,57 @@ async def call_sonar(
     model: str = "perplexity/sonar-pro",
     timeout: float = 90.0,
 ) -> str:
-    """POST a prompt to Sonar via OpenRouter. Returns the raw text response."""
+    """POST a prompt to Sonar via OpenRouter. Returns the raw text response.
+
+    Retries once after a 1-second backoff on transient errors (5xx, 429,
+    network/timeout). Returns "" on persistent failure rather than raising —
+    downstream code already handles empty/invalid JSON responses gracefully.
+    """
     body = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-    resp = await client.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
-        json=body,
-        timeout=timeout,
-    )
-    content = resp.json()["choices"][0]["message"]["content"].strip()
-    # Strip code fences if Sonar wrapped the JSON
-    if content.startswith("```"):
-        content = content.split("```", 2)[1].lstrip("json").strip()
-    return content
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY', '')}"}
+
+    last_err: Exception | None = None
+    for attempt in (0, 1):
+        try:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=body,
+                timeout=timeout,
+            )
+            if resp.status_code >= 500 or resp.status_code == 429:
+                # Transient — retry once.
+                last_err = httpx.HTTPStatusError(
+                    f"upstream {resp.status_code}", request=resp.request, response=resp,
+                )
+                if attempt == 0:
+                    await asyncio.sleep(1.0)
+                    continue
+                return ""
+            if resp.status_code != 200:
+                # Non-retryable client error (401, 403, 400) — give up quietly.
+                return ""
+            data = resp.json()
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            last_err = e
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+                continue
+            return ""
+        except Exception:
+            return ""
+
+        try:
+            content = data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, AttributeError, TypeError):
+            return ""
+        # Strip code fences if Sonar wrapped the JSON
+        if content.startswith("```"):
+            content = content.split("```", 2)[1].lstrip("json").strip()
+        return content
+
+    # Defensive — loop guarantees a return, but make the type-checker happy.
+    return ""
 
 
 # Sonar sometimes appends citation markers like  "value"[3],  after JSON
@@ -257,10 +295,12 @@ async def exa_keyword_search(
     try:
         resp = await client.post(
             "https://api.exa.ai/search",
-            headers={"x-api-key": os.environ["EXA_API_KEY"]},
+            headers={"x-api-key": os.environ.get("EXA_API_KEY", "")},
             json=body,
             timeout=20,
         )
+        if resp.status_code != 200:
+            return []
         return [
             r.get("url", "")
             for r in resp.json().get("results", [])
@@ -293,15 +333,18 @@ async def exa_news_search(
     try:
         resp = await client.post(
             "https://api.exa.ai/search",
-            headers={"x-api-key": os.environ["EXA_API_KEY"]},
+            headers={"x-api-key": os.environ.get("EXA_API_KEY", "")},
             json=body,
             timeout=20,
         )
+        if resp.status_code != 200:
+            return []
+        results = resp.json().get("results", [])
     except Exception:
         return []
 
     out: list[dict] = []
-    for r in resp.json().get("results", []):
+    for r in results:
         url = r.get("url", "")
         if not url:
             continue

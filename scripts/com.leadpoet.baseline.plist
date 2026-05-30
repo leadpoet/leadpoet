@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd plist for the daily qualification baseline run.
+
+  Currently deployed on tasnimul's Mac:
+      ~/Library/LaunchAgents/com.leadpoet.baseline.plist
+
+  Fires daily at 00:05 UTC, right after the gateway's icp_generator
+  rotates to a new ICP set at 00:00 UTC. Writes baseline_score to the
+  qualification_baselines table; gateway/qualification/api/work.py's
+  check_and_update_champion reads from that table for the dethroning
+  floor.
+
+  Install:
+      cp scripts/com.leadpoet.baseline.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.leadpoet.baseline.plist
+
+  Inspect:
+      launchctl list | grep leadpoet
+      tail -f /tmp/baseline_daily.log
+
+  Uninstall:
+      launchctl unload ~/Library/LaunchAgents/com.leadpoet.baseline.plist
+      rm ~/Library/LaunchAgents/com.leadpoet.baseline.plist
+
+  ⚠️  TEMPORARY: runs on a single laptop. Sleeping at 00:05 UTC means
+  no baseline that day → champion-selection falls back to no-baseline
+  thresholding (safe degradation, but unfair to miners). Long-term fix:
+  build a validator-side trigger that POSTs result to a new gateway
+  endpoint, or run this script on a dedicated always-on host.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.leadpoet.baseline</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>/Users/tasnimul/Desktop/leadpoet/scripts/daily_baseline.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/tasnimul/Desktop/leadpoet</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>0</integer>
+        <key>Minute</key>
+        <integer>5</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/baseline_daily.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/baseline_daily.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TZ</key>
+        <string>UTC</string>
+    </dict>
+</dict>
+</plist>

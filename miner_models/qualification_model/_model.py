@@ -869,10 +869,15 @@ async def verify_and_score_lead(
         breakdown = await score_company(
             company=prod_company,
             icp=prod_icp,
-            run_cost_usd=0.50,
-            run_time_seconds=60,
+            # This model is the reference / baseline — `is_reference_model=True`
+            # skips the cost/time variability penalty inside score_company so our
+            # internal top-5 ranking reflects the same no-penalty scoring path
+            # the validator will use when scoring the baseline run externally.
+            run_cost_usd=0.0,
+            run_time_seconds=0.0,
             seen_companies=set(),
             force_fail_reason=None,
+            is_reference_model=True,
         )
     except Exception:
         # score_company exceptions (network blip, LLM error, etc.) must not

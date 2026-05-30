@@ -127,6 +127,7 @@ async def score_company(
     run_time_seconds: float,
     seen_companies: Set[str],
     force_fail_reason: Optional[str] = None,
+    is_reference_model: bool = False,
 ) -> LeadScoreBreakdown:
     """Score a CompanyOutput against an ICP.
 
@@ -282,14 +283,24 @@ async def score_company(
     # -----------------------------------------------------------------
     # STEP 5: Cost variability penalty (same rules as lead-mode)
     # -----------------------------------------------------------------
+    # The reference / baseline model that the validator runs daily to set
+    # the per-day champion floor is exempt from the cost variability
+    # penalty — its purpose is to set a fair ceiling on what's achievable,
+    # not to compete on cost.  Miner submissions remain subject to the
+    # penalty as before.
     cost_penalty = 0.0
     time_penalty = 0.0
-    cost_penalty_threshold = CONFIG.get_cost_penalty_threshold()
-    if run_cost_usd > cost_penalty_threshold:
-        cost_penalty = float(CONFIG.VARIABILITY_PENALTY_POINTS)
+    if not is_reference_model:
+        cost_penalty_threshold = CONFIG.get_cost_penalty_threshold()
+        if run_cost_usd > cost_penalty_threshold:
+            cost_penalty = float(CONFIG.VARIABILITY_PENALTY_POINTS)
+            logger.debug(
+                f"Cost variability penalty applied: ${run_cost_usd:.4f} > "
+                f"${cost_penalty_threshold:.4f}"
+            )
+    else:
         logger.debug(
-            f"Cost variability penalty applied: ${run_cost_usd:.4f} > "
-            f"${cost_penalty_threshold:.4f}"
+            "is_reference_model=True — skipping cost/time variability penalties"
         )
 
     # -----------------------------------------------------------------

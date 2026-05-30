@@ -177,6 +177,106 @@ def is_reference_model_id(model_id: Optional[str]) -> bool:
 
 
 # =============================================================================
+# Supabase-backed persistence (production path)
+#
+# The gateway-side daily runner WRITES to `qualification_baselines`; the
+# validator-side champion-selection READS from it. File-backed persistence
+# above is kept for local development / unit tests, but production goes
+# through these functions.
+# =============================================================================
+
+DB_TABLE_NAME: str = "qualification_baselines"
+
+
+def save_baseline_to_db(
+    record: BaselineRecord,
+    supabase_client,
+    *,
+    icp_set_hash: Optional[str] = None,
+    run_duration_seconds: Optional[float] = None,
+    run_status: str = "completed",
+) -> None:
+    """Upsert ``record`` into ``qualification_baselines``.
+
+    Upsert keyed on ``set_id`` (the table's primary key). Idempotent on
+    re-run — re-running the daily baseline for the same set_id overwrites
+    the prior row, which is the desired behavior if we ever need to
+    re-evaluate the reference model mid-day.
+
+    Raises whatever the supabase client raises on failure. The caller
+    (gateway runner) wraps the call in try/except and logs — a failed
+    baseline persistence leaves the DB with no row for today, and
+    champion-selection falls back to legacy champion-only thresholding
+    (safe degradation).
+    """
+    payload = {
+        "set_id": record.set_id,
+        "baseline_score": record.baseline_score,
+        "per_icp_scores": record.per_icp_scores,
+        "scored_at": record.scored_at,
+        "model_id": record.model_id,
+        "run_status": run_status,
+    }
+    if icp_set_hash is not None:
+        payload["icp_set_hash"] = icp_set_hash
+    if run_duration_seconds is not None:
+        payload["run_duration_seconds"] = run_duration_seconds
+    supabase_client.table(DB_TABLE_NAME).upsert(payload, on_conflict="set_id").execute()
+
+
+def load_baseline_from_db(set_id: int, supabase_client) -> Optional[BaselineRecord]:
+    """Read baseline row for ``set_id``.
+
+    Returns ``None`` when:
+      * no row exists for set_id (no daily run has fired yet today)
+      * the row's ``run_status`` is anything other than ``completed``
+        (treat partial/failed runs as no-baseline so we don't gate
+        champion selection on incomplete data)
+      * any DB error (transient network blip, etc.) — caller logs and
+        falls back to legacy thresholding
+
+    Mirrors ``load_baseline`` (file-based) on the return contract so
+    champion-selection can swap which one it uses without touching the
+    consumer side.
+    """
+    try:
+        result = (
+            supabase_client.table(DB_TABLE_NAME)
+            .select("set_id, baseline_score, per_icp_scores, scored_at, model_id, run_status")
+            .eq("set_id", set_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(f"baseline DB read failed for set_id={set_id}: {e}; treating as missing")
+        return None
+
+    rows = result.data or []
+    if not rows:
+        return None
+
+    row = rows[0]
+    if row.get("run_status") != "completed":
+        logger.info(
+            f"baseline row for set_id={set_id} has run_status="
+            f"{row.get('run_status')!r}; treating as no-baseline"
+        )
+        return None
+
+    try:
+        return BaselineRecord(
+            set_id=int(row["set_id"]),
+            baseline_score=float(row["baseline_score"]),
+            per_icp_scores=list(row.get("per_icp_scores") or []),
+            scored_at=str(row.get("scored_at") or ""),
+            model_id=str(row.get("model_id") or REFERENCE_MODEL_ID),
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(f"baseline DB row for set_id={set_id} is malformed: {e}; treating as missing")
+        return None
+
+
+# =============================================================================
 # Daily reference-model evaluation
 # =============================================================================
 

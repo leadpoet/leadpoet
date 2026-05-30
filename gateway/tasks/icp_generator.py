@@ -28,6 +28,7 @@ era and is intentionally absent from generated sets.
 
 import os
 import json
+import time
 import hashlib
 import random
 import asyncio
@@ -1193,8 +1194,116 @@ async def generate_and_activate_icp_set(
             logger.info(f"Logged ICP_SET_ACTIVATED to transparency log")
         except Exception as e:
             logger.warning(f"Failed to log ICP_SET_ACTIVATED: {e}")
-    
+
+    # ─────────────────────────────────────────────────────────────────
+    # Reference-model baseline run.
+    #
+    # Per CTO direction: right after a new ICP set is activated, run the
+    # reference model (miner_models/qualification_model/) against it and
+    # persist the aggregate baseline_score to qualification_baselines.
+    # That score is the floor that miner challengers must exceed by
+    # CHAMPION_DETHRONING_THRESHOLD_POINTS (10) to become or dethrone the
+    # qualification champion. See:
+    #   * qualification/scoring/baseline.py       — persistence + runner
+    #   * qualification/scoring/champion.py       — floor consumer
+    #   * scripts/create_qualification_baselines_table.sql — schema
+    #
+    # Dispatched as a background task — the runner makes ~20 reference-
+    # model calls (one per ICP) × ~3 minutes each ≈ 60 min wall time. We
+    # don't block ICP activation on it. If it fails or partial-completes,
+    # champion-selection treats the absence of a "completed" row as
+    # no-baseline and falls back to legacy champion-only thresholding.
+    # ─────────────────────────────────────────────────────────────────
+    try:
+        asyncio.create_task(_run_baseline_in_background(set_id, icps, icp_hash))
+    except Exception as e:
+        logger.warning(f"Failed to spawn baseline runner for set_id={set_id}: {e}")
+
     return set_id
+
+
+async def _run_baseline_in_background(
+    set_id: int,
+    icps: List[Dict[str, Any]],
+    icp_set_hash: str,
+) -> None:
+    """Background entry point for the reference-model baseline run.
+
+    Runs in the same process as the gateway, so it has full network
+    access (Exa, OpenRouter, ScrapingDog) — none of which are reachable
+    from inside the qualification sandbox. Exceptions are logged but
+    never re-raised: a failed baseline doesn't block champion selection,
+    it just leaves no row for today.
+    """
+    started = time.monotonic()
+    try:
+        from miner_models.qualification_model import qualify  # the reference model
+        from qualification.scoring.lead_scorer import score_company
+        from qualification.scoring.baseline import (
+            BaselineRecord,
+            REFERENCE_MODEL_ID,
+            run_and_save_baseline,
+            save_baseline_to_db,
+        )
+        from gateway.db.client import get_write_client
+
+        logger.info(
+            f"🧪 Reference baseline run starting: set_id={set_id} "
+            f"({len(icps)} ICPs, hash={icp_set_hash[:12]})"
+        )
+
+        # Run the reference model + score each lead (persists to file too
+        # for traceability; we also push to DB below).
+        record = await run_and_save_baseline(
+            set_id=set_id,
+            icp_set=icps,
+            qualify_fn=qualify,
+            score_fn=score_company,
+        )
+
+        duration = time.monotonic() - started
+        client = get_write_client()
+        if client is not None:
+            save_baseline_to_db(
+                record,
+                client,
+                icp_set_hash=icp_set_hash,
+                run_duration_seconds=duration,
+                run_status="completed",
+            )
+            logger.info(
+                f"🧪 Reference baseline run complete: set_id={set_id} "
+                f"baseline_score={record.baseline_score:.2f} duration={duration:.0f}s"
+            )
+        else:
+            logger.error(
+                f"Reference baseline run finished but no DB client available; "
+                f"set_id={set_id} score={record.baseline_score:.2f} (file-only persistence)"
+            )
+    except Exception as e:
+        duration = time.monotonic() - started
+        logger.exception(
+            f"Reference baseline run FAILED for set_id={set_id} "
+            f"after {duration:.0f}s: {e}"
+        )
+        # Best-effort: write a 'failed' row so operators see the attempt
+        try:
+            from qualification.scoring.baseline import BaselineRecord, REFERENCE_MODEL_ID
+            from gateway.db.client import get_write_client
+            client = get_write_client()
+            if client is not None:
+                client.table("qualification_baselines").upsert({
+                    "set_id": set_id,
+                    "baseline_score": 0.0,
+                    "per_icp_scores": [],
+                    "scored_at": datetime.now(timezone.utc).isoformat(),
+                    "model_id": REFERENCE_MODEL_ID,
+                    "icp_set_hash": icp_set_hash,
+                    "run_duration_seconds": duration,
+                    "run_status": "failed",
+                }, on_conflict="set_id").execute()
+        except Exception:
+            pass
 
 
 async def icp_rotation_task():

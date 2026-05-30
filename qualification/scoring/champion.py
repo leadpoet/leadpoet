@@ -42,7 +42,36 @@ from gateway.qualification.utils.helpers import (
 from qualification.scoring.baseline import (
     is_reference_model_id,
     load_baseline,
+    load_baseline_from_db,
 )
+
+
+def _load_baseline_with_fallback(set_id: int):
+    """Production: DB (RLS-protected `qualification_baselines` table written
+    by the gateway-side daily runner). Dev/test fallback: local JSON file
+    under ``validator_weights/qualification_baseline.json``.
+
+    Either returns a ``BaselineRecord`` or None. None → champion-selection
+    falls back to legacy champion-only thresholding (safe).
+
+    DB takes precedence: if the DB lookup succeeds and returns a record,
+    we use it. If the DB is unreachable OR returns no record, we try the
+    file. This keeps `python -m qualification.scoring.champion` working
+    in dev environments without a Supabase connection.
+    """
+    # Try DB first
+    try:
+        from gateway.db.client import get_write_client  # service_role; needed for RLS
+        client = get_write_client()
+        if client is not None:
+            rec = load_baseline_from_db(set_id, client)
+            if rec is not None:
+                return rec
+    except Exception as e:
+        logger.warning(f"baseline DB lookup unavailable ({e}); falling back to file")
+
+    # File fallback (dev/test, or DB returned nothing for this set)
+    return load_baseline(set_id)
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +185,7 @@ async def run_champion_selection(
     # Load today's reference-model baseline (None if daily run hasn't fired
     # yet for this set — falls through to legacy champion-only thresholding).
     # =========================================================================
-    baseline_record = load_baseline(set_id)
+    baseline_record = _load_baseline_with_fallback(set_id)
     baseline_score = baseline_record.baseline_score if baseline_record else None
     if baseline_score is not None:
         logger.info(

@@ -287,21 +287,34 @@ async def score_company(
     # the per-day champion floor is exempt from the cost variability
     # penalty — its purpose is to set a fair ceiling on what's achievable,
     # not to compete on cost.  Miner submissions remain subject to the
-    # penalty as before.
+    # penalty as before.  The actual cost / time are logged in either
+    # case so the value is fully traceable independent of the penalty.
     cost_penalty = 0.0
     time_penalty = 0.0
-    if not is_reference_model:
-        cost_penalty_threshold = CONFIG.get_cost_penalty_threshold()
-        if run_cost_usd > cost_penalty_threshold:
-            cost_penalty = float(CONFIG.VARIABILITY_PENALTY_POINTS)
-            logger.debug(
-                f"Cost variability penalty applied: ${run_cost_usd:.4f} > "
-                f"${cost_penalty_threshold:.4f}"
-            )
-    else:
-        logger.debug(
-            "is_reference_model=True — skipping cost/time variability penalties"
+    cost_penalty_threshold = CONFIG.get_cost_penalty_threshold()
+    cost_over = run_cost_usd > cost_penalty_threshold
+    if is_reference_model:
+        # Trace: the cost still must be visible even though no penalty applies.
+        logger.info(
+            f"[reference_model] cost_recorded=${run_cost_usd:.4f} "
+            f"time_recorded={run_time_seconds:.1f}s  "
+            f"threshold=${cost_penalty_threshold:.4f}  "
+            f"would_have_penalized={cost_over}  "
+            f"penalty_applied=False (exempt)"
         )
+    else:
+        if cost_over:
+            cost_penalty = float(CONFIG.VARIABILITY_PENALTY_POINTS)
+            logger.info(
+                f"[miner] cost variability penalty applied: "
+                f"${run_cost_usd:.4f} > ${cost_penalty_threshold:.4f}  "
+                f"penalty=-{cost_penalty:.0f} pts"
+            )
+        else:
+            logger.debug(
+                f"[miner] cost ${run_cost_usd:.4f} within threshold "
+                f"${cost_penalty_threshold:.4f}, no penalty"
+            )
 
     # -----------------------------------------------------------------
     # STEP 6: Final score (floor at 0, ceiling at MAX_COMPANY_TOTAL_SCORE)
@@ -311,16 +324,19 @@ async def score_company(
     final_score = min(final_score, float(MAX_COMPANY_TOTAL_SCORE))
 
     total_penalty = cost_penalty + time_penalty
+    role_tag = "reference" if is_reference_model else "miner"
     if total_penalty > 0:
         logger.info(
-            f"Company scored: {final_score:.2f} "
+            f"Company scored [{role_tag}]: {final_score:.2f} "
             f"(ICP: {icp_fit}, Intent: {intent_final:.2f}, "
+            f"cost=${run_cost_usd:.4f}, time={run_time_seconds:.1f}s, "
             f"Variability penalty: -{total_penalty:.0f} pts)"
         )
     else:
         logger.info(
-            f"Company scored: {final_score:.2f} "
+            f"Company scored [{role_tag}]: {final_score:.2f} "
             f"(ICP: {icp_fit}, Intent: {intent_final:.2f}, "
+            f"cost=${run_cost_usd:.4f}, time={run_time_seconds:.1f}s, "
             f"No variability penalty)"
         )
 

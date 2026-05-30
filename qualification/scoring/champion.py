@@ -39,6 +39,10 @@ from gateway.qualification.utils.helpers import (
     copy_to_champions,
     delete_model_from_s3,
 )
+from qualification.scoring.baseline import (
+    is_reference_model_id,
+    load_baseline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,13 +121,21 @@ async def run_champion_selection(
         ChampionSelectionResult with details of the selection
     """
     logger.info(f"Running champion selection for set {set_id} at epoch {current_epoch}")
-    
+
     # Get current champion
     current_champion = await get_current_champion()
-    
+
     # Get all finished models in this set
     models = await get_finished_models(set_id)
-    
+
+    # Drop the daily reference run from the challenger pool — its role is
+    # to set the baseline floor, not to compete for the crown. See
+    # qualification/scoring/baseline.py:REFERENCE_MODEL_ID. Without this
+    # filter the reference model could win champion against weak miner
+    # submissions, which would defeat the "miners must beat baseline"
+    # design.
+    models = [m for m in models if not is_reference_model_id(m.model_id)]
+
     if not models:
         logger.warning("No finished models for champion selection")
         return ChampionSelectionResult(
@@ -133,20 +145,64 @@ async def run_champion_selection(
             margin=None,
             reason="No finished models in this evaluation set"
         )
-    
+
     # Sort by score descending
     models.sort(key=lambda m: m.total_score, reverse=True)
     top_model = models[0]
-    
+
     logger.info(f"Top model: {top_model.model_id} with score {top_model.total_score}")
-    
+
     # =========================================================================
-    # Case 1: No current champion - first champion is crowned
+    # Load today's reference-model baseline (None if daily run hasn't fired
+    # yet for this set — falls through to legacy champion-only thresholding).
+    # =========================================================================
+    baseline_record = load_baseline(set_id)
+    baseline_score = baseline_record.baseline_score if baseline_record else None
+    if baseline_score is not None:
+        logger.info(
+            f"Baseline floor (reference model run {baseline_record.scored_at}): "
+            f"{baseline_score:.2f}"
+        )
+    else:
+        logger.info(
+            f"No baseline record for set {set_id} yet — falling back to "
+            f"champion-only threshold (legacy behavior)"
+        )
+
+    # =========================================================================
+    # Case 1: No current champion — first crowning is gated by the baseline.
+    # Pre-baseline behavior auto-crowned the top model; that lets a weak
+    # miner take the throne unopposed when the system is fresh (or after a
+    # reset). With a baseline floor in place, the first champion must beat
+    # baseline_score + CHAMPION_DETHRONING_THRESHOLD_POINTS, same threshold
+    # any later challenger faces. If no baseline exists, preserve legacy
+    # behavior (auto-crown) so deployment is safe before the daily runner
+    # is wired up.
     # =========================================================================
     if not current_champion:
+        if baseline_score is not None:
+            first_champion_threshold = baseline_score + CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS
+            if top_model.total_score <= first_champion_threshold:
+                logger.info(
+                    f"No challenger exceeds baseline+threshold "
+                    f"({top_model.total_score:.2f} <= {first_champion_threshold:.2f}); "
+                    f"no champion crowned this epoch"
+                )
+                return ChampionSelectionResult(
+                    new_champion=None,
+                    previous_champion=None,
+                    action="no_change",
+                    margin=None,
+                    reason=(
+                        f"No champion: top challenger {top_model.total_score:.2f} did not "
+                        f"exceed baseline {baseline_score:.2f} by "
+                        f"{CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS:.0f} points"
+                    ),
+                )
+
         new_champion = await set_champion(top_model, current_epoch, set_id)
         await log_champion_selected(new_champion, None, current_epoch)
-        
+
         logger.info(f"First champion crowned: {top_model.model_id}")
         return ChampionSelectionResult(
             new_champion=new_champion,
@@ -189,11 +245,23 @@ async def run_champion_selection(
         )
         champion_score = current_champion.score
     
-    # Calculate threshold: must beat champion by >5%
-    threshold = champion_score + CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS
-    
+    # Threshold floor = max(champion_score, baseline_score). The dethroning
+    # rule is "beat whichever is higher by CHAMPION_DETHRONING_THRESHOLD_POINTS":
+    # this prevents a weak champion from blocking a stronger reference baseline
+    # from acting as the floor — and prevents miners from taking the crown by
+    # beating only a stale baseline that's now below the current champion.
+    floor = champion_score
+    floor_source = "champion"
+    if baseline_score is not None and baseline_score > champion_score:
+        floor = baseline_score
+        floor_source = "baseline"
+
+    threshold = floor + CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS
+
     logger.info(
         f"Champion score: {champion_score:.2f}, "
+        f"Baseline score: {baseline_score if baseline_score is not None else 'n/a'}, "
+        f"Floor: {floor:.2f} ({floor_source}), "
         f"Threshold to dethrone: {threshold:.2f} "
         f"(+{CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS:.0f} points)"
     )

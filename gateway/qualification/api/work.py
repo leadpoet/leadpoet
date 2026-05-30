@@ -43,6 +43,69 @@ from gateway.qualification.config import CONFIG
 CHAMPION_BEAT_THRESHOLD = CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS  # Currently 10 absolute points
 MINIMUM_CHAMPION_SCORE = CONFIG.MINIMUM_CHAMPION_SCORE  # Currently 10.0
 
+
+# =============================================================================
+# Baseline floor (reference-model daily run) — read-side
+# =============================================================================
+# Reserved model_id of the daily reference run. Kept in sync with
+# qualification/scoring/baseline.py:REFERENCE_MODEL_ID. Champion selection
+# below uses this to prevent the reference model from ever being crowned
+# (it's the FLOOR a miner must exceed by CHAMPION_BEAT_THRESHOLD, not a
+# competitor).
+REFERENCE_MODEL_ID = "reference:qualification_model:v1"
+
+
+def _today_yyyymmdd_set_id() -> int:
+    """Return today's UTC date as an int in YYYYMMDD format.
+
+    Matches the keying scheme used by ``gateway/tasks/icp_generator.py``
+    for ``qualification_private_icp_sets.set_id`` and therefore
+    ``qualification_baselines.set_id``.
+    """
+    return int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+
+
+async def _get_today_baseline_score() -> Optional[float]:
+    """Look up today's reference-model baseline_score from Supabase.
+
+    Returns ``None`` when:
+      * no row exists for today's set_id (baseline runner hasn't fired
+        yet today, or hasn't finished — common in first ~60 min after
+        00:00 UTC)
+      * the row's ``run_status`` is anything other than ``'completed'``
+        (treat partial/failed as no-baseline)
+      * any DB error (caller falls back to no-baseline gating)
+
+    None → champion-selection falls back to legacy champion-only
+    thresholding plus MINIMUM_CHAMPION_SCORE. Same threshold semantics
+    as before this change, so this is safe to deploy even on days the
+    baseline didn't fire.
+    """
+    try:
+        from gateway.db.client import get_write_client
+        supabase = get_write_client()
+        if supabase is None:
+            return None
+        result = (
+            supabase.table("qualification_baselines")
+            .select("baseline_score, run_status")
+            .eq("set_id", _today_yyyymmdd_set_id())
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(f"baseline lookup failed: {e}; treating as no-baseline")
+        return None
+    rows = result.data or []
+    if not rows:
+        return None
+    if rows[0].get("run_status") != "completed":
+        return None
+    try:
+        return float(rows[0]["baseline_score"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
 router = APIRouter(prefix="/validator", tags=["validator-work"])
 
 
@@ -1732,26 +1795,64 @@ async def check_and_update_champion(
     try:
         from gateway.db.client import get_write_client
         supabase = get_write_client()
-        
+
+        # Reference model must never be crowned — it's the floor, not a
+        # competitor. See REFERENCE_MODEL_ID above for the reserved ID.
+        if model_id == REFERENCE_MODEL_ID:
+            logger.info(
+                f"Reference model {model_id} cannot be crowned champion "
+                f"(reserved as baseline floor)"
+            )
+            return False
+
+        # Load today's baseline (None if no daily run has fired yet for
+        # this set, or if the run hasn't completed). When None, gating
+        # falls back to legacy MINIMUM_CHAMPION_SCORE-only check —
+        # same behavior as before this change.
+        baseline_score = await _get_today_baseline_score()
+
         # Get current champion
         current_champion = await get_current_champion()
-        
-        # Case 1: No current champion - become champion if score >= MINIMUM_CHAMPION_SCORE
+
+        # Effective floor a challenger must clear, combining all gates:
+        #   * MINIMUM_CHAMPION_SCORE  — absolute minimum a champion must hit
+        #   * baseline + threshold    — must beat the reference model by
+        #                               CHAMPION_BEAT_THRESHOLD (10) points
+        # Whichever is higher is the threshold. Both gates use absolute
+        # POINTS addition, not percentage multiplication.
+        def _absolute_threshold(reference_score: float) -> float:
+            """reference_score + CHAMPION_BEAT_THRESHOLD, clamped at
+            MINIMUM_CHAMPION_SCORE."""
+            return max(
+                reference_score + CHAMPION_BEAT_THRESHOLD,
+                MINIMUM_CHAMPION_SCORE,
+            )
+
+        # Case 1: No current champion - become champion if score >= floor
         if current_champion is None:
-            if new_score < MINIMUM_CHAMPION_SCORE:
+            # Floor is baseline+threshold if baseline available, else just MIN.
+            if baseline_score is not None:
+                first_crown_threshold = _absolute_threshold(baseline_score)
+                floor_source = f"baseline {baseline_score:.2f} + {CHAMPION_BEAT_THRESHOLD}"
+            else:
+                first_crown_threshold = MINIMUM_CHAMPION_SCORE
+                floor_source = "MIN (no baseline yet)"
+
+            if new_score <= first_crown_threshold:
                 logger.info(
-                    f"❌ Model {model_id[:8]}... scored {new_score:.2f} - below minimum "
-                    f"champion threshold ({MINIMUM_CHAMPION_SCORE}), cannot become champion"
+                    f"❌ Model {model_id[:8]}... scored {new_score:.2f} - below first-crown "
+                    f"threshold {first_crown_threshold:.2f} ({floor_source})"
                 )
                 print(f"\n{'='*60}")
-                print(f"❌ MODEL BELOW MINIMUM CHAMPION THRESHOLD")
+                print(f"❌ MODEL BELOW FIRST-CROWN THRESHOLD")
                 print(f"   Model: {model_id[:8]}...")
                 print(f"   Score: {new_score:.2f}")
-                print(f"   Required: {MINIMUM_CHAMPION_SCORE}")
-                print(f"   (No champion exists - threshold not met)")
+                print(f"   Required: {first_crown_threshold:.2f} ({floor_source})")
+                print(f"   Baseline: {'%.2f' % baseline_score if baseline_score is not None else 'n/a'}")
+                print(f"   MIN: {MINIMUM_CHAMPION_SCORE}")
                 print(f"{'='*60}\n")
                 return False
-            
+
             # Mark this model as champion
             supabase.table("qualification_models").update({
                 "is_champion": True,
@@ -1771,39 +1872,60 @@ async def check_and_update_champion(
             print(f"{'='*60}\n")
             return True
         
-        # Case 2: Current champion exists - need to beat by threshold
+        # Case 2: Current champion exists - need to beat by absolute threshold.
+        # Floor = max(champion_score, baseline_score). Required = floor +
+        # CHAMPION_BEAT_THRESHOLD, clamped at MINIMUM_CHAMPION_SCORE.
+        #
+        # BUG FIX: previous code used `current_score * (1 + CHAMPION_BEAT_THRESHOLD)`,
+        # treating an absolute-point threshold (10) as a percentage multiplier
+        # (1000%). A champion with score 50 required a challenger >550 (1000%
+        # improvement) — effectively un-dethrone-able. Now uses absolute-point
+        # addition: champion 50 → challenger needs > 50 + 10 = 60.
         current_score = current_champion.get("score", 0) or 0
-        required_score = current_score * (1 + CHAMPION_BEAT_THRESHOLD)
-        
+        floor = current_score
+        floor_source = "champion"
+        if baseline_score is not None and baseline_score > current_score:
+            floor = baseline_score
+            floor_source = "baseline"
+        required_score = max(
+            floor + CHAMPION_BEAT_THRESHOLD,
+            MINIMUM_CHAMPION_SCORE,
+        )
+
         logger.info(
             f"🏆 Champion check: new_score={new_score:.2f} vs "
-            f"required={required_score:.2f} (current={current_score:.2f} + {CHAMPION_BEAT_THRESHOLD*100:.0f}%)"
+            f"required={required_score:.2f} "
+            f"(floor={floor:.2f} from {floor_source}; "
+            f"champion={current_score:.2f}, baseline="
+            f"{'%.2f' % baseline_score if baseline_score is not None else 'n/a'})"
         )
-        
+
         if new_score <= current_score:
-            # Not even close - didn't beat current score
+            # Didn't even beat current champion's score
             logger.info(
                 f"❌ Model {model_id[:8]}... did not beat current champion "
                 f"({new_score:.2f} <= {current_score:.2f})"
             )
             return False
-        
-        if new_score < required_score:
-            # Beat current but not by enough
-            improvement = ((new_score - current_score) / current_score) * 100 if current_score > 0 else 100
+
+        if new_score <= required_score:
+            # Beat current but not by enough (need absolute +CHAMPION_BEAT_THRESHOLD)
+            margin = new_score - current_score
             logger.info(
-                f"📊 Model {model_id[:8]}... beat champion by {improvement:.1f}% "
-                f"but needs {CHAMPION_BEAT_THRESHOLD*100:.0f}% improvement"
+                f"📊 Model {model_id[:8]}... beat champion by {margin:.2f} points "
+                f"but needs > {required_score:.2f} ({floor_source} floor + "
+                f"{CHAMPION_BEAT_THRESHOLD} pts)"
             )
             print(f"\n{'='*60}")
             print(f"📊 CHALLENGER FELL SHORT")
             print(f"   Model: {model_id[:8]}...")
-            print(f"   Score: {new_score:.2f} (improvement: +{improvement:.1f}%)")
-            print(f"   Required: {required_score:.2f} (need +{CHAMPION_BEAT_THRESHOLD*100:.0f}%)")
-            print(f"   Current Champion Score: {current_score:.2f}")
+            print(f"   Score: {new_score:.2f} (margin over champion: +{margin:.2f} pts)")
+            print(f"   Required: > {required_score:.2f}  (floor={floor:.2f} from {floor_source} + {CHAMPION_BEAT_THRESHOLD})")
+            print(f"   Current Champion: {current_score:.2f}")
+            print(f"   Baseline: {'%.2f' % baseline_score if baseline_score is not None else 'n/a'}")
             print(f"{'='*60}\n")
             return False
-        
+
         # Check minimum score threshold even if beating current champion
         if new_score < MINIMUM_CHAMPION_SCORE:
             logger.info(
@@ -1819,8 +1941,9 @@ async def check_and_update_champion(
             return False
         
         # Case 3: New model beat champion by required threshold - CROWN NEW CHAMPION!
-        improvement = ((new_score - current_score) / current_score) * 100 if current_score > 0 else 100
-        
+        # Absolute-points margin (matches the new threshold semantics).
+        margin_points = new_score - current_score
+
         # Dethrone old champion
         old_champion_id = current_champion.get("model_id")
         if old_champion_id:
@@ -1828,17 +1951,17 @@ async def check_and_update_champion(
                 "is_champion": False,
                 "dethroned_at": datetime.now(timezone.utc).isoformat()
             }).eq("id", old_champion_id).execute()
-        
+
         # Crown new champion (clear any stale dethroned_at)
         supabase.table("qualification_models").update({
             "is_champion": True,
             "champion_at": datetime.now(timezone.utc).isoformat(),
             "dethroned_at": None
         }).eq("id", model_id).execute()
-        
+
         logger.info(
             f"👑 NEW CHAMPION! Model {model_id[:8]}... dethroned "
-            f"{current_champion['model_id'][:8]}... with {improvement:.1f}% improvement"
+            f"{current_champion['model_id'][:8]}... by +{margin_points:.2f} points"
         )
         print(f"\n{'='*60}")
         print(f"👑👑👑 NEW CHAMPION CROWNED! 👑👑👑")
@@ -1846,8 +1969,8 @@ async def check_and_update_champion(
         print(f"   New Champion Miner: {miner_hotkey[:16]}...")
         print(f"   New Score: {new_score:.2f}")
         print(f"   Old Champion Score: {current_score:.2f}")
-        print(f"   Improvement: +{improvement:.1f}%")
-        print(f"   (Exceeded {CHAMPION_BEAT_THRESHOLD*100:.0f}% threshold!)")
+        print(f"   Margin: +{margin_points:.2f} points (over floor {floor:.2f} from {floor_source})")
+        print(f"   Required: > {required_score:.2f} (floor + {CHAMPION_BEAT_THRESHOLD} pts)")
         print(f"{'='*60}\n")
         return True
         

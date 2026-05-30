@@ -1196,30 +1196,112 @@ async def generate_and_activate_icp_set(
             logger.warning(f"Failed to log ICP_SET_ACTIVATED: {e}")
 
     # ─────────────────────────────────────────────────────────────────
-    # Reference-model baseline run.
-    #
-    # Per CTO direction: right after a new ICP set is activated, run the
-    # reference model (miner_models/qualification_model/) against it and
-    # persist the aggregate baseline_score to qualification_baselines.
-    # That score is the floor that miner challengers must exceed by
-    # CHAMPION_DETHRONING_THRESHOLD_POINTS (10) to become or dethrone the
-    # qualification champion. See:
-    #   * qualification/scoring/baseline.py       — persistence + runner
-    #   * qualification/scoring/champion.py       — floor consumer
-    #   * scripts/create_qualification_baselines_table.sql — schema
-    #
-    # Dispatched as a background task — the runner makes ~20 reference-
-    # model calls (one per ICP) × ~3 minutes each ≈ 60 min wall time. We
-    # don't block ICP activation on it. If it fails or partial-completes,
-    # champion-selection treats the absence of a "completed" row as
-    # no-baseline and falls back to legacy champion-only thresholding.
+    # Reference-model baseline run. See _spawn_baseline_if_needed for
+    # idempotency + restart resilience details.
     # ─────────────────────────────────────────────────────────────────
-    try:
-        asyncio.create_task(_run_baseline_in_background(set_id, icps, icp_hash))
-    except Exception as e:
-        logger.warning(f"Failed to spawn baseline runner for set_id={set_id}: {e}")
+    _spawn_baseline_if_needed(set_id, icps, icp_hash)
 
     return set_id
+
+
+# Module-level registry of in-flight baseline tasks, keyed by set_id. Keeps
+# strong references so asyncio doesn't GC the task; allows the rotation-task
+# polling loop to detect "is today's baseline still in flight?" without
+# re-firing it concurrently.
+_baseline_tasks: Dict[int, "asyncio.Task[None]"] = {}
+
+
+def _spawn_baseline_if_needed(
+    set_id: int,
+    icps: List[Dict[str, Any]],
+    icp_set_hash: str,
+) -> bool:
+    """Idempotent, restart-aware spawn of the reference-model baseline run.
+
+    Returns True if we spawned a fresh task this call, False if we skipped
+    (because today's run is either in flight or already completed).
+
+    Idempotency layers:
+      1. In-process registry ``_baseline_tasks`` — prevents the same Python
+         process from spawning two runs for the same set_id.
+      2. Strong task reference — `asyncio.create_task` returns a Task that
+         we store in the registry, so a stray GC can't kill it mid-run
+         (which was the orphan-task bug in the first version of this code).
+      3. Done callback logs success/failure and leaves the entry in the
+         registry as a completion marker — a subsequent restart-time
+         poll can `task.done()`-check it instead of re-running.
+
+    Restart resilience (handled by the caller, not here):
+      ``icp_rotation_task`` polls every 60s. After a gateway restart
+      mid-baseline, the in-process registry is empty (fresh process), so
+      a subsequent poll will re-fire the baseline IF the icp_rotation_task
+      checks for it. See the rotation-task-side check this commit adds.
+    """
+    existing = _baseline_tasks.get(set_id)
+    if existing is not None and not existing.done():
+        logger.info(f"baseline task already in flight for set_id={set_id}; skipping spawn")
+        return False
+    if existing is not None and existing.done():
+        # Already completed (success or failure). Don't re-fire automatically
+        # from this entry point — the rotation-task DB check is the
+        # authoritative retry trigger.
+        return False
+
+    try:
+        task = asyncio.create_task(_run_baseline_in_background(set_id, icps, icp_set_hash))
+    except RuntimeError as e:
+        # No running event loop (rare — only happens if called outside
+        # asyncio context). Don't crash; baseline will be re-fired on the
+        # next icp_rotation_task poll inside an event loop.
+        logger.warning(
+            f"Cannot spawn baseline task for set_id={set_id} outside asyncio "
+            f"event loop: {e}; will retry from rotation task"
+        )
+        return False
+
+    _baseline_tasks[set_id] = task
+
+    def _on_done(t: "asyncio.Task[None]") -> None:
+        if t.cancelled():
+            logger.warning(f"baseline task cancelled for set_id={set_id}")
+        elif t.exception() is not None:
+            logger.error(
+                f"baseline task crashed for set_id={set_id}: {t.exception()}"
+            )
+        else:
+            logger.info(f"baseline task completed for set_id={set_id}")
+
+    task.add_done_callback(_on_done)
+    logger.info(f"baseline task spawned for set_id={set_id}")
+    return True
+
+
+async def _is_baseline_present_in_db(set_id: int) -> bool:
+    """Return True if today's baseline row exists with run_status='completed'.
+
+    Used by the rotation-task polling loop to decide whether to re-fire a
+    baseline run on gateway restart (when the in-process task registry is
+    empty but the DB has authoritative state).
+    """
+    try:
+        from gateway.db.client import get_write_client
+        client = get_write_client()
+        if client is None:
+            return False
+        result = (
+            client.table("qualification_baselines")
+            .select("set_id, run_status")
+            .eq("set_id", set_id)
+            .eq("run_status", "completed")
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+    except Exception as e:
+        logger.warning(f"baseline DB check failed for set_id={set_id}: {e}")
+        # Conservatively return True so we don't endlessly re-fire on a
+        # transient DB blip. The 60s polling will retry next tick.
+        return True
 
 
 async def _run_baseline_in_background(
@@ -1339,6 +1421,31 @@ async def icp_rotation_task():
             if active_set and active_set.get('set_id') == today_set_id:
                 logger.info(f"ICP rotation: Today's set {today_set_id} already active")
                 last_generated_date = current_date
+
+                # Restart-resilience: today's ICP set exists but we may have
+                # restarted mid-baseline (in-process task registry is empty
+                # in a fresh process). Re-fire the baseline IF the DB
+                # doesn't already have a 'completed' row for it. The DB
+                # check is the source of truth; the registry only prevents
+                # in-process double-fire.
+                try:
+                    if (
+                        today_set_id not in _baseline_tasks
+                        and not await _is_baseline_present_in_db(today_set_id)
+                    ):
+                        logger.info(
+                            f"ICP rotation: today's set {today_set_id} is active "
+                            f"but no completed baseline row exists — re-firing "
+                            f"baseline runner (restart recovery)"
+                        )
+                        _spawn_baseline_if_needed(
+                            today_set_id,
+                            active_set.get("icps") or [],
+                            active_set.get("icp_set_hash") or "",
+                        )
+                except Exception as e:
+                    logger.warning(f"baseline restart-recovery check failed: {e}")
+
                 await asyncio.sleep(60)
                 continue
             

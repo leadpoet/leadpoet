@@ -46,32 +46,97 @@ from qualification.scoring.baseline import (
 )
 
 
-def _load_baseline_with_fallback(set_id: int):
-    """Production: DB (RLS-protected `qualification_baselines` table written
-    by the gateway-side daily runner). Dev/test fallback: local JSON file
-    under ``validator_weights/qualification_baseline.json``.
+def _today_yyyymmdd_set_id() -> int:
+    """Return today's UTC date as an int in YYYYMMDD format.
 
-    Either returns a ``BaselineRecord`` or None. None → champion-selection
-    falls back to legacy champion-only thresholding (safe).
+    This MUST match the keying scheme ``gateway/tasks/icp_generator.py``
+    uses for ``qualification_private_icp_sets.set_id`` (and therefore
+    ``qualification_baselines.set_id``). The function ``get_set_id_for_date``
+    in icp_generator.py is the source of truth:
 
-    DB takes precedence: if the DB lookup succeeds and returns a record,
-    we use it. If the DB is unreachable OR returns no record, we try the
-    file. This keeps `python -m qualification.scoring.champion` working
-    in dev environments without a Supabase connection.
+        int(dt.strftime("%Y%m%d"))     # e.g. 20260530
+
+    Champion-selection's own ``set_id`` parameter is epoch-based
+    (``current_epoch // EVALUATION_SET_ROTATION_EPOCHS``) — a DIFFERENT
+    scheme used for evaluation bookkeeping. The baseline is keyed by the
+    DAY THE ICP SET WAS ACTIVE, which is the YYYYMMDD form. Conflating
+    the two was the bug that made every baseline lookup return None.
     """
-    # Try DB first
+    return int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+
+
+def _get_baseline_supabase_client():
+    """Resolve a Supabase client that has read access to the RLS-protected
+    ``qualification_baselines`` table.
+
+    Tries, in order:
+      1. ``gateway.db.client.get_write_client()`` — service_role, present on
+         the gateway box (where the baseline is also WRITTEN, so this path
+         is the source of truth).
+      2. Direct ``supabase.create_client`` with ``SUPABASE_SERVICE_ROLE_KEY``
+         from env — works on the validator IF the env var is present.
+      3. None — caller falls back to file / legacy thresholding.
+
+    The RLS policy ``service_role_all`` on ``qualification_baselines``
+    requires service_role; the anon key WILL be rejected. If neither path
+    yields a service_role client (e.g., validator container without the
+    env var), this returns None and champion-selection silently falls
+    back to legacy thresholding.
+    """
+    # Path 1: gateway's centralized client (works on gateway)
     try:
-        from gateway.db.client import get_write_client  # service_role; needed for RLS
+        from gateway.db.client import get_write_client
         client = get_write_client()
         if client is not None:
-            rec = load_baseline_from_db(set_id, client)
-            if rec is not None:
-                return rec
+            return client
     except Exception as e:
-        logger.warning(f"baseline DB lookup unavailable ({e}); falling back to file")
+        logger.debug(f"gateway.db.client.get_write_client unavailable: {e}")
+
+    # Path 2: direct supabase create_client with service_role from env
+    try:
+        import os
+        from supabase import create_client
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        if url and key:
+            return create_client(url, key)
+    except Exception as e:
+        logger.debug(f"direct supabase create_client unavailable: {e}")
+
+    return None
+
+
+def _load_baseline_with_fallback(set_id: int):  # set_id arg kept for API compat; ignored
+    """Load today's reference-model baseline.
+
+    NOTE: the ``set_id`` parameter is intentionally IGNORED. Callers pass
+    champion-selection's epoch-based set_id (e.g. 1175); the baseline is
+    keyed by the icp_generator's YYYYMMDD set_id (e.g. 20260530). We
+    compute the right key internally to avoid forcing every caller to
+    know the difference.
+
+    Returns ``BaselineRecord`` if today's daily run has completed and
+    persisted, else ``None``. None → legacy champion-only thresholding,
+    which is safe for first-day deployment and for the ~60 min window
+    after 00:00 UTC while the baseline runner is in flight.
+    """
+    target_set_id = _today_yyyymmdd_set_id()
+
+    # Try DB first
+    client = _get_baseline_supabase_client()
+    if client is not None:
+        rec = load_baseline_from_db(target_set_id, client)
+        if rec is not None:
+            return rec
+    else:
+        logger.info(
+            "No Supabase service-role client available for baseline lookup "
+            "(neither gateway.db.client nor SUPABASE_SERVICE_ROLE_KEY env). "
+            "Falling back to file."
+        )
 
     # File fallback (dev/test, or DB returned nothing for this set)
-    return load_baseline(set_id)
+    return load_baseline(target_set_id)
 
 logger = logging.getLogger(__name__)
 
@@ -209,25 +274,40 @@ async def run_champion_selection(
     # is wired up.
     # =========================================================================
     if not current_champion:
+        # First-crown gate: top model must clear BOTH
+        #   (a) baseline + CHAMPION_DETHRONING_THRESHOLD_POINTS (if baseline available)
+        #   (b) MINIMUM_CHAMPION_SCORE
+        # Whichever is HIGHER. (b) is the absolute floor a champion must
+        # clear so a catastrophically-bad baseline day doesn't let a weak
+        # miner take the throne (e.g. baseline=5 → baseline+10=15 < 20).
         if baseline_score is not None:
-            first_champion_threshold = baseline_score + CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS
-            if top_model.total_score <= first_champion_threshold:
-                logger.info(
-                    f"No challenger exceeds baseline+threshold "
-                    f"({top_model.total_score:.2f} <= {first_champion_threshold:.2f}); "
-                    f"no champion crowned this epoch"
-                )
-                return ChampionSelectionResult(
-                    new_champion=None,
-                    previous_champion=None,
-                    action="no_change",
-                    margin=None,
-                    reason=(
-                        f"No champion: top challenger {top_model.total_score:.2f} did not "
-                        f"exceed baseline {baseline_score:.2f} by "
-                        f"{CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS:.0f} points"
-                    ),
-                )
+            first_champion_threshold = max(
+                baseline_score + CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS,
+                CONFIG.MINIMUM_CHAMPION_SCORE,
+            )
+        else:
+            # Pre-baseline / file-only case: enforce MINIMUM_CHAMPION_SCORE
+            # so legacy auto-crown doesn't crown a sub-20 model.
+            first_champion_threshold = CONFIG.MINIMUM_CHAMPION_SCORE
+
+        if top_model.total_score <= first_champion_threshold:
+            logger.info(
+                f"No challenger exceeds first-crown threshold "
+                f"({top_model.total_score:.2f} <= {first_champion_threshold:.2f}); "
+                f"no champion crowned this epoch"
+            )
+            return ChampionSelectionResult(
+                new_champion=None,
+                previous_champion=None,
+                action="no_change",
+                margin=None,
+                reason=(
+                    f"No champion: top challenger {top_model.total_score:.2f} did not "
+                    f"exceed first-crown threshold {first_champion_threshold:.2f} "
+                    f"(baseline={baseline_score if baseline_score is not None else 'n/a'}, "
+                    f"min={CONFIG.MINIMUM_CHAMPION_SCORE:.0f})"
+                ),
+            )
 
         new_champion = await set_champion(top_model, current_epoch, set_id)
         await log_champion_selected(new_champion, None, current_epoch)
@@ -279,20 +359,28 @@ async def run_champion_selection(
     # this prevents a weak champion from blocking a stronger reference baseline
     # from acting as the floor — and prevents miners from taking the crown by
     # beating only a stale baseline that's now below the current champion.
+    #
+    # Also clamped at MINIMUM_CHAMPION_SCORE so a catastrophically-bad
+    # baseline + a slightly-bad champion can't lower the bar below the
+    # absolute champion floor (e.g. baseline=3 + champion=5 → floor=5,
+    # threshold=15, but min=20 — must still clear 20).
     floor = champion_score
     floor_source = "champion"
     if baseline_score is not None and baseline_score > champion_score:
         floor = baseline_score
         floor_source = "baseline"
 
-    threshold = floor + CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS
+    threshold = max(
+        floor + CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS,
+        CONFIG.MINIMUM_CHAMPION_SCORE,
+    )
 
     logger.info(
         f"Champion score: {champion_score:.2f}, "
         f"Baseline score: {baseline_score if baseline_score is not None else 'n/a'}, "
         f"Floor: {floor:.2f} ({floor_source}), "
-        f"Threshold to dethrone: {threshold:.2f} "
-        f"(+{CONFIG.CHAMPION_DETHRONING_THRESHOLD_POINTS:.0f} points)"
+        f"Min champion: {CONFIG.MINIMUM_CHAMPION_SCORE:.0f}, "
+        f"Threshold to dethrone: {threshold:.2f}"
     )
     
     # Find challengers that beat the threshold

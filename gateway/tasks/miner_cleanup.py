@@ -282,37 +282,18 @@ async def cleanup_deregistered_miner_leads(epoch_id: int):
             print(f"   ⚠️  Failed to log to transparency_log: {e}")
             import traceback
             traceback.print_exc()
-        
-        # Log to TEE (Arweave buffer)
-        try:
-            from gateway.utils.logger import log_event
-            
-            # Create payload for TEE
-            payload_json = json.dumps(cleanup_report, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
-            payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
-            
-            tee_event = {
-                "event_type": "DEREGISTERED_MINER_REMOVAL",
-                "actor_hotkey": "gateway",  # Gateway-generated event
-                "nonce": event_nonce,  # Use same UUID as transparency_log
-                "ts": current_timestamp,  # Use same timestamp as transparency_log
-                "payload": cleanup_report,
-                "payload_hash": payload_hash,
-                "build_id": "gateway",
-                "signature": "gateway_internal_cleanup"  # Add signature for consistency
-            }
-            
-            # Log to TEE enclave (uses log_event - dual logging)
-            result = await log_event(tee_event)
-            seq_num = result.get("sequence")
-            
-            print(f"   ✅ Logged to TEE buffer (seq={seq_num})")
-        
-        except Exception as e:
-            print(f"   ⚠️  Failed to log to TEE: {e}")
-            import traceback
-            traceback.print_exc()
-            # Continue anyway - transparency_log is the primary source
+
+        # Note: prior versions of this function ALSO called
+        # gateway.utils.logger.log_event() right here with the SAME
+        # `event_nonce`, intending to push the event to a TEE/Arweave buffer.
+        # But log_event (legacy format) writes to the same transparency_log
+        # table — so the second insert collided on the nonce uniqueness
+        # constraint and fell back to /home/ec2-user/gateway/gateway/logs/
+        # tee_fallback/, accumulating 1149+ orphaned audit files for
+        # DEREGISTERED_MINER_REMOVAL alone since Jan 6, 2026. The direct
+        # insert above is the only write needed; TEE attestation was a
+        # misunderstanding (the legacy log_event path never actually goes
+        # through the enclave). Removed 2026-05-31.
         
         # ========================================================================
         # Step 6: Print summary

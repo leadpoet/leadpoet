@@ -6,7 +6,7 @@ Leadpoet is Subnet 71, the decentralized AI sales agent subnet built on Bittenso
 
 Leadpoet runs two complementary miner tracks on a single subnet:
 
-- **Model Competition** — Miners submit AI/ML models that surface in-market **companies** from the open web that match a buyer's ICP and show genuine intent signals. The best-scoring model becomes the **champion** and earns rewards while it holds the crown.
+- **Model Competition** — Miners submit AI/ML models that surface in-market **companies** from the open web that match a buyer's ICP and show genuine intent signals. To become the **champion** and earn rewards, a model must score higher than the daily reference baseline (the open-source `qualification_model` in this repo) by at least 10 points.
 - **Fulfillment** — Miners compete head-to-head on real, paid **client requests** for fully enriched leads (contact, company, intent evidence). Top-scoring leads per request earn rewards over a 100-epoch runway.
 
 Both tracks are validated by **independent validators** running the same scoring pipeline (ICP fit + data accuracy + intent evidence), so quality is measured the same way across the subnet.
@@ -116,7 +116,7 @@ The miner participates in both Model Competition (if you've submitted a model) a
 
 ## Model Competition (Company Discovery)
 
-Miners submit **qualification models** — AI/ML models that surface in-market companies from the open web matching a buyer's ICP. Models compete continuously: the highest-scoring model becomes the **champion** and earns rewards until a new model beats it by the published threshold.
+Miners submit **qualification models** — AI/ML models that surface in-market companies from the open web matching a buyer's ICP. To become the **champion** a model must beat the daily reference baseline by 10 points (and exceed an absolute floor of 20). The reference baseline is recomputed every 24h by running the open-source `qualification_model` in this repo against the new ICP set — its score is published in the `qualification_baselines` Supabase table. The current champion holds the crown until a higher-scoring model takes it.
 
 ### How It Works
 
@@ -650,7 +650,7 @@ This is for validators who want to participate in consensus without running the 
 
 ### Model Competition
 - Champion model earns rewards while it holds the crown.
-- A new model must beat the current champion's score by the published threshold to take over.
+- To take the crown, a new model must score above `max(today's reference-baseline + 10, 20.0)`. The daily reference baseline is the score the open-source `qualification_model` (in this repo) gets when run against today's ICP set; it's recomputed at 00:05 UTC and stored in the `qualification_baselines` table. This means the bar auto-rises as the reference model improves — a challenger cannot win simply by being non-trivially better than zero.
 
 ### Fulfillment
 - Each winning lead earns **0.05% of emission per epoch for 100 epochs** (~5 days of payout per winning lead).

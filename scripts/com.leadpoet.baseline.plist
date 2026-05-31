@@ -44,10 +44,13 @@
     <key>WorkingDirectory</key>
     <string>/Users/tasnimul/Desktop/leadpoet</string>
 
+    <!-- LOCAL TIME, not UTC. launchd ignores the TZ env var for
+         scheduling. Local is EDT (UTC-4) → 20:05 EDT = 00:05 UTC.
+         When DST ends in Nov, change Hour to 19 (EST = UTC-5). -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
-        <integer>0</integer>
+        <integer>20</integer>
         <key>Minute</key>
         <integer>5</integer>
     </dict>

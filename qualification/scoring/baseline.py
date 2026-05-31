@@ -143,6 +143,24 @@ def load_baseline(set_id: int) -> Optional[BaselineRecord]:
         return None
 
 
+def _save_ckpt(path: Path, set_id: int, per_icp_scores: List[float]) -> None:
+    """Atomically write per-ICP checkpoint so a killed runner can resume.
+
+    Cheap to call once per ICP — file is small (20 floats max). Atomicity
+    via write-tmp-then-rename prevents readers from seeing a half-written
+    checkpoint after a kill mid-write.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w") as f:
+            json.dump({"set_id": set_id, "per_icp_scores": per_icp_scores}, f)
+        tmp.replace(path)
+    except Exception as e:
+        # Checkpoint failure must not abort the run — log and continue.
+        logger.warning(f"baseline checkpoint write failed at {path}: {e}")
+
+
 def save_baseline(record: BaselineRecord) -> None:
     """Atomically persist ``record`` to ``qualification_baseline.json``.
 
@@ -317,8 +335,51 @@ async def run_and_save_baseline(
     qualification model itself uses (``qualify(icp)`` returns ``[]`` on
     failure rather than raising).
     """
+    # score_company expects Pydantic CompanyOutput / ICPPrompt objects.
+    # qualify_fn returns dicts (CompanyOutput-shaped). Without this coercion
+    # score_company crashes on `company.industry` access — silently caught
+    # by the per-lead try/except below, so every lead contributed 0 and
+    # baseline_score landed as 0.00. Observed on the 20260530 bootstrap run.
+    from gateway.qualification.models import CompanyOutput, ICPPrompt
+
+    # ─── Per-ICP checkpoint (resume after kill) ────────────────────────────
+    # Each ICP costs LLM + scrape API calls. If the process gets killed
+    # mid-run (systemd timeout, OOM, manual stop), we'd waste all of that.
+    # After each ICP we write {"set_id", "per_icp_scores"} to disk; on
+    # restart, if a checkpoint exists for the same set_id, we restore the
+    # already-computed scores and skip those ICPs. The file is deleted
+    # once `save_baseline` succeeds.
+    #
+    # Observed 20260531 00:05 UTC: systemd killed the runner at the 1h
+    # timeout after ~13/20 ICPs scored — entire run lost because no
+    # checkpoint existed. This block prevents that.
+    ckpt_path = (
+        _baseline_path().with_name(f"qualification_baseline_ckpt_{set_id}.json")
+    )
     per_icp_scores: List[float] = []
-    for icp in icp_set:
+    if ckpt_path.exists():
+        try:
+            with open(ckpt_path, "r") as f:
+                ckpt = json.load(f)
+            if int(ckpt.get("set_id", -1)) == set_id:
+                per_icp_scores = [float(s) for s in (ckpt.get("per_icp_scores") or [])]
+                logger.info(
+                    f"baseline checkpoint loaded: resuming after "
+                    f"{len(per_icp_scores)}/{len(icp_set)} ICPs from {ckpt_path}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"baseline checkpoint at {ckpt_path} unreadable: {e}; restarting from scratch"
+            )
+            per_icp_scores = []
+
+    # Skip already-completed ICPs by slicing the input list. We always
+    # walk in input order, so len(per_icp_scores) == number of ICPs done.
+    remaining_icps = icp_set[len(per_icp_scores):]
+    if remaining_icps != icp_set:
+        logger.info(f"baseline: {len(remaining_icps)} ICPs remaining to score")
+
+    for icp in remaining_icps:
         icp_id = icp.get("icp_id") or icp.get("industry") or "?"
         try:
             # qualify is sync (asyncio.run internally) — run in a thread so
@@ -327,27 +388,54 @@ async def run_and_save_baseline(
         except Exception as e:
             logger.warning(f"reference qualify crashed on icp={icp_id}: {e}; scoring 0")
             per_icp_scores.append(0.0)
+            _save_ckpt(ckpt_path, set_id, per_icp_scores)
             continue
 
         if not isinstance(leads, list) or not leads:
             # Honest abstention is fine — contributes 0 to this ICP's score.
             per_icp_scores.append(0.0)
+            _save_ckpt(ckpt_path, set_id, per_icp_scores)
+            continue
+
+        try:
+            icp_obj = ICPPrompt(**icp) if isinstance(icp, dict) else icp
+        except Exception as e:
+            logger.warning(f"reference: ICPPrompt coercion failed for icp={icp_id}: {e}; scoring 0")
+            per_icp_scores.append(0.0)
+            _save_ckpt(ckpt_path, set_id, per_icp_scores)
             continue
 
         icp_total = 0.0
+        # Per-ICP dedup set — score_company's run_company_zero_checks uses
+        # this to detect repeated companies within the same ICP submission
+        # and dock them. Reference run only submits up to 5 unique companies
+        # per ICP (qualify dedupes internally before returning), so this is
+        # near-effectively empty, but pass an empty set for correctness.
+        seen_companies: set = set()
         for lead in leads:
             try:
+                lead_obj = CompanyOutput(**lead) if isinstance(lead, dict) else lead
                 result = await score_fn(
-                    company=lead,
-                    icp=icp,
+                    company=lead_obj,
+                    icp=icp_obj,
+                    # Reference-model is exempt from cost / time penalty,
+                    # so these values are not used in scoring (is_reference_model
+                    # gates the penalty branch). Pass 0.0 to be explicit that
+                    # we're not competing on cost.
+                    run_cost_usd=0.0,
+                    run_time_seconds=0.0,
+                    seen_companies=seen_companies,
                     is_reference_model=True,
                 )
-                # score_company returns either a (score, breakdown) tuple
-                # or a Score-shaped object depending on version; accept both.
-                score = (
-                    result[0] if isinstance(result, tuple)
-                    else getattr(result, "total_score", result)
-                )
+                # score_company returns either a LeadScoreBreakdown (has
+                # .final_score) or a tuple-like score depending on version;
+                # accept both. Most likely a LeadScoreBreakdown.
+                if hasattr(result, "final_score"):
+                    score = result.final_score
+                elif isinstance(result, tuple):
+                    score = result[0]
+                else:
+                    score = getattr(result, "total_score", result)
                 icp_total += float(score or 0.0)
             except Exception as e:
                 logger.warning(
@@ -358,8 +446,20 @@ async def run_and_save_baseline(
 
         per_icp_score = icp_total / leads_per_icp_normalizer if leads_per_icp_normalizer else icp_total
         per_icp_scores.append(per_icp_score)
+        _save_ckpt(ckpt_path, set_id, per_icp_scores)
 
-    baseline_score = sum(per_icp_scores)
+    # baseline_score = AVERAGE per-ICP score across all ICPs.
+    # MUST match how miner total_score is computed in
+    # gateway/qualification/api/work.py:1609:
+    #     avg_score = sum(per_icp_scores) / len(run_ids)
+    # so baseline and miner scores live on the same scale (0–100).
+    # Earlier draft used `sum(per_icp_scores)` which produced values
+    # 20× larger than miner total_scores → no miner could ever beat
+    # the baseline + threshold. Fixed.
+    baseline_score = (
+        sum(per_icp_scores) / len(per_icp_scores)
+        if per_icp_scores else 0.0
+    )
     record = BaselineRecord(
         set_id=set_id,
         baseline_score=baseline_score,
@@ -368,6 +468,13 @@ async def run_and_save_baseline(
         model_id=REFERENCE_MODEL_ID,
     )
     save_baseline(record)
+    # Run completed successfully — clean up the per-ICP checkpoint so the
+    # next set_id doesn't trip the resume-from-checkpoint branch.
+    try:
+        if ckpt_path.exists():
+            ckpt_path.unlink()
+    except Exception as e:
+        logger.warning(f"baseline checkpoint cleanup failed at {ckpt_path}: {e}")
     logger.info(
         f"baseline run complete: set_id={set_id} score={baseline_score:.2f} "
         f"per_icp={['%.2f' % s for s in per_icp_scores]}"

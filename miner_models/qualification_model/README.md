@@ -3,6 +3,26 @@
 Universal evidence-first qualification miner. Single code path runs against
 any ICP — no per-ICP hardcoding.
 
+## Role as the daily reference baseline
+
+This model also serves as the **subnet-wide reference baseline** for the
+Model Competition. Every day at 00:05 UTC (just after the daily ICP rotation
+at 00:00 UTC), a gateway-hosted runner invokes this exact `qualify()` entry
+point against the new 20-ICP set and persists its aggregate score to the
+`qualification_baselines` Supabase table under `model_id="reference:qualification_model:v1"`.
+
+A miner challenger only becomes champion if their model's score on the same
+ICP set exceeds `max(today's reference-baseline + 10, 20.0)`. In other
+words: this model defines the floor every other competitor must beat.
+Improving this open-source model raises the bar for everyone — challengers
+must do meaningfully better than the public baseline to capture the 10%
+emissions slot.
+
+The runner is deployed at `/home/ec2-user/baseline/daily_baseline.py` on
+the gateway box and is driven by a systemd-user timer (`baseline-daily.timer`).
+Each per-ICP score is checkpointed to disk so a kill mid-run resumes cleanly
+on the next fire.
+
 ## Contract
 
 ```python

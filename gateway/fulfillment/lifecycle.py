@@ -423,6 +423,45 @@ async def _lifecycle_tick_inner(supabase) -> None:
                 print(f"   {rid[:8]}... waiting for validators: {len(unique_validators)}/{FULFILLMENT_MIN_VALIDATORS} ({mins_left:.1f}min until timeout)")
                 continue
 
+            # ─── Guard: don't run consensus while revealed submissions are still un-scored ─────
+            # Observed 2026-06-01 on request fbeed690-edbb-...: 6 miners had
+            # revealed submissions (3 with 41 leads each + 3 with 9 leads each),
+            # but only 2 of 6 were scored before consensus fired. The other 4
+            # miners' work was discarded when the request transitioned to
+            # `recycled`. Miners (5GpzK4Rm, 5H17R1Za, 5HGP4yPa, 5DcJwmjL)
+            # rightly complained that their submissions "weren't scored".
+            #
+            # Root cause: this loop's gate counts unique VALIDATORS (currently
+            # MIN=1). The moment one validator submits a score for ONE miner's
+            # submission, the gate opens and consensus runs — even if other
+            # miners' revealed submissions are still queued for scoring.
+            #
+            # Fix: count distinct revealed submissions for this request and
+            # distinct submission_ids in fulfillment_scores. If revealed >
+            # scored AND we're inside the consensus grace window, defer.
+            # Once we hit the timeout, fall through to consensus anyway so a
+            # dead validator can't wedge the request forever.
+            revealed_subs_resp = supabase.table("fulfillment_submissions") \
+                .select("submission_id") \
+                .eq("request_id", rid) \
+                .eq("revealed", True) \
+                .execute()
+            revealed_subs = {s["submission_id"] for s in (revealed_subs_resp.data or [])}
+            scored_subs_resp = supabase.table("fulfillment_scores") \
+                .select("submission_id") \
+                .eq("request_id", rid) \
+                .execute()
+            scored_subs = {s.get("submission_id") for s in (scored_subs_resp.data or []) if s.get("submission_id")}
+            unscored_subs = revealed_subs - scored_subs
+            if unscored_subs and now < timeout:
+                mins_left = (timeout - now).total_seconds() / 60
+                print(
+                    f"   {rid[:8]}... deferring consensus: "
+                    f"{len(unscored_subs)}/{len(revealed_subs)} revealed submissions "
+                    f"still un-scored ({mins_left:.1f}min until forced consensus)"
+                )
+                continue
+
             if len(unique_validators) == 0 and now >= timeout:
                 print(
                     f"   ⚠️  {rid[:8]}... has 0 validators after timeout — "

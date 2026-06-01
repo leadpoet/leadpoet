@@ -412,15 +412,13 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
         return {"ok": False, "stage": "no_sd_key",
                 "content": "", "error": "missing key"}
 
-    # Format switched from "markdown" to default (raw HTML) on 2026-06-01.
-    # Raw HTML feeds trafilatura body extraction (applied to the returned
-    # `content` below), which removes nav/menu/footer/related-posts at the
-    # DOM level. The miner-reported "first 2.5k chars are mostly headers"
-    # problem was caused by SD's markdown conversion leaving boilerplate
-    # in the markdown output; trafilatura on the raw HTML is strictly better.
-    # If trafilatura isn't installed or fails to extract, the helper falls
-    # back to returning the raw HTML unchanged — Sonar can still parse it
-    # but with the old quality.
+    # Request raw HTML (default) instead of markdown so trafilatura body
+    # extraction (applied to the returned `content` below) can drop
+    # nav/menu/footer/related-posts at the DOM level. SD's markdown
+    # conversion preserves enough boilerplate that the first few thousand
+    # chars are often chrome, not article body — feeding Sonar noise.
+    # If trafilatura is unavailable or fails to extract, the helper returns
+    # the raw HTML unchanged so behavior degrades gracefully.
     base_params = {"api_key": api_key, "url": url}
     history: List[tuple] = []
     last_status: Optional[int] = None

@@ -64,11 +64,10 @@ SD_URL = "https://api.scrapingdog.com/scrape"
 SD_TIMEOUT_S = 30                  # per-fetch (legacy default — superseded by
                                    # per-tier timeouts below for the cascade)
 SD_MAX_CONTENT_CHARS = 12_000      # truncate fetched content per cited URL.
-                                   # Raised from 4k → 12k on 2026-06-01
-                                   # alongside trafilatura body extraction.
-                                   # With body extraction the first 12k chars
-                                   # are mostly article content; without it
-                                   # was mostly nav/cookies/related-posts.
+                                   # Raised from 4k alongside trafilatura
+                                   # body extraction. With body extraction the
+                                   # first 12k chars are mostly article body;
+                                   # without it would be largely boilerplate.
                                    # Multi-URL prompt-level cap is enforced
                                    # downstream by Sonar's 128k context.
 SD_RETRY_DELAYS_S = (1, 2)         # legacy retry (unused by new cascade)
@@ -690,9 +689,9 @@ async def fetch_url_via_scrapingdog(
     last_verdict = "no_tier_attempted"
     for tier_name, extra in _SD_TIERS:
         # Format omitted (defaults to raw HTML) so trafilatura body extraction
-        # can run downstream. Prior `format=markdown` left nav/cookies/related
+        # can run downstream. Prior `format=markdown` left nav/cookies/related-
         # posts in the markdown output, eating the first 4k chars of the prompt
-        # input for many sites. Miner reported 2026-06-01.
+        # input for many sites and starving Sonar of actual article content.
         params = {
             "api_key": SCRAPINGDOG_KEY,
             "url": url,

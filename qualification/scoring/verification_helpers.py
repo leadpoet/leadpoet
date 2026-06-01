@@ -81,20 +81,20 @@ LLM_TIMEOUT = 30.0
 
 # Verification thresholds
 CONFIDENCE_THRESHOLD = 70  # Minimum confidence to consider verified
-# Max chars to send to LLM. Raised from 5000 → 12000 in 2026-06-01 alongside
-# trafilatura-based body extraction. With body extraction, the first 12k chars
-# is now mostly article content (vs prior where 5k could be nav/cookies/sidebar).
+# Max chars to send to LLM. Raised from 5000 → 12000 alongside trafilatura
+# body extraction (below). With body extraction the first 12k chars are
+# mostly article content rather than nav/cookies/sidebar.
 CONTENT_MAX_LENGTH = 12000
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Article-body extraction
 # ─────────────────────────────────────────────────────────────────────────────
-# Miner reported 2026-06-01 that the validator's verification was reading mostly
-# headers/menu/cookie-banner because we passed the first N chars of raw scraper
-# output to Sonar. Even with format=markdown, sites with bloated nav still
-# consumed the cap. This helper runs trafilatura to extract just the article
-# body (drops nav/sidebar/footer/related-posts at the DOM level) before
+# Without an extractor, the first N chars of a ScrapingDog response often
+# contain nav/menu/footer/cookie-banner rather than the article body, so
+# Sonar receives boilerplate text and fails to verify legitimate claims.
+# This helper runs trafilatura on raw HTML to pull just the article body
+# (dropping nav/sidebar/footer/related-posts at the DOM level) before
 # truncation. When the input isn't HTML (e.g., markdown, plain text) or
 # trafilatura can't find an article body, falls back to returning the input
 # unchanged so behavior is at-least-as-good as before.

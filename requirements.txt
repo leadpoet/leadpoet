@@ -142,4 +142,13 @@ geonamescache>=2.0.0  # 786k+ city name variations (offline, no rate limits)
 # ScrapingDog used to return markdown with significant nav/menu/footer noise in
 # the first 2.5-5k chars; with trafilatura we extract just the article body
 # from raw HTML before sending to Sonar, lifting verification quality.
+#
+# lxml_html_clean is REQUIRED — trafilatura → justext → lxml.html.Cleaner.
+# Starting in lxml 5.2 the html.clean submodule was split into a separate
+# package (lxml_html_clean), and trafilatura's dependency justext still
+# imports from the legacy path. Without this explicit pin, the import chain
+# fails with: "lxml.html.clean module is now a separate project". The
+# fallback in verification_helpers.extract_article_body() then returns the
+# raw HTML unchanged, defeating the entire body-extraction purpose.
 trafilatura>=1.6.0
+lxml_html_clean>=0.1.0

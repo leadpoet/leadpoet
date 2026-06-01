@@ -81,7 +81,63 @@ LLM_TIMEOUT = 30.0
 
 # Verification thresholds
 CONFIDENCE_THRESHOLD = 70  # Minimum confidence to consider verified
-CONTENT_MAX_LENGTH = 5000  # Max chars to send to LLM
+# Max chars to send to LLM. Raised from 5000 → 12000 in 2026-06-01 alongside
+# trafilatura-based body extraction. With body extraction, the first 12k chars
+# is now mostly article content (vs prior where 5k could be nav/cookies/sidebar).
+CONTENT_MAX_LENGTH = 12000
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Article-body extraction
+# ─────────────────────────────────────────────────────────────────────────────
+# Miner reported 2026-06-01 that the validator's verification was reading mostly
+# headers/menu/cookie-banner because we passed the first N chars of raw scraper
+# output to Sonar. Even with format=markdown, sites with bloated nav still
+# consumed the cap. This helper runs trafilatura to extract just the article
+# body (drops nav/sidebar/footer/related-posts at the DOM level) before
+# truncation. When the input isn't HTML (e.g., markdown, plain text) or
+# trafilatura can't find an article body, falls back to returning the input
+# unchanged so behavior is at-least-as-good as before.
+
+try:
+    import trafilatura as _trafilatura
+    _TRAFILATURA_AVAILABLE = True
+except ImportError:
+    _TRAFILATURA_AVAILABLE = False
+
+
+def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
+    """Extract article body from raw HTML; fall back to input unchanged.
+
+    Returns the cleanest content available:
+      - If trafilatura is installed AND input looks like HTML AND extraction
+        succeeds with ≥ ``min_body_chars`` chars, returns the extracted body.
+      - Otherwise returns the original input.
+
+    Safe to call on any content — markdown, plain text, or HTML. Non-HTML
+    inputs pass through unchanged because trafilatura's HTML parser declines
+    to extract from non-HTML.
+    """
+    if not content or not _TRAFILATURA_AVAILABLE:
+        return content
+    # Cheap pre-check: only attempt extraction if the content looks like HTML.
+    # trafilatura accepts non-HTML but spends real time parsing — skip it for
+    # markdown/text inputs.
+    if "<html" not in content[:2000].lower() and "<body" not in content[:2000].lower() and "<div" not in content[:5000].lower():
+        return content
+    try:
+        body = _trafilatura.extract(
+            content,
+            include_comments=False,
+            include_tables=True,
+            favor_recall=True,
+            no_fallback=False,
+        )
+    except Exception:
+        return content
+    if body and len(body) >= min_body_chars:
+        return body
+    return content
 
 # Cache TTL — kept short so stale content (removed job posts, paywalled articles)
 # doesn't cause false positives on re-verification.

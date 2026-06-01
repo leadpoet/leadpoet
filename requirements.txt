@@ -137,3 +137,9 @@ grpcio>=1.60.0
 # Geographic normalization (city/state/country standardization)
 us>=3.0.0  # US state lookup (offline, no rate limits)
 geonamescache>=2.0.0  # 786k+ city name variations (offline, no rate limits)
+
+# Article-body extraction from raw HTML for verification (intent + attribute).
+# ScrapingDog used to return markdown with significant nav/menu/footer noise in
+# the first 2.5-5k chars; with trafilatura we extract just the article body
+# from raw HTML before sending to Sonar, lifting verification quality.
+trafilatura>=1.6.0

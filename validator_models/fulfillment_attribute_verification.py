@@ -63,9 +63,14 @@ MAX_CONCURRENCY = 8
 SD_URL = "https://api.scrapingdog.com/scrape"
 SD_TIMEOUT_S = 30                  # per-fetch (legacy default — superseded by
                                    # per-tier timeouts below for the cascade)
-SD_MAX_CONTENT_CHARS = 4_000       # truncate fetched HTML/markdown before
-                                   # embedding in the prompt (4 KB per cited
-                                   # URL, capped further at the prompt level).
+SD_MAX_CONTENT_CHARS = 12_000      # truncate fetched content per cited URL.
+                                   # Raised from 4k → 12k on 2026-06-01
+                                   # alongside trafilatura body extraction.
+                                   # With body extraction the first 12k chars
+                                   # are mostly article content; without it
+                                   # was mostly nav/cookies/related-posts.
+                                   # Multi-URL prompt-level cap is enforced
+                                   # downstream by Sonar's 128k context.
 SD_RETRY_DELAYS_S = (1, 2)         # legacy retry (unused by new cascade)
 
 # Content-driven escalation tiers — same cascade used by intent verifier.
@@ -684,10 +689,13 @@ async def fetch_url_via_scrapingdog(
 
     last_verdict = "no_tier_attempted"
     for tier_name, extra in _SD_TIERS:
+        # Format omitted (defaults to raw HTML) so trafilatura body extraction
+        # can run downstream. Prior `format=markdown` left nav/cookies/related
+        # posts in the markdown output, eating the first 4k chars of the prompt
+        # input for many sites. Miner reported 2026-06-01.
         params = {
             "api_key": SCRAPINGDOG_KEY,
             "url": url,
-            "format": "markdown",
             **extra,
         }
         tier_timeout = _SD_TIER_TIMEOUT.get(tier_name, SD_TIMEOUT_S)
@@ -700,6 +708,14 @@ async def fetch_url_via_scrapingdog(
                 verdict = _sd_evaluate(resp.status, text)
                 last_verdict = verdict
                 if verdict == "ok":
+                    # Body extraction (trafilatura) — pulls just the article
+                    # body from raw HTML, stripping nav/sidebar/footer. Safe
+                    # no-op if not HTML or trafilatura unavailable.
+                    try:
+                        from qualification.scoring.verification_helpers import extract_article_body
+                        text = extract_article_body(text)
+                    except Exception:
+                        pass
                     return True, text[:SD_MAX_CONTENT_CHARS], f"sd:{tier_name}"
                 # If the origin returns 404 even after dynamic-render, the URL
                 # is genuinely dead — escalating to premium won't help.

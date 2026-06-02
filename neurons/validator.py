@@ -9885,9 +9885,19 @@ def run_dedicated_fulfillment_worker(config):
             # on the next lifecycle tick.
             #
             # This runs every polling cycle (cheap: one glob + stat per file).
+            #
+            # Cross-worker cleanup: glob across ALL workers, not just this fid.
+            # If worker 3 is busy mid-scoring on file A, its own poll won't
+            # run until A is done — so its orphan file B from a prior
+            # generation can sit blocked.  Letting any idle polling worker
+            # clean any worker's stale orphan closes that gap.  Safe because
+            # the 30-min staleness threshold protects actively-leased files
+            # (lease renewal touches mtime every 30 min).  The worker-claim
+            # logic in `candidates` below still scopes to fid only, so
+            # cross-cleanup doesn't cause cross-claim.
             _ORPHAN_STALENESS_SEC = 30 * 60
             for _wf in list(weights_dir.glob(
-                f"fulfillment_worker_{fid}_work_*_*.json"
+                "fulfillment_worker_*_work_*_*.json"
             )):
                 try:
                     _age = _now_ts - _wf.stat().st_mtime

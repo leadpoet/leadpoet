@@ -394,13 +394,23 @@ async def _lifecycle_tick_inner(supabase) -> None:
     #   * fulfilled and recycled are NOT included — fulfilled would risk
     #     double-paying via a second _finalize_chain_rewards; recycled is a
     #     separate (and rarer) failure mode handled in a follow-up.
+    # The time-bound on `reveal_window_end` exists to prevent infinite
+    # re-aggregation of `partially_fulfilled` requests when late validator
+    # scores trickle in.  It must NOT apply to `scoring` — that status
+    # means the request is still waiting for consensus, and excluding it
+    # past the 3h cutoff strands it forever (the loop never sees it again,
+    # so the timeout-based forced consensus inside the loop body never
+    # fires).  Observed today on 3 stuck requests (5854e3b9, caf0923d,
+    # fc1e0a3f) all status=scoring and 11-14h past reveal_end.
     rerun_window_start = (
         now - timedelta(minutes=FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES)
     ).isoformat()
     scoring_requests = supabase.table("fulfillment_requests") \
         .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes, status, successor_request_id") \
         .in_("status", ["scoring", "partially_fulfilled"]) \
-        .gte("reveal_window_end", rerun_window_start) \
+        .or_(
+            f"status.eq.scoring,reveal_window_end.gte.{rerun_window_start}"
+        ) \
         .execute()
 
     if scoring_requests.data:

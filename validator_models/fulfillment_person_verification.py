@@ -74,6 +74,11 @@ _ROLE_PROMPT = (
     '- Different job function (e.g. Engineer vs Sales, Planner vs Student)\n'
     '- Different department (e.g. Marketing vs Operations)\n'
     '- Different seniority (e.g. Associate vs Director)\n'
+    '- The actual title indicates the person works FOR, UNDER, REPORTS TO, '
+    'SUPPORTS, or ASSISTS someone with the claimed role '
+    '(e.g. "Executive Assistant to CEO" ≠ "CEO", "Chief of Staff to CRO" ≠ "CRO", '
+    '"Reports to CFO" ≠ "CFO", "Supporting the CTO" ≠ "CTO"). '
+    'The claimed role must describe the person THEMSELVES, not someone they work for.\n'
     'Return JSON only: {{"match": true/false}}'
 )
 

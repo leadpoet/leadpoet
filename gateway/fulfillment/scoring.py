@@ -564,10 +564,13 @@ async def score_fulfillment_lead(
             if passed:
                 person_verified = True
                 skip_stage4 = True
-            elif rejection_reason and rejection_reason.get("check_name") == "fulfillment_person_fetch_failed":
-                # Apify API error — fall back to old Stage 4
-                print("   ⚠️ Apify fetch failed, falling back to ScrapingDog Stage 4")
             else:
+                # Any rejection from the Apify pipeline — including
+                # fulfillment_person_fetch_failed — is a hard reject.  The old
+                # GSE/ScrapingDog Stage 4 does not enforce the same role check
+                # (it accepts any profile whose title contains the claimant's
+                # name regardless of actual role), so falling back to it on
+                # Apify failure lets unverifiable role claims through.
                 reason = rejection_reason.get("check_name", "fulfillment_person_verification_failed") if rejection_reason else "fulfillment_person_verification_failed"
                 return FulfillmentScoreResult(
                     tier1_passed=True, tier2_passed=False,
@@ -577,7 +580,8 @@ async def score_fulfillment_lead(
                     failure_detail=_build_failure_detail(reason, person_rejection=rejection_reason),
                 )
 
-        # If person not yet verified (Apify off or fetch failed), use old Stage 4
+        # Apify not configured — use old Stage 4 (legacy path; should not run
+        # in production where APIFY_API_TOKEN is required).
         if not person_verified:
             verif_failure, verif_data = await _run_verification_stages(
                 validator_dict, email_result, stage0_2_data,

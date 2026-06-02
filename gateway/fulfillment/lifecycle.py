@@ -887,6 +887,94 @@ def _walk_chain_predecessors(supabase, request_id: str) -> list:
     return chain
 
 
+def _load_sibling_chain_held_companies(supabase, request_id: str) -> set:
+    """Cross-chain dedup at _resolve_chain_topk time.
+
+    Returns the set of normalized company names currently held
+    (``is_chain_held=TRUE``) on any OTHER active chain for the same
+    ``client_company`` as ``request_id``.  "Other chain" means any
+    request not in this request's own chain (this request + predecessors
+    via ``successor_request_id``).
+
+    The original ``excluded_companies`` snapshot built at create_request /
+    recycle time can't see helds that landed on sibling chains AFTER the
+    snapshot was taken.  This function reads that state live at
+    consensus time so the resolver can drop sibling-held companies
+    from the top-K candidate pool — preventing the same company from
+    being held & delivered twice to the same buyer across concurrent
+    requests.
+    """
+    # 1) This request's client_company
+    req_resp = supabase.table("fulfillment_requests") \
+        .select("company") \
+        .eq("request_id", request_id) \
+        .limit(1) \
+        .execute()
+    if not req_resp.data:
+        return set()
+    client_company = (req_resp.data[0].get("company") or "").strip()
+    if not client_company:
+        return set()
+
+    # 2) This chain's request_ids (predecessors include the chain we're
+    #    in; current request_id excluded since its own helds are pulled
+    #    via _load_chain_held_winners + the current consensus_results).
+    own_chain_ids = set(_walk_chain_predecessors(supabase, request_id))
+    own_chain_ids.add(request_id)
+
+    # 3) All other active requests for the same client.  Active =
+    #    statuses where helds could still be in flight; closed/recycled/
+    #    expired requests' held flags are stale and shouldn't block.
+    active_statuses = [
+        "open", "continued_open", "pending", "commit_closed",
+        "scoring", "partially_fulfilled",
+    ]
+    sibling_resp = supabase.table("fulfillment_requests") \
+        .select("request_id") \
+        .eq("company", client_company) \
+        .in_("status", active_statuses) \
+        .execute()
+    sibling_ids = [
+        r["request_id"] for r in (sibling_resp.data or [])
+        if r["request_id"] not in own_chain_ids
+    ]
+    if not sibling_ids:
+        return set()
+
+    # 4) Held consensus rows on the sibling requests.
+    held_resp = supabase.table("fulfillment_score_consensus") \
+        .select("submission_id, lead_id") \
+        .in_("request_id", sibling_ids) \
+        .eq("is_chain_held", True) \
+        .execute()
+    held_rows = held_resp.data or []
+    if not held_rows:
+        return set()
+
+    # 5) Hydrate company names from submissions.  Same lookup pattern
+    #    as _resolve_chain_topk's hydration step.
+    sub_ids = list({r["submission_id"] for r in held_rows})
+    sub_resp = supabase.table("fulfillment_submissions") \
+        .select("submission_id, lead_data") \
+        .in_("submission_id", sub_ids) \
+        .execute()
+    sub_index: dict = {}
+    for sub in (sub_resp.data or []):
+        for lead in (sub.get("lead_data") or []):
+            sub_index[(sub["submission_id"], lead.get("lead_id"))] = (
+                lead.get("data") or {}
+            ).get("business", "")
+
+    out: set = set()
+    for r in held_rows:
+        biz = sub_index.get((r["submission_id"], r["lead_id"]), "")
+        if biz:
+            norm = _normalize_company(biz)
+            if norm:
+                out.add(norm)
+    return out
+
+
 def _load_chain_held_winners(supabase, request_id: str) -> list:
     """Load all consensus rows currently flagged is_chain_held=TRUE across
     every predecessor of ``request_id`` (not including ``request_id`` itself).
@@ -1052,6 +1140,25 @@ async def _resolve_chain_topk(
                      c.get("consensus_intent_signal_final") or 0)
         if new_score > cur_score:
             by_company[key] = c
+
+    # 4.5) Cross-chain dedup: drop companies already held on a SIBLING
+    #      chain for the same client.  The icp.excluded_companies snapshot
+    #      from create_request / recycle freezes the exclusion list at one
+    #      moment in time; if a sibling chain holds a new company AFTER the
+    #      snapshot, the snapshot can't see it and Tier 1 lets it through.
+    #      Catching it here at consensus time is the authoritative dedup
+    #      point — this loop processes scoring requests sequentially, so
+    #      whichever sibling chain reached _resolve_chain_topk first owns
+    #      the company and later siblings drop it.
+    sibling_held = _load_sibling_chain_held_companies(supabase, request_id)
+    if sibling_held:
+        removed = [k for k in by_company if k in sibling_held]
+        for k in removed:
+            del by_company[k]
+        if removed:
+            print(f"   🚫 Cross-chain dedup: dropped {len(removed)} "
+                  f"sibling-held companies for {request_id[:8]}: "
+                  f"{removed[:5]}{'...' if len(removed) > 5 else ''}")
 
     # 5) Rank by score, take top K.
     ranked = sorted(

@@ -467,6 +467,7 @@ async def score_fulfillment_lead(
                     _precheck_http,
                     lead_signals=lead.intent_signals,
                     icp_intent_signal_texts=icp_signal_texts,
+                    lead_company=getattr(lead, "business", "") or "",
                 )
         except Exception as e:
             logger.warning(

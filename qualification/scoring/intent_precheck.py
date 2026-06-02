@@ -371,10 +371,14 @@ def _get_openrouter_key() -> str:
 _PROMPT_TEMPLATE = """Judge whether a miner's evidence directly satisfies a target intent signal.
 
 INPUTS
+  lead_company:      "{lead_company}"
   miner_claim:       "{miner_claim}"
   miner_source:      "{miner_source}"
   miner_url:         "{miner_url}"
   target_icp_signal: "{target_icp_signal}"
+
+The target intent signal is about lead_company specifically. Judge the claim
+relative to lead_company — not any other entity mentioned in the claim.
 
 POLICY
   Answer "yes" only if ALL rules below are satisfied for THIS pair.
@@ -423,8 +427,31 @@ RULES
        url:     "lever.co/acme/..."
        → yes (rule #1 satisfied by claim, rule #7 satisfied by source/url)
 
-  8. WHEN AMBIGUOUS, REJECT. Strict mode: if you cannot map the claim onto
-     the target unambiguously under rules 1-7, answer "no".
+  8. SUBJECT/OBJECT DIRECTION (for lead_company). When the target describes
+     an event happening TO the company (e.g., "secured/raised/received
+     investment", "was acquired", "received funding"), lead_company must
+     appear in the claim as the RECIPIENT / PASSIVE party.  If the claim
+     shows lead_company as the ACTIVE party — performing the action onto
+     someone else — REJECT, even if the same investment / acquisition
+     keywords appear.
+
+     Examples (lead_company = "Acme" in all):
+       target: "Company secured strategic or corporate investment"
+       claim:  "Acme acquired a majority stake in Y"           → no  (Acme is acquirer)
+       claim:  "Acme invested in Y"                             → no  (Acme is investor)
+       claim:  "Acme raised $50M Series B"                      → yes (Acme is recipient)
+       claim:  "Acme received strategic investment from Z"       → yes (Acme is recipient)
+
+       target: "Company was acquired in the past 12 months"
+       claim:  "Acme acquired Y"                                → no  (Acme is acquirer, not acquired)
+       claim:  "Acme was acquired by Z"                         → yes (Acme is target)
+
+       target: "Company partnered with a major enterprise"
+       claim:  "Acme signed partnership with Y, a Fortune 500"   → yes
+       claim:  "Acme expanded partner network with 5 small firms" → no  (no major enterprise)
+
+  9. WHEN AMBIGUOUS, REJECT. Strict mode: if you cannot map the claim onto
+     the target unambiguously under rules 1-8, answer "no".
 
 OUTPUT
   JSON only, schema:
@@ -448,8 +475,10 @@ def _build_prompt(
     miner_url: str,
     target_icp_signal: str,
     today_iso: str,
+    lead_company: str = "",
 ) -> str:
     return _PROMPT_TEMPLATE.format(
+        lead_company=lead_company or "<unknown>",
         miner_claim=miner_claim,
         miner_source=miner_source,
         miner_url=miner_url,
@@ -571,6 +600,7 @@ async def precheck_lead_signals(
     icp_intent_signal_texts: List[str],
     api_key: Optional[str] = None,
     today_iso: Optional[str] = None,
+    lead_company: str = "",
 ) -> List[bool]:
     """Run the Gemini pre-check across one lead's intent signals.
 
@@ -667,7 +697,7 @@ async def precheck_lead_signals(
             async with sem:
                 parsed, err = await _call_openrouter(
                     http_client, key,
-                    _build_prompt(miner_claim, source_str, miner_url, target_text, today),
+                    _build_prompt(miner_claim, source_str, miner_url, target_text, today, lead_company),
                 )
             if parsed is None:
                 return idx, True, f"fail_open({err})"

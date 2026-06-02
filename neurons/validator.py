@@ -9869,6 +9869,44 @@ def run_dedicated_fulfillment_worker(config):
             # files and missed it.
             _FF_WORK_FILE_TTL_SEC = 80 * 60
             _now_ts = time.time()
+
+            # Defensive cleanup: when the validator container is restarted,
+            # any work file in flight at the moment of SIGTERM gets orphaned
+            # — the lease-renewal task dies with the old container, the work
+            # file's mtime freezes, and the new container's worker has no
+            # reliable way to know whether the file is "still being
+            # processed" or "stale from a dead container".  Phase 1's
+            # _has_work_file uses the same TTL window, so an orphan within
+            # the 80-min window also blocks re-dispatch — request stuck.
+            #
+            # Heuristic: if mtime is older than the lease renewal interval
+            # (30 min) AND no results file exists, the lease holder is
+            # dead.  Delete the orphan so Phase 1 re-dispatches fresh work
+            # on the next lifecycle tick.
+            #
+            # This runs every polling cycle (cheap: one glob + stat per file).
+            _ORPHAN_STALENESS_SEC = 30 * 60
+            for _wf in list(weights_dir.glob(
+                f"fulfillment_worker_{fid}_work_*_*.json"
+            )):
+                try:
+                    _age = _now_ts - _wf.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                if _age <= _ORPHAN_STALENESS_SEC:
+                    continue
+                _results = _wf.parent / _wf.name.replace("_work_", "_results_", 1)
+                if _results.exists():
+                    continue
+                try:
+                    _wf.unlink()
+                    print(f"   🧹 Worker {fid}: deleted orphan work file "
+                          f"{_wf.name} (age {_age/60:.1f}min, no results)")
+                except FileNotFoundError:
+                    pass
+                except Exception as ex:
+                    print(f"   ⚠️ Worker {fid}: orphan delete failed: {ex}")
+
             candidates = sorted(
                 wf for wf in weights_dir.glob(
                     f"fulfillment_worker_{fid}_work_*_*.json"

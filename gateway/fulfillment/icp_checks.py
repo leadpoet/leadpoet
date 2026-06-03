@@ -253,12 +253,42 @@ def _looks_definitely_english(text: str) -> bool:
 
 
 def _fuzzy_role_match(lead_role: str, target_roles: list) -> bool:
-    """Check if lead_role is a fuzzy match for any target role."""
+    """Legacy fuzzy match.  Returns True if the role would have been
+    accepted under the pre-2026-06-03 logic (title+function OR 50%
+    token overlap).  Retained for backward compatibility; new code
+    should use ``classify_role`` instead.
+    """
+    verdict = classify_role(lead_role, target_roles)
+    return verdict in ("strict_match", "gray_zone")
+
+
+def classify_role(lead_role: str, target_roles: list) -> str:
+    """Three-way classification of how a lead's role relates to the buyer's
+    target_roles list.
+
+      "strict_match"  — title-overlap AND function-overlap on at least one
+                        target role.  High-confidence accept, no LLM needed.
+      "gray_zone"     — neither title+function overlap nor exact match, but
+                        raw token overlap with some target is >= 50%.
+                        Used to be auto-accepted (Path 2); now routed
+                        through batched LLM judgment in
+                        ``score_fulfillment_batch``'s pre-pass.
+      "no_match"      — fails both Path 1 and the 50% overlap check.
+                        Deterministically reject — same outcome as today.
+
+    See bug audit 2026-06-03: Path 2 (50% raw token overlap) was producing
+    ~30 of ~78 FPs across the five Revamped labels — accepting CTO against
+    a Sales target, Executive Assistant to CEO against a CEO target, etc.
+    Routing the gray zone through an LLM judge keeps legitimate variants
+    that share tokens-but-mean-the-same-thing while rejecting tokens-but-
+    different-function cases.
+    """
     if not lead_role or not target_roles:
-        return False
+        return "no_match"
 
     lead_tokens = _normalize_role_tokens(lead_role)
 
+    gray_zone_hit = False
     for target in target_roles:
         target_tokens = _normalize_role_tokens(target)
 
@@ -286,15 +316,19 @@ def _fuzzy_role_match(lead_role: str, target_roles: list) -> bool:
         title_overlap = bool(lead_titles & target_titles)
         function_overlap = bool(lead_functions & target_functions)
 
+        # Path 1: high-confidence accept.
         if title_overlap and function_overlap:
-            return True
+            return "strict_match"
 
-        overlap = lead_tokens & target_tokens
-        min_size = min(len(lead_tokens), len(target_tokens))
-        if min_size > 0 and len(overlap) / min_size >= 0.5:
-            return True
+        # Path 2 detection (used to auto-accept; now flags the gray zone).
+        if not gray_zone_hit:
+            overlap = lead_tokens & target_tokens
+            min_size = min(len(lead_tokens), len(target_tokens))
+            if min_size > 0 and len(overlap) / min_size >= 0.5:
+                gray_zone_hit = True
+        # Continue scanning — a later target may yield a strict_match.
 
-    return False
+    return "gray_zone" if gray_zone_hit else "no_match"
 
 
 # ---------------------------------------------------------------------------
@@ -306,10 +340,17 @@ def tier1_check(
     lead_output: LeadOutput,
     icp: FulfillmentICP,
     seen_companies: Set[str],
+    role_decisions: Optional[dict] = None,
 ) -> Optional[str]:
     """
     Return failure_reason string if the lead fails any ICP check, else None.
     Returns "sub_industry_needs_llm" if sub-industry needs Tier 1.5 LLM check.
+
+    ``role_decisions`` is an optional ``{lead_id: bool}`` cache pre-populated
+    by ``score_fulfillment_batch``'s LLM pre-pass for leads in the role
+    "gray zone" (Path 2 token-overlap candidates).  When provided, gray-zone
+    leads accept iff the cache says True.  When absent (e.g., called outside
+    a batch), gray-zone leads fail-closed → ``role_mismatch``.
     """
     allowed_inds = _coerce_industry_list(icp.industry)
     if allowed_inds:
@@ -348,7 +389,17 @@ def tier1_check(
         if not _looks_definitely_english(lead.role or ""):
             return "role_not_english"
         if lead.role not in icp.target_roles:
-            if not _fuzzy_role_match(lead.role, icp.target_roles):
+            verdict = classify_role(lead.role, icp.target_roles)
+            if verdict == "no_match":
+                return "role_mismatch"
+            # Both "strict_match" (Path 1 lexicon overlap) and "gray_zone"
+            # (Path 2 50% token overlap) defer to the LLM cache populated
+            # by score_fulfillment_batch's pre-pass.  See classify_role's
+            # docstring for why strict_match isn't trusted on its own.
+            # Missing cache (e.g., called outside the batch path) or
+            # explicit False → reject (fail-closed).
+            lid = getattr(lead, "lead_id", None) or getattr(lead, "email", None)
+            if not (role_decisions and role_decisions.get(lid) is True):
                 return "role_mismatch"
 
     if icp.target_seniority:

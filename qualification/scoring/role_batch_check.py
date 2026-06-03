@@ -1,0 +1,313 @@
+"""Batched LLM role-match judge.
+
+Called from ``gateway/fulfillment/scoring.py::score_fulfillment_batch`` as
+a pre-pass over leads whose role classification fell into the gray zone
+(Path 2 token-overlap, no Path 1 title+function match).  See bug audit
+2026-06-03: the previous behaviour was to auto-accept the gray zone,
+which produced ~30 false positives across the five Revamped labels
+(CTO vs Sales-CRO target, Executive Assistant to CEO vs CEO target, etc.).
+
+Design contract:
+  - Sequential per-chunk (no concurrency) — keeps debugging tractable
+    and avoids bursty 429s.
+  - ``BATCH_SIZE`` leads per LLM call (default 10).
+  - Per-chunk retry on 429 / 5xx / timeout / malformed JSON
+    (``NUM_RETRIES`` attempts with linear backoff).
+  - Fail-closed: chunk-level error after retries → every lead in the
+    chunk is recorded as ``False``.  Same conservative direction as
+    deleting Path 2 entirely.
+  - Missing ``OPENROUTER_KEY`` → all gray-zone leads recorded as ``False``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+MODEL = "google/gemini-2.5-flash-lite"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+TIMEOUT_SECONDS = 30
+NUM_RETRIES = 3
+BATCH_SIZE = 10  # leads per LLM call, per user spec
+
+_SYS_MESSAGE = "You are a strict B2B role-match judge. Return JSON only."
+
+_PROMPT_TEMPLATE = """Judge whether each LEAD's role matches ANY of the buyer's TARGET ROLES.
+
+TARGET ROLES (what the buyer wants):
+{target_roles_list}
+
+LEADS to judge ({n} total):
+{leads_block}
+
+DEFAULT TO REJECT.  Accept only when the lead's role clearly belongs to
+the same function family AND the same seniority bucket as at least one
+target.  Title-word overlap (CTO vs CRO, VP Eng vs VP Sales) does NOT
+imply a match — function and seniority must both line up.
+
+==== FUNCTION FAMILIES ====
+
+SALES / REVENUE / BD / PARTNERSHIPS family (treat as one):
+  Sales, Revenue, Commercial, Business Development, GTM, Go-to-Market,
+  Growth (when sales-aligned), Partnerships, Alliances, Channel, Account
+  Management, Strategic Accounts.
+
+SALES-OPS / REV-OPS family (treat as one):
+  Sales Operations, Revenue Operations, RevOps, GTM Operations, GTM Ops,
+  Sales Strategy & Operations, Revenue Strategy.
+
+DIFFERENT FUNCTIONS — do NOT match a Sales/RevOps target:
+  Engineering, Software Engineering, R&D, DevOps, Site Reliability,
+  Product Management, Product Design, Design, Research, Data Science,
+  Marketing (when brand/comms only, no revenue lens), Finance, Treasury,
+  Accounting, Legal, Compliance, Risk, HR, People, Talent, Recruiting,
+  IT, Security, Infrastructure, Real Estate, Facilities, Operations
+  (general — manufacturing, supply chain, mining, construction; NOT
+  sales/revenue ops), Customer Support (purely reactive), Procurement.
+
+==== SENIORITY BUCKETS ====
+
+  C-level    : CEO, CRO, CSO, CCO, CMO, CFO, COO, CTO, CIO, Chief X Officer
+  VP-level   : VP, SVP, EVP, AVP, "Vice President", "Sr. Vice President"
+  Director   : Director, Sr Director, Senior Director, Dir
+  Head of X  : Head of <function> ≈ VP-level OR Director-level
+  Manager    : Manager (without VP/Director/Senior prefix) — does NOT
+               match VP+ or Director+ targets
+  Junior/IC  : Account Executive, SDR, BDR, Analyst, Associate, Specialist,
+               Coordinator, Representative — does NOT match VP+/Director+
+
+==== ALWAYS REJECT ====
+
+  - Executive Assistant to <X>, EA to <X>, Personal Assistant, Assistant to <X>
+  - Chief of Staff to <X> (even when X is a target)
+  - Reports to <X>, Supporting the <X>, Working with the <X>
+  - Board Director, Advisor, Non-Executive Director, Board Member
+    (when target is the operating role, e.g., CEO/CRO)
+  - Country-specific BD/Sales role when target_roles list is global AND
+    the country isn't on the buyer's stated geography (judge from
+    context; absent that, accept if function matches)
+  - Industry-specific role when ICP doesn't require that industry vertical
+
+==== FUNCTIONAL EQUIVALENTS — accept these as matches ====
+
+  Head of Revenue          = CRO
+  Chief Sales Officer      = CRO   (same function family)
+  Chief Customer Officer   = CRO   IF function = revenue/growth (judge by role detail)
+  Commercial Director      = Director of Sales
+  Sales Director           = Director of Sales
+  GTM Lead / Head of GTM   = Sales/Revenue leader
+  Sales Operations         = Revenue Operations = RevOps = GTM Operations
+  Director of RevOps       = Director of Revenue Operations
+  Partnerships VP          = VP of Partnerships
+  Head of <X>              = VP of X OR Director of X (when function matches)
+
+==== EDGE CASE GUIDANCE ====
+
+  "Sales Engineering"      — this is pre-sales/solutions consulting, NOT
+                             individual contributor sales.  Accept iff
+                             target list includes "Sales Engineering"
+                             explicitly OR a generic "Sales" VP/Director
+                             target (interpret broadly).
+  "Customer Success"       — reactive support → reject.  Expansion-led
+                             (renewals, upsell quota) → accept if target
+                             includes Sales/Revenue.
+  "Growth Marketing"       — accept if target includes Growth/Marketing
+                             AND seniority matches; reject if target is
+                             explicit sales (Sales VP).
+  "VP Strategic Development" — corporate dev / M&A focus → reject for
+                             sales targets unless role clearly = BD.
+  "Sales Development"      — SDR/BDR organisation management.  Roles
+                             like "Director of Sales Development" /
+                             "Head of Sales Development" / "VP of Sales
+                             Development" are SALES family — accept for
+                             sales VP/Director targets.  Do NOT confuse
+                             with "Business Development" (which is also
+                             sales family — both accept).
+  Acronym ambiguity        — "CRO" usually means Chief Revenue Officer
+                             but in MARKETING context can mean Conversion
+                             Rate Optimization.  When role title contains
+                             "Marketing CRO" or "Digital Marketing CRO" or
+                             "Marketing & CRO", treat as marketing
+                             specialist and REJECT for sales-family
+                             targets unless target list explicitly
+                             includes a marketing role.
+
+WHEN UNCERTAIN, REJECT.
+
+OUTPUT — JSON array of length {n} in the SAME ORDER as input:
+[{{"id": <id>, "match": true|false, "reason": "<<=120 chars>"}}, ...]
+Do not return anything else."""
+
+
+def _build_prompt(target_roles: List[str], chunk: List[Dict[str, Any]]) -> str:
+    leads_block = "\n".join(
+        f"  {i+1}. id={l['id']} role={l['role']!r}" for i, l in enumerate(chunk)
+    )
+    target_block = "\n".join(f"  - {t}" for t in target_roles)
+    return _PROMPT_TEMPLATE.format(
+        target_roles_list=target_block,
+        leads_block=leads_block,
+        n=len(chunk),
+    )
+
+
+async def _judge_chunk(
+    http: httpx.AsyncClient,
+    api_key: str,
+    target_roles: List[str],
+    chunk: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Judge one chunk with retry.  Returns parsed list, or None on failure."""
+    prompt = _build_prompt(target_roles, chunk)
+    body = {
+        "model": MODEL,
+        "temperature": 0,
+        "max_tokens": 800,
+        "messages": [
+            {"role": "system", "content": _SYS_MESSAGE},
+            {"role": "user",   "content": prompt},
+        ],
+    }
+    last_err = "retries_exhausted"
+    for attempt in range(NUM_RETRIES):
+        try:
+            r = await http.post(
+                f"{OPENROUTER_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=TIMEOUT_SECONDS,
+            )
+            if r.status_code == 429:
+                wait_s = 2 * (attempt + 1)
+                logger.warning(
+                    "role-batch 429 rate-limited attempt=%d/%d sleeping=%ds",
+                    attempt + 1, NUM_RETRIES, wait_s,
+                )
+                await asyncio.sleep(wait_s)
+                last_err = "rate_limited_429"
+                continue
+            if r.status_code in (500, 502, 503, 504):
+                wait_s = 1 + attempt
+                logger.warning(
+                    "role-batch HTTP %s attempt=%d/%d sleeping=%ds",
+                    r.status_code, attempt + 1, NUM_RETRIES, wait_s,
+                )
+                await asyncio.sleep(wait_s)
+                last_err = f"http_{r.status_code}"
+                continue
+            if r.status_code != 200:
+                logger.warning(
+                    "role-batch HTTP %s body=%s — fail-closed",
+                    r.status_code, r.text[:200],
+                )
+                return None
+            content = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
+            parsed = _parse_response(content)
+            if parsed is not None and len(parsed) == len(chunk):
+                return parsed
+            logger.warning(
+                "role-batch parse / length-mismatch (got=%s expected=%d) — retrying",
+                None if parsed is None else len(parsed), len(chunk),
+            )
+            last_err = "parse_or_length_mismatch"
+            continue
+        except (httpx.TimeoutException, httpx.HTTPError) as e:
+            logger.warning(
+                "role-batch %s attempt=%d/%d", type(e).__name__,
+                attempt + 1, NUM_RETRIES,
+            )
+            last_err = type(e).__name__
+            await asyncio.sleep(1)
+            continue
+        except ValueError as e:
+            logger.warning("role-batch JSON decode error: %s", e)
+            last_err = "json_decode_error"
+            continue
+    logger.warning("role-batch %s after %d attempts — chunk fail-closed",
+                   last_err, NUM_RETRIES)
+    return None
+
+
+def _parse_response(content: str) -> Optional[List[Dict[str, Any]]]:
+    """Extract the JSON array from an LLM response.  Tolerates code-fences
+    and trailing prose."""
+    if not content:
+        return None
+    try:
+        v = json.loads(content)
+        if isinstance(v, list):
+            return v
+    except Exception:
+        pass
+    m = re.search(r"\[[\s\S]*\]", content)
+    if not m:
+        return None
+    try:
+        v = json.loads(m.group(0))
+        if isinstance(v, list):
+            return v
+    except Exception:
+        return None
+    return None
+
+
+async def batch_check(
+    leads: List[Dict[str, Any]],
+    target_roles: List[str],
+    api_key: Optional[str] = None,
+) -> Dict[Any, bool]:
+    """Run the LLM role judge over ``leads`` (the gray-zone set).
+
+    Args:
+        leads: list of ``{"id": <any hashable>, "role": <str>}``.
+        target_roles: ICP's target_roles list.
+        api_key: override; defaults to ``OPENROUTER_KEY`` env.
+
+    Returns ``{id: bool}`` — True iff LLM judged role matches a target.
+    Missing or failed leads default to False (fail-closed).
+    """
+    if not leads or not target_roles:
+        return {}
+
+    key = (
+        api_key
+        or os.environ.get("OPENROUTER_KEY")
+        or os.environ.get("OPENROUTER_API_KEY")
+    )
+    if not key:
+        logger.warning(
+            "role-batch: no OPENROUTER_KEY — fail-closed (rejecting %d gray-zone leads)",
+            len(leads),
+        )
+        return {l["id"]: False for l in leads}
+
+    # Chunk into BATCH_SIZE-sized groups
+    chunks = [leads[i:i + BATCH_SIZE] for i in range(0, len(leads), BATCH_SIZE)]
+
+    results: Dict[Any, bool] = {l["id"]: False for l in leads}  # default reject
+    async with httpx.AsyncClient() as http:
+        for chunk_idx, chunk in enumerate(chunks):
+            parsed = await _judge_chunk(http, key, target_roles, chunk)
+            if parsed is None:
+                # Chunk failed — keep defaults (False).
+                continue
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                lid = item.get("id")
+                if lid is None or lid not in results:
+                    continue
+                results[lid] = bool(item.get("match"))
+
+    return results

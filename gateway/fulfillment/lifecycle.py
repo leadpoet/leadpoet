@@ -405,6 +405,7 @@ async def _lifecycle_tick_inner(supabase) -> None:
     rerun_window_start = (
         now - timedelta(minutes=FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES)
     ).isoformat()
+    # Standard window: scoring (any age) + fresh partially_fulfilled.
     scoring_requests = supabase.table("fulfillment_requests") \
         .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes, status, successor_request_id") \
         .in_("status", ["scoring", "partially_fulfilled"]) \
@@ -412,6 +413,42 @@ async def _lifecycle_tick_inner(supabase) -> None:
             f"status.eq.scoring,reveal_window_end.gte.{rerun_window_start}"
         ) \
         .execute()
+
+    # Stale-consensus rescue: include `partially_fulfilled` requests whose
+    # latest score row is newer than the latest consensus row, even if they
+    # are past the standard time window.  This closes the window where the
+    # validator continues to re-score a finalized chain link (work files
+    # remain alive) but the consensus cache stays frozen because the
+    # lifecycle filter excluded the request.
+    #
+    # Symptom this prevents: Titan / Peeklogic / Omnissa style helds —
+    # `fulfillment_scores.final_score = 0, failure_reason = insufficient_intent`
+    # but `fulfillment_score_consensus.consensus_final_score = 18, is_chain_held = True`.
+    score_freshness_window_start = (
+        now - timedelta(days=2)
+    ).isoformat()
+    recent_score_resp = supabase.table("fulfillment_scores") \
+        .select("request_id") \
+        .gte("scored_at", score_freshness_window_start) \
+        .execute()
+    recent_scored_rids = list({
+        r["request_id"] for r in (recent_score_resp.data or [])
+    })
+    already_in = {r["request_id"] for r in (scoring_requests.data or [])}
+    missing_rids = [rid for rid in recent_scored_rids if rid not in already_in]
+    if missing_rids:
+        extra_resp = supabase.table("fulfillment_requests") \
+            .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes, status, successor_request_id") \
+            .eq("status", "partially_fulfilled") \
+            .in_("request_id", missing_rids) \
+            .execute()
+        extras = extra_resp.data or []
+        if extras:
+            scoring_requests.data = (scoring_requests.data or []) + extras
+            print(
+                f"Lifecycle Step 3 stale-rescue: +{len(extras)} partially_fulfilled "
+                f"request(s) re-included for late score re-aggregation"
+            )
 
     if scoring_requests.data:
         print(f"Lifecycle Step 3: {len(scoring_requests.data)} request(s) in scoring status")
@@ -1125,6 +1162,15 @@ async def _resolve_chain_topk(
         # Tag origin so we know which rows are "from this cycle" vs prior
         pool.append({**r, "_chain_company": company, "_chain_origin": "current"})
     for r in prior_held:
+        # Re-aggregation can demote a prior held entry to consensus_final_score=0
+        # (e.g., the validator re-scored and the new score is failure_reason=
+        # insufficient_intent).  Without this filter the entry stays in the
+        # pool with score 0 and — when the chain has spare slots — would
+        # still occupy a top-K slot, leaving stale `is_chain_held=TRUE` rows
+        # for leads the validator has rejected.  Drop them here so chain
+        # top-K never delivers a lead the current consensus values at 0.
+        if (r.get("consensus_final_score") or 0) <= 0:
+            continue
         company = _company_for(r)
         if not company:
             # A prior held row whose company we can't recover — drop it.

@@ -927,6 +927,28 @@ async def get_active_requests(miner_hotkey: str = ""):
     }
 
 
+@fulfillment_router.get("/excluded-now/{request_id}")
+async def get_excluded_now(request_id: str):
+    """Live cross-chain held set for a given request.
+
+    Miners poll this before sourcing to avoid spending money on companies
+    a sibling chain has already claimed.  Returns the NORMALIZED company
+    keys (lowercase, legal-suffix stripped) matching the same form the
+    reveal-time check uses, so a miner who normalizes locally with the
+    same rule gets a clean intersection check.
+    """
+    if not _enable_fulfillment():
+        raise HTTPException(503, detail="Fulfillment system is not enabled")
+    supabase = _get_supabase()
+    from gateway.fulfillment.lifecycle import _load_sibling_chain_held_companies
+    excluded = sorted(_load_sibling_chain_held_companies(supabase, request_id))
+    return {
+        "request_id": request_id,
+        "excluded_normalized": excluded,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 # ---------------------------------------------------------------
 # POST /fulfillment/commit  — miner submits lead hashes
 # ---------------------------------------------------------------
@@ -1204,6 +1226,26 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
             "data": lead_dict,
         })
 
+    pre_rejected: List[dict] = []
+    if lead_data_list:
+        from gateway.fulfillment.lifecycle import _load_sibling_chain_held_companies
+        from gateway.fulfillment.normalize import normalize_company
+        sibling_held = _load_sibling_chain_held_companies(supabase, reveal.request_id)
+        if sibling_held:
+            kept: List[dict] = []
+            for entry in lead_data_list:
+                biz = (entry.get("data") or {}).get("business") or ""
+                norm = normalize_company(biz)
+                if norm and norm in sibling_held:
+                    pre_rejected.append({
+                        "lead_id": entry["lead_id"],
+                        "business": biz,
+                        "reason": "sibling_chain_held",
+                    })
+                else:
+                    kept.append(entry)
+            lead_data_list = kept
+
     if not lead_data_list:
         if matched_icp_invalid and not mismatched:
             if num_client_intent_signals == 0:
@@ -1229,7 +1271,8 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
             detail=(
                 f"All {len(reveal.leads)} lead(s) rejected: "
                 f"{len(mismatched)} failed hash verification, "
-                f"{len(matched_icp_invalid)} failed matched_icp_signal validation"
+                f"{len(matched_icp_invalid)} failed matched_icp_signal validation, "
+                f"{len(pre_rejected)} held by sibling chain"
             ),
         )
 
@@ -1243,7 +1286,8 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
           f"sub={reveal.submission_id[:8]}... miner={reveal.miner_hotkey[:8]}... "
           f"leads={len(lead_data_list)}/{len(reveal.leads)} revealed=True"
           + (f" (dropped {len(mismatched)} mismatched)" if mismatched else "")
-          + (f" (dropped {len(matched_icp_invalid)} matched_icp_invalid)" if matched_icp_invalid else ""))
+          + (f" (dropped {len(matched_icp_invalid)} matched_icp_invalid)" if matched_icp_invalid else "")
+          + (f" (dropped {len(pre_rejected)} sibling-chain-held)" if pre_rejected else ""))
 
     _log_event(EventType.FULFILLMENT_REVEAL, reveal.miner_hotkey, {
         "request_id": reveal.request_id,
@@ -1251,6 +1295,7 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
         "reveal_timestamp": now.isoformat(),
         "mismatched_indices": [m["index"] for m in mismatched],
         "matched_icp_invalid_indices": [m["index"] for m in matched_icp_invalid],
+        "pre_rejected_lead_ids": [p["lead_id"] for p in pre_rejected],
     })
 
     return {
@@ -1258,6 +1303,7 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
         "num_leads": len(lead_data_list),
         "mismatched": mismatched,
         "matched_icp_invalid": matched_icp_invalid,
+        "pre_rejected": pre_rejected,
     }
 
 

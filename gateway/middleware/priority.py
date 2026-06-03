@@ -95,6 +95,7 @@ class PriorityMiddleware(BaseHTTPMiddleware):
             "/fulfillment/commit",      # Miner fulfillment commit
             "/fulfillment/reveal",      # Miner fulfillment reveal
             "/fulfillment/requests",    # Miner polling active requests
+            "/fulfillment/excluded-now",
         ]
         return any(mpath in path for mpath in miner_paths)
     

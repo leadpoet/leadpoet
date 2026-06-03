@@ -972,7 +972,10 @@ async def score_fulfillment_batch(
                     judge_queue.append({"id": lid, "role": lead.role})
             if judge_queue:
                 role_decisions = await _role_batch_check(judge_queue, icp.target_roles)
-                logger.info(
+                # logger.warning (not info) — root logger in worker
+                # containers is set to WARNING; INFO is silently dropped,
+                # which masks production visibility of accept/reject ratios.
+                logger.warning(
                     "role-batch pre-pass: %d candidates judged "
                     "(%d accept, %d reject)",
                     len(judge_queue),

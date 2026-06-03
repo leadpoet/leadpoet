@@ -505,6 +505,8 @@ async def _call_openrouter(
     body = {
         "model": MODEL,
         "temperature": 0,
+        "max_tokens": 400,
+        "reasoning": {"exclude": True},
         "messages": [
             {"role": "system", "content": _SYS_MESSAGE},
             {"role": "user",   "content": prompt},

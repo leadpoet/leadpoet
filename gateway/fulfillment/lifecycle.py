@@ -427,13 +427,30 @@ async def _lifecycle_tick_inner(supabase) -> None:
     score_freshness_window_start = (
         now - timedelta(days=2)
     ).isoformat()
-    recent_score_resp = supabase.table("fulfillment_scores") \
-        .select("request_id") \
-        .gte("scored_at", score_freshness_window_start) \
-        .execute()
-    recent_scored_rids = list({
-        r["request_id"] for r in (recent_score_resp.data or [])
-    })
+    # Paginate — score-row volume can exceed PostgREST's 1000-row default
+    # cap.  Without explicit ranging, the silent truncation makes us miss
+    # request_ids whose only recent score rows fall past the first 1000
+    # returned, leaving them stuck in the stale state forever.
+    recent_scored_rids_set: set = set()
+    _page = 0
+    _page_size = 1000
+    while True:
+        _resp = supabase.table("fulfillment_scores") \
+            .select("request_id") \
+            .gte("scored_at", score_freshness_window_start) \
+            .range(_page * _page_size, _page * _page_size + _page_size - 1) \
+            .execute()
+        _rows = _resp.data or []
+        if not _rows:
+            break
+        for r in _rows:
+            recent_scored_rids_set.add(r["request_id"])
+        if len(_rows) < _page_size:
+            break
+        _page += 1
+        if _page > 20:  # safety: 20K rows
+            break
+    recent_scored_rids = list(recent_scored_rids_set)
     already_in = {r["request_id"] for r in (scoring_requests.data or [])}
     missing_rids = [rid for rid in recent_scored_rids if rid not in already_in]
     if missing_rids:

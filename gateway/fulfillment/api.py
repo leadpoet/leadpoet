@@ -10,7 +10,7 @@ import base64
 import time as _time
 from uuid import uuid4
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from dateutil.parser import isoparse as _isoparse
 from fastapi import APIRouter, Header, HTTPException
@@ -104,38 +104,33 @@ _IN_FLIGHT_REQUEST_STATES: List[str] = [
 def _load_in_flight_held_companies(
     supabase,
     client_company: str,
-    exclude_internal_label: Optional[str] = None,
+    exclude_request_ids: Optional[Set[str]] = None,
 ) -> List[str]:
-    """Cross-chain dedup: pull every company currently held
-    (``is_chain_held=TRUE``) on another open chain for the same client.
+    """Companies held on other in-flight chains for the same client.
 
-    Closes the gap raised by the CTO: when a client has two chains in
-    flight at the same time (different ``internal_label``), the second
-    chain's ``excluded_companies`` snapshot doesn't see leads already
-    held in the first chain — so the same company can be held and
-    delivered twice.
-
-    "In flight" = ``status`` in :data:`_IN_FLIGHT_REQUEST_STATES`
-    (everything except ``fulfilled`` / ``recycled`` / ``expired``).
-
-    ``exclude_internal_label`` skips the chain whose recycle is in
-    progress (or the chain being created); its own held-lead set is
-    already merged via ``_resolve_chain_topk``'s held_companies output.
-    If unset / empty, no chain-level exclusion is applied — every
-    in-flight held lead for this client is returned (use this on
-    create_request, where no chain to exclude exists yet).
+    ``exclude_request_ids`` identifies "this chain" by request_id walk
+    (matches ``_load_sibling_chain_held_companies``); label match would
+    conflate independent chains under the same internal_label.
     """
     if not client_company or not client_company.strip():
         return []
 
-    # Step 1: find every in-flight request for this client, excluding
-    # the current chain by internal_label when one is supplied.
+    req_rows: List[dict] = []
     try:
-        req_resp = supabase.table("fulfillment_requests") \
-            .select("request_id,internal_label") \
-            .ilike("company", client_company.strip()) \
-            .in_("status", _IN_FLIGHT_REQUEST_STATES) \
-            .execute()
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_requests") \
+                .select("request_id") \
+                .ilike("company", client_company.strip()) \
+                .in_("status", _IN_FLIGHT_REQUEST_STATES) \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            req_rows.extend(page.data)
+            if len(page.data) < 1000:
+                break
+            offset += 1000
     except Exception as e:
         logger.warning(
             f"_load_in_flight_held_companies: failed to fetch in-flight "
@@ -143,27 +138,32 @@ def _load_in_flight_held_companies(
         )
         return []
 
-    label_to_skip = (exclude_internal_label or "").strip()
+    excl: Set[str] = exclude_request_ids or set()
     other_chain_ids = [
-        r["request_id"] for r in (req_resp.data or [])
-        if not label_to_skip
-        or (r.get("internal_label") or "").strip() != label_to_skip
+        r["request_id"] for r in req_rows
+        if r["request_id"] not in excl
     ]
     if not other_chain_ids:
         return []
 
-    # Step 2: find every is_chain_held=TRUE consensus row in those
-    # other-chain request rows.
+    held_keys: List[tuple] = []
     try:
-        cons_resp = supabase.table("fulfillment_score_consensus") \
-            .select("submission_id,lead_id") \
-            .in_("request_id", other_chain_ids) \
-            .eq("is_chain_held", True) \
-            .execute()
-        held_keys = [
-            (r["submission_id"], r["lead_id"])
-            for r in (cons_resp.data or [])
-        ]
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_score_consensus") \
+                .select("submission_id,lead_id") \
+                .in_("request_id", other_chain_ids) \
+                .eq("is_chain_held", True) \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            held_keys.extend(
+                (r["submission_id"], r["lead_id"]) for r in page.data
+            )
+            if len(page.data) < 1000:
+                break
+            offset += 1000
     except Exception as e:
         logger.warning(
             f"_load_in_flight_held_companies: failed to fetch chain-held "
@@ -174,15 +174,24 @@ def _load_in_flight_held_companies(
     if not held_keys:
         return []
 
-    # Step 3: pull lead_data for those submissions and extract each
-    # held lead's ``business`` field.  Same shape as
-    # ``_load_previously_delivered_companies``.
     submission_ids = list({sid for sid, _ in held_keys})
+    subs_rows: List[dict] = []
     try:
-        subs_resp = supabase.table("fulfillment_submissions") \
-            .select("submission_id,lead_data") \
-            .in_("submission_id", submission_ids) \
-            .execute()
+        for i in range(0, len(submission_ids), 100):
+            chunk = submission_ids[i:i + 100]
+            offset = 0
+            for _ in range(20):
+                page = supabase.table("fulfillment_submissions") \
+                    .select("submission_id,lead_data") \
+                    .in_("submission_id", chunk) \
+                    .range(offset, offset + 999) \
+                    .execute()
+                if not page.data:
+                    break
+                subs_rows.extend(page.data)
+                if len(page.data) < 1000:
+                    break
+                offset += 1000
     except Exception as e:
         logger.warning(
             f"_load_in_flight_held_companies: failed to fetch submissions "
@@ -191,7 +200,7 @@ def _load_in_flight_held_companies(
         return []
 
     lead_company: dict = {}
-    for row in (subs_resp.data or []):
+    for row in subs_rows:
         sid = row.get("submission_id")
         for entry in (row.get("lead_data") or []):
             lid = entry.get("lead_id")
@@ -230,14 +239,22 @@ def _load_previously_delivered_companies(supabase, client_company: str) -> List[
     if not client_company or not client_company.strip():
         return []
 
+    fulfilled_ids: List[str] = []
     try:
-        # Step 1: find every fulfilled request for this client.
-        req_resp = supabase.table("fulfillment_requests") \
-            .select("request_id") \
-            .ilike("company", client_company.strip()) \
-            .eq("status", "fulfilled") \
-            .execute()
-        fulfilled_ids = [r["request_id"] for r in (req_resp.data or [])]
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_requests") \
+                .select("request_id") \
+                .ilike("company", client_company.strip()) \
+                .eq("status", "fulfilled") \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            fulfilled_ids.extend(r["request_id"] for r in page.data)
+            if len(page.data) < 1000:
+                break
+            offset += 1000
     except Exception as e:
         logger.warning(
             f"_load_previously_delivered_companies: failed to fetch fulfilled "
@@ -248,14 +265,24 @@ def _load_previously_delivered_companies(supabase, client_company: str) -> List[
     if not fulfilled_ids:
         return []
 
-    # Step 2: find every winning consensus row across those requests.
+    winner_keys: List[tuple] = []
     try:
-        cons_resp = supabase.table("fulfillment_score_consensus") \
-            .select("submission_id,lead_id") \
-            .in_("request_id", fulfilled_ids) \
-            .eq("is_winner", True) \
-            .execute()
-        winner_keys = [(r["submission_id"], r["lead_id"]) for r in (cons_resp.data or [])]
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_score_consensus") \
+                .select("submission_id,lead_id") \
+                .in_("request_id", fulfilled_ids) \
+                .eq("is_winner", True) \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            winner_keys.extend(
+                (r["submission_id"], r["lead_id"]) for r in page.data
+            )
+            if len(page.data) < 1000:
+                break
+            offset += 1000
     except Exception as e:
         logger.warning(
             f"_load_previously_delivered_companies: failed to fetch winners: "
@@ -266,16 +293,24 @@ def _load_previously_delivered_companies(supabase, client_company: str) -> List[
     if not winner_keys:
         return []
 
-    # Step 3: pull lead_data for those submissions and extract each
-    # winner's ``business`` field.  The consensus row identifies the
-    # exact (submission_id, lead_id) pair; the lead_data column is the
-    # JSON array the miner committed + revealed, keyed by lead_id.
     submission_ids = list({sid for sid, _ in winner_keys})
+    subs_rows: List[dict] = []
     try:
-        subs_resp = supabase.table("fulfillment_submissions") \
-            .select("submission_id,lead_data") \
-            .in_("submission_id", submission_ids) \
-            .execute()
+        for i in range(0, len(submission_ids), 100):
+            chunk = submission_ids[i:i + 100]
+            offset = 0
+            for _ in range(20):
+                page = supabase.table("fulfillment_submissions") \
+                    .select("submission_id,lead_data") \
+                    .in_("submission_id", chunk) \
+                    .range(offset, offset + 999) \
+                    .execute()
+                if not page.data:
+                    break
+                subs_rows.extend(page.data)
+                if len(page.data) < 1000:
+                    break
+                offset += 1000
     except Exception as e:
         logger.warning(
             f"_load_previously_delivered_companies: failed to fetch "
@@ -285,7 +320,7 @@ def _load_previously_delivered_companies(supabase, client_company: str) -> List[
 
     # Build a (submission_id, lead_id) -> business lookup.
     lead_company: dict = {}
-    for row in (subs_resp.data or []):
+    for row in subs_rows:
         sid = row.get("submission_id")
         for entry in (row.get("lead_data") or []):
             lid = entry.get("lead_id")
@@ -555,17 +590,9 @@ async def create_request(
     if not icp.excluded_companies:
         try:
             delivered = _load_previously_delivered_companies(supabase, company)
-            # Cross-chain dedup: also exclude any company currently held
-            # (``is_chain_held=TRUE``) on another open chain for the same
-            # client.  Without this, two concurrent chains can both hold
-            # and deliver the same company.  ``exclude_internal_label`` is
-            # this new chain's own label so the helper doesn't try to scan
-            # for held rows under a request_id that doesn't exist yet
-            # (defensive — the brand-new chain has no consensus rows on
-            # create anyway).
             in_flight = _load_in_flight_held_companies(
                 supabase, company,
-                exclude_internal_label=(icp.internal_label or None),
+                exclude_request_ids=None,
             )
             seen = {b.strip().lower() for b in delivered if b.strip()}
             merged = list(delivered)
@@ -1255,39 +1282,67 @@ async def get_scoring_requests(
 
     supabase = _get_supabase()
 
-    resp = supabase.table("fulfillment_requests") \
-        .select("*") \
-        .eq("status", "scoring") \
-        .execute()
+    scoring_requests: List[dict] = []
+    offset = 0
+    for _ in range(20):
+        page = supabase.table("fulfillment_requests") \
+            .select("*") \
+            .eq("status", "scoring") \
+            .range(offset, offset + 999) \
+            .execute()
+        if not page.data:
+            break
+        scoring_requests.extend(page.data)
+        if len(page.data) < 1000:
+            break
+        offset += 1000
 
-    scoring_count = len(resp.data or [])
+    scoring_count = len(scoring_requests)
     if scoring_count > 0:
         print(f"📋 /fulfillment/scoring: {scoring_count} request(s) in scoring status")
 
     already_scored_requests = set()
     if validator_hotkey:
-        scored_resp = supabase.table("fulfillment_scores") \
-            .select("request_id") \
-            .eq("validator_hotkey", validator_hotkey) \
-            .execute()
-        already_scored_requests = {r["request_id"] for r in (scored_resp.data or [])}
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_scores") \
+                .select("request_id") \
+                .eq("validator_hotkey", validator_hotkey) \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            already_scored_requests.update(r["request_id"] for r in page.data)
+            if len(page.data) < 1000:
+                break
+            offset += 1000
         if already_scored_requests:
             print(f"   Validator {validator_hotkey[:8]}... already scored: {len(already_scored_requests)} request(s)")
 
     out = []
-    for r in (resp.data or []):
+    for r in scoring_requests:
         if r["request_id"] in already_scored_requests:
             print(f"   Skipping {r['request_id'][:8]}... (already scored by this validator)")
             continue
 
-        subs_resp = supabase.table("fulfillment_submissions") \
-            .select("*") \
-            .eq("request_id", r["request_id"]) \
-            .eq("revealed", True) \
-            .execute()
+        subs_data: List[dict] = []
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_submissions") \
+                .select("*") \
+                .eq("request_id", r["request_id"]) \
+                .eq("revealed", True) \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            subs_data.extend(page.data)
+            if len(page.data) < 1000:
+                break
+            offset += 1000
 
         submissions = []
-        for s in (subs_resp.data or []):
+        for s in subs_data:
             # SAFETY: both `leads` and `lead_ids` MUST be sourced from the
             # same list (`lead_data`) so they stay index-aligned.  Previous
             # code sourced `lead_ids` from `lead_hashes` (the full committed
@@ -1436,14 +1491,24 @@ async def get_results(request_id: str):
 
     req = req_resp.data[0]
 
-    consensus_resp = supabase.table("fulfillment_score_consensus") \
-        .select("*") \
-        .eq("request_id", request_id) \
-        .order("consensus_final_score", desc=True) \
-        .execute()
+    consensus_rows: List[dict] = []
+    offset = 0
+    for _ in range(20):
+        page = supabase.table("fulfillment_score_consensus") \
+            .select("*") \
+            .eq("request_id", request_id) \
+            .order("consensus_final_score", desc=True) \
+            .range(offset, offset + 999) \
+            .execute()
+        if not page.data:
+            break
+        consensus_rows.extend(page.data)
+        if len(page.data) < 1000:
+            break
+        offset += 1000
 
     leads = []
-    for row in (consensus_resp.data or []):
+    for row in consensus_rows:
         lead_row = {
             "lead_id": row["lead_id"],
             "miner_hotkey": row["miner_hotkey"],
@@ -1488,19 +1553,29 @@ async def get_active_rewards(current_epoch: int):
     """
     supabase = _get_supabase()
 
-    resp = supabase.table("fulfillment_score_consensus") \
-        .select("miner_hotkey, reward_pct, reward_expires_epoch") \
-        .not_.is_("reward_pct", "null") \
-        .gt("reward_expires_epoch", current_epoch) \
-        .execute()
+    all_rows: List[dict] = []
+    offset = 0
+    for _ in range(50):
+        page = supabase.table("fulfillment_score_consensus") \
+            .select("miner_hotkey, reward_pct, reward_expires_epoch") \
+            .not_.is_("reward_pct", "null") \
+            .gt("reward_expires_epoch", current_epoch) \
+            .range(offset, offset + 999) \
+            .execute()
+        if not page.data:
+            break
+        all_rows.extend(page.data)
+        if len(page.data) < 1000:
+            break
+        offset += 1000
 
     per_miner: dict = {}
-    for row in (resp.data or []):
+    for row in all_rows:
         hk = row["miner_hotkey"]
         pct = float(row["reward_pct"])
         per_miner[hk] = per_miner.get(hk, 0.0) + pct
 
-    return {"rewards": per_miner, "total_active_rows": len(resp.data or [])}
+    return {"rewards": per_miner, "total_active_rows": len(all_rows)}
 
 
 # ---------------------------------------------------------------
@@ -1571,24 +1646,41 @@ async def get_fulfillment_leaderboard(limit: int = 3):
     window_start = _rolling_epoch_window_start(epochs=140)
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    resp = supabase.table("fulfillment_score_consensus") \
-        .select("miner_hotkey, reward_pct") \
-        .eq("is_winner", True) \
-        .gte("computed_at", window_start.isoformat()) \
-        .execute()
-
-    # Banned hotkeys to exclude
-    try:
-        banned_resp = supabase.table("banned_hotkeys") \
-            .select("hotkey") \
+    winner_rows: List[dict] = []
+    offset = 0
+    for _ in range(50):
+        page = supabase.table("fulfillment_score_consensus") \
+            .select("miner_hotkey, reward_pct") \
+            .eq("is_winner", True) \
+            .gte("computed_at", window_start.isoformat()) \
+            .range(offset, offset + 999) \
             .execute()
-        banned_set = {r["hotkey"] for r in (banned_resp.data or [])}
+        if not page.data:
+            break
+        winner_rows.extend(page.data)
+        if len(page.data) < 1000:
+            break
+        offset += 1000
+
+    banned_set: set = set()
+    try:
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("banned_hotkeys") \
+                .select("hotkey") \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            banned_set.update(r["hotkey"] for r in page.data)
+            if len(page.data) < 1000:
+                break
+            offset += 1000
     except Exception:
         banned_set = set()
 
-    # Aggregate per miner
     per_miner: dict = {}
-    for row in (resp.data or []):
+    for row in winner_rows:
         hk = row["miner_hotkey"]
         if hk in banned_set:
             continue
@@ -1628,14 +1720,33 @@ async def get_fulfillment_leaderboard(limit: int = 3):
 # POST /fulfillment/ban/{hotkey}  — validator requests a ban
 # ---------------------------------------------------------------
 @fulfillment_router.post("/ban/{hotkey}")
-async def request_ban(hotkey: str, reason: str = "", validator_hotkey: str = "", request_id: str = ""):
+async def request_ban(
+    hotkey: str,
+    reason: str = "",
+    validator_hotkey: str = "",
+    request_id: str = "",
+    signature: str = "",
+    nonce: str = "",
+    timestamp: int = 0,
+):
     if not _enable_fulfillment():
         raise HTTPException(503, detail="Fulfillment system is not enabled")
 
-    _log_event(EventType.FULFILLMENT_BAN, validator_hotkey or "admin", {
+    if not validator_hotkey or not signature or not nonce or not timestamp:
+        raise HTTPException(
+            403,
+            detail="Ban requests must be signed by a validator (validator_hotkey, signature, nonce, timestamp required)",
+        )
+    await _verify_validator_request(
+        "FULFILLMENT_BAN", validator_hotkey,
+        signature, nonce, timestamp,
+        request_id=request_id,
+    )
+
+    _log_event(EventType.FULFILLMENT_BAN, validator_hotkey, {
         "hotkey": hotkey,
         "reason": reason,
-        "banned_by": validator_hotkey or "admin",
+        "banned_by": validator_hotkey,
         "request_id": request_id,
     })
 

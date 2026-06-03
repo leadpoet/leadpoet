@@ -378,8 +378,19 @@ def tier1_check(
                 return "sub_industry_needs_llm"
 
     if icp.excluded_companies and lead.business:
-        excluded_keys = {c.strip().lower() for c in icp.excluded_companies if c and c.strip()}
-        if lead.business.strip().lower() in excluded_keys:
+        from gateway.fulfillment.normalize import normalize_company
+        excluded_simple: Set[str] = set()
+        excluded_norm: Set[str] = set()
+        for c in icp.excluded_companies:
+            if not c or not c.strip():
+                continue
+            excluded_simple.add(c.strip().lower())
+            n = normalize_company(c)
+            if n:
+                excluded_norm.add(n)
+        biz_simple = lead.business.strip().lower()
+        biz_norm = normalize_company(lead.business)
+        if biz_simple in excluded_simple or (biz_norm and biz_norm in excluded_norm):
             return "company_excluded"
 
     if icp.target_role_types and lead.role_type not in icp.target_role_types:

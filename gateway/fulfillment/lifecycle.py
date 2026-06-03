@@ -995,7 +995,7 @@ def _load_sibling_chain_held_companies(supabase, request_id: str) -> set:
     ]
     sibling_resp = supabase.table("fulfillment_requests") \
         .select("request_id") \
-        .eq("company", client_company) \
+        .ilike("company", client_company.strip()) \
         .in_("status", active_statuses) \
         .execute()
     sibling_ids = [
@@ -1005,25 +1005,43 @@ def _load_sibling_chain_held_companies(supabase, request_id: str) -> set:
     if not sibling_ids:
         return set()
 
-    # 4) Held consensus rows on the sibling requests.
-    held_resp = supabase.table("fulfillment_score_consensus") \
-        .select("submission_id, lead_id") \
-        .in_("request_id", sibling_ids) \
-        .eq("is_chain_held", True) \
-        .execute()
-    held_rows = held_resp.data or []
+    held_rows: list = []
+    offset = 0
+    for _ in range(20):
+        page = supabase.table("fulfillment_score_consensus") \
+            .select("submission_id, lead_id") \
+            .in_("request_id", sibling_ids) \
+            .eq("is_chain_held", True) \
+            .range(offset, offset + 999) \
+            .execute()
+        if not page.data:
+            break
+        held_rows.extend(page.data)
+        if len(page.data) < 1000:
+            break
+        offset += 1000
     if not held_rows:
         return set()
 
-    # 5) Hydrate company names from submissions.  Same lookup pattern
-    #    as _resolve_chain_topk's hydration step.
     sub_ids = list({r["submission_id"] for r in held_rows})
-    sub_resp = supabase.table("fulfillment_submissions") \
-        .select("submission_id, lead_data") \
-        .in_("submission_id", sub_ids) \
-        .execute()
+    sub_rows: list = []
+    for i in range(0, len(sub_ids), 100):
+        chunk = sub_ids[i:i + 100]
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_submissions") \
+                .select("submission_id, lead_data") \
+                .in_("submission_id", chunk) \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            sub_rows.extend(page.data)
+            if len(page.data) < 1000:
+                break
+            offset += 1000
     sub_index: dict = {}
-    for sub in (sub_resp.data or []):
+    for sub in sub_rows:
         for lead in (sub.get("lead_data") or []):
             sub_index[(sub["submission_id"], lead.get("lead_id"))] = (
                 lead.get("data") or {}
@@ -1058,20 +1076,31 @@ def _load_chain_held_winners(supabase, request_id: str) -> list:
     if not chain_predecessors:
         return []
 
-    held = supabase.table("fulfillment_score_consensus") \
-        .select(
-            "consensus_id, request_id, submission_id, lead_id, miner_hotkey, "
-            "consensus_final_score, consensus_intent_signal_final, "
-            "consensus_company_verified, consensus_person_verified, "
-            "consensus_email_verified, consensus_decision_maker, "
-            "consensus_icp_fit, consensus_rep_score, consensus_tier2_passed, "
-            "any_fabricated, intent_details, intent_signal_mapping, "
-            "num_validators"
-        ) \
-        .in_("request_id", chain_predecessors) \
-        .eq("is_chain_held", True) \
-        .execute()
-    return list(held.data or [])
+    select_cols = (
+        "consensus_id, request_id, submission_id, lead_id, miner_hotkey, "
+        "consensus_final_score, consensus_intent_signal_final, "
+        "consensus_company_verified, consensus_person_verified, "
+        "consensus_email_verified, consensus_decision_maker, "
+        "consensus_icp_fit, consensus_rep_score, consensus_tier2_passed, "
+        "any_fabricated, intent_details, intent_signal_mapping, "
+        "num_validators"
+    )
+    out: list = []
+    offset = 0
+    for _ in range(20):
+        page = supabase.table("fulfillment_score_consensus") \
+            .select(select_cols) \
+            .in_("request_id", chain_predecessors) \
+            .eq("is_chain_held", True) \
+            .range(offset, offset + 999) \
+            .execute()
+        if not page.data:
+            break
+        out.extend(page.data)
+        if len(page.data) < 1000:
+            break
+        offset += 1000
+    return out
 
 
 def _chain_target_num_leads(supabase, request_id: str, current_num_leads: int) -> int:
@@ -1707,26 +1736,14 @@ def _recycle_request(
                     _load_previously_delivered_companies,
                     _load_in_flight_held_companies,
                 )
-                # 1) Fulfilled-history exclusions (existing behavior).
                 refreshed = _load_previously_delivered_companies(supabase, client_company)
-                # 2) Cross-chain in-flight held exclusions (new — closes the
-                #    CTO-flagged gap where two concurrent chains for the same
-                #    client could each hold and deliver the same company).
-                #    Skip this chain itself (identified by internal_label);
-                #    its own held set is merged below via the held_companies
-                #    parameter.  If internal_label is empty, no chain skip
-                #    is applied — the helper still excludes only OTHER
-                #    requests' held rows because this chain's predecessor
-                #    request_ids are already covered by the held_companies
-                #    parameter that's about to merge.
-                own_label = (original_request.get("internal_label") or "").strip()
+                own_chain_ids: set = set(_walk_chain_predecessors(supabase, rid))
+                own_chain_ids.add(rid)
                 cross_chain_held = _load_in_flight_held_companies(
                     supabase, client_company,
-                    exclude_internal_label=(own_label or None),
+                    exclude_request_ids=own_chain_ids,
                 )
                 if refreshed or cross_chain_held:
-                    # Merge with whatever was already there so a client-
-                    # supplied exclusion is never silently dropped on recycle.
                     prior = successor_icp.get("excluded_companies") or []
                     seen = {str(x).strip().lower() for x in prior if str(x).strip()}
                     merged = list(prior)
@@ -1827,17 +1844,8 @@ def _recycle_request(
 
 
 def _normalize_company(name: str) -> str:
-    """Normalize company name for dedup."""
-    import re
-    name = name.lower().strip()
-    suffixes = (
-        r"\b(inc\.?|llc|ltd\.?|corp\.?|corporation|co\.?|company|"
-        r"plc|gmbh|ag|sa|sas|srl|bv|nv|pty|pvt)\b"
-    )
-    name = re.sub(suffixes, "", name, flags=re.IGNORECASE)
-    name = re.sub(r"[,.\s]+$", "", name)
-    name = re.sub(r"\s+", " ", name).strip()
-    return name
+    from gateway.fulfillment.normalize import normalize_company
+    return normalize_company(name)
 
 
 async def _get_current_epoch() -> int:

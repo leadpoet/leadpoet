@@ -18,11 +18,21 @@ def _get_supabase():
 
 async def _fetch_request_scores(request_id: str) -> List[dict]:
     supabase = _get_supabase()
-    resp = supabase.table("fulfillment_scores") \
-        .select("*") \
-        .eq("request_id", request_id) \
-        .execute()
-    return resp.data or []
+    out: List[dict] = []
+    offset = 0
+    for _ in range(20):
+        page = supabase.table("fulfillment_scores") \
+            .select("*") \
+            .eq("request_id", request_id) \
+            .range(offset, offset + 999) \
+            .execute()
+        if not page.data:
+            break
+        out.extend(page.data)
+        if len(page.data) < 1000:
+            break
+        offset += 1000
+    return out
 
 
 async def _fetch_validator_metagraph_data(validator_hotkeys: Set[str]) -> Dict[str, dict]:

@@ -59,6 +59,16 @@ class IntentSignalSpec(BaseModel):
             "the lead fails scoring with 'missing_required_intent_signal'."
         ),
     )
+    recency_cap_days: Optional[int] = Field(
+        default=None,
+        description=(
+            "Maximum age in days for evidence supporting this signal. "
+            "Set at request creation (operator-controlled in admin UI, "
+            "LLM-suggested from the signal text). None = no cap (timeless "
+            "attribute). At scoring time, signals dated older than this "
+            "cap are rejected by the freshness gate."
+        ),
+    )
 
     # Tolerate (and discard) legacy ``is_scored`` keys that may still be
     # sitting in icp_details rows from the short window where the flag
@@ -78,6 +88,19 @@ class IntentSignalSpec(BaseModel):
             raise ValueError("intent signal text cannot be empty")
         return s
 
+    @field_validator("recency_cap_days", mode="before")
+    @classmethod
+    def _coerce_cap(cls, v):
+        if v is None or v == "":
+            return None
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"recency_cap_days must be int or null, got {v!r}")
+        if n <= 0:
+            raise ValueError(f"recency_cap_days must be positive, got {n}")
+        return n
+
 
 def _coerce_intent_signal_spec(entry) -> IntentSignalSpec:
     """Coerce one entry of the inbound ``intent_signals`` list into an
@@ -96,14 +119,10 @@ def _coerce_intent_signal_spec(entry) -> IntentSignalSpec:
     if isinstance(entry, str):
         return IntentSignalSpec(text=entry)
     if isinstance(entry, dict):
-        # Tolerate legacy dicts that may have been written with extra
-        # keys (e.g. heuristic parser drafts, or rows from the short
-        # window where ``is_scored`` was live). We pass only ``text`` and
-        # ``required`` into ``IntentSignalSpec``; stray keys never reach
-        # the constructor.
         return IntentSignalSpec(
             text=entry.get("text", entry.get("signal", entry.get("name", ""))),
             required=bool(entry.get("required", False)),
+            recency_cap_days=entry.get("recency_cap_days"),
         )
     raise ValueError(
         f"intent_signals entry must be str, dict, or IntentSignalSpec, "

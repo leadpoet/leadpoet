@@ -175,41 +175,55 @@ def _claim_max_age_days(claim_text: str) -> Optional[int]:
 
 
 def _parse_signal_date(date_str: str) -> Optional[datetime]:
-    """Parse an ISO-8601 or YYYY-MM-DD date into an aware UTC datetime."""
+    """Parse an ISO-8601 or YYYY-MM-DD date into an aware UTC datetime.
+
+    Treats implausibly-old dates (pre-2000) as unparseable.  Miners
+    occasionally emit ``1970-01-01`` (Unix epoch) as a "no verifiable date"
+    sentinel instead of using the schema's ``null``; collapsing those to
+    None lets the recency gate apply its proper "missing date" policy.
+    """
+    parsed: Optional[datetime] = None
     try:
         parsed = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        if not parsed.tzinfo:
+            parsed = parsed.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
-        pass
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
+        try:
+            parsed = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return None
+    if parsed.year < 2000:
         return None
+    return parsed
 
 
 def check_evidence_freshness(claim_text: str,
                              signal_date: Optional[str],
-                             content_found_date: Optional[str] = None
+                             content_found_date: Optional[str] = None,
+                             buyer_cap_days: Optional[int] = None,
                              ) -> Optional[str]:
-    """Return a rejection reason if the evidence is older than the freshness
-    window implied by the claim.
+    """Return a rejection reason if evidence is older than the cap.
 
-    Returns None when the claim has no time bound, the date cannot be
-    parsed, or the evidence falls within the window.  Unparseable dates
-    fail open here — the LLM judge re-extracts the date downstream.
+    When ``buyer_cap_days`` is set (operator-classified at request creation),
+    it is the authoritative cap.  Falls back to phrase-scanning the claim
+    text for legacy ICPs without an explicit cap.  Returns None when no
+    cap can be derived, the date cannot be parsed, or the evidence falls
+    within the window.
     """
-    if not claim_text:
-        return None
-    max_age = _claim_max_age_days(claim_text)
+    max_age = buyer_cap_days
+    if max_age is None and claim_text:
+        max_age = _claim_max_age_days(claim_text)
     if max_age is None:
         return None
 
     date_str = signal_date or content_found_date
-    if not date_str:
-        return None
-
-    parsed = _parse_signal_date(date_str)
+    parsed = _parse_signal_date(date_str) if date_str else None
     if parsed is None:
+        if buyer_cap_days is not None:
+            return (
+                f"buyer requires evidence within {buyer_cap_days} days but "
+                f"signal has no valid date (got {date_str!r})"
+            )
         return None
 
     age_days = (datetime.now(timezone.utc) - parsed).days

@@ -796,6 +796,78 @@ def strip_dynamic_boilerplate_dates(content: str) -> str:
     return content
 
 
+# Tier 1.5: anchored relative-date phrases.  Only count "N units ago" /
+# "yesterday" / "last week" when preceded by a timestamp anchor word
+# (Posted/Published/Shared/...) — bare body mentions like "Acme launched 6
+# months ago" must NOT match.  LinkedIn's compact `4mo •` badge is also
+# accepted because it only appears in post-metadata UI, not in body text.
+_TIMESTAMP_ANCHOR_RE = re.compile(
+    r"\b(?:posted|published|shared|uploaded|edited|updated|created|"
+    r"written|date(?:d)?)\b\s*(?:on|at|in)?\s*[:•·\-—]?\s*"
+    r"(?:about\s+|approximately\s+|~\s*)?"
+    r"(\d+)\s*(year|month|week|day|hour|minute)s?\s+ago",
+    re.IGNORECASE,
+)
+_LINKEDIN_TIMESTAMP_BADGE_RE = re.compile(
+    r"(?<![A-Za-z])(\d+)\s*(mo|w|d|h|m)\s*(?:[•·]|\bedited\b)",
+    re.IGNORECASE,
+)
+_ANCHOR_RELATIVE_WORDS_RE = re.compile(
+    r"\b(?:posted|published|shared|uploaded|edited|created|written|date(?:d)?)"
+    r"\b\s*(?:on|at|in)?\s*[:•·\-—]?\s*"
+    r"(yesterday|today|last\s+week|this\s+week|last\s+month|this\s+month|last\s+year)",
+    re.IGNORECASE,
+)
+
+_UNIT_TO_DAYS = {
+    "year": 365, "month": 30, "week": 7, "day": 1,
+    "hour": 0,   "minute": 0,
+    "mo": 30,    "w": 7, "d": 1, "h": 0, "m": 30,  # LinkedIn short forms;
+                                                    # "m" badge means month
+}
+_WORD_TO_DAYS = {
+    "yesterday": 1, "today": 0,
+    "last week": 7, "this week": 0,
+    "last month": 30, "this month": 0,
+    "last year": 365,
+}
+
+
+def _extract_implied_ages_days(content: str) -> List[int]:
+    """Anchored relative-phrase ages, in days.
+
+    Skips bare body mentions: only phrases preceded by an explicit
+    publication anchor (Posted / Published / Shared / etc.) or in
+    LinkedIn's compact badge form count.
+    """
+    out: List[int] = []
+    for m in _TIMESTAMP_ANCHOR_RE.finditer(content):
+        n = int(m.group(1))
+        unit = m.group(2).lower()
+        out.append(n * _UNIT_TO_DAYS.get(unit, 0))
+    for m in _LINKEDIN_TIMESTAMP_BADGE_RE.finditer(content):
+        n = int(m.group(1))
+        unit = m.group(2).lower()
+        out.append(n * _UNIT_TO_DAYS.get(unit, 0))
+    for m in _ANCHOR_RELATIVE_WORDS_RE.finditer(content):
+        word = " ".join(m.group(1).lower().split())
+        if word in _WORD_TO_DAYS:
+            out.append(_WORD_TO_DAYS[word])
+    return out
+
+
+def _relative_tolerance_days(claimed_age_days: int) -> int:
+    if claimed_age_days <= 7:
+        return 2
+    if claimed_age_days <= 30:
+        return 5
+    if claimed_age_days <= 90:
+        return 10
+    if claimed_age_days <= 180:
+        return 15
+    return 30
+
+
 def check_date_precision(claimed_date: str, content: str) -> str:
     """
     Verify how precisely a claimed date appears in the source content.
@@ -810,7 +882,9 @@ def check_date_precision(claimed_date: str, content: str) -> str:
         content: Scraped web content (already stripped of copyright/founded years)
 
     Returns one of:
-        "verified"   – exact date (YYYY-MM-DD or "Month Day, Year") found in content
+        "verified"   – exact date (YYYY-MM-DD or "Month Day, Year") found in content,
+                       OR an anchored relative phrase ("Posted 4 months ago") implies
+                       a date within tolerance of ``claimed_date``
         "approximate"– month+year found but not the exact day
         "year_only"  – only the year is present (manufactured precision)
         "no_match"   – the claimed year doesn't appear at all
@@ -860,6 +934,25 @@ def check_date_precision(claimed_date: str, content: str) -> str:
     slash_dmy = f"{day:02d}/{month:02d}/{year}"
     if slash_mdy in content or slash_dmy in content:
         return "verified"
+
+    # ------------------------------------------------------------------
+    # Tier 1.5: Anchored relative-phrase match.  Pages on LinkedIn / social
+    # / news often express the post date as "Posted N months ago" rather
+    # than an absolute ISO date.  Accept the miner's claim if any anchored
+    # relative phrase implies an age within tolerance.  Anchors required so
+    # bare body mentions ("we launched 6 months ago") don't falsely match.
+    # ------------------------------------------------------------------
+    try:
+        from datetime import date as _d
+        claimed_age = (_d.today() - dt.date()).days
+        if claimed_age >= 0:
+            implied = _extract_implied_ages_days(content)
+            if implied:
+                tol = _relative_tolerance_days(claimed_age)
+                if any(abs(impl - claimed_age) <= tol for impl in implied):
+                    return "verified"
+    except Exception:
+        pass
 
     # ------------------------------------------------------------------
     # Tier 2: Month + Year match (approximate)

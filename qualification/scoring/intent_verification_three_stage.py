@@ -696,6 +696,7 @@ def _output_schema() -> Dict[str, Any]:
             "entity_match_reason", "supporting_quotes",
             "contradicting_quotes", "unsupported_parts",
             "source_quality", "risk_notes", "confidence",
+            "claim_matches_miner_date",
         ],
         "properties": {
             "signal_id": {"type": "string"},
@@ -729,6 +730,10 @@ def _output_schema() -> Dict[str, Any]:
                 "type": "array", "items": {"type": "string"},
             },
             "confidence": {"type": "string", "enum": CONFIDENCE_VALUES},
+            "claim_matches_miner_date": {
+                "type": "string",
+                "enum": ["consistent", "contradicted", "no_date_in_content"],
+            },
         },
     }
     return {
@@ -784,6 +789,7 @@ def _visible_signal(row: Dict[str, Any]) -> Dict[str, Any]:
         "id": str(row.get("id") or "signal-1"),
         "signal_type": row.get("signal_type") or "unknown",
         "miner_claim": row.get("claim") or "",
+        "miner_signal_date": row.get("signal_date") or None,
         "target_icp_signal": row.get("_target_signal_text") or "",
         "claimed_source_urls": row.get("claimed_source_urls") or [],
     }
@@ -900,7 +906,27 @@ Final judge rules:
 - If content contradicts miner_claim, return contradicted.
 - If content is about another company/person, return wrong_entity.
 - evidence_urls_used must contain only exact supplied source URLs whose
-  extracted content supports or contradicts the claim."""
+  extracted content supports or contradicts the claim.
+
+Miner-date consistency check (set claim_matches_miner_date) — STEP BY STEP:
+1. Treat miner_signal_date as a HYPOTHESIS to verify, not a fact.
+2. Look for a POST TIMESTAMP in extracted_text.  Allowed forms ONLY:
+   a) absolute date ("2025-03-15", "March 15, 2025", "Posted on Jan 4, 2026")
+   b) anchored relative phrase ("Posted N months ago", "Published N weeks
+      ago", "Shared yesterday", "Updated last week")
+   c) LinkedIn timestamp badge ("4mo •", "2w •", "5d •")
+   Body prose ("we launched 6 months ago", "joined 5 years ago", "I saw
+   this 3 weeks ago") is NOT a post timestamp — IGNORE it.
+3. If you find one, COMPUTE the implied post date relative to today (the
+   page-extract date).  Example: "Posted 4 months ago" extracted today
+   2026-06-04 → implied post date ≈ 2026-02-04.
+4. Compare implied post date to miner_signal_date:
+   - within ±15 days  → "consistent"
+   - 15–30 days apart → "consistent" (benefit of the doubt)
+   - >30 days apart   → "contradicted".  When contradicted, ALSO set
+     signal_status="contradicted" and add "date_mismatch" to risk_notes.
+5. If no post timestamp found → "no_date_in_content".  Don't penalize.
+6. If miner_signal_date is null → "no_date_in_content" regardless."""
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1156,6 +1182,7 @@ async def verify_three_stage(
     contact_linkedin: str = "",
     stage1_model: Optional[str] = None,
     stage3_model: Optional[str] = None,
+    miner_signal_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """3-stage intent verification (sonar -> SD/Exa -> sonar-pro).
 
@@ -1194,6 +1221,7 @@ async def verify_three_stage(
         "company_linkedin": company_linkedin,
         "contact_linkedin": contact_linkedin,
         "claim": miner_claim,
+        "signal_date": miner_signal_date,
         "signal_type": "intent",
         "claimed_source_urls": [source_url] if source_url else [],
         "_target_signal_text": target_signal_text,
@@ -1435,6 +1463,7 @@ async def verify_three_stage(
         "confidence": s3_item.get("confidence"),
         "decision": s3_decision,
         "same_entity_check": s3_item.get("same_entity_check"),
+        "claim_matches_miner_date": s3_item.get("claim_matches_miner_date"),
         "usage": s3_envelope.get("usage") or {},
     }
 

@@ -901,6 +901,7 @@ async def _score_single_intent_signal(
                 source_url=signal.url,
                 miner_claim=signal.description,
                 target_signal_text=target_signal_text,
+                miner_signal_date=(str(signal.date) if signal.date else None),
             )
     except Exception as three_stage_error:
         logger.error(
@@ -928,11 +929,22 @@ async def _score_single_intent_signal(
         )
         return 0.0, confidence, "verified", content_found_date, -1
 
+    miner_date_match = (
+        (three_stage_result.get("stage3") or {}).get("claim_matches_miner_date")
+    )
+    if miner_date_match == "contradicted":
+        logger.info(
+            "Intent signal three-stage REJECT  reason=miner_date_contradicted  "
+            "miner_date=%s  source=%s",
+            (str(signal.date) if signal.date else None), signal.url[:60],
+        )
+        return 0.0, confidence, "fabricated", content_found_date, -1
+
     logger.info(
         "Intent signal three-stage ACCEPT  decision=%s  "
-        "s1_status=%s  s3_status=%s  scrape_results=%s  "
+        "s1_status=%s  s3_status=%s  miner_date_match=%s  scrape_results=%s  "
         "source=%s  target[%d]=%r",
-        pipeline_decision, s1_status, s3_status,
+        pipeline_decision, s1_status, s3_status, miner_date_match,
         scrape_summary.get("result_count"),
         signal.url[:60],
         miner_asserted_idx, target_signal_text[:60],

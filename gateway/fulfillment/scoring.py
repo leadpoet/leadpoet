@@ -769,6 +769,39 @@ async def score_fulfillment_lead(
             })
             continue
 
+        _miner_idx = getattr(signal, "matched_icp_signal", -1)
+        if isinstance(_miner_idx, int) and 0 <= _miner_idx < len(icp_signal_specs):
+            _spec = icp_signal_specs[_miner_idx]
+            _cap = getattr(_spec, "recency_cap_days", None)
+            if _cap is not None:
+                from qualification.scoring.intent_signal_gate import check_evidence_freshness
+                _stale = check_evidence_freshness(
+                    claim_text=signal.description or "",
+                    signal_date=str(signal.date) if signal.date else None,
+                    content_found_date=None,
+                    buyer_cap_days=_cap,
+                )
+                if _stale:
+                    print(f"   ⏭️  Signal {idx+1} stale — {_stale}")
+                    signal_results.append({"after_decay": 0.0, "decay_mult": 1.0, "confidence": 0,
+                                           "matched_icp_signal_idx": -1})
+                    signal_details.append({
+                        "url": signal.url,
+                        "description": signal.description,
+                        "snippet": signal.snippet,
+                        "date": str(signal.date) if signal.date else None,
+                        "source": source_str,
+                        "raw_score": 0.0,
+                        "after_decay_score": 0.0,
+                        "decay_multiplier": 1.0,
+                        "confidence": 0,
+                        "date_status": "stale_evidence",
+                        "matched_icp_signal_idx": -1,
+                        "matched_icp_signal": None,
+                        "matched_icp_signal_required": None,
+                    })
+                    continue
+
         matched_idx = -1
         try:
             (

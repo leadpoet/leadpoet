@@ -37,7 +37,7 @@ import asyncio
 import hashlib
 import logging
 from datetime import datetime, date, timezone, timedelta
-from typing import Optional, Tuple, Dict, Any, NamedTuple
+from typing import Optional, Tuple, Dict, Any, List, NamedTuple
 from urllib.parse import urlparse
 
 import httpx

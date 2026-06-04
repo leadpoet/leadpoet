@@ -367,6 +367,7 @@ PAID_PROVIDERS: Dict[str, str] = {
     "datauniverse": "https://datauniverse.macrocosmos.ai",
     "googlenews": "https://newsapi.org/v2",
     "jobdata": "https://api.theirstack.com",
+    "exa": "https://api.exa.ai",
 }
 
 FREE_PROVIDERS: Dict[str, str] = {
@@ -1081,6 +1082,7 @@ class LocalProxyServer:
             "datauniverse": "DATAUNIVERSE_API_KEY",
             "googlenews": "NEWS_API_KEY",
             "jobdata": "JOBDATA_API_KEY",
+            "exa": "EXA_API_KEY",
             "github": "GITHUB_TOKEN",
         }
         

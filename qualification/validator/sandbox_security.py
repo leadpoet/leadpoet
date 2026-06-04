@@ -509,6 +509,17 @@ ALLOWED_PAID_APIS: Dict[str, PaidAPI] = {
         notes="For semantic ICP matching. Use gpt-4o-mini."
         # SAFE: Model calls proxy, proxy injects key server-side
     ),
+    "exa": PaidAPI(
+        name="Exa",
+        provider_id="exa",
+        base_url="https://api.exa.ai",
+        description="Semantic web search (lead research, company discovery)",
+        cost_model=CostModel.PER_CALL,
+        cost_per_unit=0.005,
+        env_var_name="EXA_API_KEY",
+        notes="POST /search and /contents. Bearer auth via Authorization header."
+        # SAFE: Model calls proxy, proxy injects key server-side
+    ),
     
     # =========================================================================
     # COMPANY INTELLIGENCE - Tech stack, funding, data

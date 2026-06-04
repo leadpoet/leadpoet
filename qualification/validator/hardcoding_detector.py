@@ -1245,20 +1245,39 @@ async def _call_reasoning_llm(
         "max_tokens": 4000
     }
     
+    import asyncio
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload
-        )
-        response.raise_for_status()
-        
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                if response.status_code in (429, 502, 503, 504):
+                    wait_s = 2 * (2 ** attempt)
+                    logger.warning(
+                        "Hardcoding LLM HTTP %s attempt=%d/3 sleeping=%ds",
+                        response.status_code, attempt + 1, wait_s,
+                    )
+                    if attempt < 2:
+                        await asyncio.sleep(wait_s)
+                        continue
+                response.raise_for_status()
+                break
+            except (httpx.TimeoutException, httpx.RemoteProtocolError, httpx.NetworkError) as e:
+                last_exc = e
+                wait_s = 2 * (2 ** attempt)
+                logger.warning(
+                    "Hardcoding LLM %s attempt=%d/3 sleeping=%ds",
+                    type(e).__name__, attempt + 1, wait_s,
+                )
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(wait_s)
         data = response.json()
-        
-        # Extract response text
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        
-        # Extract cost from response
         cost = 0.0
         usage = data.get("usage", {})
         if "cost" in usage:
@@ -1266,14 +1285,12 @@ async def _call_reasoning_llm(
         elif "total_cost" in usage:
             cost = usage["total_cost"]
         else:
-            # Estimate cost from tokens using Sonnet 4.5 pricing
             input_tokens = usage.get("prompt_tokens", 0)
             output_tokens = usage.get("completion_tokens", 0)
             cost = (
                 (input_tokens / 1_000_000 * DETECTION_MODEL_COST_INPUT) +
                 (output_tokens / 1_000_000 * DETECTION_MODEL_COST_OUTPUT)
             )
-        
         return content, cost
 
 

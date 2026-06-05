@@ -3021,19 +3021,46 @@ def _validate_size_match(claimed: str, extracted: str) -> Tuple[bool, str]:
 
 
 _TRADEMARK_SYMBOLS_RE = re.compile(r'[®™©℠]+')
+_LEGAL_SUFFIXES_RE = re.compile(
+    r',?\s*\b(?:Inc\.?|LLC|L\.L\.C\.?|Corp\.?|Corporation|Ltd\.?|Limited|'
+    r'Co\.?|Company|Group|Holdings?|PLC|P\.L\.C\.?|LLP|L\.L\.P\.?|'
+    r'PLLC|P\.L\.L\.C\.?|PC|P\.C\.?|LP|L\.P\.?|NA|N\.A\.?|GmbH|'
+    r'AG|SA|S\.A\.?|SAS|SARL|S\.R\.L\.?|S\.p\.A\.?|SpA|BV|B\.V\.?)\s*\.?\s*$',
+    re.IGNORECASE,
+)
+
+
+def _normalize_for_name_match(name: str) -> str:
+    """Strip trademark symbols, legal suffixes, normalize whitespace, lower.
+
+    Keep in sync with fulfillment_person_verification._normalize_company —
+    both compare lead-side `business` strings against vendor-side scraped
+    company names, and they MUST agree on what counts as the canonical form
+    or Stage 4 and Stage 5 will disagree on the same lead.
+    """
+    s = _TRADEMARK_SYMBOLS_RE.sub('', name).strip()
+    s = _LEGAL_SUFFIXES_RE.sub('', s).strip().rstrip(',').strip()
+    s = re.sub(r'\band\b', '&', s, flags=re.IGNORECASE)
+    s = ' '.join(s.split())
+    return s.lower()
 
 
 def _validate_name_match(claimed: str, extracted: str) -> Tuple[bool, str]:
-    """Validate if claimed company name matches extracted (case-sensitive).
-    Trademark symbols (®™©℠) are stripped from both sides before comparing."""
+    """Validate if claimed company name matches extracted.
+
+    Strips trademark symbols (®™©℠) and legal suffixes (Inc., LLC, Corp.,
+    Holdings, GmbH, etc.) before comparing — operator-submitted `business`
+    strings rarely include the full legal form while ScrapingDog often
+    returns it, and vice versa.  Compares case-insensitively after
+    normalisation."""
     if not claimed or not extracted:
         return False, "Missing name data"
 
-    claimed_clean = ' '.join(_TRADEMARK_SYMBOLS_RE.sub('', claimed.strip()).split())
-    extracted_clean = ' '.join(_TRADEMARK_SYMBOLS_RE.sub('', extracted.strip()).split())
+    claimed_norm = _normalize_for_name_match(claimed)
+    extracted_norm = _normalize_for_name_match(extracted)
 
-    if claimed_clean == extracted_clean:
-        return True, "Exact match"
+    if claimed_norm == extracted_norm:
+        return True, "Match (normalized)"
 
     return False, f"Name mismatch: claimed '{claimed.strip()}' vs extracted '{extracted.strip()}'"
 

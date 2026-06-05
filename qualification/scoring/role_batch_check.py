@@ -53,6 +53,84 @@ the same function family AND the same seniority bucket as at least one
 target.  Title-word overlap (CTO vs CRO, VP Eng vs VP Sales) does NOT
 imply a match — function and seniority must both line up.
 
+==== ABSOLUTE REJECTS (apply BEFORE fast-path accept rules) ====
+
+REJECT R0 — NO-LONGER-IN-ROLE markers (case-insensitive, anywhere
+in the title): "former", "formerly", "ex-", "ex ", "retired",
+"past", "previous", "previously", "alum", "alumna", "alumnus".
+These ALWAYS reject regardless of any other rule.
+   REJECT: "Former President and CEO", "CEO at Acme - Retired",
+           "Ex-CRO, now Advisor", "Previously VP Sales"
+
+REJECT R1 — PRIMARY-ROLE MUST BE THE TARGET:
+A target token appearing in a multi-function laundry-list title does
+NOT count as the candidate's primary role. If the title is a long
+list separated by "|", "/", "♦", "•", "·", "—", "-", or commas, the
+candidate's PRIMARY job is the FIRST listed role (before the first
+separator).  Apply F1/F2 only against the PRIMARY role segment.
+   REJECT: "Founder & CEO ♦ Client Advisory Services ♦ Bookkeeping |
+           Payroll | HR | Recruiting" → primary is "Founder & CEO" of
+           a bookkeeping/HR/recruiting firm; not a sales-target match.
+   REJECT: "Marketing Director / Sales Director" if target is "Sales
+           Director" → primary is Marketing (listed first).
+   ACCEPT: "President & Chief Revenue Officer" → both segments are
+           target-role-equivalent; primary segment "President & Chief
+           Revenue Officer" contains "Chief Revenue Officer".
+   ACCEPT: "VP of Sales, Prime Accounts" → "Prime Accounts" is a
+           qualifier on the role, not a separate role.
+
+==== FAST-PATH ACCEPT RULES (apply AFTER absolute rejects) ====
+
+RULE F1 — TARGET-SUPERSET MATCH (qualifier additions):
+If the candidate's title CONTAINS every word of any target role
+(case-insensitive; ignore connectors "and / & / | / , / of / the / a /
+to"), accept — provided the extra qualifier is a REGION, INDUSTRY
+DOMAIN, SECONDARY FUNCTION, or SECONDARY TITLE, NOT a SENIORITY OR
+FUNCTION CHANGE.
+   ACCEPT examples (qualifier is region/domain/secondary function/co-title):
+     target "VP of Sales"           ← "VP of Sales & Marketing"
+     target "VP of Sales"           ← "Vice President of Security Sales"
+     target "VP of Sales"           ← "Vice President of Sales, Prime Accounts"
+     target "Chief Revenue Officer" ← "President & Chief Revenue Officer"
+     target "Chief Revenue Officer" ← "Founder & Chief Revenue Officer"
+     target "Director of Sales"     ← "Sales Director, West"
+     target "Director of Sales"     ← "Sales Director, Southwest U.S."
+     target "Head of Sales"         ← "Head of Sales and Business Development"
+     target "Director of Business Development" ← "Director of Business Development and Marketing"
+   REJECT examples (qualifier changes seniority or function):
+     target "VP of Sales"           ✗ "Assistant VP of Sales"            (lower seniority)
+     target "VP of Sales"           ✗ "VP of Sales Engineering"          (eng = different function)
+     target "VP of Sales"           ✗ "VP Sales Trainee"                 (Trainee = junior IC)
+     target "VP of Sales"           ✗ "Sales Manager"                    (lower seniority)
+     target "Chief Revenue Officer" ✗ "Marketing CRO"                    (Conversion Rate Optimization, not Chief Revenue Officer)
+     target "Chief Revenue Officer" ✗ "Chief Revenue Officer's EA"       (EA, not CRO)
+   PRECEDENCE: F1 wins over the "industry-specific role" reject rule
+   (line "Industry-specific role when ICP doesn't require...") because
+   the rejected industry qualifier here is attached to a TARGET ROLE,
+   not the candidate's primary job.
+
+RULE F2 — SALES-FAMILY EQUIVALENT (when ANY target is sales-family):
+If the target_roles list contains ANY role with the words "Sales",
+"Revenue", "Business Development", "BD", "GTM", "Go-to-Market",
+"Partnerships", "Alliances", "Channel", "Account Management", or
+"Strategic Accounts", then a candidate whose PRIMARY function is in
+this same family ACCEPTS — provided the candidate's seniority bucket
+(C-level / VP / Director / Head-of) is also present in the target list.
+   ACCEPT examples:
+     targets include "VP of Sales"                  ← "Vice President of GTM Operations"
+     targets include "Director of Sales"            ← "Director Of Business Development"
+     targets include "Head of Sales"                ← "Head Of Business Development"
+     targets include "Director of Sales"            ← "Director of Business Development and Marketing"
+     targets include "VP of Sales"                  ← "VP Sales & Partnerships"
+   STILL REJECT (seniority mismatch):
+     targets include only VP/Director ✗ "Business Development Manager"     (Manager < Director)
+     targets include only VP/Director ✗ "BDR"                              (junior IC)
+   STILL REJECT (function mismatch):
+     targets include only "VP of Sales" ✗ "Director of Revenue Marketing"  (Marketing primary, not Sales-rev)
+     targets include only "VP of Sales" ✗ "Head of Partnerships & Growth" (Partnerships+Growth fine BUT verify it's revenue-aligned)
+
+==== END FAST-PATH RULES ====
+
 ==== FUNCTION FAMILIES ====
 
 SALES / REVENUE / BD / PARTNERSHIPS family (treat as one):

@@ -378,6 +378,29 @@ def _url_on_lead_domain(source_url: str,
     return False
 
 
+def _normalize_company_for_match(name: str) -> str:
+    """Strip legal-suffix tokens AND any preceding/following punctuation so
+    the residual matches articles that omit the suffix.
+
+    Example: "Emery Sapp & Sons, Inc." → "emery sapp & sons"
+    (without this normalization, the trailing comma from "Sons," would stay
+    after "Inc." was stripped, and `\bemery sapp & sons,\b` would fail to
+    match articles that just say "Emery Sapp & Sons announced…").
+    """
+    n = name.lower().strip()
+    # Strip one or more legal suffixes, each optionally preceded by ", " or
+    # plain spaces, optionally followed by a period.  Apply globally so chains
+    # like "Tractian Technologies, Inc." reduce both tokens in one pass.
+    n = re.sub(
+        r"\s*,?\s*\b(inc|llc|ltd|corp|corporation|company|"
+        r"co|technologies?|holdings?|group)\b\.?",
+        "",
+        n,
+    )
+    # Clean up leftover trailing punctuation/whitespace.
+    return n.strip(" ,;:.\t").strip()
+
+
 def company_in_scrape(company_name: str, scraped_text: str) -> bool:
     """True iff the company name (or its base form with common legal/structural
     suffixes stripped) appears as a whole word in the scraped text
@@ -389,10 +412,7 @@ def company_in_scrape(company_name: str, scraped_text: str) -> bool:
     target = company_name.lower().strip()
     if re.search(rf"\b{re.escape(target)}\b", text_lower):
         return True
-    base = re.sub(
-        r"\b(inc|llc|ltd|corp|company|technologies?|holdings?|group)\b\.?",
-        "", target,
-    ).strip()
+    base = _normalize_company_for_match(company_name)
     if base and base != target:
         return bool(re.search(rf"\b{re.escape(base)}\b", text_lower))
     return False

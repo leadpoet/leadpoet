@@ -463,11 +463,20 @@ async def score_fulfillment_lead(
         try:
             from qualification.scoring.intent_precheck import precheck_lead_signals
             icp_signal_texts = [s.text for s in (icp.intent_signals or [])]
+            # Optional dashboard-provided evidence_type per signal — when
+            # set, overrides the regex topic classifier so a topic word
+            # ("hiring") inside a posting signal doesn't get misread as
+            # a URL-type requirement.
+            icp_signal_evidence_types = [
+                getattr(s, "evidence_type", None)
+                for s in (icp.intent_signals or [])
+            ]
             async with httpx.AsyncClient() as _precheck_http:
                 precheck_verdicts = await precheck_lead_signals(
                     _precheck_http,
                     lead_signals=lead.intent_signals,
                     icp_intent_signal_texts=icp_signal_texts,
+                    icp_intent_signal_evidence_types=icp_signal_evidence_types,
                     lead_company=getattr(lead, "business", "") or "",
                 )
         except Exception as e:

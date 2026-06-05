@@ -328,6 +328,56 @@ def _normalize_url(url: str) -> str:
         return url or ""
 
 
+def _strip_www(host: str) -> str:
+    h = (host or "").lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+def _url_on_lead_domain(source_url: str,
+                        company_website: str,
+                        company_linkedin: str = "") -> bool:
+    """True iff source URL is on the lead's own property:
+      (a) URL hostname == (or subdomain of) ``company_website`` hostname, OR
+      (b) URL is on linkedin.com AND its ``/company/<slug>`` matches the
+          ``<slug>`` in ``company_linkedin``.
+
+    Used to suppress wrong_entity flagging when the source URL is
+    provably on the lead's own property.
+    """
+    if not source_url:
+        return False
+    try:
+        src = _strip_www(urlparse(source_url).hostname or "")
+    except Exception:
+        return False
+    if not src:
+        return False
+
+    # (a) Same-website match
+    if company_website:
+        try:
+            web = _strip_www(urlparse(company_website).hostname or "")
+            if web and (src == web or src.endswith("." + web)):
+                return True
+        except Exception:
+            pass
+
+    # (b) Same-LinkedIn match
+    if company_linkedin and ("linkedin.com" in src):
+        try:
+            m = re.search(r"/company/([^/]+)", company_linkedin, re.I)
+            lead_slug = (m.group(1).lower() if m else "")
+            if lead_slug:
+                # Source URL must reference the same slug
+                if re.search(rf"/company/{re.escape(lead_slug)}(?:/|$)",
+                             source_url, re.I):
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
 def company_in_scrape(company_name: str, scraped_text: str) -> bool:
     """True iff the company name (or its base form with common legal/structural
     suffixes stripped) appears as a whole word in the scraped text
@@ -697,6 +747,8 @@ def _output_schema() -> Dict[str, Any]:
             "contradicting_quotes", "unsupported_parts",
             "source_quality", "risk_notes", "confidence",
             "claim_matches_miner_date",
+            "author_type", "author_employer_matches_lead",
+            "author_role_matches_spec", "author_satisfies_role_spec",
         ],
         "properties": {
             "signal_id": {"type": "string"},
@@ -733,6 +785,24 @@ def _output_schema() -> Dict[str, Any]:
             "claim_matches_miner_date": {
                 "type": "string",
                 "enum": ["consistent", "contradicted", "no_date_in_content"],
+            },
+            # PART D — AUTHOR-ROLE CHECK fields (apply only on social-post URLs
+            # AND when target_icp_signal names a person role; otherwise "n/a")
+            "author_type": {
+                "type": "string",
+                "enum": ["person", "company", "unknown", "n/a"],
+            },
+            "author_employer_matches_lead": {
+                "type": "string",
+                "enum": ["yes", "no", "unknown", "n/a"],
+            },
+            "author_role_matches_spec": {
+                "type": "string",
+                "enum": ["yes", "no", "unknown", "n/a"],
+            },
+            "author_satisfies_role_spec": {
+                "type": "string",
+                "enum": ["yes", "no", "unknown", "n/a"],
             },
         },
     }
@@ -805,11 +875,101 @@ Lead profile:
 Intent signal to verify:
 {json.dumps(signal, indent=2)}
 
-Two-part verification — BOTH must hold for `supported`:
+Three-part verification — ALL THREE must hold for `supported`:
 
-  PART A: Does `miner_claim` semantically satisfy `target_icp_signal`?
+  PART 0 — ENTITY CHECK (CRITICAL, evaluate FIRST and REJECT on any doubt):
+
+    The lead profile gives THREE identity anchors:
+      • ``company`` — short / informal name (often ambiguous)
+      • ``website`` — the lead's exact company URL
+      • ``company_linkedin`` — the lead's exact LinkedIn URL
+
+    Many short company names ("Hive", "Apex", "Copper", "Halcyon",
+    "Risotto", "Shovels", "Augment", "Proto", "Square", "Apple")
+    refer to MULTIPLE real corporate entities globally.  The
+    ``company`` field alone CANNOT disambiguate.  The ``website`` and
+    ``company_linkedin`` are the canonical entity identifiers.
+
+    To return `supported`, you must affirmatively verify the article
+    (URL + extracted content) is about THE SPECIFIC entity at the
+    lead's ``website`` and ``company_linkedin``.  This means at least
+    ONE of the following is true:
+      (a) URL hostname matches the lead's website domain (case already
+          handled structurally — these URLs are guaranteed same-entity).
+      (b) The article EXPLICITLY mentions the lead's website domain
+          (e.g. ``thehive.ai``) or LinkedIn URL.
+      (c) The article's canonical full company name (as actually
+          printed in headline, byline, infobox, or URL slug)
+          UNAMBIGUOUSLY matches the lead — including any branding
+          differentiator the lead uses (e.g. ``Hive AI`` if the
+          lead's domain is ``thehive.ai``; ``Tractian Technologies``
+          if the lead's website is ``tractian.com``).
+      (d) The article's stated industry, headquarters, leadership,
+          or product description matches the lead's known business
+          (inferable from the lead's website domain).
+
+    Return `wrong_entity` whenever ANY of the following holds:
+      • The article identifies a longer / different corporate name
+        sharing the lead's first word but adding distinguishing words
+        not in the lead's website / LinkedIn URL.  Examples:
+            lead at thehive.ai (Hive AI, content moderation)
+              vs article about "HIVE Digital Technologies"
+              (TSX:HIVE, Canadian crypto miner)         → wrong_entity
+            lead at apcoworldwide.com (PR firm)
+              vs article about "APCO Holdings"
+              (auto-warranty parent)                    → wrong_entity
+            lead at copper.com (crypto custody)
+              vs article about "Copper Labs"
+              (energy startup)                          → wrong_entity
+            lead at parabola.io (data automation)
+              vs article about "Parabola Labs"
+              (different company on LinkedIn)           → wrong_entity
+            lead at halcyon.ai (ransomware security)
+              vs article about a "Halcyon AI" doing
+              energy data analytics & clean energy      → wrong_entity
+      • The URL or content's actual subject is in a clearly different
+        INDUSTRY / DOMAIN than the lead.  Examples:
+            lead at zefir.fr (French real estate AI)
+              vs trendyol.com product page describing
+              "Zefir Fabric Orange Large Checked Pattern"
+              tablecloth                                → wrong_entity
+            lead at shovels.ai (construction-permits AI)
+              vs github.com/rabbitmq discussion
+              about RabbitMQ's "Shovel" plugin / API    → wrong_entity
+            lead at tryrisotto.com (IT help-desk AI)
+              vs github.com/joeroe/risotto, an R package
+              for radiocarbon dating by user "joeroe"   → wrong_entity
+            lead at wearepro.to (Proto, AI customer service)
+              vs an article about "Proto Corporation"
+              launching travel experiences              → wrong_entity
+      • The URL has the lead's name in it but the article body /
+        title is about a DIFFERENT named company sharing only the
+        first word.  Example:
+            lead "Augment" at goaugment.io (logistics AI)
+              vs augment.market article about a different
+              "Augment" doing private-market trading
+              ($12M Series A led by Builders VC)        → wrong_entity
+
+    Functional equivalents (same entity, NOT wrong_entity):
+      • Parent ↔ subsidiary / division
+        (lead Axos Bank ↔ "Axos Financial" parent;
+         lead Ara Partners ↔ "Ara Energy" platform;
+         lead Penzance ↔ "Penzance Digital Infrastructure" division)
+      • Formal corporate suffix
+        (lead "Bluebeam" ↔ "Bluebeam, Inc.";
+         lead "Tractian" ↔ "Tractian Technologies, Inc.";
+         lead "AmplifAI" ↔ "AmplifAI Solutions, Inc.")
+      • Verb usage in URL slug
+        (lead "Omnes" at omnescapital.com → URL slug
+         "omnes-partners-with-apex-group" — "partners"
+         is a VERB here; same entity)
+      • Aggregator profile pages keyed by the lead's slug
+        (e.g. indeed.com/cmp/<Lead-Name>/, crunchbase.com/
+         organization/<lead>, builtin.com/company/<lead>)
+
+  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
     The miner asserts their evidence proves the buyer's target_icp_signal.
-    First check whether the miner_claim, even if true, would actually mean
+    Check whether the miner_claim, even if true, would actually mean
     the target_icp_signal is satisfied.
       * "Company X offers product Y" is NOT the same as "Company X hires for
         role Y". Selling an AI BDR is the opposite signal of hiring BDRs.
@@ -819,10 +979,11 @@ Two-part verification — BOTH must hold for `supported`:
       * "Company X has a careers page" is NOT the same as "Company X has
         open positions for {{role}}".
     If miner_claim does not semantically map to target_icp_signal, return
-    wrong_entity (the claim is about a different thing) regardless of how
-    well the URL supports the claim.
+    `contradicted` (the URL is about a different topic than the ICP
+    signal asks for).  Do NOT return `wrong_entity` — `wrong_entity` is
+    reserved STRICTLY for entity-identity mismatch in PART 0.
 
-  PART B: Does the supplied source URL support `miner_claim`?
+  PART B — URL SUPPORTS THE CLAIM:
     - Treat the lead profile as context, not proof.
     - Anchor company identity to company website and company LinkedIn.
     - If source URL(s) are provided, use source_grounded mode.
@@ -831,13 +992,97 @@ Two-part verification — BOTH must hold for `supported`:
     - Independent search may only flag contradiction, stale data, or wrong-entity issues.
     - If no source URL is provided, use discovery mode and search credible sources.
 
-Signal status decision:
-- supported: PART A holds AND exact evidence directly supports miner_claim AND entity match.
-- partially_supported: PART A holds AND exact evidence supports only part of miner_claim.
-- contradicted: exact evidence or stronger current evidence clearly contradicts miner_claim.
-- unable_to_verify: evidence is missing, inaccessible, ambiguous, stale, or insufficient.
-- wrong_entity: PART A fails (miner_claim does not semantically address target_icp_signal),
-                OR evidence is about a different company/person.
+  PART D — AUTHOR-ROLE CHECK (applies ONLY when BOTH conditions hold;
+  otherwise leave all author_* fields = "n/a" and SKIP this part):
+    Condition 1 — source_url is a social-media post URL:
+      • LinkedIn:  linkedin.com/posts/<handle>_..., linkedin.com/pulse/<slug>,
+                   linkedin.com/feed/update/urn:li:activity:<id>
+      • X / Twitter: x.com/<handle>/status/<id>,
+                     twitter.com/<handle>/status/<id>
+    Condition 2 — target_icp_signal names a PERSON ROLE:
+      CEO, Founder, Co-founder, Owner, President, CRO, CSO, CMO,
+      Chief X Officer, VP of <X>, sales leader, revenue leader.
+
+    When both hold:
+
+    1. AUTHOR_TYPE — extract the handle from the URL path and decide:
+       • "person"  → handle looks like a personal handle (firstname-lastname,
+                     given-name, individual nickname).
+       • "company" → handle matches lead.company_linkedin's /company/<slug>
+                     exactly, OR is a clear corporate slug (ends in -inc,
+                     -llc, -ai, -labs, -solutions, -group, contains "company"
+                     or "official").
+
+    2. If author_type == "company":
+       The post was made by a company page / official brand account, NOT by a
+       person. Since target_icp_signal demands a person role, this fails the
+       check. Set:
+         author_employer_matches_lead = "n/a"
+         author_role_matches_spec    = "n/a"
+         author_satisfies_role_spec  = "no"
+       AND set signal_status = "contradicted" with risk_note
+       "company_handle_not_person".
+
+    3. If author_type == "person":
+       You MUST perform a separate web search for the handle (regardless of
+       what the scraped post body says).  Search the canonical LinkedIn
+       profile URL (https://www.linkedin.com/in/<handle>) and any news /
+       company bio coverage.  Look for the LinkedIn page-title pattern
+       "Name - Title at Company - LinkedIn" or an explicit "is the
+       <Title> at <Company>" in coverage.
+
+         author_employer_matches_lead = "yes" iff cited evidence shows their
+           current employer name OR current employer LinkedIn URL equals
+           lead.company / lead.company_linkedin.
+         author_role_matches_spec     = "yes" iff cited evidence shows their
+           current title satisfies the person-role in target_icp_signal.
+         author_employer_matches_lead = "no" iff cited evidence shows a
+           DIFFERENT current employer.
+         author_role_matches_spec     = "no" iff cited evidence shows a
+           DIFFERENT title that doesn't satisfy the spec.
+         Only return "unknown" if you genuinely can't surface any LinkedIn
+         profile, news mention, or company bio for the handle after a real
+         search attempt.  DO NOT default to "unknown" just because the
+         scraped post content alone doesn't cover author bio — go search.
+
+         author_satisfies_role_spec = "yes" iff BOTH match.
+         author_satisfies_role_spec = "no"  iff either is definitively "no".
+         author_satisfies_role_spec = "unknown" iff resolution failed.
+
+    4. PART D verdict-routing — when author_satisfies_role_spec == "no":
+       • If author_employer_matches_lead == "no" (right title, wrong company):
+         set signal_status = "wrong_entity" AND same_entity_check = "fail".
+       • Else (employer matches but title doesn't, OR company-handle case):
+         set signal_status = "contradicted" with risk_note "wrong_author_role"
+         or "company_handle_not_person" as applicable.
+
+    5. PART D verdict-routing — when author_satisfies_role_spec == "unknown":
+       Do NOT override the verdict from PART 0/A/B. Leave the other-parts
+       verdict to stand and surface "author_unresolved" in risk_notes.
+
+Signal status decision (mutually exclusive — pick exactly one):
+- supported: PART 0 entity check PASSES AND PART A holds AND exact evidence directly supports miner_claim.
+- partially_supported: PART 0 + PART A hold AND exact evidence supports only part of miner_claim.
+- contradicted: PART 0 entity check PASSES BUT exact evidence contradicts miner_claim,
+                OR PART A fails (miner_claim does not semantically address target_icp_signal).
+- unable_to_verify: PART 0 entity check is INCONCLUSIVE (the article COULD be about
+                    the lead but you can't confirm it from canonical-name / domain /
+                    LinkedIn / industry signals), OR evidence is missing, inaccessible,
+                    ambiguous, stale, or insufficient.
+- wrong_entity: PART 0 entity check definitively FAILS — the article identifies a
+                clearly DIFFERENT corporate entity than the lead's `website` and
+                `company_linkedin` (e.g., HIVE Digital Technologies vs Hive AI,
+                APCO Holdings vs APCO Worldwide, joeroe/risotto R package vs
+                tryrisotto.com).  RESERVED STRICTLY for entity-identity mismatch;
+                NEVER use wrong_entity for a claim-vs-ICP mismatch (that's
+                `contradicted`).
+
+When uncertain about PART 0 (article COULD be about the lead but proof is weak),
+return `unable_to_verify` — NOT `wrong_entity`.  When confidence the article is
+about a DIFFERENT entity, return `wrong_entity`.
+
+When also setting wrong_entity, ALSO set `same_entity_check` field to "fail"
+so structural callers can distinguish entity-mismatch from claim-mismatch.
 
 Return only schema-valid JSON."""
 
@@ -1227,6 +1472,16 @@ async def verify_three_stage(
         "_target_signal_text": target_signal_text,
     }
 
+    # Structural same-entity override: when the source URL is on the
+    # lead's own ``company_website`` host (or subdomain), or on the
+    # lead's exact LinkedIn ``/company/<slug>`` path, ``wrong_entity``
+    # is logically impossible — the entity IS the lead by hostname/slug
+    # match alone.  Used below to downgrade any Stage 1 / Stage 3
+    # wrong_entity verdict on those URLs.
+    _on_lead_domain = _url_on_lead_domain(
+        source_url, company_website, company_linkedin,
+    )
+
     # ── STAGE 1: sonar first-pass ──────────────────────────────────
     s1_prompt = _build_verification_prompt(row)
     s1_envelope = await _call_openrouter(
@@ -1260,6 +1515,10 @@ async def verify_three_stage(
         "confidence": s1_item.get("confidence"),
         "decision": s1_decision,
         "same_entity_check": s1_item.get("same_entity_check"),
+        "author_type": s1_item.get("author_type"),
+        "author_employer_matches_lead": s1_item.get("author_employer_matches_lead"),
+        "author_role_matches_spec": s1_item.get("author_role_matches_spec"),
+        "author_satisfies_role_spec": s1_item.get("author_satisfies_role_spec"),
         "usage": s1_envelope.get("usage") or {},
     }
 
@@ -1275,18 +1534,37 @@ async def verify_three_stage(
             "verdict": s1_verdict,
         }
     if s1_decision == "reject":
-        return {
-            "client_ready": False,
-            "decision": "reject",
-            "rejection_reason": (
-                f"stage1_{s1_item.get('signal_status') or 'reject'}"
-            ),
-            "stage1": stage1_info,
-            "scrape": None,
-            "stage3": None,
-            "company_check": None,
-            "verdict": s1_verdict,
-        }
+        # Override: when URL is on the lead's own domain AND the
+        # rejection is specifically for entity-identity reasons
+        # (same_entity_check == "fail"), downgrade to review.  URLs on
+        # the lead's own property are structural proof of same-entity,
+        # so wrong_entity for ENTITY reasons can't logically apply.
+        # We do NOT override `wrong_entity` rejects that are actually
+        # for claim-mismatch (same_entity_check != "fail"), nor any
+        # other reject status like `contradicted`.
+        if (
+            _on_lead_domain
+            and s1_item.get("signal_status") == "wrong_entity"
+            and s1_item.get("same_entity_check") == "fail"
+        ):
+            stage1_info["status"] = "review"
+            stage1_info["decision"] = "review"
+            stage1_info["same_entity_check"] = "pass"
+            stage1_info["domain_override"] = "url_on_lead_domain"
+            # Fall through to Stage 2/3 below
+        else:
+            return {
+                "client_ready": False,
+                "decision": "reject",
+                "rejection_reason": (
+                    f"stage1_{s1_item.get('signal_status') or 'reject'}"
+                ),
+                "stage1": stage1_info,
+                "scrape": None,
+                "stage3": None,
+                "company_check": None,
+                "verdict": s1_verdict,
+            }
 
     # ── STAGE 2: SD-primary + Exa-fallback fetch ───────────────────
     if not row["claimed_source_urls"]:
@@ -1464,8 +1742,28 @@ async def verify_three_stage(
         "decision": s3_decision,
         "same_entity_check": s3_item.get("same_entity_check"),
         "claim_matches_miner_date": s3_item.get("claim_matches_miner_date"),
+        "author_type": s3_item.get("author_type"),
+        "author_employer_matches_lead": s3_item.get("author_employer_matches_lead"),
+        "author_role_matches_spec": s3_item.get("author_role_matches_spec"),
+        "author_satisfies_role_spec": s3_item.get("author_satisfies_role_spec"),
         "usage": s3_envelope.get("usage") or {},
     }
+
+    # Override: same precise condition as Stage 1.  Only downgrade when
+    # ``wrong_entity`` is specifically for entity-identity reasons
+    # (``same_entity_check == "fail"``).  A claim-mismatch wrong_entity
+    # verdict (which shouldn't happen with the updated prompt, but is
+    # defended against here) is left as-is.
+    if (
+        _on_lead_domain
+        and s3_item.get("signal_status") == "wrong_entity"
+        and s3_item.get("same_entity_check") == "fail"
+    ):
+        stage3_info["status"] = "review"
+        stage3_info["decision"] = "review"
+        stage3_info["same_entity_check"] = "pass"
+        stage3_info["domain_override"] = "url_on_lead_domain"
+        s3_decision = "review"
 
     # Binary mapping for production: approve -> accept; reject -> reject;
     # review -> reject by default (set INTENT_VERIFIER_REVIEW_AS_ACCEPT=on

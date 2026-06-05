@@ -1883,38 +1883,42 @@ async def scrapingdog_linkedin(url: str) -> str:
     elif "/company/" in url:
         url_type = "company"
     elif "/posts/" in url or "/feed/" in url or "/pulse/" in url:
-        url_type = "profile"
-        # Try /in/<handle> or /company/<handle> embedded in the URL first
-        # (some Perplexity-rewritten URLs keep them).
-        link_id_match = re.search(r'/in/([^/?]+)', url) or re.search(r'/company/([^/?]+)', url)
-        if not link_id_match:
-            # Common LinkedIn post URL shape:
-            #   linkedin.com/posts/<author-handle>_<activity-slug>-activity-<id>
-            # The author handle is everything between `/posts/` and the first
-            # `_` (or `/`, `?` as backup terminators).
-            link_id_match = re.search(r'/posts/([^_/?]+)', url)
-        if link_id_match:
-            link_id_override = link_id_match.group(1)
-            api_url = "https://api.scrapingdog.com/linkedin"
-            params = {
-                "api_key": SCRAPINGDOG_API_KEY,
-                "type": url_type,
-                "linkId": link_id_override,
-            }
-            async with httpx.AsyncClient() as client:
-                response = await client.get(api_url, params=params, timeout=DEFAULT_TIMEOUT)
-                if response.status_code == 200:
-                    return json.dumps(response.json())
-                # ScrapingDog returns 404 / empty when the handle is actually
-                # a COMPANY page (we assumed profile).  Retry once with
-                # type=company before falling back to the generic scraper.
-                if response.status_code in (404, 400):
-                    params["type"] = "company"
-                    response2 = await client.get(api_url, params=params, timeout=DEFAULT_TIMEOUT)
-                    if response2.status_code == 200:
-                        return json.dumps(response2.json())
-        logger.warning(f"LinkedIn post URL: scrapingdog profile+company both failed, falling back: {url[:80]}")
-        return await scrapingdog_generic(url)
+        # For LinkedIn POST/ACTIVITY/PULSE URLs we MUST fetch the actual
+        # rendered post HTML — the profile/company structured-data API
+        # returns the AUTHOR's profile or company about page, NOT the
+        # post content.  Using profile/company API here was masking
+        # invalid post URLs as "successful scrapes" of the author/company
+        # profile, which the LLM then accepted as if it were post evidence
+        # (observed 2026-06-05 on csg-government-solutions_hiring-... —
+        # an invalid post URL whose author-handle happens to match the
+        # CSG company slug, returned company about page, judged supported).
+        #
+        # The right fetch is the generic dynamic scrape, which returns
+        # the actual server-rendered HTML of the post.  When the post
+        # URL is invalid (deleted, malformed, never existed), the scrape
+        # returns 4xx — surface that as a clean failure rather than
+        # silently substituting unrelated profile data.
+        api_url = "https://api.scrapingdog.com/scrape"
+        params = {
+            "api_key": SCRAPINGDOG_API_KEY,
+            "url": url,
+            "dynamic": "true",  # LinkedIn requires JS rendering for posts
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                api_url, params=params, timeout=DEFAULT_TIMEOUT,
+            )
+            if response.status_code == 200:
+                return response.text
+            # 4xx/5xx — surface as exception so caller's fallback (Exa)
+            # gets a chance.  Do NOT silently substitute author/company
+            # profile data for missing post content.
+            logger.warning(
+                f"LinkedIn post URL: dynamic scrape returned "
+                f"{response.status_code} for {url[:80]} — letting caller "
+                f"fall through to next tier (Exa)"
+            )
+            response.raise_for_status()
     else:
         url_type = "company"
     

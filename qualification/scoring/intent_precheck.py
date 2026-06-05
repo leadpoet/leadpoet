@@ -118,6 +118,76 @@ _HIRING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# HIRING-STRONG — language that unambiguously calls for a JOB LISTING URL,
+# not a post.  Wins over SOCIAL_POSTING when both match (e.g. "Hiring
+# manager posts open roles" should still require /jobs/, not /posts/).
+_HIRING_STRONG_RE = re.compile(
+    r"\b("
+    r"open\s+(?:position(?:s)?|role(?:s)?|vacanc(?:y|ies))|"
+    r"job\s+(?:post(?:s|ing|ings)?|listing(?:s)?|opening(?:s)?)|"
+    r"actively\s+(?:hiring|recruiting)\s+(?:for|a|an|the|its?)\b|"
+    r"hiring\s+(?:for|a|an|the|its?)\s+\w+"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# SOCIAL_POSTING — fires when BOTH a posting verb AND a person/role subject
+# AND a social platform are present in the same signal.  All three are
+# required, so a signal like "Company is hiring SDRs" doesn't trip this.
+_SOCIAL_POSTING_VERB_RE = re.compile(
+    r"\b("
+    r"post(?:s|ing|ed)?|"
+    r"publicly\s+post(?:s|ing|ed)?|"
+    r"actively\s+post(?:s|ing|ed)?|"
+    r"sharing|shares\b|"
+    r"writing\s+on|writes\s+on|"
+    r"publish(?:es|ing|ed)|"
+    r"announc(?:es|ing|ed)\s+on"
+    r")\b",
+    re.IGNORECASE,
+)
+_SOCIAL_POSTING_PERSON_RE = re.compile(
+    r"\b("
+    # Person/role subjects
+    r"founder|co-?founder|"
+    r"ceo|cto|cro|cmo|cfo|coo|cso|"
+    r"chief\s+\w+\s+officer|"
+    r"president|owner|managing\s+(?:director|partner)|"
+    r"head\s+of\s+\w+|"
+    r"vp\s+(?:of\s+)?\w+|vice\s+president|"
+    r"director\s+of\s+\w+|"
+    r"executive|leader|manager|"
+    # Entity-as-poster subjects (company social presence is also valid
+    # SOCIAL_POSTING evidence — the buyer wants a specific dated post
+    # by the company's social account, NOT a job listing)
+    r"(?:company|company's)\s+linkedin\s+page|"
+    r"(?:linkedin|twitter|\bx\b)\s+(?:page|account|profile)|"
+    r"company\s+page|"
+    r"brand\s+account"
+    r")\b",
+    re.IGNORECASE,
+)
+_SOCIAL_POSTING_PLATFORM_RE = re.compile(
+    r"\b("
+    r"linkedin|twitter|\bx\b|"
+    r"social\s+media|social\s+post"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _matches_social_posting(target_text: str) -> bool:
+    """Return True iff the target text describes a PERSON POSTING on a
+    SOCIAL PLATFORM.  All three triggers (posting verb + person subject +
+    platform) must be present in the same signal."""
+    if not target_text:
+        return False
+    return bool(
+        _SOCIAL_POSTING_VERB_RE.search(target_text)
+        and _SOCIAL_POSTING_PERSON_RE.search(target_text)
+        and _SOCIAL_POSTING_PLATFORM_RE.search(target_text)
+    )
+
 _FUNDING_RE = re.compile(
     r"\b("
     r"series\s+[a-fz]\b|"
@@ -137,6 +207,15 @@ _LINKEDIN_COMPANY_JOBS_RE = re.compile(r"^/company/[^/]+/jobs")  # /company/<slu
 _LINKEDIN_BARE_COMPANY_PAGE_RE = re.compile(r"^/company/[^/]+/?$")  # bare /company/<slug> — static profile, no event-specific evidence
 _LINKEDIN_PERSONAL_PROFILE_PREFIX = "/in/"            # /in/<slug> personal profile
 
+# SOCIAL_POSTING-acceptable URL patterns — exact post / activity links only.
+# Profile URLs ("/in/<slug>") are NOT acceptable for posting evidence — they
+# don't point at a specific dated post.  Same standard as HIRING requiring
+# /jobs/* not generic profile pages.
+_LINKEDIN_POSTS_PREFIX = "/posts/"                    # /posts/<id>
+_LINKEDIN_FEED_ACTIVITY_RE = re.compile(r"^/feed/update/urn:li:activity:\d+")
+_LINKEDIN_PULSE_PREFIX = "/pulse/"                    # /pulse/<slug>
+_X_TWEET_RE = re.compile(r"^/[^/]+/status/\d+")        # /<user>/status/<id>
+
 # Generic company-feed subpages: /company/<slug>/{posts,life,people,insights}
 # These are aggregated feeds or generic listing pages — none point at a
 # specific dated event, so they can't substantively back any intent claim.
@@ -155,16 +234,48 @@ _LINKEDIN_COMPANY_GENERIC_FEED_RE = re.compile(
 )
 
 
-def _classify_target_type(target_text: str) -> Optional[str]:
-    """Classify the TARGET ICP signal topic from target text only.
+def _classify_target_type(
+    target_text: str,
+    evidence_type_override: Optional[str] = None,
+) -> Optional[str]:
+    """Classify the TARGET ICP signal topic from target text.
 
-    Returns 'HIRING' | 'FUNDING' | None.  Used to pick which URL pre-filter
-    rules apply.  Deliberately ignores the miner's claim text — the target
-    is the source of truth for what topic the buyer is asking about.
+    Returns 'HIRING' | 'FUNDING' | 'SOCIAL_POSTING' | None.  Used to pick
+    which URL pre-filter rules apply.  Deliberately ignores the miner's
+    claim text — the target is the source of truth for what topic the
+    buyer is asking about.
+
+    When ``evidence_type_override`` is set (operator-confirmed via the
+    dashboard parse LLM), that wins over the regex classifier — there's
+    no risk of a topic word ("hiring") being misread as the URL-type
+    requirement.
+
+    Classifier order (when no override):
+      1. FUNDING       — funding-specific phrases (Series, raised $, etc.)
+      2. HIRING-STRONG — explicit job-listing language ("open positions",
+                         "job postings", "actively hiring for [role]")
+      3. SOCIAL_POSTING — all 3 triggers (verb + person subject + platform)
+      4. HIRING-WEAK   — fallback for bare "hire/hiring" word as topic
     """
+    # Operator-confirmed evidence_type wins — bypass regex classifier.
+    if evidence_type_override:
+        et = evidence_type_override.strip().upper()
+        if et in ("HIRING", "FUNDING", "SOCIAL_POSTING"):
+            return et
+        # CASE_STUDY, OTHER, or unknown → no URL pre-filter (defer to LLM)
+        return None
+
     t = target_text or ""
+    # 1) FUNDING wins first — very specific phrases
     if _FUNDING_RE.search(t):
         return "FUNDING"
+    # 2) HIRING-STRONG — explicit job-listing language, overrides social
+    if _HIRING_STRONG_RE.search(t):
+        return "HIRING"
+    # 3) SOCIAL_POSTING — all three triggers in same signal
+    if _matches_social_posting(t):
+        return "SOCIAL_POSTING"
+    # 4) HIRING-WEAK fallback — bare "hire/hiring" topic word
     if _HIRING_RE.search(t):
         return "HIRING"
     return None
@@ -348,6 +459,35 @@ def _check_intent_url_evidence_quality(
         # /press/news pages, even bare homepages) — defer to LLM, which
         # can read content to judge whether the round is on the page.
         return ("pass", "non_linkedin_defer")
+
+    if target_type == "SOCIAL_POSTING":
+        # Buyer asked for evidence of a SPECIFIC POST by a person.  Same
+        # standard as HIRING requiring /jobs/*: only EXACT POST URLs
+        # qualify — profile pages, generic feeds, bare company pages
+        # don't substantiate a specific dated post.
+        if "linkedin.com" in host:
+            #   /posts/<id>                    — specific LinkedIn post
+            #   /feed/update/urn:li:activity:* — specific activity post
+            #   /pulse/<slug>                  — specific Pulse article
+            if path.startswith(_LINKEDIN_POSTS_PREFIX):
+                return ("pass", "linkedin_posts_path")
+            if _LINKEDIN_FEED_ACTIVITY_RE.match(path):
+                return ("pass", "linkedin_feed_activity")
+            if path.startswith(_LINKEDIN_PULSE_PREFIX):
+                return ("pass", "linkedin_pulse_path")
+            # /jobs/* is wrong topic — buyer asked for a post, not a job.
+            # /in/<slug> is a profile, not a dated post — reject.
+            # /company/<slug>/posts/ is generic feed — universal layer
+            # already rejected that, but in case it slipped through:
+            return ("reject", "linkedin_not_a_specific_post")
+        if "twitter.com" in host or "x.com" in host:
+            #   /<user>/status/<id> — specific tweet
+            if _X_TWEET_RE.match(path):
+                return ("pass", "x_tweet_status_path")
+            return ("reject", "x_not_a_specific_tweet")
+        # Non-LinkedIn/X URLs — could be a company blog post, press
+        # mention, etc.  Defer to LLM to read content.
+        return ("pass", "non_social_defer")
 
     # No target_type — universal layer passed, no further rules to apply.
     return ("pass", "universal_passed_no_target_specific_rules")
@@ -603,6 +743,7 @@ async def precheck_lead_signals(
     api_key: Optional[str] = None,
     today_iso: Optional[str] = None,
     lead_company: str = "",
+    icp_intent_signal_evidence_types: Optional[List[Optional[str]]] = None,
 ) -> List[bool]:
     """Run the Gemini pre-check across one lead's intent signals.
 
@@ -634,6 +775,15 @@ async def precheck_lead_signals(
     today = today_iso or date.today().isoformat()
     icp_texts = list(icp_intent_signal_texts or [])
     num_icp = len(icp_texts)
+    # Per-target evidence_type override list, matched 1:1 with icp_texts.
+    # When the operator-confirmed value is present we use it instead of
+    # the regex classifier.  Length-mismatch or None → fall back to regex
+    # for every index.
+    icp_evidence_types: List[Optional[str]] = list(
+        icp_intent_signal_evidence_types or []
+    )
+    if len(icp_evidence_types) != num_icp:
+        icp_evidence_types = [None] * num_icp
     sem = asyncio.Semaphore(CONCURRENCY)
 
     async def _one(idx: int, signal) -> Tuple[int, bool, str]:
@@ -664,7 +814,10 @@ async def precheck_lead_signals(
             #    additionally fires only when target_type is known.
             # Both gates activated via INTENT_URL_PREFILTER_ENABLED.
             if URL_PREFILTER_ENABLED:
-                target_type = _classify_target_type(target_text)
+                target_type = _classify_target_type(
+                    target_text,
+                    evidence_type_override=icp_evidence_types[matched_idx],
+                )
                 claim_evidence_type = _classify_claim_evidence_type(miner_claim)
 
                 if (

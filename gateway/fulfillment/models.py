@@ -69,6 +69,21 @@ class IntentSignalSpec(BaseModel):
             "cap are rejected by the freshness gate."
         ),
     )
+    evidence_type: Optional[str] = Field(
+        default=None,
+        description=(
+            "Classification of what KIND of evidence URL this signal "
+            "requires.  Set at request creation by the dashboard parse "
+            "LLM (operator-editable).  Allowed values: "
+            "'HIRING' (literal job postings — LinkedIn /jobs/* required); "
+            "'FUNDING' (funding-event news); "
+            "'SOCIAL_POSTING' (LinkedIn/X post by a specific person — "
+            "exact-post URL required, not profile/feed); "
+            "'CASE_STUDY' (customer-win writeup); "
+            "'OTHER' (defer to LLM URL judgment); "
+            "None = legacy / unspecified, falls back to regex classifier."
+        ),
+    )
 
     # Tolerate (and discard) legacy ``is_scored`` keys that may still be
     # sitting in icp_details rows from the short window where the flag
@@ -101,6 +116,22 @@ class IntentSignalSpec(BaseModel):
             raise ValueError(f"recency_cap_days must be positive, got {n}")
         return n
 
+    @field_validator("evidence_type", mode="before")
+    @classmethod
+    def _coerce_evidence_type(cls, v):
+        if v is None or v == "":
+            return None
+        if not isinstance(v, str):
+            raise ValueError(f"evidence_type must be str or null, got {type(v).__name__}")
+        normalized = v.strip().upper().replace("-", "_").replace(" ", "_")
+        allowed = {"HIRING", "FUNDING", "SOCIAL_POSTING", "CASE_STUDY", "OTHER"}
+        if normalized not in allowed:
+            raise ValueError(
+                f"evidence_type must be one of {sorted(allowed)} or null, "
+                f"got {v!r}"
+            )
+        return normalized
+
 
 def _coerce_intent_signal_spec(entry) -> IntentSignalSpec:
     """Coerce one entry of the inbound ``intent_signals`` list into an
@@ -123,6 +154,7 @@ def _coerce_intent_signal_spec(entry) -> IntentSignalSpec:
             text=entry.get("text", entry.get("signal", entry.get("name", ""))),
             required=bool(entry.get("required", False)),
             recency_cap_days=entry.get("recency_cap_days"),
+            evidence_type=entry.get("evidence_type"),
         )
     raise ValueError(
         f"intent_signals entry must be str, dict, or IntentSignalSpec, "

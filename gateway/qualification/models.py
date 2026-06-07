@@ -108,6 +108,8 @@ class Seniority(str, Enum):
         aliases = {
             # C-Suite ----------------------------------------------------------
             "c_suite": cls.C_SUITE, "csuite": cls.C_SUITE, "c suite": cls.C_SUITE,
+            "c-level": cls.C_SUITE, "c level": cls.C_SUITE, "clevel": cls.C_SUITE,
+            "c-level executive": cls.C_SUITE, "c_level": cls.C_SUITE,
             "cxo": cls.C_SUITE, "chief": cls.C_SUITE,
             "ceo": cls.C_SUITE, "cfo": cls.C_SUITE, "cto": cls.C_SUITE,
             "coo": cls.C_SUITE, "cmo": cls.C_SUITE, "cro": cls.C_SUITE,

@@ -552,21 +552,43 @@ async def create_request(
         llm_classify_evidence_type,
     )
 
-    async def _autotag_evidence_type(spec):
+    async def _autotag_evidence_type(spec, idx: int):
+        text_preview = (spec.text or "")[:100].replace("\n", " ")
         # 1. Operator-confirmed → respect verbatim
         if spec.evidence_type is not None:
+            logger.info(
+                "create_request: signal#%d stage=operator result=%s text=%r",
+                idx, spec.evidence_type, text_preview,
+            )
             return spec
         # 2. Regex first (zero cost, deterministic)
         cls = _classify_target_type(spec.text)
         if cls is not None:
+            logger.info(
+                "create_request: signal#%d stage=regex result=%s text=%r",
+                idx, cls, text_preview,
+            )
             return spec.model_copy(update={"evidence_type": cls})
         # 3. LLM fallback (strict closed-enum prompt; 3 retries inside)
+        logger.info(
+            "create_request: signal#%d stage=regex result=None — falling "
+            "back to LLM; text=%r", idx, text_preview,
+        )
         cls = await llm_classify_evidence_type(spec.text)
         if cls is not None:
+            logger.info(
+                "create_request: signal#%d stage=llm result=%s text=%r",
+                idx, cls, text_preview,
+            )
             return spec.model_copy(update={"evidence_type": cls})
         # 4. Both failed → fail-closed.  Operator must rephrase the signal
         # so the classifier can resolve it, or set evidence_type manually
         # in the dashboard before re-submitting.
+        logger.error(
+            "create_request: signal#%d stage=failed — REJECTING request; "
+            "both regex and LLM classifiers returned None; text=%r",
+            idx, text_preview,
+        )
         raise HTTPException(
             status_code=400,
             detail=(
@@ -579,12 +601,13 @@ async def create_request(
             ).format(spec.text[:160]),
         )
 
-    icp.intent_signals = [
-        await _autotag_evidence_type(
-            spec.model_copy(update={"text": scrub_company_name(spec.text, company)})
+    tagged_signals = []
+    for idx, spec in enumerate(icp.intent_signals):
+        scrubbed = spec.model_copy(
+            update={"text": scrub_company_name(spec.text, company)}
         )
-        for spec in icp.intent_signals
-    ]
+        tagged_signals.append(await _autotag_evidence_type(scrubbed, idx))
+    icp.intent_signals = tagged_signals
     icp.target_roles = [scrub_company_name(s, company) for s in icp.target_roles]
 
     # Auto-expand target_roles into common variant spellings / near-

@@ -887,10 +887,16 @@ def _build_verification_prompt(row: Dict[str, Any]) -> str:
 
     Snapshot equality test: ``tests/test_prompt_refactor.py``.
     """
-    if row.get("_evidence_type") == "TECHSTACK":
+    et = row.get("_evidence_type")
+    sig_id = row.get("id", "?")
+    if et == "TECHSTACK":
+        logger.info("verify[%s]: prompt_route=techstack (PART E)", sig_id)
         return _prompts_techstack.build_verification_prompt(row)
-    if row.get("_evidence_type") == "SOCIAL_POSTING":
+    if et == "SOCIAL_POSTING":
+        logger.info("verify[%s]: prompt_route=social_posting (PART D)", sig_id)
         return _prompts_social.build_verification_prompt(row)
+    logger.info("verify[%s]: prompt_route=default evidence_type=%r",
+                sig_id, et)
     return _prompts_default.build_verification_prompt(row)
 
 

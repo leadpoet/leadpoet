@@ -483,6 +483,9 @@ def _classify_target_type(
     return None
 
 
+_evt_logger = logging.getLogger("evidence_type_classifier")
+
+
 async def llm_classify_evidence_type(text: str) -> Optional[str]:
     """Strict LLM classifier for evidence_type (Gemini Flash via OpenRouter).
 
@@ -496,8 +499,13 @@ async def llm_classify_evidence_type(text: str) -> Optional[str]:
     prompt prevents misspelling drift.  Caller decides whether None
     means "skip" (best-effort recycle path) or "raise HTTP 400"
     (create_request path).
+
+    Every attempt is logged to the ``evidence_type_classifier`` logger
+    with attempt number, HTTP status, raw response, normalized result,
+    and wall-clock latency so production failures can be traced
+    end-to-end from the gateway log.
     """
-    import aiohttp, asyncio, os
+    import aiohttp, asyncio, os, time as _time
     or_key = (
         os.environ.get("FULFILLMENT_OPENROUTER_API_KEY")
         or os.environ.get("OPENROUTER_API_KEY")
@@ -551,7 +559,9 @@ async def llm_classify_evidence_type(text: str) -> Optional[str]:
         "HIRING", "FUNDING", "SOCIAL_POSTING", "PODCAST_APPEARANCE",
         "TECHSTACK", "CASE_STUDY", "OTHER",
     }
+    text_preview = safe_text[:80].replace("\n", " ")
     for attempt in range(3):
+        t0 = _time.monotonic()
         try:
             timeout = aiohttp.ClientTimeout(total=20)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -571,10 +581,22 @@ async def llm_classify_evidence_type(text: str) -> Optional[str]:
                         "temperature": 0,
                     },
                 ) as resp:
+                    latency_ms = int((_time.monotonic() - t0) * 1000)
                     if resp.status == 429 and attempt < 2:
+                        _evt_logger.warning(
+                            "llm_classify_evidence_type attempt=%d/3 http=429 "
+                            "latency=%dms backoff=%ds text=%r",
+                            attempt + 1, latency_ms, 2 * (attempt + 1),
+                            text_preview,
+                        )
                         await asyncio.sleep(2 * (attempt + 1))
                         continue
                     if resp.status != 200:
+                        _evt_logger.warning(
+                            "llm_classify_evidence_type attempt=%d/3 http=%d "
+                            "latency=%dms text=%r",
+                            attempt + 1, resp.status, latency_ms, text_preview,
+                        )
                         if attempt < 2:
                             await asyncio.sleep(1)
                             continue
@@ -586,11 +608,28 @@ async def llm_classify_evidence_type(text: str) -> Optional[str]:
                            .replace("-", "_").replace(" ", "_")
                     )
                     if norm in allowed:
+                        _evt_logger.info(
+                            "llm_classify_evidence_type attempt=%d/3 OK "
+                            "latency=%dms result=%s text=%r",
+                            attempt + 1, latency_ms, norm, text_preview,
+                        )
                         return norm
+                    _evt_logger.warning(
+                        "llm_classify_evidence_type attempt=%d/3 BAD_OUTPUT "
+                        "latency=%dms raw=%r norm=%r text=%r",
+                        attempt + 1, latency_ms, raw[:50], norm,
+                        text_preview,
+                    )
                     if attempt < 2:
                         continue
                     return None
-        except Exception:
+        except Exception as e:
+            latency_ms = int((_time.monotonic() - t0) * 1000)
+            _evt_logger.warning(
+                "llm_classify_evidence_type attempt=%d/3 EXC=%s:%s "
+                "latency=%dms text=%r",
+                attempt + 1, type(e).__name__, e, latency_ms, text_preview,
+            )
             if attempt < 2:
                 await asyncio.sleep(1)
                 continue
@@ -1257,6 +1296,13 @@ async def precheck_lead_signals(
                         idx, target_type or "none", pre_reason, miner_url[:120],
                     )
                     return idx, False, f"url_evidence_quality_reject({pre_reason})"
+                # Pass-with-defer is logged at DEBUG so it's available for
+                # tracing without flooding INFO under normal load.
+                logger.debug(
+                    "Intent pre-check signal[%d] PASS (url-evidence-quality)  "
+                    "target_type=%s  reason=%s  url=%r",
+                    idx, target_type or "none", pre_reason, miner_url[:120],
+                )
 
             async with sem:
                 parsed, err = await _call_openrouter(

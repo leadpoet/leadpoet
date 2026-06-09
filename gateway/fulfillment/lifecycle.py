@@ -1733,13 +1733,19 @@ def _recycle_request(
                 _classify_target_type,
                 llm_classify_evidence_type,
             )
-            for sig in (successor_icp.get("intent_signals") or []):
+            successor_rid_short = (successor_icp.get("request_id") or "?")[:8]
+            for sig_idx, sig in enumerate(
+                successor_icp.get("intent_signals") or []
+            ):
                 if not isinstance(sig, dict):
                     continue
                 if sig.get("evidence_type"):
+                    # Operator value carried forward from parent.
                     continue
                 text = sig.get("text") or ""
+                text_preview = text[:100].replace("\n", " ")
                 cls = _classify_target_type(text)
+                stage = "regex"
                 if cls is None:
                     # Regex missed — try the strict LLM classifier.  This
                     # path runs in epoch_lifecycle (background task), so
@@ -1756,13 +1762,20 @@ def _recycle_request(
                         cls = loop.run_until_complete(
                             llm_classify_evidence_type(text)
                         )
+                    stage = "llm" if cls else "failed"
                 if cls:
                     sig["evidence_type"] = cls
+                    logger.info(
+                        "recycle[%s]: signal#%d stage=%s result=%s text=%r",
+                        successor_rid_short, sig_idx, stage, cls,
+                        text_preview,
+                    )
                 else:
                     logger.warning(
-                        "recycle: evidence_type autotag failed for signal "
-                        "%r (both regex and LLM); persisting null",
-                        text[:80],
+                        "recycle[%s]: signal#%d stage=failed — leaving "
+                        "evidence_type=null; both regex and LLM missed; "
+                        "text=%r",
+                        successor_rid_short, sig_idx, text_preview,
                     )
         except Exception as e:
             # Best-effort: classification failure must not block recycle.

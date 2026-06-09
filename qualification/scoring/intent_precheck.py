@@ -188,6 +188,76 @@ def _matches_social_posting(target_text: str) -> bool:
         and _SOCIAL_POSTING_PLATFORM_RE.search(target_text)
     )
 
+
+# PODCAST_APPEARANCE — fires when a podcast/interview/episode noun AND
+# either a person-role or company subject is present.  Distinct from
+# SOCIAL_POSTING (which requires a SHARING verb + social-media platform)
+# because podcast claims describe EVENT participation, not authorship of a
+# post.  Examples that should match:
+#   "CEO discussed AML strategy on a podcast"
+#   "Founder appeared on YouTube interview"
+#   "Company representative was a guest on the [Show Name] podcast"
+_PODCAST_APPEARANCE_NOUN_RE = re.compile(
+    r"\b("
+    r"podcast(?:s)?|"
+    r"podcast\s+(?:appearance|interview|episode)|"
+    r"video\s+interview|"
+    r"on(?:\s+the)?\s+podcast|"
+    r"guest(?:\s+on)?\b|"
+    r"interview(?:ed|ing)?\s+on|"
+    r"appeared\s+on|"
+    r"speaking\s+on|"
+    r"discussed\s+on(?:\s+the)?\s+(?:podcast|show|episode)|"
+    r"episode\s+of|"
+    r"youtube\s+interview"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Subject matcher for PODCAST_APPEARANCE — superset of SOCIAL_POSTING's
+# person matcher.  Adds generic podcast-context subjects (representative,
+# spokesperson, "company" alone) because podcast signals often phrase
+# the subject more loosely than social-posting signals ("Company guest on
+# a podcast", "Founder representative interviewed").  The downstream URL
+# precheck still requires a specific YouTube video URL, so being lenient
+# at the classification stage doesn't open up false-positive evidence —
+# it just routes more signals through the podcast verifier where actual
+# attribution is checked.
+_PODCAST_APPEARANCE_SUBJECT_RE = re.compile(
+    r"\b("
+    # Reuse all person roles from SOCIAL_POSTING
+    r"founder|co-?founder|"
+    r"ceo|cto|cro|cmo|cfo|coo|cso|"
+    r"chief\s+\w+\s+officer|"
+    r"president|owner|managing\s+(?:director|partner)|"
+    r"head\s+of\s+\w+|"
+    r"vp\s+(?:of\s+)?\w+|vice\s+president|"
+    r"director\s+of\s+\w+|"
+    r"executive|leader|manager|"
+    # Podcast-specific generic subjects
+    r"representative|spokesperson|company\s+representative|"
+    r"team\s+member|employee|"
+    # Entity subjects
+    r"company\b|"
+    r"brand\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _matches_podcast_appearance(target_text: str) -> bool:
+    """Return True iff the target text describes a PODCAST / INTERVIEW
+    APPEARANCE by someone (specific role or generic representative) from
+    the company.  Requires both:
+      - a podcast/interview noun phrase (podcast, episode, guest, interview)
+      - a person or company subject (lenient matcher; see notes above)
+    The verifier (PR-2) handles attribution at the URL level."""
+    if not target_text:
+        return False
+    if not _PODCAST_APPEARANCE_NOUN_RE.search(target_text):
+        return False
+    return bool(_PODCAST_APPEARANCE_SUBJECT_RE.search(target_text))
+
 _FUNDING_RE = re.compile(
     r"\b("
     r"series\s+[a-fz]\b|"
@@ -215,6 +285,17 @@ _LINKEDIN_POSTS_PREFIX = "/posts/"                    # /posts/<id>
 _LINKEDIN_FEED_ACTIVITY_RE = re.compile(r"^/feed/update/urn:li:activity:\d+")
 _LINKEDIN_PULSE_PREFIX = "/pulse/"                    # /pulse/<slug>
 _X_TWEET_RE = re.compile(r"^/[^/]+/status/\d+")        # /<user>/status/<id>
+
+# PODCAST_APPEARANCE-acceptable URL patterns — exact YouTube video URLs only.
+# Channel pages (/c/<slug>, /@<handle>, /channel/<id>) and playlists
+# (/playlist?list=<id>) are not acceptable evidence — they don't point at a
+# specific episode.  Same standard as HIRING requiring /jobs/<id> not a
+# generic profile page.  Other podcast platforms (Spotify, Apple Podcasts)
+# are deferred — the verifier (PR-2) is YouTube-only for now, so accepting
+# their URLs here would let leads through that the verifier can't process.
+_YOUTUBE_WATCH_RE = re.compile(r"^/watch")                   # /watch?v=<id>
+_YOUTUBE_SHORTS_RE = re.compile(r"^/shorts/[A-Za-z0-9_-]{11}")
+_YOUTUBE_EMBED_RE = re.compile(r"^/embed/[A-Za-z0-9_-]{11}")
 
 # Generic company-feed subpages: /company/<slug>/{posts,life,people,insights}
 # These are aggregated feeds or generic listing pages — none point at a
@@ -260,7 +341,7 @@ def _classify_target_type(
     # Operator-confirmed evidence_type wins — bypass regex classifier.
     if evidence_type_override:
         et = evidence_type_override.strip().upper()
-        if et in ("HIRING", "FUNDING", "SOCIAL_POSTING"):
+        if et in ("HIRING", "FUNDING", "SOCIAL_POSTING", "PODCAST_APPEARANCE"):
             return et
         # CASE_STUDY, OTHER, or unknown → no URL pre-filter (defer to LLM)
         return None
@@ -272,10 +353,17 @@ def _classify_target_type(
     # 2) HIRING-STRONG — explicit job-listing language, overrides social
     if _HIRING_STRONG_RE.search(t):
         return "HIRING"
-    # 3) SOCIAL_POSTING — all three triggers in same signal
+    # 3) PODCAST_APPEARANCE — podcast/interview noun + person-or-company
+    #    subject.  Runs before SOCIAL_POSTING because podcast-shaped
+    #    signals often also contain "LinkedIn" (e.g. "CEO discussed on
+    #    podcast that was shared on LinkedIn") and we want podcast
+    #    classification to win for those.
+    if _matches_podcast_appearance(t):
+        return "PODCAST_APPEARANCE"
+    # 4) SOCIAL_POSTING — all three triggers in same signal
     if _matches_social_posting(t):
         return "SOCIAL_POSTING"
-    # 4) HIRING-WEAK fallback — bare "hire/hiring" topic word
+    # 5) HIRING-WEAK fallback — bare "hire/hiring" topic word
     if _HIRING_RE.search(t):
         return "HIRING"
     return None
@@ -488,6 +576,48 @@ def _check_intent_url_evidence_quality(
         # Non-LinkedIn/X URLs — could be a company blog post, press
         # mention, etc.  Defer to LLM to read content.
         return ("pass", "non_social_defer")
+
+    if target_type == "PODCAST_APPEARANCE":
+        # Buyer asked for evidence of a podcast / video interview.  The
+        # verifier (PR-2) fetches video metadata + transcript from
+        # ScrapingDog's YouTube endpoints, so only YouTube watch / shorts /
+        # embed URLs can be processed.  Channel pages, playlist URLs, and
+        # other podcast platforms (Spotify, Apple Podcasts, SoundCloud) are
+        # deferred — the verifier can't currently extract transcripts from
+        # them, so accepting them here would let leads through that the
+        # downstream verifier rejects with no actionable feedback.
+        # Reject deterministically at the URL-shape gate (zero API cost)
+        # so miners get the specific failure reason.
+        if "youtube.com" in host or "youtu.be" in host:
+            if host.endswith("youtu.be"):
+                # https://youtu.be/<id> — short share form, any non-root path
+                if len(path.strip("/")) >= 11:
+                    return ("pass", "youtube_short_url")
+                return ("reject", "youtube_short_url_missing_id")
+            # youtube.com / m.youtube.com / www.youtube.com
+            if _YOUTUBE_WATCH_RE.match(path):
+                return ("pass", "youtube_watch_video")
+            if _YOUTUBE_SHORTS_RE.match(path):
+                return ("pass", "youtube_shorts_video")
+            if _YOUTUBE_EMBED_RE.match(path):
+                return ("pass", "youtube_embed_video")
+            # /channel/<id>, /c/<slug>, /@<handle>, /user/<name> — channel
+            # pages, not specific videos.
+            # /playlist?list=<id> — playlist of multiple videos, not one.
+            # /feed/* — feed pages.
+            return ("reject", "youtube_not_a_specific_video")
+        # Apple Podcasts / Spotify / etc — not yet supported by verifier.
+        # Reject explicitly with a clear reason so miners know YouTube is
+        # the only platform currently accepted.
+        if ("podcasts.apple.com" in host or
+            "open.spotify.com" in host or
+            "soundcloud.com" in host or
+            "anchor.fm" in host):
+            return ("reject", "podcast_platform_not_youtube")
+        # Non-podcast URLs (random blog posts, news articles, generic
+        # press) — buyer asked specifically for a podcast appearance, so
+        # a non-YouTube URL doesn't satisfy that.  Reject explicitly.
+        return ("reject", "not_a_youtube_url_for_podcast_claim")
 
     # No target_type — universal layer passed, no further rules to apply.
     return ("pass", "universal_passed_no_target_specific_rules")

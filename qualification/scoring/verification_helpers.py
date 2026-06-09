@@ -47,7 +47,15 @@ try:
     BS4_AVAILABLE = True
 except ImportError:
     BS4_AVAILABLE = False
-    logging.warning("BeautifulSoup not installed - HTML parsing will be limited")
+    # Primary HTML parser is trafilatura (see ``extract_article_body``
+    # below).  BeautifulSoup is only used for a rarely-hit fallback
+    # path, so the absence of bs4 isn't a real problem in production.
+    # Log at DEBUG so local-dev imports don't get a misleading WARNING.
+    logging.getLogger(__name__).debug(
+        "BeautifulSoup not installed — trafilatura still handles "
+        "primary HTML parsing; only the legacy BS4-fallback path is "
+        "degraded"
+    )
 
 from gateway.qualification.models import IntentSignal, IntentSignalSource
 from qualification.scoring.intent_signal_gate import (

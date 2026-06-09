@@ -860,6 +860,7 @@ _SYS_MESSAGE = (
 from qualification.scoring.prompts import default as _prompts_default
 from qualification.scoring.prompts import social_posting as _prompts_social
 from qualification.scoring.prompts import techstack as _prompts_techstack
+from qualification.scoring.prompts import podcast as _prompts_podcast
 from qualification.scoring.prompts._common import (
     lead_profile as _lead_profile_impl,
     visible_signal as _visible_signal_impl,
@@ -895,6 +896,9 @@ def _build_verification_prompt(row: Dict[str, Any]) -> str:
     if et == "SOCIAL_POSTING":
         logger.info("verify[%s]: prompt_route=social_posting (PART D)", sig_id)
         return _prompts_social.build_verification_prompt(row)
+    if et == "PODCAST_APPEARANCE":
+        logger.info("verify[%s]: prompt_route=podcast (PART F)", sig_id)
+        return _prompts_podcast.build_verification_prompt(row)
     logger.info("verify[%s]: prompt_route=default evidence_type=%r",
                 sig_id, et)
     return _prompts_default.build_verification_prompt(row)
@@ -913,6 +917,8 @@ def _build_final_judge_prompt(
         return _prompts_techstack.build_final_judge_prompt(row, contents, source_name)
     if row.get("_evidence_type") == "SOCIAL_POSTING":
         return _prompts_social.build_final_judge_prompt(row, contents, source_name)
+    if row.get("_evidence_type") == "PODCAST_APPEARANCE":
+        return _prompts_podcast.build_final_judge_prompt(row, contents, source_name)
     return _prompts_default.build_final_judge_prompt(row, contents, source_name)
 
 

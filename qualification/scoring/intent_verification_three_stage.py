@@ -890,17 +890,25 @@ def _build_verification_prompt(row: Dict[str, Any]) -> str:
     """
     et = row.get("_evidence_type")
     sig_id = row.get("id", "?")
+    # NOTE: print() (not logger.info) — the validator's root logger is at
+    # WARNING level which filters INFO records out of docker logs.  Audit
+    # routing tracing MUST be visible at the docker stdout level so
+    # operators can grep for it; print() satisfies that requirement
+    # regardless of the logging-config tree.
     if et == "TECHSTACK":
-        logger.info("verify[%s]: prompt_route=techstack (PART E)", sig_id)
+        print(f"   verify[{sig_id}]: prompt_route=techstack (PART E)",
+              flush=True)
         return _prompts_techstack.build_verification_prompt(row)
     if et == "SOCIAL_POSTING":
-        logger.info("verify[%s]: prompt_route=social_posting (PART D)", sig_id)
+        print(f"   verify[{sig_id}]: prompt_route=social_posting (PART D)",
+              flush=True)
         return _prompts_social.build_verification_prompt(row)
     if et == "PODCAST_APPEARANCE":
-        logger.info("verify[%s]: prompt_route=podcast (PART F)", sig_id)
+        print(f"   verify[{sig_id}]: prompt_route=podcast (PART F)",
+              flush=True)
         return _prompts_podcast.build_verification_prompt(row)
-    logger.info("verify[%s]: prompt_route=default evidence_type=%r",
-                sig_id, et)
+    print(f"   verify[{sig_id}]: prompt_route=default evidence_type={et!r}",
+          flush=True)
     return _prompts_default.build_verification_prompt(row)
 
 

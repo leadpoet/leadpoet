@@ -1718,6 +1718,29 @@ def _recycle_request(
         # the predecessor so audit trails stay clean across recycles.
         successor_icp = dict(original_request.get("icp_details") or {})
 
+        # Backfill evidence_type on inherited intent_signals.  Older chain
+        # roots were created before the dashboard parse-LLM started tagging
+        # evidence_type, so they propagate ``null`` forward forever.
+        # The deterministic regex classifier (also run at validation time
+        # in intent_precheck) tags HIRING / FUNDING / SOCIAL_POSTING when
+        # the signal text matches.  Re-run it on every recycle so newly-
+        # introduced regex coverage gets applied to long-running chains
+        # without requiring a one-off DB backfill.  Existing operator-set
+        # values are preserved verbatim — we only fill nulls.
+        try:
+            from qualification.scoring.intent_precheck import _classify_target_type
+            for sig in (successor_icp.get("intent_signals") or []):
+                if not isinstance(sig, dict):
+                    continue
+                if sig.get("evidence_type"):
+                    continue
+                cls = _classify_target_type(sig.get("text") or "")
+                if cls:
+                    sig["evidence_type"] = cls
+        except Exception as e:
+            # Best-effort: classification failure must not block recycle.
+            logger.warning(f"evidence_type autotag failed on recycle: {e}")
+
         # Refresh excluded_companies on every recycle.  The predecessor's
         # list was a snapshot at its creation time; in the meantime other
         # requests for the same client may have fulfilled, so their winner

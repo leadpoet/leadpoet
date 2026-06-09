@@ -538,8 +538,31 @@ async def create_request(
     # don't carry text and are operator-set. Mutate in place via
     # model_copy(update=...) so the validator's coercion runs once on
     # ingest (above) and we don't re-create dicts here.
+    #
+    # Also auto-classify ``evidence_type`` when the operator/dashboard
+    # left it null.  The downstream precheck (intent_precheck) runs the
+    # same regex classifier at validation time on every signal whose
+    # ``evidence_type`` is null, so persisting the classification here is
+    # behaviorally a no-op but makes the assignment explicit in
+    # ``icp_details`` — operators / dashboards / scripts can read,
+    # filter, and override without re-running the regex.  When the
+    # operator HAS set ``evidence_type`` (HIRING / FUNDING /
+    # SOCIAL_POSTING / CASE_STUDY / OTHER), we preserve it verbatim so
+    # an explicit override wins over the regex.
+    from qualification.scoring.intent_precheck import _classify_target_type
+
+    def _autotag_evidence_type(spec):
+        if spec.evidence_type is not None:
+            return spec  # operator-confirmed; respect verbatim
+        cls = _classify_target_type(spec.text)
+        if cls is None:
+            return spec  # regex doesn't recognize — leave null
+        return spec.model_copy(update={"evidence_type": cls})
+
     icp.intent_signals = [
-        spec.model_copy(update={"text": scrub_company_name(spec.text, company)})
+        _autotag_evidence_type(
+            spec.model_copy(update={"text": scrub_company_name(spec.text, company)})
+        )
         for spec in icp.intent_signals
     ]
     icp.target_roles = [scrub_company_name(s, company) for s in icp.target_roles]

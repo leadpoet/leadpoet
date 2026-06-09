@@ -859,6 +859,7 @@ _SYS_MESSAGE = (
 # ─────────────────────────────────────────────────────────────────────
 from qualification.scoring.prompts import default as _prompts_default
 from qualification.scoring.prompts import social_posting as _prompts_social
+from qualification.scoring.prompts import techstack as _prompts_techstack
 from qualification.scoring.prompts._common import (
     lead_profile as _lead_profile_impl,
     visible_signal as _visible_signal_impl,
@@ -886,6 +887,8 @@ def _build_verification_prompt(row: Dict[str, Any]) -> str:
 
     Snapshot equality test: ``tests/test_prompt_refactor.py``.
     """
+    if row.get("_evidence_type") == "TECHSTACK":
+        return _prompts_techstack.build_verification_prompt(row)
     if row.get("_evidence_type") == "SOCIAL_POSTING":
         return _prompts_social.build_verification_prompt(row)
     return _prompts_default.build_verification_prompt(row)
@@ -900,6 +903,8 @@ def _build_final_judge_prompt(
 
     Snapshot equality test: ``tests/test_prompt_refactor.py``.
     """
+    if row.get("_evidence_type") == "TECHSTACK":
+        return _prompts_techstack.build_final_judge_prompt(row, contents, source_name)
     if row.get("_evidence_type") == "SOCIAL_POSTING":
         return _prompts_social.build_final_judge_prompt(row, contents, source_name)
     return _prompts_default.build_final_judge_prompt(row, contents, source_name)
@@ -1159,6 +1164,7 @@ async def verify_three_stage(
     stage1_model: Optional[str] = None,
     stage3_model: Optional[str] = None,
     miner_signal_date: Optional[str] = None,
+    evidence_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """3-stage intent verification (sonar -> SD/Exa -> sonar-pro).
 
@@ -1201,6 +1207,11 @@ async def verify_three_stage(
         "signal_type": "intent",
         "claimed_source_urls": [source_url] if source_url else [],
         "_target_signal_text": target_signal_text,
+        # Dispatcher in _build_verification_prompt routes on this — TECHSTACK
+        # adds PART E (tech-stack anti-patterns), SOCIAL_POSTING adds PART D
+        # (author-role check), other values fall through to the default
+        # builder.  None is fine; the dispatcher's default branch handles it.
+        "_evidence_type": (evidence_type or "").strip().upper() or None,
     }
 
     # Structural same-entity override: when the source URL is on the

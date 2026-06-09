@@ -82,6 +82,10 @@ class IntentSignalSpec(BaseModel):
             "'CASE_STUDY' (customer-win writeup); "
             "'PODCAST_APPEARANCE' (podcast / video interview — "
             "exact YouTube watch URL required, not channel / playlist); "
+            "'TECHSTACK' (company-uses-tool claim — rejects vendor "
+            "comparison pages, integration listings, data-broker profile "
+            "pages, personal LinkedIn at URL-shape gate; LLM applies "
+            "per-tool anti-pattern rules); "
             "'OTHER' (defer to LLM URL judgment); "
             "None = legacy / unspecified, falls back to regex classifier."
         ),
@@ -127,7 +131,7 @@ class IntentSignalSpec(BaseModel):
             raise ValueError(f"evidence_type must be str or null, got {type(v).__name__}")
         normalized = v.strip().upper().replace("-", "_").replace(" ", "_")
         allowed = {"HIRING", "FUNDING", "SOCIAL_POSTING", "CASE_STUDY", "OTHER",
-                   "PODCAST_APPEARANCE"}
+                   "PODCAST_APPEARANCE", "TECHSTACK"}
         if normalized not in allowed:
             raise ValueError(
                 f"evidence_type must be one of {sorted(allowed)} or null, "

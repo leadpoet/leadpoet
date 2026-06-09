@@ -890,6 +890,19 @@ async def _score_single_intent_signal(
         if isinstance(target_signal_raw, dict)
         else str(target_signal_raw)
     )
+    # Pull spec.evidence_type off the matched ICP signal so the verifier's
+    # prompt dispatcher routes to the per-type module (PART D for
+    # SOCIAL_POSTING, PART E for TECHSTACK).  None passes through and the
+    # verifier falls back to the default builder — fail-open so signals
+    # whose evidence_type couldn't be classified still get a generic
+    # substance check rather than being silently dropped.
+    # Spec rows arrive as either a Pydantic IntentSignalSpec (has
+    # ``.evidence_type`` attribute) or a dict (legacy storage path) or
+    # a bare string (oldest legacy path with no metadata at all).
+    if isinstance(target_signal_raw, dict):
+        target_evidence_type = target_signal_raw.get("evidence_type")
+    else:
+        target_evidence_type = getattr(target_signal_raw, "evidence_type", None)
     import httpx
     try:
         async with httpx.AsyncClient() as http_client:
@@ -902,6 +915,7 @@ async def _score_single_intent_signal(
                 miner_claim=signal.description,
                 target_signal_text=target_signal_text,
                 miner_signal_date=(str(signal.date) if signal.date else None),
+                evidence_type=target_evidence_type,
             )
     except Exception as three_stage_error:
         logger.error(

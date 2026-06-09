@@ -1728,15 +1728,42 @@ def _recycle_request(
         # without requiring a one-off DB backfill.  Existing operator-set
         # values are preserved verbatim — we only fill nulls.
         try:
-            from qualification.scoring.intent_precheck import _classify_target_type
+            import asyncio as _asyncio
+            from qualification.scoring.intent_precheck import (
+                _classify_target_type,
+                llm_classify_evidence_type,
+            )
             for sig in (successor_icp.get("intent_signals") or []):
                 if not isinstance(sig, dict):
                     continue
                 if sig.get("evidence_type"):
                     continue
-                cls = _classify_target_type(sig.get("text") or "")
+                text = sig.get("text") or ""
+                cls = _classify_target_type(text)
+                if cls is None:
+                    # Regex missed — try the strict LLM classifier.  This
+                    # path runs in epoch_lifecycle (background task), so
+                    # if both fail we leave evidence_type None and rely
+                    # on downstream precheck rejection.  We never block a
+                    # recycle on a single bad signal — the chain is in
+                    # motion and there's no operator to ask.
+                    try:
+                        cls = _asyncio.run(llm_classify_evidence_type(text))
+                    except RuntimeError:
+                        # Already inside an event loop (recycle called
+                        # from an async caller) — schedule on existing.
+                        loop = _asyncio.get_event_loop()
+                        cls = loop.run_until_complete(
+                            llm_classify_evidence_type(text)
+                        )
                 if cls:
                     sig["evidence_type"] = cls
+                else:
+                    logger.warning(
+                        "recycle: evidence_type autotag failed for signal "
+                        "%r (both regex and LLM); persisting null",
+                        text[:80],
+                    )
         except Exception as e:
             # Best-effort: classification failure must not block recycle.
             logger.warning(f"evidence_type autotag failed on recycle: {e}")

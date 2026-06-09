@@ -258,6 +258,75 @@ def _matches_podcast_appearance(target_text: str) -> bool:
         return False
     return bool(_PODCAST_APPEARANCE_SUBJECT_RE.search(target_text))
 
+
+# TECHSTACK — fires when a sales / marketing / data tool noun AND a
+# usage verb are both present in the same signal.  Examples of signals
+# that match:
+#   "Company uses Salesforce as their CRM"
+#   "BuiltWith data shows recent adoption of HubSpot"
+#   "Job postings require Salesforce administration"
+#   "Tech stack includes Marketo and Outreach"
+# Examples that should NOT match (lack tool noun OR usage verb):
+#   "Company is hiring SDRs"                       — no tool noun
+#   "Founder posted on LinkedIn about hiring"      — no tool noun
+#   "Raised Series B"                              — no tool noun
+_TECHSTACK_TOOL_RE = re.compile(
+    r"\b("
+    # Sales & marketing tools
+    r"salesforce|hubspot|marketo|pardot|"
+    r"outreach|salesloft|apollo|gong|"
+    r"zoominfo|6sense|demandbase|clay|"
+    r"chili\s*piper|linkedin\s+sales\s+navigator|"
+    # Generic categories
+    r"crm\b|sales\s+engagement|sales\s+intelligence|"
+    r"marketing\s+automation|revops\s+(?:tool|stack|tooling)|"
+    r"tech\s+stack|techstack|tech-stack|"
+    # Data sources for tech stack claims
+    r"builtwith|wappalyzer|similartech"
+    r")\b",
+    re.IGNORECASE,
+)
+_TECHSTACK_USE_VERB_RE = re.compile(
+    r"\b("
+    r"uses?\b|using\b|deployed\b|adopted\b|adoption\b|adopting\b|"
+    r"implemented\b|implementing\b|"
+    r"standardiz(?:e|ed|ing|ation)|"
+    r"migrated\s+to|switched\s+to|moved\s+to|"
+    r"is\s+on\s+\w+|"
+    r"tech\s+stack|techstack|tech-stack|tooling|tool\s*kit|"
+    r"requires?\s+experience\s+with|"
+    r"requires?\s+\w+\s+certification|"
+    r"\w+\s+administration\b|\w+\s+certification\b|"
+    r"references?\b|reference\s+\w+\s+as|"
+    r"indicates?\s+active\s+use|shows?\s+\w+\s+adoption"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _matches_techstack(target_text: str) -> bool:
+    """Return True iff the target text describes a COMPANY USING A TOOL.
+    Requires both:
+      - a tool noun (Salesforce, HubSpot, CRM, tech stack, etc.)
+      - a usage verb / phrase (uses, deployed, requires experience with, etc.)
+
+    Placed BEFORE SOCIAL_POSTING in _classify_target_type because tech-stack
+    signals often phrase as "Job postings on LinkedIn mention Salesforce as
+    required" — both LinkedIn (social-platform trigger) and Salesforce (tool
+    noun) appear in the same text.  TECHSTACK is the more specific intent
+    and should win.
+
+    The downstream URL precheck rejects vendor comparison / integration /
+    data-broker URL shapes; PART E (specialty prompt) enforces the harder
+    anti-patterns at LLM substance time."""
+    if not target_text:
+        return False
+    return bool(
+        _TECHSTACK_TOOL_RE.search(target_text)
+        and _TECHSTACK_USE_VERB_RE.search(target_text)
+    )
+
+
 _FUNDING_RE = re.compile(
     r"\b("
     r"series\s+[a-fz]\b|"
@@ -296,6 +365,42 @@ _X_TWEET_RE = re.compile(r"^/[^/]+/status/\d+")        # /<user>/status/<id>
 _YOUTUBE_WATCH_RE = re.compile(r"^/watch")                   # /watch?v=<id>
 _YOUTUBE_SHORTS_RE = re.compile(r"^/shorts/[A-Za-z0-9_-]{11}")
 _YOUTUBE_EMBED_RE = re.compile(r"^/embed/[A-Za-z0-9_-]{11}")
+
+# TECHSTACK URL anti-patterns.  Documented from a production audit of the
+# Techstack request (148 unique URLs, 25 hand-examined, ~48% INVALID).  All
+# patterns below are zero-cost deterministic rejections; matched at the
+# URL-shape gate so miners get a specific failure reason and no API budget
+# is spent fetching the URL contents.
+#
+# Anti-pattern 1: VENDOR_MARKETING — vendor's own comparison pages like
+#   `6sense.com/tech/cyber-security/industrialdefender-vs-mitre`.  Path
+#   shape is `/tech/.../X-vs-Y` or `/compare/.../X-vs-Y` (case insensitive,
+#   path may include intermediate category segments before the X-vs-Y
+#   leaf).
+_TECHSTACK_VENDOR_COMPARE_RE = re.compile(
+    r"/(?:tech|compare)/.*?-vs-[^/]+", re.IGNORECASE,
+)
+# Anti-pattern 2: PRODUCT_INTEGRATION — integration listings and
+# integration directory pages.  Matches:
+#   /integrations/ (e.g. acme.com/integrations/salesforce)
+#   /integration/  (singular variant)
+#   /integrations  at end of path (no trailing slash)
+#   -integrations  as a suffix on the LAST path segment (e.g.
+#     carahsoft.com/resources/15571-industrial-defender-integrations)
+_TECHSTACK_INTEGRATION_RE = re.compile(
+    r"(?:^|/)integrations?(?:/|$)|-integrations(?:/|$)", re.IGNORECASE,
+)
+# Anti-pattern 4: DATA_BROKER — generic company profile pages on data
+# brokers don't substantiate specific tech usage.
+_ZOOMINFO_PROFILE_RE = re.compile(r"^/c/")
+_CRUNCHBASE_ORG_RE = re.compile(r"^/organization/")
+_GROWJO_COMPANY_RE = re.compile(r"^/company/[^/]+/?$")
+_APOLLO_COMPANIES_RE = re.compile(r"^/companies/")
+# Builtin lists BOTH /company/<slug> (profile) AND /job/<id>/<slug> (job
+# posting that may legitimately require a tool).  Only reject the bare
+# /company/<slug> form — job postings under /jobs/ or /job/ stay routed
+# through the LLM substance check.
+_BUILTIN_COMPANY_PROFILE_RE = re.compile(r"^/company/[^/]+/?$")
 
 # Generic company-feed subpages: /company/<slug>/{posts,life,people,insights}
 # These are aggregated feeds or generic listing pages — none point at a
@@ -341,7 +446,8 @@ def _classify_target_type(
     # Operator-confirmed evidence_type wins — bypass regex classifier.
     if evidence_type_override:
         et = evidence_type_override.strip().upper()
-        if et in ("HIRING", "FUNDING", "SOCIAL_POSTING", "PODCAST_APPEARANCE"):
+        if et in ("HIRING", "FUNDING", "SOCIAL_POSTING", "PODCAST_APPEARANCE",
+                  "TECHSTACK"):
             return et
         # CASE_STUDY, OTHER, or unknown → no URL pre-filter (defer to LLM)
         return None
@@ -350,22 +456,117 @@ def _classify_target_type(
     # 1) FUNDING wins first — very specific phrases
     if _FUNDING_RE.search(t):
         return "FUNDING"
-    # 2) HIRING-STRONG — explicit job-listing language, overrides social
+    # 2) TECHSTACK — tool noun + usage verb.  Runs BEFORE HIRING-STRONG
+    #    and SOCIAL_POSTING because tech-stack signals frequently mention
+    #    "Job postings on LinkedIn require Salesforce" — both job-posting
+    #    and LinkedIn triggers would fire, but the SPECIFIC intent is the
+    #    tech-stack adoption check.  The PART E prompt + tighter URL
+    #    rejection rules handle the actual substance verification.
+    if _matches_techstack(t):
+        return "TECHSTACK"
+    # 3) HIRING-STRONG — explicit job-listing language, overrides social
     if _HIRING_STRONG_RE.search(t):
         return "HIRING"
-    # 3) PODCAST_APPEARANCE — podcast/interview noun + person-or-company
+    # 4) PODCAST_APPEARANCE — podcast/interview noun + person-or-company
     #    subject.  Runs before SOCIAL_POSTING because podcast-shaped
     #    signals often also contain "LinkedIn" (e.g. "CEO discussed on
     #    podcast that was shared on LinkedIn") and we want podcast
     #    classification to win for those.
     if _matches_podcast_appearance(t):
         return "PODCAST_APPEARANCE"
-    # 4) SOCIAL_POSTING — all three triggers in same signal
+    # 5) SOCIAL_POSTING — all three triggers in same signal
     if _matches_social_posting(t):
         return "SOCIAL_POSTING"
-    # 5) HIRING-WEAK fallback — bare "hire/hiring" topic word
+    # 6) HIRING-WEAK fallback — bare "hire/hiring" topic word
     if _HIRING_RE.search(t):
         return "HIRING"
+    return None
+
+
+async def llm_classify_evidence_type(text: str) -> Optional[str]:
+    """Strict LLM classifier for evidence_type (Gemini Flash via OpenRouter).
+
+    Returns one of the canonical upper-case enum strings:
+      HIRING | FUNDING | SOCIAL_POSTING | PODCAST_APPEARANCE |
+      TECHSTACK | CASE_STUDY | OTHER
+    or None on final failure (after 3 retries).
+
+    Used as a fallback when the deterministic regex classifier in
+    ``_classify_target_type`` returns None.  The closed enum + explicit
+    prompt prevents misspelling drift.  Caller decides whether None
+    means "skip" (best-effort recycle path) or "raise HTTP 400"
+    (create_request path).
+    """
+    import aiohttp, asyncio, os
+    or_key = (
+        os.environ.get("FULFILLMENT_OPENROUTER_API_KEY")
+        or os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("OPENROUTER_KEY")
+        or ""
+    )
+    if not or_key:
+        return None
+    prompt = (
+        "Classify the buyer-side intent signal below into EXACTLY ONE of\n"
+        "the seven categories.  Reply with ONLY the category string (no\n"
+        "JSON, no quotes, no explanation).\n\n"
+        "CATEGORIES:\n"
+        "  HIRING              — open job postings, active recruitment\n"
+        "  FUNDING             — series A/B/C, raised $, closed seed\n"
+        "  SOCIAL_POSTING      — posts on LinkedIn / X by a person\n"
+        "  PODCAST_APPEARANCE  — guest on podcast / video interview\n"
+        "  TECHSTACK           — uses a specific tool / CRM / sales tech\n"
+        "  CASE_STUDY          — published case study, customer story\n"
+        "  OTHER               — none of the above\n\n"
+        f"SIGNAL: \"{text}\"\n\n"
+        "CATEGORY:"
+    )
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    allowed = {
+        "HIRING", "FUNDING", "SOCIAL_POSTING", "PODCAST_APPEARANCE",
+        "TECHSTACK", "CASE_STUDY", "OTHER",
+    }
+    for attempt in range(3):
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {or_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "google/gemini-2.5-flash-lite",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 16,
+                        "temperature": 0,
+                    },
+                ) as resp:
+                    if resp.status == 429 and attempt < 2:
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    if resp.status != 200:
+                        if attempt < 2:
+                            await asyncio.sleep(1)
+                            continue
+                        return None
+                    body = await resp.json()
+                    raw = body["choices"][0]["message"]["content"] or ""
+                    norm = (
+                        raw.strip().strip("\"'`. ").upper()
+                           .replace("-", "_").replace(" ", "_")
+                    )
+                    if norm in allowed:
+                        return norm
+                    if attempt < 2:
+                        continue
+                    return None
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(1)
+                continue
+            return None
     return None
 
 
@@ -618,6 +819,56 @@ def _check_intent_url_evidence_quality(
         # press) — buyer asked specifically for a podcast appearance, so
         # a non-YouTube URL doesn't satisfy that.  Reject explicitly.
         return ("reject", "not_a_youtube_url_for_podcast_claim")
+
+    if target_type == "TECHSTACK":
+        # Eight production-audited anti-patterns, all rejected at zero API
+        # cost.  Remaining patterns (REPLACED, TANGENTIAL, WRONG_COMPANY,
+        # PREVIOUS_EMPLOYER, PRODUCT_INTEGRATION semantic check) require
+        # reading the page content and are enforced by PART E of the
+        # TECHSTACK verification prompt.
+
+        # 1. VENDOR_MARKETING — vendor's own comparison pages like
+        #    `/tech/X-vs-Y` (e.g. 6sense.com/tech/...).
+        if _TECHSTACK_VENDOR_COMPARE_RE.search(path):
+            return ("reject", "techstack_vendor_comparison_page")
+
+        # 2. PRODUCT_INTEGRATION — vendor's "X integrates with our product"
+        #    pages substantiate integration availability, not target's
+        #    internal tool usage.  Canonical shapes:
+        #       /integrations/ or /integration/ as a path segment
+        #       trailing -integrations slug (e.g. carahsoft.com
+        #         /resources/<id>-<vendor>-integrations)
+        if _TECHSTACK_INTEGRATION_RE.search(path):
+            return ("reject", "techstack_integration_listing")
+
+        # 4. DATA_BROKER — generic company profile pages without
+        #    tool-specific assertions.
+        if "zoominfo.com" in host and _ZOOMINFO_PROFILE_RE.match(path):
+            return ("reject", "techstack_zoominfo_profile")
+        if "crunchbase.com" in host and _CRUNCHBASE_ORG_RE.match(path):
+            return ("reject", "techstack_crunchbase_profile")
+        if "growjo.com" in host and _GROWJO_COMPANY_RE.match(path):
+            return ("reject", "techstack_growjo_profile")
+        if "apollo.io" in host and _APOLLO_COMPANIES_RE.match(path):
+            return ("reject", "techstack_apollo_profile")
+        # Builtin: only reject /company/<slug> profile pages — job
+        # postings under /job/ or /jobs/ may legitimately list tool
+        # requirements and stay routed through the LLM check.
+        if ("builtin.com" in host
+            and _BUILTIN_COMPANY_PROFILE_RE.match(path)
+            and not path.lower().startswith(("/job/", "/jobs/"))):
+            return ("reject", "techstack_builtin_company_profile")
+
+        # 6. PERSONAL_PROFILE — individual LinkedIn pages.  Personal
+        #    profiles don't substantiate company tech choices even if the
+        #    person works at the target company.
+        if "linkedin.com" in host and path.startswith("/in/"):
+            return ("reject", "techstack_linkedin_personal_profile")
+
+        # All remaining anti-patterns (REPLACED, TANGENTIAL, WRONG_COMPANY,
+        # PREVIOUS_EMPLOYER, semantic-level VENDOR_MARKETING) require page
+        # text — defer to PART E in the LLM verifier.
+        return ("pass", "techstack_defer")
 
     # No target_type — universal layer passed, no further rules to apply.
     return ("pass", "universal_passed_no_target_specific_rules")

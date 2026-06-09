@@ -540,27 +540,47 @@ async def create_request(
     # ingest (above) and we don't re-create dicts here.
     #
     # Also auto-classify ``evidence_type`` when the operator/dashboard
-    # left it null.  The downstream precheck (intent_precheck) runs the
-    # same regex classifier at validation time on every signal whose
-    # ``evidence_type`` is null, so persisting the classification here is
-    # behaviorally a no-op but makes the assignment explicit in
-    # ``icp_details`` — operators / dashboards / scripts can read,
-    # filter, and override without re-running the regex.  When the
-    # operator HAS set ``evidence_type`` (HIRING / FUNDING /
-    # SOCIAL_POSTING / CASE_STUDY / OTHER), we preserve it verbatim so
-    # an explicit override wins over the regex.
-    from qualification.scoring.intent_precheck import _classify_target_type
+    # left it null.  Two-stage classifier — fast deterministic regex
+    # first, strict LLM fall-back second.  Both produce values from the
+    # closed enum {HIRING, FUNDING, SOCIAL_POSTING, CASE_STUDY, OTHER,
+    # PODCAST_APPEARANCE, TECHSTACK}.  After this block runs every spec
+    # HAS a non-null evidence_type — if classification fails after
+    # retries, we raise HTTP 400 so the operator gets actionable
+    # feedback instead of a silent fail-open.
+    from qualification.scoring.intent_precheck import (
+        _classify_target_type,
+        llm_classify_evidence_type,
+    )
 
-    def _autotag_evidence_type(spec):
+    async def _autotag_evidence_type(spec):
+        # 1. Operator-confirmed → respect verbatim
         if spec.evidence_type is not None:
-            return spec  # operator-confirmed; respect verbatim
+            return spec
+        # 2. Regex first (zero cost, deterministic)
         cls = _classify_target_type(spec.text)
-        if cls is None:
-            return spec  # regex doesn't recognize — leave null
-        return spec.model_copy(update={"evidence_type": cls})
+        if cls is not None:
+            return spec.model_copy(update={"evidence_type": cls})
+        # 3. LLM fallback (strict closed-enum prompt; 3 retries inside)
+        cls = await llm_classify_evidence_type(spec.text)
+        if cls is not None:
+            return spec.model_copy(update={"evidence_type": cls})
+        # 4. Both failed → fail-closed.  Operator must rephrase the signal
+        # so the classifier can resolve it, or set evidence_type manually
+        # in the dashboard before re-submitting.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "evidence_type_classification_failed: could not assign an "
+                "evidence_type to intent_signal {!r}.  Please rephrase the "
+                "signal so it clearly indicates HIRING / FUNDING / "
+                "SOCIAL_POSTING / PODCAST_APPEARANCE / TECHSTACK / "
+                "CASE_STUDY / OTHER, or set evidence_type explicitly when "
+                "creating the request."
+            ).format(spec.text[:160]),
+        )
 
     icp.intent_signals = [
-        _autotag_evidence_type(
+        await _autotag_evidence_type(
             spec.model_copy(update={"text": scrub_company_name(spec.text, company)})
         )
         for spec in icp.intent_signals

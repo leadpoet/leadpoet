@@ -881,37 +881,66 @@ async def queue_model_for_evaluation(
     code_hash: str,
     miner_hotkey: str,
     model_name: Optional[str] = None,
-    icp_set_id: int = 1,
+    icp_set_id: Optional[int] = None,
     stage: str = "final"
 ) -> Dict[str, Any]:
     """
     Queue a newly submitted model for evaluation.
-    
+
     This is called automatically from submit.py after a model is submitted.
     It downloads the model from S3 and creates work for validators.
-    
+
     Args:
         model_id: The model UUID
         s3_key: S3 key where model tarball is stored
         code_hash: SHA256 hash of the model code
         miner_hotkey: The miner's Bittensor hotkey
         model_name: Optional display name for the model
-        icp_set_id: Which ICP set to use for evaluation (default 1)
+        icp_set_id: Which ICP set to use for evaluation.  When None,
+            resolves to the currently-active daily set via
+            ``get_active_icp_set()``.  Hard-coding to 1 (the historical
+            default) broke the dashboard leaderboard view, which filters
+            by current active set_id — observed 2026-06-10 with 815
+            evaluated models all tagged set_id=1 while active was the
+            date-keyed 20260610.
         stage: Evaluation stage ("screening" or "final")
-    
+
     Returns:
         Dict with evaluation_id and runs_queued
     """
-    logger.info(f"Queueing model for evaluation: model_id={model_id[:8]}..., s3_key={s3_key}")
-    
+    # Resolve active set when caller didn't specify one.
+    if icp_set_id is None:
+        try:
+            from gateway.tasks.icp_generator import get_active_icp_set
+            active = await get_active_icp_set()
+            if active and active.get("set_id"):
+                icp_set_id = active["set_id"]
+                logger.info(
+                    f"Resolved icp_set_id={icp_set_id} from active "
+                    f"daily set"
+                )
+            else:
+                icp_set_id = 1
+                logger.warning(
+                    "No active ICP set found; falling back to icp_set_id=1"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to resolve active ICP set ({e}); "
+                f"falling back to icp_set_id=1"
+            )
+            icp_set_id = 1
+
+    logger.info(f"Queueing model for evaluation: model_id={model_id[:8]}..., s3_key={s3_key}, icp_set_id={icp_set_id}")
+
     # Fetch model code from S3
     model_code = await fetch_model_code(s3_key)
-    
+
     if not model_code:
         logger.error(f"Failed to download model from S3: {s3_key}")
         # Still queue it - validator will retry download
         model_code = b""
-    
+
     # Fetch ICP set (returns tuple of (icps, icp_set_hash))
     icp_result = await get_icp_set(icp_set_id)
     if not icp_result or not icp_result[0]:

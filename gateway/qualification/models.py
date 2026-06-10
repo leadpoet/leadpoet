@@ -581,7 +581,20 @@ class ICPPrompt(BaseModel):
     country: str = Field("", description="Target country (extracted)")
     product_service: str = Field(..., description="Product/service being sold")
     intent_signals: List[str] = Field(default_factory=list, description="Intent signals to look for")
-    
+    # Sibling list mapping 1:1 to ``intent_signals`` carrying the
+    # buyer-side evidence_type for each signal (HIRING / FUNDING /
+    # SOCIAL_POSTING / PODCAST_APPEARANCE / TECHSTACK / CASE_STUDY /
+    # OTHER / None).  Populated by ``FulfillmentICP.to_icp_prompt`` when
+    # the source spec carries structured signals; left empty for legacy
+    # qualification ICPs that only have a plain text list.  Consumers
+    # (lead_scorer.py) prefer this when present; absence means
+    # ``evidence_type=None`` and the downstream prompt dispatcher falls
+    # through to the default builder (legacy-compat behavior).
+    intent_signal_evidence_types: List[Optional[str]] = Field(
+        default_factory=list,
+        description="Per-signal evidence_type aligned to intent_signals index",
+    )
+
     # Legacy fields for backward compatibility
     target_role: Optional[str] = Field(None, description="DEPRECATED: Use target_roles list")
     additional_context: Optional[str] = Field(None, description="DEPRECATED: Use intent_signals list")

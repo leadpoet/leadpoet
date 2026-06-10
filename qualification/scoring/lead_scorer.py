@@ -892,17 +892,33 @@ async def _score_single_intent_signal(
     )
     # Pull spec.evidence_type off the matched ICP signal so the verifier's
     # prompt dispatcher routes to the per-type module (PART D for
-    # SOCIAL_POSTING, PART E for TECHSTACK).  None passes through and the
-    # verifier falls back to the default builder — fail-open so signals
-    # whose evidence_type couldn't be classified still get a generic
-    # substance check rather than being silently dropped.
-    # Spec rows arrive as either a Pydantic IntentSignalSpec (has
-    # ``.evidence_type`` attribute) or a dict (legacy storage path) or
-    # a bare string (oldest legacy path with no metadata at all).
-    if isinstance(target_signal_raw, dict):
-        target_evidence_type = target_signal_raw.get("evidence_type")
-    else:
-        target_evidence_type = getattr(target_signal_raw, "evidence_type", None)
+    # SOCIAL_POSTING, PART E for TECHSTACK, PART F for
+    # PODCAST_APPEARANCE).  None passes through and the verifier falls
+    # back to the default builder — fail-open so signals whose
+    # evidence_type couldn't be classified still get a generic substance
+    # check rather than being silently dropped.
+    #
+    # PRIMARY source: ``icp.intent_signal_evidence_types`` (sibling list
+    # indexed alongside ``intent_signals``).  Populated by
+    # ``FulfillmentICP.to_icp_prompt`` from the structured spec.  This
+    # exists because ``to_icp_prompt`` collapses ``intent_signals`` to a
+    # plain ``List[str]`` for back-compat with the qualification LLM
+    # prompt, so we can't reach back through the now-stringified entry
+    # to find the structured ``evidence_type`` field.
+    target_evidence_type = None
+    icp_ets = getattr(icp, "intent_signal_evidence_types", None) or []
+    if isinstance(icp_ets, list) and miner_asserted_idx < len(icp_ets):
+        target_evidence_type = icp_ets[miner_asserted_idx]
+    # Legacy fallback: if the sibling list isn't populated, attempt to
+    # read from the raw entry — handles the rare case where lead_scorer
+    # was called with a structured spec list directly (e.g. unit tests).
+    if target_evidence_type is None:
+        if isinstance(target_signal_raw, dict):
+            target_evidence_type = target_signal_raw.get("evidence_type")
+        else:
+            target_evidence_type = getattr(
+                target_signal_raw, "evidence_type", None,
+            )
     import httpx
     try:
         async with httpx.AsyncClient() as http_client:

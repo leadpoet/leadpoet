@@ -917,6 +917,15 @@ class FulfillmentICP(BaseModel):
         # surfaced inside the per-signal LLM scoring prompt where it
         # would be irrelevant.
         intent_signal_texts = [s.text for s in self.intent_signals]
+        # Carry buyer-side evidence_type forward in a sibling list so the
+        # downstream lead_scorer + verifier dispatcher can route signals
+        # to PART E / PART F / PART D specialty prompts.  Without this,
+        # ``intent_signals`` collapses to plain ``List[str]`` and the
+        # spec's evidence_type is lost in translation — observed
+        # 2026-06-10 as `verify[signal-1]: prompt_route=default
+        # evidence_type=None` lines on every fulfillment signal even
+        # though the persisted spec had the correct enum.
+        intent_signal_ets = [s.evidence_type for s in self.intent_signals]
         return ICPPrompt(
             icp_id=self.icp_id,
             prompt=self.prompt,
@@ -930,6 +939,7 @@ class FulfillmentICP(BaseModel):
             country=country_str,
             product_service=self.product_service,
             intent_signals=intent_signal_texts,
+            intent_signal_evidence_types=intent_signal_ets,
         )
 
 

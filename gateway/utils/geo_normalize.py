@@ -28,8 +28,8 @@ with open(_geo_path, 'r', encoding='utf-8') as _f:
 # Build sets for O(1) validation lookups
 VALID_COUNTRIES_SET = set(_geo_data['countries'])
 US_STATES_SET = set(_geo_data['us_states'].keys())
-US_CITIES_BY_STATE = {state: set(cities) for state, cities in _geo_data['us_states'].items()}
-CITIES_BY_COUNTRY = {country: set(cities) for country, cities in _geo_data['cities'].items()}
+US_CITIES_BY_STATE = {state: {c.lower() for c in cities} for state, cities in _geo_data['us_states'].items()}
+CITIES_BY_COUNTRY = {country: {c.lower() for c in cities} for country, cities in _geo_data['cities'].items()}
 STATE_ABBR_TO_NAME = _geo_data['state_abbr']
 
 # Build proper case mapping for US states (lowercase -> Proper Case)

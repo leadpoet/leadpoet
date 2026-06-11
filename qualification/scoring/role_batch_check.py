@@ -32,7 +32,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-MODEL = "google/gemini-2.5-flash-lite"
+MODEL = "google/gemini-2.5-flash"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 TIMEOUT_SECONDS = 30
 NUM_RETRIES = 3
@@ -52,6 +52,56 @@ DEFAULT TO REJECT.  Accept only when the lead's role clearly belongs to
 the same function family AND the same seniority bucket as at least one
 target.  Title-word overlap (CTO vs CRO, VP Eng vs VP Sales) does NOT
 imply a match — function and seniority must both line up.
+
+==== NORMALIZATION (apply BEFORE every rule below) ====
+
+Treat the following C-level abbreviations as EQUIVALENT to their full
+forms in BOTH the candidate's title AND the target_roles list.  This
+applies before R0/R1/F1/F2 evaluation — when the candidate's title says
+"COO" and a target says "Chief Operating Officer", they are the SAME
+string for all rule purposes.  Match the abbreviation only when it
+appears as a standalone token (separated by spaces, slashes, commas,
+or other separators) — not as part of an unrelated word.
+
+  CEO  ↔ Chief Executive Officer
+  COO  ↔ Chief Operating Officer
+  CTO  ↔ Chief Technology Officer
+  CIO  ↔ Chief Information Officer
+  CFO  ↔ Chief Financial Officer
+  CMO  ↔ Chief Marketing Officer
+  CRO  ↔ Chief Revenue Officer (NOT Conversion Rate Optimization —
+                                see EDGE CASE GUIDANCE on marketing CROs)
+  CSO  ↔ Chief Sales Officer (or Chief Strategy Officer — judge by context)
+  CCO  ↔ Chief Customer Officer (or Chief Commercial Officer)
+  CPO  ↔ Chief Product Officer (or Chief People Officer — judge by context)
+  CDO  ↔ Chief Data Officer (or Chief Digital Officer — judge by context)
+  CISO ↔ Chief Information Security Officer
+  CHRO ↔ Chief Human Resources Officer
+
+  VP   ↔ Vice President
+  SVP  ↔ Senior Vice President
+  EVP  ↔ Executive Vice President
+  AVP  ↔ Associate / Assistant Vice President  (lower seniority — see SENIORITY BUCKETS)
+
+  Director equivalents:
+    Dir, Sr Dir, Sr Director, Senior Director  ↔ Director
+
+  Functional acronyms in titles (treat as the full noun):
+    BD   = Business Development
+    GTM  = Go-to-Market
+    RevOps = Revenue Operations
+    SalesOps = Sales Operations
+    IT   = Information Technology
+
+EXAMPLE OF APPLYING NORMALIZATION:
+  Candidate: "COO | Operations Director | Operational Excellence | CX |"
+  Target:    "Chief Operating Officer"
+  → After NORMALIZATION, candidate's primary segment "COO" reads as
+    "Chief Operating Officer", which EXACTLY equals the target.
+  → R1's "primary role is first segment" still applies — primary is
+    still the FIRST segment ("COO" → "Chief Operating Officer"), the
+    other segments are still secondary.
+  → F1 fires (target string equals primary string after normalization) → ACCEPT.
 
 ==== ABSOLUTE REJECTS (apply BEFORE fast-path accept rules) ====
 
@@ -108,6 +158,12 @@ FUNCTION CHANGE.
    (line "Industry-specific role when ICP doesn't require...") because
    the rejected industry qualifier here is attached to a TARGET ROLE,
    not the candidate's primary job.
+   *** CRITICAL: If a candidate's primary segment, after NORMALIZATION,
+   EXACTLY contains every word of a target role, ACCEPT regardless of
+   trailing industry qualifiers — "Chief Operating Officer - Banking
+   and Insurance" matches target "Chief Operating Officer" even though
+   "Banking" and "Insurance" are industry qualifiers.  Do not invoke
+   the industry-mismatch reject rule when F1 fires. ***
 
 RULE F2 — SALES-FAMILY EQUIVALENT (when ANY target is sales-family):
 If the target_roles list contains ANY role with the words "Sales",

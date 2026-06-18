@@ -1,0 +1,15 @@
+{
+  "ledger_row_id": "55555555-5555-4555-8555-555555555555",
+  "schema_version": "1.0",
+  "trajectory_id": "11111111-1111-4111-8111-111111111111",
+  "node_id": "node-001",
+  "commit": "abc1234",
+  "island": "generalist",
+  "brief_id": "22222222-2222-4222-8222-222222222222",
+  "targeted_metric": "coverage",
+  "delta_vs_parent": 0.9,
+  "cost_usd": 0.33,
+  "status": "keep",
+  "description": "Source-routing swap improved L1 fixture coverage without schema regressions.",
+  "created_at": "2026-06-16T00:04:00Z"
+}

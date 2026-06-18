@@ -1,0 +1,215 @@
+{
+  "local_blocked_sample": {
+    "audit_id": "phase_scaffold_cleanup:p4.3:local-blocked-sample",
+    "scanned_roots": [
+      "research_lab",
+      "scripts"
+    ],
+    "ignored_prefixes": [
+      "scripts/techstack_test_artifacts/"
+    ],
+    "phase_module_path_refs": 1,
+    "phase_verifier_script_refs": 1,
+    "phase_fixture_path_refs": 1,
+    "phase_public_symbol_refs": 1,
+    "phase_env_var_refs": 1,
+    "audit_scope_note": "static_phase_scaffold_scan_only",
+    "findings": [
+      {
+        "path": "research_lab/scale_foundation.py",
+        "line": 0,
+        "name": "scale_foundation.py",
+        "category": "module_path"
+      },
+      {
+        "path": "scripts/verify_research_lab_scale_foundation.py",
+        "line": 0,
+        "name": "verify_research_lab_scale_foundation.py",
+        "category": "verifier_script"
+      },
+      {
+        "path": "research_lab/fixtures/scale_foundation_fixtures.json",
+        "line": 0,
+        "name": "scale_foundation_fixtures.json",
+        "category": "fixture_path"
+      },
+      {
+        "path": "research_lab/scale_foundation.py",
+        "line": 44,
+        "name": "ScaleGate",
+        "category": "public_symbol"
+      },
+      {
+        "path": "research_lab/scale_foundation.py",
+        "line": 198,
+        "name": "RESEARCH_LAB_SCALE_PUBLIC_WORKFLOWS",
+        "category": "env_var"
+      }
+    ],
+    "runtime_modules_domain_named": false,
+    "verifier_scripts_domain_named": false,
+    "fixtures_domain_named": false,
+    "public_symbols_domain_named": false,
+    "env_vars_domain_named": false,
+    "compatibility_shims_required": false,
+    "phase_scaffold_cleanup_ready": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "cleanup_plan_ref": "phase_scaffold_cleanup_plan:p4.3:pending",
+    "evidence_refs": [
+      "phase_scaffold_cleanup:p4.3:local-blocked-sample"
+    ],
+    "owner_approval_ref": "",
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_audit_only"
+  },
+  "ready_control": {
+    "audit_id": "phase_scaffold_cleanup:p4.3:ready-control",
+    "scanned_roots": [
+      "research_lab",
+      "scripts"
+    ],
+    "ignored_prefixes": [
+      "scripts/techstack_test_artifacts/"
+    ],
+    "phase_module_path_refs": 0,
+    "phase_verifier_script_refs": 0,
+    "phase_fixture_path_refs": 0,
+    "phase_public_symbol_refs": 0,
+    "phase_env_var_refs": 0,
+    "audit_scope_note": "static_phase_scaffold_scan_only",
+    "findings": [],
+    "runtime_modules_domain_named": true,
+    "verifier_scripts_domain_named": true,
+    "fixtures_domain_named": true,
+    "public_symbols_domain_named": true,
+    "env_vars_domain_named": true,
+    "compatibility_shims_required": false,
+    "phase_scaffold_cleanup_ready": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "cleanup_plan_ref": "phase_scaffold_cleanup_plan:p4.3:approved",
+    "evidence_refs": [
+      "phase_scaffold_cleanup:p4.3:ready-control",
+      "domain_module_map:research-lab-runtime-v1",
+      "domain_symbol_map:research-lab-public-api-v1",
+      "env_var_migration:research-lab-domain-env-v1",
+      "fixture_migration:research-lab-domain-fixtures-v1",
+      "script_migration:research-lab-domain-verifiers-v1",
+      "compatibility_shim_retirement:normal-runtime-clean",
+      "owner_approval:scale-phase-scaffold-cleanup"
+    ],
+    "owner_approval_ref": "owner_approval:scale-phase-scaffold-cleanup",
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_cleanup_evidence"
+  },
+  "invalid_cleanup_audits": [
+    {
+      "id": "bad-ready-with-current-blockers",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "phase_scaffold_cleanup_ready": true,
+        "state": "ready_after_cleanup_evidence"
+      },
+      "expected_error_contains": [
+        "phase_module_paths_not_domain_named",
+        "phase_verifier_scripts_not_domain_named",
+        "phase_fixtures_not_domain_named",
+        "phase_public_symbols_not_domain_named",
+        "phase_env_vars_not_domain_named",
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-count-mismatch",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "phase_public_symbol_refs": 0
+      },
+      "expected_error_contains": "phase_public_symbol_refs must match findings"
+    },
+    {
+      "id": "bad-ready-missing-cleanup-control",
+      "base": "ready_control",
+      "overrides": {
+        "public_symbols_domain_named": false
+      },
+      "expected_error_contains": "requires all cleanup controls true"
+    },
+    {
+      "id": "bad-compatibility-shim-required",
+      "base": "ready_control",
+      "overrides": {
+        "compatibility_shims_required": true
+      },
+      "expected_error_contains": [
+        "compatibility_shims_required",
+        "requires all cleanup controls true"
+      ]
+    },
+    {
+      "id": "bad-not-ready-non-local",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "local_only": false
+      },
+      "expected_error_contains": "not-ready phase scaffold cleanup audits must remain local_only"
+    },
+    {
+      "id": "bad-ready-state-without-cleanup",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "state": "ready_after_cleanup_evidence"
+      },
+      "expected_error_contains": "ready_after_cleanup_evidence state requires phase_scaffold_cleanup_ready"
+    },
+    {
+      "id": "bad-audit-scope-note",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "audit_scope_note": "runtime_scaffold_cleanup_certified"
+      },
+      "expected_error_contains": "audit_scope_note must be static_phase_scaffold_scan_only"
+    },
+    {
+      "id": "bad-production-writes",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "production_writes": true
+      },
+      "expected_error_contains": "must not enable production writes"
+    },
+    {
+      "id": "bad-supabase-writes",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "supabase_writes": true
+      },
+      "expected_error_contains": "must not enable Supabase writes"
+    },
+    {
+      "id": "bad-public-workflows",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "public_workflows": true
+      },
+      "expected_error_contains": "must not enable public workflows"
+    },
+    {
+      "id": "bad-evidence-prefix",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "evidence_refs": [
+          "phase_runtime:legacy"
+        ]
+      },
+      "expected_error_contains": "approved phase scaffold cleanup prefixes"
+    }
+  ]
+}

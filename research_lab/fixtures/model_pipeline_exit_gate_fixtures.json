@@ -1,0 +1,437 @@
+{
+  "unsafe_model_pipeline_guards": {
+    "fine_tune_success_claims": true,
+    "distillation_success_claims": true,
+    "workspace_api_beta": true,
+    "production_writes": true,
+    "expected_error_contains": "Phase 3 local build must keep these workflows disabled"
+  },
+  "local_judge_calibration": {
+    "calibration_id": "judge_calibration:p3.7:local-stub",
+    "label_set_ref": "outcome_label_set:p3.7:pending",
+    "feasibility_memo_ref": "baseline_feasibility_memo:label-volume",
+    "methodology_ref": "judge_calibration_methodology:p3.7:v1",
+    "calibration_curve_ref": "calibration_curve:p3.7:pending",
+    "label_volume": 0,
+    "required_label_volume": 1000,
+    "auc": 0.0,
+    "auc_threshold": 0.65,
+    "calibration_claimed_valid": false,
+    "published_label_volume_math": false,
+    "heldout_labels_used": false,
+    "outcome_labels_verified": false,
+    "synthetic_labels_used": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "judge_calibration:p3.7:local-stub",
+      "baseline_feasibility_memo:label-volume"
+    ],
+    "state": "local_calibration_stub",
+    "contract_version": "judge_calibration:v1:local_contract"
+  },
+  "local_exit_gate": {
+    "exit_gate_id": "model_pipeline_exit_gate:p3.7:local",
+    "model_pipeline_readiness_ref": "model_pipeline_readiness:p3.0:local-foundation-ready",
+    "engine_ab_ref": "engine_ab:41c0604c9639e96a",
+    "reranker_parity_ref": "reranker_parity:dd83749a164ba833",
+    "judge_calibration_ref": "judge_calibration:p3.7:local-stub",
+    "workspace_beta_ref": "workspace_api_beta:p3.6:miner-alpha",
+    "engine_yield_delta_pct": 0.0,
+    "reranker_quality_retention_pct": 0.0,
+    "reranker_cost_ratio_to_teacher_pct": 100.0,
+    "judge_label_volume": 0,
+    "judge_required_label_volume": 1000,
+    "judge_auc": 0.0,
+    "workspace_beta_allowlisted": false,
+    "workspace_entropy_accounting_live": false,
+    "workspace_security_review_passed": false,
+    "evidence_refs": [
+      "model_pipeline_readiness:p3.0:local-foundation-ready",
+      "engine_ab:41c0604c9639e96a",
+      "reranker_parity:dd83749a164ba833",
+      "judge_calibration:p3.7:local-stub",
+      "workspace_api_beta:p3.6:miner-alpha"
+    ],
+    "owner_approval_ref": "",
+    "engine_yield_threshold_pct": 20.0,
+    "reranker_quality_threshold_pct": 98.0,
+    "reranker_cost_ratio_max_pct": 30.0,
+    "judge_auc_threshold": 0.65,
+    "local_code_complete": true,
+    "production_operational_ready": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "production_writes_enabled": false,
+    "supabase_writes_enabled": false,
+    "public_workflows_enabled": false,
+    "state": "local_not_ready",
+    "contract_version": "model_pipeline_exit_gate:v1:local_contract"
+  },
+  "measured_engine_comparison": {
+    "comparison_id": "engine_ab:p3.7:measured-pass",
+    "control_result_ref": "engine_ab_result:p3.7:control",
+    "candidate_result_ref": "engine_ab_result:p3.7:candidate",
+    "fine_tune_training_ref": "fine_tune_training:p3.7:trained",
+    "fine_tune_dataset_ref": "fine_tune_dataset:p3.7:measured",
+    "fine_tune_dataset_hash": "sha256:p3-7-fine-tune-dataset",
+    "heldout_split_ref": "holdout_split:p3.7:engine",
+    "heldout_task_refs": [
+      "heldout_task:p3.7:001",
+      "heldout_task:p3.7:002"
+    ],
+    "matched_budget_cents": 100000,
+    "control_budget_cents": 100000,
+    "candidate_budget_cents": 100000,
+    "control_verified_points": 100.0,
+    "candidate_verified_points": 125.0,
+    "control_yield_points_per_1000_usd": 100.0,
+    "candidate_yield_points_per_1000_usd": 125.0,
+    "yield_delta_points_per_1000_usd": 25.0,
+    "yield_delta_pct": 25.0,
+    "passed_20_percent_gate": true,
+    "methodology_ref": "engine_ab_methodology:p3.7:matched-budget",
+    "measured_data_ready": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "improvement_claimed": true,
+    "owner_approval_ref": "owner_approval:p3.7:engine",
+    "evidence_refs": [
+      "engine_ab:p3.7:measured-pass",
+      "engine_ab_result:p3.7:control",
+      "engine_ab_result:p3.7:candidate",
+      "owner_approval:p3.7:engine"
+    ],
+    "model_registry_write": false,
+    "model_weights_published": false,
+    "production_promotion_requested": false,
+    "model_pipeline_exit_claimed": false,
+    "public_success_claim_enabled": false,
+    "production_writes": false,
+    "state": "passed_20_percent_gate",
+    "contract_version": "engine_ab_evaluator:v1:local_contract"
+  },
+  "measured_reranker_comparison": {
+    "comparison_id": "reranker_parity:p3.7:measured-pass",
+    "teacher_eval_ref": "reranker_eval:p3.7:teacher",
+    "student_eval_ref": "reranker_eval:p3.7:student",
+    "training_run_ref": "reranker_distillation_run:p3.7:trained",
+    "dataset_ref": "reranker_distillation_dataset:p3.7:measured",
+    "dataset_hash": "sha256:p3-7-reranker-dataset",
+    "holdout_split_ref": "holdout_split:p3.7:reranker",
+    "eval_task_refs": [
+      "reranker_eval_task:p3.7:001",
+      "reranker_eval_task:p3.7:002"
+    ],
+    "teacher_quality_score": 0.92,
+    "student_quality_score": 0.91,
+    "quality_retention_pct": 98.913043,
+    "quality_delta_pct": -1.086957,
+    "teacher_cost_cents": 100000,
+    "student_cost_cents": 28000,
+    "cost_ratio_to_teacher_pct": 28.0,
+    "cost_savings_pct": 72.0,
+    "quality_parity_passed": true,
+    "cost_gate_passed": true,
+    "passed_parity_cost_gate": true,
+    "methodology_ref": "reranker_distillation_methodology:p3.7:teacher-student",
+    "measured_data_ready": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "parity_claimed": true,
+    "owner_approval_ref": "owner_approval:p3.7:reranker",
+    "evidence_refs": [
+      "reranker_parity:p3.7:measured-pass",
+      "reranker_eval:p3.7:teacher",
+      "reranker_eval:p3.7:student",
+      "owner_approval:p3.7:reranker"
+    ],
+    "student_model_registry_write": false,
+    "student_model_weights_published": false,
+    "production_promotion_requested": false,
+    "model_pipeline_exit_claimed": false,
+    "public_success_claim_enabled": false,
+    "production_writes": false,
+    "state": "passed_parity_cost_gate",
+    "contract_version": "reranker_distillation_eval:v1:local_contract"
+  },
+  "measured_judge_calibration": {
+    "calibration_id": "judge_calibration:p3.7:measured-pass",
+    "label_set_ref": "outcome_label_set:p3.7:measured",
+    "feasibility_memo_ref": "baseline_feasibility_memo:label-volume",
+    "methodology_ref": "judge_calibration_methodology:p3.7:v1",
+    "calibration_curve_ref": "calibration_curve:p3.7:measured",
+    "label_volume": 1200,
+    "required_label_volume": 1000,
+    "auc": 0.67,
+    "auc_threshold": 0.65,
+    "calibration_claimed_valid": true,
+    "published_label_volume_math": true,
+    "heldout_labels_used": true,
+    "outcome_labels_verified": true,
+    "synthetic_labels_used": false,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:p3.7:judge",
+    "evidence_refs": [
+      "judge_calibration:p3.7:measured-pass",
+      "outcome_label_set:p3.7:measured",
+      "baseline_feasibility_memo:label-volume",
+      "calibration_curve:p3.7:measured",
+      "owner_approval:p3.7:judge"
+    ],
+    "state": "passed_after_label_volume",
+    "contract_version": "judge_calibration:v1:local_contract"
+  },
+  "measured_workspace_beta": {
+    "beta_id": "workspace_api_beta:p3.7:measured-enabled",
+    "allowlist_ref": "workspace_api_allowlist:p3.6:miner-alpha",
+    "entropy_ledger_ref": "workspace_entropy:p3.6:miner-alpha",
+    "security_review_ref": "workspace_security_review:p3.6:miner-alpha",
+    "model_pipeline_readiness_ref": "model_pipeline_readiness:p3.0:local-foundation-ready",
+    "beta_scope_ref": "workspace_beta_scope:p3.6:local-agent-track",
+    "allowed_miner_refs": [
+      "miner:agent-alpha"
+    ],
+    "allowed_methods": [
+      "get_repo_map",
+      "propose_patch",
+      "request_eval",
+      "get_failure_analysis",
+      "search_corpus"
+    ],
+    "max_cohort_size": 1,
+    "beta_enablement_claimed": true,
+    "workspace_api_calls_enabled": true,
+    "public_ga_enabled": false,
+    "production_workflows_enabled": false,
+    "public_agent_track_enabled": false,
+    "credential_material_issued": false,
+    "production_writes": false,
+    "supabase_writes": false,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:p3.7:workspace",
+    "evidence_refs": [
+      "workspace_api_beta:p3.7:measured-enabled",
+      "workspace_api_allowlist:p3.6:miner-alpha",
+      "workspace_entropy:p3.6:miner-alpha",
+      "workspace_security_review:p3.6:miner-alpha",
+      "owner_approval:p3.7:workspace"
+    ],
+    "state": "allowlisted_beta_enabled",
+    "contract_version": "workspace_api_beta:v1:local_contract"
+  },
+  "measured_exit_gate": {
+    "exit_gate_id": "model_pipeline_exit_gate:p3.7:measured-pass",
+    "model_pipeline_readiness_ref": "model_pipeline_readiness:p3.0:local-foundation-ready",
+    "engine_ab_ref": "engine_ab:p3.7:measured-pass",
+    "reranker_parity_ref": "reranker_parity:p3.7:measured-pass",
+    "judge_calibration_ref": "judge_calibration:p3.7:measured-pass",
+    "workspace_beta_ref": "workspace_api_beta:p3.7:measured-enabled",
+    "engine_yield_delta_pct": 25.0,
+    "reranker_quality_retention_pct": 98.913043,
+    "reranker_cost_ratio_to_teacher_pct": 28.0,
+    "judge_label_volume": 1200,
+    "judge_required_label_volume": 1000,
+    "judge_auc": 0.67,
+    "workspace_beta_allowlisted": true,
+    "workspace_entropy_accounting_live": true,
+    "workspace_security_review_passed": true,
+    "evidence_refs": [
+      "model_pipeline_readiness:p3.0:local-foundation-ready",
+      "engine_ab:p3.7:measured-pass",
+      "reranker_parity:p3.7:measured-pass",
+      "judge_calibration:p3.7:measured-pass",
+      "workspace_api_beta:p3.7:measured-enabled",
+      "outcome_label_set:p3.7:measured",
+      "workspace_api_allowlist:p3.6:miner-alpha",
+      "workspace_entropy:p3.6:miner-alpha",
+      "workspace_security_review:p3.6:miner-alpha",
+      "owner_approval:p3.7:exit"
+    ],
+    "owner_approval_ref": "owner_approval:p3.7:exit",
+    "engine_yield_threshold_pct": 20.0,
+    "reranker_quality_threshold_pct": 98.0,
+    "reranker_cost_ratio_max_pct": 30.0,
+    "judge_auc_threshold": 0.65,
+    "local_code_complete": true,
+    "production_operational_ready": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "production_writes_enabled": false,
+    "supabase_writes_enabled": false,
+    "public_workflows_enabled": false,
+    "state": "ready_after_measured_evidence",
+    "contract_version": "model_pipeline_exit_gate:v1:local_contract"
+  },
+  "bare_measured_exit_expected_errors": {
+    "expected_error_contains": [
+      "supplied engine_comparison",
+      "supplied reranker_comparison",
+      "supplied judge_calibration",
+      "supplied workspace_beta"
+    ]
+  },
+  "invalid_judge_calibrations": [
+    {
+      "id": "bad-claimed-from-local",
+      "overrides": {
+        "calibration_claimed_valid": true,
+        "state": "passed_after_label_volume"
+      },
+      "expected_error_contains": [
+        "cannot be claimed from local fixtures",
+        "cannot be claimed by a local_only record",
+        "label volume >= required",
+        "auc >= threshold",
+        "published_label_volume_math",
+        "heldout_labels_used",
+        "outcome_labels_verified",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-insufficient-label-volume",
+      "base": "measured_judge_calibration",
+      "overrides": {
+        "label_volume": 500
+      },
+      "expected_error_contains": "label volume >= required"
+    },
+    {
+      "id": "bad-synthetic-labels",
+      "base": "measured_judge_calibration",
+      "overrides": {
+        "synthetic_labels_used": true
+      },
+      "expected_error_contains": "synthetic labels"
+    },
+    {
+      "id": "bad-raw-label-key",
+      "overrides": {
+        "raw_outcome_label": "do not include raw labels"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ],
+  "invalid_exit_gates": [
+    {
+      "id": "bad-ready-from-local",
+      "overrides": {
+        "production_operational_ready": true,
+        "state": "ready_after_measured_evidence"
+      },
+      "expected_error_contains": [
+        "supplied engine_comparison",
+        "supplied reranker_comparison",
+        "supplied judge_calibration",
+        "supplied workspace_beta",
+        "cannot be claimed from local fixtures",
+        "cannot be claimed by a local_only record",
+        "missing checks",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-ready-without-local-code-complete",
+      "base": "measured_exit_gate",
+      "supplied": "measured",
+      "overrides": {
+        "local_code_complete": false
+      },
+      "expected_error_contains": "production_operational_ready requires local_code_complete"
+    },
+    {
+      "id": "bad-engine-below-threshold",
+      "base": "measured_exit_gate",
+      "supplied": "measured",
+      "overrides": {
+        "engine_yield_delta_pct": 10.0
+      },
+      "expected_error_contains": [
+        "engine_yield_delta_pct mismatch",
+        "engine_vnext_yield_gate"
+      ]
+    },
+    {
+      "id": "bad-reranker-cost-over-threshold",
+      "base": "measured_exit_gate",
+      "supplied": "measured",
+      "overrides": {
+        "reranker_cost_ratio_to_teacher_pct": 40.0
+      },
+      "expected_error_contains": [
+        "reranker_cost_ratio_to_teacher_pct mismatch",
+        "reranker_parity_cost_gate"
+      ]
+    },
+    {
+      "id": "bad-judge-insufficient-label-volume",
+      "base": "measured_exit_gate",
+      "supplied": "measured",
+      "overrides": {
+        "judge_label_volume": 500
+      },
+      "expected_error_contains": [
+        "judge_label_volume mismatch",
+        "judge_calibration_gate"
+      ]
+    },
+    {
+      "id": "bad-workspace-pending-ref",
+      "base": "measured_exit_gate",
+      "supplied": "measured",
+      "overrides": {
+        "workspace_beta_ref": "workspace_api_beta:pending"
+      },
+      "expected_error_contains": [
+        "workspace_beta_ref mismatch",
+        "workspace_api_beta_gate"
+      ]
+    },
+    {
+      "id": "bad-missing-evidence-ref",
+      "base": "measured_exit_gate",
+      "supplied": "measured",
+      "overrides": {
+        "evidence_refs": [
+          "model_pipeline_readiness:p3.0:local-foundation-ready",
+          "reranker_parity:p3.7:measured-pass",
+          "judge_calibration:p3.7:measured-pass",
+          "workspace_api_beta:p3.7:measured-enabled"
+        ]
+      },
+      "expected_error_contains": "evidence_refs must include all core evidence refs"
+    },
+    {
+      "id": "bad-production-writes",
+      "overrides": {
+        "production_writes_enabled": true
+      },
+      "expected_error_contains": "must not enable production writes"
+    },
+    {
+      "id": "bad-supabase-writes",
+      "overrides": {
+        "supabase_writes_enabled": true
+      },
+      "expected_error_contains": "must not enable Supabase writes"
+    },
+    {
+      "id": "bad-public-workflows",
+      "overrides": {
+        "public_workflows_enabled": true
+      },
+      "expected_error_contains": "must not enable public workflows"
+    },
+    {
+      "id": "bad-raw-outcome-label",
+      "overrides": {
+        "raw_outcome_label": "do not include raw outcome labels"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ]
+}

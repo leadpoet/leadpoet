@@ -1,0 +1,105 @@
+{
+  "trajectory_id": "11111111-1111-4111-8111-111111111111",
+  "schema_version": "1.0",
+  "brief_id": "22222222-2222-4222-8222-222222222222",
+  "island": "generalist",
+  "funder_hotkey": "5FunderHotkeyExample",
+  "brief_sanitized_ref": "sha256:brief-sanitized-example",
+  "novelty_gate": {
+    "result": "pass",
+    "similarity": 0.17,
+    "nearest_prior_receipt": null
+  },
+  "engine_version": "0.1.0+abc1234",
+  "champion_base": "sha256:champion-base-example",
+  "created_at": "2026-06-16T00:00:00Z",
+  "events": [
+    {
+      "seq": 0,
+      "ts": "2026-06-16T00:00:05Z",
+      "type": "NODE_DRAFTED",
+      "cost_usd": 0.08,
+      "anchored_hash": "sha256:event-0",
+      "node_id": "node-001",
+      "parent_id": null,
+      "operator": "draft",
+      "component": "qualification.query_strategy",
+      "patch_type": "STRATEGY_SWAP",
+      "hypothesis": {
+        "failure_mode": "misses intent pages when search is evidence-light",
+        "mechanism": "try source routing that prioritizes archived evidence snapshots",
+        "predicted_delta": 1.2,
+        "falsifier": "coverage does not improve on L1 snapshot replay fixtures"
+      },
+      "patch_ref": "abc1234",
+      "model_used": "research-loop-engine-v0",
+      "tokens": {
+        "in": 2120,
+        "out": 540
+      }
+    },
+    {
+      "seq": 1,
+      "ts": "2026-06-16T00:02:00Z",
+      "type": "NODE_EVALUATED",
+      "cost_usd": 0.21,
+      "anchored_hash": "sha256:event-1",
+      "node_id": "node-001",
+      "status": "scored",
+      "rung": "L1",
+      "metrics": {
+        "proxy_score": 72.4,
+        "evidence_defect_rate_by_category": {
+          "stale_date": 0.05,
+          "wrong_domain": 0.0
+        },
+        "coverage": 0.82,
+        "cost_per_icp": 0.07,
+        "latency_s": 18.4,
+        "schema_validity": true,
+        "complexity": {
+          "diff_loc": 36,
+          "prompt_pack_tokens": 0,
+          "component_count": 1
+        }
+      },
+      "paired_lcb_vs_parent": 0.4,
+      "fixtures": ["fixture:l1:snapshot-replay:001"],
+      "cache_hits": {
+        "snapshot": 12,
+        "verdict": 5
+      },
+      "execution_trace_ref": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "seq": 2,
+      "ts": "2026-06-16T00:03:00Z",
+      "type": "NODE_REFLECTED",
+      "cost_usd": 0.04,
+      "anchored_hash": "sha256:event-2",
+      "node_id": "node-001",
+      "lesson": {
+        "worked": "coverage improved on intent-rich fixtures",
+        "failed": "latency rose on sparse fixtures",
+        "why": "the alternate routing added one extra provider call",
+        "next_question": "can the same coverage gain be kept with a provider cap"
+      },
+      "lesson_embedding_ref": "embedding:lesson-001",
+      "lesson_provenance": {
+        "champion_base": "sha256:champion-base-example",
+        "component": "qualification.query_strategy",
+        "eval_version": "l1-fixtures-2026-06-16"
+      }
+    }
+  ],
+  "final": {
+    "settlement": {
+      "loops_consumed": 1,
+      "probation_charged": false,
+      "balance_returned": 9.67,
+      "crown": null,
+      "grant_state": "none",
+      "receipt_ref": "receipt:11111111-1111-4111-8111-111111111111"
+    }
+  }
+}

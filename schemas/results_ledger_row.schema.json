@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leadpoet.com/schemas/results_ledger_row.schema.json",
+  "title": "Leadpoet Research Lab Results Ledger Row",
+  "description": "Flat lab-side projection of trajectory events, one row per expansion.",
+  "type": "object",
+  "required": [
+    "ledger_row_id",
+    "schema_version",
+    "trajectory_id",
+    "node_id",
+    "commit",
+    "island",
+    "brief_id",
+    "targeted_metric",
+    "delta_vs_parent",
+    "cost_usd",
+    "status",
+    "description",
+    "created_at"
+  ],
+  "properties": {
+    "ledger_row_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "trajectory_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "node_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "commit": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "island": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "brief_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "targeted_metric": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "delta_vs_parent": {
+      "type": ["number", "null"]
+    },
+    "cost_usd": {
+      "type": "number",
+      "minimum": 0
+    },
+    "status": {
+      "enum": ["keep", "discard", "crash", "timeout"]
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

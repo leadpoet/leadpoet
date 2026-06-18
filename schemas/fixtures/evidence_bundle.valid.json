@@ -1,0 +1,25 @@
+{
+  "bundle_id": "44444444-4444-4444-8444-444444444444",
+  "schema_version": "1.0",
+  "run_id": "33333333-3333-4333-8333-333333333333",
+  "artifact_hash": "sha256:artifact-example",
+  "created_at": "2026-06-16T00:01:10Z",
+  "retention_class": "live_verification",
+  "verification_state": "active",
+  "bundle_hash": "sha256:bundle-example",
+  "merkle_anchor_ref": "arweave:pending-batch-2026-06-16T00",
+  "deletion_request_ref": null,
+  "snapshots": [
+    {
+      "url": "https://example.com/news/funding",
+      "fetch_ts": "2026-06-16T00:01:05Z",
+      "content_hash": "sha256:content-1",
+      "normalized_text_hash": "sha256:normalized-text-1",
+      "snapshot_ref": "snapshots/2026/06/16/content-1",
+      "signature": "fabric_sig:example",
+      "l0_verification_state": "active",
+      "deleted_at": null,
+      "deletion_reason_ref": null
+    }
+  ]
+}

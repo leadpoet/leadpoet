@@ -64,18 +64,22 @@ REFERENCE_MODEL_ID: str = "reference:qualification_model:v1"
 # Same directory as ``qualification_champion.json`` for consistency.
 BASELINE_FILE_NAME: str = "qualification_baseline.json"
 
+# Non-reference arms use model-specific local files. Keep the historical
+# reference path unchanged so existing local/dev champion gating still works.
+_MAX_MODEL_ID_FILE_SUFFIX = 80
+
 
 class BaselineRecord(NamedTuple):
     """What we persist for a daily reference-model run.
 
     ``baseline_score`` is the aggregate the champion-selection logic
     compares against — the same scale as challenger ``total_score``
-    (sum of per-ICP scores, where each per-ICP score is
+    (average of per-ICP scores, where each per-ICP score is
     ``sum(score_company over up-to-5 leads) / 5`` per the v2 normalization
     in ``gateway/qualification/config.py``).
 
     ``per_icp_scores`` is kept for traceability — operators inspecting the
-    daily run can see which ICPs the reference model bombed on.
+    daily run can see which ICPs a fixed arm underperformed on.
     """
 
     set_id: int
@@ -90,7 +94,13 @@ class BaselineRecord(NamedTuple):
 # =============================================================================
 
 
-def _baseline_path() -> Path:
+def _safe_model_id_suffix(model_id: str) -> str:
+    """Return a filesystem-safe suffix for non-reference baseline arms."""
+    safe = "".join(ch if ch.isalnum() else "_" for ch in model_id).strip("_")
+    return (safe or "unknown")[:_MAX_MODEL_ID_FILE_SUFFIX]
+
+
+def _baseline_path(model_id: str = REFERENCE_MODEL_ID) -> Path:
     """Return the absolute path to the on-disk baseline record.
 
     Located alongside ``qualification_champion.json`` under
@@ -100,10 +110,23 @@ def _baseline_path() -> Path:
     # Anchor to repo root, not cwd — validator may be launched from a
     # different working directory (Docker entrypoint, systemd unit, etc.)
     repo_root = Path(__file__).resolve().parents[2]
-    return repo_root / "validator_weights" / BASELINE_FILE_NAME
+    base = repo_root / "validator_weights" / BASELINE_FILE_NAME
+    if model_id == REFERENCE_MODEL_ID:
+        return base
+    return base.with_name(
+        f"{base.stem}_{_safe_model_id_suffix(model_id)}{base.suffix}"
+    )
 
 
-def load_baseline(set_id: int) -> Optional[BaselineRecord]:
+def _baseline_checkpoint_path(set_id: int, model_id: str) -> Path:
+    base = _baseline_path(model_id)
+    return base.with_name(f"{base.stem}_ckpt_{set_id}{base.suffix}")
+
+
+def load_baseline(
+    set_id: int,
+    model_id: str = REFERENCE_MODEL_ID,
+) -> Optional[BaselineRecord]:
     """Read the baseline record for ``set_id`` from disk.
 
     Returns ``None`` when:
@@ -117,7 +140,7 @@ def load_baseline(set_id: int) -> Optional[BaselineRecord]:
     keeps the system safe during the rollout window before the daily
     runner is wired up.
     """
-    path = _baseline_path()
+    path = _baseline_path(model_id)
     if not path.exists():
         return None
     try:
@@ -129,6 +152,12 @@ def load_baseline(set_id: int) -> Optional[BaselineRecord]:
     if data.get("set_id") != set_id:
         # Common case during transition (e.g., set just rotated and the
         # daily run hasn't fired yet). Don't warn — too noisy.
+        return None
+    if str(data.get("model_id") or REFERENCE_MODEL_ID) != model_id:
+        logger.warning(
+            f"baseline file {path} contains model_id={data.get('model_id')!r}, "
+            f"expected {model_id!r}; treating as missing"
+        )
         return None
     try:
         return BaselineRecord(
@@ -143,7 +172,12 @@ def load_baseline(set_id: int) -> Optional[BaselineRecord]:
         return None
 
 
-def _save_ckpt(path: Path, set_id: int, per_icp_scores: List[float]) -> None:
+def _save_ckpt(
+    path: Path,
+    set_id: int,
+    per_icp_scores: List[float],
+    model_id: str = REFERENCE_MODEL_ID,
+) -> None:
     """Atomically write per-ICP checkpoint so a killed runner can resume.
 
     Cheap to call once per ICP — file is small (20 floats max). Atomicity
@@ -154,7 +188,11 @@ def _save_ckpt(path: Path, set_id: int, per_icp_scores: List[float]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         with open(tmp, "w") as f:
-            json.dump({"set_id": set_id, "per_icp_scores": per_icp_scores}, f)
+            json.dump({
+                "set_id": set_id,
+                "model_id": model_id,
+                "per_icp_scores": per_icp_scores,
+            }, f)
         tmp.replace(path)
     except Exception as e:
         # Checkpoint failure must not abort the run — log and continue.
@@ -168,7 +206,7 @@ def save_baseline(record: BaselineRecord) -> None:
     selection) see either the old record or the new one, never a
     half-written file.
     """
-    path = _baseline_path()
+    path = _baseline_path(record.model_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w") as f:
@@ -216,10 +254,9 @@ def save_baseline_to_db(
 ) -> None:
     """Upsert ``record`` into ``qualification_baselines``.
 
-    Upsert keyed on ``set_id`` (the table's primary key). Idempotent on
-    re-run — re-running the daily baseline for the same set_id overwrites
-    the prior row, which is the desired behavior if we ever need to
-    re-evaluate the reference model mid-day.
+    Upsert keyed on ``(set_id, model_id)``. Idempotent on re-run —
+    re-running the same baseline arm for the same set_id overwrites the
+    prior row, while additional arms can be stored for the same set.
 
     Raises whatever the supabase client raises on failure. The caller
     (gateway runner) wraps the call in try/except and logs — a failed
@@ -239,10 +276,63 @@ def save_baseline_to_db(
         payload["icp_set_hash"] = icp_set_hash
     if run_duration_seconds is not None:
         payload["run_duration_seconds"] = run_duration_seconds
-    supabase_client.table(DB_TABLE_NAME).upsert(payload, on_conflict="set_id").execute()
+    try:
+        supabase_client.table(DB_TABLE_NAME).upsert(
+            payload,
+            on_conflict="set_id,model_id",
+        ).execute()
+    except Exception as e:
+        msg = str(e)
+        missing_composite_target = (
+            "42P10" in msg
+            or "set_id,model_id" in msg
+            or "no unique or exclusion constraint" in msg.lower()
+        )
+        if not missing_composite_target:
+            raise
+        if record.model_id != REFERENCE_MODEL_ID:
+            raise
+        logger.warning(
+            "qualification_baselines composite conflict target unavailable; "
+            "falling back to legacy set_id upsert for reference arm only"
+        )
+        supabase_client.table(DB_TABLE_NAME).upsert(
+            payload,
+            on_conflict="set_id",
+        ).execute()
 
 
-def load_baseline_from_db(set_id: int, supabase_client) -> Optional[BaselineRecord]:
+def save_baseline_failure_to_db(
+    set_id: int,
+    model_id: str,
+    supabase_client,
+    *,
+    icp_set_hash: Optional[str] = None,
+    run_duration_seconds: Optional[float] = None,
+) -> None:
+    """Persist a visible failed-attempt row for a baseline arm."""
+    record = BaselineRecord(
+        set_id=set_id,
+        baseline_score=0.0,
+        per_icp_scores=[],
+        scored_at=datetime.now(timezone.utc).isoformat(),
+        model_id=model_id,
+    )
+    save_baseline_to_db(
+        record,
+        supabase_client,
+        icp_set_hash=icp_set_hash,
+        run_duration_seconds=run_duration_seconds,
+        run_status="failed",
+    )
+
+
+def load_baseline_from_db(
+    set_id: int,
+    supabase_client,
+    *,
+    model_id: str = REFERENCE_MODEL_ID,
+) -> Optional[BaselineRecord]:
     """Read baseline row for ``set_id``.
 
     Returns ``None`` when:
@@ -262,11 +352,15 @@ def load_baseline_from_db(set_id: int, supabase_client) -> Optional[BaselineReco
             supabase_client.table(DB_TABLE_NAME)
             .select("set_id, baseline_score, per_icp_scores, scored_at, model_id, run_status")
             .eq("set_id", set_id)
+            .eq("model_id", model_id)
             .limit(1)
             .execute()
         )
     except Exception as e:
-        logger.warning(f"baseline DB read failed for set_id={set_id}: {e}; treating as missing")
+        logger.warning(
+            f"baseline DB read failed for set_id={set_id} "
+            f"model_id={model_id}: {e}; treating as missing"
+        )
         return None
 
     rows = result.data or []
@@ -294,6 +388,52 @@ def load_baseline_from_db(set_id: int, supabase_client) -> Optional[BaselineReco
         return None
 
 
+def load_completed_baseline_arms_from_db(
+    set_id: int,
+    supabase_client,
+) -> List[BaselineRecord]:
+    """Return every completed baseline arm for ``set_id``.
+
+    Research Lab Phase 0 uses this to retrieve paired fixed-artifact runs
+    on the same ICP set. Champion selection should continue using
+    ``load_baseline_from_db(..., model_id=REFERENCE_MODEL_ID)`` so it only
+    gates against the reserved reference arm.
+    """
+    try:
+        result = (
+            supabase_client.table(DB_TABLE_NAME)
+            .select("set_id, baseline_score, per_icp_scores, scored_at, model_id, run_status")
+            .eq("set_id", set_id)
+            .eq("run_status", "completed")
+            .order("model_id")
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(
+            f"baseline arm DB read failed for set_id={set_id}: {e}; "
+            f"returning no arms"
+        )
+        return []
+
+    records: List[BaselineRecord] = []
+    for row in result.data or []:
+        try:
+            records.append(BaselineRecord(
+                set_id=int(row["set_id"]),
+                baseline_score=float(row["baseline_score"]),
+                per_icp_scores=list(row.get("per_icp_scores") or []),
+                scored_at=str(row.get("scored_at") or ""),
+                model_id=str(row.get("model_id") or REFERENCE_MODEL_ID),
+            ))
+        except (KeyError, TypeError, ValueError) as e:
+            logger.warning(
+                f"baseline DB row for set_id={set_id} is malformed: {e}; "
+                f"skipping row"
+            )
+            continue
+    return records
+
+
 # =============================================================================
 # Daily reference-model evaluation
 # =============================================================================
@@ -311,8 +451,10 @@ async def run_and_save_baseline(
     qualify_fn: QualifyFn,
     score_fn: ScoreFn,
     leads_per_icp_normalizer: float = 5.0,
+    model_id: str = REFERENCE_MODEL_ID,
+    score_cost_exempt: bool = True,
 ) -> BaselineRecord:
-    """Run the reference model on every ICP in ``icp_set`` and persist a
+    """Run a fixed baseline arm on every ICP in ``icp_set`` and persist a
     ``BaselineRecord`` matching the v2 scoring shape.
 
     Why this is the validator's responsibility (not the qualification
@@ -325,7 +467,7 @@ async def run_and_save_baseline(
 
     Aggregation matches the v2 model-competition scoring used by miner
     challengers: ``per_icp_score = sum(score_company over up-to-5 leads) /
-    leads_per_icp_normalizer`` (5 by default), then we sum across the 20
+    leads_per_icp_normalizer`` (5 by default), then average across the
     ICPs to get the comparable ``baseline_score``. This is the same
     arithmetic ``get_model_score`` returns for miners, so champion
     selection compares apples to apples.
@@ -353,19 +495,21 @@ async def run_and_save_baseline(
     # Observed 20260531 00:05 UTC: systemd killed the runner at the 1h
     # timeout after ~13/20 ICPs scored — entire run lost because no
     # checkpoint existed. This block prevents that.
-    ckpt_path = (
-        _baseline_path().with_name(f"qualification_baseline_ckpt_{set_id}.json")
-    )
+    ckpt_path = _baseline_checkpoint_path(set_id, model_id)
     per_icp_scores: List[float] = []
     if ckpt_path.exists():
         try:
             with open(ckpt_path, "r") as f:
                 ckpt = json.load(f)
-            if int(ckpt.get("set_id", -1)) == set_id:
+            if (
+                int(ckpt.get("set_id", -1)) == set_id
+                and str(ckpt.get("model_id") or REFERENCE_MODEL_ID) == model_id
+            ):
                 per_icp_scores = [float(s) for s in (ckpt.get("per_icp_scores") or [])]
                 logger.info(
                     f"baseline checkpoint loaded: resuming after "
-                    f"{len(per_icp_scores)}/{len(icp_set)} ICPs from {ckpt_path}"
+                    f"{len(per_icp_scores)}/{len(icp_set)} ICPs from {ckpt_path} "
+                    f"for model_id={model_id}"
                 )
         except Exception as e:
             logger.warning(
@@ -388,13 +532,13 @@ async def run_and_save_baseline(
         except Exception as e:
             logger.warning(f"reference qualify crashed on icp={icp_id}: {e}; scoring 0")
             per_icp_scores.append(0.0)
-            _save_ckpt(ckpt_path, set_id, per_icp_scores)
+            _save_ckpt(ckpt_path, set_id, per_icp_scores, model_id)
             continue
 
         if not isinstance(leads, list) or not leads:
             # Honest abstention is fine — contributes 0 to this ICP's score.
             per_icp_scores.append(0.0)
-            _save_ckpt(ckpt_path, set_id, per_icp_scores)
+            _save_ckpt(ckpt_path, set_id, per_icp_scores, model_id)
             continue
 
         try:
@@ -402,7 +546,7 @@ async def run_and_save_baseline(
         except Exception as e:
             logger.warning(f"reference: ICPPrompt coercion failed for icp={icp_id}: {e}; scoring 0")
             per_icp_scores.append(0.0)
-            _save_ckpt(ckpt_path, set_id, per_icp_scores)
+            _save_ckpt(ckpt_path, set_id, per_icp_scores, model_id)
             continue
 
         icp_total = 0.0
@@ -418,14 +562,14 @@ async def run_and_save_baseline(
                 result = await score_fn(
                     company=lead_obj,
                     icp=icp_obj,
-                    # Reference-model is exempt from cost / time penalty,
-                    # so these values are not used in scoring (is_reference_model
-                    # gates the penalty branch). Pass 0.0 to be explicit that
-                    # we're not competing on cost.
+                    # Phase 0 baseline arms measure paired quality variance,
+                    # not miner economics. When score_cost_exempt=True, the
+                    # scorer skips the cost/time variability penalty and the
+                    # 0.0 cost/time values below are explicit non-inputs.
                     run_cost_usd=0.0,
                     run_time_seconds=0.0,
                     seen_companies=seen_companies,
-                    is_reference_model=True,
+                    is_reference_model=score_cost_exempt,
                 )
                 # score_company returns either a LeadScoreBreakdown (has
                 # .final_score) or a tuple-like score depending on version;
@@ -446,7 +590,7 @@ async def run_and_save_baseline(
 
         per_icp_score = icp_total / leads_per_icp_normalizer if leads_per_icp_normalizer else icp_total
         per_icp_scores.append(per_icp_score)
-        _save_ckpt(ckpt_path, set_id, per_icp_scores)
+        _save_ckpt(ckpt_path, set_id, per_icp_scores, model_id)
 
     # baseline_score = AVERAGE per-ICP score across all ICPs.
     # MUST match how miner total_score is computed in
@@ -465,7 +609,7 @@ async def run_and_save_baseline(
         baseline_score=baseline_score,
         per_icp_scores=per_icp_scores,
         scored_at=datetime.now(timezone.utc).isoformat(),
-        model_id=REFERENCE_MODEL_ID,
+        model_id=model_id,
     )
     save_baseline(record)
     # Run completed successfully — clean up the per-ICP checkpoint so the
@@ -476,7 +620,8 @@ async def run_and_save_baseline(
     except Exception as e:
         logger.warning(f"baseline checkpoint cleanup failed at {ckpt_path}: {e}")
     logger.info(
-        f"baseline run complete: set_id={set_id} score={baseline_score:.2f} "
+        f"baseline run complete: set_id={set_id} model_id={model_id} "
+        f"score={baseline_score:.2f} "
         f"per_icp={['%.2f' % s for s in per_icp_scores]}"
     )
     return record

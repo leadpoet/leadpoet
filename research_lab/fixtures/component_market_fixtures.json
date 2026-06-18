@@ -1,0 +1,541 @@
+{
+  "registry_entries": [
+    {
+      "component_type": "source_add",
+      "display_name": "SOURCE_ADD coverage adapter",
+      "submission_schema_ref": "schema:component-market:source-add-submission:v1",
+      "review_schema_ref": "schema:component-market:source-add-review:v1",
+      "allowed_patch_types": [
+        "SOURCE_ADD"
+      ],
+      "accepts_code_bundle": true,
+      "requires_sandbox_review": true,
+      "allowed_output_ref_prefixes": [
+        "evidence:",
+        "snapshot:",
+        "metadata:",
+        "sha256:",
+        "schema:",
+        "artifact:"
+      ],
+      "max_trial_cost_cents": 5000,
+      "enabled_for_paid_market": false,
+      "production_enabled": false,
+      "local_only": true
+    },
+    {
+      "component_type": "evidence_adapter",
+      "display_name": "Evidence adapter",
+      "submission_schema_ref": "schema:component-market:evidence-adapter-submission:v1",
+      "review_schema_ref": "schema:component-market:evidence-adapter-review:v1",
+      "allowed_patch_types": [
+        "SOURCE_ADD",
+        "CODE_EDIT"
+      ],
+      "accepts_code_bundle": true,
+      "requires_sandbox_review": true,
+      "allowed_output_ref_prefixes": [
+        "evidence:",
+        "snapshot:",
+        "metadata:",
+        "sha256:",
+        "schema:",
+        "artifact:"
+      ],
+      "max_trial_cost_cents": 7000,
+      "enabled_for_paid_market": false,
+      "production_enabled": false,
+      "local_only": true
+    },
+    {
+      "component_type": "prompt_template",
+      "display_name": "Prompt template",
+      "submission_schema_ref": "schema:component-market:prompt-template-submission:v1",
+      "review_schema_ref": "schema:component-market:prompt-template-review:v1",
+      "allowed_patch_types": [
+        "PROMPT_EDIT"
+      ],
+      "accepts_code_bundle": false,
+      "requires_sandbox_review": true,
+      "allowed_output_ref_prefixes": [
+        "artifact:",
+        "trace:",
+        "sha256:",
+        "schema:"
+      ],
+      "max_trial_cost_cents": 2500,
+      "enabled_for_paid_market": false,
+      "production_enabled": false,
+      "local_only": true
+    },
+    {
+      "component_type": "parameter_policy",
+      "display_name": "Parameter policy",
+      "submission_schema_ref": "schema:component-market:parameter-policy-submission:v1",
+      "review_schema_ref": "schema:component-market:parameter-policy-review:v1",
+      "allowed_patch_types": [
+        "PARAM_EDIT"
+      ],
+      "accepts_code_bundle": false,
+      "requires_sandbox_review": true,
+      "allowed_output_ref_prefixes": [
+        "artifact:",
+        "trace:",
+        "sha256:",
+        "schema:"
+      ],
+      "max_trial_cost_cents": 2000,
+      "enabled_for_paid_market": false,
+      "production_enabled": false,
+      "local_only": true
+    },
+    {
+      "component_type": "strategy_module",
+      "display_name": "Strategy module",
+      "submission_schema_ref": "schema:component-market:strategy-module-submission:v1",
+      "review_schema_ref": "schema:component-market:strategy-module-review:v1",
+      "allowed_patch_types": [
+        "STRATEGY_SWAP",
+        "CODE_EDIT"
+      ],
+      "accepts_code_bundle": true,
+      "requires_sandbox_review": true,
+      "allowed_output_ref_prefixes": [
+        "artifact:",
+        "component_output:",
+        "trace:",
+        "sha256:",
+        "schema:"
+      ],
+      "max_trial_cost_cents": 5000,
+      "enabled_for_paid_market": false,
+      "production_enabled": false,
+      "local_only": true
+    },
+    {
+      "component_type": "eval_case",
+      "display_name": "Eval case",
+      "submission_schema_ref": "schema:component-market:eval-case-submission:v1",
+      "review_schema_ref": "schema:component-market:eval-case-review:v1",
+      "allowed_patch_types": [
+        "PROMPT_EDIT",
+        "PARAM_EDIT"
+      ],
+      "accepts_code_bundle": false,
+      "requires_sandbox_review": true,
+      "allowed_output_ref_prefixes": [
+        "artifact:",
+        "trace:",
+        "sha256:",
+        "schema:"
+      ],
+      "max_trial_cost_cents": 3000,
+      "enabled_for_paid_market": false,
+      "production_enabled": false,
+      "local_only": true
+    },
+    {
+      "component_type": "red_team_exploit",
+      "display_name": "Red-team exploit",
+      "submission_schema_ref": "schema:component-market:red-team-exploit-submission:v1",
+      "review_schema_ref": "schema:component-market:red-team-exploit-review:v1",
+      "allowed_patch_types": [
+        "PROMPT_EDIT",
+        "CODE_EDIT"
+      ],
+      "accepts_code_bundle": true,
+      "requires_sandbox_review": true,
+      "allowed_output_ref_prefixes": [
+        "artifact:",
+        "trace:",
+        "sha256:",
+        "schema:"
+      ],
+      "max_trial_cost_cents": 4000,
+      "enabled_for_paid_market": false,
+      "production_enabled": false,
+      "local_only": true
+    }
+  ],
+  "invalid_registry_entries": [
+    {
+      "component_type": "evidence_adapter",
+      "display_name": "Bad paid registry",
+      "submission_schema_ref": "schema:component-market:evidence-adapter-submission:v1",
+      "review_schema_ref": "schema:component-market:evidence-adapter-review:v1",
+      "allowed_patch_types": [
+        "SOURCE_ADD"
+      ],
+      "allowed_output_ref_prefixes": [
+        "evidence:",
+        "snapshot:",
+        "sha256:"
+      ],
+      "max_trial_cost_cents": 7000,
+      "enabled_for_paid_market": true,
+      "production_enabled": false,
+      "local_only": true,
+      "expected_error_contains": "paid workflow"
+    },
+    {
+      "component_type": "unknown_component",
+      "display_name": "Bad unknown component",
+      "submission_schema_ref": "schema:component-market:unknown-submission:v1",
+      "review_schema_ref": "schema:component-market:unknown-review:v1",
+      "allowed_patch_types": [
+        "SOURCE_ADD"
+      ],
+      "allowed_output_ref_prefixes": [
+        "artifact:"
+      ],
+      "max_trial_cost_cents": 1000,
+      "enabled_for_paid_market": false,
+      "production_enabled": false,
+      "local_only": true,
+      "expected_error_contains": "unknown component_type"
+    }
+  ],
+  "submission": {
+    "submission_id": "component_submission:p2.2:evidence-adapter:procurement-v2",
+    "component_type": "evidence_adapter",
+    "miner_ref": "miner:component-builder-alpha",
+    "artifact_ref": "artifact:component-market:evidence-adapter:procurement-v2",
+    "artifact_hash": "sha256:componentmarketprocurementv200000000000000000000000000000000000",
+    "component_interface_ref": "component_interface:evidence-adapter:v1",
+    "declared_output_refs": [
+      "evidence:component-market:procurement-v2:001",
+      "snapshot:component-market:procurement-v2:001",
+      "sha256:componentmarketoutputhash00100000000000000000000000000000000"
+    ],
+    "fixture_refs": [
+      "fixture:component-market:procurement-v2:001",
+      "fixture:component-market:procurement-v2:002"
+    ],
+    "registry_entry_ref": "component_registry:evidence_adapter:v1",
+    "code_bundle_hash": "sha256:componentmarketevidenceadapterbundle000000000000000000000000000",
+    "credential_policy": "credential_ref_only",
+    "credential_ref": "credential_ref:component-market:procurement-v2:stub",
+    "protected_material_flags_checked": true,
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "arbitrary_code_execution_enabled": false,
+    "live_network_enabled": false,
+    "submitted_for_public_market": false,
+    "production_review_enabled": false,
+    "component_enabled_in_market": false,
+    "live_champion_dependency_ref": "",
+    "sealed_eval_dependency_ref": "",
+    "visibility_policy": "default_private",
+    "artifact_release_state": "private_live_champion",
+    "local_only": true
+  },
+  "invalid_submissions": [
+    {
+      "submission_id": "component_submission:p2.2:raw-api-key",
+      "component_type": "evidence_adapter",
+      "miner_ref": "miner:component-builder-alpha",
+      "artifact_ref": "artifact:component-market:bad-raw-api-key",
+      "artifact_hash": "sha256:badrawapikey000000000000000000000000000000000000000000000",
+      "component_interface_ref": "component_interface:evidence-adapter:v1",
+      "declared_output_refs": [
+        "evidence:component-market:bad"
+      ],
+      "fixture_refs": [
+        "fixture:component-market:bad"
+      ],
+      "registry_entry_ref": "component_registry:evidence_adapter:v1",
+      "credential_policy": "credential_ref_only",
+      "credential_ref": "credential_ref:component-market:bad",
+      "api_key": "sk-live-should-not-be-here",
+      "protected_material_flags_checked": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "local_only": true,
+      "expected_error_contains": "api_key"
+    },
+    {
+      "submission_id": "component_submission:p2.2:raw-output",
+      "component_type": "evidence_adapter",
+      "miner_ref": "miner:component-builder-alpha",
+      "artifact_ref": "artifact:component-market:bad-raw-output",
+      "artifact_hash": "sha256:badrawoutput00000000000000000000000000000000000000000000",
+      "component_interface_ref": "component_interface:evidence-adapter:v1",
+      "declared_output_refs": [
+        "raw html payload"
+      ],
+      "fixture_refs": [
+        "fixture:component-market:bad"
+      ],
+      "registry_entry_ref": "component_registry:evidence_adapter:v1",
+      "credential_policy": "no_credentials",
+      "protected_material_flags_checked": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "local_only": true,
+      "expected_error_contains": "non-ref/raw values"
+    },
+    {
+      "submission_id": "component_submission:p2.2:live-champion",
+      "component_type": "strategy_module",
+      "miner_ref": "miner:component-builder-alpha",
+      "artifact_ref": "artifact:component-market:bad-live-champion",
+      "artifact_hash": "sha256:badlivechampion00000000000000000000000000000000000000000",
+      "component_interface_ref": "component_interface:strategy-module:v1",
+      "declared_output_refs": [
+        "artifact:component-market:bad-live-champion"
+      ],
+      "fixture_refs": [
+        "fixture:component-market:bad"
+      ],
+      "registry_entry_ref": "component_registry:strategy_module:v1",
+      "credential_policy": "no_credentials",
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": true,
+      "live_champion_dependency_ref": "private_live_champion:current",
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "local_only": true,
+      "expected_error_contains": [
+        "protected material flags",
+        "live champion material"
+      ]
+    },
+    {
+      "submission_id": "component_submission:p2.2:public-market",
+      "component_type": "prompt_template",
+      "miner_ref": "miner:component-builder-alpha",
+      "artifact_ref": "artifact:component-market:bad-public-market",
+      "artifact_hash": "sha256:badpublicmarket000000000000000000000000000000000000000000",
+      "component_interface_ref": "component_interface:prompt-template:v1",
+      "declared_output_refs": [
+        "artifact:component-market:bad-public-market"
+      ],
+      "fixture_refs": [
+        "fixture:component-market:bad"
+      ],
+      "registry_entry_ref": "component_registry:prompt_template:v1",
+      "credential_policy": "no_credentials",
+      "protected_material_flags_checked": true,
+      "submitted_for_public_market": true,
+      "production_review_enabled": true,
+      "component_enabled_in_market": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "local_only": false,
+      "expected_error_contains": [
+        "submitted_for_public_market",
+        "production_review_enabled",
+        "component_enabled_in_market",
+        "must remain private",
+        "must remain local_only"
+      ]
+    }
+  ],
+  "review": {
+    "review_id": "component_review:p2.2:procurement-v2",
+    "submission_id": "component_submission:p2.2:evidence-adapter:procurement-v2",
+    "component_type": "evidence_adapter",
+    "reviewer_ref": "reviewer:component-market-local",
+    "trial_refs": [
+      "trial:component-market:procurement-v2:001",
+      "trial:component-market:procurement-v2:002"
+    ],
+    "output_refs": [
+      "component_output:procurement-v2:001",
+      "component_output:procurement-v2:002"
+    ],
+    "measured_trial_yield": 3.6,
+    "sandbox_job_ref": "sandbox_job:component-market:procurement-v2:planned",
+    "status": "measured_not_accepted",
+    "lab_only": true,
+    "sandboxed_execution_performed": false,
+    "arbitrary_code_executed": false,
+    "live_network_used": false,
+    "component_accepted": false,
+    "paid_market_enabled": false,
+    "human_acceptance_gate_passed": false,
+    "production_writes": false,
+    "review_notes_sanitized": "Local fixture review only; no live execution or acceptance."
+  },
+  "invalid_reviews": [
+    {
+      "review_id": "component_review:p2.2:accepted",
+      "submission_id": "component_submission:p2.2:evidence-adapter:procurement-v2",
+      "component_type": "evidence_adapter",
+      "reviewer_ref": "reviewer:component-market-local",
+      "trial_refs": [
+        "trial:component-market:bad"
+      ],
+      "output_refs": [
+        "component_output:bad"
+      ],
+      "measured_trial_yield": 3.6,
+      "sandbox_job_ref": "sandbox_job:component-market:bad",
+      "status": "acceptable_pending_owner_gate",
+      "lab_only": false,
+      "sandboxed_execution_performed": true,
+      "arbitrary_code_executed": true,
+      "live_network_used": true,
+      "component_accepted": true,
+      "paid_market_enabled": true,
+      "human_acceptance_gate_passed": true,
+      "production_writes": true,
+      "review_notes_sanitized": "Bad review",
+      "expected_error_contains": [
+        "must remain lab_only",
+        "sandboxed execution",
+        "arbitrary code",
+        "live network",
+        "component_accepted",
+        "paid_market_enabled",
+        "production_writes"
+      ]
+    },
+    {
+      "review_id": "component_review:p2.2:protected-marker",
+      "submission_id": "component_submission:p2.2:evidence-adapter:procurement-v2",
+      "component_type": "evidence_adapter",
+      "reviewer_ref": "reviewer:component-market-local",
+      "trial_refs": [
+        "trial:component-market:bad"
+      ],
+      "output_refs": [
+        "component_output:bad"
+      ],
+      "measured_trial_yield": 0.5,
+      "sandbox_job_ref": "sandbox_job:component-market:bad",
+      "status": "measured_not_accepted",
+      "lab_only": true,
+      "sandboxed_execution_performed": false,
+      "arbitrary_code_executed": false,
+      "live_network_used": false,
+      "component_accepted": false,
+      "paid_market_enabled": false,
+      "human_acceptance_gate_passed": false,
+      "production_writes": false,
+      "review_notes_sanitized": "This includes a sealed judge prompt and should be rejected.",
+      "expected_error_contains": "review_notes_sanitized"
+    }
+  ],
+  "bounty_bands": [
+    {
+      "band_ref": "component_bounty_band:evidence-adapter:low",
+      "component_type": "evidence_adapter",
+      "min_trial_yield": 0.0,
+      "max_trial_yield": 1.0,
+      "bounty_cents": 5000
+    },
+    {
+      "band_ref": "component_bounty_band:evidence-adapter:mid",
+      "component_type": "evidence_adapter",
+      "min_trial_yield": 1.0,
+      "max_trial_yield": 3.0,
+      "bounty_cents": 15000
+    },
+    {
+      "band_ref": "component_bounty_band:evidence-adapter:high",
+      "component_type": "evidence_adapter",
+      "min_trial_yield": 3.0,
+      "max_trial_yield": null,
+      "bounty_cents": 30000
+    },
+    {
+      "band_ref": "component_bounty_band:prompt-template:low",
+      "component_type": "prompt_template",
+      "min_trial_yield": 0.0,
+      "max_trial_yield": null,
+      "bounty_cents": 5000
+    }
+  ],
+  "expected_bounty_band_ref": "component_bounty_band:evidence-adapter:high",
+  "invalid_bounty_records": [
+    {
+      "bounty_ref": "component_bounty:bad-paid",
+      "component_type": "evidence_adapter",
+      "submission_id": "component_submission:p2.2:evidence-adapter:procurement-v2",
+      "review_id": "component_review:p2.2:procurement-v2",
+      "miner_ref": "miner:component-builder-alpha",
+      "measured_trial_yield": 3.6,
+      "band_ref": "component_bounty_band:evidence-adapter:high",
+      "bounty_cents": 30000,
+      "state": "calculated_not_payable",
+      "payment_enabled": true,
+      "settlement_ref": "settlement:bad",
+      "paid_at": "2026-06-16T00:00:00Z",
+      "balance_mutation_enabled": true,
+      "expected_error_contains": [
+        "payment_enabled",
+        "settlement_ref",
+        "paid_at",
+        "balance mutation"
+      ]
+    }
+  ],
+  "ip_assignment": {
+    "assignment_ref": "component_ip_assignment:p2.2:procurement-v2",
+    "component_type": "evidence_adapter",
+    "submission_id": "component_submission:p2.2:evidence-adapter:procurement-v2",
+    "miner_ref": "miner:component-builder-alpha",
+    "assigned_to_ref": "leadpoet:research-lab",
+    "rights_scope": "component_market_component:evidence_adapter:use_modify_retain_publish_receipts_after_acceptance",
+    "state": "acknowledged_pending_acceptance",
+    "effective_on_acceptance_only": true,
+    "component_publicly_accepted": false,
+    "signature_ref": "signature:pending",
+    "public_release_authorized": false
+  },
+  "invalid_ip_assignments": [
+    {
+      "assignment_ref": "component_ip_assignment:p2.2:bad-public",
+      "component_type": "evidence_adapter",
+      "submission_id": "component_submission:p2.2:evidence-adapter:procurement-v2",
+      "miner_ref": "miner:component-builder-alpha",
+      "assigned_to_ref": "leadpoet:research-lab",
+      "rights_scope": "component_market_component:evidence_adapter:use_modify_retain",
+      "state": "acknowledged_pending_acceptance",
+      "effective_on_acceptance_only": false,
+      "component_publicly_accepted": true,
+      "signature_ref": "signature:complete",
+      "public_release_authorized": true,
+      "expected_error_contains": [
+        "effective on acceptance only",
+        "component_publicly_accepted",
+        "signature:pending",
+        "public release"
+      ]
+    },
+    {
+      "assignment_ref": "component_ip_assignment:p2.2:bad-protected",
+      "component_type": "evidence_adapter",
+      "submission_id": "component_submission:p2.2:evidence-adapter:procurement-v2",
+      "miner_ref": "miner:component-builder-alpha",
+      "assigned_to_ref": "leadpoet:research-lab",
+      "rights_scope": "component_market_component:evidence_adapter:use_modify_retain",
+      "state": "acknowledged_pending_acceptance",
+      "effective_on_acceptance_only": true,
+      "component_publicly_accepted": false,
+      "signature_ref": "signature:pending",
+      "public_release_authorized": false,
+      "raw_customer_data": "should not be present",
+      "expected_error_contains": "raw_customer_data"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "full_component_market": true,
+    "live_meta_allocation": false,
+    "research_map_live_api": false,
+    "kms_key_release": false,
+    "research_enclaves": false,
+    "on_chain_anchor_publication": false,
+    "ledger_audit_publication": false,
+    "counterfactual_consequences": false,
+    "balance_mutations": true,
+    "bounty_payments": true,
+    "production_writes": true,
+    "supabase_writes": true,
+    "public_workflows": true
+  }
+}

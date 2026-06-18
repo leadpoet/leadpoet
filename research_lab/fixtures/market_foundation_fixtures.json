@@ -1,0 +1,290 @@
+{
+  "market_dependency_gate_values": [
+    "production_sql_applied",
+    "dual_arm_paired_day_clock_started",
+    "dual_arm_paired_days_accumulated",
+    "same_day_crowning_certified",
+    "engine_v0_external_cost_calibrated",
+    "loop_hosted_run_corpus_ready",
+    "hosted_run_crowning_survived_probation",
+    "external_validators_verified",
+    "job_unit_economics_published",
+    "baseline_arm_comparison_published",
+    "outcome_label_accumulation_on_curve",
+    "gold_icp_inventory_ready"
+  ],
+  "workflow_guards": {
+    "disabled": {
+      "full_component_market": false,
+      "live_meta_allocation": false,
+      "research_map_live_api": false,
+      "kms_key_release": false,
+      "research_enclaves": false,
+      "on_chain_anchor_publication": false,
+      "ledger_audit_publication": false,
+      "counterfactual_consequences": false,
+      "balance_mutations": false,
+      "bounty_payments": false,
+      "production_writes": false,
+      "supabase_writes": false,
+      "public_workflows": false
+    },
+    "invalid": {
+      "full_component_market": true,
+      "live_meta_allocation": true,
+      "research_map_live_api": false,
+      "kms_key_release": true,
+      "research_enclaves": true,
+      "on_chain_anchor_publication": true,
+      "ledger_audit_publication": true,
+      "counterfactual_consequences": true,
+      "balance_mutations": true,
+      "bounty_payments": true,
+      "production_writes": true,
+      "supabase_writes": true,
+      "public_workflows": true,
+      "expected_error_contains": [
+        "full_component_market",
+        "kms_key_release",
+        "counterfactual_consequences",
+        "supabase_writes"
+      ]
+    }
+  },
+  "workflow_guard_env": {
+    "RESEARCH_LAB_MARKET_FULL_COMPONENT_MARKET": "1",
+    "RESEARCH_LAB_MARKET_LIVE_META_ALLOCATION": "true",
+    "RESEARCH_LAB_MARKET_RESEARCH_MAP_LIVE_API": "",
+    "RESEARCH_LAB_MARKET_KMS_KEY_RELEASE": "yes",
+    "RESEARCH_LAB_MARKET_RESEARCH_ENCLAVES": "on",
+    "RESEARCH_LAB_MARKET_ON_CHAIN_ANCHORS": "1",
+    "RESEARCH_LAB_MARKET_LEDGER_AUDIT_PUBLICATION": "true",
+    "RESEARCH_LAB_MARKET_COUNTERFACTUAL_CONSEQUENCES": "yes",
+    "RESEARCH_LAB_MARKET_BALANCE_MUTATIONS": "1",
+    "RESEARCH_LAB_MARKET_BOUNTY_PAYMENTS": "true",
+    "RESEARCH_LAB_MARKET_PRODUCTION_WRITES": "1",
+    "RESEARCH_LAB_MARKET_SUPABASE_WRITES": "1",
+    "RESEARCH_LAB_MARKET_PUBLIC_WORKFLOWS": "true",
+    "expected_error_contains": [
+      "full_component_market",
+      "kms_key_release",
+      "public_workflows"
+    ]
+  },
+  "carry_forward_status": {
+    "production_sql_applied": false,
+    "dual_arm_paired_day_clock_started": false,
+    "dual_arm_paired_days_accumulated": false,
+    "same_day_crowning_certified": false,
+    "engine_v0_external_cost_calibrated": false,
+    "loop_hosted_run_corpus_ready": false,
+    "hosted_run_crowning_survived_probation": false,
+    "external_validators_verified": false,
+    "job_unit_economics_published": false,
+    "baseline_arm_comparison_published": false,
+    "outcome_label_accumulation_on_curve": false,
+    "gold_icp_inventory_ready": false
+  },
+  "readiness_claims": {
+    "local_not_ready": {
+      "readiness_id": "market_readiness:p2.0:local-not-ready",
+      "carry_forward_status": {
+        "production_sql_applied": false,
+        "dual_arm_paired_day_clock_started": false,
+        "dual_arm_paired_days_accumulated": false,
+        "same_day_crowning_certified": false,
+        "engine_v0_external_cost_calibrated": false,
+        "loop_hosted_run_corpus_ready": false,
+        "hosted_run_crowning_survived_probation": false,
+        "external_validators_verified": false,
+        "job_unit_economics_published": false,
+        "baseline_arm_comparison_published": false,
+        "outcome_label_accumulation_on_curve": false,
+        "gold_icp_inventory_ready": false
+      },
+      "market_operation_claimed_ready": false,
+      "uses_local_fixtures": true,
+      "local_only": true,
+      "evidence_refs": [],
+      "owner_approval_ref": ""
+    },
+    "invalid": [
+      {
+        "readiness_id": "market_readiness:p2.0:bad-local-fixture-claim",
+        "carry_forward_status": {
+          "production_sql_applied": false,
+          "dual_arm_paired_day_clock_started": false,
+          "dual_arm_paired_days_accumulated": false,
+          "same_day_crowning_certified": false,
+          "engine_v0_external_cost_calibrated": false,
+          "loop_hosted_run_corpus_ready": false,
+          "hosted_run_crowning_survived_probation": false,
+          "external_validators_verified": false,
+          "job_unit_economics_published": false,
+          "baseline_arm_comparison_published": false,
+          "outcome_label_accumulation_on_curve": false,
+          "gold_icp_inventory_ready": false
+        },
+        "market_operation_claimed_ready": true,
+        "uses_local_fixtures": true,
+        "local_only": true,
+        "evidence_refs": [],
+        "owner_approval_ref": "",
+        "expected_error_contains": [
+          "local fixtures",
+          "local_only",
+          "missing dependency gates",
+          "evidence_refs",
+          "owner_approval_ref"
+        ]
+      },
+      {
+        "readiness_id": "market_readiness:p2.0:bad-partial-gates",
+        "carry_forward_status": {
+          "production_sql_applied": true,
+          "dual_arm_paired_day_clock_started": true,
+          "dual_arm_paired_days_accumulated": false,
+          "same_day_crowning_certified": false,
+          "engine_v0_external_cost_calibrated": true,
+          "loop_hosted_run_corpus_ready": false,
+          "hosted_run_crowning_survived_probation": false,
+          "external_validators_verified": false,
+          "job_unit_economics_published": false,
+          "baseline_arm_comparison_published": false,
+          "outcome_label_accumulation_on_curve": false,
+          "gold_icp_inventory_ready": false
+        },
+        "market_operation_claimed_ready": true,
+        "uses_local_fixtures": false,
+        "local_only": false,
+        "evidence_refs": [
+          "evidence:partial"
+        ],
+        "owner_approval_ref": "owner_approval:partial",
+        "expected_error_contains": [
+          "dual_arm_paired_days_accumulated",
+          "loop_hosted_run_corpus_ready"
+        ]
+      }
+    ]
+  },
+  "sealing_postures": {
+    "local_stub": {
+      "posture_id": "market_sealing:p2.0:local-stub",
+      "pcr0_allowlist_ref": "pcr0_allowlist:local-placeholder",
+      "enclave_measurement_ref": "enclave_measurement:pending",
+      "kms_policy_ref": "kms_policy:pending",
+      "on_chain_anchor_ref": "on_chain_anchor:pending",
+      "pcr0_allowlist_checked": false,
+      "pcr0_allowed": false,
+      "signature_chain_checked": false,
+      "signature_chain_valid": false,
+      "egress_policy_checked": false,
+      "egress_policy_passed": false,
+      "equivocation_check_performed": false,
+      "equivocation_conflict": false,
+      "kms_policy_checked": false,
+      "kms_policy_passed": false,
+      "live_verification_performed": false,
+      "kms_key_release_requested": false,
+      "kms_key_released": false,
+      "research_enclave_started": false,
+      "on_chain_anchor_submitted": false,
+      "production_valid": false,
+      "local_stub_only": true,
+      "state": "local_stub_only"
+    },
+    "invalid": [
+      {
+        "posture_id": "market_sealing:p2.0:bad-skipped-checks",
+        "pcr0_allowlist_ref": "pcr0_allowlist:local-placeholder",
+        "enclave_measurement_ref": "enclave_measurement:pending",
+        "kms_policy_ref": "kms_policy:pending",
+        "on_chain_anchor_ref": "on_chain_anchor:pending",
+        "pcr0_allowlist_checked": false,
+        "pcr0_allowed": false,
+        "signature_chain_checked": false,
+        "signature_chain_valid": false,
+        "egress_policy_checked": false,
+        "egress_policy_passed": false,
+        "equivocation_check_performed": false,
+        "equivocation_conflict": false,
+        "kms_policy_checked": false,
+        "kms_policy_passed": false,
+        "live_verification_performed": false,
+        "kms_key_release_requested": false,
+        "kms_key_released": true,
+        "research_enclave_started": false,
+        "on_chain_anchor_submitted": false,
+        "production_valid": true,
+        "local_stub_only": false,
+        "state": "production_ready",
+        "expected_error_contains": [
+          "live_verification_performed",
+          "PCR0 allowlist check must not be skipped",
+          "signature-chain check must not be skipped",
+          "equivocation check must not be skipped",
+          "KMS policy check must not be skipped"
+        ]
+      },
+      {
+        "posture_id": "market_sealing:p2.0:bad-local-release",
+        "pcr0_allowlist_ref": "pcr0_allowlist:local-placeholder",
+        "enclave_measurement_ref": "enclave_measurement:pending",
+        "kms_policy_ref": "kms_policy:pending",
+        "on_chain_anchor_ref": "on_chain_anchor:pending",
+        "pcr0_allowlist_checked": false,
+        "pcr0_allowed": false,
+        "signature_chain_checked": false,
+        "signature_chain_valid": false,
+        "egress_policy_checked": false,
+        "egress_policy_passed": false,
+        "equivocation_check_performed": false,
+        "equivocation_conflict": false,
+        "kms_policy_checked": false,
+        "kms_policy_passed": false,
+        "live_verification_performed": false,
+        "kms_key_release_requested": true,
+        "kms_key_released": true,
+        "research_enclave_started": true,
+        "on_chain_anchor_submitted": true,
+        "production_valid": true,
+        "local_stub_only": true,
+        "state": "local_stub_only",
+        "expected_error_contains": [
+          "local sealing stub must not request KMS key release",
+          "local sealing stub must not release KMS keys",
+          "local sealing stub must not start research enclaves",
+          "local sealing stub must not submit on-chain anchors",
+          "local sealing stub must not claim production_valid"
+        ]
+      },
+      {
+        "posture_id": "market_sealing:p2.0:bad-equivocation",
+        "pcr0_allowlist_ref": "pcr0_allowlist:production-allowlist",
+        "enclave_measurement_ref": "enclave_measurement:live",
+        "kms_policy_ref": "kms_policy:live",
+        "on_chain_anchor_ref": "on_chain_anchor:live",
+        "pcr0_allowlist_checked": true,
+        "pcr0_allowed": true,
+        "signature_chain_checked": true,
+        "signature_chain_valid": true,
+        "egress_policy_checked": true,
+        "egress_policy_passed": true,
+        "equivocation_check_performed": true,
+        "equivocation_conflict": true,
+        "kms_policy_checked": true,
+        "kms_policy_passed": true,
+        "live_verification_performed": true,
+        "kms_key_release_requested": true,
+        "kms_key_released": true,
+        "research_enclave_started": true,
+        "on_chain_anchor_submitted": true,
+        "production_valid": true,
+        "local_stub_only": false,
+        "state": "production_ready",
+        "expected_error_contains": "equivocation conflict blocks production sealing"
+      }
+    ]
+  }
+}

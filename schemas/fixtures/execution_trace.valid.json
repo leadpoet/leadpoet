@@ -1,0 +1,82 @@
+{
+  "run_id": "33333333-3333-4333-8333-333333333333",
+  "schema_version": "1.0",
+  "artifact_hash": "sha256:artifact-example",
+  "role": "baseline_arm",
+  "rung": "L1",
+  "status": "completed",
+  "lane_id": null,
+  "icp_set_hash": "sha256:icp-set-example",
+  "eval_version": {
+    "verifier_hash": "sha256:verifier-example",
+    "judge_version_hash": "sha256:judge-version-example"
+  },
+  "calls": [
+    {
+      "seq": 1,
+      "ts": "2026-06-16T00:01:00Z",
+      "provider": "exa",
+      "model": "exa-search",
+      "purpose": "search",
+      "call_emitter": "code",
+      "component": "qualification.discovery",
+      "request_hash": "sha256:req-1",
+      "response_hash": "sha256:res-1",
+      "tokens": {
+        "in": 0,
+        "out": 0
+      },
+      "cost_usd": 0.02,
+      "teacher_model_flag": false
+    },
+    {
+      "seq": 2,
+      "ts": "2026-06-16T00:01:30Z",
+      "provider": "openrouter",
+      "model": "sealed-judge-dev",
+      "purpose": "judge",
+      "call_emitter": "code",
+      "component": "qualification.intent_judge",
+      "request_hash": "sha256:req-2",
+      "response_hash": "sha256:res-2",
+      "tokens": {
+        "in": 900,
+        "out": 120
+      },
+      "cost_usd": 0.04,
+      "teacher_model_flag": true
+    }
+  ],
+  "evidence_bundles": [
+    {
+      "url": "https://example.com/news/funding",
+      "fetch_ts": "2026-06-16T00:01:05Z",
+      "content_hash": "sha256:content-1",
+      "snapshot_ref": "snapshots/2026/06/16/content-1",
+      "signature": "fabric_sig:example",
+      "used_in_signal_idx": 0
+    }
+  ],
+  "judge_verdicts": [
+    {
+      "input_hash": "sha256:judge-input-1",
+      "verdict_hash": "sha256:judge-verdict-1",
+      "judge_version_hash": "sha256:judge-version-example",
+      "cached": false
+    }
+  ],
+  "outputs_ref": "sha256:outputs-example",
+  "score_bundle_ref": "sha256:score-bundle-example",
+  "cost_ledger": {
+    "total_usd": 0.06,
+    "by_provider": {
+      "exa": 0.02,
+      "openrouter": 0.04
+    },
+    "by_purpose": {
+      "search": 0.02,
+      "judge": 0.04
+    }
+  },
+  "attestation_ref": "sha256:attestation-example"
+}

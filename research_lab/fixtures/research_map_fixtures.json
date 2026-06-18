@@ -1,0 +1,498 @@
+{
+  "generated_for_date": "2026-06-16",
+  "map_version": "research_map_v0:local",
+  "static_uri": "local://research-map/2026-06-16.json",
+  "artifact_kind": "static_json",
+  "source_ledger_refs": [
+    "results_ledger:p1.7:engine-v0-sample",
+    "failure_board:p1.4:local",
+    "component_registry:p1.3:local"
+  ],
+  "source_failure_board_items": [
+    {
+      "item_id": "fb:p1.7:funding:001",
+      "island": "generalist",
+      "target_component": "source_router",
+      "target_metric": "coverage",
+      "failure_summary": "Sanitized: funding announcements on non-English fintech sites are missed.",
+      "fixture_refs": [
+        "fixture:gold-icp:german-fintech-weekly"
+      ],
+      "bounty_tier_ref": "bounty_tier:coverage-medium",
+      "allocator_prediction_ref": "allocator_prediction:p1.7:source-router-source-add",
+      "expected_yield_score": 0.72,
+      "status": "open",
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    }
+  ],
+  "component_statuses": [
+    {
+      "component_ref": "component_status:p1.7:source-router",
+      "island": "generalist",
+      "component_name": "source_router",
+      "status": "active",
+      "registry_ref": "component_registry:p1.3:source-router",
+      "public_summary": "Chooses evidence sources before lead scoring. Current public work focuses on coverage gaps, not live champion internals.",
+      "allowed_patch_types": [
+        "STRATEGY_SWAP",
+        "SOURCE_ADD"
+      ],
+      "current_patch_seq": 7,
+      "public_receipt_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "sanitized_trace_refs": [
+        "trace:p1.7:source-router-sanitized"
+      ],
+      "withheld_private_artifact_count": 2,
+      "live_champion_artifact_public": false,
+      "sealed_eval_details_included": false,
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    }
+  ],
+  "frontier_summaries": [
+    {
+      "frontier_id": "frontier:p1.7:source-router",
+      "island": "generalist",
+      "target_component": "source_router",
+      "points": [
+        {
+          "point_id": "frontier_point:p1.7:source-router:001",
+          "run_ref": "run:p1.7:coverage:001",
+          "receipt_ref": "receipt:p1.4:coverage-public",
+          "patch_ref": "patch:p1.3:source-router:strategy-swap",
+          "score": 78.1,
+          "delta_vs_parent": 1.4,
+          "cost_cents": 900,
+          "status": "keep",
+          "public_summary": "Kept a source-routing strategy that improved public coverage fixtures.",
+          "kept": true
+        },
+        {
+          "point_id": "frontier_point:p1.7:source-router:002",
+          "run_ref": "run:p1.7:coverage:002",
+          "receipt_ref": "receipt:p1.4:coverage-discard",
+          "patch_ref": "patch:p1.3:source-router:param-edit",
+          "score": 77.2,
+          "delta_vs_parent": -0.2,
+          "cost_cents": 800,
+          "status": "discard",
+          "public_summary": "Discarded a recency-threshold tweak after lower held-out coverage.",
+          "kept": false
+        }
+      ],
+      "running_best_score": 78.1,
+      "keep_rate": 0.5,
+      "cost_per_kept_patch_cents": 1700,
+      "crash_rate": 0.0,
+      "source_ledger_refs": [
+        "results_ledger:p1.7:source-router"
+      ],
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    }
+  ],
+  "allocator_predictions": [
+    {
+      "prediction_id": "allocator_prediction:p1.7:source-router-source-add",
+      "cell_ref": "cell:p1.7:source-router-source-add",
+      "island": "generalist",
+      "target_component": "source_router",
+      "patch_type": "SOURCE_ADD",
+      "predicted_delta": 1.2,
+      "confidence": 0.62,
+      "expected_cost_cents": 1200,
+      "expected_value_score": 0.73,
+      "provenance_refs": [
+        "frontier:p1.7:source-router",
+        "failure_board:fb:p1.7:funding:001",
+        "results_ledger:p1.7:source-router"
+      ],
+      "model_version_ref": "meta_allocator:uniform_prior:p1.7-local",
+      "is_prediction": true,
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    }
+  ],
+  "cells": [
+    {
+      "cell_id": "cell:p1.7:source-router-source-add",
+      "island": "generalist",
+      "target_component": "source_router",
+      "patch_type": "SOURCE_ADD",
+      "failure_board_item_ref": "fb:p1.7:funding:001",
+      "sanitized_failure_summary": "Funding announcements on non-English fintech sites remain under-covered.",
+      "sanitized_examples": [
+        "Missed a German-language fintech funding announcement despite public press coverage.",
+        "Over-weighted stale English syndication when a fresher local source existed."
+      ],
+      "recent_case_count": 7,
+      "run_density_7d": 3,
+      "achieved_delta_mean": 0.6,
+      "frontier_summary_ref": "frontier:p1.7:source-router",
+      "allocator_prediction_ref": "allocator_prediction:p1.7:source-router-source-add",
+      "source_receipt_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    }
+  ],
+  "invalid_cross_reference_cells": [
+    {
+      "cell_id": "cell:p1.7:dangling-component",
+      "island": "generalist",
+      "target_component": "missing_component",
+      "patch_type": "SOURCE_ADD",
+      "failure_board_item_ref": "fb:p1.7:funding:001",
+      "sanitized_failure_summary": "This cell is otherwise public-safe but points at a missing component.",
+      "sanitized_examples": [
+        "Example is sanitized."
+      ],
+      "recent_case_count": 1,
+      "run_density_7d": 1,
+      "achieved_delta_mean": 0.1,
+      "frontier_summary_ref": "frontier:p1.7:source-router",
+      "allocator_prediction_ref": "allocator_prediction:p1.7:source-router-source-add",
+      "source_receipt_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "target_component not in component statuses"
+    },
+    {
+      "cell_id": "cell:p1.7:dangling-frontier",
+      "island": "generalist",
+      "target_component": "source_router",
+      "patch_type": "SOURCE_ADD",
+      "failure_board_item_ref": "fb:p1.7:funding:001",
+      "sanitized_failure_summary": "This cell is otherwise public-safe but points at a missing frontier.",
+      "sanitized_examples": [
+        "Example is sanitized."
+      ],
+      "recent_case_count": 1,
+      "run_density_7d": 1,
+      "achieved_delta_mean": 0.1,
+      "frontier_summary_ref": "frontier:p1.7:missing",
+      "allocator_prediction_ref": "allocator_prediction:p1.7:source-router-source-add",
+      "source_receipt_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "frontier_summary_ref missing"
+    },
+    {
+      "cell_id": "cell:p1.7:dangling-prediction",
+      "island": "generalist",
+      "target_component": "source_router",
+      "patch_type": "SOURCE_ADD",
+      "failure_board_item_ref": "fb:p1.7:funding:001",
+      "sanitized_failure_summary": "This cell is otherwise public-safe but points at a missing allocator prediction.",
+      "sanitized_examples": [
+        "Example is sanitized."
+      ],
+      "recent_case_count": 1,
+      "run_density_7d": 1,
+      "achieved_delta_mean": 0.1,
+      "frontier_summary_ref": "frontier:p1.7:source-router",
+      "allocator_prediction_ref": "allocator_prediction:p1.7:missing",
+      "source_receipt_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "allocator_prediction_ref missing"
+    }
+  ],
+  "invalid_allocator_predictions": [
+    {
+      "prediction_id": "allocator_prediction:p1.7:not-prediction",
+      "cell_ref": "cell:p1.7:source-router-source-add",
+      "island": "generalist",
+      "target_component": "source_router",
+      "patch_type": "SOURCE_ADD",
+      "predicted_delta": 1.2,
+      "confidence": 0.62,
+      "expected_cost_cents": 1200,
+      "expected_value_score": 0.73,
+      "provenance_refs": [
+        "frontier:p1.7:source-router"
+      ],
+      "model_version_ref": "meta_allocator:uniform_prior:p1.7-local",
+      "is_prediction": false,
+      "protected_material_flags_checked": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "is_prediction=true"
+    },
+    {
+      "prediction_id": "allocator_prediction:p1.7:no-provenance",
+      "cell_ref": "cell:p1.7:source-router-source-add",
+      "island": "generalist",
+      "target_component": "source_router",
+      "patch_type": "SOURCE_ADD",
+      "predicted_delta": 1.2,
+      "confidence": 0.62,
+      "expected_cost_cents": 1200,
+      "expected_value_score": 0.73,
+      "provenance_refs": [],
+      "model_version_ref": "meta_allocator:uniform_prior:p1.7-local",
+      "is_prediction": true,
+      "protected_material_flags_checked": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "provenance refs"
+    }
+  ],
+  "invalid_component_statuses": [
+    {
+      "component_ref": "component_status:p1.7:bad-live",
+      "island": "generalist",
+      "component_name": "source_router",
+      "status": "active",
+      "registry_ref": "component_registry:p1.3:source-router",
+      "public_summary": "Bad public component row.",
+      "allowed_patch_types": [
+        "SOURCE_ADD"
+      ],
+      "current_patch_seq": 7,
+      "public_receipt_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "sanitized_trace_refs": [],
+      "withheld_private_artifact_count": 0,
+      "live_champion_artifact_public": true,
+      "sealed_eval_details_included": false,
+      "protected_material_flags_checked": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "live champion artifacts"
+    }
+  ],
+  "invalid_frontier_summaries": [
+    {
+      "frontier_id": "frontier:p1.7:bad-best",
+      "island": "generalist",
+      "target_component": "source_router",
+      "points": [
+        {
+          "point_id": "frontier_point:p1.7:bad:001",
+          "run_ref": "run:p1.7:coverage:001",
+          "receipt_ref": "receipt:p1.4:coverage-public",
+          "patch_ref": "patch:p1.3:source-router:strategy-swap",
+          "score": 78.1,
+          "delta_vs_parent": 1.4,
+          "cost_cents": 900,
+          "status": "keep",
+          "public_summary": "Kept a source-routing strategy.",
+          "kept": true
+        }
+      ],
+      "running_best_score": 77.1,
+      "keep_rate": 1.0,
+      "cost_per_kept_patch_cents": 900,
+      "crash_rate": 0.0,
+      "source_ledger_refs": [
+        "results_ledger:p1.7:source-router"
+      ],
+      "protected_material_flags_checked": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "running_best_score"
+    },
+    {
+      "frontier_id": "frontier:p1.7:bad-raw",
+      "island": "generalist",
+      "target_component": "source_router",
+      "points": [],
+      "running_best_score": 0,
+      "keep_rate": 0,
+      "cost_per_kept_patch_cents": 0,
+      "crash_rate": 0,
+      "source_ledger_refs": [
+        "results_ledger:p1.7:source-router"
+      ],
+      "protected_material_flags_checked": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "sealed_judge_prompt": "private rubric",
+      "expected_error_contains": "protected or raw"
+    }
+  ],
+  "invalid_cells": [
+    {
+      "cell_id": "cell:p1.7:unchecked-flags",
+      "island": "generalist",
+      "target_component": "source_router",
+      "patch_type": "SOURCE_ADD",
+      "failure_board_item_ref": "fb:p1.7:funding:001",
+      "sanitized_failure_summary": "Unchecked flags.",
+      "sanitized_examples": [
+        "Example is sanitized."
+      ],
+      "recent_case_count": 1,
+      "run_density_7d": 1,
+      "achieved_delta_mean": 0.1,
+      "frontier_summary_ref": "frontier:p1.7:source-router",
+      "allocator_prediction_ref": "allocator_prediction:p1.7:source-router-source-add",
+      "source_receipt_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "protected_material_flags_checked": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "protected-material flags"
+    },
+    {
+      "cell_id": "cell:p1.7:raw-customer",
+      "island": "generalist",
+      "target_component": "source_router",
+      "patch_type": "SOURCE_ADD",
+      "failure_board_item_ref": "fb:p1.7:funding:001",
+      "sanitized_failure_summary": "Bad raw row.",
+      "sanitized_examples": [
+        "Example is sanitized."
+      ],
+      "recent_case_count": 1,
+      "run_density_7d": 1,
+      "achieved_delta_mean": 0.1,
+      "frontier_summary_ref": "frontier:p1.7:source-router",
+      "allocator_prediction_ref": "allocator_prediction:p1.7:source-router-source-add",
+      "source_receipt_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "protected_material_flags_checked": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "raw_customer_data": "customer private data",
+      "expected_error_contains": "protected or raw"
+    }
+  ],
+  "invalid_projections": [
+    {
+      "projection_id": "research_map_projection:p1.7:bad-live-api",
+      "generated_for_date": "2026-06-16",
+      "map_version": "research_map_v0:local",
+      "component_statuses": [],
+      "cells": [],
+      "frontier_summaries": [],
+      "allocator_predictions": [],
+      "source_ledger_refs": [
+        "results_ledger:p1.7:engine-v0-sample"
+      ],
+      "state": "static_local_only",
+      "local_only": true,
+      "static_generation": true,
+      "daily_regeneration_cadence": "daily",
+      "live_api_enabled": true,
+      "production_publish_enabled": false,
+      "public_champion_artifacts_included": false,
+      "unreleased_eval_details_included": false,
+      "raw_customer_data_included": false,
+      "protected_material_flags_checked": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "live API"
+    },
+    {
+      "projection_id": "research_map_projection:p1.7:bad-private-material",
+      "generated_for_date": "2026-06-16",
+      "map_version": "research_map_v0:local",
+      "component_statuses": [],
+      "cells": [],
+      "frontier_summaries": [],
+      "allocator_predictions": [],
+      "source_ledger_refs": [
+        "results_ledger:p1.7:engine-v0-sample"
+      ],
+      "state": "static_local_only",
+      "local_only": true,
+      "static_generation": true,
+      "daily_regeneration_cadence": "daily",
+      "live_api_enabled": false,
+      "production_publish_enabled": false,
+      "public_champion_artifacts_included": true,
+      "unreleased_eval_details_included": true,
+      "raw_customer_data_included": true,
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "current live champion artifacts"
+    }
+  ],
+  "invalid_artifacts": [
+    {
+      "artifact_ref": "research_map_artifact:p1.7:bad-prod",
+      "projection_id": "research_map_projection:wrong",
+      "generated_for_date": "2026-06-16",
+      "artifact_kind": "static_json",
+      "static_uri": "https://public.example.com/research-map.json",
+      "artifact_hash": "sha256:notmatching",
+      "local_only": false,
+      "live_api_enabled": true,
+      "production_publish_enabled": true,
+      "protected_material_flags_checked": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "local://"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "public_miner_workflows": false,
+    "paid_loops": false,
+    "autopilot": false,
+    "hosted_run_crowning": false,
+    "source_add_payments": false,
+    "scheduler_jobs": true,
+    "production_writes": true,
+    "supabase_writes": true,
+    "live_champion_publication": false
+  }
+}

@@ -1,6 +1,5 @@
-"""Manual one-shot: run the reference model on today's ICP set and persist
-the baseline_score to qualification_baselines. This is the bootstrapping
-run for 20260530 — automation kicks in from tomorrow's 00:00 UTC rotation.
+"""Manual one-shot: run configured baseline arms on today's ICP set and persist
+their baseline_score rows to qualification_baselines.
 
 Logs every step + writes a 'failed' row on crash so it's visible in DB.
 """
@@ -14,10 +13,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, "/Users/tasnimul/Desktop/leadpoet")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
 from dotenv import load_dotenv
-load_dotenv(Path("/Users/tasnimul/Desktop/leadpoet/.env"), override=False)
+load_dotenv(REPO_ROOT / ".env", override=False)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +26,16 @@ logging.basicConfig(
 logger = logging.getLogger("baseline_bootstrap")
 
 from supabase import create_client
+from qualification.scoring.baseline import (
+    REFERENCE_MODEL_ID,
+    run_and_save_baseline,
+    save_baseline_failure_to_db,
+    save_baseline_to_db,
+)
+from qualification.scoring.baseline_arms import (
+    daily_baseline_arm_specs,
+    resolve_qualify_fn,
+)
 
 
 async def main() -> int:
@@ -48,48 +58,87 @@ async def main() -> int:
     icp_set_hash = active["icp_set_hash"]
     logger.info(f"Loaded {len(icps)} ICPs (hash={icp_set_hash[:12]})")
 
-    # ── Step 2: skip if a completed row already exists ────────────────
+    arms = daily_baseline_arm_specs()
+    arm_model_ids = {arm.model_id for arm in arms}
+    logger.info(
+        "Configured baseline arms: "
+        + ", ".join(f"{arm.label}={arm.model_id}" for arm in arms)
+    )
+
+    # ── Step 2: skip arms that already have completed rows ────────────
     b = sb.table("qualification_baselines") \
-        .select("set_id, run_status") \
-        .eq("set_id", today_set_id).execute()
-    if b.data and b.data[0].get("run_status") == "completed":
-        logger.info("Baseline already completed for today; nothing to do")
+        .select("set_id, model_id, run_status") \
+        .eq("set_id", today_set_id) \
+        .eq("run_status", "completed") \
+        .execute()
+    completed_model_ids = {
+        row.get("model_id") or REFERENCE_MODEL_ID
+        for row in (b.data or [])
+        if (row.get("model_id") or REFERENCE_MODEL_ID) in arm_model_ids
+    }
+    if arm_model_ids.issubset(completed_model_ids):
+        logger.info("All configured baseline arms already completed for today")
         return 0
 
-    # ── Step 3: import + run reference model ──────────────────────────
-    from miner_models.qualification_model import qualify
+    # ── Step 3: import + run configured arms ──────────────────────────
     from qualification.scoring.lead_scorer import score_company
-    from qualification.scoring.baseline import (
-        run_and_save_baseline,
-        save_baseline_to_db,
-        REFERENCE_MODEL_ID,
-    )
 
-    started = time.monotonic()
-    logger.info(f"Starting reference-model evaluation against {len(icps)} ICPs")
-    record = await run_and_save_baseline(
-        set_id=today_set_id,
-        icp_set=icps,
-        qualify_fn=qualify,
-        score_fn=score_company,
-    )
-    duration = time.monotonic() - started
+    failures = 0
+    for arm in arms:
+        if arm.model_id in completed_model_ids:
+            logger.info(f"Skipping completed baseline arm {arm.model_id}")
+            continue
 
-    logger.info(
-        f"Reference model evaluation complete: "
-        f"baseline_score={record.baseline_score:.2f} duration={duration:.0f}s"
-    )
-    logger.info(f"per_icp_scores: {[f'{s:.2f}' for s in record.per_icp_scores]}")
+        started = time.monotonic()
+        try:
+            qualify = resolve_qualify_fn(arm)
+            logger.info(
+                f"Starting baseline arm {arm.label} ({arm.model_id}) "
+                f"against {len(icps)} ICPs"
+            )
+            record = await run_and_save_baseline(
+                set_id=today_set_id,
+                icp_set=icps,
+                qualify_fn=qualify,
+                score_fn=score_company,
+                model_id=arm.model_id,
+                score_cost_exempt=True,
+            )
+            duration = time.monotonic() - started
 
-    # ── Step 4: persist ───────────────────────────────────────────────
-    save_baseline_to_db(
-        record, sb,
-        icp_set_hash=icp_set_hash,
-        run_duration_seconds=duration,
-        run_status="completed",
-    )
-    logger.info(f"✅ Baseline row written for set_id={today_set_id}")
-    return 0
+            logger.info(
+                f"Baseline arm {arm.model_id} complete: "
+                f"baseline_score={record.baseline_score:.2f} "
+                f"duration={duration:.0f}s"
+            )
+            logger.info(
+                f"{arm.model_id} per_icp_scores: "
+                f"{[f'{s:.2f}' for s in record.per_icp_scores]}"
+            )
+
+            save_baseline_to_db(
+                record, sb,
+                icp_set_hash=icp_set_hash,
+                run_duration_seconds=duration,
+                run_status="completed",
+            )
+            logger.info(f"✅ Baseline row written for set_id={today_set_id} model_id={arm.model_id}")
+        except Exception as e:
+            failures += 1
+            duration = time.monotonic() - started
+            logger.exception(f"Baseline arm {arm.model_id} FAILED: {e}")
+            try:
+                save_baseline_failure_to_db(
+                    today_set_id,
+                    arm.model_id,
+                    sb,
+                    icp_set_hash=icp_set_hash,
+                    run_duration_seconds=duration,
+                )
+            except Exception:
+                logger.exception(f"Failed to persist failed row for arm {arm.model_id}")
+
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
@@ -102,14 +151,7 @@ if __name__ == "__main__":
         try:
             sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
             today_set_id = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
-            sb.table("qualification_baselines").upsert({
-                "set_id": today_set_id,
-                "baseline_score": 0.0,
-                "per_icp_scores": [],
-                "scored_at": datetime.now(timezone.utc).isoformat(),
-                "model_id": "reference:qualification_model:v1",
-                "run_status": "failed",
-            }, on_conflict="set_id").execute()
+            save_baseline_failure_to_db(today_set_id, REFERENCE_MODEL_ID, sb)
         except Exception:
             pass
         sys.exit(1)

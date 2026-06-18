@@ -1,0 +1,199 @@
+{
+  "fixture_set_id": "research-loop-v0-l1-fixtures-2026-06-16",
+  "schema_version": "1.0",
+  "description": "Frozen, network-free L1 fixtures for Phase 0 research-loop depth calibration.",
+  "fixtures": [
+    {
+      "fixture_id": "rlv0-001",
+      "icp": {
+        "icp_id": "rlv0-001",
+        "industry": "Fintech",
+        "sub_industry": "Compliance automation",
+        "company_stage": "Series A-B",
+        "geography": "United States",
+        "intent_signals": [
+          "recently raised funding for compliance automation"
+        ],
+        "prompt": "Find fintech companies with recent funding tied to compliance automation."
+      },
+      "answer_key": [
+        "Northstar Compliance AI",
+        "LedgerGuard"
+      ],
+      "candidate_pool": [
+        {
+          "company_name": "Northstar Compliance AI",
+          "website": "https://northstar-compliance.example",
+          "source_url": "https://news.example/northstar-series-b",
+          "source": "news",
+          "date": "2026-05-22",
+          "snippet": "Northstar Compliance AI raised Series B funding to expand automated compliance workflows.",
+          "description": "Northstar Compliance AI raised funding for compliance automation.",
+          "strategies": ["reference", "source_routing_v0", "overbroad_v0"],
+          "strategy_score": {
+            "reference": 91,
+            "source_routing_v0": 94,
+            "overbroad_v0": 90
+          },
+          "defects": []
+        },
+        {
+          "company_name": "LedgerGuard",
+          "website": "https://ledgerguard.example",
+          "source_url": "https://ledgerguard.example/blog/compliance-automation-funding",
+          "source": "company_website",
+          "date": "2026-05-30",
+          "snippet": "LedgerGuard announced new funding for its compliance automation platform.",
+          "description": "LedgerGuard announced funding for compliance automation.",
+          "strategies": ["source_routing_v0"],
+          "strategy_score": {
+            "source_routing_v0": 89
+          },
+          "defects": []
+        },
+        {
+          "company_name": "Generic Workflow CRM",
+          "website": "https://generic-workflow.example",
+          "source_url": "https://generic-workflow.example/about",
+          "source": "company_website",
+          "date": "2026-05-28",
+          "snippet": "Generic Workflow CRM sells general operations software.",
+          "description": "Generic Workflow CRM is a generic workflow vendor, not compliance automation.",
+          "strategies": ["overbroad_v0"],
+          "strategy_score": {
+            "overbroad_v0": 87
+          },
+          "defects": ["wrong_intent"]
+        }
+      ]
+    },
+    {
+      "fixture_id": "rlv0-002",
+      "icp": {
+        "icp_id": "rlv0-002",
+        "industry": "Industrial",
+        "sub_industry": "Warehouse robotics",
+        "company_stage": "Growth",
+        "geography": "North America",
+        "intent_signals": [
+          "announced expansion of warehouse automation deployments"
+        ],
+        "prompt": "Find industrial companies expanding warehouse robotics deployments."
+      },
+      "answer_key": [
+        "PalletPilot Robotics",
+        "DockMind Systems"
+      ],
+      "candidate_pool": [
+        {
+          "company_name": "PalletPilot Robotics",
+          "website": "https://palletpilot.example",
+          "source_url": "https://news.example/palletpilot-warehouse-expansion",
+          "source": "news",
+          "date": "2026-06-01",
+          "snippet": "PalletPilot Robotics announced an expansion of warehouse automation deployments.",
+          "description": "PalletPilot Robotics expanded warehouse robotics deployments.",
+          "strategies": ["reference", "source_routing_v0", "overbroad_v0"],
+          "strategy_score": {
+            "reference": 92,
+            "source_routing_v0": 95,
+            "overbroad_v0": 91
+          },
+          "defects": []
+        },
+        {
+          "company_name": "DockMind Systems",
+          "website": "https://dockmind.example",
+          "source_url": "https://dockmind.example/news/automation-rollout",
+          "source": "company_website",
+          "date": "2026-05-26",
+          "snippet": "DockMind Systems described a new warehouse automation rollout across regional sites.",
+          "description": "DockMind Systems is rolling out warehouse automation.",
+          "strategies": ["source_routing_v0"],
+          "strategy_score": {
+            "source_routing_v0": 88
+          },
+          "defects": []
+        },
+        {
+          "company_name": "Retail Shelf Analytics",
+          "website": "https://retail-shelf.example",
+          "source_url": "https://retail-shelf.example/platform",
+          "source": "company_website",
+          "date": "2026-06-02",
+          "snippet": "Retail Shelf Analytics tracks store shelf inventory with cameras.",
+          "description": "Retail Shelf Analytics is not a warehouse robotics deployment lead.",
+          "strategies": ["overbroad_v0"],
+          "strategy_score": {
+            "overbroad_v0": 86
+          },
+          "defects": ["wrong_domain"]
+        }
+      ]
+    },
+    {
+      "fixture_id": "rlv0-003",
+      "icp": {
+        "icp_id": "rlv0-003",
+        "industry": "Healthcare",
+        "sub_industry": "Revenue cycle automation",
+        "company_stage": "Series B-C",
+        "geography": "United States",
+        "intent_signals": [
+          "launched or expanded revenue cycle automation"
+        ],
+        "prompt": "Find healthcare companies expanding revenue cycle automation."
+      },
+      "answer_key": [
+        "ClaimSpring Health",
+        "RevOpsMD"
+      ],
+      "candidate_pool": [
+        {
+          "company_name": "ClaimSpring Health",
+          "website": "https://claimspring.example",
+          "source_url": "https://news.example/claimspring-revenue-cycle",
+          "source": "news",
+          "date": "2026-05-18",
+          "snippet": "ClaimSpring Health launched revenue cycle automation for multi-site providers.",
+          "description": "ClaimSpring Health launched revenue cycle automation.",
+          "strategies": ["reference", "source_routing_v0", "overbroad_v0"],
+          "strategy_score": {
+            "reference": 90,
+            "source_routing_v0": 93,
+            "overbroad_v0": 88
+          },
+          "defects": []
+        },
+        {
+          "company_name": "RevOpsMD",
+          "website": "https://revopsmd.example",
+          "source_url": "https://revopsmd.example/news/rcm-expansion",
+          "source": "company_website",
+          "date": "2026-05-29",
+          "snippet": "RevOpsMD expanded revenue cycle automation for specialty clinics.",
+          "description": "RevOpsMD expanded revenue cycle automation.",
+          "strategies": ["source_routing_v0"],
+          "strategy_score": {
+            "source_routing_v0": 87
+          },
+          "defects": []
+        },
+        {
+          "company_name": "General Patient Portal",
+          "website": "https://patient-portal.example",
+          "source_url": "https://patient-portal.example/news",
+          "source": "company_website",
+          "date": "2026-05-25",
+          "snippet": "General Patient Portal redesigned patient scheduling screens.",
+          "description": "General Patient Portal is patient scheduling, not revenue cycle automation.",
+          "strategies": ["overbroad_v0"],
+          "strategy_score": {
+            "overbroad_v0": 85
+          },
+          "defects": ["wrong_intent"]
+        }
+      ]
+    }
+  ]
+}

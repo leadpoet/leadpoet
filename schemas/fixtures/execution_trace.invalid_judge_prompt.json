@@ -1,0 +1,33 @@
+{
+  "run_id": "33333333-3333-4333-8333-333333333333",
+  "schema_version": "1.0",
+  "artifact_hash": "sha256:artifact-example",
+  "role": "baseline_arm",
+  "rung": "L1",
+  "status": "completed",
+  "lane_id": null,
+  "icp_set_hash": "sha256:icp-set-example",
+  "eval_version": {
+    "verifier_hash": "sha256:verifier-example",
+    "judge_version_hash": "sha256:judge-version-example"
+  },
+  "calls": [],
+  "evidence_bundles": [],
+  "judge_verdicts": [
+    {
+      "input_hash": "sha256:judge-input-1",
+      "verdict_hash": "sha256:judge-verdict-1",
+      "judge_version_hash": "sha256:judge-version-example",
+      "cached": false,
+      "judge_prompt": "This sealed judge prompt must never enter the trace corpus."
+    }
+  ],
+  "outputs_ref": "sha256:outputs-example",
+  "score_bundle_ref": "sha256:score-bundle-example",
+  "cost_ledger": {
+    "total_usd": 0.0,
+    "by_provider": {},
+    "by_purpose": {}
+  },
+  "attestation_ref": "sha256:attestation-example"
+}

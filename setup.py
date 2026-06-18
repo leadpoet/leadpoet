@@ -137,7 +137,11 @@ setup(
     author="Leadpoet",  
     author_email="hello@leadpoet.com",  
     license="MIT",
-    packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'miner_models', 'miner_models.*', 'neurons', 'neurons.*', 'validator_models', 'validator_models.*', 'leadpoet_audit', 'leadpoet_audit.*', 'gateway', 'gateway.*', 'leadpoet_canonical', 'leadpoet_canonical.*', 'qualification', 'qualification.*']),
+    packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'miner_models', 'miner_models.*', 'neurons', 'neurons.*', 'validator_models', 'validator_models.*', 'leadpoet_audit', 'leadpoet_audit.*', 'gateway', 'gateway.*', 'leadpoet_canonical', 'leadpoet_canonical.*', 'qualification', 'qualification.*', 'leadpoet_verifier', 'leadpoet_verifier.*', 'research_lab', 'research_lab.*']),
+    package_data={
+        "leadpoet_verifier": ["fixtures/*.json"],
+        "research_lab": ["engine_program.md", "fixtures/*.json"],
+    },
     include_package_data=True,
     python_requires=">=3.8",
     install_requires=requirements,

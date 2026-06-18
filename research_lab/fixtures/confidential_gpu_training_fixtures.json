@@ -1,0 +1,474 @@
+{
+  "local_data_policy": {
+    "policy_id": "data_policy:p4.4:local-stub",
+    "source_dataset_ref": "fine_tune_dataset:p3.3:local-engine-v-next",
+    "rights_review_ref": "rights_review:p4.4:pending",
+    "pii_review_ref": "pii_review:p4.4:pending",
+    "retention_policy_ref": "retention_policy:p4.4:local",
+    "sealed_eval_policy_ref": "sealed_eval_policy:p4.4:local",
+    "allowed_data_classes": [
+      "trajectory hashes",
+      "sanitized features"
+    ],
+    "prohibited_material_classes": [
+      "raw customer data",
+      "sealed eval details",
+      "live champion IP",
+      "model weights",
+      "plaintext keys"
+    ],
+    "private_training_data_allowed": false,
+    "raw_customer_data_excluded": true,
+    "sealed_eval_excluded": true,
+    "live_champion_ip_excluded": true,
+    "policy_approved": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "data_policy:p4.4:local-stub"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_policy_stub",
+    "contract_version": "confidential_gpu_data_policy:v1:local_contract"
+  },
+  "ready_data_policy": {
+    "policy_id": "data_policy:p4.4:approved-v1",
+    "source_dataset_ref": "fine_tune_dataset:p3.3:measured-ready",
+    "rights_review_ref": "rights_review:p4.4:approved",
+    "pii_review_ref": "pii_review:p4.4:approved",
+    "retention_policy_ref": "retention_policy:p4.4:approved",
+    "sealed_eval_policy_ref": "sealed_eval_policy:p4.4:approved",
+    "allowed_data_classes": [
+      "approved training rows",
+      "sanitized features",
+      "trajectory hashes"
+    ],
+    "prohibited_material_classes": [
+      "raw customer data",
+      "sealed eval details",
+      "live champion IP",
+      "model weights",
+      "plaintext keys"
+    ],
+    "private_training_data_allowed": true,
+    "raw_customer_data_excluded": true,
+    "sealed_eval_excluded": true,
+    "live_champion_ip_excluded": true,
+    "policy_approved": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:scale-confidential-gpu-data-policy",
+    "evidence_refs": [
+      "data_policy:p4.4:approved-v1",
+      "rights_review:p4.4:approved",
+      "pii_review:p4.4:approved",
+      "retention_policy:p4.4:approved",
+      "sealed_eval_policy:p4.4:approved",
+      "owner_approval:scale-confidential-gpu-data-policy"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_owner_approval",
+    "contract_version": "confidential_gpu_data_policy:v1:local_contract"
+  },
+  "local_training_run": {
+    "training_run_id": "confidential_gpu_training:p4.4:local-stub",
+    "source_training_ref": "engine_finetune_run:p3.3:local-stub",
+    "source_dataset_ref": "fine_tune_dataset:p3.3:local-engine-v-next",
+    "data_policy_ref": "data_policy:p4.4:local-stub",
+    "measurement_gate_ref": "measurement_gate:e4cdaef2aaa49b1d",
+    "research_enclave_run_ref": "research_enclave_run:392d11604b359eda",
+    "kms_release_decision_ref": "kms_release_decision:1e45558e86f2ca82",
+    "gpu_attestation_ref": "gpu_attestation:p4.4:pending",
+    "enclave_measurement_ref": "enclave_measurement:local-fixture-v1",
+    "egress_policy_ref": "egress_policy:local-deny-by-default",
+    "input_dataset_hash": "sha256:datasetpending",
+    "output_model_hash": "sha256:pending",
+    "cost_ledger_hash": "sha256:costpending",
+    "data_policy_approved": false,
+    "live_confidential_gpu_stack_verified": false,
+    "attestation_signature_chain_verified": false,
+    "pcr0_allowlist_passed": false,
+    "kms_policy_enforced": false,
+    "kms_key_release_performed": false,
+    "egress_policy_enforced": false,
+    "equivocation_check_passed": false,
+    "training_started": false,
+    "training_completed": false,
+    "production_training_valid": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "confidential_gpu:p4.4:local-stub",
+      "data_policy:p4.4:local-stub"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_training_stub",
+    "contract_version": "confidential_gpu_training:v1:local_contract"
+  },
+  "ready_training_control": {
+    "training_run_id": "confidential_gpu_training:p4.4:ready-control",
+    "source_training_ref": "engine_finetune_run:p3.3:measured-ready",
+    "source_dataset_ref": "fine_tune_dataset:p3.3:measured-ready",
+    "data_policy_ref": "data_policy:p4.4:approved-v1",
+    "measurement_gate_ref": "measurement_gate:production-verified-v1",
+    "research_enclave_run_ref": "research_enclave_run:production-gpu-v1",
+    "kms_release_decision_ref": "kms_release_decision:production-approved-v1",
+    "gpu_attestation_ref": "gpu_attestation:production-v1",
+    "enclave_measurement_ref": "enclave_measurement:production-approved-v1",
+    "egress_policy_ref": "egress_policy:production-approved-v1",
+    "input_dataset_hash": "sha256:measuredinputdataset",
+    "output_model_hash": "sha256:measuredprivateweights",
+    "cost_ledger_hash": "sha256:measuredcostledger",
+    "data_policy_approved": true,
+    "live_confidential_gpu_stack_verified": true,
+    "attestation_signature_chain_verified": true,
+    "pcr0_allowlist_passed": true,
+    "kms_policy_enforced": true,
+    "kms_key_release_performed": true,
+    "egress_policy_enforced": true,
+    "equivocation_check_passed": true,
+    "training_started": true,
+    "training_completed": true,
+    "production_training_valid": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:scale-confidential-gpu-training",
+    "evidence_refs": [
+      "confidential_gpu:p4.4:ready-control",
+      "gpu_attestation:production-v1",
+      "measurement_gate:production-verified-v1",
+      "research_enclave_run:production-gpu-v1",
+      "kms_release_decision:production-approved-v1",
+      "kms_policy:production-approved-v1",
+      "data_policy:p4.4:approved-v1",
+      "fine_tune_dataset:p3.3:measured-ready",
+      "owner_approval:scale-confidential-gpu-training"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_confidential_gpu_evidence",
+    "contract_version": "confidential_gpu_training:v1:local_contract"
+  },
+  "local_weight_artifact": {
+    "weight_artifact_id": "model_weight_artifact:p4.4:local-stub",
+    "training_run_ref": "confidential_gpu_training:p4.4:local-stub",
+    "model_weight_hash": "sha256:pending",
+    "private_artifact_ref": "model_weight_private:p4.4:pending",
+    "release_policy_ref": "release_policy:private_live_champion",
+    "weight_card_ref": "weight_card:p4.4:local-stub",
+    "hash_recorded": false,
+    "protected_material_scan_passed": false,
+    "private_artifact_ready": false,
+    "public_release_enabled": false,
+    "public_download_enabled": false,
+    "model_registry_write": false,
+    "production_promotion_requested": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "model_weight_artifact:p4.4:local-stub"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "private_hash_only_stub",
+    "contract_version": "confidential_gpu_weight_artifact:v1:local_contract"
+  },
+  "ready_weight_artifact_control": {
+    "weight_artifact_id": "model_weight_artifact:p4.4:private-ready",
+    "training_run_ref": "confidential_gpu_training:p4.4:ready-control",
+    "model_weight_hash": "sha256:measuredprivateweights",
+    "private_artifact_ref": "model_weight_private:p4.4:private-ready",
+    "release_policy_ref": "release_policy:private_live_champion",
+    "weight_card_ref": "weight_card:p4.4:private-ready",
+    "hash_recorded": true,
+    "protected_material_scan_passed": true,
+    "private_artifact_ready": true,
+    "public_release_enabled": false,
+    "public_download_enabled": false,
+    "model_registry_write": false,
+    "production_promotion_requested": false,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:scale-private-weight-artifact",
+    "evidence_refs": [
+      "model_weight_artifact:p4.4:private-ready",
+      "model_weight_private:p4.4:private-ready",
+      "weight_card:p4.4:private-ready",
+      "confidential_gpu_training:p4.4:ready-control",
+      "owner_approval:scale-private-weight-artifact"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "private_artifact_ready",
+    "contract_version": "confidential_gpu_weight_artifact:v1:local_contract"
+  },
+  "unsafe_scale_guards": {
+    "confidential_gpu_training": true,
+    "model_weight_publication": true,
+    "production_writes": true,
+    "expected_error_contains": "Phase 4 local build must keep these workflows disabled"
+  },
+  "invalid_data_policies": [
+    {
+      "id": "bad-approved-from-local-fixtures",
+      "base": "local_data_policy",
+      "overrides": {
+        "policy_approved": true,
+        "state": "ready_after_owner_approval"
+      },
+      "expected_error_contains": [
+        "private training data",
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-approved-raw-customer-data-not-excluded",
+      "base": "ready_data_policy",
+      "overrides": {
+        "raw_customer_data_excluded": false
+      },
+      "expected_error_contains": "exclude raw customer data"
+    },
+    {
+      "id": "bad-approved-sealed-eval-not-excluded",
+      "base": "ready_data_policy",
+      "overrides": {
+        "sealed_eval_excluded": false
+      },
+      "expected_error_contains": "exclude sealed eval details"
+    },
+    {
+      "id": "bad-approved-missing-owner",
+      "base": "ready_data_policy",
+      "overrides": {
+        "owner_approval_ref": ""
+      },
+      "expected_error_contains": "requires owner_approval_ref"
+    },
+    {
+      "id": "bad-policy-protected-unknown-key",
+      "base": "local_data_policy",
+      "overrides": {
+        "customer_training_payload": "do not store"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-policy-evidence-prefix",
+      "base": "local_data_policy",
+      "overrides": {
+        "evidence_refs": [
+          "gpu_attestation:not-policy-evidence"
+        ]
+      },
+      "expected_error_contains": "approved confidential GPU data policy prefixes"
+    },
+    {
+      "id": "bad-policy-production-writes",
+      "base": "local_data_policy",
+      "overrides": {
+        "production_writes": true
+      },
+      "expected_error_contains": "must not enable production writes"
+    }
+  ],
+  "invalid_training_runs": [
+    {
+      "id": "bad-valid-from-local-fixtures",
+      "base": "local_training_run",
+      "data_policy_base": "local_data_policy",
+      "overrides": {
+        "production_training_valid": true,
+        "state": "ready_after_confidential_gpu_evidence"
+      },
+      "expected_error_contains": [
+        "approved data policy",
+        "live stack verification",
+        "signature-chain verification",
+        "KMS key release",
+        "training_started",
+        "training_completed",
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-valid-without-signature-chain",
+      "base": "ready_training_control",
+      "data_policy_base": "ready_data_policy",
+      "overrides": {
+        "attestation_signature_chain_verified": false
+      },
+      "expected_error_contains": "requires signature-chain verification"
+    },
+    {
+      "id": "bad-valid-without-supplied-data-policy",
+      "base": "ready_training_control",
+      "omit_data_policy": true,
+      "overrides": {},
+      "expected_error_contains": "requires supplied data_policy"
+    },
+    {
+      "id": "bad-valid-without-kms-release",
+      "base": "ready_training_control",
+      "data_policy_base": "ready_data_policy",
+      "overrides": {
+        "kms_key_release_performed": false
+      },
+      "expected_error_contains": "requires performed KMS key release"
+    },
+    {
+      "id": "bad-data-policy-ref-mismatch",
+      "base": "ready_training_control",
+      "data_policy_base": "ready_data_policy",
+      "overrides": {
+        "data_policy_ref": "data_policy:p4.4:wrong"
+      },
+      "expected_error_contains": "data_policy_ref mismatch"
+    },
+    {
+      "id": "bad-training-started-local",
+      "base": "local_training_run",
+      "data_policy_base": "local_data_policy",
+      "overrides": {
+        "training_started": true
+      },
+      "expected_error_contains": "must not start confidential GPU training"
+    },
+    {
+      "id": "bad-training-protected-unknown-key",
+      "base": "local_training_run",
+      "data_policy_base": "local_data_policy",
+      "overrides": {
+        "kms_plaintext": "do not store"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-training-evidence-prefix",
+      "base": "local_training_run",
+      "data_policy_base": "local_data_policy",
+      "overrides": {
+        "evidence_refs": [
+          "model_weight_release:not-training-evidence"
+        ]
+      },
+      "expected_error_contains": "approved confidential GPU training prefixes"
+    },
+    {
+      "id": "bad-training-supabase-writes",
+      "base": "local_training_run",
+      "data_policy_base": "local_data_policy",
+      "overrides": {
+        "supabase_writes": true
+      },
+      "expected_error_contains": "must not enable Supabase writes"
+    }
+  ],
+  "invalid_weight_artifacts": [
+    {
+      "id": "bad-ready-from-local-fixtures",
+      "base": "local_weight_artifact",
+      "training_base": "local_training_run",
+      "overrides": {
+        "private_artifact_ready": true,
+        "state": "private_artifact_ready"
+      },
+      "expected_error_contains": [
+        "requires hash_recorded",
+        "requires protected_material_scan_passed",
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-ready-with-invalid-training",
+      "base": "ready_weight_artifact_control",
+      "training_base": "local_training_run",
+      "overrides": {},
+      "expected_error_contains": [
+        "training_run_ref mismatch",
+        "requires production-valid confidential GPU training"
+      ]
+    },
+    {
+      "id": "bad-ready-without-supplied-training",
+      "base": "ready_weight_artifact_control",
+      "omit_training": true,
+      "overrides": {},
+      "expected_error_contains": "requires supplied confidential GPU training"
+    },
+    {
+      "id": "bad-public-release-enabled",
+      "base": "ready_weight_artifact_control",
+      "training_base": "ready_training_control",
+      "overrides": {
+        "public_release_enabled": true
+      },
+      "expected_error_contains": "must not enable public model-weight release"
+    },
+    {
+      "id": "bad-public-download-enabled",
+      "base": "ready_weight_artifact_control",
+      "training_base": "ready_training_control",
+      "overrides": {
+        "public_download_enabled": true
+      },
+      "expected_error_contains": "must not enable public model-weight downloads"
+    },
+    {
+      "id": "bad-model-registry-write",
+      "base": "ready_weight_artifact_control",
+      "training_base": "ready_training_control",
+      "overrides": {
+        "model_registry_write": true
+      },
+      "expected_error_contains": "must not write model registries"
+    },
+    {
+      "id": "bad-weight-protected-unknown-key",
+      "base": "local_weight_artifact",
+      "training_base": "local_training_run",
+      "overrides": {
+        "model_weight_blob": "do not store"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-weight-evidence-prefix",
+      "base": "local_weight_artifact",
+      "training_base": "local_training_run",
+      "overrides": {
+        "evidence_refs": [
+          "kms_policy:not-weight-evidence"
+        ]
+      },
+      "expected_error_contains": "approved confidential GPU weight artifact prefixes"
+    },
+    {
+      "id": "bad-weight-public-workflows",
+      "base": "local_weight_artifact",
+      "training_base": "local_training_run",
+      "overrides": {
+        "public_workflows": true
+      },
+      "expected_error_contains": "must not enable public workflows"
+    }
+  ]
+}

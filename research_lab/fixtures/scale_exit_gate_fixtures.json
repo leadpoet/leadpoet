@@ -1,0 +1,256 @@
+{
+  "scale_gate_values": [
+    "model_pipeline_exit_gate_ready",
+    "package_migration_ready",
+    "legacy_surface_retired",
+    "phase_scaffold_cleanup_ready",
+    "confidential_gpu_evidence_ready",
+    "stage3_experiment_evidence_ready",
+    "workspace_api_ga_evidence_ready",
+    "research_slice_governance_ready"
+  ],
+  "local_exit_gate": {
+    "exit_gate_id": "scale_exit_gate:p4.8:local",
+    "scale_readiness_ref": "scale_readiness:p4.0:local-foundation-ready",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:p3.7:local",
+    "package_migration_ref": "package_migration:p4.1:local-current-audit",
+    "legacy_surface_ref": "legacy_surface_retirement:p4.2:local-current-audit",
+    "phase_scaffold_ref": "phase_scaffold_cleanup:p4.3:local-current-audit",
+    "confidential_gpu_ref": "confidential_gpu_training:p4.4:local-stub",
+    "stage3_success_ref": "stage3_success:p4.5:local-not-claimed",
+    "workspace_api_ga_ref": "agent_track_ga:p4.6:local-stub",
+    "research_slice_governance_ref": "research_slice_decision:p4.7:local-stub",
+    "scale_readiness": {
+      "model_pipeline_exit_gate_ready": false,
+      "package_migration_ready": false,
+      "legacy_surface_retired": false,
+      "phase_scaffold_cleanup_ready": true,
+      "confidential_gpu_evidence_ready": false,
+      "stage3_experiment_evidence_ready": false,
+      "workspace_api_ga_evidence_ready": false,
+      "research_slice_governance_ready": false
+    },
+    "build_status": {
+      "scale_readiness_contracts": true,
+      "package_migration_audit": true,
+      "legacy_surface_retirement_guard": true,
+      "phase_scaffold_cleanup_verifier": true,
+      "confidential_gpu_contracts": true,
+      "stage3_experiment_contracts": true,
+      "agent_track_ga_gate": true,
+      "research_slice_governance_gate": true,
+      "scale_exit_gate_verifier": true
+    },
+    "evidence_refs": [
+      "scale_readiness:p4.0:local-foundation-ready",
+      "model_pipeline_exit_gate:p3.7:local",
+      "package_migration:p4.1:local-current-audit",
+      "legacy_surface_retirement:p4.2:local-current-audit",
+      "phase_scaffold_cleanup:p4.3:local-current-audit",
+      "confidential_gpu_training:p4.4:local-stub",
+      "stage3_success:p4.5:local-not-claimed",
+      "agent_track_ga:p4.6:local-stub",
+      "research_slice_decision:p4.7:local-stub"
+    ],
+    "owner_approval_ref": "",
+    "local_code_complete": true,
+    "production_scale_ready": false,
+    "package_migration_ready": false,
+    "legacy_surface_retired": false,
+    "phase_scaffold_cleanup_ready": true,
+    "confidential_gpu_evidence_ready": false,
+    "stage3_experiment_evidence_ready": false,
+    "workspace_api_ga_evidence_ready": false,
+    "research_slice_governance_ready": false,
+    "model_weight_publication_enabled": false,
+    "public_agent_track_enabled": false,
+    "research_slice_raise_executed": false,
+    "production_deployment_requested": false,
+    "production_writes_enabled": false,
+    "supabase_writes_enabled": false,
+    "public_workflows_enabled": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "state": "local_not_ready",
+    "contract_version": "scale_exit_gate:v1:local_contract"
+  },
+  "measured_exit_gate": {
+    "exit_gate_id": "scale_exit_gate:p4.8:measured-control",
+    "scale_readiness_ref": "scale_readiness:p4.0:measured-control",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:p3.7:measured",
+    "package_migration_ref": "package_migration:p4.1:ready-control",
+    "legacy_surface_ref": "legacy_surface_retirement:p4.2:ready-control",
+    "phase_scaffold_ref": "phase_scaffold_cleanup:p4.3:ready-control",
+    "confidential_gpu_ref": "confidential_gpu_training:p4.4:ready-control",
+    "stage3_success_ref": "stage3_success:p4.5:ready-control",
+    "workspace_api_ga_ref": "agent_track_ga:p4.6:ready-control",
+    "research_slice_governance_ref": "research_slice_decision:p4.7:owner-approved-control",
+    "scale_readiness": {
+      "model_pipeline_exit_gate_ready": true,
+      "package_migration_ready": true,
+      "legacy_surface_retired": true,
+      "phase_scaffold_cleanup_ready": true,
+      "confidential_gpu_evidence_ready": true,
+      "stage3_experiment_evidence_ready": true,
+      "workspace_api_ga_evidence_ready": true,
+      "research_slice_governance_ready": true
+    },
+    "build_status": {
+      "scale_readiness_contracts": true,
+      "package_migration_audit": true,
+      "legacy_surface_retirement_guard": true,
+      "phase_scaffold_cleanup_verifier": true,
+      "confidential_gpu_contracts": true,
+      "stage3_experiment_contracts": true,
+      "agent_track_ga_gate": true,
+      "research_slice_governance_gate": true,
+      "scale_exit_gate_verifier": true
+    },
+    "evidence_refs": [
+      "scale_readiness:p4.0:measured-control",
+      "model_pipeline_exit_gate:p3.7:measured",
+      "package_migration:p4.1:ready-control",
+      "legacy_surface_retirement:p4.2:ready-control",
+      "phase_scaffold_cleanup:p4.3:ready-control",
+      "confidential_gpu_training:p4.4:ready-control",
+      "stage3_success:p4.5:ready-control",
+      "agent_track_ga:p4.6:ready-control",
+      "research_slice_decision:p4.7:owner-approved-control",
+      "owner_approval:p4.8:scale-exit"
+    ],
+    "owner_approval_ref": "owner_approval:p4.8:scale-exit",
+    "local_code_complete": true,
+    "production_scale_ready": true,
+    "package_migration_ready": true,
+    "legacy_surface_retired": true,
+    "phase_scaffold_cleanup_ready": true,
+    "confidential_gpu_evidence_ready": true,
+    "stage3_experiment_evidence_ready": true,
+    "workspace_api_ga_evidence_ready": true,
+    "research_slice_governance_ready": true,
+    "model_weight_publication_enabled": false,
+    "public_agent_track_enabled": false,
+    "research_slice_raise_executed": false,
+    "production_deployment_requested": false,
+    "production_writes_enabled": false,
+    "supabase_writes_enabled": false,
+    "public_workflows_enabled": false,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "state": "ready_after_scale_evidence",
+    "contract_version": "scale_exit_gate:v1:local_contract"
+  },
+  "unsafe_scale_guards": {
+    "model_weight_publication": true,
+    "research_slice_governance_change": true,
+    "production_writes": true,
+    "expected_error_contains": "Phase 4 local build must keep these workflows disabled"
+  },
+  "invalid_exit_gates": [
+    {
+      "id": "bad-scale-ready-from-local",
+      "overrides": {
+        "production_scale_ready": true,
+        "state": "ready_after_scale_evidence"
+      },
+      "expected_error_contains": [
+        "cannot be claimed from local fixtures",
+        "cannot be claimed by a local_only record",
+        "Phase 4 exit missing checks"
+      ]
+    },
+    {
+      "id": "bad-measured-missing-owner",
+      "base": "measured_exit_gate",
+      "overrides": {
+        "owner_approval_ref": ""
+      },
+      "expected_error_contains": "requires owner_approval_ref"
+    },
+    {
+      "id": "bad-measured-missing-build-field",
+      "base": "measured_exit_gate",
+      "overrides": {
+        "build_status": {
+          "scale_exit_gate_verifier": false
+        }
+      },
+      "expected_error_contains": "all Phase 4 build fields complete"
+    },
+    {
+      "id": "bad-scale-flag-mismatch",
+      "base": "measured_exit_gate",
+      "overrides": {
+        "package_migration_ready": false
+      },
+      "expected_error_contains": "scale flags must mirror scale_readiness"
+    },
+    {
+      "id": "bad-missing-package-gate",
+      "base": "measured_exit_gate",
+      "overrides": {
+        "scale_readiness": {
+          "package_migration_ready": false
+        },
+        "package_migration_ready": false
+      },
+      "expected_error_contains": "package_migration_ready"
+    },
+    {
+      "id": "bad-model-weight-publication",
+      "overrides": {
+        "model_weight_publication_enabled": true
+      },
+      "expected_error_contains": "must not enable model-weight publication"
+    },
+    {
+      "id": "bad-public-agent-track",
+      "overrides": {
+        "public_agent_track_enabled": true
+      },
+      "expected_error_contains": "must not enable public agent track"
+    },
+    {
+      "id": "bad-research-slice-executed",
+      "overrides": {
+        "research_slice_raise_executed": true
+      },
+      "expected_error_contains": "must not execute research-slice raises"
+    },
+    {
+      "id": "bad-production-deploy",
+      "overrides": {
+        "production_deployment_requested": true
+      },
+      "expected_error_contains": "must not request production deployment"
+    },
+    {
+      "id": "bad-production-writes",
+      "overrides": {
+        "production_writes_enabled": true
+      },
+      "expected_error_contains": "must not enable production writes"
+    },
+    {
+      "id": "bad-supabase-writes",
+      "overrides": {
+        "supabase_writes_enabled": true
+      },
+      "expected_error_contains": "must not enable Supabase writes"
+    },
+    {
+      "id": "bad-public-workflows",
+      "overrides": {
+        "public_workflows_enabled": true
+      },
+      "expected_error_contains": "must not enable public workflows"
+    },
+    {
+      "id": "bad-protected-deploy-token",
+      "overrides": {
+        "production_deploy_token": "production deploy token secret"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ]
+}

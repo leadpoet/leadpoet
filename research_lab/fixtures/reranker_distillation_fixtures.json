@@ -1,0 +1,491 @@
+{
+  "local_dataset_manifest": {
+    "dataset_id": "reranker_distillation_dataset:p3.5:local-stage2-reranker",
+    "source_corpus_ref": "trajectory_corpus:p3.1:built-local",
+    "source_corpus_hash": "sha256:trajectory-corpus-local",
+    "source_contract_version": "trajectory_corpus:v1:local_contract",
+    "source_record_hashes": [
+      "sha256:source-record-local-001",
+      "sha256:source-record-local-002",
+      "sha256:source-record-local-003"
+    ],
+    "train_count": 1,
+    "validation_count": 1,
+    "holdout_count": 1,
+    "teacher_policy_ref": "teacher_policy:p3.5:local-reranker",
+    "teacher_trace_refs": [
+      "execution_trace:p3.5:teacher-local-001",
+      "execution_trace:p3.5:teacher-local-002"
+    ],
+    "reranker_label_set_ref": "reranker_label_set:p3.5:local",
+    "split_policy_ref": "split_policy:p3.1:deterministic-v1",
+    "dataset_hash": "sha256:pending",
+    "dataset_card_ref": "dataset_card:p3.5:local-stage2-reranker",
+    "rights_summary_ref": "rights_summary:p3.5:local",
+    "distillation_rights_ref": "distillation_rights:p3.5:local",
+    "protected_filter_ref": "protected_filter:p3.5:local",
+    "pii_review_ref": "pii_review:p3.5:local",
+    "label_quality_report_ref": "label_quality_report:p3.5:local",
+    "teacher_policy_compliant": true,
+    "clean_reranker_labels": true,
+    "distillation_rights_verified": false,
+    "protected_data_excluded": true,
+    "pii_review_passed": true,
+    "holdout_locked": true,
+    "local_only": true,
+    "uses_local_fixtures": true,
+    "dataset_ready_claimed": false,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "trajectory_corpus:p3.1:built-local",
+      "teacher_policy:p3.5:local-reranker"
+    ],
+    "state": "local_contract_stub",
+    "contract_version": "reranker_distillation_dataset:v1:local_contract"
+  },
+  "local_training_run": {
+    "training_run_id": "reranker_distillation_run:p3.5:local-stub",
+    "dataset_ref": "reranker_distillation_dataset:p3.5:local-stage2-reranker",
+    "dataset_hash": "sha256:from-local-dataset",
+    "teacher_policy_ref": "teacher_policy:p3.5:local-reranker",
+    "student_model_ref": "student_reranker:p3.5:pending",
+    "student_model_hash_ref": "sha256:student-reranker-pending",
+    "training_plan_ref": "training_plan:p3.5:local",
+    "hyperparam_config_hash": "sha256:reranker-hyperparams-local",
+    "cost_cap_ref": "cost_cap:p3.5:local",
+    "parity_eval_ref": "reranker_parity:pending",
+    "training_enabled": false,
+    "training_started": false,
+    "training_completed": false,
+    "student_model_weights_published": false,
+    "model_registry_write": false,
+    "production_promotion_requested": false,
+    "parity_claimed": false,
+    "parity_eval_passed": false,
+    "measured_quality_retention_pct": 0.0,
+    "cost_ratio_to_teacher_pct": 0.0,
+    "local_only": true,
+    "uses_local_fixtures": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "reranker_distillation_dataset:p3.5:local-stage2-reranker"
+    ],
+    "state": "local_training_stub",
+    "contract_version": "reranker_distillation_training:v1:local_contract"
+  },
+  "builder_args": {
+    "dataset_id": "reranker_distillation_dataset:p3.5:built-local",
+    "source_corpus_ref": "trajectory_corpus:p3.1:built-local",
+    "source_corpus_hash": "sha256:trajectory-corpus-local",
+    "source_record_hashes": [
+      "sha256:source-record-local-001",
+      "sha256:source-record-local-002",
+      "sha256:source-record-local-003"
+    ],
+    "train_count": 1,
+    "validation_count": 1,
+    "holdout_count": 1,
+    "teacher_policy_ref": "teacher_policy:p3.5:local-reranker",
+    "teacher_trace_refs": [
+      "execution_trace:p3.5:teacher-local-001"
+    ],
+    "reranker_label_set_ref": "reranker_label_set:p3.5:built-local",
+    "split_policy_ref": "split_policy:p3.1:deterministic-v1",
+    "dataset_card_ref": "dataset_card:p3.5:built-local",
+    "rights_summary_ref": "rights_summary:p3.5:built-local",
+    "distillation_rights_ref": "distillation_rights:p3.5:built-local",
+    "protected_filter_ref": "protected_filter:p3.5:built-local",
+    "pii_review_ref": "pii_review:p3.5:built-local",
+    "label_quality_report_ref": "label_quality_report:p3.5:built-local",
+    "uses_local_fixtures": true,
+    "local_only": true
+  },
+  "teacher_eval_input": {
+    "arm_kind": "teacher_reranker",
+    "model_ref": "teacher_reranker:stage2:v1",
+    "dataset_ref": "reranker_distillation_dataset:p3.5:local-stage2-reranker",
+    "dataset_hash": "sha256:from-local-dataset",
+    "holdout_split_ref": "holdout_split:p3.5:local-v1",
+    "eval_task_refs": [
+      "reranker_eval_task:p3.5:001",
+      "reranker_eval_task:p3.5:002",
+      "reranker_eval_task:p3.5:003"
+    ],
+    "quality_score": 0.92,
+    "cost_cents": 100000,
+    "latency_ms": 1800,
+    "run_count": 3,
+    "receipt_refs": [
+      "receipt_v2:p3.5:teacher"
+    ],
+    "cost_ledger_refs": [
+      "cost_ledger:p3.5:teacher"
+    ],
+    "teacher_policy_ref": "teacher_policy:p3.5:local-reranker",
+    "heldout_eval_only": true,
+    "uses_training_split": false,
+    "measured_data_ready": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "source_data_state": "local_fixture",
+    "contract_version": "reranker_distillation_eval:v1:local_contract"
+  },
+  "student_eval_input": {
+    "arm_kind": "student_reranker",
+    "model_ref": "student_reranker:p3.5:pending",
+    "dataset_ref": "reranker_distillation_dataset:p3.5:local-stage2-reranker",
+    "dataset_hash": "sha256:from-local-dataset",
+    "holdout_split_ref": "holdout_split:p3.5:local-v1",
+    "eval_task_refs": [
+      "reranker_eval_task:p3.5:001",
+      "reranker_eval_task:p3.5:002",
+      "reranker_eval_task:p3.5:003"
+    ],
+    "quality_score": 0.91,
+    "cost_cents": 28000,
+    "latency_ms": 280,
+    "run_count": 3,
+    "receipt_refs": [
+      "receipt_v2:p3.5:student"
+    ],
+    "cost_ledger_refs": [
+      "cost_ledger:p3.5:student"
+    ],
+    "teacher_policy_ref": "teacher_policy:p3.5:local-reranker",
+    "heldout_eval_only": true,
+    "uses_training_split": false,
+    "measured_data_ready": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "source_data_state": "local_fixture",
+    "contract_version": "reranker_distillation_eval:v1:local_contract"
+  },
+  "comparison_methodology_ref": "reranker_distillation_methodology:p3.5:teacher-student-heldout-v1",
+  "measured_dataset_overrides": {
+    "train_count": 25,
+    "validation_count": 5,
+    "holdout_count": 5,
+    "teacher_policy_compliant": true,
+    "clean_reranker_labels": true,
+    "distillation_rights_verified": true,
+    "protected_data_excluded": true,
+    "pii_review_passed": true,
+    "holdout_locked": true,
+    "local_only": false,
+    "uses_local_fixtures": false,
+    "dataset_ready_claimed": true,
+    "owner_approval_ref": "owner_approval:p3.5:dataset",
+    "evidence_refs": [
+      "trajectory_corpus:p3.1:measured",
+      "reranker_label_set:p3.5:measured",
+      "distillation_rights:p3.5:measured",
+      "owner_approval:p3.5:dataset"
+    ],
+    "state": "ready_after_corpus"
+  },
+  "measured_training_overrides": {
+    "training_enabled": true,
+    "training_started": true,
+    "training_completed": true,
+    "local_only": false,
+    "uses_local_fixtures": false,
+    "owner_approval_ref": "owner_approval:p3.5:training",
+    "evidence_refs": [
+      "reranker_distillation_dataset:p3.5:local-stage2-reranker",
+      "training_plan:p3.5:measured"
+    ],
+    "state": "trained_awaiting_eval"
+  },
+  "measured_eval_overrides": {
+    "source_data_state": "measured_lab_only",
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "measured_data_ready": true
+  },
+  "measured_pass_overrides": {
+    "measured_data_ready": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "parity_claimed": true,
+    "owner_approval_ref": "owner_approval:p3.5:parity",
+    "state": "passed_parity_cost_gate"
+  },
+  "bare_measured_claim_expected_errors": {
+    "expected_error_contains": [
+      "supplied dataset_manifest",
+      "supplied training_run",
+      "supplied teacher_eval",
+      "supplied student_eval"
+    ]
+  },
+  "zero_teacher_quality_claim": {
+    "teacher_eval_overrides": {
+      "quality_score": 0.0
+    },
+    "comparison_overrides": {
+      "teacher_quality_score": 0.0,
+      "quality_retention_pct": 98.913043,
+      "quality_delta_pct": -1.086957,
+      "quality_parity_passed": true,
+      "passed_parity_cost_gate": true,
+      "measured_data_ready": true,
+      "uses_local_fixtures": false,
+      "local_only": false,
+      "parity_claimed": true,
+      "owner_approval_ref": "owner_approval:p3.5:parity",
+      "state": "passed_parity_cost_gate"
+    },
+    "expected_error_contains": [
+      "teacher_quality_score must be positive",
+      "teacher_reranker quality_score must be positive"
+    ]
+  },
+  "invalid_dataset_manifests": [
+    {
+      "id": "bad-ready-from-local-fixtures",
+      "overrides": {
+        "dataset_ready_claimed": true,
+        "state": "ready_after_corpus"
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "minimum train rows",
+        "minimum holdout rows",
+        "distillation_rights_verified",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-dataset-hash",
+      "overrides": {
+        "dataset_hash": "sha256:wrong"
+      },
+      "expected_error_contains": "dataset_hash must match reranker distillation dataset manifest"
+    },
+    {
+      "id": "bad-raw-teacher-trace-key",
+      "overrides": {
+        "raw_teacher_trace": "do not include raw traces"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-ready-without-teacher-policy",
+      "overrides": {
+        "dataset_ready_claimed": true,
+        "uses_local_fixtures": false,
+        "local_only": false,
+        "train_count": 25,
+        "holdout_count": 5,
+        "distillation_rights_verified": true,
+        "protected_data_excluded": true,
+        "pii_review_passed": true,
+        "holdout_locked": true,
+        "owner_approval_ref": "owner_approval:p3.5:dataset",
+        "evidence_refs": [
+          "trajectory_corpus:p3.1:measured"
+        ],
+        "state": "ready_after_corpus",
+        "teacher_policy_compliant": false
+      },
+      "expected_error_contains": "teacher_policy_compliant"
+    }
+  ],
+  "invalid_training_runs": [
+    {
+      "id": "bad-training-starts-from-local",
+      "overrides": {
+        "training_enabled": true,
+        "training_started": true
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-student-weights-published",
+      "overrides": {
+        "student_model_weights_published": true
+      },
+      "expected_error_contains": "must not publish student model weights"
+    },
+    {
+      "id": "bad-model-registry-write",
+      "overrides": {
+        "model_registry_write": true
+      },
+      "expected_error_contains": "must not write model registry"
+    },
+    {
+      "id": "bad-parity-claim-from-local",
+      "overrides": {
+        "parity_claimed": true
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "training_completed",
+        "parity_eval_passed",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-pending-parity-eval-ref",
+      "overrides": {
+        "training_completed": true,
+        "parity_claimed": true,
+        "parity_eval_passed": true,
+        "measured_quality_retention_pct": 99.0,
+        "cost_ratio_to_teacher_pct": 25.0,
+        "local_only": false,
+        "uses_local_fixtures": false,
+        "owner_approval_ref": "owner_approval:p3.5",
+        "evidence_refs": [
+          "reranker_parity:pending"
+        ],
+        "state": "ready_after_parity_eval"
+      },
+      "expected_error_contains": "non-pending parity_eval_ref"
+    }
+  ],
+  "invalid_eval_arms": [
+    {
+      "id": "bad-teacher-model-prefix",
+      "base": "teacher_eval_input",
+      "overrides": {
+        "model_ref": "student_reranker:not-teacher"
+      },
+      "expected_error_contains": "teacher_reranker arm requires teacher_reranker:-prefixed model_ref"
+    },
+    {
+      "id": "bad-student-model-prefix",
+      "base": "student_eval_input",
+      "overrides": {
+        "model_ref": "teacher_reranker:not-student"
+      },
+      "expected_error_contains": "student_reranker arm requires student_reranker:-prefixed model_ref"
+    },
+    {
+      "id": "bad-uses-training-split",
+      "base": "student_eval_input",
+      "overrides": {
+        "uses_training_split": true
+      },
+      "expected_error_contains": "must not use training split tasks"
+    },
+    {
+      "id": "bad-local-eval-claims-measured",
+      "base": "teacher_eval_input",
+      "overrides": {
+        "measured_data_ready": true
+      },
+      "expected_error_contains": "local fixture reranker eval arms cannot claim measured_data_ready"
+    },
+    {
+      "id": "bad-teacher-zero-quality",
+      "base": "teacher_eval_input",
+      "overrides": {
+        "quality_score": 0.0
+      },
+      "expected_error_contains": "teacher_reranker quality_score must be positive"
+    },
+    {
+      "id": "bad-raw-student-output-key",
+      "base": "student_eval_input",
+      "overrides": {
+        "raw_student_output": "do not include raw reranker output"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ],
+  "invalid_parity_comparisons": [
+    {
+      "id": "bad-quality-retention",
+      "overrides": {
+        "quality_retention_pct": 50.0
+      },
+      "expected_error_contains": "quality_retention_pct must equal student quality divided by teacher quality"
+    },
+    {
+      "id": "bad-cost-ratio",
+      "overrides": {
+        "cost_ratio_to_teacher_pct": 80.0
+      },
+      "expected_error_contains": "cost_ratio_to_teacher_pct must equal student cost divided by teacher cost"
+    },
+    {
+      "id": "bad-gate-boolean",
+      "overrides": {
+        "passed_parity_cost_gate": false
+      },
+      "expected_error_contains": "passed_parity_cost_gate must reflect quality and cost gates"
+    },
+    {
+      "id": "bad-comparison-zero-teacher-quality",
+      "overrides": {
+        "teacher_quality_score": 0.0
+      },
+      "expected_error_contains": "teacher_quality_score must be positive"
+    },
+    {
+      "id": "bad-task-drift",
+      "overrides": {
+        "eval_task_refs": [
+          "reranker_eval_task:p3.5:001",
+          "reranker_eval_task:p3.5:999"
+        ]
+      },
+      "expected_error_contains": "comparison eval_task_refs must match supplied teacher eval"
+    },
+    {
+      "id": "bad-local-parity-claim",
+      "overrides": {
+        "parity_claimed": true
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "measured_data_ready",
+        "owner_approval_ref",
+        "evidence_refs"
+      ]
+    },
+    {
+      "id": "bad-passed-state-from-local",
+      "overrides": {
+        "state": "passed_parity_cost_gate"
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "measured_data_ready",
+        "ready distillation dataset",
+        "completed distillation training"
+      ]
+    },
+    {
+      "id": "bad-student-weights-published",
+      "overrides": {
+        "student_model_weights_published": true
+      },
+      "expected_error_contains": "must not publish student model weights"
+    },
+    {
+      "id": "bad-model_pipeline-exit-claim",
+      "overrides": {
+        "model_pipeline_exit_claimed": true
+      },
+      "expected_error_contains": "must not claim Phase 3 exit"
+    },
+    {
+      "id": "bad-raw-teacher-output-key",
+      "overrides": {
+        "raw_teacher_output": "do not include teacher output"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ]
+}

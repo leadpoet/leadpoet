@@ -1,0 +1,274 @@
+{
+  "failure_board_items": [
+    {
+      "item_id": "fb:p1.4:coverage:001",
+      "island": "generalist",
+      "target_component": "source_router",
+      "target_metric": "coverage",
+      "failure_summary": "Champion misses German-language fintech funding announcements in recent public pages.",
+      "fixture_refs": [
+        "fixture:gold-icp:fintech-de:2026-06",
+        "snapshot_set:p0.4:fintech-funding-de"
+      ],
+      "bounty_tier_ref": "tier:loop-game:generalist:coverage",
+      "allocator_prediction_ref": "allocator:p1.4:generalist:coverage:001",
+      "expected_yield_score": 0.82,
+      "status": "open",
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    },
+    {
+      "item_id": "fb:p1.4:cost:001",
+      "island": "generalist",
+      "target_component": "hyperparams",
+      "target_metric": "cost_per_icp_cents",
+      "failure_summary": "Broad source routing spends too much on low-yield pages for generic B2B SaaS ICPs.",
+      "fixture_refs": [
+        "fixture:gold-icp:saas-generalist:2026-06",
+        "receipt:p0.6:param-headroom"
+      ],
+      "bounty_tier_ref": "tier:loop-game:generalist:cost",
+      "allocator_prediction_ref": "allocator:p1.4:generalist:cost:001",
+      "expected_yield_score": 0.54,
+      "status": "open",
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    }
+  ],
+  "invalid_failure_board_items": [
+    {
+      "item_id": "fb:p1.4:bad-island",
+      "island": "crypto_vertical",
+      "target_component": "source_router",
+      "target_metric": "coverage",
+      "failure_summary": "Wrong island should not be accepted in P1.4.",
+      "fixture_refs": [
+        "fixture:bad-island"
+      ],
+      "bounty_tier_ref": "tier:loop-game:bad",
+      "allocator_prediction_ref": "allocator:bad",
+      "expected_yield_score": 0.2,
+      "status": "open",
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    },
+    {
+      "item_id": "fb:p1.4:no-fixtures",
+      "island": "generalist",
+      "target_component": "source_router",
+      "target_metric": "coverage",
+      "failure_summary": "Missing fixtures should fail.",
+      "fixture_refs": [],
+      "bounty_tier_ref": "tier:loop-game:bad",
+      "allocator_prediction_ref": "allocator:bad",
+      "expected_yield_score": 0.2,
+      "status": "open",
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    }
+  ],
+  "ticket": {
+    "ticket_id": "ticket:p1.4:001",
+    "owner_ref": "owner:leadpoet-lab",
+    "miner_ref": "miner:example-alpha",
+    "brief_ref": "brief:p1.4:fintech-funding-de",
+    "island": "generalist",
+    "target_component": "source_router",
+    "funded_balance_cents": 5000,
+    "remaining_balance_cents": 5000,
+    "status": "funded",
+    "created_seq": 14,
+    "visibility_policy": "default_private",
+    "artifact_release_state": "private_live_champion",
+    "budget_caps": {
+      "loop_unit_cents": 1000,
+      "max_loops_per_day": 10,
+      "per_node_eval_cap_cents": 1200,
+      "loop_batch_cap_cents": 10000,
+      "per_node_wall_clock_cap_s": 900,
+      "loop_batch_wall_clock_cap_s": 3600
+    }
+  },
+  "private_probe_receipts": [
+    {
+      "receipt_ref": "probe_receipt:p1.4:001",
+      "probe_id": "probe:p1.4:001",
+      "ticket_id": "ticket:p1.4:001",
+      "miner_ref": "miner:example-alpha",
+      "brief_ref": "brief:p1.4:fintech-funding-de",
+      "island": "generalist",
+      "cost_cents": 0,
+      "result_ref": "probe_result:p1.4:001",
+      "cost_ledger_ref": "cost_ledger:p1.4:probe:001",
+      "dev_delta_lcb": 1.4,
+      "private_to_owner_ref": "owner:leadpoet-lab",
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion"
+    }
+  ],
+  "invalid_private_probe_receipts": [
+    {
+      "receipt_ref": "probe_receipt:p1.4:bad-public",
+      "probe_id": "probe:p1.4:bad-public",
+      "ticket_id": "ticket:p1.4:001",
+      "miner_ref": "miner:example-alpha",
+      "brief_ref": "brief:p1.4:fintech-funding-de",
+      "island": "generalist",
+      "cost_cents": 0,
+      "result_ref": "probe_result:p1.4:bad",
+      "cost_ledger_ref": "cost_ledger:p1.4:probe:bad",
+      "dev_delta_lcb": 1.4,
+      "private_to_owner_ref": "owner:leadpoet-lab",
+      "visibility_policy": "public_receipt",
+      "artifact_release_state": "public_receipt"
+    },
+    {
+      "receipt_ref": "probe_receipt:p1.4:bad-cost",
+      "probe_id": "probe:p1.4:bad-cost",
+      "ticket_id": "ticket:p1.4:001",
+      "miner_ref": "miner:example-alpha",
+      "brief_ref": "brief:p1.4:fintech-funding-de",
+      "island": "generalist",
+      "cost_cents": -1,
+      "result_ref": "probe_result:p1.4:bad",
+      "cost_ledger_ref": "cost_ledger:p1.4:probe:bad",
+      "dev_delta_lcb": 1.4,
+      "private_to_owner_ref": "owner:leadpoet-lab",
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion"
+    }
+  ],
+  "loop_balance": {
+    "balance_id": "balance:p1.4:001",
+    "owner_ref": "owner:leadpoet-lab",
+    "miner_ref": "miner:example-alpha",
+    "currency": "usd_cents",
+    "total_funded_cents": 5000,
+    "available_cents": 5000,
+    "reserved_cents": 0,
+    "spent_cents": 0,
+    "local_only": true,
+    "payments_enabled": false,
+    "settlement_enabled": false,
+    "external_account_ref": ""
+  },
+  "low_loop_balance": {
+    "balance_id": "balance:p1.4:low",
+    "owner_ref": "owner:leadpoet-lab",
+    "miner_ref": "miner:example-alpha",
+    "currency": "usd_cents",
+    "total_funded_cents": 500,
+    "available_cents": 500,
+    "reserved_cents": 0,
+    "spent_cents": 0,
+    "local_only": true,
+    "payments_enabled": false,
+    "settlement_enabled": false,
+    "external_account_ref": ""
+  },
+  "escrow": {
+    "requested_loops": 2,
+    "idempotency_key": "reserve-ticket-p1.4-001-loop-1",
+    "actual_spend_cents": 1700,
+    "expected_released_cents": 300,
+    "cost_ledger_ref": "cost_ledger:p1.4:loop:001"
+  },
+  "public_loop_receipt_source": {
+    "ticket_id": "ticket:p1.4:001",
+    "miner_ref": "miner:example-alpha",
+    "brief_ref": "brief:p1.4:fintech-funding-de",
+    "island": "generalist",
+    "summary_text": "Tried Sonar-first routing for German fintech funding announcements; best dev LCB improved coverage by 1.4.",
+    "stopped_reason": "plateau_detector",
+    "loops_consumed": 2,
+    "dev_delta_trajectory": [
+      0.6,
+      1.4
+    ],
+    "best_dev_delta_lcb": 1.4,
+    "cost_ledger_ref": "cost_ledger:p1.4:loop:001",
+    "result_ref": "result:p1.4:loop:001",
+    "proof_refs": [
+      "attestation:p1.4:stub:001",
+      "trace:p1.4:sanitized:001",
+      "escrow:p1.4:committed:001"
+    ],
+    "public_trace_ref": "sanitized_trace:p1.4:001",
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false
+  },
+  "protected_loop_receipt_source": {
+    "ticket_id": "ticket:p1.4:002",
+    "miner_ref": "miner:example-beta",
+    "brief_ref": "brief:p1.4:protected",
+    "island": "generalist",
+    "summary_text": "This source should fail because it contains protected data.",
+    "stopped_reason": "plateau_detector",
+    "loops_consumed": 1,
+    "dev_delta_trajectory": [
+      0.2
+    ],
+    "best_dev_delta_lcb": 0.2,
+    "cost_ledger_ref": "cost_ledger:p1.4:loop:protected",
+    "result_ref": "result:p1.4:loop:protected",
+    "proof_refs": [
+      "attestation:p1.4:stub:protected"
+    ],
+    "public_trace_ref": "sanitized_trace:p1.4:protected",
+    "live_champion_ref": "champion:private-live",
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false
+  },
+  "expected_autopilot_item_id": "fb:p1.4:coverage:001",
+  "invalid_autopilot_recommendations": [
+    {
+      "recommendation_id": "autopilot:p1.4:bad-island",
+      "island": "crypto_vertical",
+      "failure_board_item_id": "fb:p1.4:coverage:001",
+      "aiming_rule": "highest expected-yield generalist failure-board cell",
+      "expected_yield_score": 0.82,
+      "recommended_loop_count": 1,
+      "budget_cents": 1000,
+      "status": "advisory_local_only",
+      "advisory_only": true,
+      "autopilot_enabled": false,
+      "funding_action_enabled": false,
+      "public_workflow_side_effects": false,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion"
+    },
+    {
+      "recommendation_id": "autopilot:p1.4:bad-enabled",
+      "island": "generalist",
+      "failure_board_item_id": "fb:p1.4:coverage:001",
+      "aiming_rule": "highest expected-yield generalist failure-board cell",
+      "expected_yield_score": 0.82,
+      "recommended_loop_count": 1,
+      "budget_cents": 1000,
+      "status": "advisory_local_only",
+      "advisory_only": false,
+      "autopilot_enabled": true,
+      "funding_action_enabled": true,
+      "public_workflow_side_effects": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "public_miner_workflows": true,
+    "paid_loops": true,
+    "autopilot": true,
+    "hosted_run_crowning": false,
+    "source_add_payments": false,
+    "scheduler_jobs": true,
+    "production_writes": false,
+    "supabase_writes": false,
+    "live_champion_publication": false
+  }
+}

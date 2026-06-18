@@ -1,0 +1,322 @@
+{
+  "fine_tune_training_stub": {
+    "training_run_id": "engine_finetune_run:p3.3:local-stub",
+    "dataset_ref": "fine_tune_dataset:p3.3:local-engine-v-next",
+    "dataset_hash": "sha256:p3-3-local-engine-v-next",
+    "base_engine_version": "engine-v1:local-contract",
+    "candidate_model_ref": "model_candidate:engine-v-next:pending",
+    "candidate_model_hash_ref": "sha256:candidate-model-pending",
+    "hyperparam_config_hash": "sha256:hyperparams-local",
+    "training_plan_ref": "training_plan:p3.3:local",
+    "cost_cap_ref": "cost_cap:p3.3:local",
+    "matched_budget_eval_ref": "engine_ab:pending",
+    "training_enabled": false,
+    "training_started": false,
+    "training_completed": false,
+    "model_weights_published": false,
+    "model_registry_write": false,
+    "production_promotion_requested": false,
+    "success_claimed": false,
+    "matched_budget_eval_passed": false,
+    "measured_yield_delta_pct": 0.0,
+    "local_only": true,
+    "uses_local_fixtures": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "fine_tune_dataset:p3.3:local-engine-v-next"
+    ],
+    "state": "local_training_stub",
+    "contract_version": "engine_finetune_training:v1:local_contract"
+  },
+  "control_arm_input": {
+    "arm_kind": "engine_v1_control",
+    "engine_ref": "engine_v1:qualification-loop",
+    "fine_tune_dataset_ref": "fine_tune_dataset:p3.3:local-engine-v-next",
+    "fine_tune_dataset_hash": "sha256:p3-3-local-engine-v-next",
+    "heldout_split_ref": "holdout_split:p3.4:local-v1",
+    "heldout_task_refs": [
+      "heldout_task:p3.4:001",
+      "heldout_task:p3.4:002",
+      "heldout_task:p3.4:003"
+    ],
+    "budget_cents": 100000,
+    "verified_points": 10.0,
+    "run_count": 3,
+    "receipt_refs": [
+      "receipt_v2:p3.4:control"
+    ],
+    "cost_ledger_refs": [
+      "cost_ledger:p3.4:control"
+    ],
+    "external_cost_cents": 42000,
+    "heldout_eval_only": true,
+    "uses_training_split": false,
+    "measured_data_ready": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "production_data_claimed": false,
+    "source_data_state": "local_fixture",
+    "contract_version": "engine_ab_evaluator:v1:local_contract"
+  },
+  "candidate_arm_input": {
+    "arm_kind": "engine_vnext_candidate",
+    "engine_ref": "model_candidate:engine-v-next:pending",
+    "fine_tune_dataset_ref": "fine_tune_dataset:p3.3:local-engine-v-next",
+    "fine_tune_dataset_hash": "sha256:p3-3-local-engine-v-next",
+    "heldout_split_ref": "holdout_split:p3.4:local-v1",
+    "heldout_task_refs": [
+      "heldout_task:p3.4:001",
+      "heldout_task:p3.4:002",
+      "heldout_task:p3.4:003"
+    ],
+    "budget_cents": 100000,
+    "verified_points": 12.5,
+    "run_count": 3,
+    "receipt_refs": [
+      "receipt_v2:p3.4:candidate"
+    ],
+    "cost_ledger_refs": [
+      "cost_ledger:p3.4:candidate"
+    ],
+    "external_cost_cents": 43000,
+    "heldout_eval_only": true,
+    "uses_training_split": false,
+    "measured_data_ready": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "production_data_claimed": false,
+    "source_data_state": "local_fixture",
+    "contract_version": "engine_ab_evaluator:v1:local_contract"
+  },
+  "comparison_methodology_ref": "engine_ab_methodology:p3.4:matched-budget-heldout-v1",
+  "measured_arm_overrides": {
+    "source_data_state": "measured_lab_only",
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "measured_data_ready": true
+  },
+  "measured_training_run": {
+    "training_run_id": "engine_finetune_run:p3.3:local-stub",
+    "dataset_ref": "fine_tune_dataset:p3.3:local-engine-v-next",
+    "dataset_hash": "sha256:p3-3-local-engine-v-next",
+    "base_engine_version": "engine-v1:local-contract",
+    "candidate_model_ref": "model_candidate:engine-v-next:pending",
+    "candidate_model_hash_ref": "sha256:candidate-model-pending",
+    "hyperparam_config_hash": "sha256:hyperparams-local",
+    "training_plan_ref": "training_plan:p3.3:measured",
+    "cost_cap_ref": "cost_cap:p3.3:measured",
+    "matched_budget_eval_ref": "engine_ab:pending",
+    "training_enabled": true,
+    "training_started": true,
+    "training_completed": true,
+    "model_weights_published": false,
+    "model_registry_write": false,
+    "production_promotion_requested": false,
+    "success_claimed": false,
+    "matched_budget_eval_passed": false,
+    "measured_yield_delta_pct": 0.0,
+    "local_only": false,
+    "uses_local_fixtures": false,
+    "owner_approval_ref": "owner_approval:p3.4:training",
+    "evidence_refs": [
+      "fine_tune_dataset:p3.3:local-engine-v-next",
+      "training_plan:p3.3:measured"
+    ],
+    "state": "trained_awaiting_eval",
+    "contract_version": "engine_finetune_training:v1:local_contract"
+  },
+  "measured_pass_overrides": {
+    "measured_data_ready": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "improvement_claimed": true,
+    "owner_approval_ref": "owner_approval:p3.4:engine-ab",
+    "state": "passed_20_percent_gate"
+  },
+  "bare_measured_claim_expected_errors": {
+    "expected_error_contains": [
+      "requires supplied control_result",
+      "requires supplied candidate_result",
+      "requires supplied fine_tune_training"
+    ]
+  },
+  "invalid_arms": [
+    {
+      "id": "bad-control-engine-prefix",
+      "base": "control_arm_input",
+      "overrides": {
+        "engine_ref": "model_candidate:not-control"
+      },
+      "expected_error_contains": "engine_v1_control arm requires engine_v1:-prefixed engine_ref"
+    },
+    {
+      "id": "bad-candidate-engine-prefix",
+      "base": "candidate_arm_input",
+      "overrides": {
+        "engine_ref": "engine_v1:not-candidate"
+      },
+      "expected_error_contains": "engine_vnext_candidate arm requires model_candidate:-prefixed engine_ref"
+    },
+    {
+      "id": "bad-not-heldout-eval-only",
+      "base": "control_arm_input",
+      "overrides": {
+        "heldout_eval_only": false
+      },
+      "expected_error_contains": "must use heldout_eval_only"
+    },
+    {
+      "id": "bad-uses-training-split",
+      "base": "candidate_arm_input",
+      "overrides": {
+        "uses_training_split": true
+      },
+      "expected_error_contains": "must not use training split tasks"
+    },
+    {
+      "id": "bad-local-arm-claims-measured",
+      "base": "control_arm_input",
+      "overrides": {
+        "measured_data_ready": true
+      },
+      "expected_error_contains": "local fixture engine A/B arms cannot claim measured_data_ready"
+    },
+    {
+      "id": "bad-measured-arm-still-local",
+      "base": "candidate_arm_input",
+      "overrides": {
+        "source_data_state": "measured_lab_only",
+        "measured_data_ready": true,
+        "uses_local_fixtures": true,
+        "local_only": true
+      },
+      "expected_error_contains": [
+        "must not use local fixtures",
+        "cannot be local_only"
+      ]
+    },
+    {
+      "id": "bad-raw-model-output-key",
+      "base": "candidate_arm_input",
+      "overrides": {
+        "raw_model_output": "do not include model outputs"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ],
+  "invalid_comparisons": [
+    {
+      "id": "bad-unmatched-budget",
+      "overrides": {
+        "candidate_budget_cents": 110000
+      },
+      "expected_error_contains": "exact matched budgets"
+    },
+    {
+      "id": "bad-matched-budget-field-drift",
+      "overrides": {
+        "matched_budget_cents": 90000
+      },
+      "expected_error_contains": "matched_budget_cents must equal both arm budgets"
+    },
+    {
+      "id": "bad-heldout-task-mismatch",
+      "overrides": {
+        "heldout_task_refs": [
+          "heldout_task:p3.4:001",
+          "heldout_task:p3.4:999"
+        ]
+      },
+      "expected_error_contains": "heldout_task_refs must match supplied control result"
+    },
+    {
+      "id": "bad-yield-delta-pct",
+      "overrides": {
+        "yield_delta_pct": 1.0
+      },
+      "expected_error_contains": "yield_delta_pct must equal candidate lift over control yield"
+    },
+    {
+      "id": "bad-gate-boolean",
+      "overrides": {
+        "passed_20_percent_gate": false
+      },
+      "expected_error_contains": "passed_20_percent_gate must reflect yield_delta_pct >= 20"
+    },
+    {
+      "id": "bad-local-improvement-claim",
+      "overrides": {
+        "improvement_claimed": true
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "measured_data_ready",
+        "owner_approval_ref",
+        "evidence_refs"
+      ]
+    },
+    {
+      "id": "bad-passed-state-from-local",
+      "overrides": {
+        "state": "passed_20_percent_gate"
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "measured_data_ready"
+      ]
+    },
+    {
+      "id": "bad-pending-comparison-claim",
+      "overrides": {
+        "comparison_id": "engine_ab:pending",
+        "improvement_claimed": true
+      },
+      "expected_error_contains": "non-pending engine_ab comparison id"
+    },
+    {
+      "id": "bad-improvement-claim-with-ready-state",
+      "overrides": {
+        "improvement_claimed": true,
+        "state": "ready_after_measured_evidence"
+      },
+      "expected_error_contains": "improvement claims require passed_20_percent_gate state"
+    },
+    {
+      "id": "bad-model-registry-write",
+      "overrides": {
+        "model_registry_write": true
+      },
+      "expected_error_contains": "must not write model registry"
+    },
+    {
+      "id": "bad-model-weights-published",
+      "overrides": {
+        "model_weights_published": true
+      },
+      "expected_error_contains": "must not publish model weights"
+    },
+    {
+      "id": "bad-production-promotion-request",
+      "overrides": {
+        "production_promotion_requested": true
+      },
+      "expected_error_contains": "must not request production promotion"
+    },
+    {
+      "id": "bad-model_pipeline-exit-claim",
+      "overrides": {
+        "model_pipeline_exit_claimed": true
+      },
+      "expected_error_contains": "must not claim Phase 3 exit"
+    },
+    {
+      "id": "bad-raw-eval-task-key",
+      "overrides": {
+        "raw_eval_task": "do not include raw heldout tasks"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ]
+}

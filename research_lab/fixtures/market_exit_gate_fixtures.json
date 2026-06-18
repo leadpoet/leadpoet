@@ -1,0 +1,234 @@
+{
+  "invalid_readiness_claims": [
+    {
+      "base": "local_not_ready",
+      "expected_error_contains": "cannot be claimed from local fixtures",
+      "id": "bad-local-fixture-ready",
+      "overrides": {
+        "production_operational_ready": true,
+        "state": "ready_after_production_evidence"
+      }
+    },
+    {
+      "expected_error_contains": "carry_forward_gates_complete",
+      "id": "missing-carry-forward-gates",
+      "overrides": {
+        "carry_forward_status": {
+          "baseline_arm_comparison_published": true,
+          "dual_arm_paired_day_clock_started": true,
+          "dual_arm_paired_days_accumulated": true,
+          "engine_v0_external_cost_calibrated": true,
+          "external_validators_verified": true,
+          "gold_icp_inventory_ready": true,
+          "hosted_run_crowning_survived_probation": true,
+          "job_unit_economics_published": true,
+          "outcome_label_accumulation_on_curve": true,
+          "loop_hosted_run_corpus_ready": true,
+          "production_sql_applied": false,
+          "same_day_crowning_certified": true
+        }
+      }
+    },
+    {
+      "expected_error_contains": "active_component_count",
+      "id": "missing-active-components",
+      "overrides": {
+        "active_component_count": 9,
+        "active_component_refs": [
+          "component:active:01",
+          "component:active:02",
+          "component:active:03",
+          "component:active:04",
+          "component:active:05",
+          "component:active:06",
+          "component:active:07",
+          "component:active:08",
+          "component:active:09"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "component_in_crowned_champion",
+      "id": "missing-component-in-crowned-champion",
+      "overrides": {
+        "component_in_crowned_champion": false,
+        "crowned_champion_component_refs": []
+      }
+    },
+    {
+      "expected_error_contains": "island_crown_diversity",
+      "id": "missing-island-crown-diversity",
+      "overrides": {
+        "island_crown_miner_refs": [
+          "miner:alpha",
+          "miner:alpha"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "ledger_audits_anchored",
+      "id": "missing-ledger-audits",
+      "overrides": {
+        "ledger_audits_anchored": false
+      }
+    },
+    {
+      "expected_error_contains": "measured_yield_threshold",
+      "id": "missing-measured-yield",
+      "overrides": {
+        "measured_yield_points_per_1000_usd": 0.9
+      }
+    },
+    {
+      "expected_error_contains": "counterfactual_gate_passed",
+      "id": "missing-counterfactual-gate",
+      "overrides": {
+        "counterfactual_gate_passed": false
+      }
+    },
+    {
+      "expected_error_contains": "must not enable production writes",
+      "id": "bad-production-writes",
+      "overrides": {
+        "production_writes_enabled": true
+      }
+    },
+    {
+      "expected_error_contains": "must not enable Supabase writes",
+      "id": "bad-supabase-writes",
+      "overrides": {
+        "supabase_writes_enabled": true
+      }
+    },
+    {
+      "expected_error_contains": "must not enable public workflows",
+      "id": "bad-public-workflows",
+      "overrides": {
+        "public_workflows_enabled": true
+      }
+    },
+    {
+      "expected_error_contains": "protected material",
+      "id": "bad-protected-key",
+      "overrides": {
+        "Raw_Outcome_Label": "do not leak"
+      }
+    }
+  ],
+  "local_not_ready": {
+    "active_component_count": 0,
+    "active_component_refs": [],
+    "carry_forward_status": {
+      "baseline_arm_comparison_published": false,
+      "dual_arm_paired_day_clock_started": false,
+      "dual_arm_paired_days_accumulated": false,
+      "engine_v0_external_cost_calibrated": false,
+      "external_validators_verified": false,
+      "gold_icp_inventory_ready": false,
+      "hosted_run_crowning_survived_probation": false,
+      "job_unit_economics_published": false,
+      "outcome_label_accumulation_on_curve": false,
+      "loop_hosted_run_corpus_ready": false,
+      "production_sql_applied": false,
+      "same_day_crowning_certified": false
+    },
+    "component_in_crowned_champion": false,
+    "counterfactual_comparison_ref": "counterfactual_comparison:9b829495304931de",
+    "counterfactual_gate_passed": false,
+    "crowned_champion_component_refs": [],
+    "evidence_refs": [
+      "balance_ledger_audit:e7aff9b189016ad0",
+      "cost_ledger_audit:cf5e40dd8f2e4dd8",
+      "counterfactual_comparison:9b829495304931de"
+    ],
+    "exit_gate_id": "market_exit_gate:local-not-ready",
+    "island_crown_miner_refs": [],
+    "ledger_audit_refs": [
+      "balance_ledger_audit:e7aff9b189016ad0",
+      "cost_ledger_audit:cf5e40dd8f2e4dd8"
+    ],
+    "ledger_audits_anchored": true,
+    "local_only": true,
+    "measured_yield_points_per_1000_usd": 0.0,
+    "measured_yield_ready": false,
+    "owner_approval_ref": "",
+    "production_operational_ready": false,
+    "production_writes_enabled": false,
+    "public_workflows_enabled": false,
+    "state": "local_not_ready",
+    "supabase_writes_enabled": false,
+    "uses_local_fixtures": true
+  },
+  "ready_claim_for_negative_tests": {
+    "active_component_count": 10,
+    "active_component_refs": [
+      "component:active:01",
+      "component:active:02",
+      "component:active:03",
+      "component:active:04",
+      "component:active:05",
+      "component:active:06",
+      "component:active:07",
+      "component:active:08",
+      "component:active:09",
+      "component:active:10"
+    ],
+    "carry_forward_status": {
+      "baseline_arm_comparison_published": true,
+      "dual_arm_paired_day_clock_started": true,
+      "dual_arm_paired_days_accumulated": true,
+      "engine_v0_external_cost_calibrated": true,
+      "external_validators_verified": true,
+      "gold_icp_inventory_ready": true,
+      "hosted_run_crowning_survived_probation": true,
+      "job_unit_economics_published": true,
+      "outcome_label_accumulation_on_curve": true,
+      "loop_hosted_run_corpus_ready": true,
+      "production_sql_applied": true,
+      "same_day_crowning_certified": true
+    },
+    "component_in_crowned_champion": true,
+    "counterfactual_comparison_ref": "counterfactual_comparison:9b829495304931de",
+    "counterfactual_gate_passed": true,
+    "crowned_champion_component_refs": [
+      "component:active:01"
+    ],
+    "evidence_refs": [
+      "market_readiness:sql-and-live-data",
+      "component:active:01",
+      "champion:component-active-01",
+      "island_crown:healthcare:miner-alpha",
+      "island_crown:fintech:miner-beta",
+      "balance_ledger_audit:e7aff9b189016ad0",
+      "cost_ledger_audit:cf5e40dd8f2e4dd8",
+      "results_ledger:measured-yield-q3",
+      "counterfactual_comparison:9b829495304931de",
+      "owner_approval:market-exit"
+    ],
+    "exit_gate_id": "market_exit_gate:ready-negative-fixture",
+    "island_crown_miner_refs": [
+      "miner:alpha",
+      "miner:beta"
+    ],
+    "ledger_audit_refs": [
+      "balance_ledger_audit:e7aff9b189016ad0",
+      "cost_ledger_audit:cf5e40dd8f2e4dd8"
+    ],
+    "ledger_audits_anchored": true,
+    "local_only": false,
+    "measured_yield_points_per_1000_usd": 1.25,
+    "measured_yield_ready": true,
+    "owner_approval_ref": "owner_approval:market-exit",
+    "production_operational_ready": true,
+    "production_writes_enabled": false,
+    "public_workflows_enabled": false,
+    "state": "ready_after_production_evidence",
+    "supabase_writes_enabled": false,
+    "uses_local_fixtures": false
+  },
+  "unsafe_workflow_guards": {
+    "expected_error_contains": "production_writes",
+    "production_writes": true,
+    "public_workflows": true
+  }
+}

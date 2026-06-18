@@ -1,0 +1,662 @@
+{
+  "cell_yield_priors": [
+    {
+      "prior_id": "cell_yield_prior:healthcare-evidence-adapter-v1",
+      "cell_ref": "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+      "island": "healthcare",
+      "target_component": "evidence_adapter",
+      "patch_type": "SOURCE_ADD",
+      "observed_attempts": 12,
+      "kept_patches": 4,
+      "total_spend_cents": 14400,
+      "verified_delta_sum": 14.4,
+      "posterior_mean_delta": 1.2,
+      "posterior_std_delta": 0.25,
+      "expected_cost_cents": 1200,
+      "source_results_ledger_refs": ["fixture_ledger:market-meta-allocator:v1"]
+    },
+    {
+      "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+      "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "observed_attempts": 10,
+      "kept_patches": 3,
+      "total_spend_cents": 9000,
+      "verified_delta_sum": 8.0,
+      "posterior_mean_delta": 0.8,
+      "posterior_std_delta": 0.2,
+      "expected_cost_cents": 900,
+      "source_results_ledger_refs": ["fixture_ledger:market-meta-allocator:v1"]
+    },
+    {
+      "prior_id": "cell_yield_prior:industrial-strategy-module-v1",
+      "cell_ref": "map_cell:industrial:strategy_module:STRATEGY_SWAP",
+      "island": "industrial",
+      "target_component": "strategy_module",
+      "patch_type": "STRATEGY_SWAP",
+      "observed_attempts": 8,
+      "kept_patches": 3,
+      "total_spend_cents": 16000,
+      "verified_delta_sum": 12.0,
+      "posterior_mean_delta": 1.5,
+      "posterior_std_delta": 0.5,
+      "expected_cost_cents": 2000,
+      "source_results_ledger_refs": ["fixture_ledger:market-meta-allocator:v1"]
+    },
+    {
+      "prior_id": "cell_yield_prior:healthcare-parameter-policy-v1",
+      "cell_ref": "map_cell:healthcare:parameter_policy:PARAM_EDIT",
+      "island": "healthcare",
+      "target_component": "parameter_policy",
+      "patch_type": "PARAM_EDIT",
+      "observed_attempts": 9,
+      "kept_patches": 2,
+      "total_spend_cents": 4500,
+      "verified_delta_sum": 3.6,
+      "posterior_mean_delta": 0.4,
+      "posterior_std_delta": 0.1,
+      "expected_cost_cents": 500,
+      "source_results_ledger_refs": ["fixture_ledger:market-meta-allocator:v1"]
+    }
+  ],
+  "invalid_cell_yield_priors": [
+    {
+      "prior_id": "cell_yield_prior:bad-local-claims-ledger",
+      "cell_ref": "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+      "island": "healthcare",
+      "target_component": "evidence_adapter",
+      "patch_type": "SOURCE_ADD",
+      "observed_attempts": 12,
+      "kept_patches": 4,
+      "total_spend_cents": 14400,
+      "verified_delta_sum": 14.4,
+      "posterior_mean_delta": 1.2,
+      "posterior_std_delta": 0.25,
+      "expected_cost_cents": 1200,
+      "source_results_ledger_refs": ["fixture_ledger:market-meta-allocator:v1"],
+      "results_ledger_input_ready": true,
+      "expected_error_contains": "local fixture priors cannot claim results_ledger_input_ready"
+    },
+    {
+      "prior_id": "cell_yield_prior:bad-measured-from-fixture",
+      "cell_ref": "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+      "island": "healthcare",
+      "target_component": "evidence_adapter",
+      "patch_type": "SOURCE_ADD",
+      "observed_attempts": 12,
+      "kept_patches": 4,
+      "total_spend_cents": 14400,
+      "verified_delta_sum": 14.4,
+      "posterior_mean_delta": 1.2,
+      "posterior_std_delta": 0.25,
+      "expected_cost_cents": 1200,
+      "source_results_ledger_refs": ["fixture_ledger:market-meta-allocator:v1"],
+      "data_state": "results_ledger_measured",
+      "expected_error_contains": "results-ledger priors must not use local fixtures"
+    },
+    {
+      "prior_id": "cell_yield_prior:bad-kept-count",
+      "cell_ref": "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+      "island": "healthcare",
+      "target_component": "evidence_adapter",
+      "patch_type": "SOURCE_ADD",
+      "observed_attempts": 2,
+      "kept_patches": 4,
+      "total_spend_cents": 14400,
+      "verified_delta_sum": 14.4,
+      "posterior_mean_delta": 1.2,
+      "posterior_std_delta": 0.25,
+      "expected_cost_cents": 1200,
+      "source_results_ledger_refs": ["fixture_ledger:market-meta-allocator:v1"],
+      "expected_error_contains": "kept_patches cannot exceed observed_attempts"
+    },
+    {
+      "prior_id": "cell_yield_prior:bad-raw-results-ledger",
+      "cell_ref": "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+      "island": "healthcare",
+      "target_component": "evidence_adapter",
+      "patch_type": "SOURCE_ADD",
+      "observed_attempts": 12,
+      "kept_patches": 4,
+      "total_spend_cents": 14400,
+      "verified_delta_sum": 14.4,
+      "posterior_mean_delta": 1.2,
+      "posterior_std_delta": 0.25,
+      "expected_cost_cents": 1200,
+      "source_results_ledger_refs": ["fixture_ledger:market-meta-allocator:v1"],
+      "raw_results_ledger": "private outcomes withheld",
+      "expected_error_contains": "raw_results_ledger"
+    }
+  ],
+  "invalid_builder_prior": {
+    "prior_id": "cell_yield_prior:bad-zero-cost-builder",
+    "cell_ref": "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+    "island": "healthcare",
+    "target_component": "evidence_adapter",
+    "patch_type": "SOURCE_ADD",
+    "observed_attempts": 12,
+    "kept_patches": 4,
+    "total_spend_cents": 14400,
+    "verified_delta_sum": 14.4,
+    "posterior_mean_delta": 1.2,
+    "posterior_std_delta": 0.25,
+    "expected_cost_cents": 0,
+    "source_results_ledger_refs": ["fixture_ledger:market-meta-allocator:v1"],
+    "expected_error_contains": "expected_cost_cents must be positive"
+  },
+  "selection_request": {
+    "selection_id": "meta_allocator_selection:fixture-v1",
+    "budget_cents": 5000,
+    "selection_count": 2,
+    "seed": 2404
+  },
+  "expected_ranked_cell_refs": [
+    "map_cell:fintech:prompt_template:PROMPT_EDIT",
+    "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+    "map_cell:industrial:strategy_module:STRATEGY_SWAP",
+    "map_cell:healthcare:parameter_policy:PARAM_EDIT"
+  ],
+  "expected_selected_cell_refs": [
+    "map_cell:fintech:prompt_template:PROMPT_EDIT",
+    "map_cell:healthcare:evidence_adapter:SOURCE_ADD"
+  ],
+  "expected_sample_scores": [
+    {
+      "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+      "posterior_mean_delta": 0.8,
+      "posterior_std_delta": 0.2,
+      "expected_cost_cents": 900,
+      "seeded_uncertainty_draw": 0.883716,
+      "sampled_delta": 0.976743,
+      "sampled_value_per_1000_cents": 1.08527
+    },
+    {
+      "cell_ref": "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+      "prior_id": "cell_yield_prior:healthcare-evidence-adapter-v1",
+      "posterior_mean_delta": 1.2,
+      "posterior_std_delta": 0.25,
+      "expected_cost_cents": 1200,
+      "seeded_uncertainty_draw": -0.08841,
+      "sampled_delta": 1.177898,
+      "sampled_value_per_1000_cents": 0.981582
+    },
+    {
+      "cell_ref": "map_cell:industrial:strategy_module:STRATEGY_SWAP",
+      "prior_id": "cell_yield_prior:industrial-strategy-module-v1",
+      "posterior_mean_delta": 1.5,
+      "posterior_std_delta": 0.5,
+      "expected_cost_cents": 2000,
+      "seeded_uncertainty_draw": 0.812353,
+      "sampled_delta": 1.906176,
+      "sampled_value_per_1000_cents": 0.953088
+    },
+    {
+      "cell_ref": "map_cell:healthcare:parameter_policy:PARAM_EDIT",
+      "prior_id": "cell_yield_prior:healthcare-parameter-policy-v1",
+      "posterior_mean_delta": 0.4,
+      "posterior_std_delta": 0.1,
+      "expected_cost_cents": 500,
+      "seeded_uncertainty_draw": -0.285952,
+      "sampled_delta": 0.371405,
+      "sampled_value_per_1000_cents": 0.74281
+    }
+  ],
+  "invalid_selection_records": [
+    {
+      "selection_id": "meta_allocator_selection:bad-live-allocation",
+      "budget_cents": 5000,
+      "selection_count": 2,
+      "seed": 2404,
+      "formula": "sampled_value_per_1000_cents = (posterior_mean_delta + seeded_uncertainty_draw * posterior_std_delta) * 1000 / expected_cost_cents",
+      "prior_refs": [
+        "cell_yield_prior:healthcare-evidence-adapter-v1",
+        "cell_yield_prior:fintech-prompt-template-v1",
+        "cell_yield_prior:industrial-strategy-module-v1",
+        "cell_yield_prior:healthcare-parameter-policy-v1"
+      ],
+      "ranked_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT",
+        "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+        "map_cell:industrial:strategy_module:STRATEGY_SWAP",
+        "map_cell:healthcare:parameter_policy:PARAM_EDIT"
+      ],
+      "selected_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT",
+        "map_cell:healthcare:evidence_adapter:SOURCE_ADD"
+      ],
+      "sample_scores": [
+        {
+          "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+          "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+          "posterior_mean_delta": 0.8,
+          "posterior_std_delta": 0.2,
+          "expected_cost_cents": 900,
+          "seeded_uncertainty_draw": 0.883716,
+          "sampled_delta": 0.976743,
+          "sampled_value_per_1000_cents": 1.08527
+        }
+      ],
+      "live_allocation_enabled": true,
+      "expected_error_contains": "live_allocation_enabled must remain false"
+    },
+    {
+      "selection_id": "meta_allocator_selection:bad-spend-effects",
+      "budget_cents": 5000,
+      "selection_count": 1,
+      "seed": 2404,
+      "formula": "sampled_value_per_1000_cents = (posterior_mean_delta + seeded_uncertainty_draw * posterior_std_delta) * 1000 / expected_cost_cents",
+      "prior_refs": [
+        "cell_yield_prior:healthcare-evidence-adapter-v1",
+        "cell_yield_prior:fintech-prompt-template-v1",
+        "cell_yield_prior:industrial-strategy-module-v1",
+        "cell_yield_prior:healthcare-parameter-policy-v1"
+      ],
+      "ranked_cell_refs": ["map_cell:fintech:prompt_template:PROMPT_EDIT"],
+      "selected_cell_refs": ["map_cell:fintech:prompt_template:PROMPT_EDIT"],
+      "sample_scores": [
+        {
+          "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+          "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+          "posterior_mean_delta": 0.8,
+          "posterior_std_delta": 0.2,
+          "expected_cost_cents": 900,
+          "seeded_uncertainty_draw": 0.883716,
+          "sampled_delta": 0.976743,
+          "sampled_value_per_1000_cents": 1.08527
+        }
+      ],
+      "allocation_spend_effect_enabled": true,
+      "balance_mutation_enabled": true,
+      "expected_error_contains": [
+        "allocation_spend_effect_enabled must remain false",
+        "balance_mutation_enabled must remain false"
+      ]
+    },
+    {
+      "selection_id": "meta_allocator_selection:bad-results-ledger-claim",
+      "budget_cents": 5000,
+      "selection_count": 1,
+      "seed": 2404,
+      "formula": "sampled_value_per_1000_cents = (posterior_mean_delta + seeded_uncertainty_draw * posterior_std_delta) * 1000 / expected_cost_cents",
+      "prior_refs": [
+        "cell_yield_prior:healthcare-evidence-adapter-v1",
+        "cell_yield_prior:fintech-prompt-template-v1",
+        "cell_yield_prior:industrial-strategy-module-v1",
+        "cell_yield_prior:healthcare-parameter-policy-v1"
+      ],
+      "ranked_cell_refs": ["map_cell:fintech:prompt_template:PROMPT_EDIT"],
+      "selected_cell_refs": ["map_cell:fintech:prompt_template:PROMPT_EDIT"],
+      "sample_scores": [
+        {
+          "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+          "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+          "posterior_mean_delta": 0.8,
+          "posterior_std_delta": 0.2,
+          "expected_cost_cents": 900,
+          "seeded_uncertainty_draw": 0.883716,
+          "sampled_delta": 0.976743,
+          "sampled_value_per_1000_cents": 1.08527
+        }
+      ],
+      "uses_results_ledger_inputs": true,
+      "expected_error_contains": "results-ledger selection requires real measured priors"
+    },
+    {
+      "selection_id": "meta_allocator_selection:bad-ready-without-ledger",
+      "budget_cents": 5000,
+      "selection_count": 1,
+      "seed": 2404,
+      "formula": "sampled_value_per_1000_cents = (posterior_mean_delta + seeded_uncertainty_draw * posterior_std_delta) * 1000 / expected_cost_cents",
+      "prior_refs": [
+        "cell_yield_prior:healthcare-evidence-adapter-v1",
+        "cell_yield_prior:fintech-prompt-template-v1",
+        "cell_yield_prior:industrial-strategy-module-v1",
+        "cell_yield_prior:healthcare-parameter-policy-v1"
+      ],
+      "ranked_cell_refs": ["map_cell:fintech:prompt_template:PROMPT_EDIT"],
+      "selected_cell_refs": ["map_cell:fintech:prompt_template:PROMPT_EDIT"],
+      "sample_scores": [
+        {
+          "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+          "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+          "posterior_mean_delta": 0.8,
+          "posterior_std_delta": 0.2,
+          "expected_cost_cents": 900,
+          "seeded_uncertainty_draw": 0.883716,
+          "sampled_delta": 0.976743,
+          "sampled_value_per_1000_cents": 1.08527
+        }
+      ],
+      "state": "ready_after_results_ledger",
+      "expected_error_contains": "ready_after_results_ledger state requires uses_results_ledger_inputs"
+    },
+    {
+      "selection_id": "meta_allocator_selection:bad-ranking",
+      "budget_cents": 5000,
+      "selection_count": 1,
+      "seed": 2404,
+      "formula": "sampled_value_per_1000_cents = (posterior_mean_delta + seeded_uncertainty_draw * posterior_std_delta) * 1000 / expected_cost_cents",
+      "prior_refs": [
+        "cell_yield_prior:healthcare-evidence-adapter-v1",
+        "cell_yield_prior:fintech-prompt-template-v1",
+        "cell_yield_prior:industrial-strategy-module-v1",
+        "cell_yield_prior:healthcare-parameter-policy-v1"
+      ],
+      "ranked_cell_refs": ["map_cell:healthcare:evidence_adapter:SOURCE_ADD"],
+      "selected_cell_refs": ["map_cell:healthcare:evidence_adapter:SOURCE_ADD"],
+      "sample_scores": [
+        {
+          "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+          "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+          "posterior_mean_delta": 0.8,
+          "posterior_std_delta": 0.2,
+          "expected_cost_cents": 900,
+          "seeded_uncertainty_draw": 0.883716,
+          "sampled_delta": 0.976743,
+          "sampled_value_per_1000_cents": 1.08527
+        }
+      ],
+      "expected_error_contains": "ranked_cell_refs must match sampled value ranking"
+    }
+  ],
+  "invalid_selection_records_without_priors": [
+    {
+      "selection_id": "meta_allocator_selection:bad-results-ledger-no-priors",
+      "budget_cents": 5000,
+      "selection_count": 2,
+      "seed": 2404,
+      "formula": "sampled_value_per_1000_cents = (posterior_mean_delta + seeded_uncertainty_draw * posterior_std_delta) * 1000 / expected_cost_cents",
+      "prior_refs": [
+        "cell_yield_prior:healthcare-evidence-adapter-v1",
+        "cell_yield_prior:fintech-prompt-template-v1",
+        "cell_yield_prior:industrial-strategy-module-v1",
+        "cell_yield_prior:healthcare-parameter-policy-v1"
+      ],
+      "ranked_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT",
+        "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+        "map_cell:industrial:strategy_module:STRATEGY_SWAP",
+        "map_cell:healthcare:parameter_policy:PARAM_EDIT"
+      ],
+      "selected_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT",
+        "map_cell:healthcare:evidence_adapter:SOURCE_ADD"
+      ],
+      "sample_scores": [
+        {
+          "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+          "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+          "posterior_mean_delta": 0.8,
+          "posterior_std_delta": 0.2,
+          "expected_cost_cents": 900,
+          "seeded_uncertainty_draw": 0.883716,
+          "sampled_delta": 0.976743,
+          "sampled_value_per_1000_cents": 1.08527
+        },
+        {
+          "cell_ref": "map_cell:healthcare:evidence_adapter:SOURCE_ADD",
+          "prior_id": "cell_yield_prior:healthcare-evidence-adapter-v1",
+          "posterior_mean_delta": 1.2,
+          "posterior_std_delta": 0.25,
+          "expected_cost_cents": 1200,
+          "seeded_uncertainty_draw": -0.08841,
+          "sampled_delta": 1.177898,
+          "sampled_value_per_1000_cents": 0.981582
+        },
+        {
+          "cell_ref": "map_cell:industrial:strategy_module:STRATEGY_SWAP",
+          "prior_id": "cell_yield_prior:industrial-strategy-module-v1",
+          "posterior_mean_delta": 1.5,
+          "posterior_std_delta": 0.5,
+          "expected_cost_cents": 2000,
+          "seeded_uncertainty_draw": 0.812353,
+          "sampled_delta": 1.906176,
+          "sampled_value_per_1000_cents": 0.953088
+        },
+        {
+          "cell_ref": "map_cell:healthcare:parameter_policy:PARAM_EDIT",
+          "prior_id": "cell_yield_prior:healthcare-parameter-policy-v1",
+          "posterior_mean_delta": 0.4,
+          "posterior_std_delta": 0.1,
+          "expected_cost_cents": 500,
+          "seeded_uncertainty_draw": -0.285952,
+          "sampled_delta": 0.371405,
+          "sampled_value_per_1000_cents": 0.74281
+        }
+      ],
+      "uses_results_ledger_inputs": true,
+      "state": "ready_after_results_ledger",
+      "expected_error_contains": [
+        "selection cannot use local fixtures and results-ledger inputs simultaneously",
+        "results-ledger selection requires supplied priors for verification",
+        "ready_after_results_ledger selection cannot use local fixtures"
+      ]
+    }
+  ],
+  "expected_prediction_stub": {
+    "prediction_id": "allocator_prediction_stub:16ee81146e1f06d5",
+    "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+    "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+    "island": "fintech",
+    "target_component": "prompt_template",
+    "patch_type": "PROMPT_EDIT",
+    "predicted_delta": 0.8,
+    "lower_delta": 0.472,
+    "upper_delta": 1.128,
+    "confidence": 0.8,
+    "expected_cost_cents": 900,
+    "expected_value_score": 0.888889,
+    "provenance_refs": [
+      "cell_yield_prior:fintech-prompt-template-v1",
+      "meta_allocator_selection:fixture-v1",
+      "fixture_ledger:market-meta-allocator:v1"
+    ],
+    "model_version_ref": "meta_allocator:v1:local",
+    "publication_state": "local_stub",
+    "uses_local_fixtures": true,
+    "uses_results_ledger_inputs": false,
+    "published_to_live_map": false,
+    "live_allocator_prediction": false,
+    "protected_material_flags_checked": true,
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "visibility_policy": "sanitized_trace",
+    "artifact_release_state": "sanitized_trace",
+    "local_only": true
+  },
+  "invalid_prediction_stubs": [
+    {
+      "prediction_id": "allocator_prediction_stub:bad-live-publication",
+      "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "predicted_delta": 0.8,
+      "lower_delta": 0.472,
+      "upper_delta": 1.128,
+      "confidence": 0.8,
+      "expected_cost_cents": 900,
+      "expected_value_score": 0.888889,
+      "provenance_refs": ["cell_yield_prior:fintech-prompt-template-v1"],
+      "published_to_live_map": true,
+      "expected_error_contains": "local fixture prediction stubs cannot be published as live allocator predictions"
+    },
+    {
+      "prediction_id": "allocator_prediction_stub:bad-published-stub-from-fixture",
+      "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "predicted_delta": 0.8,
+      "lower_delta": 0.472,
+      "upper_delta": 1.128,
+      "confidence": 0.8,
+      "expected_cost_cents": 900,
+      "expected_value_score": 0.888889,
+      "provenance_refs": ["cell_yield_prior:fintech-prompt-template-v1"],
+      "publication_state": "published_stub",
+      "expected_error_contains": "published_stub state requires real results-ledger inputs"
+    },
+    {
+      "prediction_id": "allocator_prediction_stub:bad-interval",
+      "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "predicted_delta": 0.8,
+      "lower_delta": 0.9,
+      "upper_delta": 1.128,
+      "confidence": 0.8,
+      "expected_cost_cents": 900,
+      "expected_value_score": 0.888889,
+      "provenance_refs": ["cell_yield_prior:fintech-prompt-template-v1"],
+      "expected_error_contains": "prediction interval must satisfy"
+    },
+    {
+      "prediction_id": "allocator_prediction_stub:bad-raw-key",
+      "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "predicted_delta": 0.8,
+      "lower_delta": 0.472,
+      "upper_delta": 1.128,
+      "confidence": 0.8,
+      "expected_cost_cents": 900,
+      "expected_value_score": 0.888889,
+      "provenance_refs": ["cell_yield_prior:fintech-prompt-template-v1"],
+      "judge_prompt": "sealed prompt",
+      "expected_error_contains": "judge_prompt"
+    },
+    {
+      "prediction_id": "allocator_prediction_stub:bad-protected-flag",
+      "cell_ref": "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "prior_id": "cell_yield_prior:fintech-prompt-template-v1",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "predicted_delta": 0.8,
+      "lower_delta": 0.472,
+      "upper_delta": 1.128,
+      "confidence": 0.8,
+      "expected_cost_cents": 900,
+      "expected_value_score": 0.888889,
+      "provenance_refs": ["cell_yield_prior:fintech-prompt-template-v1"],
+      "contains_private_customer_data": true,
+      "expected_error_contains": "contains_private_customer_data"
+    }
+  ],
+  "pricing_request": {
+    "preset_ref": "preset:market-local-pool-v1",
+    "pool_ref": "allocation_pool:market-local-fixture",
+    "quoted_ticket_count": 5,
+    "price_per_ticket_cents": 1000
+  },
+  "expected_pricing_record": {
+    "pricing_id": "allocator_pricing:4b50ab81591c0a04",
+    "selection_id": "meta_allocator_selection:fixture-v1",
+    "preset_ref": "preset:market-local-pool-v1",
+    "pool_ref": "allocation_pool:market-local-fixture",
+    "pool_spend_cents": 5000,
+    "quoted_ticket_count": 5,
+    "price_per_ticket_cents": 1000,
+    "quote_currency": "usd_cents",
+    "quote_source": "local_fixture",
+    "owner_approval_ref": "",
+    "state": "local_quote",
+    "live_price_enabled": false,
+    "allocation_spend_effect_enabled": false,
+    "balance_mutation_enabled": false,
+    "funds_moved": false,
+    "production_pricing_changed": false,
+    "local_only": true
+  },
+  "invalid_pricing_records": [
+    {
+      "pricing_id": "allocator_pricing:bad-live-price",
+      "selection_id": "meta_allocator_selection:fixture-v1",
+      "preset_ref": "preset:market-local-pool-v1",
+      "pool_ref": "allocation_pool:market-local-fixture",
+      "pool_spend_cents": 5000,
+      "quoted_ticket_count": 5,
+      "price_per_ticket_cents": 1000,
+      "live_price_enabled": true,
+      "expected_error_contains": "live_price_enabled must remain false"
+    },
+    {
+      "pricing_id": "allocator_pricing:bad-balance-mutation",
+      "selection_id": "meta_allocator_selection:fixture-v1",
+      "preset_ref": "preset:market-local-pool-v1",
+      "pool_ref": "allocation_pool:market-local-fixture",
+      "pool_spend_cents": 5000,
+      "quoted_ticket_count": 5,
+      "price_per_ticket_cents": 1000,
+      "allocation_spend_effect_enabled": true,
+      "balance_mutation_enabled": true,
+      "expected_error_contains": [
+        "allocation_spend_effect_enabled must remain false",
+        "balance_mutation_enabled must remain false"
+      ]
+    },
+    {
+      "pricing_id": "allocator_pricing:bad-funds-moved",
+      "selection_id": "meta_allocator_selection:fixture-v1",
+      "preset_ref": "preset:market-local-pool-v1",
+      "pool_ref": "allocation_pool:market-local-fixture",
+      "pool_spend_cents": 5000,
+      "quoted_ticket_count": 5,
+      "price_per_ticket_cents": 1000,
+      "funds_moved": true,
+      "expected_error_contains": "funds_moved must remain false"
+    },
+    {
+      "pricing_id": "allocator_pricing:bad-quote-math",
+      "selection_id": "meta_allocator_selection:fixture-v1",
+      "preset_ref": "preset:market-local-pool-v1",
+      "pool_ref": "allocation_pool:market-local-fixture",
+      "pool_spend_cents": 6000,
+      "quoted_ticket_count": 5,
+      "price_per_ticket_cents": 1000,
+      "expected_error_contains": "pool_spend_cents must equal"
+    },
+    {
+      "pricing_id": "allocator_pricing:bad-owner-ready",
+      "selection_id": "meta_allocator_selection:fixture-v1",
+      "preset_ref": "preset:market-local-pool-v1",
+      "pool_ref": "allocation_pool:market-local-fixture",
+      "pool_spend_cents": 5000,
+      "quoted_ticket_count": 5,
+      "price_per_ticket_cents": 1000,
+      "state": "ready_after_owner_approval",
+      "expected_error_contains": "ready_after_owner_approval pricing requires owner_approval_ref"
+    },
+    {
+      "pricing_id": "allocator_pricing:bad-raw-marker",
+      "selection_id": "meta_allocator_selection:fixture-v1",
+      "preset_ref": "preset:market-local-pool-v1",
+      "pool_ref": "allocation_pool:market-local-fixture",
+      "pool_spend_cents": 5000,
+      "quoted_ticket_count": 5,
+      "price_per_ticket_cents": 1000,
+      "quote_source": "sealed allocator state fixture",
+      "expected_error_contains": "quote_source"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "live_meta_allocation": true,
+    "balance_mutations": true,
+    "production_writes": true,
+    "supabase_writes": true,
+    "public_workflows": true
+  }
+}

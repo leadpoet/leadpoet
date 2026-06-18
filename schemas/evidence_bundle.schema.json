@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leadpoet.com/schemas/evidence_bundle.schema.json",
+  "title": "Leadpoet Research Lab Evidence Bundle",
+  "description": "Canonical verification object for notarized evidence snapshots. Raw page content is stored in the snapshot store, not in this structured corpus record.",
+  "type": "object",
+  "required": [
+    "bundle_id",
+    "schema_version",
+    "run_id",
+    "artifact_hash",
+    "created_at",
+    "retention_class",
+    "verification_state",
+    "bundle_hash",
+    "merkle_anchor_ref",
+    "snapshots"
+  ],
+  "properties": {
+    "bundle_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "artifact_hash": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "retention_class": {
+      "enum": ["live_verification", "regression_anchor", "general_snapshot"]
+    },
+    "verification_state": {
+      "enum": ["active", "content_deleted", "hash_attested"]
+    },
+    "bundle_hash": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "merkle_anchor_ref": {
+      "type": ["string", "null"],
+      "maxLength": 256
+    },
+    "deletion_request_ref": {
+      "type": ["string", "null"],
+      "maxLength": 256
+    },
+    "snapshots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/snapshot"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "snapshot": {
+      "type": "object",
+      "required": [
+        "url",
+        "fetch_ts",
+        "content_hash",
+        "normalized_text_hash",
+        "snapshot_ref",
+        "signature",
+        "l0_verification_state"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "fetch_ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "content_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "normalized_text_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "snapshot_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "l0_verification_state": {
+          "enum": ["active", "content_deleted", "hash_attested"]
+        },
+        "deleted_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "deletion_reason_ref": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

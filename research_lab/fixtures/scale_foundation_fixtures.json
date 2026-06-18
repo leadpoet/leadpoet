@@ -1,0 +1,276 @@
+{
+  "scale_gate_values": [
+    "model_pipeline_exit_gate_ready",
+    "package_migration_ready",
+    "legacy_surface_retired",
+    "phase_scaffold_cleanup_ready",
+    "confidential_gpu_evidence_ready",
+    "stage3_experiment_evidence_ready",
+    "workspace_api_ga_evidence_ready",
+    "research_slice_governance_ready"
+  ],
+  "workflow_guards": {
+    "disabled": {
+      "confidential_gpu_training": false,
+      "stage3_end_to_end_experiments": false,
+      "agent_track_ga": false,
+      "model_weight_publication": false,
+      "research_slice_governance_change": false,
+      "legacy_surface_enabled": false,
+      "phase_scaffold_runtime_public": false,
+      "production_writes": false,
+      "supabase_writes": false,
+      "public_workflows": false
+    },
+    "invalid": {
+      "confidential_gpu_training": true,
+      "stage3_end_to_end_experiments": true,
+      "agent_track_ga": true,
+      "model_weight_publication": true,
+      "research_slice_governance_change": true,
+      "legacy_surface_enabled": true,
+      "phase_scaffold_runtime_public": true,
+      "production_writes": true,
+      "supabase_writes": true,
+      "public_workflows": true,
+      "expected_error_contains": [
+        "confidential_gpu_training",
+        "agent_track_ga",
+        "legacy_surface_enabled",
+        "supabase_writes"
+      ]
+    }
+  },
+  "workflow_guard_env": {
+    "RESEARCH_LAB_SCALE_CONFIDENTIAL_GPU_TRAINING": "1",
+    "RESEARCH_LAB_SCALE_STAGE3_END_TO_END_EXPERIMENTS": "true",
+    "RESEARCH_LAB_SCALE_AGENT_TRACK_GA": "yes",
+    "RESEARCH_LAB_SCALE_MODEL_WEIGHT_PUBLICATION": "on",
+    "RESEARCH_LAB_SCALE_RESEARCH_SLICE_GOVERNANCE_CHANGE": "1",
+    "RESEARCH_LAB_SCALE_LEGACY_SURFACE_ENABLED": "true",
+    "RESEARCH_LAB_SCALE_PHASE_SCAFFOLD_RUNTIME_PUBLIC": "yes",
+    "RESEARCH_LAB_SCALE_PRODUCTION_WRITES": "on",
+    "RESEARCH_LAB_SCALE_SUPABASE_WRITES": "1",
+    "RESEARCH_LAB_SCALE_PUBLIC_WORKFLOWS": "true",
+    "expected_error_contains": [
+      "stage3_end_to_end_experiments",
+      "model_weight_publication",
+      "public_workflows"
+    ]
+  },
+  "scale_readiness_status": {
+    "model_pipeline_exit_gate_ready": false,
+    "package_migration_ready": false,
+    "legacy_surface_retired": false,
+    "phase_scaffold_cleanup_ready": false,
+    "confidential_gpu_evidence_ready": false,
+    "stage3_experiment_evidence_ready": false,
+    "workspace_api_ga_evidence_ready": false,
+    "research_slice_governance_ready": false
+  },
+  "readiness_claims": {
+    "local_foundation_ready": {
+      "readiness_id": "scale_readiness:p4.0:local-foundation-ready",
+      "scale_readiness": {
+        "model_pipeline_exit_gate_ready": false,
+        "package_migration_ready": false,
+        "legacy_surface_retired": false,
+        "phase_scaffold_cleanup_ready": false,
+        "confidential_gpu_evidence_ready": false,
+        "stage3_experiment_evidence_ready": false,
+        "workspace_api_ga_evidence_ready": false,
+        "research_slice_governance_ready": false
+      },
+      "build_status": {
+        "scale_readiness_contracts": true,
+        "package_migration_audit": false,
+        "legacy_surface_retirement_guard": false,
+        "phase_scaffold_cleanup_verifier": false,
+        "confidential_gpu_contracts": false,
+        "stage3_experiment_contracts": false,
+        "agent_track_ga_gate": false,
+        "research_slice_governance_gate": false,
+        "scale_exit_gate_verifier": false
+      },
+      "local_code_complete": true,
+      "production_scale_ready": false,
+      "confidential_gpu_claimed_valid": false,
+      "stage3_success_claimed": false,
+      "agent_track_ga_claimed": false,
+      "model_weights_publication_claimed": false,
+      "research_slice_raise_claimed": false,
+      "uses_local_fixtures": true,
+      "local_only": true,
+      "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:p3.7:local",
+      "evidence_refs": [
+        "model_pipeline_exit_gate:p3.7:local"
+      ],
+      "owner_approval_ref": "",
+      "state": "awaiting_scale_evidence"
+    },
+    "ready_claim_for_negative_tests": {
+      "readiness_id": "scale_readiness:p4.0:bad-ready-claim-base",
+      "scale_readiness": {
+        "model_pipeline_exit_gate_ready": true,
+        "package_migration_ready": true,
+        "legacy_surface_retired": true,
+        "phase_scaffold_cleanup_ready": true,
+        "confidential_gpu_evidence_ready": true,
+        "stage3_experiment_evidence_ready": true,
+        "workspace_api_ga_evidence_ready": true,
+        "research_slice_governance_ready": true
+      },
+      "build_status": {
+        "scale_readiness_contracts": true,
+        "package_migration_audit": true,
+        "legacy_surface_retirement_guard": true,
+        "phase_scaffold_cleanup_verifier": true,
+        "confidential_gpu_contracts": true,
+        "stage3_experiment_contracts": true,
+        "agent_track_ga_gate": true,
+        "research_slice_governance_gate": true,
+        "scale_exit_gate_verifier": true
+      },
+      "local_code_complete": true,
+      "production_scale_ready": true,
+      "confidential_gpu_claimed_valid": true,
+      "stage3_success_claimed": true,
+      "agent_track_ga_claimed": true,
+      "model_weights_publication_claimed": true,
+      "research_slice_raise_claimed": true,
+      "uses_local_fixtures": false,
+      "local_only": false,
+      "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:measured-pass",
+      "evidence_refs": [
+        "model_pipeline_exit_gate:measured-pass",
+        "package_migration:leadpoet-native-eval",
+        "legacy_retirement:model-submission-surface",
+        "phase_scaffold_cleanup:domain-runtime-names",
+        "confidential_gpu:training-attested",
+        "gpu_attestation:nitro-gpu-chain",
+        "kms_policy:sealed-weight-release",
+        "stage3_experiment:end-to-end-heldout-pass",
+        "heldout_eval:stage3-axis-a",
+        "workspace_api_ga:agent-track-security",
+        "research_slice_governance:owner-approved-raise",
+        "market_yield:measured",
+        "counterfactual_gate:passed",
+        "model_weight_release:approved",
+        "owner_approval:scale"
+      ],
+      "owner_approval_ref": "owner_approval:scale",
+      "state": "ready_after_scale_evidence"
+    },
+    "invalid": [
+      {
+        "id": "bad-local-fixture-scale-ready",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "production_scale_ready": true,
+          "state": "ready_after_scale_evidence"
+        },
+        "expected_error_contains": [
+          "all Phase 4 build fields true",
+          "local fixtures",
+          "local_only",
+          "missing gates",
+          "owner_approval_ref"
+        ]
+      },
+      {
+        "id": "bad-ready-claim-with-missing-cleanup-builders",
+        "base": "ready_claim_for_negative_tests",
+        "overrides": {
+          "build_status": {
+            "package_migration_audit": false,
+            "phase_scaffold_cleanup_verifier": false
+          }
+        },
+        "expected_error_contains": "all Phase 4 build fields true"
+      },
+      {
+        "id": "bad-confidential-gpu-claim-local",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "confidential_gpu_claimed_valid": true
+        },
+        "expected_error_contains": [
+          "confidential GPU validity cannot be claimed from local fixtures",
+          "confidential GPU validity cannot be claimed by a local_only record",
+          "Phase 3 exit and confidential GPU evidence",
+          "confidential_gpu, gpu_attestation, or kms_policy evidence"
+        ]
+      },
+      {
+        "id": "bad-stage3-success-without-evidence",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "stage3_success_claimed": true
+        },
+        "expected_error_contains": [
+          "Stage-3 success cannot be claimed from local fixtures",
+          "Stage-3 success cannot be claimed by a local_only record",
+          "Phase 3 exit and Stage-3 experiment evidence",
+          "stage3_experiment or heldout_eval evidence"
+        ]
+      },
+      {
+        "id": "bad-agent-track-ga-without-security",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "agent_track_ga_claimed": true
+        },
+        "expected_error_contains": [
+          "Agent-track GA cannot be claimed from local fixtures",
+          "Agent-track GA cannot be claimed by a local_only record",
+          "Workspace API GA evidence",
+          "workspace_api_ga or workspace_api_beta evidence"
+        ]
+      },
+      {
+        "id": "bad-model-weight-publication-local",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "model_weights_publication_claimed": true
+        },
+        "expected_error_contains": [
+          "model-weight publication cannot be claimed from local fixtures",
+          "model-weight publication cannot be claimed by a local_only record",
+          "confidential GPU and Stage-3 evidence",
+          "model_weight_release evidence"
+        ]
+      },
+      {
+        "id": "bad-research-slice-raise-local",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "research_slice_raise_claimed": true
+        },
+        "expected_error_contains": [
+          "research-slice raise cannot be claimed from local fixtures",
+          "research-slice raise cannot be claimed by a local_only record",
+          "Phase 3 exit and governance evidence",
+          "governance, market_yield, or counterfactual_gate evidence"
+        ]
+      },
+      {
+        "id": "bad-protected-gpu-key",
+        "overrides": {
+          "kms_plaintext_key": "do not include plaintext key material"
+        },
+        "expected_error_contains": "protected material"
+      },
+      {
+        "id": "bad-malformed-protected-payload",
+        "raw": true,
+        "overrides": {
+          "model_weight_blob": "do not include model weight blob"
+        },
+        "expected_error_contains": [
+          "protected material",
+          "missing required Phase 4 readiness field"
+        ]
+      }
+    ]
+  }
+}

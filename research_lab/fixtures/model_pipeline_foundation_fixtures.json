@@ -1,0 +1,308 @@
+{
+  "model_pipeline_data_gate_values": [
+    "market_exit_gate_ready",
+    "trajectory_corpus_ready",
+    "outcome_label_volume_ready",
+    "cost_data_ready",
+    "component_outcomes_ready",
+    "crown_outcomes_ready",
+    "distillation_data_ready",
+    "workspace_api_security_ready"
+  ],
+  "workflow_guards": {
+    "disabled": {
+      "judge_calibration_publication": false,
+      "engine_finetune_training": false,
+      "engine_v_next_promotion": false,
+      "reranker_distillation_training": false,
+      "workspace_api_beta": false,
+      "public_agent_track": false,
+      "model_weight_publication": false,
+      "calibration_success_claims": false,
+      "fine_tune_success_claims": false,
+      "distillation_success_claims": false,
+      "production_writes": false,
+      "supabase_writes": false,
+      "public_workflows": false
+    },
+    "invalid": {
+      "judge_calibration_publication": true,
+      "engine_finetune_training": true,
+      "engine_v_next_promotion": true,
+      "reranker_distillation_training": true,
+      "workspace_api_beta": true,
+      "public_agent_track": true,
+      "model_weight_publication": true,
+      "calibration_success_claims": true,
+      "fine_tune_success_claims": true,
+      "distillation_success_claims": true,
+      "production_writes": true,
+      "supabase_writes": true,
+      "public_workflows": true,
+      "expected_error_contains": [
+        "judge_calibration_publication",
+        "engine_finetune_training",
+        "workspace_api_beta",
+        "supabase_writes"
+      ]
+    }
+  },
+  "workflow_guard_env": {
+    "RESEARCH_LAB_MODEL_PIPELINE_JUDGE_CALIBRATION_PUBLICATION": "1",
+    "RESEARCH_LAB_MODEL_PIPELINE_ENGINE_FINETUNE_TRAINING": "true",
+    "RESEARCH_LAB_MODEL_PIPELINE_ENGINE_V_NEXT_PROMOTION": "yes",
+    "RESEARCH_LAB_MODEL_PIPELINE_RERANKER_DISTILLATION_TRAINING": "on",
+    "RESEARCH_LAB_MODEL_PIPELINE_WORKSPACE_API_BETA": "1",
+    "RESEARCH_LAB_MODEL_PIPELINE_PUBLIC_AGENT_TRACK": "true",
+    "RESEARCH_LAB_MODEL_PIPELINE_MODEL_WEIGHT_PUBLICATION": "yes",
+    "RESEARCH_LAB_MODEL_PIPELINE_CALIBRATION_SUCCESS_CLAIMS": "on",
+    "RESEARCH_LAB_MODEL_PIPELINE_FINE_TUNE_SUCCESS_CLAIMS": "1",
+    "RESEARCH_LAB_MODEL_PIPELINE_DISTILLATION_SUCCESS_CLAIMS": "true",
+    "RESEARCH_LAB_MODEL_PIPELINE_PRODUCTION_WRITES": "yes",
+    "RESEARCH_LAB_MODEL_PIPELINE_SUPABASE_WRITES": "1",
+    "RESEARCH_LAB_MODEL_PIPELINE_PUBLIC_WORKFLOWS": "true",
+    "expected_error_contains": [
+      "engine_v_next_promotion",
+      "model_weight_publication",
+      "public_workflows"
+    ]
+  },
+  "data_readiness_status": {
+    "market_exit_gate_ready": false,
+    "trajectory_corpus_ready": false,
+    "outcome_label_volume_ready": false,
+    "cost_data_ready": false,
+    "component_outcomes_ready": false,
+    "crown_outcomes_ready": false,
+    "distillation_data_ready": false,
+    "workspace_api_security_ready": false
+  },
+  "readiness_claims": {
+    "local_foundation_ready": {
+      "readiness_id": "model_pipeline_readiness:p3.0:local-foundation-ready",
+      "data_readiness": {
+        "market_exit_gate_ready": false,
+        "trajectory_corpus_ready": false,
+        "outcome_label_volume_ready": false,
+        "cost_data_ready": false,
+        "component_outcomes_ready": false,
+        "crown_outcomes_ready": false,
+        "distillation_data_ready": false,
+        "workspace_api_security_ready": false
+      },
+      "pipeline_build_status": {
+        "trajectory_corpus_builder": false,
+        "run_log_summarizer": false,
+        "cost_ledger_summarizer": false,
+        "fine_tune_dataset_builder": false,
+        "matched_budget_ab_evaluator": false,
+        "reranker_distillation_dataset_builder": false,
+        "workspace_api_beta_contracts": false,
+        "model_pipeline_exit_gate_verifier": false
+      },
+      "local_code_complete": true,
+      "model_pipeline_operation_claimed_ready": false,
+      "judge_calibration_v1_claimed_valid": false,
+      "engine_v_next_yield_claimed": false,
+      "reranker_distillation_parity_claimed": false,
+      "workspace_api_beta_enablement_claimed": false,
+      "uses_local_fixtures": true,
+      "uses_synthetic_labels": false,
+      "local_only": true,
+      "market_exit_gate_ref": "market_exit_gate:local-not-ready",
+      "evidence_refs": [
+        "market_exit_gate:local-not-ready"
+      ],
+      "owner_approval_ref": "",
+      "state": "awaiting_production_data"
+    },
+    "ready_claim_for_negative_tests": {
+      "readiness_id": "model_pipeline_readiness:p3.0:bad-ready-claim-base",
+      "data_readiness": {
+        "market_exit_gate_ready": true,
+        "trajectory_corpus_ready": true,
+        "outcome_label_volume_ready": true,
+        "cost_data_ready": true,
+        "component_outcomes_ready": true,
+        "crown_outcomes_ready": true,
+        "distillation_data_ready": true,
+        "workspace_api_security_ready": true
+      },
+      "pipeline_build_status": {
+        "trajectory_corpus_builder": true,
+        "run_log_summarizer": true,
+        "cost_ledger_summarizer": true,
+        "fine_tune_dataset_builder": true,
+        "matched_budget_ab_evaluator": true,
+        "reranker_distillation_dataset_builder": true,
+        "workspace_api_beta_contracts": true,
+        "model_pipeline_exit_gate_verifier": true
+      },
+      "local_code_complete": true,
+      "model_pipeline_operation_claimed_ready": true,
+      "judge_calibration_v1_claimed_valid": true,
+      "engine_v_next_yield_claimed": true,
+      "reranker_distillation_parity_claimed": true,
+      "workspace_api_beta_enablement_claimed": true,
+      "uses_local_fixtures": false,
+      "uses_synthetic_labels": false,
+      "local_only": false,
+      "market_exit_gate_ref": "market_exit_gate:measured",
+      "evidence_refs": [
+        "market_exit_gate:measured",
+        "trajectory_corpus:measured",
+        "cost_ledger:measured",
+        "outcome_label_set:measured",
+        "judge_calibration:v1",
+        "engine_ab:v-next-vs-v1",
+        "distillation_eval:reranker-v1",
+        "workspace_api_beta:allowlisted"
+      ],
+      "owner_approval_ref": "owner_approval:model_pipeline",
+      "state": "ready_after_measured_evidence"
+    },
+    "invalid": [
+      {
+        "id": "bad-local-fixture-ready-claim",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "model_pipeline_operation_claimed_ready": true
+        },
+        "expected_error_contains": [
+          "local fixtures",
+          "local_only",
+          "missing data gates",
+          "owner_approval_ref",
+          "ready_after_measured_evidence state"
+        ]
+      },
+      {
+        "id": "bad-ready-claim-with-missing-builders",
+        "base": "ready_claim_for_negative_tests",
+        "overrides": {
+          "pipeline_build_status": {
+            "fine_tune_dataset_builder": false,
+            "model_pipeline_exit_gate_verifier": false
+          }
+        },
+        "expected_error_contains": "Phase 3 readiness requires all Phase 3 pipeline build fields true"
+      },
+      {
+        "id": "bad-synthetic-calibration-claim",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "judge_calibration_v1_claimed_valid": true,
+          "uses_synthetic_labels": true
+        },
+        "expected_error_contains": [
+          "synthetic labels",
+          "outcome_label_volume_ready",
+          "judge_calibration evidence"
+        ]
+      },
+      {
+        "id": "bad-engine-yield-claim-without-data",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "engine_v_next_yield_claimed": true
+        },
+        "expected_error_contains": [
+          "Phase 2 exit, trajectory corpus, and cost data",
+          "engine_ab evidence"
+        ]
+      },
+      {
+        "id": "bad-engine-yield-claim-local-fixture-even-with-data",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "data_readiness": {
+            "market_exit_gate_ready": true,
+            "trajectory_corpus_ready": true,
+            "cost_data_ready": true
+          },
+          "engine_v_next_yield_claimed": true,
+          "evidence_refs": [
+            "market_exit_gate:local-not-ready",
+            "engine_ab:v-next-local"
+          ]
+        },
+        "expected_error_contains": [
+          "engine v-next yield claims cannot be claimed from local fixtures",
+          "engine v-next yield claims cannot be claimed by a local_only record",
+          "engine v-next yield claims require owner_approval_ref"
+        ]
+      },
+      {
+        "id": "bad-reranker-parity-claim-without-data",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "reranker_distillation_parity_claimed": true
+        },
+        "expected_error_contains": [
+          "distillation data and cost data",
+          "distillation_eval evidence"
+        ]
+      },
+      {
+        "id": "bad-reranker-parity-claim-local-fixture-even-with-data",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "data_readiness": {
+            "distillation_data_ready": true,
+            "cost_data_ready": true
+          },
+          "reranker_distillation_parity_claimed": true,
+          "evidence_refs": [
+            "market_exit_gate:local-not-ready",
+            "distillation_eval:reranker-local"
+          ]
+        },
+        "expected_error_contains": [
+          "reranker parity claims cannot be claimed from local fixtures",
+          "reranker parity claims cannot be claimed by a local_only record",
+          "reranker parity claims require owner_approval_ref"
+        ]
+      },
+      {
+        "id": "bad-workspace-api-enable-without-security",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "workspace_api_beta_enablement_claimed": true
+        },
+        "expected_error_contains": [
+          "workspace_api_security_ready",
+          "local_only",
+          "owner_approval_ref",
+          "workspace_api_beta evidence"
+        ]
+      },
+      {
+        "id": "bad-ready-state-without-ready-claim",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "state": "ready_after_measured_evidence"
+        },
+        "expected_error_contains": "ready_after_measured_evidence state requires model_pipeline_operation_claimed_ready"
+      },
+      {
+        "id": "bad-raw-training-key",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "raw_training_example": "do not store this"
+        },
+        "expected_error_contains": "protected material"
+      },
+      {
+        "id": "bad-raw-outcome-marker",
+        "base": "local_foundation_ready",
+        "overrides": {
+          "evidence_refs": [
+            "market_exit_gate:local-not-ready",
+            "trajectory_corpus:contains raw outcome label"
+          ]
+        },
+        "expected_error_contains": "protected material"
+      }
+    ]
+  }
+}

@@ -30,6 +30,7 @@ from gateway.qualification.models import (
     EvaluationRunStatus,
     ICPPrompt,
 )
+from qualification.scoring.baseline import REFERENCE_MODEL_ID
 
 logger = logging.getLogger(__name__)
 
@@ -47,20 +48,12 @@ MINIMUM_CHAMPION_SCORE = CONFIG.MINIMUM_CHAMPION_SCORE  # Currently 10.0
 # =============================================================================
 # Baseline floor (reference-model daily run) — read-side
 # =============================================================================
-# Reserved model_id of the daily reference run. Kept in sync with
-# qualification/scoring/baseline.py:REFERENCE_MODEL_ID. Champion selection
-# below uses this to prevent the reference model from ever being crowned
-# (it's the FLOOR a miner must exceed by CHAMPION_BEAT_THRESHOLD, not a
-# competitor).
-REFERENCE_MODEL_ID = "reference:qualification_model:v1"
-
-
 def _today_yyyymmdd_set_id() -> int:
     """Return today's UTC date as an int in YYYYMMDD format.
 
     Matches the keying scheme used by ``gateway/tasks/icp_generator.py``
     for ``qualification_private_icp_sets.set_id`` and therefore
-    ``qualification_baselines.set_id``.
+    ``qualification_baselines`` set_id/model_id rows.
     """
     return int(datetime.now(timezone.utc).strftime("%Y%m%d"))
 
@@ -88,8 +81,9 @@ async def _get_today_baseline_score() -> Optional[float]:
             return None
         result = (
             supabase.table("qualification_baselines")
-            .select("baseline_score, run_status")
+            .select("baseline_score, run_status, model_id")
             .eq("set_id", _today_yyyymmdd_set_id())
+            .eq("model_id", REFERENCE_MODEL_ID)
             .limit(1)
             .execute()
         )

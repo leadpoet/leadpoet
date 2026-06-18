@@ -1,0 +1,436 @@
+{
+  "private_probe_receipt": {
+    "receipt_ref": "probe_receipt:p1.4:001",
+    "probe_id": "probe:p1.4:001",
+    "ticket_id": "ticket:p1.4:001",
+    "miner_ref": "miner:example-alpha",
+    "brief_ref": "brief:p1.4:fintech-funding-de",
+    "island": "generalist",
+    "cost_cents": 0,
+    "result_ref": "probe_result:p1.4:001",
+    "cost_ledger_ref": "cost_ledger:p1.4:probe:001",
+    "dev_delta_lcb": 1.4,
+    "private_to_owner_ref": "owner:leadpoet-lab",
+    "visibility_policy": "default_private",
+    "artifact_release_state": "private_live_champion"
+  },
+  "graduation_criteria": {
+    "criteria_id": "probe_graduation_criteria:p2.3:evidence-adapter:v1",
+    "target_component_type": "evidence_adapter",
+    "min_dev_delta_lcb": 1.0,
+    "min_result_refs": 1,
+    "requires_owner_opt_in": true,
+    "requires_component_review": true,
+    "requires_sanitized_trace_policy": true,
+    "live_probe_scheduling_enabled": false,
+    "public_miner_workflow_enabled": false,
+    "local_only": true
+  },
+  "invalid_graduation_criteria": [
+    {
+      "criteria_id": "probe_graduation_criteria:p2.3:bad-source-add",
+      "target_component_type": "source_add",
+      "min_dev_delta_lcb": 1.0,
+      "min_result_refs": 1,
+      "requires_owner_opt_in": true,
+      "requires_component_review": true,
+      "requires_sanitized_trace_policy": true,
+      "live_probe_scheduling_enabled": false,
+      "public_miner_workflow_enabled": false,
+      "local_only": true,
+      "expected_error_contains": "beyond source_add"
+    },
+    {
+      "criteria_id": "probe_graduation_criteria:p2.3:bad-open-workflow",
+      "target_component_type": "evidence_adapter",
+      "min_dev_delta_lcb": 1.0,
+      "min_result_refs": 1,
+      "requires_owner_opt_in": false,
+      "requires_component_review": false,
+      "requires_sanitized_trace_policy": false,
+      "live_probe_scheduling_enabled": true,
+      "public_miner_workflow_enabled": true,
+      "local_only": false,
+      "expected_error_contains": [
+        "owner opt-in",
+        "component-market review",
+        "sanitized trace policy",
+        "live probe scheduling",
+        "public miner workflows",
+        "local_only"
+      ]
+    },
+    {
+      "criteria_id": "probe_graduation_criteria:p2.3:bad-raw-credential",
+      "target_component_type": "evidence_adapter",
+      "min_dev_delta_lcb": 1.0,
+      "min_result_refs": 1,
+      "requires_owner_opt_in": true,
+      "requires_component_review": true,
+      "requires_sanitized_trace_policy": true,
+      "live_probe_scheduling_enabled": false,
+      "public_miner_workflow_enabled": false,
+      "local_only": true,
+      "raw_credential": "should not be present on criteria",
+      "expected_error_contains": "raw_credential"
+    }
+  ],
+  "graduation_decision": {
+    "decision_id": "probe_graduation_decision:p2.3:001",
+    "probe_receipt_ref": "probe_receipt:p1.4:001",
+    "probe_result_ref": "probe_result:p1.4:001",
+    "target_component_type": "evidence_adapter",
+    "dev_delta_lcb": 1.4,
+    "result_refs": [
+      "probe_result:p1.4:001"
+    ],
+    "criteria_ref": "probe_graduation_criteria:p2.3:evidence-adapter:v1",
+    "owner_opt_in_ref": "owner_opt_in:p2.3:001",
+    "graduation_ready": true,
+    "component_submission_ref": "component_submission:p2.2:evidence-adapter:procurement-v2",
+    "component_review_ref": "component_review:p2.2:procurement-v2",
+    "component_review_required": true,
+    "component_review_bypass_requested": false,
+    "live_probe_scheduling_enabled": false,
+    "public_miner_workflow_enabled": false,
+    "local_only": true,
+    "state": "ready_for_component_review"
+  },
+  "invalid_graduation_decisions": [
+    {
+      "decision_id": "probe_graduation_decision:p2.3:bad-low-signal",
+      "probe_receipt_ref": "probe_receipt:p1.4:001",
+      "probe_result_ref": "probe_result:p1.4:001",
+      "target_component_type": "evidence_adapter",
+      "dev_delta_lcb": 0.5,
+      "result_refs": [
+        "probe_result:p1.4:001"
+      ],
+      "criteria_ref": "probe_graduation_criteria:p2.3:evidence-adapter:v1",
+      "owner_opt_in_ref": "",
+      "graduation_ready": true,
+      "component_submission_ref": "",
+      "component_review_ref": "",
+      "component_review_required": true,
+      "component_review_bypass_requested": false,
+      "live_probe_scheduling_enabled": false,
+      "public_miner_workflow_enabled": false,
+      "local_only": true,
+      "state": "ready_for_component_review",
+      "expected_error_contains": [
+        "dev_delta_lcb must match private probe receipt",
+        "owner_opt_in_ref",
+        "component_submission_ref",
+        "component_review_ref"
+      ]
+    },
+    {
+      "decision_id": "probe_graduation_decision:p2.3:bad-bypass",
+      "probe_receipt_ref": "probe_receipt:p1.4:001",
+      "probe_result_ref": "probe_result:p1.4:001",
+      "target_component_type": "evidence_adapter",
+      "dev_delta_lcb": 1.4,
+      "result_refs": [],
+      "criteria_ref": "probe_graduation_criteria:p2.3:evidence-adapter:v1",
+      "owner_opt_in_ref": "owner_opt_in:p2.3:bad",
+      "graduation_ready": true,
+      "component_submission_ref": "component_submission:p2.2:evidence-adapter:procurement-v2",
+      "component_review_ref": "component_review:p2.2:procurement-v2",
+      "component_review_required": false,
+      "component_review_bypass_requested": true,
+      "live_probe_scheduling_enabled": true,
+      "public_miner_workflow_enabled": true,
+      "local_only": false,
+      "state": "ready_for_component_review",
+      "expected_error_contains": [
+        "enough result_refs",
+        "component review",
+        "bypass",
+        "live probe scheduling",
+        "public miner workflows",
+        "local_only"
+      ]
+    },
+    {
+      "decision_id": "probe_graduation_decision:p2.3:bad-raw-key",
+      "probe_receipt_ref": "probe_receipt:p1.4:001",
+      "probe_result_ref": "probe_result:p1.4:001",
+      "target_component_type": "evidence_adapter",
+      "dev_delta_lcb": 1.4,
+      "result_refs": [
+        "probe_result:p1.4:001"
+      ],
+      "criteria_ref": "probe_graduation_criteria:p2.3:evidence-adapter:v1",
+      "owner_opt_in_ref": "owner_opt_in:p2.3:bad",
+      "graduation_ready": true,
+      "component_submission_ref": "component_submission:p2.2:evidence-adapter:procurement-v2",
+      "component_review_ref": "component_review:p2.2:procurement-v2",
+      "component_review_required": true,
+      "component_review_bypass_requested": false,
+      "live_probe_scheduling_enabled": false,
+      "public_miner_workflow_enabled": false,
+      "local_only": true,
+      "state": "ready_for_component_review",
+      "raw_probe_result": "private probe result should not be here",
+      "expected_error_contains": "raw_probe_result"
+    }
+  ],
+  "outcome_release_policy": {
+    "policy_id": "probe_outcome_policy:p2.3:001",
+    "probe_receipt_ref": "probe_receipt:p1.4:001",
+    "private_result_ref": "probe_result:p1.4:001",
+    "sanitized_summary_ref": "sanitized_probe_summary:p2.3:001",
+    "summary_text": "Probe showed a positive local signal on cached fixtures; raw result remains private.",
+    "proof_refs": [
+      "sha256:probeoutcomesummaryhash001000000000000000000000000000000000"
+    ],
+    "public_receipt_ref": "",
+    "sanitized_trace_ref": "sanitized_trace:probe:p2.3:001",
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "raw_probe_result_included": false,
+    "public_publication_enabled": false,
+    "visibility_policy": "sanitized_trace",
+    "artifact_release_state": "sanitized_trace",
+    "state": "sanitized_trace_stub"
+  },
+  "private_only_outcome_release_policy": {
+    "policy_id": "probe_outcome_policy:p2.3:private-only",
+    "probe_receipt_ref": "probe_receipt:p1.4:001",
+    "private_result_ref": "probe_result:p1.4:001",
+    "sanitized_summary_ref": "sanitized_probe_summary:p2.3:private-only",
+    "summary_text": "Probe outcome remains private to the owner.",
+    "proof_refs": [
+      "sha256:probeprivateonlysummaryhash001000000000000000000000000000000"
+    ],
+    "public_receipt_ref": "",
+    "sanitized_trace_ref": "",
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "raw_probe_result_included": false,
+    "public_publication_enabled": false,
+    "visibility_policy": "default_private",
+    "artifact_release_state": "private_live_champion",
+    "state": "private_only"
+  },
+  "public_receipt_outcome_release_policy": {
+    "policy_id": "probe_outcome_policy:p2.3:public-receipt-stub",
+    "probe_receipt_ref": "probe_receipt:p1.4:001",
+    "private_result_ref": "probe_result:p1.4:001",
+    "sanitized_summary_ref": "sanitized_probe_summary:p2.3:public-receipt-stub",
+    "summary_text": "Sanitized receipt stub with source details omitted.",
+    "proof_refs": [
+      "sha256:probepublicreceiptstubhash001000000000000000000000000000000"
+    ],
+    "public_receipt_ref": "public_receipt:probe:p2.3:stub",
+    "sanitized_trace_ref": "",
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "raw_probe_result_included": false,
+    "public_publication_enabled": false,
+    "visibility_policy": "public_receipt",
+    "artifact_release_state": "public_receipt",
+    "state": "public_receipt_stub"
+  },
+  "invalid_outcome_release_policies": [
+    {
+      "policy_id": "probe_outcome_policy:p2.3:bad-publication",
+      "probe_receipt_ref": "probe_receipt:p1.4:001",
+      "private_result_ref": "probe_result:p1.4:001",
+      "sanitized_summary_ref": "sanitized_probe_summary:p2.3:bad",
+      "summary_text": "Bad public publication",
+      "proof_refs": [
+        "sha256:badprobeoutcome"
+      ],
+      "public_receipt_ref": "public_receipt:probe:p2.3:bad",
+      "sanitized_trace_ref": "",
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "raw_probe_result_included": true,
+      "public_publication_enabled": true,
+      "visibility_policy": "public_receipt",
+      "artifact_release_state": "public_receipt",
+      "state": "public_receipt_stub",
+      "expected_error_contains": [
+        "raw probe result",
+        "public publication"
+      ]
+    },
+    {
+      "policy_id": "probe_outcome_policy:p2.3:bad-protected-flag",
+      "probe_receipt_ref": "probe_receipt:p1.4:001",
+      "private_result_ref": "probe_result:p1.4:001",
+      "sanitized_summary_ref": "sanitized_probe_summary:p2.3:bad",
+      "summary_text": "Contains a sealed judge prompt marker.",
+      "proof_refs": [
+        "sha256:badprobeoutcome"
+      ],
+      "public_receipt_ref": "",
+      "sanitized_trace_ref": "sanitized_trace:probe:p2.3:bad",
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": true,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": true,
+      "raw_probe_result_included": false,
+      "public_publication_enabled": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "state": "sanitized_trace_stub",
+      "expected_error_contains": [
+        "summary_text",
+        "protected material flags"
+      ]
+    },
+    {
+      "policy_id": "probe_outcome_policy:p2.3:bad-credential-marker",
+      "probe_receipt_ref": "probe_receipt:p1.4:001",
+      "private_result_ref": "probe_result:p1.4:001",
+      "sanitized_summary_ref": "sanitized_probe_summary:p2.3:bad-credential-marker",
+      "summary_text": "Contains api key: AKIA-EXAMPLE and model weights attached.",
+      "proof_refs": [
+        "sha256:badprobecredentialmarker"
+      ],
+      "public_receipt_ref": "",
+      "sanitized_trace_ref": "sanitized_trace:probe:p2.3:bad-credential-marker",
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "raw_probe_result_included": false,
+      "public_publication_enabled": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "state": "sanitized_trace_stub",
+      "wallet_address": "0x0000000000000000000000000000000000000000",
+      "raw_credential": "should not be present",
+      "expected_error_contains": [
+        "wallet_address",
+        "raw_credential",
+        "summary_text"
+      ]
+    }
+  ],
+  "handoff": {
+    "handoff_id": "probe_component_handoff:p2.3:001",
+    "probe_receipt_ref": "probe_receipt:p1.4:001",
+    "graduation_decision_ref": "probe_graduation_decision:p2.3:001",
+    "release_policy_ref": "probe_outcome_policy:p2.3:001",
+    "target_component_type": "evidence_adapter",
+    "component_submission_ref": "component_submission:p2.2:evidence-adapter:procurement-v2",
+    "component_review_ref": "component_review:p2.2:procurement-v2",
+    "private_result_ref": "probe_result:p1.4:001",
+    "sanitized_trace_ref": "sanitized_trace:probe:p2.3:001",
+    "component_review_required": true,
+    "component_review_bypass_requested": false,
+    "public_miner_workflow_enabled": false,
+    "live_probe_scheduling_enabled": false,
+    "component_market_workflow_enabled": false,
+    "production_writes": false,
+    "local_only": true,
+    "state": "ready_for_component_review"
+  },
+  "invalid_handoffs": [
+    {
+      "handoff_id": "probe_component_handoff:p2.3:bad-bypass",
+      "probe_receipt_ref": "probe_receipt:p1.4:001",
+      "graduation_decision_ref": "probe_graduation_decision:p2.3:001",
+      "release_policy_ref": "probe_outcome_policy:p2.3:001",
+      "target_component_type": "evidence_adapter",
+      "component_submission_ref": "component_submission:p2.2:evidence-adapter:procurement-v2",
+      "component_review_ref": "component_review:p2.2:procurement-v2",
+      "private_result_ref": "probe_result:p1.4:001",
+      "sanitized_trace_ref": "sanitized_trace:probe:p2.3:001",
+      "component_review_required": false,
+      "component_review_bypass_requested": true,
+      "public_miner_workflow_enabled": true,
+      "live_probe_scheduling_enabled": true,
+      "component_market_workflow_enabled": true,
+      "production_writes": true,
+      "local_only": false,
+      "state": "ready_for_component_review",
+      "expected_error_contains": [
+        "component review",
+        "bypass",
+        "public miner workflows",
+        "live probe scheduling",
+        "component-market workflow",
+        "production_writes",
+        "local_only"
+      ]
+    },
+    {
+      "handoff_id": "probe_component_handoff:p2.3:bad-raw-key",
+      "probe_receipt_ref": "probe_receipt:p1.4:001",
+      "graduation_decision_ref": "probe_graduation_decision:p2.3:001",
+      "release_policy_ref": "probe_outcome_policy:p2.3:001",
+      "target_component_type": "evidence_adapter",
+      "component_submission_ref": "component_submission:p2.2:evidence-adapter:procurement-v2",
+      "component_review_ref": "component_review:p2.2:procurement-v2",
+      "private_result_ref": "probe_result:p1.4:001",
+      "sanitized_trace_ref": "sanitized_trace:probe:p2.3:001",
+      "component_review_required": true,
+      "component_review_bypass_requested": false,
+      "public_miner_workflow_enabled": false,
+      "live_probe_scheduling_enabled": false,
+      "component_market_workflow_enabled": false,
+      "production_writes": false,
+      "local_only": true,
+      "state": "ready_for_component_review",
+      "judge_prompt": "should not be here",
+      "expected_error_contains": "judge_prompt"
+    }
+  ],
+  "component_review_stub": {
+    "review_id": "component_review:p2.3:bad-accepted-from-probe",
+    "submission_id": "component_submission:p2.2:evidence-adapter:procurement-v2",
+    "component_type": "evidence_adapter",
+    "reviewer_ref": "reviewer:component-market-local",
+    "trial_refs": [
+      "trial:component-market:probe-handoff"
+    ],
+    "output_refs": [
+      "component_output:probe-handoff"
+    ],
+    "measured_trial_yield": 1.4,
+    "sandbox_job_ref": "sandbox_job:component-market:probe-handoff",
+    "status": "acceptable_pending_owner_gate",
+    "lab_only": true,
+    "sandboxed_execution_performed": true,
+    "arbitrary_code_executed": false,
+    "live_network_used": false,
+    "component_accepted": true,
+    "paid_market_enabled": false,
+    "human_acceptance_gate_passed": true,
+    "production_writes": false,
+    "review_notes_sanitized": "This intentionally proves probe handoff cannot bypass P2.2 review."
+  },
+  "unsafe_workflow_guards": {
+    "full_component_market": true,
+    "live_meta_allocation": false,
+    "research_map_live_api": false,
+    "kms_key_release": false,
+    "research_enclaves": false,
+    "on_chain_anchor_publication": false,
+    "ledger_audit_publication": false,
+    "counterfactual_consequences": false,
+    "balance_mutations": false,
+    "bounty_payments": false,
+    "production_writes": true,
+    "supabase_writes": true,
+    "public_workflows": true
+  }
+}

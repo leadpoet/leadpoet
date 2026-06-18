@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leadpoet.com/schemas/execution_trace.schema.json",
+  "title": "Leadpoet Research Lab Execution Trace",
+  "description": "Trace emitted by the notary proxy and run fabric for one artifact run. Artifact code must not author this record.",
+  "type": "object",
+  "required": [
+    "run_id",
+    "schema_version",
+    "artifact_hash",
+    "role",
+    "rung",
+    "status",
+    "lane_id",
+    "icp_set_hash",
+    "eval_version",
+    "calls",
+    "evidence_bundles",
+    "judge_verdicts",
+    "outputs_ref",
+    "score_bundle_ref",
+    "cost_ledger",
+    "attestation_ref"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "artifact_hash": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "role": {
+      "enum": ["champion", "candidate", "shadow", "baseline_arm", "reference"]
+    },
+    "rung": {
+      "enum": ["L0", "L1", "L2", "L3", "L4", "anchor"]
+    },
+    "status": {
+      "enum": ["completed", "crash", "timeout"]
+    },
+    "lane_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "icp_set_hash": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "eval_version": {
+      "type": "object",
+      "required": ["verifier_hash", "judge_version_hash"],
+      "properties": {
+        "verifier_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "judge_version_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    },
+    "calls": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/call"
+      }
+    },
+    "evidence_bundles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence_ref"
+      }
+    },
+    "judge_verdicts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/judge_verdict"
+      }
+    },
+    "outputs_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "score_bundle_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "cost_ledger": {
+      "$ref": "#/$defs/cost_ledger"
+    },
+    "attestation_ref": {
+      "type": ["string", "null"],
+      "maxLength": 256
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "call": {
+      "type": "object",
+      "required": [
+        "seq",
+        "ts",
+        "provider",
+        "model",
+        "purpose",
+        "call_emitter",
+        "component",
+        "request_hash",
+        "response_hash",
+        "tokens",
+        "cost_usd",
+        "teacher_model_flag"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "purpose": {
+          "enum": ["search", "scrape", "extract", "judge", "engine_internal", "other"]
+        },
+        "call_emitter": {
+          "enum": ["model", "code"]
+        },
+        "component": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "request_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "response_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "tokens": {
+          "type": "object",
+          "required": ["in", "out"],
+          "properties": {
+            "in": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "out": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "cost_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "teacher_model_flag": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "evidence_ref": {
+      "type": "object",
+      "required": ["url", "fetch_ts", "content_hash", "snapshot_ref", "signature", "used_in_signal_idx"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "fetch_ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "content_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "snapshot_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "used_in_signal_idx": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "judge_verdict": {
+      "type": "object",
+      "required": ["input_hash", "verdict_hash", "judge_version_hash", "cached"],
+      "properties": {
+        "input_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "verdict_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "judge_version_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "cached": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "cost_ledger": {
+      "type": "object",
+      "required": ["total_usd", "by_provider", "by_purpose"],
+      "properties": {
+        "total_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "by_provider": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "by_purpose": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,389 @@
+{
+  "validator_ref": "validator:local:p1.6:001",
+  "validator_refs": [
+    "validator:local:p1.6:001",
+    "validator:local:p1.6:002"
+  ],
+  "run_id": "run:p1.6:official-score:001",
+  "role": "gateway",
+  "epoch_ref": "epoch:p1.6:local:001",
+  "pcr0_allowlist_ref": "pcr0_allowlist:repo:p1.6",
+  "attestation_anchor": {
+    "attestation_ref": "attestation:p1.6:001",
+    "run_id": "run:p1.6:official-score:001",
+    "enclave_measurement_ref": "measurement:nitro:p1.6:gateway",
+    "engine_version_ref": "engine:v1:validator-flow-fixture",
+    "verifier_image_ref": "image:leadpoet-verifier:p1.6-fixture",
+    "verifier_hash": "sha256:verifierp160000000000000000000000000000000000000000000000000",
+    "judge_version_hash": "sha256:judgep16000000000000000000000000000000000000000000000000000",
+    "pcr0_allowlist_ref": "pcr0_allowlist:repo:p1.6",
+    "icp_set_commitment": "sha256:icpsetp160000000000000000000000000000000000000000000000000",
+    "output_hash": "sha256:outputp160000000000000000000000000000000000000000000000000",
+    "evidence_bundle_merkle_root": "sha256:evidencep160000000000000000000000000000000000000000000000",
+    "cost_ledger_hash": "sha256:costledgerp16000000000000000000000000000000000000000000000",
+    "attestation_response": {
+      "trust_level": "full_nitro",
+      "attestation_document": "dGVzdA==",
+      "enclave_pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "code_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pcr0": "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5"
+    },
+    "anchor_state": "shape_recorded_only",
+    "allowlist_checked": false,
+    "cryptographic_verification_performed": false,
+    "production_valid": false,
+    "signed_anchor_ref": "anchor:pending"
+  },
+  "observed_attestations": [
+    {
+      "attestation_ref": "attestation:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "output_hash": "sha256:outputp160000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "invalid_attestation_verifications": [
+    {
+      "verification_id": "attestation_verification:pcr0-skip",
+      "validator_ref": "validator:local:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "attestation_ref": "attestation:p1.6:001",
+      "role": "gateway",
+      "attestation_response": {
+        "trust_level": "full_nitro",
+        "attestation_document": "dGVzdA==",
+        "enclave_pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "code_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pcr0": "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5"
+      },
+      "pcr0_allowlist_ref": "pcr0_allowlist:repo:p1.6",
+      "pcr0": "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5",
+      "shape_checked": true,
+      "shape_passed": true,
+      "pcr0_allowlist_checked": false,
+      "pcr0_allowed": true,
+      "equivocation_check_performed": true,
+      "equivocation_conflict": false,
+      "observed_output_hashes": [
+        "sha256:outputp160000000000000000000000000000000000000000000000000"
+      ],
+      "status": "failed",
+      "expected_error_contains": "PCR0 allowlist check must not be skipped"
+    },
+    {
+      "verification_id": "attestation_verification:equivocation-skip",
+      "validator_ref": "validator:local:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "attestation_ref": "attestation:p1.6:001",
+      "role": "gateway",
+      "attestation_response": {
+        "trust_level": "full_nitro",
+        "attestation_document": "dGVzdA==",
+        "enclave_pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "code_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pcr0": "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5"
+      },
+      "pcr0_allowlist_ref": "pcr0_allowlist:repo:p1.6",
+      "pcr0": "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5",
+      "shape_checked": true,
+      "shape_passed": true,
+      "pcr0_allowlist_checked": true,
+      "pcr0_allowed": true,
+      "equivocation_check_performed": false,
+      "equivocation_conflict": false,
+      "observed_output_hashes": [
+        "sha256:outputp160000000000000000000000000000000000000000000000000"
+      ],
+      "status": "failed",
+      "expected_error_contains": "equivocation check must not be skipped"
+    },
+    {
+      "verification_id": "attestation_verification:pcr0-denied",
+      "validator_ref": "validator:local:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "attestation_ref": "attestation:p1.6:denied",
+      "role": "gateway",
+      "attestation_response": {
+        "trust_level": "full_nitro",
+        "attestation_document": "dGVzdA==",
+        "enclave_pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "code_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pcr0": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "pcr0_allowlist_ref": "pcr0_allowlist:repo:p1.6",
+      "pcr0": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "shape_checked": true,
+      "shape_passed": true,
+      "pcr0_allowlist_checked": true,
+      "pcr0_allowed": false,
+      "equivocation_check_performed": true,
+      "equivocation_conflict": false,
+      "observed_output_hashes": [
+        "sha256:outputp160000000000000000000000000000000000000000000000000"
+      ],
+      "status": "failed",
+      "expected_error_contains": "PCR0 is not allowlisted"
+    }
+  ],
+  "equivocation_anchor": {
+    "attestation_ref": "attestation:p1.6:equivocation-a",
+    "run_id": "run:p1.6:equivocation",
+    "enclave_measurement_ref": "measurement:nitro:p1.6:gateway",
+    "engine_version_ref": "engine:v1:validator-flow-fixture",
+    "verifier_image_ref": "image:leadpoet-verifier:p1.6-fixture",
+    "verifier_hash": "sha256:verifierp160000000000000000000000000000000000000000000000000",
+    "judge_version_hash": "sha256:judgep16000000000000000000000000000000000000000000000000000",
+    "pcr0_allowlist_ref": "pcr0_allowlist:repo:p1.6",
+    "icp_set_commitment": "sha256:icpsetp16equivocation0000000000000000000000000000000000000000",
+    "output_hash": "sha256:outputp16equivocationa0000000000000000000000000000000000000000",
+    "evidence_bundle_merkle_root": "sha256:evidencep16equivocation000000000000000000000000000000000000",
+    "cost_ledger_hash": "sha256:costledgerp16equivocation00000000000000000000000000000000000",
+    "attestation_response": {
+      "trust_level": "full_nitro",
+      "attestation_document": "dGVzdA==",
+      "enclave_pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "code_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pcr0": "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5"
+    },
+    "anchor_state": "shape_recorded_only",
+    "allowlist_checked": false,
+    "cryptographic_verification_performed": false,
+    "production_valid": false,
+    "signed_anchor_ref": "anchor:pending"
+  },
+  "equivocation_observed_attestations": [
+    {
+      "attestation_ref": "attestation:p1.6:equivocation-a",
+      "run_id": "run:p1.6:equivocation",
+      "output_hash": "sha256:outputp16equivocationa0000000000000000000000000000000000000000"
+    },
+    {
+      "attestation_ref": "attestation:p1.6:equivocation-b",
+      "run_id": "run:p1.6:equivocation",
+      "output_hash": "sha256:outputp16equivocationb0000000000000000000000000000000000000000"
+    }
+  ],
+  "open_verifier_rerun": {
+    "fixture_ref": "leadpoet_verifier/fixtures/golden_vectors.json",
+    "fixture_payload": {
+      "case_set": "golden_vectors",
+      "fixture_version": "p1.6-local"
+    },
+    "expected_result_payload": {
+      "passed": true,
+      "error_count": 0,
+      "result_hash": "sha256:openverifierresultp16000000000000000000000000000000000000"
+    },
+    "actual_result_payload": {
+      "passed": true,
+      "error_count": 0,
+      "result_hash": "sha256:openverifierresultp16000000000000000000000000000000000000"
+    }
+  },
+  "invalid_open_verifier_reruns": [
+    {
+      "rerun_id": "open_verifier_rerun:bad-diff",
+      "validator_ref": "validator:local:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "fixture_ref": "leadpoet_verifier/fixtures/golden_vectors.json",
+      "fixture_hash": "sha256:fixturehashp160000000000000000000000000000000000000000000",
+      "expected_result_hash": "sha256:expectedp16000000000000000000000000000000000000000000000",
+      "actual_result_hash": "sha256:actualp160000000000000000000000000000000000000000000000",
+      "byte_identical": false,
+      "open_verifier_hash": "sha256:openverifierp16000000000000000000000000000000000000000000",
+      "local_only": true,
+      "rerun_performed_locally": true,
+      "live_network_used": false,
+      "production_consensus_write": false,
+      "expected_error_contains": "byte-identical"
+    },
+    {
+      "rerun_id": "open_verifier_rerun:bad-network",
+      "validator_ref": "validator:local:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "fixture_ref": "leadpoet_verifier/fixtures/golden_vectors.json",
+      "fixture_hash": "sha256:fixturehashp160000000000000000000000000000000000000000000",
+      "expected_result_hash": "sha256:samep160000000000000000000000000000000000000000000000",
+      "actual_result_hash": "sha256:samep160000000000000000000000000000000000000000000000",
+      "byte_identical": true,
+      "open_verifier_hash": "sha256:openverifierp16000000000000000000000000000000000000000000",
+      "local_only": true,
+      "rerun_performed_locally": true,
+      "live_network_used": true,
+      "production_consensus_write": false,
+      "expected_error_contains": "live network"
+    }
+  ],
+  "judge_requery_sample": {
+    "sample_id": "judge_sample:p1.6:001",
+    "validator_ref": "validator:local:p1.6:001",
+    "run_id": "run:p1.6:official-score:001",
+    "evidence_bundle_ref": "evidence_bundle:p1.6:001",
+    "original_verdict_hash": "sha256:judgeverdictp16000000000000000000000000000000000000000000",
+    "judge_version_hash": "sha256:judgep16000000000000000000000000000000000000000000000000000",
+    "sample_rate": 0.05,
+    "status": "sampled_record_only",
+    "sampled": true,
+    "live_requery_performed": false,
+    "sealed_judge_accessed": false,
+    "production_consensus_write": false,
+    "requery_result_hash": "hash:pending"
+  },
+  "invalid_judge_requery_samples": [
+    {
+      "sample_id": "judge_sample:p1.6:bad-live",
+      "validator_ref": "validator:local:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "evidence_bundle_ref": "evidence_bundle:p1.6:001",
+      "original_verdict_hash": "sha256:judgeverdictp16000000000000000000000000000000000000000000",
+      "judge_version_hash": "sha256:judgep16000000000000000000000000000000000000000000000000000",
+      "sample_rate": 0.05,
+      "status": "sampled_record_only",
+      "sampled": true,
+      "live_requery_performed": true,
+      "sealed_judge_accessed": false,
+      "production_consensus_write": false,
+      "requery_result_hash": "hash:pending",
+      "expected_error_contains": "live calls"
+    },
+    {
+      "sample_id": "judge_sample:p1.6:bad-sealed",
+      "validator_ref": "validator:local:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "evidence_bundle_ref": "evidence_bundle:p1.6:001",
+      "original_verdict_hash": "sha256:judgeverdictp16000000000000000000000000000000000000000000",
+      "judge_version_hash": "sha256:judgep16000000000000000000000000000000000000000000000000000",
+      "sample_rate": 0.05,
+      "status": "sampled_record_only",
+      "sampled": true,
+      "live_requery_performed": false,
+      "sealed_judge_accessed": true,
+      "production_consensus_write": false,
+      "requery_result_hash": "hash:pending",
+      "expected_error_contains": "sealed judges"
+    }
+  ],
+  "liveness_sample": {
+    "sample_id": "liveness_sample:p1.6:001",
+    "validator_ref": "validator:local:p1.6:001",
+    "run_id": "run:p1.6:official-score:001",
+    "evidence_url": "https://news.example.com/acme-series-b-2026-06-01",
+    "evidence_ref": "evidence:p1.6:001",
+    "snapshot_ref": "snapshot:p1.6:001",
+    "sample_rate": 0.05,
+    "status": "sampled_record_only",
+    "sampled": true,
+    "live_http_performed": false,
+    "anti_bot_wall_seen": true,
+    "anti_bot_tolerant": true,
+    "fabrication_escalated": false,
+    "fabrication_evidence_ref": "",
+    "production_consensus_write": false
+  },
+  "invalid_liveness_samples": [
+    {
+      "sample_id": "liveness_sample:p1.6:bad-live-http",
+      "validator_ref": "validator:local:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "evidence_url": "https://news.example.com/acme-series-b-2026-06-01",
+      "evidence_ref": "evidence:p1.6:001",
+      "snapshot_ref": "snapshot:p1.6:001",
+      "sample_rate": 0.05,
+      "status": "sampled_record_only",
+      "sampled": true,
+      "live_http_performed": true,
+      "anti_bot_wall_seen": false,
+      "anti_bot_tolerant": true,
+      "fabrication_escalated": false,
+      "fabrication_evidence_ref": "",
+      "production_consensus_write": false,
+      "expected_error_contains": "live HTTP"
+    },
+    {
+      "sample_id": "liveness_sample:p1.6:bad-antibot",
+      "validator_ref": "validator:local:p1.6:001",
+      "run_id": "run:p1.6:official-score:001",
+      "evidence_url": "https://news.example.com/acme-series-b-2026-06-01",
+      "evidence_ref": "evidence:p1.6:001",
+      "snapshot_ref": "snapshot:p1.6:001",
+      "sample_rate": 0.05,
+      "status": "sampled_record_only",
+      "sampled": true,
+      "live_http_performed": false,
+      "anti_bot_wall_seen": true,
+      "anti_bot_tolerant": false,
+      "fabrication_escalated": true,
+      "fabrication_evidence_ref": "",
+      "production_consensus_write": false,
+      "expected_error_contains": "anti-bot wall"
+    }
+  ],
+  "invalid_consensus_summaries": [
+    {
+      "consensus_id": "validator_consensus:bad-emission",
+      "epoch_ref": "epoch:p1.6:local:001",
+      "validator_refs": [
+        "validator:local:p1.6:001"
+      ],
+      "attestation_verification_refs": [
+        "attestation_verification:fixture"
+      ],
+      "open_verifier_rerun_refs": [
+        "open_verifier_rerun:fixture"
+      ],
+      "judge_requery_sample_refs": [
+        "judge_sample:p1.6:001"
+      ],
+      "liveness_sample_refs": [
+        "liveness_sample:p1.6:001"
+      ],
+      "passed": true,
+      "state": "local_summary_only",
+      "local_only": true,
+      "chain_weights_emitted": true,
+      "live_validator_emission_changed": true,
+      "production_consensus_enabled": false,
+      "supabase_writes": false,
+      "consensus_hash": "sha256:consensusbadp160000000000000000000000000000000000000000000",
+      "expected_error_contains": "chain weights"
+    },
+    {
+      "consensus_id": "validator_consensus:bad-production",
+      "epoch_ref": "epoch:p1.6:local:001",
+      "validator_refs": [
+        "validator:local:p1.6:001"
+      ],
+      "attestation_verification_refs": [
+        "attestation_verification:fixture"
+      ],
+      "open_verifier_rerun_refs": [
+        "open_verifier_rerun:fixture"
+      ],
+      "judge_requery_sample_refs": [
+        "judge_sample:p1.6:001"
+      ],
+      "liveness_sample_refs": [
+        "liveness_sample:p1.6:001"
+      ],
+      "passed": true,
+      "state": "local_summary_only",
+      "local_only": true,
+      "chain_weights_emitted": false,
+      "live_validator_emission_changed": false,
+      "production_consensus_enabled": true,
+      "supabase_writes": true,
+      "consensus_hash": "sha256:consensusbadp160000000000000000000000000000000000000000000",
+      "expected_error_contains": "production consensus"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "public_miner_workflows": false,
+    "paid_loops": false,
+    "autopilot": false,
+    "hosted_run_crowning": false,
+    "source_add_payments": false,
+    "scheduler_jobs": false,
+    "production_writes": true,
+    "supabase_writes": true,
+    "live_champion_publication": false
+  }
+}

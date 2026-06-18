@@ -377,7 +377,7 @@ FREE_PROVIDERS: Dict[str, str] = {
 
 ALL_PROVIDERS: Dict[str, str] = {**PAID_PROVIDERS, **FREE_PROVIDERS}
 
-PROXY_TIMEOUT_SECONDS = 30.0
+PROXY_TIMEOUT_SECONDS = 90.0
 
 # =============================================================================
 # GitHub API Endpoint Allowlist (Security)

@@ -724,6 +724,7 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
                     "datauniverse": 0.00005, # $0.00005 per call
                     "googlenews": 0.001,     # $0.001 per call
                     "jobdata": 0.01,         # $0.01 per call
+                    "exa": 0.005,            # $0.005 per call (matches PaidAPI config)
                 }
                 
                 cost = per_call_costs.get(provider, 0.0)
@@ -968,7 +969,11 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
         
         elif provider == "jobdata":
             headers["Authorization"] = f"Bearer {api_key}"
-        
+
+        elif provider == "exa":
+            # Exa uses the x-api-key header; without it requests return 402.
+            headers["x-api-key"] = api_key
+
         return headers
     
     def _make_upstream_request(

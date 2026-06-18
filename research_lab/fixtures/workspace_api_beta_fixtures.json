@@ -1,0 +1,669 @@
+{
+  "model_pipeline_readiness_ref": "model_pipeline_readiness:p3.0:local-foundation",
+  "unsafe_model_pipeline_guards": {
+    "workspace_api_beta": true,
+    "public_agent_track": true,
+    "production_writes": true,
+    "expected_error_contains": "Phase 3 local build must keep these workflows disabled"
+  },
+  "method_contracts": [
+    {
+      "contract_id": "workspace_api_method:p3.6:get_repo_map",
+      "method": "get_repo_map",
+      "endpoint_ref": "workspace_api_endpoint:get_repo_map:v1",
+      "input_schema_ref": "workspace_api_schema:get_repo_map:input:v1",
+      "output_schema_ref": "workspace_api_schema:get_repo_map:output:v1",
+      "allowed_request_fields": [
+        "repo_ref",
+        "path_prefix",
+        "max_depth"
+      ],
+      "allowed_response_fields": [
+        "module_refs",
+        "symbol_refs",
+        "dependency_edges",
+        "redaction_report_ref"
+      ],
+      "max_entropy_bits_per_call": 16,
+      "rate_limit_per_hour": 20,
+      "sanitized_output_only": true,
+      "no_raw_corpus": true,
+      "no_private_customer_data": true,
+      "no_live_champion_ip": true,
+      "no_model_weights": true,
+      "no_direct_repo_write": true,
+      "no_secret_access": true,
+      "no_unbounded_search": true,
+      "production_workflow_enabled": false,
+      "public_ga_enabled": false,
+      "uses_local_fixtures": true,
+      "local_only": true,
+      "state": "local_contract_stub",
+      "contract_version": "workspace_api_method:v1:local_contract"
+    },
+    {
+      "contract_id": "workspace_api_method:p3.6:propose_patch",
+      "method": "propose_patch",
+      "endpoint_ref": "workspace_api_endpoint:propose_patch:v1",
+      "input_schema_ref": "workspace_api_schema:propose_patch:input:v1",
+      "output_schema_ref": "workspace_api_schema:propose_patch:output:v1",
+      "allowed_request_fields": [
+        "patch_manifest_ref",
+        "component_ref",
+        "test_plan_ref"
+      ],
+      "allowed_response_fields": [
+        "patch_receipt_ref",
+        "lint_status",
+        "review_queue_ref",
+        "redaction_report_ref"
+      ],
+      "max_entropy_bits_per_call": 24,
+      "rate_limit_per_hour": 10,
+      "sanitized_output_only": true,
+      "no_raw_corpus": true,
+      "no_private_customer_data": true,
+      "no_live_champion_ip": true,
+      "no_model_weights": true,
+      "no_direct_repo_write": true,
+      "no_secret_access": true,
+      "no_unbounded_search": true,
+      "production_workflow_enabled": false,
+      "public_ga_enabled": false,
+      "uses_local_fixtures": true,
+      "local_only": true,
+      "state": "local_contract_stub",
+      "contract_version": "workspace_api_method:v1:local_contract"
+    },
+    {
+      "contract_id": "workspace_api_method:p3.6:request_eval",
+      "method": "request_eval",
+      "endpoint_ref": "workspace_api_endpoint:request_eval:v1",
+      "input_schema_ref": "workspace_api_schema:request_eval:input:v1",
+      "output_schema_ref": "workspace_api_schema:request_eval:output:v1",
+      "allowed_request_fields": [
+        "patch_receipt_ref",
+        "eval_level",
+        "budget_ref"
+      ],
+      "allowed_response_fields": [
+        "eval_job_ref",
+        "budget_remaining_ref",
+        "queue_state",
+        "redaction_report_ref"
+      ],
+      "max_entropy_bits_per_call": 12,
+      "rate_limit_per_hour": 8,
+      "sanitized_output_only": true,
+      "no_raw_corpus": true,
+      "no_private_customer_data": true,
+      "no_live_champion_ip": true,
+      "no_model_weights": true,
+      "no_direct_repo_write": true,
+      "no_secret_access": true,
+      "no_unbounded_search": true,
+      "production_workflow_enabled": false,
+      "public_ga_enabled": false,
+      "uses_local_fixtures": true,
+      "local_only": true,
+      "state": "local_contract_stub",
+      "contract_version": "workspace_api_method:v1:local_contract"
+    },
+    {
+      "contract_id": "workspace_api_method:p3.6:get_failure_analysis",
+      "method": "get_failure_analysis",
+      "endpoint_ref": "workspace_api_endpoint:get_failure_analysis:v1",
+      "input_schema_ref": "workspace_api_schema:get_failure_analysis:input:v1",
+      "output_schema_ref": "workspace_api_schema:get_failure_analysis:output:v1",
+      "allowed_request_fields": [
+        "failure_board_ref",
+        "component_ref",
+        "summary_level"
+      ],
+      "allowed_response_fields": [
+        "sanitized_failure_summary_ref",
+        "recommended_patch_types",
+        "blocked_material_report_ref",
+        "redaction_report_ref"
+      ],
+      "max_entropy_bits_per_call": 20,
+      "rate_limit_per_hour": 12,
+      "sanitized_output_only": true,
+      "no_raw_corpus": true,
+      "no_private_customer_data": true,
+      "no_live_champion_ip": true,
+      "no_model_weights": true,
+      "no_direct_repo_write": true,
+      "no_secret_access": true,
+      "no_unbounded_search": true,
+      "production_workflow_enabled": false,
+      "public_ga_enabled": false,
+      "uses_local_fixtures": true,
+      "local_only": true,
+      "state": "local_contract_stub",
+      "contract_version": "workspace_api_method:v1:local_contract"
+    },
+    {
+      "contract_id": "workspace_api_method:p3.6:search_corpus",
+      "method": "search_corpus",
+      "endpoint_ref": "workspace_api_endpoint:search_corpus:v1",
+      "input_schema_ref": "workspace_api_schema:search_corpus:input:v1",
+      "output_schema_ref": "workspace_api_schema:search_corpus:output:v1",
+      "allowed_request_fields": [
+        "query_ref",
+        "corpus_scope_ref",
+        "top_k"
+      ],
+      "allowed_response_fields": [
+        "sanitized_result_refs",
+        "match_reason_refs",
+        "source_release_states",
+        "redaction_report_ref"
+      ],
+      "max_entropy_bits_per_call": 32,
+      "rate_limit_per_hour": 15,
+      "sanitized_output_only": true,
+      "no_raw_corpus": true,
+      "no_private_customer_data": true,
+      "no_live_champion_ip": true,
+      "no_model_weights": true,
+      "no_direct_repo_write": true,
+      "no_secret_access": true,
+      "no_unbounded_search": true,
+      "production_workflow_enabled": false,
+      "public_ga_enabled": false,
+      "uses_local_fixtures": true,
+      "local_only": true,
+      "state": "local_contract_stub",
+      "contract_version": "workspace_api_method:v1:local_contract"
+    }
+  ],
+  "local_allowlist": {
+    "allowlist_id": "workspace_api_allowlist:p3.6:miner-alpha",
+    "miner_ref": "miner:agent-alpha",
+    "track": "agent_track",
+    "scope_ref": "workspace_beta_scope:p3.6:local-agent-track",
+    "stake_ref": "stake:p3.6:pending",
+    "track_record_ref": "miner_track_record:p3.6:pending",
+    "legal_terms_ref": "legal_terms:p3.6:agent-beta",
+    "entropy_budget_ref": "workspace_entropy:p3.6:miner-alpha",
+    "abuse_monitoring_ref": "abuse_monitoring:p3.6:miner-alpha",
+    "workspace_role_ref": "workspace_role:p3.6:agent-beta",
+    "access_token_ref": "workspace_token_ref:p3.6:pending",
+    "allowed_methods": [
+      "get_repo_map",
+      "propose_patch",
+      "request_eval",
+      "get_failure_analysis",
+      "search_corpus"
+    ],
+    "stake_gated": false,
+    "track_record_gated": false,
+    "legal_terms_accepted": false,
+    "entropy_accounting_required": true,
+    "abuse_monitoring_enabled": false,
+    "beta_access_enabled": false,
+    "public_access_enabled": false,
+    "account_created": false,
+    "credential_material_issued": false,
+    "production_writes": false,
+    "supabase_writes": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "workspace_api_allowlist:p3.6:miner-alpha"
+    ],
+    "state": "local_allowlist_stub",
+    "contract_version": "workspace_api_beta:v1:local_contract"
+  },
+  "local_entropy_ledger": {
+    "ledger_id": "workspace_entropy:p3.6:miner-alpha",
+    "miner_ref": "miner:agent-alpha",
+    "budget_window_ref": "workspace_entropy_window:p3.6:day-001",
+    "entropy_budget_bits": 200,
+    "entropy_used_bits": 60,
+    "entropy_remaining_bits": 140,
+    "alert_threshold_bits": 160,
+    "per_method_bits": {
+      "get_repo_map": 8,
+      "propose_patch": 16,
+      "request_eval": 4,
+      "get_failure_analysis": 12,
+      "search_corpus": 20
+    },
+    "accounting_live": false,
+    "budget_enforced": false,
+    "expansion_allowed": false,
+    "over_budget": false,
+    "public_agent_track_enabled": false,
+    "production_writes": false,
+    "supabase_writes": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "workspace_entropy:p3.6:miner-alpha"
+    ],
+    "state": "local_ledger_stub",
+    "contract_version": "workspace_api_beta:v1:local_contract"
+  },
+  "local_security_review": {
+    "review_id": "workspace_security_review:p3.6:miner-alpha",
+    "allowlist_ref": "workspace_api_allowlist:p3.6:miner-alpha",
+    "entropy_ledger_ref": "workspace_entropy:p3.6:miner-alpha",
+    "scope_ref": "workspace_beta_scope:p3.6:local-agent-track",
+    "abuse_monitoring_ref": "abuse_monitoring:p3.6:miner-alpha",
+    "rate_limit_policy_ref": "rate_limit_policy:p3.6:workspace-beta",
+    "endpoint_allowlist_ref": "workspace_endpoint_allowlist:p3.6:agent-beta",
+    "redaction_policy_ref": "redaction_policy:p3.6:workspace-beta",
+    "penetration_test_ref": "security_test:p3.6:pending",
+    "incident_response_ref": "incident_response:p3.6:workspace-beta",
+    "tos_enforcement_ref": "tos_enforcement:p3.6:agent-beta",
+    "security_review_passed": false,
+    "rate_limits_configured": false,
+    "endpoint_allowlist_enforced": false,
+    "abuse_monitoring_ready": false,
+    "redaction_review_passed": false,
+    "entropy_accounting_verified": false,
+    "no_raw_secret_access": true,
+    "no_live_champion_exposure": true,
+    "no_private_customer_data": true,
+    "no_production_workflows": true,
+    "no_public_ga": true,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "workspace_security_review:p3.6:miner-alpha"
+    ],
+    "state": "local_checklist_stub",
+    "contract_version": "workspace_api_beta:v1:local_contract"
+  },
+  "local_beta_enablement": {
+    "beta_id": "workspace_api_beta:p3.6:miner-alpha",
+    "allowlist_ref": "workspace_api_allowlist:p3.6:miner-alpha",
+    "entropy_ledger_ref": "workspace_entropy:p3.6:miner-alpha",
+    "security_review_ref": "workspace_security_review:p3.6:miner-alpha",
+    "model_pipeline_readiness_ref": "model_pipeline_readiness:p3.0:local-foundation",
+    "beta_scope_ref": "workspace_beta_scope:p3.6:local-agent-track",
+    "allowed_miner_refs": [
+      "miner:agent-alpha"
+    ],
+    "allowed_methods": [
+      "get_repo_map",
+      "propose_patch",
+      "request_eval",
+      "get_failure_analysis",
+      "search_corpus"
+    ],
+    "max_cohort_size": 1,
+    "beta_enablement_claimed": false,
+    "workspace_api_calls_enabled": false,
+    "public_ga_enabled": false,
+    "production_workflows_enabled": false,
+    "public_agent_track_enabled": false,
+    "credential_material_issued": false,
+    "production_writes": false,
+    "supabase_writes": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "workspace_api_beta:p3.6:miner-alpha"
+    ],
+    "state": "local_beta_stub",
+    "contract_version": "workspace_api_beta:v1:local_contract"
+  },
+  "measured_allowlist_overrides": {
+    "stake_gated": true,
+    "track_record_gated": true,
+    "legal_terms_accepted": true,
+    "abuse_monitoring_enabled": true,
+    "beta_access_enabled": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:p3.6:allowlist",
+    "evidence_refs": [
+      "workspace_api_allowlist:p3.6:miner-alpha",
+      "stake:p3.6:verified",
+      "miner_track_record:p3.6:verified",
+      "legal_terms:p3.6:accepted",
+      "owner_approval:p3.6:allowlist"
+    ],
+    "state": "allowlisted_beta_ready"
+  },
+  "measured_entropy_overrides": {
+    "accounting_live": true,
+    "budget_enforced": true,
+    "expansion_allowed": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:p3.6:entropy",
+    "evidence_refs": [
+      "workspace_entropy:p3.6:miner-alpha",
+      "abuse_monitoring:p3.6:miner-alpha",
+      "owner_approval:p3.6:entropy"
+    ],
+    "state": "accounting_live"
+  },
+  "measured_security_overrides": {
+    "security_review_passed": true,
+    "rate_limits_configured": true,
+    "endpoint_allowlist_enforced": true,
+    "abuse_monitoring_ready": true,
+    "redaction_review_passed": true,
+    "entropy_accounting_verified": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:p3.6:security",
+    "evidence_refs": [
+      "workspace_security_review:p3.6:miner-alpha",
+      "security_test:p3.6:passed",
+      "redaction_policy:p3.6:workspace-beta",
+      "owner_approval:p3.6:security"
+    ],
+    "state": "passed_after_review"
+  },
+  "measured_beta_overrides": {
+    "beta_enablement_claimed": true,
+    "workspace_api_calls_enabled": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:p3.6:beta",
+    "evidence_refs": [
+      "workspace_api_beta:p3.6:miner-alpha",
+      "workspace_api_allowlist:p3.6:miner-alpha",
+      "workspace_entropy:p3.6:miner-alpha",
+      "workspace_security_review:p3.6:miner-alpha",
+      "owner_approval:p3.6:beta"
+    ],
+    "state": "allowlisted_beta_enabled"
+  },
+  "bare_measured_beta_expected_errors": {
+    "expected_error_contains": [
+      "supplied allowlist",
+      "supplied entropy_ledger",
+      "supplied security_review"
+    ]
+  },
+  "invalid_method_contracts": [
+    {
+      "id": "bad-public-ga",
+      "overrides": {
+        "public_ga_enabled": true
+      },
+      "expected_error_contains": "must not enable public GA"
+    },
+    {
+      "id": "bad-direct-repo-write",
+      "overrides": {
+        "no_direct_repo_write": false
+      },
+      "expected_error_contains": "no_direct_repo_write=true"
+    },
+    {
+      "id": "bad-raw-response-field",
+      "overrides": {
+        "allowed_response_fields": [
+          "raw_corpus"
+        ]
+      },
+      "expected_error_contains": "allowed_response_fields must not expose protected field"
+    },
+    {
+      "id": "bad-entropy-cap",
+      "overrides": {
+        "max_entropy_bits_per_call": 999
+      },
+      "expected_error_contains": "entropy cap"
+    }
+  ],
+  "invalid_allowlists": [
+    {
+      "id": "bad-public-access",
+      "overrides": {
+        "public_access_enabled": true
+      },
+      "expected_error_contains": "must not enable public access"
+    },
+    {
+      "id": "bad-beta-from-local",
+      "overrides": {
+        "beta_access_enabled": true,
+        "state": "allowlisted_beta_ready"
+      },
+      "expected_error_contains": [
+        "cannot be enabled from local fixtures",
+        "cannot be enabled by a local_only record",
+        "stake_gated",
+        "track_record_gated",
+        "legal_terms_accepted",
+        "abuse_monitoring_enabled",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-unknown-method",
+      "overrides": {
+        "allowed_methods": [
+          "get_repo_map",
+          "open_shell"
+        ]
+      },
+      "expected_error_contains": "unknown Workspace API methods"
+    },
+    {
+      "id": "bad-account-created",
+      "overrides": {
+        "account_created": true
+      },
+      "expected_error_contains": "must not create Workspace accounts"
+    },
+    {
+      "id": "bad-raw-api-key",
+      "overrides": {
+        "api_key": "sk-live-not-allowed"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ],
+  "invalid_entropy_ledgers": [
+    {
+      "id": "bad-remaining-arithmetic",
+      "overrides": {
+        "entropy_remaining_bits": 99
+      },
+      "expected_error_contains": "remaining_bits must equal budget minus used"
+    },
+    {
+      "id": "bad-method-sum",
+      "overrides": {
+        "per_method_bits": {
+          "get_repo_map": 1
+        }
+      },
+      "expected_error_contains": "entropy_used_bits must equal sum"
+    },
+    {
+      "id": "bad-expansion-without-live-accounting",
+      "overrides": {
+        "expansion_allowed": true,
+        "owner_approval_ref": "owner_approval:p3.6:entropy"
+      },
+      "expected_error_contains": [
+        "cannot be allowed from local fixtures",
+        "cannot be allowed by a local_only ledger",
+        "live entropy accounting",
+        "enforced entropy budget"
+      ]
+    },
+    {
+      "id": "bad-public-agent-track",
+      "overrides": {
+        "public_agent_track_enabled": true
+      },
+      "expected_error_contains": "must not enable public agent track"
+    }
+  ],
+  "invalid_security_reviews": [
+    {
+      "id": "bad-passed-from-local",
+      "overrides": {
+        "security_review_passed": true,
+        "state": "passed_after_review"
+      },
+      "expected_error_contains": [
+        "cannot pass from local fixtures",
+        "cannot pass as local_only",
+        "rate_limits_configured",
+        "endpoint_allowlist_enforced",
+        "abuse_monitoring_ready",
+        "redaction_review_passed",
+        "entropy_accounting_verified",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-secret-access",
+      "overrides": {
+        "no_raw_secret_access": false
+      },
+      "expected_error_contains": "no_raw_secret_access=true"
+    },
+    {
+      "id": "bad-production-workflows",
+      "overrides": {
+        "no_production_workflows": false
+      },
+      "expected_error_contains": "no_production_workflows=true"
+    },
+    {
+      "id": "bad-raw-customer-data",
+      "overrides": {
+        "raw_customer_payload": "private customer data"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ],
+  "invalid_beta_enablements": [
+    {
+      "id": "bad-claim-from-local",
+      "overrides": {
+        "beta_enablement_claimed": true,
+        "workspace_api_calls_enabled": true,
+        "state": "allowlisted_beta_enabled"
+      },
+      "expected_error_contains": [
+        "cannot be claimed from local fixtures",
+        "cannot be claimed by a local_only record",
+        "owner_approval_ref",
+        "requires allowlist beta_access_enabled",
+        "requires live enforced entropy accounting",
+        "requires entropy expansion_allowed",
+        "requires passed security review"
+      ]
+    },
+    {
+      "id": "bad-public-ga",
+      "overrides": {
+        "public_ga_enabled": true
+      },
+      "expected_error_contains": "must not enable public GA"
+    },
+    {
+      "id": "bad-production-workflow",
+      "overrides": {
+        "production_workflows_enabled": true
+      },
+      "expected_error_contains": "must not enable production workflows"
+    },
+    {
+      "id": "bad-calls-without-claim",
+      "overrides": {
+        "workspace_api_calls_enabled": true
+      },
+      "expected_error_contains": "workspace_api_calls_enabled requires beta_enablement_claimed"
+    },
+    {
+      "id": "bad-pending-beta-id-claim",
+      "base": "local_beta_enablement",
+      "supplied": "measured",
+      "overrides": {
+        "beta_id": "workspace_api_beta:pending",
+        "beta_enablement_claimed": true,
+        "workspace_api_calls_enabled": true,
+        "uses_local_fixtures": false,
+        "local_only": false,
+        "owner_approval_ref": "owner_approval:p3.6:beta",
+        "evidence_refs": [
+          "workspace_api_beta:pending",
+          "workspace_api_allowlist:p3.6:miner-alpha",
+          "workspace_entropy:p3.6:miner-alpha",
+          "workspace_security_review:p3.6:miner-alpha",
+          "owner_approval:p3.6:beta"
+        ],
+        "state": "allowlisted_beta_enabled"
+      },
+      "expected_error_contains": "requires non-pending beta_id"
+    },
+    {
+      "id": "bad-method-drift",
+      "base": "local_beta_enablement",
+      "supplied": "measured",
+      "overrides": {
+        "beta_enablement_claimed": true,
+        "workspace_api_calls_enabled": true,
+        "uses_local_fixtures": false,
+        "local_only": false,
+        "owner_approval_ref": "owner_approval:p3.6:beta",
+        "allowed_methods": [
+          "get_repo_map",
+          "open_shell"
+        ],
+        "evidence_refs": [
+          "workspace_api_beta:p3.6:miner-alpha"
+        ],
+        "state": "allowlisted_beta_enabled"
+      },
+      "expected_error_contains": [
+        "unknown methods",
+        "allowed_methods exceed allowlist"
+      ]
+    },
+    {
+      "id": "bad-miner-drift",
+      "base": "local_beta_enablement",
+      "supplied": "measured",
+      "overrides": {
+        "beta_enablement_claimed": true,
+        "workspace_api_calls_enabled": true,
+        "uses_local_fixtures": false,
+        "local_only": false,
+        "owner_approval_ref": "owner_approval:p3.6:beta",
+        "allowed_miner_refs": [
+          "miner:other-agent"
+        ],
+        "evidence_refs": [
+          "workspace_api_beta:p3.6:miner-alpha"
+        ],
+        "state": "allowlisted_beta_enabled"
+      },
+      "expected_error_contains": "allowed_miner_refs must match allowlisted miner"
+    },
+    {
+      "id": "bad-supabase-writes",
+      "overrides": {
+        "supabase_writes": true
+      },
+      "expected_error_contains": "must not enable Supabase writes"
+    },
+    {
+      "id": "bad-raw-token",
+      "overrides": {
+        "access_token": "bearer token should not appear"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ]
+}

@@ -1,0 +1,157 @@
+{
+  "ticket": {
+    "ticket_id": "ticket:p1.1:001",
+    "owner_ref": "owner:leadpoet-lab",
+    "miner_ref": "miner:example-alpha",
+    "brief_ref": "brief:fintech-intent-routing",
+    "island": "generalist",
+    "target_component": "source_router",
+    "funded_balance_cents": 2500,
+    "remaining_balance_cents": 2500,
+    "status": "funded",
+    "created_seq": 10,
+    "visibility_policy": "default_private",
+    "artifact_release_state": "private_live_champion",
+    "budget_caps": {
+      "loop_unit_cents": 1000,
+      "max_loops_per_day": 10,
+      "per_node_eval_cap_cents": 1200,
+      "loop_batch_cap_cents": 10000,
+      "per_node_wall_clock_cap_s": 900,
+      "loop_batch_wall_clock_cap_s": 3600
+    }
+  },
+  "budget_checks": {
+    "valid": {
+      "requested_loops": 2,
+      "estimated_node_eval_cents": 900,
+      "estimated_node_wall_clock_s": 600,
+      "estimated_wall_clock_s": 1200
+    },
+    "overspend": {
+      "requested_loops": 3,
+      "estimated_node_eval_cents": 900,
+      "estimated_node_wall_clock_s": 600,
+      "estimated_wall_clock_s": 1200
+    },
+    "node_cap": {
+      "requested_loops": 1,
+      "estimated_node_eval_cents": 1300,
+      "estimated_node_wall_clock_s": 600,
+      "estimated_wall_clock_s": 1200
+    },
+    "node_wall_clock_cap": {
+      "requested_loops": 1,
+      "estimated_node_eval_cents": 900,
+      "estimated_node_wall_clock_s": 901,
+      "estimated_wall_clock_s": 1200
+    },
+    "max_loops_per_day": {
+      "requested_loops": 11,
+      "estimated_node_eval_cents": 900,
+      "estimated_node_wall_clock_s": 600,
+      "estimated_wall_clock_s": 1200
+    },
+    "loop_batch_cap": {
+      "ticket_overrides": {
+        "funded_balance_cents": 10000,
+        "remaining_balance_cents": 10000,
+        "budget_caps": {
+          "loop_unit_cents": 1000,
+          "max_loops_per_day": 10,
+          "per_node_eval_cap_cents": 1200,
+          "loop_batch_cap_cents": 1500,
+          "per_node_wall_clock_cap_s": 900,
+          "loop_batch_wall_clock_cap_s": 3600
+        }
+      },
+      "requested_loops": 2,
+      "estimated_node_eval_cents": 900,
+      "estimated_node_wall_clock_s": 600,
+      "estimated_wall_clock_s": 1200
+    },
+    "loop_batch_wall_clock_cap": {
+      "requested_loops": 1,
+      "estimated_node_eval_cents": 900,
+      "estimated_node_wall_clock_s": 600,
+      "estimated_wall_clock_s": 3601
+    }
+  },
+  "queue_entries": [
+    {
+      "queue_id": "queue:003",
+      "ticket_id": "ticket:p1.1:003",
+      "priority_score": 50,
+      "created_seq": 3,
+      "lab_only": true,
+      "scheduler_enabled": false
+    },
+    {
+      "queue_id": "queue:001",
+      "ticket_id": "ticket:p1.1:001",
+      "priority_score": 90,
+      "created_seq": 2,
+      "lab_only": true,
+      "scheduler_enabled": false
+    },
+    {
+      "queue_id": "queue:002",
+      "ticket_id": "ticket:p1.1:002",
+      "priority_score": 90,
+      "created_seq": 1,
+      "lab_only": true,
+      "scheduler_enabled": false
+    }
+  ],
+  "expected_queue_ticket_order": [
+    "ticket:p1.1:002",
+    "ticket:p1.1:001",
+    "ticket:p1.1:003"
+  ],
+  "invalid_queue_entries": [
+    {
+      "queue_id": "queue:bad-public",
+      "ticket_id": "ticket:p1.1:bad-public",
+      "priority_score": 10,
+      "created_seq": 1,
+      "lab_only": false,
+      "scheduler_enabled": false
+    },
+    {
+      "queue_id": "queue:bad-scheduler",
+      "ticket_id": "ticket:p1.1:bad-scheduler",
+      "priority_score": 10,
+      "created_seq": 2,
+      "lab_only": true,
+      "scheduler_enabled": true
+    }
+  ],
+  "static_corpus_index_version": "static-corpus:p1.1:v1",
+  "prior_receipts": [
+    {
+      "receipt_ref": "receipt:prior:fintech-treasury-risk",
+      "brief_ref": "brief:prior:fintech-treasury-risk",
+      "summary_text": "Find fintech companies showing treasury risk, cash management, and payment operations intent from public evidence."
+    },
+    {
+      "receipt_ref": "receipt:prior:industrial-maintenance",
+      "brief_ref": "brief:prior:industrial-maintenance",
+      "summary_text": "Find industrial manufacturers showing predictive maintenance, machine downtime, and plant reliability intent from public evidence."
+    }
+  ],
+  "briefs": {
+    "reject": "Find fintech companies showing treasury risk, cash management, and payment operations intent from public evidence.",
+    "pass": "Find healthcare clinics expanding patient scheduling automation and insurance verification workflows."
+  },
+  "unsafe_workflow_guards": {
+    "public_miner_workflows": false,
+    "paid_loops": false,
+    "autopilot": false,
+    "hosted_run_crowning": false,
+    "source_add_payments": false,
+    "scheduler_jobs": true,
+    "production_writes": false,
+    "supabase_writes": false,
+    "live_champion_publication": false
+  }
+}

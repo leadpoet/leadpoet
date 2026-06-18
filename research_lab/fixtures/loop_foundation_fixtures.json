@@ -1,0 +1,143 @@
+{
+  "artifact_release_state_values": [
+    "private_live_champion",
+    "public_receipt",
+    "sanitized_trace",
+    "delayed_release",
+    "retired_public_artifact"
+  ],
+  "visibility_policy_values": [
+    "default_private",
+    "public_receipt",
+    "sanitized_trace",
+    "delayed_release",
+    "retired_public_artifact"
+  ],
+  "valid_release_records": [
+    {
+      "artifact_ref": "artifact:champion:qualification:live",
+      "artifact_type": "champion",
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "contains_live_champion_ip": true,
+      "contains_sealed_eval_details": true,
+      "reason": "live champion remains protected"
+    },
+    {
+      "artifact_ref": "receipt:loop:example-001",
+      "artifact_type": "receipt",
+      "visibility_policy": "public_receipt",
+      "artifact_release_state": "public_receipt",
+      "reason": "hash-addressed proof with no protected material"
+    },
+    {
+      "artifact_ref": "trace:sanitized:example-001",
+      "artifact_type": "sanitized_trace",
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "reason": "trajectory summary with raw inputs and eval secrets removed"
+    },
+    {
+      "artifact_ref": "artifact:delayed:qualification-candidate",
+      "artifact_type": "candidate_artifact",
+      "visibility_policy": "delayed_release",
+      "artifact_release_state": "delayed_release",
+      "release_condition": "release only after replacement or owner approval",
+      "reason": "future public learning artifact, not live champion IP"
+    },
+    {
+      "artifact_ref": "artifact:retired:qualification-arm-b-v1",
+      "artifact_type": "retired_artifact",
+      "visibility_policy": "retired_public_artifact",
+      "artifact_release_state": "retired_public_artifact",
+      "reason": "retired artifact can be used for miner learning and corpus value"
+    }
+  ],
+  "invalid_release_records": [
+    {
+      "artifact_ref": "receipt:bad-live-leak",
+      "artifact_type": "receipt",
+      "visibility_policy": "public_receipt",
+      "artifact_release_state": "public_receipt",
+      "contains_live_champion_ip": true,
+      "reason": "public receipt cannot carry live champion IP"
+    },
+    {
+      "artifact_ref": "trace:bad-raw-evidence",
+      "artifact_type": "sanitized_trace",
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "contains_raw_evidence_snapshot": true,
+      "reason": "sanitized trace cannot carry raw snapshot content"
+    },
+    {
+      "artifact_ref": "artifact:bad-sealed-eval",
+      "artifact_type": "candidate_artifact",
+      "visibility_policy": "delayed_release",
+      "artifact_release_state": "delayed_release",
+      "contains_sealed_eval_details": true,
+      "release_condition": "release after delay",
+      "reason": "delayed release still cannot carry sealed eval details"
+    },
+    {
+      "artifact_ref": "artifact:bad-customer-data",
+      "artifact_type": "retired_artifact",
+      "visibility_policy": "retired_public_artifact",
+      "artifact_release_state": "retired_public_artifact",
+      "contains_private_customer_data": true,
+      "reason": "retired public artifacts cannot carry private customer data"
+    },
+    {
+      "artifact_ref": "trace:bad-judge-prompt",
+      "artifact_type": "sanitized_trace",
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "contains_judge_prompts": true,
+      "reason": "sanitized traces cannot carry judge prompts"
+    },
+    {
+      "artifact_ref": "artifact:bad-state",
+      "artifact_type": "receipt",
+      "visibility_policy": "public_receipt",
+      "artifact_release_state": "public_everything",
+      "reason": "unknown release state fails closed"
+    },
+    {
+      "artifact_ref": "artifact:bad-policy-mismatch",
+      "artifact_type": "receipt",
+      "visibility_policy": "default_private",
+      "artifact_release_state": "public_receipt",
+      "reason": "policy and release state must stay aligned"
+    }
+  ],
+  "workflow_guards": {
+    "disabled": {
+      "public_miner_workflows": false,
+      "paid_loops": false,
+      "autopilot": false,
+      "hosted_run_crowning": false,
+      "source_add_payments": false,
+      "scheduler_jobs": false,
+      "production_writes": false,
+      "supabase_writes": false,
+      "live_champion_publication": false
+    },
+    "invalid": {
+      "public_miner_workflows": false,
+      "paid_loops": true,
+      "autopilot": false,
+      "hosted_run_crowning": false,
+      "source_add_payments": false,
+      "scheduler_jobs": false,
+      "production_writes": false,
+      "supabase_writes": false,
+      "live_champion_publication": false
+    }
+  },
+  "baseline_carry_forward_status": {
+    "production_sql_applied": false,
+    "paired_day_clock_started": false,
+    "same_day_crowning_certified": false,
+    "engine_v0_external_cost_calibrated": false
+  }
+}

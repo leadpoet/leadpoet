@@ -1,0 +1,516 @@
+{
+  "anchor_fixture_proposal": {
+    "proposal_id": "anchor_proposal:b3f3ef34dfd5826d",
+    "epoch_ref": "anchor_epoch:2026-06-17T00",
+    "transparency_log_ref": "transparency_log:local-p2.7",
+    "arweave_checkpoint_ref": "arweave_checkpoint:local-stub-p2.7",
+    "prior_anchor_ref": "on_chain_anchor:genesis-local",
+    "payload_hashes": [
+      "sha256:731d5dfaf1a98f18f7acb944be16fe50afb9bb35c342f49f48f33d3433056b5b",
+      "sha256:f89997dcdd3e608947eff1e898692d8a9632b504854c524599a9ab6f9e52599a",
+      "sha256:3bf499028444ae4e8c077f691c1b6dcf8248a69280df08ebdf1aa2f2de951f99"
+    ],
+    "merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "fabric_signature_ref": "local_anchor_sig:p2.7-fixture",
+    "proposer_ref": "validator:local-p2.7",
+    "contract_version": "on_chain_anchor:v1:local_contract",
+    "state": "local_proposal",
+    "local_only": true,
+    "public_payload_sanitized": true,
+    "on_chain_submission_requested": false,
+    "chain_transaction_submitted": false,
+    "production_anchor_claimed": false,
+    "raw_payload_present": false
+  },
+  "receipt_v2_source": {
+    "trajectory_id": "trajectory:p2.8-local-fixture",
+    "brief_summary_sanitized": "Improve generalist qualification coverage on stale pricing-page evidence.",
+    "credited_funder_ref": "hotkey:p2.8-funder",
+    "island": "generalist",
+    "stop_reason": "plateau",
+    "loops_consumed": 3,
+    "dev_delta_curve": [
+      0.2,
+      0.8,
+      1.1
+    ],
+    "map_change_refs": [
+      "research_map_cell:p2.8-generalist-pricing-pages"
+    ],
+    "cost_ledger_ref": "cost_ledger:p2.8-local",
+    "cost_ledger_hash": "sha256:46660a7b0312dd9d1f9115ee33361f38bbdd7943778347c3a3305e37f33918c6",
+    "balance_ledger_ref": "balance_ledger:p2.8-local",
+    "balance_ledger_hash": "sha256:003e29e90167b1a1593325a13064493b8597705cc19ffea54e7a9ddd1e11aaf4",
+    "cost_audit_ref": "cost_ledger_audit:cf5e40dd8f2e4dd8",
+    "balance_audit_ref": "balance_ledger_audit:e7aff9b189016ad0",
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "anchor_merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "public_trace_ref": "sanitized_trace:p2.8-local-fixture",
+    "proof_refs": [
+      "anchor_inclusion:1bd48ad7286c6350",
+      "measurement_gate:e4cdaef2aaa49b1d"
+    ],
+    "prior_receipt_refs": [
+      "receipt_v2:sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    ]
+  },
+  "expected_receipt_v2": {
+    "receipt_ref": "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410",
+    "trajectory_id": "trajectory:p2.8-local-fixture",
+    "brief_summary_sanitized": "Improve generalist qualification coverage on stale pricing-page evidence.",
+    "credited_funder_ref": "hotkey:p2.8-funder",
+    "island": "generalist",
+    "stop_reason": "plateau",
+    "loops_consumed": 3,
+    "dev_delta_curve": [
+      0.2,
+      0.8,
+      1.1
+    ],
+    "map_change_refs": [
+      "research_map_cell:p2.8-generalist-pricing-pages"
+    ],
+    "cost_ledger_ref": "cost_ledger:p2.8-local",
+    "cost_ledger_hash": "sha256:46660a7b0312dd9d1f9115ee33361f38bbdd7943778347c3a3305e37f33918c6",
+    "balance_ledger_ref": "balance_ledger:p2.8-local",
+    "balance_ledger_hash": "sha256:003e29e90167b1a1593325a13064493b8597705cc19ffea54e7a9ddd1e11aaf4",
+    "cost_audit_ref": "cost_ledger_audit:cf5e40dd8f2e4dd8",
+    "balance_audit_ref": "balance_ledger_audit:e7aff9b189016ad0",
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "anchor_merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "public_trace_ref": "sanitized_trace:p2.8-local-fixture",
+    "proof_refs": [
+      "anchor_inclusion:1bd48ad7286c6350",
+      "measurement_gate:e4cdaef2aaa49b1d"
+    ],
+    "prior_receipt_refs": [
+      "receipt_v2:sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    ],
+    "cost_ledger_attested": true,
+    "contract_version": "receipt_ledger_audit:v1:local_contract",
+    "state": "local_receipt_stub",
+    "local_only": true,
+    "public_payload_sanitized": true,
+    "production_published": false,
+    "live_publication_enabled": false,
+    "audit_publication_ref": "ledger_audit_publication:pending",
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "visibility_policy": "public_receipt",
+    "artifact_release_state": "public_receipt"
+  },
+  "balance_audit_input": {
+    "balance_ledger_ref": "balance_ledger:p2.8-local",
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "anchor_merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "entry_hashes": [
+      "sha256:b53a4048fd3536d156be0e10faea0b649c665937420c146e4d32474d542f1ba0",
+      "sha256:651b35905d4cf8521ded49da229c075a737236ea809211084cc4b880ee772303",
+      "sha256:7d0af1a63091dd6cebbebecc962a2428806175c012d2ec2cb123f4fbc6e195f5"
+    ],
+    "opening_available_cents": 0,
+    "credited_cents": 10000,
+    "debited_cents": 2500,
+    "returned_cents": 7500
+  },
+  "expected_balance_audit": {
+    "audit_id": "balance_ledger_audit:e7aff9b189016ad0",
+    "balance_ledger_ref": "balance_ledger:p2.8-local",
+    "balance_ledger_hash": "sha256:003e29e90167b1a1593325a13064493b8597705cc19ffea54e7a9ddd1e11aaf4",
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "anchor_merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "entry_hashes": [
+      "sha256:b53a4048fd3536d156be0e10faea0b649c665937420c146e4d32474d542f1ba0",
+      "sha256:651b35905d4cf8521ded49da229c075a737236ea809211084cc4b880ee772303",
+      "sha256:7d0af1a63091dd6cebbebecc962a2428806175c012d2ec2cb123f4fbc6e195f5"
+    ],
+    "row_count": 3,
+    "opening_available_cents": 0,
+    "credited_cents": 10000,
+    "debited_cents": 2500,
+    "returned_cents": 7500,
+    "closing_available_cents": 0,
+    "mismatch_reasons": [],
+    "fraud_evidence_refs": [],
+    "contract_version": "receipt_ledger_audit:v1:local_contract",
+    "state": "local_matched",
+    "local_only": true,
+    "mutable_summary_only": false,
+    "source_summary_ref": "",
+    "audit_publication_ref": "ledger_audit_publication:pending",
+    "balance_mutation_performed": false,
+    "payment_executed": false,
+    "bounty_paid": false,
+    "production_write_performed": false,
+    "audit_published_live": false
+  },
+  "valid_mismatch_balance_audit": {
+    "audit_id": "balance_ledger_audit:e7aff9b189016ad0",
+    "balance_ledger_ref": "balance_ledger:p2.8-local",
+    "balance_ledger_hash": "sha256:003e29e90167b1a1593325a13064493b8597705cc19ffea54e7a9ddd1e11aaf4",
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "anchor_merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "entry_hashes": [
+      "sha256:b53a4048fd3536d156be0e10faea0b649c665937420c146e4d32474d542f1ba0",
+      "sha256:651b35905d4cf8521ded49da229c075a737236ea809211084cc4b880ee772303",
+      "sha256:7d0af1a63091dd6cebbebecc962a2428806175c012d2ec2cb123f4fbc6e195f5"
+    ],
+    "row_count": 3,
+    "opening_available_cents": 0,
+    "credited_cents": 10000,
+    "debited_cents": 2500,
+    "returned_cents": 7500,
+    "closing_available_cents": 25,
+    "mismatch_reasons": [
+      "closing balance differs from anchored entry projection by 25 cents"
+    ],
+    "fraud_evidence_refs": [],
+    "contract_version": "receipt_ledger_audit:v1:local_contract",
+    "state": "local_mismatch",
+    "local_only": true,
+    "mutable_summary_only": false,
+    "source_summary_ref": "",
+    "audit_publication_ref": "ledger_audit_publication:pending",
+    "balance_mutation_performed": false,
+    "payment_executed": false,
+    "bounty_paid": false,
+    "production_write_performed": false,
+    "audit_published_live": false
+  },
+  "cost_audit_input": {
+    "cost_ledger_ref": "cost_ledger:p2.8-local",
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "anchor_merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "entry_hashes": [
+      "sha256:1d7888954b27d3620413fb708b39093d89447f5d235b4032b33e532d77d6c850",
+      "sha256:73fdf874f9ee5aa042735040bd80d690c64225354e6a140a6c435c8840dcb465",
+      "sha256:254c6c55a08ab13dedb2cf91652c2eed052187cf1796cbd10c5ab89648f670ea"
+    ],
+    "provider_cost_cents": 2000,
+    "fabric_cost_cents": 400,
+    "verifier_cost_cents": 100,
+    "refund_cents": 0
+  },
+  "expected_cost_audit": {
+    "audit_id": "cost_ledger_audit:cf5e40dd8f2e4dd8",
+    "cost_ledger_ref": "cost_ledger:p2.8-local",
+    "cost_ledger_hash": "sha256:46660a7b0312dd9d1f9115ee33361f38bbdd7943778347c3a3305e37f33918c6",
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "anchor_merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "entry_hashes": [
+      "sha256:1d7888954b27d3620413fb708b39093d89447f5d235b4032b33e532d77d6c850",
+      "sha256:73fdf874f9ee5aa042735040bd80d690c64225354e6a140a6c435c8840dcb465",
+      "sha256:254c6c55a08ab13dedb2cf91652c2eed052187cf1796cbd10c5ab89648f670ea"
+    ],
+    "row_count": 3,
+    "provider_cost_cents": 2000,
+    "fabric_cost_cents": 400,
+    "verifier_cost_cents": 100,
+    "refund_cents": 0,
+    "total_cost_cents": 2500,
+    "discrepancy_cents": 0,
+    "mismatch_reasons": [],
+    "fraud_evidence_refs": [],
+    "contract_version": "receipt_ledger_audit:v1:local_contract",
+    "state": "local_matched",
+    "local_only": true,
+    "mutable_summary_only": false,
+    "source_summary_ref": "",
+    "audit_publication_ref": "ledger_audit_publication:pending",
+    "balance_mutation_performed": false,
+    "payment_executed": false,
+    "bounty_paid": false,
+    "production_write_performed": false,
+    "audit_published_live": false
+  },
+  "valid_unknown_cost_audit": {
+    "audit_id": "cost_ledger_audit:cf5e40dd8f2e4dd8",
+    "cost_ledger_ref": "cost_ledger:p2.8-local",
+    "cost_ledger_hash": "sha256:46660a7b0312dd9d1f9115ee33361f38bbdd7943778347c3a3305e37f33918c6",
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "anchor_merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "entry_hashes": [
+      "sha256:1d7888954b27d3620413fb708b39093d89447f5d235b4032b33e532d77d6c850",
+      "sha256:73fdf874f9ee5aa042735040bd80d690c64225354e6a140a6c435c8840dcb465",
+      "sha256:254c6c55a08ab13dedb2cf91652c2eed052187cf1796cbd10c5ab89648f670ea"
+    ],
+    "row_count": 3,
+    "provider_cost_cents": 2000,
+    "fabric_cost_cents": 400,
+    "verifier_cost_cents": 100,
+    "refund_cents": 0,
+    "total_cost_cents": 2500,
+    "discrepancy_cents": 0,
+    "mismatch_reasons": [
+      "provider row missing from local fixture export; production ledger not queried"
+    ],
+    "fraud_evidence_refs": [],
+    "contract_version": "receipt_ledger_audit:v1:local_contract",
+    "state": "unknown",
+    "local_only": true,
+    "mutable_summary_only": false,
+    "source_summary_ref": "",
+    "audit_publication_ref": "ledger_audit_publication:pending",
+    "balance_mutation_performed": false,
+    "payment_executed": false,
+    "bounty_paid": false,
+    "production_write_performed": false,
+    "audit_published_live": false
+  },
+  "valid_fraud_cost_audit": {
+    "audit_id": "cost_ledger_audit:cf5e40dd8f2e4dd8",
+    "cost_ledger_ref": "cost_ledger:p2.8-local",
+    "cost_ledger_hash": "sha256:46660a7b0312dd9d1f9115ee33361f38bbdd7943778347c3a3305e37f33918c6",
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "anchor_merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "entry_hashes": [
+      "sha256:1d7888954b27d3620413fb708b39093d89447f5d235b4032b33e532d77d6c850",
+      "sha256:73fdf874f9ee5aa042735040bd80d690c64225354e6a140a6c435c8840dcb465",
+      "sha256:254c6c55a08ab13dedb2cf91652c2eed052187cf1796cbd10c5ab89648f670ea"
+    ],
+    "row_count": 3,
+    "provider_cost_cents": 2000,
+    "fabric_cost_cents": 400,
+    "verifier_cost_cents": 100,
+    "refund_cents": 0,
+    "total_cost_cents": 2400,
+    "discrepancy_cents": 100,
+    "mismatch_reasons": [
+      "cost row total differs from anchored entry projection"
+    ],
+    "fraud_evidence_refs": [
+      "anchor_inclusion:1bd48ad7286c6350"
+    ],
+    "contract_version": "receipt_ledger_audit:v1:local_contract",
+    "state": "fraud_suspected",
+    "local_only": true,
+    "mutable_summary_only": false,
+    "source_summary_ref": "",
+    "audit_publication_ref": "ledger_audit_publication:pending",
+    "balance_mutation_performed": false,
+    "payment_executed": false,
+    "bounty_paid": false,
+    "production_write_performed": false,
+    "audit_published_live": false
+  },
+  "invalid_receipts_v2": [
+    {
+      "id": "bad-receipt-hash",
+      "overrides": {
+        "receipt_ref": "receipt_v2:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "expected_error_contains": "receipt_ref does not match canonical public payload hash"
+    },
+    {
+      "id": "private-material-flag",
+      "overrides": {
+        "contains_private_customer_data": true
+      },
+      "expected_error_contains": "cannot contain protected material flags"
+    },
+    {
+      "id": "raw-extra-field",
+      "overrides": {
+        "raw_invoice": "redacted local fixture value"
+      },
+      "expected_error_contains": "raw_invoice"
+    },
+    {
+      "id": "published-live",
+      "overrides": {
+        "state": "published_live",
+        "production_published": true,
+        "live_publication_enabled": true,
+        "local_only": false,
+        "audit_publication_ref": "ledger_audit_publication:live"
+      },
+      "expected_error_contains": [
+        "must remain local_only",
+        "must not claim production publication",
+        "published_live receipt state is disabled"
+      ]
+    },
+    {
+      "id": "mutable-ledger-only",
+      "overrides": {
+        "anchor_proposal_ref": "",
+        "anchor_merkle_root": ""
+      },
+      "expected_error_contains": [
+        "receipt v2 requires anchor_proposal_ref",
+        "anchor_proposal_ref must be anchor_proposal:-prefixed"
+      ]
+    }
+  ],
+  "invalid_balance_audits": [
+    {
+      "id": "mutable-summary-only",
+      "overrides": {
+        "mutable_summary_only": true,
+        "source_summary_ref": "summary:mutable-local"
+      },
+      "expected_error_contains": "not mutable summaries only"
+    },
+    {
+      "id": "bad-ledger-hash",
+      "overrides": {
+        "balance_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected_error_contains": "balance_ledger_hash does not match entry_hashes"
+    },
+    {
+      "id": "arithmetic-mismatch-marked-matched",
+      "overrides": {
+        "closing_available_cents": 25
+      },
+      "expected_error_contains": "local_matched audit cannot contain arithmetic mismatch"
+    },
+    {
+      "id": "mismatch-without-reason",
+      "overrides": {
+        "state": "local_mismatch",
+        "closing_available_cents": 25
+      },
+      "expected_error_contains": "local_mismatch audit requires mismatch_reasons"
+    },
+    {
+      "id": "mutation-and-payment",
+      "overrides": {
+        "balance_mutation_performed": true,
+        "payment_executed": true,
+        "bounty_paid": true,
+        "production_write_performed": true,
+        "audit_published_live": true,
+        "local_only": false,
+        "audit_publication_ref": "ledger_audit_publication:live"
+      },
+      "expected_error_contains": [
+        "must remain local_only",
+        "must not mutate balances",
+        "must not execute payments",
+        "must not pay bounties",
+        "must not write production state",
+        "must not publish live audit results"
+      ]
+    },
+    {
+      "id": "raw-secret-extra-field",
+      "overrides": {
+        "payment_secret": "redacted local fixture value"
+      },
+      "expected_error_contains": "payment_secret"
+    }
+  ],
+  "invalid_cost_audits": [
+    {
+      "id": "bad-ledger-hash",
+      "overrides": {
+        "cost_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected_error_contains": "cost_ledger_hash does not match entry_hashes"
+    },
+    {
+      "id": "arithmetic-mismatch-marked-matched",
+      "overrides": {
+        "total_cost_cents": 2400
+      },
+      "expected_error_contains": "local_matched audit cannot contain arithmetic mismatch"
+    },
+    {
+      "id": "fraud-without-evidence",
+      "overrides": {
+        "state": "fraud_suspected",
+        "total_cost_cents": 2400,
+        "mismatch_reasons": [
+          "cost row was altered"
+        ]
+      },
+      "expected_error_contains": "fraud_suspected audit requires fraud_evidence_refs"
+    },
+    {
+      "id": "bad-discrepancy-cents",
+      "overrides": {
+        "state": "fraud_suspected",
+        "total_cost_cents": 2400,
+        "discrepancy_cents": 99,
+        "mismatch_reasons": [
+          "cost row total differs from anchored entry projection"
+        ],
+        "fraud_evidence_refs": [
+          "anchor_inclusion:1bd48ad7286c6350"
+        ]
+      },
+      "expected_error_contains": "discrepancy_cents must equal expected total minus reported total_cost_cents"
+    },
+    {
+      "id": "production-verified-disabled",
+      "overrides": {
+        "state": "production_verified",
+        "local_only": false,
+        "audit_published_live": true,
+        "production_write_performed": true
+      },
+      "expected_error_contains": [
+        "must remain local_only",
+        "production_verified audit state is disabled",
+        "must not publish live audit results"
+      ]
+    },
+    {
+      "id": "raw-marker",
+      "overrides": {
+        "source_summary_ref": "raw invoice export"
+      },
+      "expected_error_contains": "source_summary_ref"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "full_component_market": false,
+    "live_meta_allocation": false,
+    "research_map_live_api": false,
+    "kms_key_release": false,
+    "research_enclaves": false,
+    "on_chain_anchor_publication": false,
+    "ledger_audit_publication": true,
+    "counterfactual_consequences": false,
+    "balance_mutations": true,
+    "bounty_payments": true,
+    "production_writes": true,
+    "supabase_writes": true,
+    "public_workflows": true,
+    "expected_error_contains": "Phase 2 local build must keep these workflows disabled"
+  }
+}

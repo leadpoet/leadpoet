@@ -1,0 +1,319 @@
+{
+  "local_snapshot": {
+    "url": "https://example.com/research-lab-fixture",
+    "content": "Fixture page for P1.2 fabric validation. This content is captured locally and never fetched over the network.",
+    "fetch_ts": "2026-06-16T12:00:00Z"
+  },
+  "eval_run": {
+    "run_id": "11111111-1111-4111-8111-111111111111",
+    "ticket_id": "ticket:p1.1:001",
+    "run_role": "candidate",
+    "rung": "L2",
+    "status": "planned",
+    "enclave_measurement_ref": "measurement:nitro:eval-service-placeholder",
+    "verifier_image_ref": "image:leadpoet-verifier:loop-placeholder",
+    "verifier_hash": "sha256:verifier-p1-2-placeholder",
+    "judge_version_hash": "sha256:judge-p1-2-placeholder",
+    "egress_policy_ref": "egress-policy:notary-proxy:v1",
+    "evidence_bundle_refs": [],
+    "attestation_ref": "attestation:p1.2:001",
+    "icp_set_commitment": "sha256:icp-set-placeholder",
+    "output_hash": "sha256:output-placeholder",
+    "cost_ledger_hash": "sha256:cost-ledger-placeholder",
+    "lab_only": true,
+    "enclave_started": false,
+    "sealed_keys_released": false,
+    "production_valid_attestation": false
+  },
+  "sandbox_job": {
+    "job_id": "sandbox:p1.2:001",
+    "ticket_id": "ticket:p1.1:001",
+    "image_ref": "image:research-sandbox:loop-placeholder",
+    "sandbox_policy_ref": "sandbox-policy:hardened:v1",
+    "resource_caps": {
+      "cpu_cores": 2,
+      "memory_mb": 4096,
+      "disk_mb": 2048,
+      "wall_clock_cap_s": 900,
+      "max_cost_cents": 1000,
+      "network_disabled": true
+    },
+    "mounted_artifact_refs": [
+      "artifact:component-source-router-placeholder"
+    ],
+    "status": "queued",
+    "estimated_cost_cents": 250,
+    "actual_cost_cents": 0,
+    "lab_only": true,
+    "provisioned_host": false,
+    "network_enabled": false,
+    "enclave_attested": false
+  },
+  "egress_stub": {
+    "egress_id": "egress:p1.2:001",
+    "method": "GET",
+    "vsock_route_ref": "vsock:notary-proxy:stub",
+    "live_network_performed": false,
+    "artifact_raw_egress_access": false
+  },
+  "attestation_anchor": {
+    "attestation_ref": "attestation:p1.2:001",
+    "run_id": "11111111-1111-4111-8111-111111111111",
+    "enclave_measurement_ref": "measurement:nitro:eval-service-placeholder",
+    "engine_version_ref": "engine:v1-placeholder",
+    "verifier_image_ref": "image:leadpoet-verifier:loop-placeholder",
+    "verifier_hash": "sha256:verifier-p1-2-placeholder",
+    "judge_version_hash": "sha256:judge-p1-2-placeholder",
+    "pcr0_allowlist_ref": "pcr0-allowlist:loop-placeholder",
+    "icp_set_commitment": "sha256:icp-set-placeholder",
+    "output_hash": "sha256:output-placeholder",
+    "evidence_bundle_merkle_root": "sha256:evidence-merkle-placeholder",
+    "cost_ledger_hash": "sha256:cost-ledger-placeholder",
+    "attestation_response": {
+      "trust_level": "signature_only",
+      "enclave_pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "code_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pcr0": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "anchor_state": "shape_recorded_only",
+    "allowlist_checked": false,
+    "cryptographic_verification_performed": false,
+    "production_valid": false,
+    "signed_anchor_ref": "anchor:pending"
+  },
+  "invalid_records": [
+    {
+      "id": "eval-live-enclave-started",
+      "kind": "eval_run",
+      "base": "eval_run",
+      "overrides": {
+        "evidence_bundle_refs": [
+          "sha256:evidence-bundle-placeholder"
+        ],
+        "enclave_started": true
+      },
+      "expected_error_contains": "must not start a live enclave"
+    },
+    {
+      "id": "eval-sealed-keys-released",
+      "kind": "eval_run",
+      "base": "eval_run",
+      "overrides": {
+        "evidence_bundle_refs": [
+          "sha256:evidence-bundle-placeholder"
+        ],
+        "sealed_keys_released": true
+      },
+      "expected_error_contains": "must not release sealed keys"
+    },
+    {
+      "id": "eval-production-valid-attestation",
+      "kind": "eval_run",
+      "base": "eval_run",
+      "overrides": {
+        "evidence_bundle_refs": [
+          "sha256:evidence-bundle-placeholder"
+        ],
+        "production_valid_attestation": true
+      },
+      "expected_error_contains": "must not mark attestation as production-valid"
+    },
+    {
+      "id": "eval-empty-evidence-bundles",
+      "kind": "eval_run",
+      "base": "eval_run",
+      "expected_error_contains": "evidence_bundle_refs must not be empty"
+    },
+    {
+      "id": "eval-not-lab-only",
+      "kind": "eval_run",
+      "base": "eval_run",
+      "overrides": {
+        "evidence_bundle_refs": [
+          "sha256:evidence-bundle-placeholder"
+        ],
+        "lab_only": false
+      },
+      "expected_error_contains": "must remain lab_only"
+    },
+    {
+      "id": "sandbox-provisioned-host",
+      "kind": "sandbox_job",
+      "base": "sandbox_job",
+      "overrides": {
+        "provisioned_host": true
+      },
+      "expected_error_contains": "must not provision sandbox hosts"
+    },
+    {
+      "id": "sandbox-network-enabled",
+      "kind": "sandbox_job",
+      "base": "sandbox_job",
+      "overrides": {
+        "network_enabled": true
+      },
+      "expected_error_contains": "must not enable network"
+    },
+    {
+      "id": "sandbox-network-disabled-false",
+      "kind": "sandbox_job",
+      "base": "sandbox_job",
+      "overrides": {
+        "resource_caps": {
+          "network_disabled": false
+        }
+      },
+      "expected_error_contains": "network_disabled=true"
+    },
+    {
+      "id": "sandbox-enclave-attested",
+      "kind": "sandbox_job",
+      "base": "sandbox_job",
+      "overrides": {
+        "enclave_attested": true
+      },
+      "expected_error_contains": "not enclave-attested"
+    },
+    {
+      "id": "sandbox-not-lab-only",
+      "kind": "sandbox_job",
+      "base": "sandbox_job",
+      "overrides": {
+        "lab_only": false
+      },
+      "expected_error_contains": "must remain lab_only"
+    },
+    {
+      "id": "sandbox-crash-missing-reason",
+      "kind": "sandbox_job",
+      "base": "sandbox_job",
+      "overrides": {
+        "status": "crash"
+      },
+      "expected_error_contains": "crash status requires crash_reason"
+    },
+    {
+      "id": "sandbox-timeout-missing-timeout-s",
+      "kind": "sandbox_job",
+      "base": "sandbox_job",
+      "overrides": {
+        "status": "timeout"
+      },
+      "expected_error_contains": "timeout status requires timeout_s"
+    },
+    {
+      "id": "sandbox-guardrail-missing-reason",
+      "kind": "sandbox_job",
+      "base": "sandbox_job",
+      "overrides": {
+        "status": "guardrail_breach"
+      },
+      "expected_error_contains": "guardrail_breach status requires guardrail_reason"
+    },
+    {
+      "id": "egress-live-network",
+      "kind": "egress_stub",
+      "record": {
+        "egress_id": "egress:p1.2:bad-live",
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "url": "https://example.com/research-lab-fixture",
+        "method": "GET",
+        "vsock_route_ref": "vsock:notary-proxy:stub",
+        "egress_policy_ref": "egress-policy:notary-proxy:v1",
+        "snapshot_ref": "snapshots/fixture.json",
+        "content_hash": "sha256:content-placeholder",
+        "normalized_text_hash": "sha256:normalized-placeholder",
+        "snapshot_signature": "local_hmac:v1:test:signature",
+        "evidence_bundle_ref": "sha256:evidence-bundle-placeholder",
+        "live_network_performed": true,
+        "artifact_raw_egress_access": false
+      },
+      "expected_error_contains": "must not perform live network egress"
+    },
+    {
+      "id": "egress-artifact-raw-access",
+      "kind": "egress_stub",
+      "record": {
+        "egress_id": "egress:p1.2:bad-raw-access",
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "url": "https://example.com/research-lab-fixture",
+        "method": "GET",
+        "vsock_route_ref": "vsock:notary-proxy:stub",
+        "egress_policy_ref": "egress-policy:notary-proxy:v1",
+        "snapshot_ref": "snapshots/fixture.json",
+        "content_hash": "sha256:content-placeholder",
+        "normalized_text_hash": "sha256:normalized-placeholder",
+        "snapshot_signature": "local_hmac:v1:test:signature",
+        "evidence_bundle_ref": "sha256:evidence-bundle-placeholder",
+        "live_network_performed": false,
+        "artifact_raw_egress_access": true
+      },
+      "expected_error_contains": "artifact code must not receive raw egress access"
+    },
+    {
+      "id": "attestation-allowlist-checked",
+      "kind": "attestation_anchor",
+      "base": "attestation_anchor",
+      "overrides": {
+        "allowlist_checked": true
+      },
+      "expected_error_contains": "does not claim allowlist verification"
+    },
+    {
+      "id": "attestation-crypto-verification",
+      "kind": "attestation_anchor",
+      "base": "attestation_anchor",
+      "overrides": {
+        "cryptographic_verification_performed": true
+      },
+      "expected_error_contains": "must not claim Nitro/COSE cryptographic verification"
+    },
+    {
+      "id": "attestation-production-valid",
+      "kind": "attestation_anchor",
+      "base": "attestation_anchor",
+      "overrides": {
+        "production_valid": true
+      },
+      "expected_error_contains": "must not mark attestation as production-valid"
+    },
+    {
+      "id": "attestation-signed-anchor",
+      "kind": "attestation_anchor",
+      "base": "attestation_anchor",
+      "overrides": {
+        "signed_anchor_ref": "anchor:published"
+      },
+      "expected_error_contains": "must remain pending"
+    },
+    {
+      "id": "attestation-invalid-shape",
+      "kind": "attestation_anchor",
+      "base": "attestation_anchor",
+      "overrides": {
+        "attestation_response": {
+          "trust_level": "signature_only",
+          "enclave_pubkey": "not-hex",
+          "code_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "expected_error_contains": "attestation response shape"
+    },
+    {
+      "id": "unsafe-workflow-guards",
+      "kind": "fabric_bundle_guards",
+      "record": {
+        "public_miner_workflows": false,
+        "paid_loops": false,
+        "autopilot": false,
+        "hosted_run_crowning": false,
+        "source_add_payments": false,
+        "scheduler_jobs": false,
+        "production_writes": true,
+        "supabase_writes": false,
+        "live_champion_publication": false
+      },
+      "expected_error_contains": "production_writes"
+    }
+  ]
+}

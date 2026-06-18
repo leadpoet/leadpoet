@@ -1,0 +1,203 @@
+{
+  "local_blocked_sample": {
+    "audit_id": "legacy_surface_retirement:p4.2:local-blocked-sample",
+    "scanned_roots": [
+      "gateway",
+      "qualification",
+      "scripts"
+    ],
+    "ignored_prefixes": [
+      "scripts/techstack_test_artifacts/"
+    ],
+    "legacy_route_refs": 1,
+    "legacy_table_refs": 1,
+    "legacy_payment_refs": 1,
+    "submission_credit_refs": 1,
+    "artifact_competition_refs": 1,
+    "audit_scope_note": "static_text_marker_scan_only",
+    "findings": [
+      {
+        "path": "gateway/qualification/api/submit.py",
+        "line": 1,
+        "marker_name": "qualification_model_route",
+        "category": "route"
+      },
+      {
+        "path": "gateway/qualification/api/work.py",
+        "line": 1,
+        "marker_name": "qualification_models_table",
+        "category": "table"
+      },
+      {
+        "path": "gateway/qualification/api/payment.py",
+        "line": 1,
+        "marker_name": "qualification_payments_table",
+        "category": "payment"
+      },
+      {
+        "path": "gateway/qualification/api/model_rate_limiter.py",
+        "line": 1,
+        "marker_name": "submission_credits_field",
+        "category": "submission_credit"
+      },
+      {
+        "path": "qualification/main.py",
+        "line": 1,
+        "marker_name": "model_submission_phrase",
+        "category": "artifact_competition"
+      }
+    ],
+    "routes_hard_gated": false,
+    "legacy_tables_retired_or_read_only": false,
+    "legacy_payments_disabled": false,
+    "submission_credits_disabled": false,
+    "artifact_competition_disabled": false,
+    "legacy_surface_retired": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "retirement_plan_ref": "legacy_surface_retirement_plan:p4.2:pending",
+    "evidence_refs": [
+      "legacy_surface_retirement:p4.2:local-blocked-sample"
+    ],
+    "owner_approval_ref": "",
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_audit_only"
+  },
+  "ready_control": {
+    "audit_id": "legacy_surface_retirement:p4.2:ready-control",
+    "scanned_roots": [
+      "gateway",
+      "qualification",
+      "scripts"
+    ],
+    "ignored_prefixes": [
+      "scripts/techstack_test_artifacts/"
+    ],
+    "legacy_route_refs": 0,
+    "legacy_table_refs": 0,
+    "legacy_payment_refs": 0,
+    "submission_credit_refs": 0,
+    "artifact_competition_refs": 0,
+    "audit_scope_note": "static_text_marker_scan_only",
+    "findings": [],
+    "routes_hard_gated": true,
+    "legacy_tables_retired_or_read_only": true,
+    "legacy_payments_disabled": true,
+    "submission_credits_disabled": true,
+    "artifact_competition_disabled": true,
+    "legacy_surface_retired": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "retirement_plan_ref": "legacy_surface_retirement_plan:p4.2:approved",
+    "evidence_refs": [
+      "legacy_surface_retirement:p4.2:ready-control",
+      "route_gate:qualification-model-retired",
+      "table_retirement:qualification-models-read-only",
+      "payment_disablement:qualification-payments-disabled",
+      "submission_credit_retirement:submission-credits-disabled",
+      "artifact_competition_retirement:model-submission-disabled",
+      "owner_approval:scale-legacy-surface-retirement"
+    ],
+    "owner_approval_ref": "owner_approval:scale-legacy-surface-retirement",
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_retirement_evidence"
+  },
+  "invalid_retirement_audits": [
+    {
+      "id": "bad-ready-with-current-blockers",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "legacy_surface_retired": true,
+        "state": "ready_after_retirement_evidence"
+      },
+      "expected_error_contains": [
+        "legacy_route_surface_not_hard_gated",
+        "legacy_tables_not_retired_or_read_only",
+        "legacy_payments_not_disabled",
+        "submission_credits_not_disabled",
+        "artifact_competition_not_disabled",
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-count-mismatch",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "legacy_route_refs": 0
+      },
+      "expected_error_contains": "legacy_route_refs must match findings"
+    },
+    {
+      "id": "bad-ready-missing-retirement-control",
+      "base": "ready_control",
+      "overrides": {
+        "routes_hard_gated": false
+      },
+      "expected_error_contains": "requires all retirement controls true"
+    },
+    {
+      "id": "bad-not-ready-non-local",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "local_only": false
+      },
+      "expected_error_contains": "not-ready legacy surface retirement audits must remain local_only"
+    },
+    {
+      "id": "bad-ready-state-without-retirement",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "state": "ready_after_retirement_evidence"
+      },
+      "expected_error_contains": "ready_after_retirement_evidence state requires legacy_surface_retired"
+    },
+    {
+      "id": "bad-audit-scope-note",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "audit_scope_note": "runtime_route_enforcement_certified"
+      },
+      "expected_error_contains": "audit_scope_note must be static_text_marker_scan_only"
+    },
+    {
+      "id": "bad-production-writes",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "production_writes": true
+      },
+      "expected_error_contains": "must not enable production writes"
+    },
+    {
+      "id": "bad-supabase-writes",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "supabase_writes": true
+      },
+      "expected_error_contains": "must not enable Supabase writes"
+    },
+    {
+      "id": "bad-public-workflows",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "public_workflows": true
+      },
+      "expected_error_contains": "must not enable public workflows"
+    },
+    {
+      "id": "bad-evidence-prefix",
+      "base": "local_blocked_sample",
+      "overrides": {
+        "evidence_refs": [
+          "qualification_model:legacy"
+        ]
+      },
+      "expected_error_contains": "approved legacy surface retirement prefixes"
+    }
+  ]
+}

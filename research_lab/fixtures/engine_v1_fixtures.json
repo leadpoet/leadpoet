@@ -1,0 +1,412 @@
+{
+  "registry": {
+    "manifest_version": "loop-engine-v1-manifest:v1",
+    "champion_base": "reference:qualification_model:v1",
+    "eval_version": "eval:loop:v1",
+    "engine_v0_receipt_refs": [
+      "receipt:p0.6:research-loop-v0:source-routing-headroom"
+    ],
+    "meta_allocator_priors_enabled": false,
+    "entries": [
+      {
+        "name": "source_router",
+        "purpose": "Choose the evidence-source routing strategy for each ICP before extraction.",
+        "input_contract": "Sanitized ICP profile, approved evidence-source catalog, and budget caps.",
+        "output_contract": "Ordered source plan with no raw customer content and no unregistered adapters.",
+        "ablation_leverage": 0.42,
+        "allowed_patch_types": [
+          "STRATEGY_SWAP"
+        ],
+        "token_budget": 1200,
+        "cost_budget_cents": 180,
+        "strategy_options": [
+          "reference_routing",
+          "sonar_first_exa_fill"
+        ],
+        "engine_v0_evidence_refs": [
+          "p0.6:cluster:source-routing",
+          "p0.6:node:route-current-intent-first"
+        ],
+        "current_patch_seq": 2
+      },
+      {
+        "name": "prompt_pack",
+        "purpose": "Render the evidence-backed prompts used by extraction and ranking components.",
+        "input_contract": "Sanitized ICP fields and normalized signal names.",
+        "output_contract": "Schema-valid prompt text with required placeholders preserved.",
+        "ablation_leverage": 0.31,
+        "allowed_patch_types": [
+          "PROMPT_EDIT"
+        ],
+        "token_budget": 1800,
+        "cost_budget_cents": 90,
+        "prompt_required_placeholders": [
+          "icp",
+          "signals"
+        ],
+        "engine_v0_evidence_refs": [
+          "p0.6:cluster:prompt-pack",
+          "p0.6:node:signal-specific-extraction-prompt"
+        ],
+        "current_patch_seq": 1
+      },
+      {
+        "name": "hyperparams",
+        "purpose": "Hold bounded numeric controls for fixed-pipeline experimentation.",
+        "input_contract": "Typed parameter name and value.",
+        "output_contract": "Parameter value within declared safety bounds.",
+        "ablation_leverage": 0.18,
+        "allowed_patch_types": [
+          "PARAM_EDIT"
+        ],
+        "token_budget": 250,
+        "cost_budget_cents": 25,
+        "param_bounds": {
+          "max_sources_per_icp": {
+            "min": 3,
+            "max": 12
+          },
+          "candidate_batch_size": {
+            "min": 5,
+            "max": 50
+          }
+        },
+        "engine_v0_evidence_refs": [
+          "p0.6:cluster:param-headroom",
+          "p0.6:node:max-sources-cost-coverage"
+        ],
+        "current_patch_seq": 0
+      }
+    ]
+  },
+  "hypothesis": {
+    "hypothesis_id": "hyp:p1.3:001",
+    "component": "source_router",
+    "failure_mode": "coverage_gap",
+    "mechanism": "Route current-intent sources before broad search, then fill missing evidence with Exa.",
+    "patch_type": "STRATEGY_SWAP",
+    "predicted_delta": 4.0,
+    "falsifier": "coverage",
+    "context_pack_refs": [
+      "manifest:loop-engine-v1-manifest:v1",
+      "receipt:p0.6:research-loop-v0:source-routing-headroom",
+      "lesson:p0.6:route-current-intent-first"
+    ],
+    "miner_brief_ref": "brief:sanitized:coverage-gap:001",
+    "generated_by": "engine"
+  },
+  "valid_patches": [
+    {
+      "patch_id": "patch:p1.3:strategy:001",
+      "hypothesis_id": "hyp:p1.3:001",
+      "component": "source_router",
+      "patch_type": "STRATEGY_SWAP",
+      "payload": {
+        "strategy_name": "sonar_first_exa_fill"
+      }
+    },
+    {
+      "patch_id": "patch:p1.3:param:001",
+      "hypothesis_id": "hyp:p1.3:002",
+      "component": "hyperparams",
+      "patch_type": "PARAM_EDIT",
+      "payload": {
+        "param_name": "max_sources_per_icp",
+        "new_value": 8
+      }
+    },
+    {
+      "patch_id": "patch:p1.3:prompt:001",
+      "hypothesis_id": "hyp:p1.3:003",
+      "component": "prompt_pack",
+      "patch_type": "PROMPT_EDIT",
+      "payload": {
+        "template_name": "signal_extraction",
+        "new_template": "For ICP {icp}, extract only evidence-backed signals from this normalized set: {signals}."
+      }
+    }
+  ],
+  "invalid_patches": [
+    {
+      "patch_id": "patch:p1.3:invalid:code-edit",
+      "hypothesis_id": "hyp:p1.3:004",
+      "component": "prompt_pack",
+      "patch_type": "CODE_EDIT",
+      "payload": {
+        "diff": "--- a/prompt_pack.py\n+++ b/prompt_pack.py\n"
+      },
+      "expected_error_contains": "deferred"
+    },
+    {
+      "patch_id": "patch:p1.3:invalid:source-add",
+      "hypothesis_id": "hyp:p1.3:005",
+      "component": "source_router",
+      "patch_type": "SOURCE_ADD",
+      "payload": {
+        "adapter_name": "new_intent_feed"
+      },
+      "expected_error_contains": "deferred"
+    },
+    {
+      "patch_id": "patch:p1.3:invalid:unknown-component",
+      "hypothesis_id": "hyp:p1.3:006",
+      "component": "ranker",
+      "patch_type": "PARAM_EDIT",
+      "payload": {
+        "param_name": "max_sources_per_icp",
+        "new_value": 8
+      },
+      "expected_error_contains": "unknown component"
+    },
+    {
+      "patch_id": "patch:p1.3:invalid:out-of-scope-component",
+      "hypothesis_id": "hyp:p1.3:007",
+      "component": "prompt_pack",
+      "patch_type": "PARAM_EDIT",
+      "payload": {
+        "param_name": "max_sources_per_icp",
+        "new_value": 8
+      },
+      "expected_error_contains": "not allowed"
+    },
+    {
+      "patch_id": "patch:p1.3:invalid:param-bounds",
+      "hypothesis_id": "hyp:p1.3:008",
+      "component": "hyperparams",
+      "patch_type": "PARAM_EDIT",
+      "payload": {
+        "param_name": "max_sources_per_icp",
+        "new_value": 99
+      },
+      "expected_error_contains": "outside bounds"
+    },
+    {
+      "patch_id": "patch:p1.3:invalid:unknown-strategy",
+      "hypothesis_id": "hyp:p1.3:009",
+      "component": "source_router",
+      "patch_type": "STRATEGY_SWAP",
+      "payload": {
+        "strategy_name": "unregistered_live_feed"
+      },
+      "expected_error_contains": "not registered"
+    },
+    {
+      "patch_id": "patch:p1.3:invalid:prompt-placeholder",
+      "hypothesis_id": "hyp:p1.3:010",
+      "component": "prompt_pack",
+      "patch_type": "PROMPT_EDIT",
+      "payload": {
+        "template_name": "signal_extraction",
+        "new_template": "For ICP {icp}, extract only evidence-backed signals."
+      },
+      "expected_error_contains": "missing required placeholder"
+    },
+    {
+      "patch_id": "patch:p1.3:invalid:prompt-raw-data",
+      "hypothesis_id": "hyp:p1.3:011",
+      "component": "prompt_pack",
+      "patch_type": "PROMPT_EDIT",
+      "payload": {
+        "template_name": "signal_extraction",
+        "new_template": "For ICP {icp}, use raw_customer_data and signals {signals}."
+      },
+      "expected_error_contains": "raw customer data"
+    }
+  ],
+  "dev_eval": {
+    "guardrails": {
+      "max_evidence_defect_rate_increase": 0.02,
+      "min_coverage": 0.05,
+      "max_cost_per_icp_cents": 250,
+      "max_latency_ms": 15000,
+      "max_complexity_increase": 50,
+      "flat_metric_tolerance": 0.1
+    },
+    "parent_metrics": {
+      "proxy_score": 50.0,
+      "evidence_defect_rate": 0.05,
+      "coverage": 0.5,
+      "cost_per_icp_cents": 120,
+      "latency_ms": 4000,
+      "schema_validity": true,
+      "complexity": {
+        "diff_loc": 20,
+        "prompt_pack_tokens": 500,
+        "component_count": 8,
+        "strategy_count": 3
+      }
+    },
+    "candidate_good": {
+      "proxy_score": 54.0,
+      "evidence_defect_rate": 0.05,
+      "coverage": 0.62,
+      "cost_per_icp_cents": 130,
+      "latency_ms": 4500,
+      "schema_validity": true,
+      "complexity": {
+        "diff_loc": 25,
+        "prompt_pack_tokens": 505,
+        "component_count": 8,
+        "strategy_count": 3
+      }
+    },
+    "candidate_simplification": {
+      "proxy_score": 49.95,
+      "evidence_defect_rate": 0.05,
+      "coverage": 0.5,
+      "cost_per_icp_cents": 110,
+      "latency_ms": 3900,
+      "schema_validity": true,
+      "complexity": {
+        "diff_loc": 10,
+        "prompt_pack_tokens": 450,
+        "component_count": 8,
+        "strategy_count": 2
+      }
+    },
+    "candidate_lower_is_better_keep": {
+      "proxy_score": 50.0,
+      "evidence_defect_rate": 0.05,
+      "coverage": 0.5,
+      "cost_per_icp_cents": 100,
+      "latency_ms": 4000,
+      "schema_validity": true,
+      "complexity": {
+        "diff_loc": 20,
+        "prompt_pack_tokens": 500,
+        "component_count": 8,
+        "strategy_count": 3
+      }
+    },
+    "candidate_lower_is_better_discard": {
+      "proxy_score": 50.0,
+      "evidence_defect_rate": 0.05,
+      "coverage": 0.5,
+      "cost_per_icp_cents": 240,
+      "latency_ms": 4000,
+      "schema_validity": true,
+      "complexity": {
+        "diff_loc": 20,
+        "prompt_pack_tokens": 500,
+        "component_count": 8,
+        "strategy_count": 3
+      }
+    },
+    "invalid_cases": [
+      {
+        "node_id": "node:p1.3:schema-crash",
+        "targeted_metric": "proxy_score",
+        "expected_status": "crash",
+        "candidate_metrics": {
+          "proxy_score": 55.0,
+          "evidence_defect_rate": 0.05,
+          "coverage": 0.6,
+          "cost_per_icp_cents": 125,
+          "latency_ms": 4200,
+          "schema_validity": false,
+          "complexity": {
+            "diff_loc": 24,
+            "prompt_pack_tokens": 505,
+            "component_count": 8,
+            "strategy_count": 3
+          }
+        }
+      },
+      {
+        "node_id": "node:p1.3:zero-coverage-crash",
+        "targeted_metric": "coverage",
+        "expected_status": "crash",
+        "candidate_metrics": {
+          "proxy_score": 45.0,
+          "evidence_defect_rate": 0.05,
+          "coverage": 0.0,
+          "cost_per_icp_cents": 100,
+          "latency_ms": 3000,
+          "schema_validity": true,
+          "complexity": {
+            "diff_loc": 20,
+            "prompt_pack_tokens": 500,
+            "component_count": 8,
+            "strategy_count": 3
+          }
+        }
+      },
+      {
+        "node_id": "node:p1.3:timeout",
+        "targeted_metric": "latency_ms",
+        "expected_status": "timeout",
+        "candidate_metrics": {
+          "proxy_score": 56.0,
+          "evidence_defect_rate": 0.05,
+          "coverage": 0.6,
+          "cost_per_icp_cents": 125,
+          "latency_ms": 16000,
+          "schema_validity": true,
+          "complexity": {
+            "diff_loc": 20,
+            "prompt_pack_tokens": 500,
+            "component_count": 8,
+            "strategy_count": 3
+          }
+        }
+      },
+      {
+        "node_id": "node:p1.3:defect-guardrail",
+        "targeted_metric": "proxy_score",
+        "expected_status": "guardrail_breach",
+        "candidate_metrics": {
+          "proxy_score": 56.0,
+          "evidence_defect_rate": 0.1,
+          "coverage": 0.6,
+          "cost_per_icp_cents": 125,
+          "latency_ms": 4200,
+          "schema_validity": true,
+          "complexity": {
+            "diff_loc": 20,
+            "prompt_pack_tokens": 500,
+            "component_count": 8,
+            "strategy_count": 3
+          }
+        }
+      },
+      {
+        "node_id": "node:p1.3:cost-guardrail",
+        "targeted_metric": "proxy_score",
+        "expected_status": "guardrail_breach",
+        "candidate_metrics": {
+          "proxy_score": 56.0,
+          "evidence_defect_rate": 0.05,
+          "coverage": 0.6,
+          "cost_per_icp_cents": 300,
+          "latency_ms": 4200,
+          "schema_validity": true,
+          "complexity": {
+            "diff_loc": 20,
+            "prompt_pack_tokens": 500,
+            "component_count": 8,
+            "strategy_count": 3
+          }
+        }
+      },
+      {
+        "node_id": "node:p1.3:complexity-guardrail",
+        "targeted_metric": "proxy_score",
+        "expected_status": "guardrail_breach",
+        "candidate_metrics": {
+          "proxy_score": 56.0,
+          "evidence_defect_rate": 0.05,
+          "coverage": 0.6,
+          "cost_per_icp_cents": 125,
+          "latency_ms": 4200,
+          "schema_validity": true,
+          "complexity": {
+            "diff_loc": 80,
+            "prompt_pack_tokens": 520,
+            "component_count": 8,
+            "strategy_count": 3
+          }
+        }
+      }
+    ]
+  }
+}

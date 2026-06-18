@@ -1,0 +1,398 @@
+{
+  "candidates": [
+    {
+      "candidate_id": "island_candidate:p2.1:healthcare",
+      "island": "healthcare",
+      "display_name": "Healthcare",
+      "delivered_lead_volume": 120,
+      "outcome_label_density": 0.4,
+      "measurement_window": "working-placeholder-until-market-entry",
+      "source_refs": [
+        "working_pick:plan:market:healthcare",
+        "source_ref:pending:delivered-lead-volume"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:fintech",
+      "island": "fintech",
+      "display_name": "Fintech",
+      "delivered_lead_volume": 100,
+      "outcome_label_density": 0.42,
+      "measurement_window": "working-placeholder-until-market-entry",
+      "source_refs": [
+        "working_pick:plan:market:fintech",
+        "source_ref:pending:outcome-label-density"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:industrial",
+      "island": "industrial",
+      "display_name": "Industrial",
+      "delivered_lead_volume": 90,
+      "outcome_label_density": 0.38,
+      "measurement_window": "working-placeholder-until-market-entry",
+      "source_refs": [
+        "working_pick:plan:market:industrial",
+        "source_ref:pending:fulfillment-volume"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:crypto-infra",
+      "island": "crypto_infra",
+      "display_name": "Crypto Infrastructure",
+      "delivered_lead_volume": 70,
+      "outcome_label_density": 0.2,
+      "measurement_window": "working-placeholder-until-market-entry",
+      "source_refs": [
+        "source_ref:pending:crypto-infra-volume"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:real-estate",
+      "island": "real_estate",
+      "display_name": "Real Estate",
+      "delivered_lead_volume": 80,
+      "outcome_label_density": 0.15,
+      "measurement_window": "working-placeholder-until-market-entry",
+      "source_refs": [
+        "source_ref:pending:real-estate-volume"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true
+    }
+  ],
+  "selection": {
+    "selection_id": "island_selection:p2.1:working-placeholder",
+    "candidate_refs": [
+      "island_candidate:p2.1:healthcare",
+      "island_candidate:p2.1:fintech",
+      "island_candidate:p2.1:industrial",
+      "island_candidate:p2.1:crypto-infra",
+      "island_candidate:p2.1:real-estate"
+    ],
+    "selected_islands": [
+      "healthcare",
+      "fintech",
+      "industrial"
+    ],
+    "formula": "delivered_lead_volume * outcome_label_density",
+    "tie_breaker": "score desc, delivered_lead_volume desc, outcome_label_density desc, island asc",
+    "selection_count": 3,
+    "uses_production_data": false,
+    "final_selection": false,
+    "local_only": true,
+    "production_routing_enabled": false,
+    "island_champion_lines_created": false,
+    "owner_approval_ref": "",
+    "evidence_refs": [],
+    "state": "working_placeholder"
+  },
+  "invalid_candidates": [
+    {
+      "candidate_id": "island_candidate:p2.1:bad-negative-volume",
+      "island": "bad_negative_volume",
+      "display_name": "Bad Negative Volume",
+      "delivered_lead_volume": -1,
+      "outcome_label_density": 0.3,
+      "measurement_window": "bad",
+      "source_refs": [
+        "source_ref:bad"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true,
+      "expected_error_contains": "delivered_lead_volume must be non-negative"
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:bad-density",
+      "island": "bad_density",
+      "display_name": "Bad Density",
+      "delivered_lead_volume": 10,
+      "outcome_label_density": 1.2,
+      "measurement_window": "bad",
+      "source_refs": [
+        "source_ref:bad"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true,
+      "expected_error_contains": "outcome_label_density must be between 0 and 1"
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:bad-placeholder-ready",
+      "island": "bad_placeholder_ready",
+      "display_name": "Bad Placeholder Ready",
+      "delivered_lead_volume": 10,
+      "outcome_label_density": 0.5,
+      "measurement_window": "bad",
+      "source_refs": [
+        "source_ref:bad"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": true,
+      "local_only": false,
+      "expected_error_contains": [
+        "working-placeholder island candidate must not claim production_data_ready",
+        "working-placeholder island candidate must remain local_only"
+      ]
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:bad-production-not-ready",
+      "island": "bad_production_not_ready",
+      "display_name": "Bad Production Not Ready",
+      "delivered_lead_volume": 10,
+      "outcome_label_density": 0.5,
+      "measurement_window": "bad",
+      "source_refs": [
+        "source_ref:bad"
+      ],
+      "data_state": "production_measured",
+      "production_data_ready": false,
+      "local_only": true,
+      "expected_error_contains": [
+        "production-measured island candidate requires production_data_ready",
+        "production-measured island candidate must not be local_only"
+      ]
+    }
+  ],
+  "invalid_selections": [
+    {
+      "selection_id": "island_selection:p2.1:bad-wrong-ranking",
+      "candidate_refs": [
+        "island_candidate:p2.1:healthcare",
+        "island_candidate:p2.1:fintech",
+        "island_candidate:p2.1:industrial",
+        "island_candidate:p2.1:crypto-infra",
+        "island_candidate:p2.1:real-estate"
+      ],
+      "selected_islands": [
+        "crypto_infra",
+        "healthcare",
+        "fintech"
+      ],
+      "formula": "delivered_lead_volume * outcome_label_density",
+      "tie_breaker": "score desc, delivered_lead_volume desc, outcome_label_density desc, island asc",
+      "selection_count": 3,
+      "uses_production_data": false,
+      "final_selection": false,
+      "local_only": true,
+      "production_routing_enabled": false,
+      "island_champion_lines_created": false,
+      "owner_approval_ref": "",
+      "evidence_refs": [],
+      "state": "working_placeholder",
+      "expected_error_contains": [
+        "selected_islands does not match formula ranking",
+        "working-placeholder selected_islands must be healthcare, fintech, industrial"
+      ]
+    },
+    {
+      "selection_id": "island_selection:p2.1:bad-final-from-placeholders",
+      "candidate_refs": [
+        "island_candidate:p2.1:healthcare",
+        "island_candidate:p2.1:fintech",
+        "island_candidate:p2.1:industrial",
+        "island_candidate:p2.1:crypto-infra",
+        "island_candidate:p2.1:real-estate"
+      ],
+      "selected_islands": [
+        "healthcare",
+        "fintech",
+        "industrial"
+      ],
+      "formula": "delivered_lead_volume * outcome_label_density",
+      "tie_breaker": "score desc, delivered_lead_volume desc, outcome_label_density desc, island asc",
+      "selection_count": 3,
+      "uses_production_data": false,
+      "final_selection": true,
+      "local_only": true,
+      "production_routing_enabled": false,
+      "island_champion_lines_created": false,
+      "owner_approval_ref": "",
+      "evidence_refs": [],
+      "state": "finalized_after_production_data",
+      "expected_error_contains": [
+        "finalized island selection requires production data",
+        "finalized island selection must not be local_only",
+        "finalized island selection requires owner_approval_ref",
+        "finalized island selection requires evidence_refs",
+        "production-measured candidates"
+      ]
+    },
+    {
+      "selection_id": "island_selection:p2.1:bad-live-routing",
+      "candidate_refs": [
+        "island_candidate:p2.1:healthcare",
+        "island_candidate:p2.1:fintech",
+        "island_candidate:p2.1:industrial",
+        "island_candidate:p2.1:crypto-infra",
+        "island_candidate:p2.1:real-estate"
+      ],
+      "selected_islands": [
+        "healthcare",
+        "fintech",
+        "industrial"
+      ],
+      "formula": "delivered_lead_volume * outcome_label_density",
+      "tie_breaker": "score desc, delivered_lead_volume desc, outcome_label_density desc, island asc",
+      "selection_count": 3,
+      "uses_production_data": false,
+      "final_selection": false,
+      "local_only": true,
+      "production_routing_enabled": true,
+      "island_champion_lines_created": true,
+      "owner_approval_ref": "",
+      "evidence_refs": [],
+      "state": "working_placeholder",
+      "expected_error_contains": [
+        "production island routing",
+        "live island champion lines"
+      ]
+    },
+    {
+      "selection_id": "island_selection:p2.1:bad-count",
+      "candidate_refs": [
+        "island_candidate:p2.1:healthcare",
+        "island_candidate:p2.1:fintech",
+        "island_candidate:p2.1:industrial",
+        "island_candidate:p2.1:crypto-infra",
+        "island_candidate:p2.1:real-estate"
+      ],
+      "selected_islands": [
+        "healthcare",
+        "fintech"
+      ],
+      "formula": "delivered_lead_volume * outcome_label_density",
+      "tie_breaker": "score desc, delivered_lead_volume desc, outcome_label_density desc, island asc",
+      "selection_count": 2,
+      "uses_production_data": false,
+      "final_selection": false,
+      "local_only": true,
+      "production_routing_enabled": false,
+      "island_champion_lines_created": false,
+      "owner_approval_ref": "",
+      "evidence_refs": [],
+      "state": "working_placeholder",
+      "expected_error_contains": "selection_count must be 3"
+    },
+    {
+      "selection_id": "island_selection:p2.1:bad-duplicate-ref",
+      "candidate_refs": [
+        "island_candidate:p2.1:healthcare",
+        "island_candidate:p2.1:healthcare",
+        "island_candidate:p2.1:fintech",
+        "island_candidate:p2.1:industrial",
+        "island_candidate:p2.1:crypto-infra",
+        "island_candidate:p2.1:real-estate"
+      ],
+      "selected_islands": [
+        "healthcare",
+        "fintech",
+        "industrial"
+      ],
+      "formula": "delivered_lead_volume * outcome_label_density",
+      "tie_breaker": "score desc, delivered_lead_volume desc, outcome_label_density desc, island asc",
+      "selection_count": 3,
+      "uses_production_data": false,
+      "final_selection": false,
+      "local_only": true,
+      "production_routing_enabled": false,
+      "island_champion_lines_created": false,
+      "owner_approval_ref": "",
+      "evidence_refs": [],
+      "state": "working_placeholder",
+      "expected_error_contains": "candidate_refs must not contain duplicates"
+    }
+  ],
+  "tie_break_candidates": [
+    {
+      "candidate_id": "island_candidate:p2.1:tie-alpha",
+      "island": "alpha",
+      "display_name": "Alpha",
+      "delivered_lead_volume": 100,
+      "outcome_label_density": 0.5,
+      "measurement_window": "tie-break-fixture",
+      "source_refs": [
+        "source_ref:tie"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:tie-beta",
+      "island": "beta",
+      "display_name": "Beta",
+      "delivered_lead_volume": 125,
+      "outcome_label_density": 0.4,
+      "measurement_window": "tie-break-fixture",
+      "source_refs": [
+        "source_ref:tie"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:tie-gamma",
+      "island": "gamma",
+      "display_name": "Gamma",
+      "delivered_lead_volume": 100,
+      "outcome_label_density": 0.5,
+      "measurement_window": "tie-break-fixture",
+      "source_refs": [
+        "source_ref:tie"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true
+    },
+    {
+      "candidate_id": "island_candidate:p2.1:tie-delta",
+      "island": "delta",
+      "display_name": "Delta",
+      "delivered_lead_volume": 80,
+      "outcome_label_density": 0.5,
+      "measurement_window": "tie-break-fixture",
+      "source_refs": [
+        "source_ref:tie"
+      ],
+      "data_state": "working_placeholder",
+      "production_data_ready": false,
+      "local_only": true
+    }
+  ],
+  "tie_break_expected": [
+    "beta",
+    "alpha",
+    "gamma"
+  ],
+  "unsafe_workflow_guards": {
+    "full_component_market": false,
+    "live_meta_allocation": false,
+    "research_map_live_api": false,
+    "kms_key_release": false,
+    "research_enclaves": false,
+    "on_chain_anchor_publication": false,
+    "ledger_audit_publication": false,
+    "counterfactual_consequences": false,
+    "balance_mutations": false,
+    "bounty_payments": false,
+    "production_writes": true,
+    "supabase_writes": true,
+    "public_workflows": true
+  }
+}

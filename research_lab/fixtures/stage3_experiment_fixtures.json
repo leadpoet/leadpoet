@@ -1,0 +1,626 @@
+{
+  "local_experiment_plan": {
+    "plan_id": "stage3_experiment_plan:p4.5:local-stub",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:p3.7:local",
+    "confidential_gpu_training_ref": "confidential_gpu_training:p4.4:local-stub",
+    "data_policy_ref": "data_policy:p4.4:local-stub",
+    "axis_selection_policy_ref": "axis_policy:p4.5:local",
+    "rewrite_pipeline_ref": "rewrite_pipeline:p4.5:local",
+    "reward_spec_ref": "reward_spec:p4.5:local-attested-ladder",
+    "heldout_eval_plan_ref": "heldout_eval_plan:p4.5:local",
+    "outcome_label_set_ref": "outcome_label_set:p4.5:pending",
+    "methodology_ref": "methodology:p4.5:local",
+    "target_hybrid_champion_ref": "champion:hybrid-local",
+    "axis_a_or_rewritten_only": true,
+    "leak_cluster_split_enforced": true,
+    "token_budget_curation_checked": true,
+    "teacher_model_policy_enforced": true,
+    "reward_uses_attested_eval_ladder": true,
+    "generation_n_never_grades_n_plus_1": true,
+    "plan_approved": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "stage3_experiment_plan:p4.5:local-stub",
+      "model_pipeline_exit_gate:p3.7:local"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_plan_stub",
+    "contract_version": "stage3_experiment_plan:v1:local_contract"
+  },
+  "ready_experiment_plan": {
+    "plan_id": "stage3_experiment_plan:p4.5:approved-v1",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:production-ready-v1",
+    "confidential_gpu_training_ref": "confidential_gpu_training:p4.4:ready-control",
+    "data_policy_ref": "data_policy:p4.4:approved-v1",
+    "axis_selection_policy_ref": "axis_policy:p4.5:approved-v1",
+    "rewrite_pipeline_ref": "rewrite_pipeline:p4.5:approved-v1",
+    "reward_spec_ref": "reward_spec:p4.5:attested-ladder-v1",
+    "heldout_eval_plan_ref": "heldout_eval_plan:p4.5:approved-v1",
+    "outcome_label_set_ref": "outcome_label_set:p4.5:production-v1",
+    "methodology_ref": "methodology:p4.5:owner-approved-v1",
+    "target_hybrid_champion_ref": "champion:hybrid-production-v1",
+    "axis_a_or_rewritten_only": true,
+    "leak_cluster_split_enforced": true,
+    "token_budget_curation_checked": true,
+    "teacher_model_policy_enforced": true,
+    "reward_uses_attested_eval_ladder": true,
+    "generation_n_never_grades_n_plus_1": true,
+    "plan_approved": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:scale-stage3-methodology",
+    "evidence_refs": [
+      "stage3_experiment_plan:p4.5:approved-v1",
+      "model_pipeline_exit_gate:production-ready-v1",
+      "confidential_gpu_training:p4.4:ready-control",
+      "data_policy:p4.4:approved-v1",
+      "axis_policy:p4.5:approved-v1",
+      "rewrite_pipeline:p4.5:approved-v1",
+      "reward_spec:p4.5:attested-ladder-v1",
+      "heldout_eval_plan:p4.5:approved-v1",
+      "outcome_label_set:p4.5:production-v1",
+      "methodology:p4.5:owner-approved-v1",
+      "owner_approval:scale-stage3-methodology"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_method_approval",
+    "contract_version": "stage3_experiment_plan:v1:local_contract"
+  },
+  "local_experiment_run": {
+    "experiment_run_id": "stage3_experiment:p4.5:local-stub",
+    "plan_ref": "stage3_experiment_plan:p4.5:local-stub",
+    "confidential_gpu_training_ref": "confidential_gpu_training:p4.4:local-stub",
+    "private_weight_artifact_ref": "model_weight_artifact:p4.4:local-stub",
+    "sft_seed_dataset_ref": "trajectory_corpus:p3.1:built-local",
+    "rl_environment_ref": "rl_environment:p4.5:local-stub",
+    "reward_spec_ref": "reward_spec:p4.5:local-attested-ladder",
+    "axis_mix_summary_ref": "axis_mix:p4.5:local-stub",
+    "cost_ledger_hash": "sha256:pendingcost",
+    "run_summary_hash": "sha256:pendingrun",
+    "sft_seed_from_rewritten_axis_a": false,
+    "rlvr_reward_from_attested_eval": false,
+    "dense_per_step_reward_enabled": false,
+    "passk_headroom_checked": false,
+    "confidential_gpu_training_valid": false,
+    "training_started": false,
+    "training_completed": false,
+    "production_experiment_run_valid": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "stage3_experiment:p4.5:local-stub",
+      "stage3_experiment_plan:p4.5:local-stub"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_run_stub",
+    "contract_version": "stage3_experiment_run:v1:local_contract"
+  },
+  "ready_experiment_run": {
+    "experiment_run_id": "stage3_experiment:p4.5:ready-control",
+    "plan_ref": "stage3_experiment_plan:p4.5:approved-v1",
+    "confidential_gpu_training_ref": "confidential_gpu_training:p4.4:ready-control",
+    "private_weight_artifact_ref": "model_weight_artifact:p4.4:private-ready",
+    "sft_seed_dataset_ref": "trajectory_corpus:p3.1:production-stage3-v1",
+    "rl_environment_ref": "rl_environment:p4.5:attested-v1",
+    "reward_spec_ref": "reward_spec:p4.5:attested-ladder-v1",
+    "axis_mix_summary_ref": "axis_mix:p4.5:axis-a-rewritten-v1",
+    "cost_ledger_hash": "sha256:measuredstage3cost",
+    "run_summary_hash": "sha256:measuredstage3run",
+    "sft_seed_from_rewritten_axis_a": true,
+    "rlvr_reward_from_attested_eval": true,
+    "dense_per_step_reward_enabled": true,
+    "passk_headroom_checked": true,
+    "confidential_gpu_training_valid": true,
+    "training_started": true,
+    "training_completed": true,
+    "production_experiment_run_valid": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:scale-stage3-experiment-run",
+    "evidence_refs": [
+      "stage3_experiment:p4.5:ready-control",
+      "stage3_experiment_plan:p4.5:approved-v1",
+      "confidential_gpu_training:p4.4:ready-control",
+      "model_weight_artifact:p4.4:private-ready",
+      "trajectory_corpus:p3.1:production-stage3-v1",
+      "rl_environment:p4.5:attested-v1",
+      "reward_spec:p4.5:attested-ladder-v1",
+      "axis_mix:p4.5:axis-a-rewritten-v1",
+      "cost_ledger:p4.5:measured-stage3",
+      "owner_approval:scale-stage3-experiment-run"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_confidential_gpu_run",
+    "contract_version": "stage3_experiment_run:v1:local_contract"
+  },
+  "local_heldout_eval": {
+    "heldout_eval_id": "heldout_eval:p4.5:local-stub",
+    "experiment_run_ref": "stage3_experiment:p4.5:local-stub",
+    "sequestered_set_ref": "sequestered_set:p4.5:pending",
+    "outcome_label_set_ref": "outcome_label_set:p4.5:pending",
+    "baseline_hybrid_ref": "champion:hybrid-local",
+    "candidate_weight_artifact_ref": "model_weight_artifact:p4.4:local-stub",
+    "evaluation_ladder_ref": "evaluation_ladder:p4.5:local",
+    "cost_ledger_hash": "sha256:pendingevalcost",
+    "result_bundle_hash": "sha256:pendingevalresult",
+    "sample_count": 0,
+    "required_sample_count": 100,
+    "score_delta_pct": 0.0,
+    "required_score_delta_pct": 5.0,
+    "outcome_labels_verified": false,
+    "heldout_set_sequestered": false,
+    "leak_cluster_split_verified": false,
+    "judge_calibration_valid": false,
+    "evaluator_blinded": false,
+    "measured_heldout_pass": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "heldout_eval:p4.5:local-stub"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_eval_stub",
+    "contract_version": "stage3_heldout_eval:v1:local_contract"
+  },
+  "ready_heldout_eval": {
+    "heldout_eval_id": "heldout_eval:p4.5:measured-pass-v1",
+    "experiment_run_ref": "stage3_experiment:p4.5:ready-control",
+    "sequestered_set_ref": "sequestered_set:p4.5:production-v1",
+    "outcome_label_set_ref": "outcome_label_set:p4.5:production-v1",
+    "baseline_hybrid_ref": "champion:hybrid-production-v1",
+    "candidate_weight_artifact_ref": "model_weight_artifact:p4.4:private-ready",
+    "evaluation_ladder_ref": "evaluation_ladder:p4.5:attested-v1",
+    "cost_ledger_hash": "sha256:measuredstage3evalcost",
+    "result_bundle_hash": "sha256:measuredstage3evalresult",
+    "sample_count": 140,
+    "required_sample_count": 100,
+    "score_delta_pct": 7.5,
+    "required_score_delta_pct": 5.0,
+    "outcome_labels_verified": true,
+    "heldout_set_sequestered": true,
+    "leak_cluster_split_verified": true,
+    "judge_calibration_valid": true,
+    "evaluator_blinded": true,
+    "measured_heldout_pass": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:scale-stage3-heldout-eval",
+    "evidence_refs": [
+      "heldout_eval:p4.5:measured-pass-v1",
+      "stage3_experiment:p4.5:ready-control",
+      "sequestered_set:p4.5:production-v1",
+      "outcome_label_set:p4.5:production-v1",
+      "evaluation_ladder:p4.5:attested-v1",
+      "judge_calibration:p3.7:production-valid-v1",
+      "cost_ledger:p4.5:measured-stage3-eval",
+      "owner_approval:scale-stage3-heldout-eval"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "passed_after_measured_heldout",
+    "contract_version": "stage3_heldout_eval:v1:local_contract"
+  },
+  "local_success_claim": {
+    "success_claim_id": "stage3_success:p4.5:local-not-claimed",
+    "experiment_run_ref": "stage3_experiment:p4.5:local-stub",
+    "heldout_eval_ref": "heldout_eval:p4.5:local-stub",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:p3.7:local",
+    "confidential_gpu_training_ref": "confidential_gpu_training:p4.4:local-stub",
+    "model_weight_artifact_ref": "model_weight_artifact:p4.4:local-stub",
+    "success_claimed": false,
+    "beats_hybrid_champion": false,
+    "heldout_eval_passed": false,
+    "outcome_evidence_verified": false,
+    "production_deployment_requested": false,
+    "model_weight_publication_enabled": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "stage3_success:p4.5:local-not-claimed"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_not_claimed",
+    "contract_version": "stage3_success_claim:v1:local_contract"
+  },
+  "ready_success_claim": {
+    "success_claim_id": "stage3_success:p4.5:ready-control",
+    "experiment_run_ref": "stage3_experiment:p4.5:ready-control",
+    "heldout_eval_ref": "heldout_eval:p4.5:measured-pass-v1",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:production-ready-v1",
+    "confidential_gpu_training_ref": "confidential_gpu_training:p4.4:ready-control",
+    "model_weight_artifact_ref": "model_weight_artifact:p4.4:private-ready",
+    "success_claimed": true,
+    "beats_hybrid_champion": true,
+    "heldout_eval_passed": true,
+    "outcome_evidence_verified": true,
+    "production_deployment_requested": false,
+    "model_weight_publication_enabled": false,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:scale-stage3-success",
+    "evidence_refs": [
+      "stage3_success:p4.5:ready-control",
+      "stage3_experiment:p4.5:ready-control",
+      "heldout_eval:p4.5:measured-pass-v1",
+      "model_pipeline_exit_gate:production-ready-v1",
+      "confidential_gpu_training:p4.4:ready-control",
+      "model_weight_artifact:p4.4:private-ready",
+      "outcome_label_set:p4.5:production-v1",
+      "sequestered_set:p4.5:production-v1",
+      "owner_approval:scale-stage3-success"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_owner_review",
+    "contract_version": "stage3_success_claim:v1:local_contract"
+  },
+  "unsafe_scale_guards": {
+    "stage3_end_to_end_experiments": true,
+    "production_writes": true,
+    "expected_error_contains": "Phase 4 local build must keep these workflows disabled"
+  },
+  "invalid_experiment_plans": [
+    {
+      "id": "bad-approved-from-local-fixtures",
+      "base": "local_experiment_plan",
+      "overrides": {
+        "plan_approved": true,
+        "state": "ready_after_method_approval"
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-approved-without-axis-rewrite-policy",
+      "base": "ready_experiment_plan",
+      "overrides": {
+        "axis_a_or_rewritten_only": false
+      },
+      "expected_error_contains": "axis-A or rewritten-axis-A inputs"
+    },
+    {
+      "id": "bad-approved-without-attested-reward",
+      "base": "ready_experiment_plan",
+      "overrides": {
+        "reward_uses_attested_eval_ladder": false
+      },
+      "expected_error_contains": "attested eval-ladder reward"
+    },
+    {
+      "id": "bad-plan-protected-unknown-key",
+      "base": "local_experiment_plan",
+      "overrides": {
+        "raw_stage3_trace": "do not store"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-plan-evidence-prefix",
+      "base": "local_experiment_plan",
+      "overrides": {
+        "evidence_refs": [
+          "model_weight_release:not-plan-evidence"
+        ]
+      },
+      "expected_error_contains": "evidence_refs must use approved prefixes"
+    },
+    {
+      "id": "bad-plan-production-writes",
+      "base": "local_experiment_plan",
+      "overrides": {
+        "production_writes": true
+      },
+      "expected_error_contains": "must not enable production writes"
+    }
+  ],
+  "invalid_experiment_runs": [
+    {
+      "id": "bad-valid-from-local-fixtures",
+      "base": "local_experiment_run",
+      "plan_base": "local_experiment_plan",
+      "overrides": {
+        "production_experiment_run_valid": true,
+        "state": "ready_after_confidential_gpu_run"
+      },
+      "expected_error_contains": [
+        "rewritten-axis-A SFT seed",
+        "attested-eval RLVR reward",
+        "confidential-GPU training validity",
+        "training_started",
+        "training_completed",
+        "approved plan",
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-valid-without-supplied-plan",
+      "base": "ready_experiment_run",
+      "omit_plan": true,
+      "overrides": {},
+      "expected_error_contains": "requires supplied plan"
+    },
+    {
+      "id": "bad-valid-without-supplied-confidential-gpu-training",
+      "base": "ready_experiment_run",
+      "plan_base": "ready_experiment_plan",
+      "omit_confidential_gpu_training": true,
+      "overrides": {},
+      "expected_error_contains": "requires supplied confidential_gpu_training"
+    },
+    {
+      "id": "bad-valid-without-supplied-confidential-gpu-data-policy",
+      "base": "ready_experiment_run",
+      "plan_base": "ready_experiment_plan",
+      "omit_confidential_gpu_data_policy": true,
+      "overrides": {},
+      "expected_error_contains": "requires supplied confidential_gpu_data_policy"
+    },
+    {
+      "id": "bad-run-confidential-gpu-flag-mismatch",
+      "base": "ready_experiment_run",
+      "plan_base": "ready_experiment_plan",
+      "confidential_gpu_training_base": "local_training_run",
+      "confidential_gpu_policy_base": "local_data_policy",
+      "overrides": {},
+      "expected_error_contains": "confidential_gpu_training_valid flag mismatch"
+    },
+    {
+      "id": "bad-valid-without-dense-reward",
+      "base": "ready_experiment_run",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {
+        "dense_per_step_reward_enabled": false
+      },
+      "expected_error_contains": "requires dense per-step reward"
+    },
+    {
+      "id": "bad-run-plan-ref-mismatch",
+      "base": "ready_experiment_run",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {
+        "plan_ref": "stage3_experiment_plan:p4.5:wrong"
+      },
+      "expected_error_contains": "plan_ref mismatch"
+    },
+    {
+      "id": "bad-run-training-started-local",
+      "base": "local_experiment_run",
+      "plan_base": "local_experiment_plan",
+      "overrides": {
+        "training_started": true
+      },
+      "expected_error_contains": "must not start Stage-3 training"
+    },
+    {
+      "id": "bad-run-protected-unknown-key",
+      "base": "local_experiment_run",
+      "plan_base": "local_experiment_plan",
+      "overrides": {
+        "dense_reward_label": "do not store"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-run-supabase-writes",
+      "base": "local_experiment_run",
+      "plan_base": "local_experiment_plan",
+      "overrides": {
+        "supabase_writes": true
+      },
+      "expected_error_contains": "must not enable Supabase writes"
+    }
+  ],
+  "invalid_heldout_evals": [
+    {
+      "id": "bad-pass-from-local-fixtures",
+      "base": "local_heldout_eval",
+      "run_base": "local_experiment_run",
+      "plan_base": "local_experiment_plan",
+      "overrides": {
+        "measured_heldout_pass": true,
+        "state": "passed_after_measured_heldout"
+      },
+      "expected_error_contains": [
+        "verified outcome labels",
+        "sequestered heldout set",
+        "valid judge calibration",
+        "production-valid experiment run",
+        "sample_count >= required_sample_count",
+        "score_delta_pct >= required_score_delta_pct",
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-pass-without-supplied-run",
+      "base": "ready_heldout_eval",
+      "omit_experiment_run": true,
+      "overrides": {},
+      "expected_error_contains": "requires supplied experiment_run"
+    },
+    {
+      "id": "bad-pass-with-invalid-run",
+      "base": "ready_heldout_eval",
+      "run_base": "local_experiment_run",
+      "plan_base": "local_experiment_plan",
+      "overrides": {},
+      "expected_error_contains": [
+        "experiment_run_ref mismatch",
+        "requires production-valid experiment run"
+      ]
+    },
+    {
+      "id": "bad-pass-insufficient-sample-count",
+      "base": "ready_heldout_eval",
+      "run_base": "ready_experiment_run",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {
+        "sample_count": 50
+      },
+      "expected_error_contains": "sample_count >= required_sample_count"
+    },
+    {
+      "id": "bad-pass-lowered-sample-threshold",
+      "base": "ready_heldout_eval",
+      "run_base": "ready_experiment_run",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {
+        "required_sample_count": 1
+      },
+      "expected_error_contains": "required_sample_count must be at least"
+    },
+    {
+      "id": "bad-pass-lowered-score-threshold",
+      "base": "ready_heldout_eval",
+      "run_base": "ready_experiment_run",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {
+        "required_score_delta_pct": 0.01
+      },
+      "expected_error_contains": "required_score_delta_pct must be at least"
+    },
+    {
+      "id": "bad-pass-outcome-labels-not-verified",
+      "base": "ready_heldout_eval",
+      "run_base": "ready_experiment_run",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {
+        "outcome_labels_verified": false
+      },
+      "expected_error_contains": "verified outcome labels"
+    },
+    {
+      "id": "bad-eval-protected-unknown-key",
+      "base": "local_heldout_eval",
+      "run_base": "local_experiment_run",
+      "plan_base": "local_experiment_plan",
+      "overrides": {
+        "heldout_answer_key": "do not store"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-eval-evidence-prefix",
+      "base": "local_heldout_eval",
+      "run_base": "local_experiment_run",
+      "plan_base": "local_experiment_plan",
+      "overrides": {
+        "evidence_refs": [
+          "confidential_gpu_training:not-eval-evidence"
+        ]
+      },
+      "expected_error_contains": "evidence_refs must use approved prefixes"
+    }
+  ],
+  "invalid_success_claims": [
+    {
+      "id": "bad-success-from-local-fixtures",
+      "base": "local_success_claim",
+      "run_base": "local_experiment_run",
+      "eval_base": "local_heldout_eval",
+      "plan_base": "local_experiment_plan",
+      "overrides": {
+        "success_claimed": true,
+        "state": "ready_after_owner_review"
+      },
+      "expected_error_contains": [
+        "beating the hybrid champion",
+        "passed heldout evaluation",
+        "verified outcome evidence",
+        "production-valid experiment run",
+        "measured heldout pass",
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-success-without-supplied-run",
+      "base": "ready_success_claim",
+      "omit_experiment_run": true,
+      "eval_base": "ready_heldout_eval",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {},
+      "expected_error_contains": "requires supplied experiment_run"
+    },
+    {
+      "id": "bad-success-without-supplied-eval",
+      "base": "ready_success_claim",
+      "run_base": "ready_experiment_run",
+      "omit_heldout_eval": true,
+      "plan_base": "ready_experiment_plan",
+      "overrides": {},
+      "expected_error_contains": "requires supplied heldout_evaluation"
+    },
+    {
+      "id": "bad-success-with-failing-eval",
+      "base": "ready_success_claim",
+      "run_base": "ready_experiment_run",
+      "eval_base": "local_heldout_eval",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {},
+      "expected_error_contains": [
+        "heldout_eval_ref mismatch",
+        "requires measured heldout pass"
+      ]
+    },
+    {
+      "id": "bad-success-deployment-requested",
+      "base": "ready_success_claim",
+      "run_base": "ready_experiment_run",
+      "eval_base": "ready_heldout_eval",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {
+        "production_deployment_requested": true
+      },
+      "expected_error_contains": "must not request production deployment"
+    },
+    {
+      "id": "bad-success-publication-enabled",
+      "base": "ready_success_claim",
+      "run_base": "ready_experiment_run",
+      "eval_base": "ready_heldout_eval",
+      "plan_base": "ready_experiment_plan",
+      "overrides": {
+        "model_weight_publication_enabled": true
+      },
+      "expected_error_contains": "must not enable model-weight publication"
+    },
+    {
+      "id": "bad-success-protected-unknown-key",
+      "base": "local_success_claim",
+      "run_base": "local_experiment_run",
+      "eval_base": "local_heldout_eval",
+      "plan_base": "local_experiment_plan",
+      "overrides": {
+        "customer_outcome_label": "do not store"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ]
+}

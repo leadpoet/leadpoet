@@ -1,0 +1,455 @@
+{
+  "measurement_gate_request": {
+    "run_id": "fabric_run:p2.6-local-fixture",
+    "role": "validator",
+    "attestation_ref": "attestation:p2.6-local-fixture",
+    "attestation_response": {
+      "trust_level": "full_nitro",
+      "attestation_document": "bG9jYWwtYXR0ZXN0YXRpb24=",
+      "enclave_pubkey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "code_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "pcr0": "1697ef7e8c095ff5fc3d7e0e79bb7d00d29d0bdfa487d2c7353812ebafb35667ebd428c42db59ad1efe1c2999d1e5d85"
+    },
+    "pcr0_allowlist_ref": "pcr0_allowlist:repo-current",
+    "enclave_measurement_ref": "enclave_measurement:validator-v1.0.0",
+    "egress_policy_ref": "egress_policy:research-enclave-local",
+    "kms_policy_ref": "kms_policy:research-lab-local",
+    "egress_policy_passed": true,
+    "kms_policy_passed": true
+  },
+  "expected_measurement_gate": {
+    "gate_id": "measurement_gate:e4cdaef2aaa49b1d",
+    "run_id": "fabric_run:p2.6-local-fixture",
+    "role": "validator",
+    "attestation_ref": "attestation:p2.6-local-fixture",
+    "attestation_response": {
+      "trust_level": "full_nitro",
+      "attestation_document": "bG9jYWwtYXR0ZXN0YXRpb24=",
+      "enclave_pubkey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "code_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "pcr0": "1697ef7e8c095ff5fc3d7e0e79bb7d00d29d0bdfa487d2c7353812ebafb35667ebd428c42db59ad1efe1c2999d1e5d85"
+    },
+    "pcr0_allowlist_ref": "pcr0_allowlist:repo-current",
+    "pcr0": "1697ef7e8c095ff5fc3d7e0e79bb7d00d29d0bdfa487d2c7353812ebafb35667ebd428c42db59ad1efe1c2999d1e5d85",
+    "enclave_measurement_ref": "enclave_measurement:validator-v1.0.0",
+    "egress_policy_ref": "egress_policy:research-enclave-local",
+    "kms_policy_ref": "kms_policy:research-lab-local",
+    "shape_checked": true,
+    "shape_passed": true,
+    "pcr0_allowlist_checked": true,
+    "pcr0_allowed": true,
+    "signature_chain_checked": false,
+    "signature_chain_valid": false,
+    "egress_policy_checked": true,
+    "egress_policy_passed": true,
+    "equivocation_check_performed": true,
+    "equivocation_conflict": false,
+    "kms_policy_checked": true,
+    "kms_policy_passed": true,
+    "live_verification_performed": false,
+    "production_valid": false,
+    "status": "local_contract_stub",
+    "local_only": true
+  },
+  "kms_request_input": {
+    "requester_ref": "research_enclave:p2.6-local-fixture",
+    "sealed_key_ref": "kms_key:leadpoet-research-lab-local-sealed",
+    "purpose": "local contract proof; no key release"
+  },
+  "expected_kms_request": {
+    "request_id": "kms_release_request:7f70e472f11cf766",
+    "run_id": "fabric_run:p2.6-local-fixture",
+    "requester_ref": "research_enclave:p2.6-local-fixture",
+    "measurement_gate_ref": "measurement_gate:e4cdaef2aaa49b1d",
+    "pcr0_allowlist_ref": "pcr0_allowlist:repo-current",
+    "enclave_measurement_ref": "enclave_measurement:validator-v1.0.0",
+    "kms_policy_ref": "kms_policy:research-lab-local",
+    "sealed_key_ref": "kms_key:leadpoet-research-lab-local-sealed",
+    "purpose": "local contract proof; no key release",
+    "state": "local_request_stub",
+    "contract_version": "full_sealing_kms:v1:local_contract",
+    "local_only": true,
+    "live_kms_request_performed": false,
+    "production_release_requested": false,
+    "plaintext_key_material_present": false,
+    "raw_secret_material_present": false
+  },
+  "expected_kms_decision": {
+    "decision_id": "kms_release_decision:1e45558e86f2ca82",
+    "request_id": "kms_release_request:7f70e472f11cf766",
+    "run_id": "fabric_run:p2.6-local-fixture",
+    "measurement_gate_ref": "measurement_gate:e4cdaef2aaa49b1d",
+    "kms_policy_ref": "kms_policy:research-lab-local",
+    "sealed_key_ref": "kms_key:leadpoet-research-lab-local-sealed",
+    "decision": "denied",
+    "denial_reasons": [
+      "live_kms_disabled",
+      "signature_chain_not_verified"
+    ],
+    "pcr0_allowlist_checked": true,
+    "pcr0_allowed": true,
+    "signature_chain_checked": false,
+    "signature_chain_valid": false,
+    "egress_policy_checked": true,
+    "egress_policy_passed": true,
+    "equivocation_check_performed": true,
+    "equivocation_conflict": false,
+    "kms_policy_checked": true,
+    "kms_policy_passed": true,
+    "state": "local_denied_stub",
+    "contract_version": "full_sealing_kms:v1:local_contract",
+    "local_only": true,
+    "live_kms_call_performed": false,
+    "kms_grant_created": false,
+    "key_release_performed": false,
+    "production_valid": false,
+    "ciphertext_key_ref": "kms_release:pending",
+    "plaintext_key_material_present": false,
+    "raw_secret_material_present": false
+  },
+  "enclave_run_input": {
+    "ticket_id": "ticket:p2.6-local-fixture",
+    "engine_version_ref": "engine:research-loop-v1-local",
+    "enclave_image_ref": "enclave_image:research-v1-local",
+    "evidence_bundle_ref": "evidence_bundle:p2.6-local-fixture",
+    "output_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "cost_ledger_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "expected_enclave_run": {
+    "run_id": "research_enclave_run:392d11604b359eda",
+    "ticket_id": "ticket:p2.6-local-fixture",
+    "role": "validator",
+    "engine_version_ref": "engine:research-loop-v1-local",
+    "enclave_image_ref": "enclave_image:research-v1-local",
+    "enclave_measurement_ref": "enclave_measurement:validator-v1.0.0",
+    "measurement_gate_ref": "measurement_gate:e4cdaef2aaa49b1d",
+    "kms_release_decision_ref": "kms_release_decision:1e45558e86f2ca82",
+    "egress_policy_ref": "egress_policy:research-enclave-local",
+    "evidence_bundle_ref": "evidence_bundle:p2.6-local-fixture",
+    "output_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "cost_ledger_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "state": "local_record_only",
+    "local_only": true,
+    "enclave_started": false,
+    "live_enclave_boot_performed": false,
+    "sealed_key_material_mounted": false,
+    "kms_key_released": false,
+    "production_network_egress_enabled": false,
+    "production_valid": false
+  },
+  "invalid_measurement_gates": [
+    {
+      "id": "skip-pcr0",
+      "overrides": {
+        "pcr0_allowlist_checked": false
+      },
+      "expected_error_contains": "PCR0 allowlist check must not be skipped"
+    },
+    {
+      "id": "pcr0-denied",
+      "overrides": {
+        "pcr0": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attestation_response": {
+          "pcr0": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "pcr0_allowed": false,
+        "status": "blocked"
+      },
+      "expected_error_contains": "PCR0 is not allowlisted"
+    },
+    {
+      "id": "signature-overclaim-local",
+      "overrides": {
+        "signature_chain_checked": true,
+        "signature_chain_valid": true
+      },
+      "expected_error_contains": "local P2.6 records must not claim Nitro/COSE signature-chain verification"
+    },
+    {
+      "id": "signature-skip-production-claim",
+      "overrides": {
+        "status": "production_valid",
+        "production_valid": true,
+        "local_only": false
+      },
+      "expected_error_contains": [
+        "signature-chain check must not be skipped for production sealing",
+        "production_valid measurement gate state is disabled"
+      ]
+    },
+    {
+      "id": "skip-egress",
+      "overrides": {
+        "egress_policy_checked": false,
+        "status": "blocked"
+      },
+      "expected_error_contains": "egress-policy check must not be skipped"
+    },
+    {
+      "id": "skip-equivocation",
+      "overrides": {
+        "equivocation_check_performed": false,
+        "status": "blocked"
+      },
+      "expected_error_contains": "equivocation check must not be skipped"
+    },
+    {
+      "id": "equivocation-conflict",
+      "overrides": {
+        "equivocation_conflict": true,
+        "status": "blocked"
+      },
+      "expected_error_contains": "equivocation conflict blocks sealing"
+    },
+    {
+      "id": "skip-kms-policy",
+      "overrides": {
+        "kms_policy_checked": false,
+        "status": "blocked"
+      },
+      "expected_error_contains": "KMS policy check must not be skipped"
+    },
+    {
+      "id": "live-verification-overclaim",
+      "overrides": {
+        "live_verification_performed": true
+      },
+      "expected_error_contains": "live_verification_performed must remain false"
+    }
+  ],
+  "standalone_default_allowlist_gate": {
+    "id": "standalone-default-allowlist-mismatch",
+    "overrides": {
+      "pcr0": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "attestation_response": {
+        "pcr0": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "pcr0_allowed": true
+    },
+    "expected_error_contains": "pcr0_allowed does not match allowlist"
+  },
+  "invalid_kms_requests": [
+    {
+      "id": "live-kms-request",
+      "overrides": {
+        "live_kms_request_performed": true
+      },
+      "expected_error_contains": "must not perform live KMS requests"
+    },
+    {
+      "id": "production-release-request",
+      "overrides": {
+        "production_release_requested": true,
+        "state": "production_requested"
+      },
+      "expected_error_contains": [
+        "must not request production KMS release",
+        "production_requested state is disabled"
+      ]
+    },
+    {
+      "id": "bad-sealed-key-ref",
+      "overrides": {
+        "sealed_key_ref": "plaintext:not-a-kms-key"
+      },
+      "expected_error_contains": "sealed_key_ref must be kms_key:-prefixed"
+    },
+    {
+      "id": "raw-key-flag",
+      "overrides": {
+        "plaintext_key_material_present": true
+      },
+      "expected_error_contains": "must not contain plaintext key material"
+    },
+    {
+      "id": "raw-key-extra-field",
+      "overrides": {
+        "key_material": "redacted fixture value"
+      },
+      "expected_error_contains": "key_material"
+    }
+  ],
+  "invalid_kms_decisions": [
+    {
+      "id": "approved-release",
+      "overrides": {
+        "decision": "release_approved",
+        "state": "release_approved",
+        "denial_reasons": []
+      },
+      "expected_error_contains": [
+        "signature-chain check must not be skipped for KMS release",
+        "release_approved decision is disabled"
+      ]
+    },
+    {
+      "id": "missing-signature-denial-reason",
+      "overrides": {
+        "denial_reasons": [
+          "live_kms_disabled"
+        ]
+      },
+      "expected_error_contains": "signature_chain_not_verified"
+    },
+    {
+      "id": "missing-live-kms-denial-reason",
+      "overrides": {
+        "denial_reasons": [
+          "signature_chain_not_verified"
+        ]
+      },
+      "expected_error_contains": "live_kms_disabled"
+    },
+    {
+      "id": "skip-pcr0",
+      "overrides": {
+        "pcr0_allowlist_checked": false
+      },
+      "expected_error_contains": "KMS decision cannot skip PCR0 allowlist check"
+    },
+    {
+      "id": "skip-egress",
+      "overrides": {
+        "egress_policy_checked": false
+      },
+      "expected_error_contains": "KMS decision cannot skip egress-policy check"
+    },
+    {
+      "id": "skip-equivocation",
+      "overrides": {
+        "equivocation_check_performed": false
+      },
+      "expected_error_contains": "KMS decision cannot skip equivocation check"
+    },
+    {
+      "id": "equivocation-conflict",
+      "overrides": {
+        "equivocation_conflict": true
+      },
+      "expected_error_contains": "equivocation conflict blocks KMS release"
+    },
+    {
+      "id": "skip-kms-policy",
+      "overrides": {
+        "kms_policy_checked": false
+      },
+      "expected_error_contains": "KMS decision cannot skip KMS policy check"
+    },
+    {
+      "id": "live-kms-call",
+      "overrides": {
+        "live_kms_call_performed": true
+      },
+      "expected_error_contains": "must not perform live KMS calls"
+    },
+    {
+      "id": "key-release",
+      "overrides": {
+        "key_release_performed": true,
+        "ciphertext_key_ref": "kms_ciphertext:fixture"
+      },
+      "expected_error_contains": "must not release KMS keys"
+    },
+    {
+      "id": "raw-secret-extra-field",
+      "overrides": {
+        "raw_secret": "redacted fixture value"
+      },
+      "expected_error_contains": "raw_secret"
+    }
+  ],
+  "invalid_enclave_runs": [
+    {
+      "id": "enclave-started",
+      "overrides": {
+        "enclave_started": true,
+        "live_enclave_boot_performed": true,
+        "state": "production_enclave_started"
+      },
+      "expected_error_contains": [
+        "must not start research enclaves",
+        "production_enclave_started state is disabled"
+      ]
+    },
+    {
+      "id": "sealed-key-mounted",
+      "overrides": {
+        "sealed_key_material_mounted": true,
+        "kms_key_released": true
+      },
+      "expected_error_contains": [
+        "sealed key material must not be mounted",
+        "must not release KMS keys"
+      ]
+    },
+    {
+      "id": "production-network",
+      "overrides": {
+        "production_network_egress_enabled": true
+      },
+      "expected_error_contains": "production network egress must remain disabled"
+    },
+    {
+      "id": "production-valid",
+      "overrides": {
+        "production_valid": true,
+        "local_only": false
+      },
+      "expected_error_contains": [
+        "must remain local_only",
+        "must not claim production_valid"
+      ]
+    },
+    {
+      "id": "gate-mismatch",
+      "overrides": {
+        "measurement_gate_ref": "measurement_gate:stale"
+      },
+      "expected_error_contains": "measurement_gate_ref mismatch"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "full_component_market": false,
+    "live_meta_allocation": false,
+    "research_map_live_api": false,
+    "kms_key_release": true,
+    "research_enclaves": true,
+    "on_chain_anchor_publication": false,
+    "ledger_audit_publication": false,
+    "counterfactual_consequences": false,
+    "balance_mutations": false,
+    "bounty_payments": false,
+    "production_writes": true,
+    "supabase_writes": false,
+    "public_workflows": true
+  },
+  "market_sealing_posture_link": {
+    "posture_id": "market_sealing:p2.6:bad-production-claim",
+    "pcr0_allowlist_ref": "pcr0_allowlist:repo-current",
+    "enclave_measurement_ref": "enclave_measurement:validator-v1.0.0",
+    "kms_policy_ref": "kms_policy:research-lab-local",
+    "on_chain_anchor_ref": "on_chain_anchor:pending",
+    "pcr0_allowlist_checked": true,
+    "pcr0_allowed": true,
+    "signature_chain_checked": false,
+    "signature_chain_valid": false,
+    "egress_policy_checked": true,
+    "egress_policy_passed": true,
+    "equivocation_check_performed": true,
+    "equivocation_conflict": false,
+    "kms_policy_checked": true,
+    "kms_policy_passed": true,
+    "live_verification_performed": false,
+    "kms_key_release_requested": true,
+    "kms_key_released": true,
+    "research_enclave_started": true,
+    "on_chain_anchor_submitted": false,
+    "production_valid": true,
+    "local_stub_only": true,
+    "state": "production_ready",
+    "expected_error_contains": [
+      "local sealing stub must not request KMS key release",
+      "production sealing cannot be claimed by a local_stub_only record"
+    ]
+  }
+}

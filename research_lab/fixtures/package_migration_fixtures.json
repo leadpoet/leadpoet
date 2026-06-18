@@ -1,0 +1,206 @@
+{
+  "local_audit": {
+    "audit_id": "package_migration:p4.1:local-current-audit",
+    "scanned_roots": [
+      "research_lab",
+      "leadpoet_verifier",
+      "scripts"
+    ],
+    "ignored_prefixes": [
+      "scripts/techstack_test_artifacts/"
+    ],
+    "leadpoet_native_package_ref": "research_lab/eval:pending",
+    "leadpoet_native_package_present": false,
+    "research_lab_runtime_legacy_imports": 0,
+    "operational_script_legacy_imports": 4,
+    "test_or_archive_legacy_imports": 0,
+    "audit_scope_note": "static_ast_imports_only",
+    "findings": [
+      {
+        "path": "scripts/capture_prompt_snapshots.py",
+        "line": 21,
+        "import_name": "qualification.scoring.intent_verification_three_stage",
+        "category": "operational_script"
+      },
+      {
+        "path": "scripts/daily_baseline.py",
+        "line": 29,
+        "import_name": "qualification.scoring.baseline",
+        "category": "operational_script"
+      },
+      {
+        "path": "scripts/daily_baseline.py",
+        "line": 35,
+        "import_name": "qualification.scoring.baseline_arms",
+        "category": "operational_script"
+      },
+      {
+        "path": "scripts/daily_baseline.py",
+        "line": 84,
+        "import_name": "qualification.scoring.lead_scorer",
+        "category": "operational_script"
+      }
+    ],
+    "package_migration_ready": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "migration_plan_ref": "scale_package_migration_plan:p4.1:pending",
+    "evidence_refs": [
+      "package_migration:p4.1:local-current-audit"
+    ],
+    "owner_approval_ref": "",
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_audit_only"
+  },
+  "ready_control": {
+    "audit_id": "package_migration:p4.1:ready-control",
+    "scanned_roots": [
+      "research_lab",
+      "leadpoet_verifier",
+      "scripts"
+    ],
+    "ignored_prefixes": [
+      "scripts/techstack_test_artifacts/"
+    ],
+    "leadpoet_native_package_ref": "research_lab/eval:v1",
+    "leadpoet_native_package_present": true,
+    "research_lab_runtime_legacy_imports": 0,
+    "operational_script_legacy_imports": 0,
+    "test_or_archive_legacy_imports": 0,
+    "audit_scope_note": "static_ast_imports_only",
+    "findings": [],
+    "package_migration_ready": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "migration_plan_ref": "scale_package_migration_plan:p4.1:approved",
+    "evidence_refs": [
+      "package_migration:p4.1:ready-control",
+      "scale_package_migration_plan:p4.1:approved",
+      "model_pipeline_exit_gate:measured-pass",
+      "owner_approval:scale-package-migration"
+    ],
+    "owner_approval_ref": "owner_approval:scale-package-migration",
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_migration_evidence"
+  },
+  "invalid_audits": [
+    {
+      "id": "bad-ready-with-current-blockers",
+      "base": "local_audit",
+      "overrides": {
+        "package_migration_ready": true,
+        "state": "ready_after_migration_evidence"
+      },
+      "expected_error_contains": [
+        "leadpoet_native_package_missing",
+        "operational_script_legacy_imports",
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-count-mismatch",
+      "base": "local_audit",
+      "overrides": {
+        "operational_script_legacy_imports": 0
+      },
+      "expected_error_contains": "operational_script_legacy_imports must match findings"
+    },
+    {
+      "id": "bad-research-lab-runtime-legacy-import",
+      "base": "ready_control",
+      "overrides": {
+        "research_lab_runtime_legacy_imports": 1,
+        "findings": [
+          {
+            "path": "research_lab/example.py",
+            "line": 1,
+            "import_name": "qualification.scoring.baseline",
+            "category": "research_lab_runtime"
+          }
+        ]
+      },
+      "expected_error_contains": "research_lab_runtime_legacy_imports"
+    },
+    {
+      "id": "bad-missing-native-package",
+      "base": "ready_control",
+      "overrides": {
+        "leadpoet_native_package_ref": "research_lab/eval:pending",
+        "leadpoet_native_package_present": false
+      },
+      "expected_error_contains": "leadpoet_native_package_missing"
+    },
+    {
+      "id": "bad-ready-from-local-fixtures",
+      "base": "ready_control",
+      "overrides": {
+        "uses_local_fixtures": true
+      },
+      "expected_error_contains": "cannot be claimed from local fixtures"
+    },
+    {
+      "id": "bad-ready-local-only",
+      "base": "ready_control",
+      "overrides": {
+        "local_only": true
+      },
+      "expected_error_contains": "cannot be claimed by a local_only record"
+    },
+    {
+      "id": "bad-ready-missing-owner-approval",
+      "base": "ready_control",
+      "overrides": {
+        "owner_approval_ref": ""
+      },
+      "expected_error_contains": "requires owner_approval_ref"
+    },
+    {
+      "id": "bad-audit-scope-note",
+      "base": "local_audit",
+      "overrides": {
+        "audit_scope_note": "dynamic_imports_certified"
+      },
+      "expected_error_contains": "audit_scope_note must be static_ast_imports_only"
+    },
+    {
+      "id": "bad-production-writes",
+      "base": "local_audit",
+      "overrides": {
+        "production_writes": true
+      },
+      "expected_error_contains": "must not enable production writes"
+    },
+    {
+      "id": "bad-supabase-writes",
+      "base": "local_audit",
+      "overrides": {
+        "supabase_writes": true
+      },
+      "expected_error_contains": "must not enable Supabase writes"
+    },
+    {
+      "id": "bad-public-workflows",
+      "base": "local_audit",
+      "overrides": {
+        "public_workflows": true
+      },
+      "expected_error_contains": "must not enable public workflows"
+    },
+    {
+      "id": "bad-evidence-prefix",
+      "base": "local_audit",
+      "overrides": {
+        "evidence_refs": [
+          "qualification:legacy"
+        ]
+      },
+      "expected_error_contains": "approved package migration prefixes"
+    }
+  ]
+}

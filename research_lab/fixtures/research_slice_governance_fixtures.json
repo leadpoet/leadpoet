@@ -1,0 +1,365 @@
+{
+  "local_counterfactual_comparison": {
+    "allocator_budget_cents": 40000,
+    "allocator_verified_points": 16.25,
+    "allocator_yield_points_per_1000_usd": 40.625,
+    "allocator_yield_ref": "counterfactual_yield:f8d7ca921c19ae10",
+    "comparison_id": "counterfactual_comparison:9b829495304931de",
+    "consequence_due": false,
+    "contract_version": "counterfactual_gate:v1:local_contract",
+    "delta_yield_points_per_1000_usd": 4.375,
+    "local_only": true,
+    "matched_budget_cents": 40000,
+    "measured_data_ready": false,
+    "methodology_ref": "counterfactual_methodology:market-local-v1",
+    "miner_budget_cents": 40000,
+    "miner_verified_points": 18.0,
+    "miner_yield_points_per_1000_usd": 45.0,
+    "miner_yield_ref": "counterfactual_yield:4029b225b38d4499",
+    "passed_gate": true,
+    "production_gate_claimed": false,
+    "public_claim_enabled": false,
+    "publication_ref": "counterfactual_publication:pending",
+    "quarter_ref": "quarter:2026q3-local",
+    "shared_prior_caveat": "Shared-prior caveat: miner-briefed and allocator-directed arms may consume overlapping priors, so this local gate is a matched-budget counterfactual input, not causal proof.",
+    "state": "local_stub",
+    "uses_local_fixtures": true
+  },
+  "measured_counterfactual_comparison": {
+    "allocator_budget_cents": 40000,
+    "allocator_verified_points": 16.25,
+    "allocator_yield_points_per_1000_usd": 40.625,
+    "allocator_yield_ref": "counterfactual_yield:f8d7ca921c19ae10",
+    "comparison_id": "counterfactual_comparison:9b829495304931de",
+    "consequence_due": false,
+    "contract_version": "counterfactual_gate:v1:local_contract",
+    "delta_yield_points_per_1000_usd": 4.375,
+    "local_only": false,
+    "matched_budget_cents": 40000,
+    "measured_data_ready": true,
+    "methodology_ref": "counterfactual_methodology:market-local-v1",
+    "miner_budget_cents": 40000,
+    "miner_verified_points": 18.0,
+    "miner_yield_points_per_1000_usd": 45.0,
+    "miner_yield_ref": "counterfactual_yield:4029b225b38d4499",
+    "passed_gate": true,
+    "production_gate_claimed": false,
+    "public_claim_enabled": false,
+    "publication_ref": "counterfactual_publication:pending",
+    "quarter_ref": "quarter:2026q3-local",
+    "shared_prior_caveat": "Shared-prior caveat: miner-briefed and allocator-directed arms may consume overlapping priors, so this measured control remains a matched-budget counterfactual input, not causal proof.",
+    "state": "passed",
+    "uses_local_fixtures": false
+  },
+  "local_proposal": {
+    "proposal_id": "research_slice_governance:p4.7:local-stub",
+    "quarter_ref": "quarter:2026q3-local",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:p3.7:local",
+    "market_yield_ref": "market_yield:p4.7:pending",
+    "counterfactual_comparison_ref": "counterfactual_comparison:9b829495304931de",
+    "robustness_evidence_ref": "robustness_evidence:p4.7:pending",
+    "abuse_monitoring_ref": "abuse_monitoring:p4.7:pending",
+    "fulfillment_health_ref": "fulfillment_health:p4.7:pending",
+    "outcome_label_supply_ref": "outcome_label_supply:p4.7:pending",
+    "ceiling_utilization_ref": "ceiling_utilization:p4.7:pending",
+    "alpha_price_window_ref": "alpha_price:p4.7:pending",
+    "current_research_slice_bps": 200,
+    "proposed_research_slice_bps": 200,
+    "max_research_slice_bps": 10000,
+    "measured_market_yield_ready": false,
+    "counterfactual_gate_passed": false,
+    "market_yield_delta_points_per_1000_usd": 4.375,
+    "robustness_evidence_ready": false,
+    "abuse_monitoring_ready": false,
+    "fulfillment_health_checked": false,
+    "outcome_label_supply_checked": false,
+    "ceiling_utilization_published": false,
+    "manual_governance_required": true,
+    "formula_only_increase": false,
+    "pre_scheduled_increase": false,
+    "proposal_ready": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_review_ref": "",
+    "evidence_refs": [
+      "research_slice_governance:p4.7:local-stub"
+    ],
+    "budget_mutation_enabled": false,
+    "treasury_transfer_enabled": false,
+    "emission_schedule_changed": false,
+    "payment_distribution_changed": false,
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_proposal_stub",
+    "contract_version": "research_slice_proposal:v1:local_contract"
+  },
+  "ready_proposal": {
+    "proposal_id": "research_slice_governance:p4.7:ready-control",
+    "quarter_ref": "quarter:2026q3-local",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:p3.7:measured",
+    "market_yield_ref": "market_yield:p4.7:measured",
+    "counterfactual_comparison_ref": "counterfactual_comparison:9b829495304931de",
+    "robustness_evidence_ref": "robustness_evidence:p4.7:passed",
+    "abuse_monitoring_ref": "abuse_monitoring:p4.7:clean",
+    "fulfillment_health_ref": "fulfillment_health:p4.7:healthy",
+    "outcome_label_supply_ref": "outcome_label_supply:p4.7:sufficient",
+    "ceiling_utilization_ref": "ceiling_utilization:p4.7:published",
+    "alpha_price_window_ref": "alpha_price:p4.7:observed",
+    "current_research_slice_bps": 200,
+    "proposed_research_slice_bps": 500,
+    "max_research_slice_bps": 10000,
+    "measured_market_yield_ready": true,
+    "counterfactual_gate_passed": true,
+    "market_yield_delta_points_per_1000_usd": 4.375,
+    "robustness_evidence_ready": true,
+    "abuse_monitoring_ready": true,
+    "fulfillment_health_checked": true,
+    "outcome_label_supply_checked": true,
+    "ceiling_utilization_published": true,
+    "manual_governance_required": true,
+    "formula_only_increase": false,
+    "pre_scheduled_increase": false,
+    "proposal_ready": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_review_ref": "owner_review:p4.7:research-slice",
+    "evidence_refs": [
+      "research_slice_governance:p4.7:ready-control",
+      "market_yield:p4.7:measured",
+      "counterfactual_comparison:9b829495304931de",
+      "robustness_evidence:p4.7:passed",
+      "abuse_monitoring:p4.7:clean",
+      "fulfillment_health:p4.7:healthy",
+      "outcome_label_supply:p4.7:sufficient",
+      "ceiling_utilization:p4.7:published",
+      "owner_review:p4.7:research-slice"
+    ],
+    "budget_mutation_enabled": false,
+    "treasury_transfer_enabled": false,
+    "emission_schedule_changed": false,
+    "payment_distribution_changed": false,
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_measured_evidence",
+    "contract_version": "research_slice_proposal:v1:local_contract"
+  },
+  "local_decision": {
+    "decision_id": "research_slice_decision:p4.7:local-stub",
+    "proposal_ref": "research_slice_governance:p4.7:local-stub",
+    "scale_readiness_ref": "scale_readiness:p4.0:local",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:p3.7:local",
+    "owner_approval_ref": "",
+    "governance_meeting_ref": "governance_meeting:p4.7:pending",
+    "implementation_plan_ref": "research_slice_implementation:p4.7:pending",
+    "current_research_slice_bps": 200,
+    "approved_research_slice_bps": 200,
+    "max_research_slice_bps": 10000,
+    "raise_approved": false,
+    "proposal_ready": false,
+    "manual_owner_approved": false,
+    "governance_review_complete": false,
+    "post_approval_monitoring_ready": false,
+    "formula_only_decision": false,
+    "pre_scheduled_decision": false,
+    "automatic_execution_enabled": false,
+    "budget_mutation_enabled": false,
+    "treasury_transfer_enabled": false,
+    "emission_schedule_changed": false,
+    "payment_distribution_changed": false,
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "evidence_refs": [
+      "research_slice_decision:p4.7:local-stub"
+    ],
+    "state": "local_decision_stub",
+    "contract_version": "research_slice_decision:v1:local_contract"
+  },
+  "ready_decision": {
+    "decision_id": "research_slice_decision:p4.7:owner-approved-control",
+    "proposal_ref": "research_slice_governance:p4.7:ready-control",
+    "scale_readiness_ref": "scale_readiness:p4.0:measured",
+    "model_pipeline_exit_gate_ref": "model_pipeline_exit_gate:p3.7:measured",
+    "owner_approval_ref": "owner_approval:p4.7:research-slice",
+    "governance_meeting_ref": "governance_meeting:p4.7:owner-reviewed",
+    "implementation_plan_ref": "research_slice_implementation:p4.7:manual-rollout",
+    "current_research_slice_bps": 200,
+    "approved_research_slice_bps": 500,
+    "max_research_slice_bps": 10000,
+    "raise_approved": true,
+    "proposal_ready": true,
+    "manual_owner_approved": true,
+    "governance_review_complete": true,
+    "post_approval_monitoring_ready": true,
+    "formula_only_decision": false,
+    "pre_scheduled_decision": false,
+    "automatic_execution_enabled": false,
+    "budget_mutation_enabled": false,
+    "treasury_transfer_enabled": false,
+    "emission_schedule_changed": false,
+    "payment_distribution_changed": false,
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "evidence_refs": [
+      "research_slice_decision:p4.7:owner-approved-control",
+      "research_slice_governance:p4.7:ready-control",
+      "market_yield:p4.7:measured",
+      "counterfactual_comparison:9b829495304931de",
+      "robustness_evidence:p4.7:passed",
+      "abuse_monitoring:p4.7:clean",
+      "fulfillment_health:p4.7:healthy",
+      "outcome_label_supply:p4.7:sufficient",
+      "ceiling_utilization:p4.7:published",
+      "owner_approval:p4.7:research-slice",
+      "governance_meeting:p4.7:owner-reviewed"
+    ],
+    "state": "approved_for_future_manual_rollout",
+    "contract_version": "research_slice_decision:v1:local_contract"
+  },
+  "unsafe_scale_guards": {
+    "research_slice_governance_change": true,
+    "production_writes": true,
+    "expected_error_contains": "Phase 4 local build must keep these workflows disabled"
+  },
+  "invalid_proposals": [
+    {
+      "id": "bad-ready-from-local",
+      "overrides": {
+        "proposal_ready": true,
+        "state": "ready_after_measured_evidence"
+      },
+      "expected_error_contains": [
+        "cannot be claimed from local fixtures",
+        "cannot be claimed by a local_only record"
+      ]
+    },
+    {
+      "id": "bad-formula-only",
+      "overrides": {
+        "formula_only_increase": true
+      },
+      "expected_error_contains": "formula-only"
+    },
+    {
+      "id": "bad-pre-scheduled",
+      "overrides": {
+        "pre_scheduled_increase": true
+      },
+      "expected_error_contains": "pre-scheduled"
+    },
+    {
+      "id": "bad-ready-without-counterfactual",
+      "base": "ready_proposal",
+      "omit_counterfactual": true,
+      "expected_error_contains": "requires supplied counterfactual comparison"
+    },
+    {
+      "id": "bad-ready-with-local-counterfactual",
+      "base": "ready_proposal",
+      "counterfactual_base": "local_counterfactual_comparison",
+      "expected_error_contains": "counterfactual_gate_passed flag mismatch"
+    },
+    {
+      "id": "bad-missing-robustness",
+      "base": "ready_proposal",
+      "counterfactual_base": "measured_counterfactual_comparison",
+      "overrides": {
+        "robustness_evidence_ready": false
+      },
+      "expected_error_contains": "robustness evidence"
+    },
+    {
+      "id": "bad-budget-mutation",
+      "overrides": {
+        "budget_mutation_enabled": true
+      },
+      "expected_error_contains": "must not mutate budgets"
+    },
+    {
+      "id": "bad-protected-wallet-key",
+      "overrides": {
+        "research_slice_wallet_key": "research slice wallet private material"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ],
+  "invalid_decisions": [
+    {
+      "id": "bad-approved-from-local",
+      "overrides": {
+        "raise_approved": true,
+        "state": "approved_for_future_manual_rollout"
+      },
+      "expected_error_contains": [
+        "requires ready proposal",
+        "cannot be claimed from local fixtures",
+        "manual owner approval"
+      ]
+    },
+    {
+      "id": "bad-approved-without-proposal",
+      "base": "ready_decision",
+      "omit_proposal": true,
+      "expected_error_contains": "requires supplied proposal"
+    },
+    {
+      "id": "bad-ready-decision-with-local-proposal",
+      "base": "ready_decision",
+      "proposal_base": "local_proposal",
+      "counterfactual_base": "local_counterfactual_comparison",
+      "expected_error_contains": "requires ready proposal"
+    },
+    {
+      "id": "bad-formula-only-decision",
+      "overrides": {
+        "formula_only_decision": true
+      },
+      "expected_error_contains": "formula-only"
+    },
+    {
+      "id": "bad-automatic-execution",
+      "overrides": {
+        "automatic_execution_enabled": true
+      },
+      "expected_error_contains": "must not enable automatic execution"
+    },
+    {
+      "id": "bad-treasury-transfer",
+      "overrides": {
+        "treasury_transfer_enabled": true
+      },
+      "expected_error_contains": "must not transfer treasury funds"
+    },
+    {
+      "id": "bad-emission-change",
+      "overrides": {
+        "emission_schedule_changed": true
+      },
+      "expected_error_contains": "must not change emission schedules"
+    },
+    {
+      "id": "bad-approved-bps-mismatch",
+      "base": "ready_decision",
+      "proposal_base": "ready_proposal",
+      "counterfactual_base": "measured_counterfactual_comparison",
+      "overrides": {
+        "approved_research_slice_bps": 600
+      },
+      "expected_error_contains": "approved_research_slice_bps must match proposal"
+    },
+    {
+      "id": "bad-protected-treasury-key",
+      "overrides": {
+        "treasury_private_key": "treasury private key material"
+      },
+      "expected_error_contains": "protected material"
+    }
+  ]
+}

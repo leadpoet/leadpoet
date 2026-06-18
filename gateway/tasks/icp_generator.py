@@ -1196,7 +1196,7 @@ async def generate_and_activate_icp_set(
             logger.warning(f"Failed to log ICP_SET_ACTIVATED: {e}")
 
     # ─────────────────────────────────────────────────────────────────
-    # Reference-model baseline run. See _spawn_baseline_if_needed for
+    # Baseline-arm run. See _spawn_baseline_if_needed for
     # idempotency + restart resilience details.
     # ─────────────────────────────────────────────────────────────────
     _spawn_baseline_if_needed(set_id, icps, icp_hash)
@@ -1216,7 +1216,7 @@ def _spawn_baseline_if_needed(
     icps: List[Dict[str, Any]],
     icp_set_hash: str,
 ) -> bool:
-    """Idempotent, restart-aware spawn of the reference-model baseline run.
+    """Idempotent, restart-aware spawn of the configured baseline-arm run.
 
     Returns True if we spawned a fresh task this call, False if we skipped
     (because today's run is either in flight or already completed).
@@ -1276,8 +1276,25 @@ def _spawn_baseline_if_needed(
     return True
 
 
+def _completed_baseline_model_ids_from_db(set_id: int, client) -> set[str]:
+    """Return completed baseline model_ids for ``set_id``."""
+    from qualification.scoring.baseline import REFERENCE_MODEL_ID
+
+    result = (
+        client.table("qualification_baselines")
+        .select("set_id, model_id, run_status")
+        .eq("set_id", set_id)
+        .eq("run_status", "completed")
+        .execute()
+    )
+    return {
+        row.get("model_id") or REFERENCE_MODEL_ID
+        for row in (result.data or [])
+    }
+
+
 async def _is_baseline_present_in_db(set_id: int) -> bool:
-    """Return True if today's baseline row exists with run_status='completed'.
+    """Return True if all configured baseline arms are completed.
 
     Used by the rotation-task polling loop to decide whether to re-fire a
     baseline run on gateway restart (when the in-process task registry is
@@ -1285,18 +1302,20 @@ async def _is_baseline_present_in_db(set_id: int) -> bool:
     """
     try:
         from gateway.db.client import get_write_client
+        from qualification.scoring.baseline_arms import daily_baseline_arm_specs
         client = get_write_client()
         if client is None:
             return False
-        result = (
-            client.table("qualification_baselines")
-            .select("set_id, run_status")
-            .eq("set_id", set_id)
-            .eq("run_status", "completed")
-            .limit(1)
-            .execute()
-        )
-        return bool(result.data)
+        required_model_ids = {arm.model_id for arm in daily_baseline_arm_specs()}
+        completed_model_ids = _completed_baseline_model_ids_from_db(set_id, client)
+        missing = required_model_ids - completed_model_ids
+        if missing:
+            logger.info(
+                f"baseline DB check: set_id={set_id} missing completed arms "
+                f"{sorted(missing)}"
+            )
+            return False
+        return True
     except Exception as e:
         logger.warning(f"baseline DB check failed for set_id={set_id}: {e}")
         # Conservatively return True so we don't endlessly re-fire on a
@@ -1309,7 +1328,7 @@ async def _run_baseline_in_background(
     icps: List[Dict[str, Any]],
     icp_set_hash: str,
 ) -> None:
-    """Background entry point for the reference-model baseline run.
+    """Background entry point for configured baseline-arm runs.
 
     Runs in the same process as the gateway, so it has full network
     access (Exa, OpenRouter, ScrapingDog) — none of which are reachable
@@ -1317,75 +1336,101 @@ async def _run_baseline_in_background(
     never re-raised: a failed baseline doesn't block champion selection,
     it just leaves no row for today.
     """
-    started = time.monotonic()
-    try:
-        from miner_models.qualification_model import qualify  # the reference model
-        from qualification.scoring.lead_scorer import score_company
-        from qualification.scoring.baseline import (
-            BaselineRecord,
-            REFERENCE_MODEL_ID,
-            run_and_save_baseline,
-            save_baseline_to_db,
-        )
-        from gateway.db.client import get_write_client
+    from gateway.db.client import get_write_client
+    from qualification.scoring.baseline import (
+        run_and_save_baseline,
+        save_baseline_failure_to_db,
+        save_baseline_to_db,
+    )
+    from qualification.scoring.baseline_arms import (
+        daily_baseline_arm_specs,
+        resolve_qualify_fn,
+    )
+    from qualification.scoring.lead_scorer import score_company
 
-        logger.info(
-            f"🧪 Reference baseline run starting: set_id={set_id} "
-            f"({len(icps)} ICPs, hash={icp_set_hash[:12]})"
-        )
+    arms = daily_baseline_arm_specs()
+    logger.info(
+        f"🧪 Baseline runner starting: set_id={set_id} "
+        f"({len(icps)} ICPs, hash={icp_set_hash[:12]}), arms="
+        + ", ".join(f"{arm.label}:{arm.model_id}" for arm in arms)
+    )
 
-        # Run the reference model + score each lead (persists to file too
-        # for traceability; we also push to DB below).
-        record = await run_and_save_baseline(
-            set_id=set_id,
-            icp_set=icps,
-            qualify_fn=qualify,
-            score_fn=score_company,
-        )
-
-        duration = time.monotonic() - started
-        client = get_write_client()
-        if client is not None:
-            save_baseline_to_db(
-                record,
-                client,
-                icp_set_hash=icp_set_hash,
-                run_duration_seconds=duration,
-                run_status="completed",
-            )
-            logger.info(
-                f"🧪 Reference baseline run complete: set_id={set_id} "
-                f"baseline_score={record.baseline_score:.2f} duration={duration:.0f}s"
-            )
-        else:
-            logger.error(
-                f"Reference baseline run finished but no DB client available; "
-                f"set_id={set_id} score={record.baseline_score:.2f} (file-only persistence)"
-            )
-    except Exception as e:
-        duration = time.monotonic() - started
-        logger.exception(
-            f"Reference baseline run FAILED for set_id={set_id} "
-            f"after {duration:.0f}s: {e}"
-        )
-        # Best-effort: write a 'failed' row so operators see the attempt
+    client = get_write_client()
+    completed_model_ids: set[str] = set()
+    if client is not None:
         try:
-            from qualification.scoring.baseline import BaselineRecord, REFERENCE_MODEL_ID
-            from gateway.db.client import get_write_client
-            client = get_write_client()
+            completed_model_ids = _completed_baseline_model_ids_from_db(set_id, client)
+        except Exception as e:
+            logger.warning(
+                f"baseline completed-arm lookup failed for set_id={set_id}: {e}; "
+                "running configured arms without DB skip"
+            )
+
+    for arm in arms:
+        if arm.model_id in completed_model_ids:
+            logger.info(
+                f"🧪 Baseline arm already completed; skipping "
+                f"set_id={set_id} model_id={arm.model_id}"
+            )
+            continue
+
+        started = time.monotonic()
+        try:
+            qualify = resolve_qualify_fn(arm)
+            logger.info(
+                f"🧪 Baseline arm starting: set_id={set_id} "
+                f"model_id={arm.model_id}"
+            )
+            record = await run_and_save_baseline(
+                set_id=set_id,
+                icp_set=icps,
+                qualify_fn=qualify,
+                score_fn=score_company,
+                model_id=arm.model_id,
+                score_cost_exempt=True,
+            )
+
+            duration = time.monotonic() - started
             if client is not None:
-                client.table("qualification_baselines").upsert({
-                    "set_id": set_id,
-                    "baseline_score": 0.0,
-                    "per_icp_scores": [],
-                    "scored_at": datetime.now(timezone.utc).isoformat(),
-                    "model_id": REFERENCE_MODEL_ID,
-                    "icp_set_hash": icp_set_hash,
-                    "run_duration_seconds": duration,
-                    "run_status": "failed",
-                }, on_conflict="set_id").execute()
-        except Exception:
-            pass
+                save_baseline_to_db(
+                    record,
+                    client,
+                    icp_set_hash=icp_set_hash,
+                    run_duration_seconds=duration,
+                    run_status="completed",
+                )
+                logger.info(
+                    f"🧪 Baseline arm complete: set_id={set_id} "
+                    f"model_id={arm.model_id} "
+                    f"baseline_score={record.baseline_score:.2f} "
+                    f"duration={duration:.0f}s"
+                )
+            else:
+                logger.error(
+                    f"Baseline arm finished but no DB client available; "
+                    f"set_id={set_id} model_id={arm.model_id} "
+                    f"score={record.baseline_score:.2f} (file-only persistence)"
+                )
+        except Exception as e:
+            duration = time.monotonic() - started
+            logger.exception(
+                f"Baseline arm FAILED for set_id={set_id} "
+                f"model_id={arm.model_id} after {duration:.0f}s: {e}"
+            )
+            try:
+                if client is not None:
+                    save_baseline_failure_to_db(
+                        set_id,
+                        arm.model_id,
+                        client,
+                        icp_set_hash=icp_set_hash,
+                        run_duration_seconds=duration,
+                    )
+            except Exception:
+                logger.exception(
+                    f"Failed to persist failed baseline row for "
+                    f"set_id={set_id} model_id={arm.model_id}"
+                )
 
 
 async def icp_rotation_task():

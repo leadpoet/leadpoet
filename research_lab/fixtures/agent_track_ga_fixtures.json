@@ -1,0 +1,456 @@
+{
+  "local_ga_criteria": {
+    "criteria_id": "agent_track_ga_criteria:p4.6:local-stub",
+    "workspace_beta_ref": "workspace_api_beta:p3.6:miner-alpha",
+    "security_policy_ref": "workspace_api_ga_security_policy:p4.6:pending",
+    "entropy_policy_ref": "workspace_entropy_policy:p4.6:pending",
+    "abuse_monitoring_policy_ref": "abuse_monitoring_policy:p4.6:pending",
+    "legal_terms_ref": "legal_terms:p4.6:agent-ga",
+    "slashing_policy_ref": "slashing_policy:p4.6:agent-ga",
+    "stake_threshold_usd": 500,
+    "min_crowned_patch_count": 1,
+    "min_funded_loop_count": 25,
+    "min_clean_receipt_count": 25,
+    "require_clean_receipts": true,
+    "require_entropy_accounting_live": true,
+    "require_security_review_passed": true,
+    "require_abuse_monitoring": true,
+    "require_legal_terms": true,
+    "require_slashing_terms": true,
+    "criteria_approved": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "agent_track_ga_criteria:p4.6:local-stub"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_criteria_stub",
+    "contract_version": "agent_track_ga_criteria:v1:local_contract"
+  },
+  "ready_ga_criteria": {
+    "criteria_id": "agent_track_ga_criteria:p4.6:owner-approved-control",
+    "workspace_beta_ref": "workspace_api_beta:p3.6:miner-alpha",
+    "security_policy_ref": "workspace_api_ga_security_policy:p4.6:approved",
+    "entropy_policy_ref": "workspace_entropy_policy:p4.6:approved",
+    "abuse_monitoring_policy_ref": "abuse_monitoring_policy:p4.6:approved",
+    "legal_terms_ref": "legal_terms:p4.6:agent-ga",
+    "slashing_policy_ref": "slashing_policy:p4.6:agent-ga",
+    "stake_threshold_usd": 500,
+    "min_crowned_patch_count": 1,
+    "min_funded_loop_count": 25,
+    "min_clean_receipt_count": 25,
+    "require_clean_receipts": true,
+    "require_entropy_accounting_live": true,
+    "require_security_review_passed": true,
+    "require_abuse_monitoring": true,
+    "require_legal_terms": true,
+    "require_slashing_terms": true,
+    "criteria_approved": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:p4.6:ga-criteria",
+    "evidence_refs": [
+      "agent_track_ga_criteria:p4.6:owner-approved-control",
+      "workspace_api_beta:p3.6:miner-alpha",
+      "workspace_api_ga:security-policy:p4.6",
+      "workspace_entropy_policy:p4.6:approved",
+      "abuse_monitoring_policy:p4.6:approved",
+      "legal_terms:p4.6:agent-ga",
+      "slashing_policy:p4.6:agent-ga",
+      "owner_approval:p4.6:ga-criteria"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_owner_policy",
+    "contract_version": "agent_track_ga_criteria:v1:local_contract"
+  },
+  "local_ga_candidate": {
+    "eligibility_id": "agent_track_candidate:p4.6:miner-alpha-local",
+    "miner_ref": "miner:agent-alpha",
+    "criteria_ref": "agent_track_ga_criteria:p4.6:local-stub",
+    "workspace_beta_ref": "workspace_api_beta:p3.6:miner-alpha",
+    "stake_ref": "stake:p4.6:pending",
+    "track_record_ref": "miner_track_record:p4.6:pending",
+    "clean_receipt_audit_ref": "clean_receipt_audit:p4.6:pending",
+    "legal_terms_ref": "legal_terms:p4.6:agent-ga",
+    "slashing_terms_ref": "slashing_terms:p4.6:agent-ga",
+    "entropy_ledger_ref": "workspace_entropy:p3.6:miner-alpha",
+    "abuse_monitoring_ref": "abuse_monitoring:p3.6:miner-alpha",
+    "security_review_ref": "workspace_security_review:p3.6:miner-alpha",
+    "stake_usd": 0,
+    "crowned_patch_count": 0,
+    "funded_loop_count": 0,
+    "clean_receipt_count": 0,
+    "tos_violation_count": 0,
+    "entropy_accounting_live": false,
+    "entropy_budget_enforced": false,
+    "abuse_monitoring_clean": false,
+    "legal_terms_accepted": false,
+    "slashing_terms_accepted": false,
+    "security_review_passed": false,
+    "ga_eligible": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "agent_track_candidate:p4.6:miner-alpha-local"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_candidate_stub",
+    "contract_version": "agent_track_ga_candidate:v1:local_contract"
+  },
+  "ready_ga_candidate": {
+    "eligibility_id": "agent_track_candidate:p4.6:miner-alpha-ready-control",
+    "miner_ref": "miner:agent-alpha",
+    "criteria_ref": "agent_track_ga_criteria:p4.6:owner-approved-control",
+    "workspace_beta_ref": "workspace_api_beta:p3.6:miner-alpha",
+    "stake_ref": "stake:p4.6:miner-alpha:verified",
+    "track_record_ref": "miner_track_record:p4.6:miner-alpha:verified",
+    "clean_receipt_audit_ref": "clean_receipt_audit:p4.6:miner-alpha",
+    "legal_terms_ref": "legal_terms:p4.6:agent-ga",
+    "slashing_terms_ref": "slashing_terms:p4.6:agent-ga",
+    "entropy_ledger_ref": "workspace_entropy:p3.6:miner-alpha",
+    "abuse_monitoring_ref": "abuse_monitoring:p3.6:miner-alpha",
+    "security_review_ref": "workspace_security_review:p3.6:miner-alpha",
+    "stake_usd": 750,
+    "crowned_patch_count": 1,
+    "funded_loop_count": 25,
+    "clean_receipt_count": 25,
+    "tos_violation_count": 0,
+    "entropy_accounting_live": true,
+    "entropy_budget_enforced": true,
+    "abuse_monitoring_clean": true,
+    "legal_terms_accepted": true,
+    "slashing_terms_accepted": true,
+    "security_review_passed": true,
+    "ga_eligible": true,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:p4.6:candidate",
+    "evidence_refs": [
+      "agent_track_candidate:p4.6:miner-alpha-ready-control",
+      "agent_track_ga_criteria:p4.6:owner-approved-control",
+      "workspace_api_beta:p3.6:miner-alpha",
+      "workspace_entropy:p3.6:miner-alpha",
+      "workspace_security_review:p3.6:miner-alpha",
+      "stake:p4.6:miner-alpha:verified",
+      "miner_track_record:p4.6:miner-alpha:verified",
+      "clean_receipt_audit:p4.6:miner-alpha",
+      "legal_terms:p4.6:agent-ga",
+      "slashing_terms:p4.6:agent-ga",
+      "abuse_monitoring:p3.6:miner-alpha",
+      "owner_approval:p4.6:candidate"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "eligible_after_track_record",
+    "contract_version": "agent_track_ga_candidate:v1:local_contract"
+  },
+  "local_ga_readiness": {
+    "ga_readiness_id": "agent_track_ga:p4.6:local-stub",
+    "criteria_ref": "agent_track_ga_criteria:p4.6:local-stub",
+    "candidate_ref": "agent_track_candidate:p4.6:miner-alpha-local",
+    "workspace_beta_ref": "workspace_api_beta:p3.6:miner-alpha",
+    "scale_readiness_ref": "scale_readiness:p4.0:local",
+    "entropy_ledger_ref": "workspace_entropy:p3.6:miner-alpha",
+    "security_review_ref": "workspace_security_review:p3.6:miner-alpha",
+    "abuse_monitoring_ref": "abuse_monitoring:p3.6:miner-alpha",
+    "owner_review_ref": "owner_approval:p4.6:pending",
+    "allowed_miner_refs": [
+      "miner:agent-alpha"
+    ],
+    "ga_claimed": false,
+    "criteria_approved": false,
+    "candidate_eligible": false,
+    "workspace_beta_valid": false,
+    "entropy_accounting_live": false,
+    "security_review_passed": false,
+    "abuse_monitoring_ready": false,
+    "owner_approved": false,
+    "public_agent_track_enabled": false,
+    "production_workflows_enabled": false,
+    "credential_material_issued": false,
+    "account_creation_enabled": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "agent_track_ga:p4.6:local-stub"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "local_ga_stub",
+    "contract_version": "agent_track_ga_readiness:v1:local_contract"
+  },
+  "ready_ga_readiness": {
+    "ga_readiness_id": "agent_track_ga:p4.6:ready-control",
+    "criteria_ref": "agent_track_ga_criteria:p4.6:owner-approved-control",
+    "candidate_ref": "agent_track_candidate:p4.6:miner-alpha-ready-control",
+    "workspace_beta_ref": "workspace_api_beta:p3.6:miner-alpha",
+    "scale_readiness_ref": "scale_readiness:p4.0:local",
+    "entropy_ledger_ref": "workspace_entropy:p3.6:miner-alpha",
+    "security_review_ref": "workspace_security_review:p3.6:miner-alpha",
+    "abuse_monitoring_ref": "abuse_monitoring:p3.6:miner-alpha",
+    "owner_review_ref": "owner_approval:p4.6:ga",
+    "allowed_miner_refs": [
+      "miner:agent-alpha"
+    ],
+    "ga_claimed": true,
+    "criteria_approved": true,
+    "candidate_eligible": true,
+    "workspace_beta_valid": true,
+    "entropy_accounting_live": true,
+    "security_review_passed": true,
+    "abuse_monitoring_ready": true,
+    "owner_approved": true,
+    "public_agent_track_enabled": false,
+    "production_workflows_enabled": false,
+    "credential_material_issued": false,
+    "account_creation_enabled": false,
+    "uses_local_fixtures": false,
+    "local_only": false,
+    "owner_approval_ref": "owner_approval:p4.6:ga",
+    "evidence_refs": [
+      "agent_track_ga:p4.6:ready-control",
+      "agent_track_ga_criteria:p4.6:owner-approved-control",
+      "agent_track_candidate:p4.6:miner-alpha-ready-control",
+      "workspace_api_ga:p4.6:readiness-control",
+      "workspace_api_beta:p3.6:miner-alpha",
+      "workspace_api_allowlist:p3.6:miner-alpha",
+      "workspace_entropy:p3.6:miner-alpha",
+      "workspace_security_review:p3.6:miner-alpha",
+      "abuse_monitoring:p3.6:miner-alpha",
+      "owner_approval:p4.6:ga"
+    ],
+    "production_writes": false,
+    "supabase_writes": false,
+    "public_workflows": false,
+    "state": "ready_after_owner_review",
+    "contract_version": "agent_track_ga_readiness:v1:local_contract"
+  },
+  "unsafe_scale_guards": {
+    "agent_track_ga": true,
+    "production_writes": true,
+    "expected_error_contains": "Phase 4 local build must keep these workflows disabled"
+  },
+  "invalid_ga_criteria": [
+    {
+      "id": "bad-approved-from-local",
+      "overrides": {
+        "criteria_approved": true,
+        "state": "ready_after_owner_policy"
+      },
+      "expected_error_contains": [
+        "cannot be claimed from local fixtures",
+        "cannot be claimed by a local_only record",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-low-stake-threshold",
+      "overrides": {
+        "stake_threshold_usd": 100
+      },
+      "expected_error_contains": "stake_threshold_usd"
+    },
+    {
+      "id": "bad-low-funded-loops",
+      "overrides": {
+        "min_funded_loop_count": 5
+      },
+      "expected_error_contains": "min_funded_loop_count"
+    },
+    {
+      "id": "bad-low-clean-receipts",
+      "overrides": {
+        "min_clean_receipt_count": 5
+      },
+      "expected_error_contains": "min_clean_receipt_count"
+    },
+    {
+      "id": "bad-approved-without-entropy",
+      "base": "ready_ga_criteria",
+      "overrides": {
+        "require_entropy_accounting_live": false
+      },
+      "expected_error_contains": "live entropy accounting"
+    },
+    {
+      "id": "bad-protected-token",
+      "overrides": {
+        "workspace_access_token": "workspace access token: secret"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-production-writes",
+      "overrides": {
+        "production_writes": true
+      },
+      "expected_error_contains": "must not enable production writes"
+    }
+  ],
+  "invalid_ga_candidates": [
+    {
+      "id": "bad-eligible-from-local",
+      "overrides": {
+        "ga_eligible": true,
+        "state": "eligible_after_track_record"
+      },
+      "expected_error_contains": [
+        "requires approved criteria",
+        "cannot be claimed from local fixtures",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-no-supplied-criteria",
+      "base": "ready_ga_candidate",
+      "omit_criteria": true,
+      "expected_error_contains": "requires supplied criteria"
+    },
+    {
+      "id": "bad-insufficient-track-record",
+      "base": "ready_ga_candidate",
+      "criteria_base": "ready_ga_criteria",
+      "overrides": {
+        "crowned_patch_count": 0,
+        "funded_loop_count": 24,
+        "clean_receipt_count": 25
+      },
+      "expected_error_contains": "funded-loop track record"
+    },
+    {
+      "id": "bad-crowned-patch-without-clean-receipts",
+      "base": "ready_ga_candidate",
+      "criteria_base": "ready_ga_criteria",
+      "overrides": {
+        "funded_loop_count": 0,
+        "clean_receipt_count": 0
+      },
+      "expected_error_contains": "clean_receipt_count"
+    },
+    {
+      "id": "bad-tos-violation",
+      "base": "ready_ga_candidate",
+      "criteria_base": "ready_ga_criteria",
+      "overrides": {
+        "tos_violation_count": 1
+      },
+      "expected_error_contains": "zero ToS violations"
+    },
+    {
+      "id": "bad-missing-slashing-terms",
+      "base": "ready_ga_candidate",
+      "criteria_base": "ready_ga_criteria",
+      "overrides": {
+        "slashing_terms_accepted": false
+      },
+      "expected_error_contains": "accepted slashing terms"
+    },
+    {
+      "id": "bad-protected-private-key",
+      "overrides": {
+        "agent_private_key": "agent private key material"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-supabase-writes",
+      "overrides": {
+        "supabase_writes": true
+      },
+      "expected_error_contains": "must not enable Supabase writes"
+    }
+  ],
+  "invalid_ga_readiness": [
+    {
+      "id": "bad-ga-from-local",
+      "base": "local_ga_readiness",
+      "overrides": {
+        "ga_claimed": true,
+        "state": "ready_after_owner_review"
+      },
+      "expected_error_contains": [
+        "cannot be claimed from local fixtures",
+        "cannot be claimed by a local_only record",
+        "requires owner approval"
+      ]
+    },
+    {
+      "id": "bad-no-criteria",
+      "base": "ready_ga_readiness",
+      "omit_criteria": true,
+      "expected_error_contains": "requires supplied criteria"
+    },
+    {
+      "id": "bad-no-candidate",
+      "base": "ready_ga_readiness",
+      "omit_candidate": true,
+      "expected_error_contains": "requires supplied candidate"
+    },
+    {
+      "id": "bad-no-workspace-beta",
+      "base": "ready_ga_readiness",
+      "omit_workspace_beta": true,
+      "expected_error_contains": [
+        "requires supplied workspace_beta",
+        "requires supplied workspace_entropy",
+        "requires supplied workspace_security"
+      ]
+    },
+    {
+      "id": "bad-local-workspace-beta",
+      "base": "ready_ga_readiness",
+      "workspace_supplied": "local",
+      "expected_error_contains": "workspace_beta_valid flag mismatch"
+    },
+    {
+      "id": "bad-public-agent-track-enabled",
+      "base": "ready_ga_readiness",
+      "overrides": {
+        "public_agent_track_enabled": true
+      },
+      "expected_error_contains": "must not enable public agent track"
+    },
+    {
+      "id": "bad-credential-material-issued",
+      "base": "ready_ga_readiness",
+      "overrides": {
+        "credential_material_issued": true
+      },
+      "expected_error_contains": "must not issue credential material"
+    },
+    {
+      "id": "bad-account-creation-enabled",
+      "base": "ready_ga_readiness",
+      "overrides": {
+        "account_creation_enabled": true
+      },
+      "expected_error_contains": "must not create Workspace accounts"
+    },
+    {
+      "id": "bad-protected-session-token",
+      "overrides": {
+        "session_token": "session token: secret"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-candidate-flag-mismatch",
+      "base": "ready_ga_readiness",
+      "overrides": {
+        "candidate_eligible": false
+      },
+      "expected_error_contains": "candidate_eligible flag mismatch"
+    }
+  ]
+}

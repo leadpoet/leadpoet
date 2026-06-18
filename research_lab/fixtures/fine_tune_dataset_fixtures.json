@@ -1,0 +1,324 @@
+{
+  "local_dataset_manifest": {
+    "dataset_id": "fine_tune_dataset:p3.3:local-engine-v-next",
+    "source_corpus_ref": "trajectory_corpus:p3.1:built-local",
+    "source_corpus_hash": "sha256:trajectory-corpus-local",
+    "source_contract_version": "trajectory_corpus:v1:local_contract",
+    "source_record_hashes": [
+      "sha256:source-record-local-001",
+      "sha256:source-record-local-002",
+      "sha256:source-record-local-003"
+    ],
+    "train_count": 1,
+    "validation_count": 1,
+    "holdout_count": 1,
+    "component_refs": [
+      "component:qualification.discovery",
+      "component:qualification.scoring"
+    ],
+    "island_refs": [
+      "island:generalist"
+    ],
+    "split_policy_ref": "split_policy:p3.1:deterministic-v1",
+    "dataset_hash": "sha256:pending",
+    "dataset_card_ref": "dataset_card:p3.3:local-engine-v-next",
+    "rights_summary_ref": "rights_summary:p3.3:local",
+    "protected_filter_ref": "protected_filter:p3.3:local",
+    "leakage_report_ref": "leakage_report:p3.3:local",
+    "measured_corpus_ready": false,
+    "rights_complete": false,
+    "protected_data_excluded": true,
+    "eval_leakage_guard_passed": true,
+    "train_eval_separation_passed": true,
+    "holdout_locked": true,
+    "local_only": true,
+    "uses_local_fixtures": true,
+    "dataset_ready_claimed": false,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "trajectory_corpus:p3.1:built-local"
+    ],
+    "state": "local_contract_stub",
+    "contract_version": "fine_tune_dataset:v1:local_contract"
+  },
+  "local_training_run": {
+    "training_run_id": "engine_finetune_run:p3.3:local-stub",
+    "dataset_ref": "fine_tune_dataset:p3.3:local-engine-v-next",
+    "dataset_hash": "sha256:from-local-dataset",
+    "base_engine_version": "engine-v1:local-contract",
+    "candidate_model_ref": "model_candidate:engine-v-next:pending",
+    "candidate_model_hash_ref": "sha256:candidate-model-pending",
+    "hyperparam_config_hash": "sha256:hyperparams-local",
+    "training_plan_ref": "training_plan:p3.3:local",
+    "cost_cap_ref": "cost_cap:p3.3:local",
+    "matched_budget_eval_ref": "engine_ab:pending",
+    "training_enabled": false,
+    "training_started": false,
+    "training_completed": false,
+    "model_weights_published": false,
+    "model_registry_write": false,
+    "production_promotion_requested": false,
+    "success_claimed": false,
+    "matched_budget_eval_passed": false,
+    "measured_yield_delta_pct": 0.0,
+    "local_only": true,
+    "uses_local_fixtures": true,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "fine_tune_dataset:p3.3:local-engine-v-next"
+    ],
+    "state": "local_training_stub",
+    "contract_version": "engine_finetune_training:v1:local_contract"
+  },
+    "builder_args": {
+        "dataset_id": "fine_tune_dataset:p3.3:built-local",
+        "source_corpus_ref": "trajectory_corpus:p3.1:built-local",
+    "source_corpus_hash": "sha256:trajectory-corpus-local",
+    "source_record_hashes": [
+      "sha256:source-record-local-001",
+      "sha256:source-record-local-002",
+      "sha256:source-record-local-003"
+    ],
+    "train_count": 1,
+    "validation_count": 1,
+    "holdout_count": 1,
+    "component_refs": [
+      "component:qualification.discovery"
+    ],
+    "island_refs": [
+      "island:generalist"
+    ],
+    "split_policy_ref": "split_policy:p3.1:deterministic-v1",
+    "dataset_card_ref": "dataset_card:p3.3:built-local",
+    "rights_summary_ref": "rights_summary:p3.3:built-local",
+    "protected_filter_ref": "protected_filter:p3.3:built-local",
+    "leakage_report_ref": "leakage_report:p3.3:built-local",
+        "uses_local_fixtures": true,
+        "local_only": true
+    },
+    "malformed_dataset_manifest": {
+        "raw_dataset_row": "do not train on malformed raw row"
+    },
+    "malformed_training_run": {
+        "model_checkpoint": "do not include checkpoint bytes in malformed payload"
+    },
+    "invalid_dataset_manifests": [
+        {
+            "id": "bad-malformed-dataset-still-reports-protected-material",
+            "base": "malformed_dataset_manifest",
+            "expected_error_contains": [
+                "protected material",
+                "missing required fine-tune dataset field"
+            ]
+        },
+        {
+            "id": "bad-dataset-ready-from-local-fixtures",
+            "overrides": {
+        "dataset_ready_claimed": true,
+        "state": "ready_after_corpus"
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "minimum train rows",
+        "minimum holdout rows",
+        "measured_corpus_ready",
+        "rights_complete",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-dataset-hash",
+      "overrides": {
+        "dataset_hash": "sha256:wrong"
+      },
+      "expected_error_contains": "dataset_hash must match fine-tune dataset manifest"
+    },
+    {
+      "id": "bad-component-prefix",
+      "overrides": {
+        "component_refs": [
+          "qualification.discovery"
+        ]
+      },
+      "expected_error_contains": "component_refs must use approved prefixes"
+    },
+    {
+      "id": "bad-raw-dataset-key",
+      "overrides": {
+        "raw_dataset_row": "do not train on raw row"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-ready-without-leakage-guard",
+      "overrides": {
+        "dataset_ready_claimed": true,
+        "uses_local_fixtures": false,
+        "local_only": false,
+        "train_count": 25,
+        "holdout_count": 5,
+        "measured_corpus_ready": true,
+        "rights_complete": true,
+        "protected_data_excluded": true,
+        "eval_leakage_guard_passed": false,
+        "train_eval_separation_passed": true,
+        "holdout_locked": true,
+        "owner_approval_ref": "owner_approval:p3.3",
+        "evidence_refs": [
+          "trajectory_corpus:p3.1:measured"
+        ],
+        "state": "ready_after_corpus"
+      },
+      "expected_error_contains": "fine-tune dataset readiness requires eval_leakage_guard_passed"
+    }
+    ],
+    "invalid_training_runs": [
+        {
+            "id": "bad-malformed-training-still-reports-protected-material",
+            "base": "malformed_training_run",
+            "expected_error_contains": [
+                "protected material",
+                "missing required fine-tune training field"
+            ]
+        },
+        {
+            "id": "bad-training-starts-from-local-fixture",
+            "overrides": {
+        "training_enabled": true,
+        "training_started": true
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-model-weights-published",
+      "overrides": {
+        "model_weights_published": true
+      },
+      "expected_error_contains": "must not publish model weights"
+    },
+    {
+      "id": "bad-model-registry-write",
+      "overrides": {
+        "model_registry_write": true
+      },
+      "expected_error_contains": "must not write model registry"
+    },
+    {
+      "id": "bad-production-promotion-request",
+      "overrides": {
+        "production_promotion_requested": true
+      },
+      "expected_error_contains": "must not request production promotion"
+    },
+        {
+            "id": "bad-success-without-matched-budget-eval",
+            "overrides": {
+                "success_claimed": true
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "matched_budget_eval_passed",
+        "measured_yield_delta_pct >= 20",
+                "owner_approval_ref"
+            ]
+        },
+        {
+            "id": "bad-success-with-pending-engine-ab-ref",
+            "overrides": {
+                "training_completed": true,
+                "success_claimed": true,
+                "matched_budget_eval_passed": true,
+                "measured_yield_delta_pct": 25.0,
+                "local_only": false,
+                "uses_local_fixtures": false,
+                "owner_approval_ref": "owner_approval:p3.3",
+                "evidence_refs": [
+                    "engine_ab:pending"
+                ]
+            },
+            "expected_error_contains": "non-pending engine_ab matched-budget evidence"
+        },
+        {
+            "id": "bad-success-without-training-completed",
+            "overrides": {
+                "success_claimed": true,
+                "matched_budget_eval_passed": true,
+                "measured_yield_delta_pct": 25.0,
+                "matched_budget_eval_ref": "engine_ab:p3.4:measured",
+                "local_only": false,
+                "uses_local_fixtures": false,
+                "owner_approval_ref": "owner_approval:p3.3",
+                "evidence_refs": [
+                    "engine_ab:p3.4:measured"
+                ]
+            },
+            "expected_error_contains": "fine-tune success requires training_completed"
+        },
+        {
+            "id": "bad-success-without-evidence-refs",
+            "overrides": {
+                "training_completed": true,
+                "success_claimed": true,
+                "matched_budget_eval_passed": true,
+                "measured_yield_delta_pct": 25.0,
+                "matched_budget_eval_ref": "engine_ab:p3.4:measured",
+                "local_only": false,
+                "uses_local_fixtures": false,
+                "owner_approval_ref": "owner_approval:p3.3",
+                "evidence_refs": []
+            },
+            "expected_error_contains": "fine-tune success requires evidence_refs"
+        },
+        {
+            "id": "bad-success-evidence-ref-mismatch",
+            "overrides": {
+                "training_completed": true,
+                "success_claimed": true,
+                "matched_budget_eval_passed": true,
+                "measured_yield_delta_pct": 25.0,
+                "matched_budget_eval_ref": "engine_ab:p3.4:measured",
+                "local_only": false,
+                "uses_local_fixtures": false,
+                "owner_approval_ref": "owner_approval:p3.3",
+                "evidence_refs": [
+                    "engine_ab:p3.4:other"
+                ]
+            },
+            "expected_error_contains": "evidence_refs must include matched_budget_eval_ref"
+        },
+        {
+            "id": "bad-success-local-even-with-eval",
+            "overrides": {
+        "success_claimed": true,
+        "matched_budget_eval_passed": true,
+        "measured_yield_delta_pct": 24.0,
+        "matched_budget_eval_ref": "engine_ab:p3.4:local"
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-raw-checkpoint-key",
+      "overrides": {
+        "model_checkpoint": "do not include checkpoint bytes"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-ready-state-without-success",
+      "overrides": {
+        "state": "ready_after_matched_budget_eval"
+      },
+      "expected_error_contains": "ready_after_matched_budget_eval state requires success_claimed"
+    }
+  ]
+}

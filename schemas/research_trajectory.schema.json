@@ -1,0 +1,594 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leadpoet.com/schemas/research_trajectory.schema.json",
+  "title": "Leadpoet Research Lab Research Trajectory",
+  "description": "Event-sourced trajectory log for a Research Lab brief. This schema intentionally excludes raw prompts, champion code, judge prompts, unsanitized brief text, and scraped page content.",
+  "type": "object",
+  "required": [
+    "trajectory_id",
+    "schema_version",
+    "brief_id",
+    "island",
+    "funder_hotkey",
+    "brief_sanitized_ref",
+    "novelty_gate",
+    "engine_version",
+    "champion_base",
+    "created_at",
+    "events",
+    "final"
+  ],
+  "properties": {
+    "trajectory_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "brief_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "island": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "funder_hotkey": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "brief_sanitized_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "novelty_gate": {
+      "type": "object",
+      "required": ["result", "similarity", "nearest_prior_receipt"],
+      "properties": {
+        "result": {
+          "enum": ["pass", "reject"]
+        },
+        "similarity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "nearest_prior_receipt": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    },
+    "engine_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "champion_base": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    },
+    "final": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/final"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "event": {
+      "type": "object",
+      "required": ["seq", "ts", "type", "cost_usd", "anchored_hash"],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "enum": [
+            "PROBE",
+            "LOOP_FUNDED",
+            "NODE_DRAFTED",
+            "NODE_EVALUATED",
+            "NODE_REFLECTED",
+            "PLATEAU_STOP",
+            "L2_PROMOTED",
+            "LANE_ENTERED",
+            "PROBATION_SET_SCORED",
+            "CROWNED",
+            "REVERTED",
+            "FINALIZED"
+          ]
+        },
+        "cost_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "anchored_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "probe_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "result_quantized": {
+          "type": "number"
+        },
+        "fixtures_used": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "loop_n": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "balance_before": {
+          "type": "number",
+          "minimum": 0
+        },
+        "node_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "parent_id": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "operator": {
+          "enum": ["draft", "improve", "debug", "merge"]
+        },
+        "component": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "patch_type": {
+          "enum": ["PROMPT_EDIT", "PARAM_EDIT", "STRATEGY_SWAP", "SOURCE_ADD", "CODE_EDIT"]
+        },
+        "hypothesis": {
+          "$ref": "#/$defs/hypothesis"
+        },
+        "patch_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "model_used": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "tokens": {
+          "$ref": "#/$defs/tokens"
+        },
+        "status": {
+          "enum": ["scored", "crash", "timeout", "guardrail_breach"]
+        },
+        "rung": {
+          "enum": ["L0", "L1"]
+        },
+        "metrics": {
+          "$ref": "#/$defs/node_metrics"
+        },
+        "paired_lcb_vs_parent": {
+          "type": ["number", "null"]
+        },
+        "fixtures": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "cache_hits": {
+          "type": "object",
+          "required": ["snapshot", "verdict"],
+          "properties": {
+            "snapshot": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "verdict": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "execution_trace_ref": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        },
+        "lesson": {
+          "$ref": "#/$defs/lesson"
+        },
+        "lesson_embedding_ref": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        },
+        "lesson_provenance": {
+          "$ref": "#/$defs/lesson_provenance"
+        },
+        "reason": {
+          "enum": ["plateau", "balance_exhausted", "funder_stop"]
+        },
+        "best_node_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "l2_score": {
+          "type": "number"
+        },
+        "champion_same_day_l2": {
+          "type": "number"
+        },
+        "delta": {
+          "type": "number"
+        },
+        "entry_bar_passed": {
+          "type": "boolean"
+        },
+        "lane_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "set_n": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "set_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "d_paired_per_icp": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "running_lcb": {
+          "type": "number"
+        },
+        "decision": {
+          "enum": ["continue", "crown", "futility_stop"]
+        },
+        "area": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provisional_window_end": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "revert_evidence_ref": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "PROBE" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["probe_id", "result_quantized", "fixtures_used"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "LOOP_FUNDED" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["loop_n", "balance_before"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "NODE_DRAFTED" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["node_id", "parent_id", "operator", "component", "patch_type", "hypothesis", "patch_ref", "model_used", "tokens"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "NODE_EVALUATED" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["node_id", "status", "rung", "metrics", "paired_lcb_vs_parent", "fixtures", "cache_hits", "execution_trace_ref"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "NODE_REFLECTED" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["node_id", "lesson", "lesson_embedding_ref", "lesson_provenance"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "PLATEAU_STOP" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["reason", "best_node_id"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "L2_PROMOTED" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["node_id", "l2_score", "champion_same_day_l2", "delta", "entry_bar_passed"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "enum": ["LANE_ENTERED", "PROBATION_SET_SCORED"] } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["lane_id", "set_n", "set_hash", "d_paired_per_icp", "running_lcb", "decision"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "enum": ["CROWNED", "REVERTED", "FINALIZED"] } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["area", "epoch"]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "hypothesis": {
+      "type": "object",
+      "required": ["failure_mode", "mechanism", "predicted_delta", "falsifier"],
+      "properties": {
+        "failure_mode": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mechanism": {
+          "type": "string",
+          "minLength": 1
+        },
+        "predicted_delta": {
+          "type": "number"
+        },
+        "falsifier": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "tokens": {
+      "type": "object",
+      "required": ["in", "out"],
+      "properties": {
+        "in": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "out": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "node_metrics": {
+      "type": "object",
+      "required": [
+        "proxy_score",
+        "evidence_defect_rate_by_category",
+        "coverage",
+        "cost_per_icp",
+        "latency_s",
+        "schema_validity",
+        "complexity"
+      ],
+      "properties": {
+        "proxy_score": {
+          "type": "number"
+        },
+        "evidence_defect_rate_by_category": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "cost_per_icp": {
+          "type": "number",
+          "minimum": 0
+        },
+        "latency_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "schema_validity": {
+          "type": "boolean"
+        },
+        "complexity": {
+          "type": "object",
+          "required": ["diff_loc", "prompt_pack_tokens", "component_count"],
+          "properties": {
+            "diff_loc": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "prompt_pack_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "component_count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "lesson": {
+      "type": "object",
+      "required": ["worked", "failed", "why", "next_question"],
+      "properties": {
+        "worked": {
+          "type": "string"
+        },
+        "failed": {
+          "type": "string"
+        },
+        "why": {
+          "type": "string"
+        },
+        "next_question": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "lesson_provenance": {
+      "type": "object",
+      "required": ["champion_base", "component", "eval_version"],
+      "properties": {
+        "champion_base": {
+          "type": "string",
+          "minLength": 1
+        },
+        "component": {
+          "type": "string",
+          "minLength": 1
+        },
+        "eval_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "final": {
+      "type": "object",
+      "required": ["settlement"],
+      "properties": {
+        "settlement": {
+          "type": "object",
+          "required": ["loops_consumed", "probation_charged", "balance_returned", "crown", "grant_state", "receipt_ref"],
+          "properties": {
+            "loops_consumed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "probation_charged": {
+              "type": "boolean"
+            },
+            "balance_returned": {
+              "type": "number",
+              "minimum": 0
+            },
+            "crown": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "required": ["area", "started_epoch", "grant_share", "term_k"],
+                  "properties": {
+                    "area": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "started_epoch": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "grant_share": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "term_k": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "grant_state": {
+              "type": "string",
+              "minLength": 1
+            },
+            "receipt_ref": {
+              "type": ["string", "null"],
+              "maxLength": 256
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

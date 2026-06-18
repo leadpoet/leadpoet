@@ -1,0 +1,634 @@
+{
+  "projection_request": {
+    "generated_for_date": "2026-06-16",
+    "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+    "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+    "novelty_index_ref": "novelty_index:market-local-v1",
+    "public_cell_refs": [
+      "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "map_cell:healthcare:evidence_adapter:SOURCE_ADD"
+    ],
+    "allocator_prediction_refs": [
+      "allocator_prediction:16ee81146e1f06d5"
+    ],
+    "component_registry_refs": [
+      "component_registry:p2.2:prompt-template",
+      "component_registry:p2.2:evidence-adapter"
+    ]
+  },
+  "expected_projection": {
+    "projection_id": "research_map_v1_projection:b288587890b37cab",
+    "generated_for_date": "2026-06-16",
+    "map_version": "v1",
+    "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+    "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+    "novelty_index_ref": "novelty_index:market-local-v1",
+    "public_cell_refs": [
+      "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "map_cell:healthcare:evidence_adapter:SOURCE_ADD"
+    ],
+    "allocator_prediction_refs": [
+      "allocator_prediction:16ee81146e1f06d5"
+    ],
+    "component_registry_refs": [
+      "component_registry:p2.2:prompt-template",
+      "component_registry:p2.2:evidence-adapter"
+    ],
+    "production_results_ledger_refs": [],
+    "quote_endpoint_path": "/research-map/v1/novelty/quote",
+    "state": "local_contract_stub",
+    "uses_local_fixtures": true,
+    "production_map_data_ready": false,
+    "live_api_enabled": false,
+    "public_api_server_started": false,
+    "production_publish_enabled": false,
+    "supabase_read_enabled": false,
+    "supabase_write_enabled": false,
+    "local_only": true,
+    "protected_material_flags_checked": true,
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "visibility_policy": "sanitized_trace",
+    "artifact_release_state": "sanitized_trace"
+  },
+  "invalid_projections": [
+    {
+      "projection_id": "research_map_v1_projection:bad-live-api",
+      "generated_for_date": "2026-06-16",
+      "map_version": "v1",
+      "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+      "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+      "novelty_index_ref": "novelty_index:market-local-v1",
+      "public_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "allocator_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "component_registry_refs": [
+        "component_registry:p2.2:prompt-template"
+      ],
+      "production_results_ledger_refs": [],
+      "live_api_enabled": true,
+      "expected_error_contains": "live_api_enabled must remain false"
+    },
+    {
+      "projection_id": "research_map_v1_projection:bad-server",
+      "generated_for_date": "2026-06-16",
+      "map_version": "v1",
+      "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+      "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+      "novelty_index_ref": "novelty_index:market-local-v1",
+      "public_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "allocator_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "component_registry_refs": [
+        "component_registry:p2.2:prompt-template"
+      ],
+      "production_results_ledger_refs": [],
+      "public_api_server_started": true,
+      "expected_error_contains": "public_api_server_started must remain false"
+    },
+    {
+      "projection_id": "research_map_v1_projection:bad-prod-ready-fixture",
+      "generated_for_date": "2026-06-16",
+      "map_version": "v1",
+      "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+      "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+      "novelty_index_ref": "novelty_index:market-local-v1",
+      "public_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "allocator_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "component_registry_refs": [
+        "component_registry:p2.2:prompt-template"
+      ],
+      "production_results_ledger_refs": [
+        "results_ledger:prod-001"
+      ],
+      "production_map_data_ready": true,
+      "state": "ready_after_production_data",
+      "expected_error_contains": [
+        "local Research Map v1 projection cannot claim production_map_data_ready",
+        "local Research Map v1 projection cannot include production_results_ledger_refs",
+        "ready_after_production_data projection requires real production map data"
+      ]
+    },
+    {
+      "projection_id": "research_map_v1_projection:bad-prod-ready-state-linkage",
+      "generated_for_date": "2026-06-16",
+      "map_version": "v1",
+      "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+      "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+      "novelty_index_ref": "novelty_index:market-local-v1",
+      "public_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "allocator_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "component_registry_refs": [
+        "component_registry:p2.2:prompt-template"
+      ],
+      "production_results_ledger_refs": [
+        "results_ledger:prod-001"
+      ],
+      "uses_local_fixtures": false,
+      "production_map_data_ready": true,
+      "expected_error_contains": "production_map_data_ready requires ready_after_production_data state"
+    },
+    {
+      "projection_id": "research_map_v1_projection:bad-prod-ready-ledger-linkage",
+      "generated_for_date": "2026-06-16",
+      "map_version": "v1",
+      "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+      "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+      "novelty_index_ref": "novelty_index:market-local-v1",
+      "public_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "allocator_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "component_registry_refs": [
+        "component_registry:p2.2:prompt-template"
+      ],
+      "production_results_ledger_refs": [],
+      "uses_local_fixtures": false,
+      "production_map_data_ready": true,
+      "state": "ready_after_production_data",
+      "expected_error_contains": "production_map_data_ready requires production_results_ledger_refs"
+    },
+    {
+      "projection_id": "research_map_v1_projection:bad-ledger-ref",
+      "generated_for_date": "2026-06-16",
+      "map_version": "v1",
+      "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+      "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+      "novelty_index_ref": "novelty_index:market-local-v1",
+      "public_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "allocator_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "component_registry_refs": [
+        "component_registry:p2.2:prompt-template"
+      ],
+      "production_results_ledger_refs": [
+        "fixture_ledger:not-prod"
+      ],
+      "uses_local_fixtures": false,
+      "production_map_data_ready": true,
+      "state": "ready_after_production_data",
+      "expected_error_contains": "production_results_ledger_refs must be results_ledger:-prefixed"
+    },
+    {
+      "projection_id": "research_map_v1_projection:bad-raw-key",
+      "generated_for_date": "2026-06-16",
+      "map_version": "v1",
+      "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+      "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+      "novelty_index_ref": "novelty_index:market-local-v1",
+      "public_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "allocator_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "component_registry_refs": [
+        "component_registry:p2.2:prompt-template"
+      ],
+      "production_results_ledger_refs": [],
+      "private_map_index": "raw nearest-neighbor vectors",
+      "expected_error_contains": "private_map_index"
+    },
+    {
+      "projection_id": "research_map_v1_projection:bad-protected-flag",
+      "generated_for_date": "2026-06-16",
+      "map_version": "v1",
+      "source_v0_projection_ref": "research_map_projection:e3d5636be372e33d",
+      "source_meta_allocator_selection_ref": "meta_allocator_selection:fixture-v1",
+      "novelty_index_ref": "novelty_index:market-local-v1",
+      "public_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "allocator_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "component_registry_refs": [
+        "component_registry:p2.2:prompt-template"
+      ],
+      "production_results_ledger_refs": [],
+      "contains_live_champion_ip": true,
+      "expected_error_contains": "contains_live_champion_ip"
+    }
+  ],
+  "quote_request": {
+    "request_id": "novelty_quote_request:fixture-v1",
+    "requester_ref": "miner:ss58-local-fixture",
+    "island": "fintech",
+    "target_component": "prompt_template",
+    "patch_type": "PROMPT_EDIT",
+    "sanitized_brief_ref": "sanitized_brief:fixture-v1",
+    "sanitized_query_terms": [
+      "reduce false positives",
+      "fintech qualification",
+      "pricing-page evidence"
+    ],
+    "source_projection_ref": "research_map_v1_projection:b288587890b37cab"
+  },
+  "invalid_quote_requests": [
+    {
+      "request_id": "novelty_quote_request:bad-live",
+      "requester_ref": "miner:ss58-local-fixture",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "sanitized_brief_ref": "sanitized_brief:fixture-v1",
+      "sanitized_query_terms": [
+        "reduce false positives"
+      ],
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "live_api_request": true,
+      "expected_error_contains": "live_api_request must remain false"
+    },
+    {
+      "request_id": "novelty_quote_request:bad-prod-traffic",
+      "requester_ref": "miner:ss58-local-fixture",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "sanitized_brief_ref": "sanitized_brief:fixture-v1",
+      "sanitized_query_terms": [
+        "reduce false positives"
+      ],
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "production_traffic": true,
+      "expected_error_contains": "production_traffic must remain false"
+    },
+    {
+      "request_id": "novelty_quote_request:bad-prod-data-fixture",
+      "requester_ref": "miner:ss58-local-fixture",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "sanitized_brief_ref": "sanitized_brief:fixture-v1",
+      "sanitized_query_terms": [
+        "reduce false positives"
+      ],
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "uses_production_map_data": true,
+      "expected_error_contains": "novelty quote request cannot use local fixtures and production map data simultaneously"
+    },
+    {
+      "request_id": "novelty_quote_request:bad-raw-key",
+      "requester_ref": "miner:ss58-local-fixture",
+      "island": "fintech",
+      "target_component": "prompt_template",
+      "patch_type": "PROMPT_EDIT",
+      "sanitized_brief_ref": "sanitized_brief:fixture-v1",
+      "sanitized_query_terms": [
+        "reduce false positives"
+      ],
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "raw_query": "customer private ICP text",
+      "expected_error_contains": "raw_query"
+    }
+  ],
+  "quote_response_request": {
+    "decision": "local_stub",
+    "novelty_score": 0.72,
+    "nearest_prior_receipt_refs": [
+      "receipt:prior-fintech-prompt-001"
+    ],
+    "nearest_cell_refs": [
+      "map_cell:fintech:prompt_template:PROMPT_EDIT"
+    ],
+    "suggested_cell_refs": [
+      "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "map_cell:healthcare:evidence_adapter:SOURCE_ADD"
+    ],
+    "quote_explanation_sanitized": "Local contract stub: nearest prior is related but leaves room for a narrower fintech evidence prompt."
+  },
+  "expected_quote_response": {
+    "quote_id": "novelty_quote:6a119dc772889ed4",
+    "request_id": "novelty_quote_request:fixture-v1",
+    "decision": "local_stub",
+    "novelty_score": 0.72,
+    "nearest_prior_receipt_refs": [
+      "receipt:prior-fintech-prompt-001"
+    ],
+    "nearest_cell_refs": [
+      "map_cell:fintech:prompt_template:PROMPT_EDIT"
+    ],
+    "suggested_cell_refs": [
+      "map_cell:fintech:prompt_template:PROMPT_EDIT",
+      "map_cell:healthcare:evidence_adapter:SOURCE_ADD"
+    ],
+    "quote_explanation_sanitized": "Local contract stub: nearest prior is related but leaves room for a narrower fintech evidence prompt.",
+    "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+    "source_prediction_refs": [
+      "allocator_prediction:16ee81146e1f06d5"
+    ],
+    "state": "local_stub",
+    "api_version": "research_map:v1:local_api_contract",
+    "uses_local_fixtures": true,
+    "uses_production_map_data": false,
+    "live_quote": false,
+    "public_api_response": false,
+    "production_data_ready": false,
+    "protected_material_flags_checked": true,
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "visibility_policy": "sanitized_trace",
+    "artifact_release_state": "sanitized_trace",
+    "local_only": true
+  },
+  "invalid_quote_responses": [
+    {
+      "quote_id": "novelty_quote:bad-live-quote",
+      "request_id": "novelty_quote_request:fixture-v1",
+      "decision": "local_stub",
+      "novelty_score": 0.72,
+      "nearest_prior_receipt_refs": [
+        "receipt:prior-fintech-prompt-001"
+      ],
+      "nearest_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "suggested_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "quote_explanation_sanitized": "Local contract stub.",
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "source_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "live_quote": true,
+      "expected_error_contains": "live_quote must remain false"
+    },
+    {
+      "quote_id": "novelty_quote:bad-public-response",
+      "request_id": "novelty_quote_request:fixture-v1",
+      "decision": "local_stub",
+      "novelty_score": 0.72,
+      "nearest_prior_receipt_refs": [
+        "receipt:prior-fintech-prompt-001"
+      ],
+      "nearest_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "suggested_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "quote_explanation_sanitized": "Local contract stub.",
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "source_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "public_api_response": true,
+      "expected_error_contains": "public_api_response must remain false"
+    },
+    {
+      "quote_id": "novelty_quote:bad-prod-ready-fixture",
+      "request_id": "novelty_quote_request:fixture-v1",
+      "decision": "pass",
+      "novelty_score": 0.88,
+      "nearest_prior_receipt_refs": [
+        "receipt:prior-fintech-prompt-001"
+      ],
+      "nearest_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "suggested_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "quote_explanation_sanitized": "Local contract stub.",
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "source_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "state": "ready_after_production_map",
+      "uses_production_map_data": true,
+      "production_data_ready": true,
+      "expected_error_contains": [
+        "novelty quote response cannot use local fixtures and production map data simultaneously",
+        "ready_after_production_map quote requires real production map data",
+        "local quote responses cannot claim production_data_ready"
+      ]
+    },
+    {
+      "quote_id": "novelty_quote:bad-prod-ready-state-linkage",
+      "request_id": "novelty_quote_request:fixture-v1",
+      "decision": "pass",
+      "novelty_score": 0.88,
+      "nearest_prior_receipt_refs": [
+        "receipt:prior-fintech-prompt-001"
+      ],
+      "nearest_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "suggested_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "quote_explanation_sanitized": "Local contract stub.",
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "source_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "uses_local_fixtures": false,
+      "uses_production_map_data": true,
+      "production_data_ready": true,
+      "expected_error_contains": "production_data_ready requires ready_after_production_map state"
+    },
+    {
+      "quote_id": "novelty_quote:bad-prod-ready-data-linkage",
+      "request_id": "novelty_quote_request:fixture-v1",
+      "decision": "pass",
+      "novelty_score": 0.88,
+      "nearest_prior_receipt_refs": [
+        "receipt:prior-fintech-prompt-001"
+      ],
+      "nearest_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "suggested_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "quote_explanation_sanitized": "Local contract stub.",
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "source_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "state": "ready_after_production_map",
+      "uses_local_fixtures": false,
+      "production_data_ready": true,
+      "expected_error_contains": "production_data_ready requires uses_production_map_data"
+    },
+    {
+      "quote_id": "novelty_quote:bad-score",
+      "request_id": "novelty_quote_request:fixture-v1",
+      "decision": "local_stub",
+      "novelty_score": 1.2,
+      "nearest_prior_receipt_refs": [
+        "receipt:prior-fintech-prompt-001"
+      ],
+      "nearest_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "suggested_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "quote_explanation_sanitized": "Local contract stub.",
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "source_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "expected_error_contains": "novelty_score must be in [0, 1]"
+    },
+    {
+      "quote_id": "novelty_quote:bad-raw-marker",
+      "request_id": "novelty_quote_request:fixture-v1",
+      "decision": "local_stub",
+      "novelty_score": 0.72,
+      "nearest_prior_receipt_refs": [
+        "receipt:prior-fintech-prompt-001"
+      ],
+      "nearest_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "suggested_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "quote_explanation_sanitized": "Contains raw query details from a private brief.",
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "source_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "expected_error_contains": "quote_explanation_sanitized"
+    },
+    {
+      "quote_id": "novelty_quote:bad-protected-flag",
+      "request_id": "novelty_quote_request:fixture-v1",
+      "decision": "local_stub",
+      "novelty_score": 0.72,
+      "nearest_prior_receipt_refs": [
+        "receipt:prior-fintech-prompt-001"
+      ],
+      "nearest_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "suggested_cell_refs": [
+        "map_cell:fintech:prompt_template:PROMPT_EDIT"
+      ],
+      "quote_explanation_sanitized": "Local contract stub.",
+      "source_projection_ref": "research_map_v1_projection:b288587890b37cab",
+      "source_prediction_refs": [
+        "allocator_prediction:16ee81146e1f06d5"
+      ],
+      "contains_judge_prompts": true,
+      "expected_error_contains": "contains_judge_prompts"
+    }
+  ],
+  "artifact_request": {
+    "local_uri": "local://research_map/v1/api_contract_fixture.json",
+    "artifact_kind": "api_contract_json"
+  },
+  "expected_artifact": {
+    "artifact_ref": "research_map_v1_artifact:5e0a5b3027197731",
+    "projection_id": "research_map_v1_projection:b288587890b37cab",
+    "artifact_kind": "api_contract_json",
+    "local_uri": "local://research_map/v1/api_contract_fixture.json",
+    "artifact_hash": "sha256:18154a5194a9294fb03584662a904b0c5b670e7060974bb89c00090fd974e9bb",
+    "api_version": "research_map:v1:local_api_contract",
+    "endpoint_path": "/research-map/v1/novelty/quote",
+    "state": "local_contract_artifact",
+    "local_only": true,
+    "public_api_server_started": false,
+    "live_api_enabled": false,
+    "production_publish_enabled": false,
+    "production_traffic_enabled": false,
+    "supabase_read_enabled": false,
+    "supabase_write_enabled": false,
+    "protected_material_flags_checked": true,
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "visibility_policy": "sanitized_trace",
+    "artifact_release_state": "sanitized_trace"
+  },
+  "invalid_artifacts": [
+    {
+      "artifact_ref": "research_map_v1_artifact:bad-server-started",
+      "projection_id": "research_map_v1_projection:b288587890b37cab",
+      "artifact_kind": "api_contract_json",
+      "local_uri": "local://research_map/v1/api_contract_fixture.json",
+      "artifact_hash": "sha256:8dc889bc71e78fb98aca61bc2892e98dd902c36c79949b89fd8114f64fbe45fc",
+      "public_api_server_started": true,
+      "expected_error_contains": "public_api_server_started must remain false"
+    },
+    {
+      "artifact_ref": "research_map_v1_artifact:bad-live-api",
+      "projection_id": "research_map_v1_projection:b288587890b37cab",
+      "artifact_kind": "api_contract_json",
+      "local_uri": "local://research_map/v1/api_contract_fixture.json",
+      "artifact_hash": "sha256:8dc889bc71e78fb98aca61bc2892e98dd902c36c79949b89fd8114f64fbe45fc",
+      "live_api_enabled": true,
+      "expected_error_contains": "live_api_enabled must remain false"
+    },
+    {
+      "artifact_ref": "research_map_v1_artifact:bad-uri",
+      "projection_id": "research_map_v1_projection:b288587890b37cab",
+      "artifact_kind": "api_contract_json",
+      "local_uri": "https://leadpoet.example/research-map/v1.json",
+      "artifact_hash": "sha256:8dc889bc71e78fb98aca61bc2892e98dd902c36c79949b89fd8114f64fbe45fc",
+      "expected_error_contains": "URI must remain local://"
+    },
+    {
+      "artifact_ref": "research_map_v1_artifact:bad-hash",
+      "projection_id": "research_map_v1_projection:b288587890b37cab",
+      "artifact_kind": "api_contract_json",
+      "local_uri": "local://research_map/v1/api_contract_fixture.json",
+      "artifact_hash": "sha256:bad",
+      "expected_error_contains": "artifact_hash does not match projection"
+    },
+    {
+      "artifact_ref": "research_map_v1_artifact:bad-raw-marker",
+      "projection_id": "research_map_v1_projection:b288587890b37cab",
+      "artifact_kind": "api_contract_json",
+      "local_uri": "local://research_map/v1/api_contract_fixture.json",
+      "artifact_hash": "sha256:8dc889bc71e78fb98aca61bc2892e98dd902c36c79949b89fd8114f64fbe45fc",
+      "api_version": "private map index export",
+      "expected_error_contains": "api_version"
+    },
+    {
+      "artifact_ref": "research_map_v1_artifact:bad-protected-flag",
+      "projection_id": "research_map_v1_projection:b288587890b37cab",
+      "artifact_kind": "api_contract_json",
+      "local_uri": "local://research_map/v1/api_contract_fixture.json",
+      "artifact_hash": "sha256:8dc889bc71e78fb98aca61bc2892e98dd902c36c79949b89fd8114f64fbe45fc",
+      "contains_private_customer_data": true,
+      "expected_error_contains": "contains_private_customer_data"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "research_map_live_api": true,
+    "production_writes": true,
+    "supabase_writes": true,
+    "public_workflows": true
+  }
+}

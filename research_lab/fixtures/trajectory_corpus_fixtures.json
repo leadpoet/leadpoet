@@ -1,0 +1,539 @@
+{
+  "schema_fixture_checks": [
+    {
+      "schema": "research_trajectory.schema.json",
+      "fixture": "research_trajectory.valid.json",
+      "valid": true
+    },
+    {
+      "schema": "results_ledger_row.schema.json",
+      "fixture": "results_ledger_row.valid.json",
+      "valid": true
+    },
+    {
+      "schema": "execution_trace.schema.json",
+      "fixture": "execution_trace.valid.json",
+      "valid": true
+    },
+    {
+      "schema": "evidence_bundle.schema.json",
+      "fixture": "evidence_bundle.valid.json",
+      "valid": true
+    }
+  ],
+  "valid_source_record": {
+    "source_id": "trajectory_source:p3.1:local:001",
+    "trajectory_id": "11111111-1111-4111-8111-111111111111",
+    "trajectory_hash": "sha256:trajectory-local-001",
+    "trajectory_schema_valid": true,
+    "event_count": 3,
+    "execution_trace_refs": [
+      "execution_trace:33333333-3333-4333-8333-333333333333"
+    ],
+    "evidence_bundle_refs": [
+      "evidence_bundle:44444444-4444-4444-8444-444444444444"
+    ],
+    "results_ledger_refs": [
+      "results_ledger:55555555-5555-4555-8555-555555555555"
+    ],
+    "receipt_refs": [
+      "receipt:11111111-1111-4111-8111-111111111111"
+    ],
+    "cost_ledger_refs": [
+      "cost_ledger:trace:33333333-3333-4333-8333-333333333333"
+    ],
+    "release_policy_ref": "release_policy:private-live-fixture",
+    "trajectory_rights_ref": "trajectory_rights:pending",
+    "distillation_rights_ref": "distillation_rights:pending",
+    "pii_review_ref": "pii_review:pending",
+    "legal_gate_ref": "legal_gate:pending",
+    "island": "generalist",
+    "component_refs": [
+      "component:qualification.discovery"
+    ],
+    "outcome_label_refs": [],
+    "split": "train",
+    "data_state": "local_fixture",
+    "measured_data": false,
+    "rights_verified": false,
+    "distillation_rights_verified": false,
+    "pii_review_passed": false,
+    "legal_gate_passed": false,
+    "protected_data_scanned": true,
+    "contains_live_champion_ip": false,
+    "contains_sealed_eval_details": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_private_customer_data": false,
+    "contains_judge_prompts": false,
+    "eligible_for_training": false,
+    "eligible_for_distillation": false
+  },
+  "source_records_for_builder": [
+    {
+      "source_id": "trajectory_source:p3.1:local:001",
+      "trajectory_id": "11111111-1111-4111-8111-111111111111",
+      "trajectory_hash": "sha256:trajectory-local-001",
+      "trajectory_schema_valid": true,
+      "event_count": 3,
+      "execution_trace_refs": [
+        "execution_trace:33333333-3333-4333-8333-333333333333"
+      ],
+      "evidence_bundle_refs": [
+        "evidence_bundle:44444444-4444-4444-8444-444444444444"
+      ],
+      "results_ledger_refs": [
+        "results_ledger:55555555-5555-4555-8555-555555555555"
+      ],
+      "receipt_refs": [
+        "receipt:11111111-1111-4111-8111-111111111111"
+      ],
+      "cost_ledger_refs": [
+        "cost_ledger:trace:33333333-3333-4333-8333-333333333333"
+      ],
+      "release_policy_ref": "release_policy:private-live-fixture",
+      "trajectory_rights_ref": "trajectory_rights:pending",
+      "distillation_rights_ref": "distillation_rights:pending",
+      "pii_review_ref": "pii_review:pending",
+      "legal_gate_ref": "legal_gate:pending",
+      "island": "generalist",
+      "component_refs": [
+        "component:qualification.discovery"
+      ],
+      "outcome_label_refs": [],
+      "split": "train",
+      "data_state": "local_fixture",
+      "measured_data": false,
+      "rights_verified": false,
+      "distillation_rights_verified": false,
+      "pii_review_passed": false,
+      "legal_gate_passed": false,
+      "protected_data_scanned": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "eligible_for_training": false,
+      "eligible_for_distillation": false
+    },
+    {
+      "source_id": "trajectory_source:p3.1:local:002",
+      "trajectory_id": "22222222-2222-4222-8222-222222222222",
+      "trajectory_hash": "sha256:trajectory-local-002",
+      "trajectory_schema_valid": true,
+      "event_count": 4,
+      "execution_trace_refs": [
+        "execution_trace:local-002"
+      ],
+      "evidence_bundle_refs": [
+        "evidence_bundle:local-002"
+      ],
+      "results_ledger_refs": [
+        "results_ledger:local-002"
+      ],
+      "receipt_refs": [
+        "receipt:local-002"
+      ],
+      "cost_ledger_refs": [
+        "cost_ledger:local-002"
+      ],
+      "release_policy_ref": "release_policy:private-live-fixture",
+      "trajectory_rights_ref": "trajectory_rights:pending",
+      "distillation_rights_ref": "distillation_rights:pending",
+      "pii_review_ref": "pii_review:pending",
+      "legal_gate_ref": "legal_gate:pending",
+      "island": "generalist",
+      "component_refs": [
+        "component:qualification.scoring"
+      ],
+      "outcome_label_refs": [],
+      "split": "validation",
+      "data_state": "local_fixture",
+      "measured_data": false,
+      "rights_verified": false,
+      "distillation_rights_verified": false,
+      "pii_review_passed": false,
+      "legal_gate_passed": false,
+      "protected_data_scanned": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "eligible_for_training": false,
+      "eligible_for_distillation": false
+    },
+    {
+      "source_id": "trajectory_source:p3.1:local:003",
+      "trajectory_id": "33333333-3333-4333-8333-333333333333",
+      "trajectory_hash": "sha256:trajectory-local-003",
+      "trajectory_schema_valid": true,
+      "event_count": 5,
+      "execution_trace_refs": [
+        "execution_trace:local-003"
+      ],
+      "evidence_bundle_refs": [
+        "evidence_bundle:local-003"
+      ],
+      "results_ledger_refs": [
+        "results_ledger:local-003"
+      ],
+      "receipt_refs": [
+        "receipt:local-003"
+      ],
+      "cost_ledger_refs": [
+        "cost_ledger:local-003"
+      ],
+      "release_policy_ref": "release_policy:private-live-fixture",
+      "trajectory_rights_ref": "trajectory_rights:pending",
+      "distillation_rights_ref": "distillation_rights:pending",
+      "pii_review_ref": "pii_review:pending",
+      "legal_gate_ref": "legal_gate:pending",
+      "island": "generalist",
+      "component_refs": [
+        "component:qualification.evidence_adapter"
+      ],
+      "outcome_label_refs": [],
+      "split": "holdout",
+      "data_state": "local_fixture",
+      "measured_data": false,
+      "rights_verified": false,
+      "distillation_rights_verified": false,
+      "pii_review_passed": false,
+      "legal_gate_passed": false,
+      "protected_data_scanned": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "eligible_for_training": false,
+      "eligible_for_distillation": false
+    }
+  ],
+  "valid_split_policy": {
+    "split_policy_id": "split_policy:p3.1:deterministic-v1",
+    "train_percent": 70,
+    "validation_percent": 15,
+    "holdout_percent": 15,
+    "deterministic_seed_ref": "sha256:split-seed-p3-1",
+    "group_by_fields": [
+      "trajectory_id",
+      "brief_id",
+      "customer_ref"
+    ],
+    "leakage_guard_enabled": true,
+    "holdout_locked": true,
+    "no_cross_split_trajectory_id": true,
+    "no_cross_split_brief_id": true,
+    "no_cross_split_customer_ref": true,
+    "min_holdout_trajectories": 5,
+    "state": "local_contract_stub"
+  },
+  "local_manifest": {
+    "corpus_id": "trajectory_corpus:p3.1:local-fixture",
+    "source_records": [],
+    "split_policy": {
+      "split_policy_id": "split_policy:p3.1:deterministic-v1",
+      "train_percent": 70,
+      "validation_percent": 15,
+      "holdout_percent": 15,
+      "deterministic_seed_ref": "sha256:split-seed-p3-1",
+      "group_by_fields": [
+        "trajectory_id",
+        "brief_id",
+        "customer_ref"
+      ],
+      "leakage_guard_enabled": true,
+      "holdout_locked": true,
+      "no_cross_split_trajectory_id": true,
+      "no_cross_split_brief_id": true,
+      "no_cross_split_customer_ref": true,
+      "min_holdout_trajectories": 5,
+      "state": "local_contract_stub"
+    },
+    "trajectory_count": 3,
+    "train_count": 1,
+    "validation_count": 1,
+    "holdout_count": 1,
+    "source_record_hashes": [],
+    "local_code_complete": true,
+    "training_ready_claimed": false,
+    "distillation_ready_claimed": false,
+    "calibration_ready_claimed": false,
+    "uses_local_fixtures": true,
+    "local_only": true,
+    "measured_data_only": false,
+    "rights_complete": false,
+    "protected_data_excluded": true,
+    "eval_leakage_guard_passed": true,
+    "outcome_labels_ready": false,
+    "owner_approval_ref": "",
+    "evidence_refs": [
+      "results_ledger:55555555-5555-4555-8555-555555555555",
+      "results_ledger:local-002",
+      "results_ledger:local-003"
+    ],
+    "state": "local_contract_stub",
+    "contract_version": "trajectory_corpus:v1:local_contract"
+  },
+  "invalid_sources": [
+    {
+      "id": "bad-raw-training-key",
+      "overrides": {
+        "raw_training_example": "do not include this"
+      },
+      "expected_error_contains": "protected material"
+    },
+    {
+      "id": "bad-local-source-claims-measured",
+      "overrides": {
+        "measured_data": true
+      },
+      "expected_error_contains": "local_fixture source records must not claim measured_data"
+    },
+    {
+      "id": "bad-training-eligible-without-rights",
+      "overrides": {
+        "data_state": "lab_measured",
+        "measured_data": true,
+        "eligible_for_training": true
+      },
+      "expected_error_contains": "training eligibility requires rights, PII review, and legal gate"
+    },
+    {
+      "id": "bad-distillation-without-training",
+      "overrides": {
+        "eligible_for_distillation": true
+      },
+      "expected_error_contains": "distillation eligibility requires training eligibility"
+    },
+    {
+      "id": "bad-execution-trace-prefix",
+      "overrides": {
+        "execution_trace_refs": [
+          "33333333-3333-4333-8333-333333333333"
+        ]
+      },
+      "expected_error_contains": "execution_trace_refs must use approved prefixes"
+    }
+  ],
+  "invalid_split_policies": [
+    {
+      "id": "bad-split-percent-sum",
+      "overrides": {
+        "train_percent": 80,
+        "validation_percent": 15,
+        "holdout_percent": 15
+      },
+      "expected_error_contains": "split percentages must sum to 100"
+    },
+    {
+      "id": "bad-leakage-disabled",
+      "overrides": {
+        "leakage_guard_enabled": false
+      },
+      "expected_error_contains": "split policy requires leakage_guard_enabled"
+    },
+    {
+      "id": "bad-missing-group-field",
+      "overrides": {
+        "group_by_fields": [
+          "trajectory_id",
+          "brief_id"
+        ]
+      },
+      "expected_error_contains": "group_by_fields must include customer_ref"
+    },
+    {
+      "id": "bad-holdout-minimum",
+      "overrides": {
+        "min_holdout_trajectories": 1
+      },
+      "expected_error_contains": "min_holdout_trajectories must not be below Phase 3 minimum"
+    }
+  ],
+  "invalid_manifests": [
+    {
+      "id": "bad-training-ready-from-local-fixtures",
+      "overrides": {
+        "training_ready_claimed": true,
+        "state": "ready_after_measured_data"
+      },
+      "expected_error_contains": [
+        "local fixtures",
+        "local_only",
+        "minimum training trajectory count",
+        "measured_data_only",
+        "rights_complete",
+        "owner_approval_ref"
+      ]
+    },
+    {
+      "id": "bad-training-ready-with-sources-not-eligible",
+      "overrides": {
+        "training_ready_claimed": true,
+        "uses_local_fixtures": false,
+        "local_only": false,
+        "measured_data_only": true,
+        "rights_complete": true,
+        "protected_data_excluded": true,
+        "eval_leakage_guard_passed": true,
+        "owner_approval_ref": "owner_approval:p3.1",
+        "state": "ready_after_measured_data",
+        "evidence_refs": [
+          "results_ledger:55555555-5555-4555-8555-555555555555"
+        ]
+      },
+      "expected_error_contains": "training readiness requires every source eligible_for_training"
+    },
+    {
+      "id": "bad-source-hashes",
+      "overrides": {
+        "source_record_hashes": [
+          "sha256:wrong"
+        ]
+      },
+      "expected_error_contains": "source_record_hashes must match source records"
+    },
+    {
+      "id": "bad-split-counts",
+      "overrides": {
+        "train_count": 3,
+        "validation_count": 0,
+        "holdout_count": 0
+      },
+      "expected_error_contains": "train_count must match source split assignments"
+    },
+    {
+      "id": "bad-cross-split-trajectory-leakage",
+      "overrides": {
+        "source_records": [
+          {
+            "source_id": "trajectory_source:p3.1:leak:train",
+            "trajectory_id": "99999999-9999-4999-8999-999999999999",
+            "trajectory_hash": "sha256:trajectory-leak-train",
+            "trajectory_schema_valid": true,
+            "event_count": 3,
+            "execution_trace_refs": [
+              "execution_trace:leak-train"
+            ],
+            "evidence_bundle_refs": [
+              "evidence_bundle:leak-train"
+            ],
+            "results_ledger_refs": [
+              "results_ledger:leak-train"
+            ],
+            "receipt_refs": [
+              "receipt:leak-train"
+            ],
+            "cost_ledger_refs": [
+              "cost_ledger:leak-train"
+            ],
+            "release_policy_ref": "release_policy:private-live-fixture",
+            "trajectory_rights_ref": "trajectory_rights:pending",
+            "distillation_rights_ref": "distillation_rights:pending",
+            "pii_review_ref": "pii_review:pending",
+            "legal_gate_ref": "legal_gate:pending",
+            "island": "generalist",
+            "component_refs": [
+              "component:qualification.discovery"
+            ],
+            "outcome_label_refs": [],
+            "split": "train",
+            "data_state": "local_fixture",
+            "measured_data": false,
+            "rights_verified": false,
+            "distillation_rights_verified": false,
+            "pii_review_passed": false,
+            "legal_gate_passed": false,
+            "protected_data_scanned": true,
+            "contains_live_champion_ip": false,
+            "contains_sealed_eval_details": false,
+            "contains_raw_evidence_snapshot": false,
+            "contains_private_customer_data": false,
+            "contains_judge_prompts": false,
+            "eligible_for_training": false,
+            "eligible_for_distillation": false
+          },
+          {
+            "source_id": "trajectory_source:p3.1:leak:holdout",
+            "trajectory_id": "99999999-9999-4999-8999-999999999999",
+            "trajectory_hash": "sha256:trajectory-leak-holdout",
+            "trajectory_schema_valid": true,
+            "event_count": 3,
+            "execution_trace_refs": [
+              "execution_trace:leak-holdout"
+            ],
+            "evidence_bundle_refs": [
+              "evidence_bundle:leak-holdout"
+            ],
+            "results_ledger_refs": [
+              "results_ledger:leak-holdout"
+            ],
+            "receipt_refs": [
+              "receipt:leak-holdout"
+            ],
+            "cost_ledger_refs": [
+              "cost_ledger:leak-holdout"
+            ],
+            "release_policy_ref": "release_policy:private-live-fixture",
+            "trajectory_rights_ref": "trajectory_rights:pending",
+            "distillation_rights_ref": "distillation_rights:pending",
+            "pii_review_ref": "pii_review:pending",
+            "legal_gate_ref": "legal_gate:pending",
+            "island": "generalist",
+            "component_refs": [
+              "component:qualification.discovery"
+            ],
+            "outcome_label_refs": [],
+            "split": "holdout",
+            "data_state": "local_fixture",
+            "measured_data": false,
+            "rights_verified": false,
+            "distillation_rights_verified": false,
+            "pii_review_passed": false,
+            "legal_gate_passed": false,
+            "protected_data_scanned": true,
+            "contains_live_champion_ip": false,
+            "contains_sealed_eval_details": false,
+            "contains_raw_evidence_snapshot": false,
+            "contains_private_customer_data": false,
+            "contains_judge_prompts": false,
+            "eligible_for_training": false,
+            "eligible_for_distillation": false
+          }
+        ],
+        "trajectory_count": 2,
+        "train_count": 1,
+        "validation_count": 0,
+        "holdout_count": 1,
+        "eval_leakage_guard_passed": true
+      },
+      "expected_error_contains": "eval_leakage_guard_passed must match recomputed split leakage guard"
+    },
+    {
+      "id": "bad-distillation-ready-without-eligible-sources",
+      "overrides": {
+        "distillation_ready_claimed": true
+      },
+      "expected_error_contains": "distillation readiness requires every source eligible_for_distillation"
+    },
+    {
+      "id": "bad-calibration-ready-without-labels",
+      "overrides": {
+        "calibration_ready_claimed": true
+      },
+      "expected_error_contains": "calibration readiness requires outcome_labels_ready"
+    },
+    {
+      "id": "bad-raw-marker-in-evidence",
+      "overrides": {
+        "evidence_refs": [
+          "results_ledger:contains raw content"
+        ]
+      },
+      "expected_error_contains": "protected material"
+    }
+  ]
+}

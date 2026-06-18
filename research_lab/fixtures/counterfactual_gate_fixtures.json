@@ -1,0 +1,341 @@
+{
+  "allocator_yield_input": {
+    "allocator_selection_refs": [
+      "meta_allocator_selection:fixture-v1"
+    ],
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "arm_kind": "allocator_directed",
+    "budget_cents": 40000,
+    "ledger_audit_refs": [
+      "balance_ledger_audit:e7aff9b189016ad0",
+      "cost_ledger_audit:cf5e40dd8f2e4dd8"
+    ],
+    "novelty_weighted_points": 19.0,
+    "quarter_ref": "quarter:2026q3-local",
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "run_count": 12,
+    "verified_points": 16.25
+  },
+  "comparison_methodology_ref": "counterfactual_methodology:market-local-v1",
+  "consequence_stub": {
+    "aimed_ticket_share_changed": false,
+    "aimed_ticket_share_shift_target": "red_team_autopilot",
+    "consequence_id": "counterfactual_consequence_stub:market-local-v1",
+    "contract_version": "counterfactual_gate:v1:local_contract",
+    "counterfactual_consequences_enabled": false,
+    "executed": false,
+    "local_only": true,
+    "owner_approval_ref": "",
+    "precommitted_action_summary": "If two measured quarters fail the gate, record a future shift toward red-team/autopilot tickets and a surface redesign; this stub performs neither action.",
+    "production_policy_changed": false,
+    "production_writes": false,
+    "public_workflow_enabled": false,
+    "state": "local_stub",
+    "surface_redesign_applied": false,
+    "surface_redesign_ref": "surface_redesign_stub:counterfactual-gate-v1",
+    "tracker_ref": "counterfactual_failure_tracker:market-local-v1",
+    "triggering_comparison_refs": [
+      "counterfactual_comparison:previous-local-failure",
+      "counterfactual_comparison:9b829495304931de"
+    ]
+  },
+  "expected_allocator_yield": {
+    "yield_id": "counterfactual_yield:f8d7ca921c19ae10",
+    "arm_kind": "allocator_directed",
+    "quarter_ref": "quarter:2026q3-local",
+    "budget_cents": 40000,
+    "verified_points": 16.25,
+    "novelty_weighted_points": 19.0,
+    "run_count": 12,
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "ledger_audit_refs": [
+      "balance_ledger_audit:e7aff9b189016ad0",
+      "cost_ledger_audit:cf5e40dd8f2e4dd8"
+    ],
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "allocator_selection_refs": [
+      "meta_allocator_selection:fixture-v1"
+    ],
+    "brief_refs": [],
+    "source_data_state": "local_fixture",
+    "uses_local_fixtures": true,
+    "measured_data_ready": false,
+    "production_data_claimed": false,
+    "local_only": true,
+    "contract_version": "counterfactual_gate:v1:local_contract"
+  },
+  "expected_comparison": {
+    "comparison_id": "counterfactual_comparison:9b829495304931de",
+    "quarter_ref": "quarter:2026q3-local",
+    "miner_yield_ref": "counterfactual_yield:c6f228fef0a45bbe",
+    "allocator_yield_ref": "counterfactual_yield:f8d7ca921c19ae10",
+    "matched_budget_cents": 40000,
+    "miner_budget_cents": 40000,
+    "allocator_budget_cents": 40000,
+    "miner_verified_points": 18.0,
+    "allocator_verified_points": 16.25,
+    "miner_yield_points_per_1000_usd": 45.0,
+    "allocator_yield_points_per_1000_usd": 40.625,
+    "delta_yield_points_per_1000_usd": 4.375,
+    "passed_gate": true,
+    "methodology_ref": "counterfactual_methodology:market-local-v1",
+    "shared_prior_caveat": "Shared-prior caveat: miner-briefed and allocator-directed arms may consume overlapping priors, so this local gate is a matched-budget counterfactual input, not causal proof.",
+    "measured_data_ready": false,
+    "uses_local_fixtures": true,
+    "state": "local_stub",
+    "local_only": true,
+    "production_gate_claimed": false,
+    "public_claim_enabled": false,
+    "consequence_due": false,
+    "publication_ref": "counterfactual_publication:pending",
+    "contract_version": "counterfactual_gate:v1:local_contract"
+  },
+  "expected_miner_yield": {
+    "yield_id": "counterfactual_yield:c6f228fef0a45bbe",
+    "arm_kind": "miner_briefed",
+    "quarter_ref": "quarter:2026q3-local",
+    "budget_cents": 40000,
+    "verified_points": 18.0,
+    "novelty_weighted_points": 21.5,
+    "run_count": 12,
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "ledger_audit_refs": [
+      "balance_ledger_audit:e7aff9b189016ad0",
+      "cost_ledger_audit:cf5e40dd8f2e4dd8"
+    ],
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "allocator_selection_refs": [],
+    "brief_refs": [
+      "miner_brief:market-local-v1"
+    ],
+    "source_data_state": "local_fixture",
+    "uses_local_fixtures": true,
+    "measured_data_ready": false,
+    "production_data_claimed": false,
+    "local_only": true,
+    "contract_version": "counterfactual_gate:v1:local_contract"
+  },
+  "failure_tracker": {
+    "aimed_ticket_share_changed": false,
+    "comparison_refs": [
+      "counterfactual_comparison:previous-local-failure",
+      "counterfactual_comparison:9b829495304931de"
+    ],
+    "consecutive_failure_count": 2,
+    "consequence_execution_enabled": false,
+    "consequence_stub_ref": "counterfactual_consequence_stub:market-local-v1",
+    "contract_version": "counterfactual_gate:v1:local_contract",
+    "failure_count": 2,
+    "local_only": true,
+    "production_policy_changed": false,
+    "quarter_refs": [
+      "quarter:2026q2-local",
+      "quarter:2026q3-local"
+    ],
+    "state": "consequence_due",
+    "tracker_id": "counterfactual_failure_tracker:market-local-v1",
+    "two_consecutive_failures": true,
+    "uses_local_fixtures": true
+  },
+  "invalid_comparisons": [
+    {
+      "expected_error_contains": "requires matched budgets",
+      "id": "bad-budget-match",
+      "patch": {
+        "allocator_budget_cents": 50000
+      }
+    },
+    {
+      "expected_error_contains": "pass/fail claims require measured data, not fixtures",
+      "id": "bad-fixture-pass",
+      "patch": {
+        "state": "passed"
+      }
+    },
+    {
+      "expected_error_contains": "must equal miner yield minus allocator yield",
+      "id": "bad-delta",
+      "patch": {
+        "delta_yield_points_per_1000_usd": 99.0
+      }
+    },
+    {
+      "expected_error_contains": "must not execute or trigger consequences directly",
+      "id": "bad-consequence-direct",
+      "patch": {
+        "consequence_due": true
+      }
+    }
+  ],
+  "invalid_consequence_stubs": [
+    {
+      "expected_error_contains": "must not execute consequences",
+      "id": "bad-executed",
+      "patch": {
+        "executed": true
+      }
+    },
+    {
+      "expected_error_contains": "must not alter aimed-ticket shares",
+      "id": "bad-share-change",
+      "patch": {
+        "aimed_ticket_share_changed": true
+      }
+    },
+    {
+      "expected_error_contains": "must not write production state",
+      "id": "bad-prod-write",
+      "patch": {
+        "production_writes": true
+      }
+    }
+  ],
+  "invalid_failure_trackers": [
+    {
+      "expected_error_contains": "must reflect consecutive_failure_count >= 2",
+      "id": "bad-two-consecutive",
+      "patch": {
+        "consecutive_failure_count": 1,
+        "two_consecutive_failures": true
+      }
+    },
+    {
+      "expected_error_contains": "must not enable consequence execution",
+      "id": "bad-execution-enabled",
+      "patch": {
+        "consequence_execution_enabled": true
+      }
+    },
+    {
+      "expected_error_contains": "must not alter aimed-ticket shares",
+      "id": "bad-share-change",
+      "patch": {
+        "aimed_ticket_share_changed": true
+      }
+    }
+  ],
+  "invalid_methodology_publications": [
+    {
+      "expected_error_contains": "must not enable live methodology publication",
+      "id": "bad-live-publish",
+      "patch": {
+        "live_publication_enabled": true
+      }
+    },
+    {
+      "expected_error_contains": "must not claim the counterfactual gate is satisfied",
+      "id": "bad-gate-claim",
+      "patch": {
+        "claims_counterfactual_gate_satisfied": true
+      }
+    },
+    {
+      "expected_error_contains": "protected or raw material",
+      "id": "bad-raw-marker",
+      "patch": {
+        "methodology_summary": "contains sealed judge prompt"
+      }
+    }
+  ],
+  "invalid_yields": [
+    {
+      "base": "expected_miner_yield",
+      "expected_error_contains": "miner_briefed yield requires brief_refs",
+      "id": "bad-missing-miner-brief",
+      "patch": {
+        "brief_refs": []
+      }
+    },
+    {
+      "base": "expected_miner_yield",
+      "expected_error_contains": "local fixture yield records cannot claim measured_data_ready",
+      "id": "bad-fixture-ready",
+      "patch": {
+        "measured_data_ready": true
+      }
+    },
+    {
+      "base": "expected_miner_yield",
+      "expected_error_contains": "protected or raw material",
+      "id": "bad-raw-key",
+      "patch": {
+        "raw_brief": "do not leak"
+      }
+    },
+    {
+      "base": "expected_miner_yield",
+      "expected_error_contains": "protected or raw material",
+      "id": "bad-mixed-case-raw-key",
+      "patch": {
+        "Raw_Evidence": "do not leak"
+      }
+    },
+    {
+      "base": "expected_allocator_yield",
+      "expected_error_contains": "allocator_directed yield requires allocator_selection_refs",
+      "id": "bad-allocator-selection",
+      "patch": {
+        "allocator_selection_refs": []
+      }
+    }
+  ],
+  "methodology_publication": {
+    "artifact_release_state": "sanitized_trace",
+    "claims_counterfactual_gate_satisfied": false,
+    "comparison_ref": "counterfactual_comparison:9b829495304931de",
+    "contains_judge_prompts": false,
+    "contains_live_champion_ip": false,
+    "contains_private_customer_data": false,
+    "contains_raw_evidence_snapshot": false,
+    "contains_sealed_eval_details": false,
+    "contract_version": "counterfactual_gate:v1:local_contract",
+    "live_publication_enabled": false,
+    "local_only": true,
+    "matched_budget_caveat": "Matched-budget caveat: both arms must use identical budget_cents before a pass/fail claim is valid.",
+    "methodology_summary": "Compares miner-briefed verified yield against allocator-directed baseline-arm yield at the same budget and quarter. Fixture values exercise math only.",
+    "production_publish_enabled": false,
+    "publication_id": "counterfactual_methodology:market-local-v1",
+    "publication_ref": "counterfactual_publication:pending",
+    "publication_state": "local_publication_stub",
+    "shared_prior_caveat": "Shared-prior caveat: miner-briefed and allocator-directed arms may consume overlapping priors, so this local gate is a matched-budget counterfactual input, not causal proof.",
+    "source_refs": [
+      "baseline_arm_policy:p1.9:market-open",
+      "meta_allocator_selection:fixture-v1",
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410",
+      "counterfactual_comparison:9b829495304931de"
+    ],
+    "title": "Local counterfactual gate methodology stub",
+    "visibility_policy": "sanitized_trace"
+  },
+  "miner_yield_input": {
+    "anchor_proposal_ref": "anchor_proposal:b3f3ef34dfd5826d",
+    "arm_kind": "miner_briefed",
+    "brief_refs": [
+      "miner_brief:market-local-v1"
+    ],
+    "budget_cents": 40000,
+    "ledger_audit_refs": [
+      "balance_ledger_audit:e7aff9b189016ad0",
+      "cost_ledger_audit:cf5e40dd8f2e4dd8"
+    ],
+    "novelty_weighted_points": 21.5,
+    "quarter_ref": "quarter:2026q3-local",
+    "receipt_refs": [
+      "receipt_v2:sha256:7cd730161c0a0fc17adce9f746837882d6aa44ca3f02146adc4597396aa9b410"
+    ],
+    "run_count": 12,
+    "verified_points": 18.0
+  },
+  "shared_prior_caveat": "Shared-prior caveat: miner-briefed and allocator-directed arms may consume overlapping priors, so this local gate is a matched-budget counterfactual input, not causal proof.",
+  "unsafe_workflow_guards": {
+    "counterfactual_consequences": true,
+    "expected_error_contains": "counterfactual_consequences",
+    "production_writes": true
+  }
+}

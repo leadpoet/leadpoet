@@ -40,6 +40,7 @@ from gateway.qualification.utils.helpers import (
     delete_model_from_s3,
 )
 from qualification.scoring.baseline import (
+    REFERENCE_MODEL_ID,
     is_reference_model_id,
     load_baseline,
     load_baseline_from_db,
@@ -51,7 +52,7 @@ def _today_yyyymmdd_set_id() -> int:
 
     This MUST match the keying scheme ``gateway/tasks/icp_generator.py``
     uses for ``qualification_private_icp_sets.set_id`` (and therefore
-    ``qualification_baselines.set_id``). The function ``get_set_id_for_date``
+    ``qualification_baselines`` set_id/model_id rows). The function ``get_set_id_for_date``
     in icp_generator.py is the source of truth:
 
         int(dt.strftime("%Y%m%d"))     # e.g. 20260530
@@ -125,7 +126,11 @@ def _load_baseline_with_fallback(set_id: int):  # set_id arg kept for API compat
     # Try DB first
     client = _get_baseline_supabase_client()
     if client is not None:
-        rec = load_baseline_from_db(target_set_id, client)
+        rec = load_baseline_from_db(
+            target_set_id,
+            client,
+            model_id=REFERENCE_MODEL_ID,
+        )
         if rec is not None:
             return rec
     else:
@@ -136,7 +141,7 @@ def _load_baseline_with_fallback(set_id: int):  # set_id arg kept for API compat
         )
 
     # File fallback (dev/test, or DB returned nothing for this set)
-    return load_baseline(target_set_id)
+    return load_baseline(target_set_id, model_id=REFERENCE_MODEL_ID)
 
 logger = logging.getLogger(__name__)
 

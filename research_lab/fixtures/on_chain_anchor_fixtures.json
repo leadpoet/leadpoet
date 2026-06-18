@@ -1,0 +1,344 @@
+{
+  "proposal_input": {
+    "epoch_ref": "anchor_epoch:2026-06-17T00",
+    "transparency_log_ref": "transparency_log:local-p2.7",
+    "arweave_checkpoint_ref": "arweave_checkpoint:local-stub-p2.7",
+    "prior_anchor_ref": "on_chain_anchor:genesis-local",
+    "anchor_payloads": [
+      {
+        "artifact_ref": "evidence_bundle:p2.7-local-fixture",
+        "artifact_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "artifact_type": "evidence_bundle"
+      },
+      {
+        "artifact_ref": "kms_release_decision:1e45558e86f2ca82",
+        "artifact_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "artifact_type": "kms_decision_stub"
+      },
+      {
+        "artifact_ref": "cost_ledger:p2.7-local-fixture",
+        "artifact_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "artifact_type": "cost_ledger_hash"
+      }
+    ],
+    "fabric_signature_ref": "local_anchor_sig:p2.7-fixture",
+    "proposer_ref": "validator:local-p2.7"
+  },
+  "expected_proposal": {
+    "proposal_id": "anchor_proposal:b3f3ef34dfd5826d",
+    "epoch_ref": "anchor_epoch:2026-06-17T00",
+    "transparency_log_ref": "transparency_log:local-p2.7",
+    "arweave_checkpoint_ref": "arweave_checkpoint:local-stub-p2.7",
+    "prior_anchor_ref": "on_chain_anchor:genesis-local",
+    "payload_hashes": [
+      "sha256:731d5dfaf1a98f18f7acb944be16fe50afb9bb35c342f49f48f33d3433056b5b",
+      "sha256:f89997dcdd3e608947eff1e898692d8a9632b504854c524599a9ab6f9e52599a",
+      "sha256:3bf499028444ae4e8c077f691c1b6dcf8248a69280df08ebdf1aa2f2de951f99"
+    ],
+    "merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "fabric_signature_ref": "local_anchor_sig:p2.7-fixture",
+    "proposer_ref": "validator:local-p2.7",
+    "contract_version": "on_chain_anchor:v1:local_contract",
+    "state": "local_proposal",
+    "local_only": true,
+    "public_payload_sanitized": true,
+    "on_chain_submission_requested": false,
+    "chain_transaction_submitted": false,
+    "production_anchor_claimed": false,
+    "raw_payload_present": false
+  },
+  "tx_stub_input": {
+    "chain_ref": "chain:bittensor-local-stub",
+    "signer_ref": "hotkey:local-p2.7",
+    "signature_ref": "local_anchor_sig:p2.7-chain-stub"
+  },
+  "expected_tx_stub": {
+    "tx_stub_id": "chain_tx_stub:0cd7bf8d5b41b9cb",
+    "proposal_id": "anchor_proposal:b3f3ef34dfd5826d",
+    "chain_ref": "chain:bittensor-local-stub",
+    "extrinsic_payload_hash": "sha256:e5565e6a93f019164be24231116516acb907d11c6b0b1d6d33b7ab1c845568aa",
+    "signer_ref": "hotkey:local-p2.7",
+    "signature_ref": "local_anchor_sig:p2.7-chain-stub",
+    "merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "anchor_payload_hash": "sha256:eac570be3c66e9376454beac7a56f4d20630f4da9c64903caec20fd44ce3fca8",
+    "submitted_tx_hash": "chain_tx:pending",
+    "block_hash": "block:pending",
+    "contract_version": "on_chain_anchor:v1:local_contract",
+    "state": "local_tx_stub",
+    "local_only": true,
+    "transaction_signed": false,
+    "transaction_submitted": false,
+    "broadcast_performed": false,
+    "chain_client_used": false,
+    "fee_spent": false,
+    "production_anchor_claimed": false
+  },
+  "expected_inclusion": {
+    "verification_id": "anchor_inclusion:1bd48ad7286c6350",
+    "proposal_id": "anchor_proposal:b3f3ef34dfd5826d",
+    "tx_stub_id": "chain_tx_stub:0cd7bf8d5b41b9cb",
+    "chain_ref": "chain:bittensor-local-stub",
+    "chain_tx_ref": "chain_tx:pending",
+    "merkle_root": "merkle_root:4ed5d60a27b5f638776fa6c36e1dd57e2829b33c0aa5810f72190097538eb5b3",
+    "inclusion_proof_ref": "inclusion_proof:pending",
+    "inclusion_proof_hash": "sha256:pending",
+    "block_hash": "block:pending",
+    "block_number": 0,
+    "contract_version": "on_chain_anchor:v1:local_contract",
+    "state": "local_not_verified",
+    "local_only": true,
+    "proof_checked": false,
+    "merkle_root_matches": false,
+    "tx_included": false,
+    "finalized": false,
+    "live_chain_query_performed": false,
+    "production_anchor_verified": false
+  },
+  "invalid_proposals": [
+    {
+      "id": "missing-signature",
+      "overrides": {
+        "fabric_signature_ref": ""
+      },
+      "expected_error_contains": [
+        "anchor proposal requires fabric_signature_ref",
+        "local_anchor_sig: prefix"
+      ]
+    },
+    {
+      "id": "production-signature-prefix",
+      "overrides": {
+        "fabric_signature_ref": "fabric_sig:example"
+      },
+      "expected_error_contains": "local_anchor_sig: prefix"
+    },
+    {
+      "id": "bad-merkle-root",
+      "overrides": {
+        "merkle_root": "merkle_root:bad"
+      },
+      "expected_error_contains": "merkle_root does not match payload_hashes"
+    },
+    {
+      "id": "missing-merkle-root",
+      "overrides": {
+        "merkle_root": ""
+      },
+      "expected_error_contains": [
+        "anchor proposal requires merkle_root",
+        "merkle_root must be merkle_root:-prefixed"
+      ]
+    },
+    {
+      "id": "submitted-chain",
+      "overrides": {
+        "state": "submitted_chain",
+        "on_chain_submission_requested": true,
+        "chain_transaction_submitted": true,
+        "production_anchor_claimed": true,
+        "local_only": false
+      },
+      "expected_error_contains": [
+        "must remain local_only",
+        "must not request on-chain submission",
+        "submitted_chain proposal state is disabled"
+      ]
+    },
+    {
+      "id": "raw-payload-flag",
+      "overrides": {
+        "raw_payload_present": true
+      },
+      "expected_error_contains": "must not contain raw payload"
+    },
+    {
+      "id": "raw-payload-extra-field",
+      "overrides": {
+        "raw_payload": "redacted local fixture value"
+      },
+      "expected_error_contains": "raw_payload"
+    },
+    {
+      "id": "p2-6-protected-key",
+      "overrides": {
+        "key_material": "redacted local fixture value"
+      },
+      "expected_error_contains": "key_material"
+    }
+  ],
+  "invalid_tx_stubs": [
+    {
+      "id": "missing-signature",
+      "overrides": {
+        "signature_ref": ""
+      },
+      "expected_error_contains": [
+        "chain transaction stub requires signature_ref",
+        "local_anchor_sig: prefix"
+      ]
+    },
+    {
+      "id": "submitted-chain",
+      "overrides": {
+        "state": "submitted_chain",
+        "transaction_signed": true,
+        "transaction_submitted": true,
+        "broadcast_performed": true,
+        "chain_client_used": true,
+        "fee_spent": true,
+        "submitted_tx_hash": "chain_tx:submitted-local",
+        "block_hash": "block:submitted-local"
+      },
+      "expected_error_contains": [
+        "must not mark chain transaction signed",
+        "must not submit chain transactions",
+        "submitted_tx_hash must remain pending",
+        "submitted_chain transaction state is disabled"
+      ]
+    },
+    {
+      "id": "bad-merkle-root",
+      "overrides": {
+        "merkle_root": "merkle_root:stale"
+      },
+      "expected_error_contains": "chain transaction merkle_root mismatch"
+    },
+    {
+      "id": "bad-anchor-payload-hash",
+      "overrides": {
+        "anchor_payload_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected_error_contains": "chain transaction anchor_payload_hash mismatch"
+    },
+    {
+      "id": "production-anchor-claimed",
+      "overrides": {
+        "production_anchor_claimed": true,
+        "local_only": false
+      },
+      "expected_error_contains": [
+        "must remain local_only",
+        "must not claim production anchor"
+      ]
+    },
+    {
+      "id": "raw-marker",
+      "overrides": {
+        "signer_ref": "raw evidence signer"
+      },
+      "expected_error_contains": "signer_ref"
+    }
+  ],
+  "invalid_inclusions": [
+    {
+      "id": "verified-without-proof",
+      "overrides": {
+        "state": "verified_chain",
+        "chain_tx_ref": "chain_tx:submitted-local",
+        "tx_included": true,
+        "finalized": true,
+        "production_anchor_verified": true,
+        "local_only": false
+      },
+      "expected_error_contains": [
+        "requires proof_checked",
+        "verified_chain inclusion requires inclusion_proof_ref",
+        "verified_chain inclusion state is disabled",
+        "must not claim production anchor verified"
+      ]
+    },
+    {
+      "id": "tx-included-without-proof",
+      "overrides": {
+        "tx_included": true
+      },
+      "expected_error_contains": "tx_included requires proof_checked"
+    },
+    {
+      "id": "finalized-without-inclusion",
+      "overrides": {
+        "finalized": true
+      },
+      "expected_error_contains": "finalized requires tx_included"
+    },
+    {
+      "id": "live-chain-query",
+      "overrides": {
+        "live_chain_query_performed": true
+      },
+      "expected_error_contains": "must not query live chains"
+    },
+    {
+      "id": "nonpending-tx-without-proof",
+      "overrides": {
+        "chain_tx_ref": "chain_tx:submitted-local"
+      },
+      "expected_error_contains": "non-pending chain_tx_ref requires proof_checked"
+    },
+    {
+      "id": "merkle-mismatch",
+      "overrides": {
+        "merkle_root": "merkle_root:stale"
+      },
+      "expected_error_contains": "inclusion verification merkle_root mismatch"
+    },
+    {
+      "id": "raw-field",
+      "overrides": {
+        "raw_evidence": "redacted local fixture value"
+      },
+      "expected_error_contains": "raw_evidence"
+    },
+    {
+      "id": "p2-6-protected-key",
+      "overrides": {
+        "session_token": "redacted local fixture value"
+      },
+      "expected_error_contains": "session_token"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "full_component_market": false,
+    "live_meta_allocation": false,
+    "research_map_live_api": false,
+    "kms_key_release": false,
+    "research_enclaves": false,
+    "on_chain_anchor_publication": true,
+    "ledger_audit_publication": false,
+    "counterfactual_consequences": false,
+    "balance_mutations": false,
+    "bounty_payments": false,
+    "production_writes": true,
+    "supabase_writes": false,
+    "public_workflows": true
+  },
+  "market_sealing_posture_anchor_claim": {
+    "posture_id": "market_sealing:p2.7:bad-anchor-claim",
+    "pcr0_allowlist_ref": "pcr0_allowlist:repo-current",
+    "enclave_measurement_ref": "enclave_measurement:validator-v1.0.0",
+    "kms_policy_ref": "kms_policy:research-lab-local",
+    "on_chain_anchor_ref": "on_chain_anchor:submitted-local",
+    "pcr0_allowlist_checked": true,
+    "pcr0_allowed": true,
+    "signature_chain_checked": false,
+    "signature_chain_valid": false,
+    "egress_policy_checked": true,
+    "egress_policy_passed": true,
+    "equivocation_check_performed": true,
+    "equivocation_conflict": false,
+    "kms_policy_checked": true,
+    "kms_policy_passed": true,
+    "live_verification_performed": false,
+    "kms_key_release_requested": false,
+    "kms_key_released": false,
+    "research_enclave_started": false,
+    "on_chain_anchor_submitted": true,
+    "production_valid": true,
+    "local_stub_only": true,
+    "state": "production_ready",
+    "expected_error_contains": [
+      "local sealing stub must not submit on-chain anchors",
+      "production sealing cannot be claimed by a local_stub_only record"
+    ]
+  }
+}

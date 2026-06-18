@@ -1,0 +1,386 @@
+{
+  "template_briefs": [
+    {
+      "brief_id": "template_brief:p1.8:crypto-gtm:funding-sources",
+      "target_domain": "crypto-native GTM operators with fintech funding-source knowledge",
+      "island": "generalist",
+      "source_failure_board_ref": "fb:p1.7:funding:001",
+      "source_map_cell_ref": "cell:p1.7:source-router-source-add",
+      "problem_statement": "Find better public funding-announcement sources for non-English fintech and crypto infrastructure companies.",
+      "domain_context": "The map shows a public coverage gap in local-language funding announcements and stale syndication.",
+      "desired_evidence_refs": [
+        "evidence_source_class:local-language-pr",
+        "evidence_source_class:regional-fintech-news"
+      ],
+      "suggested_patch_types": [
+        "SOURCE_ADD",
+        "STRATEGY_SWAP"
+      ],
+      "success_metric_refs": [
+        "metric:coverage",
+        "metric:evidence_defect_rate"
+      ],
+      "example_public_refs": [
+        "receipt:p1.4:coverage-public",
+        "frontier:p1.7:source-router"
+      ],
+      "operator_prompt": "Describe public source classes and domain heuristics that could improve coverage. Do not include private customer data, judge prompts, or live champion details.",
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": false,
+      "contains_judge_prompts": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace"
+    }
+  ],
+  "invalid_template_briefs": [
+    {
+      "brief_id": "template_brief:p1.8:bad-private",
+      "target_domain": "crypto-native GTM operators",
+      "island": "generalist",
+      "source_failure_board_ref": "fb:p1.7:funding:001",
+      "source_map_cell_ref": "cell:p1.7:source-router-source-add",
+      "problem_statement": "Bad public brief.",
+      "domain_context": "Bad context.",
+      "desired_evidence_refs": [
+        "evidence_source_class:regional-fintech-news"
+      ],
+      "suggested_patch_types": [
+        "SOURCE_ADD"
+      ],
+      "success_metric_refs": [
+        "metric:coverage"
+      ],
+      "example_public_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "operator_prompt": "Use public source classes.",
+      "protected_material_flags_checked": true,
+      "contains_live_champion_ip": false,
+      "contains_sealed_eval_details": false,
+      "contains_raw_evidence_snapshot": false,
+      "contains_private_customer_data": true,
+      "contains_judge_prompts": false,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "protected material"
+    },
+    {
+      "brief_id": "template_brief:p1.8:bad-patch",
+      "target_domain": "crypto-native GTM operators",
+      "island": "generalist",
+      "source_failure_board_ref": "fb:p1.7:funding:001",
+      "source_map_cell_ref": "cell:p1.7:source-router-source-add",
+      "problem_statement": "Bad patch type.",
+      "domain_context": "Bad context.",
+      "desired_evidence_refs": [
+        "evidence_source_class:regional-fintech-news"
+      ],
+      "suggested_patch_types": [
+        "UNBOUNDED_CODE"
+      ],
+      "success_metric_refs": [
+        "metric:coverage"
+      ],
+      "example_public_refs": [
+        "receipt:p1.4:coverage-public"
+      ],
+      "operator_prompt": "Use public source classes.",
+      "protected_material_flags_checked": true,
+      "visibility_policy": "sanitized_trace",
+      "artifact_release_state": "sanitized_trace",
+      "expected_error_contains": "unknown suggested_patch_types"
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_ref": "candidate:p1.8:crypto-gtm-001",
+      "source_ref": "source:manual-public-list:crypto-gtm-operators",
+      "source_channel": "manual_public_research",
+      "status": "manual_review_ready",
+      "expertise_tags": [
+        "crypto-native",
+        "gtm",
+        "fintech-funding-sources"
+      ],
+      "target_domain_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "public_profile_ref": "public_profile_ref:candidate:p1.8:001",
+      "sanitized_notes": "Public operator profile suggests strong knowledge of regional fintech launch and funding channels.",
+      "crypto_native": true,
+      "pseudonymous_ref_only": true,
+      "unnecessary_sensitive_data_present": false,
+      "outreach_automation_enabled": false,
+      "email_sent": false,
+      "dm_sent": false,
+      "crm_sync_enabled": false,
+      "account_created": false,
+      "workflow_access_enabled": false,
+      "protected_material_flags_checked": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion"
+    }
+  ],
+  "invalid_candidates": [
+    {
+      "candidate_ref": "candidate:p1.8:bad-email",
+      "source_ref": "source:manual-public-list:crypto-gtm-operators",
+      "source_channel": "manual_public_research",
+      "status": "manual_review_ready",
+      "expertise_tags": [
+        "crypto-native"
+      ],
+      "target_domain_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "public_profile_ref": "public_profile_ref:candidate:p1.8:bad-email",
+      "sanitized_notes": "Looks promising.",
+      "crypto_native": true,
+      "pseudonymous_ref_only": true,
+      "email_address": "person@example.com",
+      "unnecessary_sensitive_data_present": false,
+      "outreach_automation_enabled": false,
+      "email_sent": false,
+      "dm_sent": false,
+      "crm_sync_enabled": false,
+      "account_created": false,
+      "workflow_access_enabled": false,
+      "protected_material_flags_checked": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "expected_error_contains": "unnecessary sensitive data"
+    },
+    {
+      "candidate_ref": "candidate:p1.8:bad-outreach",
+      "source_ref": "source:manual-public-list:crypto-gtm-operators",
+      "source_channel": "manual_public_research",
+      "status": "manual_review_ready",
+      "expertise_tags": [
+        "crypto-native"
+      ],
+      "target_domain_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "public_profile_ref": "public_profile_ref:candidate:p1.8:bad-outreach",
+      "sanitized_notes": "Looks promising.",
+      "crypto_native": true,
+      "pseudonymous_ref_only": true,
+      "unnecessary_sensitive_data_present": false,
+      "outreach_automation_enabled": true,
+      "email_sent": true,
+      "dm_sent": false,
+      "crm_sync_enabled": false,
+      "account_created": false,
+      "workflow_access_enabled": false,
+      "protected_material_flags_checked": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "expected_error_contains": "outreach automation"
+    },
+    {
+      "candidate_ref": "candidate:p1.8:bad-account",
+      "source_ref": "source:manual-public-list:crypto-gtm-operators",
+      "source_channel": "manual_public_research",
+      "status": "manual_review_ready",
+      "expertise_tags": [
+        "crypto-native"
+      ],
+      "target_domain_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "public_profile_ref": "public_profile_ref:candidate:p1.8:bad-account",
+      "sanitized_notes": "Looks promising.",
+      "crypto_native": true,
+      "pseudonymous_ref_only": true,
+      "unnecessary_sensitive_data_present": false,
+      "outreach_automation_enabled": false,
+      "email_sent": false,
+      "dm_sent": false,
+      "crm_sync_enabled": true,
+      "account_created": true,
+      "workflow_access_enabled": true,
+      "protected_material_flags_checked": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "expected_error_contains": "create accounts"
+    }
+  ],
+  "cohort_plan": {
+    "cohort_id": "recruiting_cohort:p1.8:crypto-native-operators",
+    "target_min_experts": 20,
+    "target_max_experts": 50,
+    "target_profile": "20-50 crypto-native GTM/domain experts for white-glove template-brief pilots",
+    "candidate_refs": [
+      "candidate:p1.8:crypto-gtm-001"
+    ],
+    "template_brief_refs": [
+      "template_brief:p1.8:crypto-gtm:funding-sources"
+    ],
+    "local_only": true,
+    "outreach_automation_enabled": false,
+    "email_sequence_enabled": false,
+    "dm_sequence_enabled": false,
+    "crm_sync_enabled": false,
+    "account_creation_enabled": false,
+    "public_workflow_open": false,
+    "production_writes": false
+  },
+  "invalid_cohort_plans": [
+    {
+      "cohort_id": "recruiting_cohort:p1.8:bad-size",
+      "target_min_experts": 5,
+      "target_max_experts": 75,
+      "target_profile": "crypto-native GTM/domain experts",
+      "candidate_refs": [
+        "candidate:p1.8:crypto-gtm-001"
+      ],
+      "template_brief_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "local_only": true,
+      "outreach_automation_enabled": false,
+      "email_sequence_enabled": false,
+      "dm_sequence_enabled": false,
+      "crm_sync_enabled": false,
+      "account_creation_enabled": false,
+      "public_workflow_open": false,
+      "production_writes": false,
+      "expected_error_contains": "at least 20"
+    },
+    {
+      "cohort_id": "recruiting_cohort:p1.8:bad-automation",
+      "target_min_experts": 20,
+      "target_max_experts": 50,
+      "target_profile": "crypto-native GTM/domain experts",
+      "candidate_refs": [
+        "candidate:p1.8:crypto-gtm-001"
+      ],
+      "template_brief_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "local_only": true,
+      "outreach_automation_enabled": true,
+      "email_sequence_enabled": true,
+      "dm_sequence_enabled": false,
+      "crm_sync_enabled": true,
+      "account_creation_enabled": false,
+      "public_workflow_open": true,
+      "production_writes": true,
+      "expected_error_contains": "outreach automation"
+    }
+  ],
+  "onboarding_checklists": [
+    {
+      "checklist_id": "onboarding:p1.8:crypto-gtm-001",
+      "candidate_ref": "candidate:p1.8:crypto-gtm-001",
+      "assigned_template_brief_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "contributor_terms_status": "pending_manual_review",
+      "ip_assignment_status": "pending_review",
+      "trajectory_rights_status": "pending_review",
+      "distillation_rights_status": "pending_review",
+      "pii_review_status": "pending_review",
+      "legal_gate_status": "pending_review",
+      "onboarding_state": "waiting_on_legal",
+      "local_only": true,
+      "contributor_enabled": false,
+      "legal_gate_bypassed": false,
+      "account_created": false,
+      "workflow_access_enabled": false,
+      "public_miner_workflow_enabled": false,
+      "outreach_automation_enabled": false,
+      "email_sent": false,
+      "production_writes": false
+    }
+  ],
+  "invalid_onboarding_checklists": [
+    {
+      "checklist_id": "onboarding:p1.8:bad-bypass",
+      "candidate_ref": "candidate:p1.8:crypto-gtm-001",
+      "assigned_template_brief_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "contributor_terms_status": "signed_recorded_only",
+      "ip_assignment_status": "approved_recorded_only",
+      "trajectory_rights_status": "approved_recorded_only",
+      "distillation_rights_status": "approved_recorded_only",
+      "pii_review_status": "approved_recorded_only",
+      "legal_gate_status": "approved_recorded_only",
+      "onboarding_state": "draft_local_only",
+      "local_only": true,
+      "contributor_enabled": true,
+      "legal_gate_bypassed": true,
+      "account_created": true,
+      "workflow_access_enabled": true,
+      "public_miner_workflow_enabled": true,
+      "outreach_automation_enabled": false,
+      "email_sent": false,
+      "production_writes": false,
+      "expected_error_contains": "not enable contributor access"
+    },
+    {
+      "checklist_id": "onboarding:p1.8:bad-email",
+      "candidate_ref": "candidate:p1.8:crypto-gtm-001",
+      "assigned_template_brief_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "contributor_terms_status": "not_sent",
+      "ip_assignment_status": "not_started",
+      "trajectory_rights_status": "not_started",
+      "distillation_rights_status": "not_started",
+      "pii_review_status": "not_started",
+      "legal_gate_status": "not_started",
+      "onboarding_state": "draft_local_only",
+      "local_only": true,
+      "contributor_enabled": false,
+      "legal_gate_bypassed": false,
+      "account_created": false,
+      "workflow_access_enabled": false,
+      "public_miner_workflow_enabled": false,
+      "outreach_automation_enabled": true,
+      "email_sent": true,
+      "production_writes": true,
+      "expected_error_contains": "outreach automation"
+    },
+    {
+      "checklist_id": "onboarding:p1.8:bad-raw-contact",
+      "candidate_ref": "candidate:p1.8:crypto-gtm-001",
+      "assigned_template_brief_refs": [
+        "template_brief:p1.8:crypto-gtm:funding-sources"
+      ],
+      "contributor_terms_status": "not_sent",
+      "ip_assignment_status": "not_started",
+      "trajectory_rights_status": "not_started",
+      "distillation_rights_status": "not_started",
+      "pii_review_status": "not_started",
+      "legal_gate_status": "not_started",
+      "onboarding_state": "draft_local_only",
+      "local_only": true,
+      "contributor_enabled": false,
+      "legal_gate_bypassed": false,
+      "account_created": false,
+      "workflow_access_enabled": false,
+      "public_miner_workflow_enabled": false,
+      "outreach_automation_enabled": false,
+      "email_sent": false,
+      "production_writes": false,
+      "email_address": "person@example.com",
+      "expected_error_contains": "unnecessary sensitive data"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "public_miner_workflows": true,
+    "paid_loops": false,
+    "autopilot": false,
+    "hosted_run_crowning": false,
+    "source_add_payments": false,
+    "scheduler_jobs": true,
+    "production_writes": true,
+    "supabase_writes": true,
+    "live_champion_publication": false
+  }
+}

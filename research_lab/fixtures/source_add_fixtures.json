@@ -1,0 +1,614 @@
+{
+  "adapter_manifest": {
+    "adapter_id": "source_add:adapter:procurement-rfp-v1",
+    "miner_ref": "miner:source-builder-alpha",
+    "source_name": "State procurement RFP portal coverage",
+    "source_kind": "procurement",
+    "declared_base_domains": [
+      "procurement.example.gov"
+    ],
+    "output_schema_ref": "schema:source-add-output:v1",
+    "allowed_output_fields": [
+      "evidence_refs",
+      "snapshot_refs",
+      "content_hashes",
+      "normalized_text_hashes",
+      "metadata_refs"
+    ],
+    "submitted_artifact_ref": "artifact:source-add:procurement-rfp-v1",
+    "code_bundle_hash": "sha256:sourceaddprocurementrfpv100000000000000000000000000000000000000",
+    "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+    "max_trial_cost_cents": 1200,
+    "max_request_cost_cents": 75,
+    "max_latency_ms": 8000,
+    "credential_policy": "credential_ref_only",
+    "credential_ref": "credential_ref:source-add:procurement-rfp-v1:stub",
+    "fixture_refs": [
+      "fixture:source-add:procurement:rfp:001",
+      "fixture:source-add:procurement:rfp:002"
+    ],
+    "arbitrary_code_execution_enabled": false,
+    "live_network_enabled": false,
+    "component_publicly_accepted": false,
+    "visibility_policy": "default_private",
+    "artifact_release_state": "private_live_champion"
+  },
+  "invalid_manifests": [
+    {
+      "adapter_id": "source_add:adapter:raw-credential",
+      "miner_ref": "miner:source-builder-alpha",
+      "source_name": "Bad raw credential adapter",
+      "source_kind": "procurement",
+      "declared_base_domains": [
+        "procurement.example.gov"
+      ],
+      "output_schema_ref": "schema:source-add-output:v1",
+      "allowed_output_fields": [
+        "evidence_refs",
+        "snapshot_refs",
+        "content_hashes",
+        "normalized_text_hashes"
+      ],
+      "submitted_artifact_ref": "artifact:source-add:bad-raw-credential",
+      "code_bundle_hash": "sha256:badrawcredential000000000000000000000000000000000000000000",
+      "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+      "max_trial_cost_cents": 1200,
+      "max_request_cost_cents": 75,
+      "max_latency_ms": 8000,
+      "credential_policy": "credential_ref_only",
+      "credential_ref": "credential_ref:source-add:bad",
+      "api_key": "sk-live-should-never-appear",
+      "fixture_refs": [
+        "fixture:source-add:bad"
+      ],
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "expected_error_contains": "raw credential"
+    },
+    {
+      "adapter_id": "source_add:adapter:raw-output-field",
+      "miner_ref": "miner:source-builder-alpha",
+      "source_name": "Bad raw output adapter",
+      "source_kind": "procurement",
+      "declared_base_domains": [
+        "procurement.example.gov"
+      ],
+      "output_schema_ref": "schema:source-add-output:v1",
+      "allowed_output_fields": [
+        "evidence_refs",
+        "raw_content"
+      ],
+      "submitted_artifact_ref": "artifact:source-add:bad-raw-output",
+      "code_bundle_hash": "sha256:badrawoutput0000000000000000000000000000000000000000000000",
+      "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+      "max_trial_cost_cents": 1200,
+      "max_request_cost_cents": 75,
+      "max_latency_ms": 8000,
+      "credential_policy": "no_credentials",
+      "fixture_refs": [
+        "fixture:source-add:bad"
+      ],
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "expected_error_contains": "disallowed fields"
+    },
+    {
+      "adapter_id": "source_add:adapter:live-network",
+      "miner_ref": "miner:source-builder-alpha",
+      "source_name": "Bad live network adapter",
+      "source_kind": "procurement",
+      "declared_base_domains": [
+        "procurement.example.gov"
+      ],
+      "output_schema_ref": "schema:source-add-output:v1",
+      "allowed_output_fields": [
+        "evidence_refs",
+        "snapshot_refs",
+        "content_hashes",
+        "normalized_text_hashes"
+      ],
+      "submitted_artifact_ref": "artifact:source-add:bad-live-network",
+      "code_bundle_hash": "sha256:badlivenetwork000000000000000000000000000000000000000000",
+      "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+      "max_trial_cost_cents": 1200,
+      "max_request_cost_cents": 75,
+      "max_latency_ms": 8000,
+      "credential_policy": "no_credentials",
+      "fixture_refs": [
+        "fixture:source-add:bad"
+      ],
+      "live_network_enabled": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "expected_error_contains": "live_network_enabled"
+    },
+    {
+      "adapter_id": "source_add:adapter:arbitrary-code",
+      "miner_ref": "miner:source-builder-alpha",
+      "source_name": "Bad arbitrary-code adapter",
+      "source_kind": "procurement",
+      "declared_base_domains": [
+        "procurement.example.gov"
+      ],
+      "output_schema_ref": "schema:source-add-output:v1",
+      "allowed_output_fields": [
+        "evidence_refs",
+        "snapshot_refs",
+        "content_hashes",
+        "normalized_text_hashes"
+      ],
+      "submitted_artifact_ref": "artifact:source-add:bad-arbitrary-code",
+      "code_bundle_hash": "sha256:badarbitrarycode000000000000000000000000000000000000000000",
+      "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+      "max_trial_cost_cents": 1200,
+      "max_request_cost_cents": 75,
+      "max_latency_ms": 8000,
+      "credential_policy": "no_credentials",
+      "fixture_refs": [
+        "fixture:source-add:bad"
+      ],
+      "arbitrary_code_execution_enabled": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "expected_error_contains": "arbitrary_code_execution_enabled"
+    },
+    {
+      "adapter_id": "source_add:adapter:public-accepted",
+      "miner_ref": "miner:source-builder-alpha",
+      "source_name": "Bad accepted adapter",
+      "source_kind": "procurement",
+      "declared_base_domains": [
+        "procurement.example.gov"
+      ],
+      "output_schema_ref": "schema:source-add-output:v1",
+      "allowed_output_fields": [
+        "evidence_refs",
+        "snapshot_refs",
+        "content_hashes",
+        "normalized_text_hashes"
+      ],
+      "submitted_artifact_ref": "artifact:source-add:bad-accepted",
+      "code_bundle_hash": "sha256:badaccepted0000000000000000000000000000000000000000000000",
+      "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+      "max_trial_cost_cents": 1200,
+      "max_request_cost_cents": 75,
+      "max_latency_ms": 8000,
+      "credential_policy": "no_credentials",
+      "fixture_refs": [
+        "fixture:source-add:bad"
+      ],
+      "component_publicly_accepted": true,
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "expected_error_contains": "component_publicly_accepted"
+    },
+    {
+      "adapter_id": "source_add:adapter:cost-cap",
+      "miner_ref": "miner:source-builder-alpha",
+      "source_name": "Bad cost cap adapter",
+      "source_kind": "procurement",
+      "declared_base_domains": [
+        "procurement.example.gov"
+      ],
+      "output_schema_ref": "schema:source-add-output:v1",
+      "allowed_output_fields": [
+        "evidence_refs",
+        "snapshot_refs",
+        "content_hashes",
+        "normalized_text_hashes"
+      ],
+      "submitted_artifact_ref": "artifact:source-add:bad-cost-cap",
+      "code_bundle_hash": "sha256:badcostcap00000000000000000000000000000000000000000000000",
+      "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+      "max_trial_cost_cents": 6000,
+      "max_request_cost_cents": 75,
+      "max_latency_ms": 8000,
+      "credential_policy": "no_credentials",
+      "fixture_refs": [
+        "fixture:source-add:bad"
+      ],
+      "visibility_policy": "default_private",
+      "artifact_release_state": "private_live_champion",
+      "expected_error_contains": "launch cap"
+    }
+  ],
+  "trial_outputs": [
+    {
+      "output_ref": "source_add_output:p1.5:001",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "icp_ref": "icp:fixture:state-procurement-001",
+      "evidence_refs": [
+        "evidence:source-add:procurement-rfp-v1:001"
+      ],
+      "snapshot_refs": [
+        "snapshot:source-add:procurement-rfp-v1:001"
+      ],
+      "content_hashes": [
+        "sha256:contenthashsourceadd001000000000000000000000000000000000000"
+      ],
+      "normalized_text_hashes": [
+        "sha256:normtexthashsourceadd0010000000000000000000000000000000000"
+      ],
+      "metadata_refs": [
+        "metadata:source-add:procurement-rfp-v1:001"
+      ],
+      "output_schema_ref": "schema:source-add-output:v1"
+    },
+    {
+      "output_ref": "source_add_output:p1.5:002",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "icp_ref": "icp:fixture:state-procurement-002",
+      "evidence_refs": [
+        "evidence:source-add:procurement-rfp-v1:002"
+      ],
+      "snapshot_refs": [
+        "snapshot:source-add:procurement-rfp-v1:002"
+      ],
+      "content_hashes": [
+        "sha256:contenthashsourceadd002000000000000000000000000000000000000"
+      ],
+      "normalized_text_hashes": [
+        "sha256:normtexthashsourceadd0020000000000000000000000000000000000"
+      ],
+      "metadata_refs": [
+        "metadata:source-add:procurement-rfp-v1:002"
+      ],
+      "output_schema_ref": "schema:source-add-output:v1"
+    }
+  ],
+  "invalid_trial_outputs": [
+    {
+      "output_ref": "source_add_output:p1.5:bad-raw",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "icp_ref": "icp:fixture:bad",
+      "evidence_refs": [
+        "evidence:source-add:bad"
+      ],
+      "snapshot_refs": [
+        "snapshot:source-add:bad"
+      ],
+      "content_hashes": [
+        "sha256:badcontenthash000000000000000000000000000000000000000000"
+      ],
+      "normalized_text_hashes": [
+        "sha256:badnormtexthash00000000000000000000000000000000000000000"
+      ],
+      "raw_content": "This raw scraped page body must not leave the adapter.",
+      "expected_error_contains": "raw scraped content"
+    },
+    {
+      "output_ref": "source_add_output:p1.5:bad-empty-evidence",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "icp_ref": "icp:fixture:bad",
+      "evidence_refs": [],
+      "snapshot_refs": [
+        "snapshot:source-add:bad"
+      ],
+      "content_hashes": [
+        "sha256:badcontenthash000000000000000000000000000000000000000000"
+      ],
+      "normalized_text_hashes": [
+        "sha256:badnormtexthash00000000000000000000000000000000000000000"
+      ],
+      "expected_error_contains": "evidence_refs"
+    },
+    {
+      "output_ref": "source_add_output:p1.5:bad-hash",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "icp_ref": "icp:fixture:bad",
+      "evidence_refs": [
+        "evidence:source-add:bad"
+      ],
+      "snapshot_refs": [
+        "snapshot:source-add:bad"
+      ],
+      "content_hashes": [
+        "not-a-sha"
+      ],
+      "normalized_text_hashes": [
+        "sha256:badnormtexthash00000000000000000000000000000000000000000"
+      ],
+      "expected_error_contains": "sha256"
+    }
+  ],
+  "sandbox_review": {
+    "review_id": "source_add_review:p1.5:001",
+    "adapter_id": "source_add:adapter:procurement-rfp-v1",
+    "sandbox_job": {
+      "job_id": "sandbox:source-add:p1.5:001",
+      "ticket_id": "ticket:p1.4:001",
+      "image_ref": "image:research-sandbox:source-add-review-placeholder",
+      "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+      "resource_caps": {
+        "cpu_cores": 2,
+        "memory_mb": 4096,
+        "disk_mb": 2048,
+        "wall_clock_cap_s": 900,
+        "max_cost_cents": 1200,
+        "network_disabled": true
+      },
+      "mounted_artifact_refs": [
+        "artifact:source-add:procurement-rfp-v1"
+      ],
+      "status": "queued",
+      "estimated_cost_cents": 300,
+      "actual_cost_cents": 0,
+      "lab_only": true,
+      "provisioned_host": false,
+      "network_enabled": false,
+      "enclave_attested": false
+    },
+    "trial_icp_refs": [
+      "icp:fixture:state-procurement-001",
+      "icp:fixture:state-procurement-002"
+    ],
+    "output_refs": [
+      "source_add_output:p1.5:001",
+      "source_add_output:p1.5:002"
+    ],
+    "measured_trial_yield": 0.18,
+    "status": "recorded",
+    "lab_only": true,
+    "adapter_code_executed": false,
+    "arbitrary_code_executed_outside_sandbox": false,
+    "component_publicly_accepted": false,
+    "bounty_payment_enabled": false,
+    "acceptance_human_gate_passed": false
+  },
+  "invalid_sandbox_reviews": [
+    {
+      "review_id": "source_add_review:p1.5:bad-executed",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "sandbox_job": {
+        "job_id": "sandbox:source-add:p1.5:bad-executed",
+        "ticket_id": "ticket:p1.4:001",
+        "image_ref": "image:research-sandbox:source-add-review-placeholder",
+        "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+        "resource_caps": {
+          "cpu_cores": 2,
+          "memory_mb": 4096,
+          "disk_mb": 2048,
+          "wall_clock_cap_s": 900,
+          "max_cost_cents": 1200,
+          "network_disabled": true
+        },
+        "mounted_artifact_refs": [
+          "artifact:source-add:procurement-rfp-v1"
+        ],
+        "status": "queued",
+        "estimated_cost_cents": 300,
+        "actual_cost_cents": 0,
+        "lab_only": true,
+        "provisioned_host": false,
+        "network_enabled": false,
+        "enclave_attested": false
+      },
+      "trial_icp_refs": [
+        "icp:fixture:state-procurement-001"
+      ],
+      "output_refs": [
+        "source_add_output:p1.5:001"
+      ],
+      "measured_trial_yield": 0.18,
+      "status": "recorded",
+      "lab_only": true,
+      "adapter_code_executed": true,
+      "arbitrary_code_executed_outside_sandbox": false,
+      "component_publicly_accepted": false,
+      "bounty_payment_enabled": false,
+      "acceptance_human_gate_passed": false,
+      "expected_error_contains": "must not execute adapter code"
+    },
+    {
+      "review_id": "source_add_review:p1.5:bad-network",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "sandbox_job": {
+        "job_id": "sandbox:source-add:p1.5:bad-network",
+        "ticket_id": "ticket:p1.4:001",
+        "image_ref": "image:research-sandbox:source-add-review-placeholder",
+        "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+        "resource_caps": {
+          "cpu_cores": 2,
+          "memory_mb": 4096,
+          "disk_mb": 2048,
+          "wall_clock_cap_s": 900,
+          "max_cost_cents": 1200,
+          "network_disabled": false
+        },
+        "mounted_artifact_refs": [
+          "artifact:source-add:procurement-rfp-v1"
+        ],
+        "status": "queued",
+        "estimated_cost_cents": 300,
+        "actual_cost_cents": 0,
+        "lab_only": true,
+        "provisioned_host": false,
+        "network_enabled": true,
+        "enclave_attested": false
+      },
+      "trial_icp_refs": [
+        "icp:fixture:state-procurement-001"
+      ],
+      "output_refs": [
+        "source_add_output:p1.5:001"
+      ],
+      "measured_trial_yield": 0.18,
+      "status": "recorded",
+      "lab_only": true,
+      "adapter_code_executed": false,
+      "arbitrary_code_executed_outside_sandbox": false,
+      "component_publicly_accepted": false,
+      "bounty_payment_enabled": false,
+      "acceptance_human_gate_passed": false,
+      "expected_error_contains": "network"
+    },
+    {
+      "review_id": "source_add_review:p1.5:bad-accepted",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "sandbox_job": {
+        "job_id": "sandbox:source-add:p1.5:bad-accepted",
+        "ticket_id": "ticket:p1.4:001",
+        "image_ref": "image:research-sandbox:source-add-review-placeholder",
+        "sandbox_policy_ref": "sandbox-policy:source-add-review:v1",
+        "resource_caps": {
+          "cpu_cores": 2,
+          "memory_mb": 4096,
+          "disk_mb": 2048,
+          "wall_clock_cap_s": 900,
+          "max_cost_cents": 1200,
+          "network_disabled": true
+        },
+        "mounted_artifact_refs": [
+          "artifact:source-add:procurement-rfp-v1"
+        ],
+        "status": "queued",
+        "estimated_cost_cents": 300,
+        "actual_cost_cents": 0,
+        "lab_only": true,
+        "provisioned_host": false,
+        "network_enabled": false,
+        "enclave_attested": false
+      },
+      "trial_icp_refs": [
+        "icp:fixture:state-procurement-001"
+      ],
+      "output_refs": [
+        "source_add_output:p1.5:001"
+      ],
+      "measured_trial_yield": 0.18,
+      "status": "recorded",
+      "lab_only": true,
+      "adapter_code_executed": false,
+      "arbitrary_code_executed_outside_sandbox": false,
+      "component_publicly_accepted": true,
+      "bounty_payment_enabled": true,
+      "acceptance_human_gate_passed": true,
+      "expected_error_contains": "public components"
+    }
+  ],
+  "bounty_bands": [
+    {
+      "band_ref": "source_add_band:low",
+      "min_trial_yield": 0.0,
+      "max_trial_yield": 0.1,
+      "bounty_cents": 10000
+    },
+    {
+      "band_ref": "source_add_band:medium",
+      "min_trial_yield": 0.1,
+      "max_trial_yield": 0.25,
+      "bounty_cents": 50000
+    },
+    {
+      "band_ref": "source_add_band:high",
+      "min_trial_yield": 0.25,
+      "max_trial_yield": null,
+      "bounty_cents": 100000
+    }
+  ],
+  "expected_bounty_band_ref": "source_add_band:medium",
+  "invalid_bounty_records": [
+    {
+      "bounty_ref": "source_add_bounty:bad-paid",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "review_id": "source_add_review:p1.5:001",
+      "miner_ref": "miner:source-builder-alpha",
+      "measured_trial_yield": 0.18,
+      "band_ref": "source_add_band:medium",
+      "bounty_cents": 50000,
+      "state": "calculated_not_payable",
+      "payment_enabled": true,
+      "settlement_ref": "",
+      "paid_at": "",
+      "expected_error_contains": "payment_enabled"
+    },
+    {
+      "bounty_ref": "source_add_bounty:bad-settlement",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "review_id": "source_add_review:p1.5:001",
+      "miner_ref": "miner:source-builder-alpha",
+      "measured_trial_yield": 0.18,
+      "band_ref": "source_add_band:medium",
+      "bounty_cents": 50000,
+      "state": "calculated_not_payable",
+      "payment_enabled": false,
+      "settlement_ref": "settlement:should-not-exist",
+      "paid_at": "",
+      "expected_error_contains": "settlement_ref"
+    },
+    {
+      "bounty_ref": "source_add_bounty:bad-paid-at",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "review_id": "source_add_review:p1.5:001",
+      "miner_ref": "miner:source-builder-alpha",
+      "measured_trial_yield": 0.18,
+      "band_ref": "source_add_band:medium",
+      "bounty_cents": 50000,
+      "state": "calculated_not_payable",
+      "payment_enabled": false,
+      "settlement_ref": "",
+      "paid_at": "2026-06-16T12:00:00Z",
+      "expected_error_contains": "paid_at"
+    }
+  ],
+  "ip_assignment": {
+    "assignment_ref": "source_add_ip:p1.5:001",
+    "adapter_id": "source_add:adapter:procurement-rfp-v1",
+    "miner_ref": "miner:source-builder-alpha",
+    "assigned_to_ref": "leadpoet:research-lab",
+    "rights_scope": "source_add_adapter acceptance rights and downstream training/eval corpus rights",
+    "state": "acknowledged_pending_acceptance",
+    "effective_on_acceptance_only": true,
+    "public_component_accepted": false,
+    "signature_ref": "signature:pending"
+  },
+  "invalid_ip_assignments": [
+    {
+      "assignment_ref": "source_add_ip:p1.5:bad-accepted",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "miner_ref": "miner:source-builder-alpha",
+      "assigned_to_ref": "leadpoet:research-lab",
+      "rights_scope": "source_add_adapter acceptance rights",
+      "state": "acknowledged_pending_acceptance",
+      "effective_on_acceptance_only": true,
+      "public_component_accepted": true,
+      "signature_ref": "signature:pending",
+      "expected_error_contains": "public component accepted"
+    },
+    {
+      "assignment_ref": "source_add_ip:p1.5:bad-signature",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "miner_ref": "miner:source-builder-alpha",
+      "assigned_to_ref": "leadpoet:research-lab",
+      "rights_scope": "source_add_adapter acceptance rights",
+      "state": "acknowledged_pending_acceptance",
+      "effective_on_acceptance_only": true,
+      "public_component_accepted": false,
+      "signature_ref": "signature:signed:should-not-exist",
+      "expected_error_contains": "signature:pending"
+    },
+    {
+      "assignment_ref": "source_add_ip:p1.5:bad-scope",
+      "adapter_id": "source_add:adapter:procurement-rfp-v1",
+      "miner_ref": "miner:source-builder-alpha",
+      "assigned_to_ref": "leadpoet:research-lab",
+      "rights_scope": "generic rights",
+      "state": "acknowledged_pending_acceptance",
+      "effective_on_acceptance_only": false,
+      "public_component_accepted": false,
+      "signature_ref": "signature:pending",
+      "expected_error_contains": "rights_scope"
+    }
+  ],
+  "unsafe_workflow_guards": {
+    "public_miner_workflows": false,
+    "paid_loops": false,
+    "autopilot": false,
+    "hosted_run_crowning": false,
+    "source_add_payments": true,
+    "scheduler_jobs": true,
+    "production_writes": false,
+    "supabase_writes": false,
+    "live_champion_publication": false
+  }
+}

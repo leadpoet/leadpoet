@@ -143,3 +143,18 @@ validator_logs.txt
 
 # Cloned external repo — burn->vault goal; remove when integration is done
 treasury-contract/
+
+# Internal notes / audits / plans — keep local, never commit
+*.plan.md
+*_plan.md
+*_audit_*.md
+*_audit.md
+*_postmortem*.md
+*_internal*.md
+audits/
+notes/
+.scratch/
+TODO_*.md
+NOTES_*.md
+DRAFT_*.md
+

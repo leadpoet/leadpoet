@@ -102,6 +102,10 @@ Leadpoet/api/
 # Local agent handoff transcripts
 .agent_handoffs/
 
+# Codex local instructions (never commit; use ~/.codex/AGENTS.md for global rules)
+AGENTS.md
+AGENTS.override.md
+
 # Local/private Research Lab planning drafts
 docs/agent_handoff_loop.md
 docs/leadpoet_research_lab_plan_v5.md

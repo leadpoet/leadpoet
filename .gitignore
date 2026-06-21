@@ -102,6 +102,9 @@ Leadpoet/api/
 # Local agent handoff transcripts
 .agent_handoffs/
 
+# Cursor-era local instructions/transcripts. Do not commit or use as Codex rules.
+cursor_md_files/
+
 # Codex local instructions (never commit; use ~/.codex/AGENTS.md for global rules)
 AGENTS.md
 AGENTS.override.md

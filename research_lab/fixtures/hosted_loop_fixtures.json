@@ -1,0 +1,671 @@
+{
+  "created_at": "2026-06-20T00:00:00Z",
+  "icp_set_hash": "sha256:hosted-loop-local-icp-set",
+  "runtime_flags": {
+    "local_execution_enabled": true,
+    "production_paid_loops_enabled": false,
+    "gateway_api_enabled": false,
+    "supabase_writes_enabled": false,
+    "scheduler_enabled": false,
+    "live_crowning_enabled": false,
+    "validator_weight_writes_enabled": false,
+    "fulfillment_touch_enabled": false
+  },
+  "unsafe_runtime_flags": {
+    "local_execution_enabled": true,
+    "production_paid_loops_enabled": true,
+    "gateway_api_enabled": false,
+    "supabase_writes_enabled": false,
+    "scheduler_enabled": false,
+    "live_crowning_enabled": false,
+    "validator_weight_writes_enabled": false,
+    "fulfillment_touch_enabled": false
+  },
+  "loop_start_policy": {
+    "policy_id": "research-loop-start-hosted-local-v0",
+    "contract_enabled": true,
+    "loop_start_fee_enabled": true,
+    "loop_start_fee_usd": "5.00",
+    "amount_buffer_percent": "0.01",
+    "payment_max_age_seconds": 86400,
+    "leadpoet_payment_wallet": "local-leadpoet-payment-wallet",
+    "miner_openrouter_key_required": true,
+    "miner_openrouter_key_preflight_required": true,
+    "gateway_payment_verifier_enabled": false,
+    "openrouter_key_handling_modes": [
+      "encrypted_ref",
+      "ephemeral_ref"
+    ],
+    "leadpoet_exa_key_ref": "server-side:leadpoet:exa",
+    "leadpoet_scrapingdog_key_ref": "server-side:leadpoet:scrapingdog"
+  },
+  "loop_start_request": {
+    "request_id": "hosted-loop-request-001",
+    "miner_hotkey": "5FhostedLoopMinerHotkey111111111111111111111111111111111",
+    "island": "generalist",
+    "brief_ref": "brief:sanitized:hosted-loop:coverage-cost-001",
+    "payment_block_hash": "0xhostedloop0000000000000000000000000000000000000000000000000001",
+    "payment_extrinsic_index": 12,
+    "miner_openrouter_key_ref": "vaultref:miner-alpha:openrouter:v1",
+    "requested_at": "2026-06-20T00:00:00Z",
+    "loop_count": 2
+  },
+  "payment_evidence": {
+    "block_hash": "0xhostedloop0000000000000000000000000000000000000000000000000001",
+    "extrinsic_index": 12,
+    "miner_hotkey": "5FhostedLoopMinerHotkey111111111111111111111111111111111",
+    "sender_coldkey": "5ChostedLoopColdkey1111111111111111111111111111111111",
+    "hotkey_owner_coldkey": "5ChostedLoopColdkey1111111111111111111111111111111111",
+    "destination_wallet": "local-leadpoet-payment-wallet",
+    "amount_usd": "5.00",
+    "call_function": "transfer_keep_alive",
+    "extrinsic_success": true,
+    "age_seconds": 120,
+    "network": "local"
+  },
+  "miner_openrouter_key_ref": {
+    "provider": "openrouter",
+    "key_ref": "vaultref:miner-alpha:openrouter:v1",
+    "handling": "encrypted_ref",
+    "preflight_status": "passed",
+    "secret_material_stored": false
+  },
+  "ticket": {
+    "ticket_id": "ticket:hosted-loop:001",
+    "owner_ref": "owner:leadpoet-lab",
+    "miner_ref": "miner:example-alpha",
+    "funded_balance_cents": 5000,
+    "created_seq": 100,
+    "budget_caps": {
+      "loop_unit_cents": 1000,
+      "max_loops_per_day": 10,
+      "per_node_eval_cap_cents": 1200,
+      "loop_batch_cap_cents": 10000,
+      "per_node_wall_clock_cap_s": 900,
+      "loop_batch_wall_clock_cap_s": 3600
+    }
+  },
+  "balance": {
+    "balance_id": "balance:hosted-loop:001"
+  },
+  "probe": {
+    "receipt_ref": "probe_receipt:hosted-loop:001",
+    "cost_cents": 0,
+    "result_ref": "probe_result:hosted-loop:coverage-cost-001",
+    "cost_ledger_ref": "cost_ledger:hosted-loop:probe:001",
+    "dev_delta_lcb": 0.7
+  },
+  "queue": {
+    "idempotency_key": "hosted-loop-001-reserve-2",
+    "priority_score": 80,
+    "created_seq": 101
+  },
+  "sandbox": {
+    "image_ref": "local://research-lab/engine-v1-sandbox:fixture",
+    "sandbox_policy_ref": "sandbox-policy:hosted-loop-local-v0",
+    "estimated_cost_cents": 2000,
+    "mounted_artifact_refs": [
+      "manifest:loop-engine-v1-manifest:v1",
+      "brief:sanitized:hosted-loop:coverage-cost-001"
+    ],
+    "resource_caps": {
+      "cpu_cores": 2,
+      "memory_mb": 2048,
+      "disk_mb": 1024,
+      "wall_clock_cap_s": 900,
+      "max_cost_cents": 2000,
+      "network_disabled": true
+    }
+  },
+  "trace": {
+    "openrouter_model": "openrouter:local-fixture-model",
+    "exa_cost_cents": 80,
+    "scrapingdog_cost_cents": 50
+  },
+  "eval_version": {
+    "verifier_hash": "sha256:hosted-loop-local-verifier",
+    "judge_version_hash": "sha256:hosted-loop-local-judge-version"
+  },
+  "local_snapshot": {
+    "url": "https://evidence.example.com/hosted-loop-local",
+    "content": "Hosted loop local fixture: public evidence confirms coverage opportunities for current-intent research without exposing raw customer data.",
+    "fetch_ts": "2026-06-20T00:00:05Z",
+    "signing_key": "hosted-loop-local-test-key"
+  },
+  "map": {
+    "generated_for_date": "2026-06-20",
+    "map_version": "research-map-hosted-local-v0",
+    "allocator_confidence": 0.62,
+    "expected_cost_cents": 2000,
+    "expected_value_score": 0.71,
+    "model_version_ref": "allocator:hosted-loop-local-v0",
+    "failure_board_item_ref": "fb:hosted-loop:coverage-cost-001",
+    "sanitized_failure_summary": "Current-intent evidence routing leaves coverage and cost headroom on generalist ICPs.",
+    "sanitized_examples": [
+      "Recent public pages often contain stronger buying-intent evidence than broad search snippets.",
+      "Coverage can improve while keeping source count bounded."
+    ],
+    "recent_case_count": 3
+  },
+  "registry": {
+    "manifest_version": "loop-engine-v1-manifest:v1",
+    "champion_base": "reference:qualification_model:v1",
+    "eval_version": "eval:loop:v1",
+    "engine_v0_receipt_refs": [
+      "receipt:p0.6:research-loop-v0:source-routing-headroom"
+    ],
+    "meta_allocator_priors_enabled": false,
+    "entries": [
+      {
+        "name": "source_router",
+        "purpose": "Choose the evidence-source routing strategy for each ICP before extraction.",
+        "input_contract": "Sanitized ICP profile, approved evidence-source catalog, and budget caps.",
+        "output_contract": "Ordered source plan with no raw customer content and no unregistered adapters.",
+        "ablation_leverage": 0.42,
+        "allowed_patch_types": [
+          "STRATEGY_SWAP"
+        ],
+        "token_budget": 1200,
+        "cost_budget_cents": 180,
+        "strategy_options": [
+          "reference_routing",
+          "sonar_first_exa_fill"
+        ],
+        "engine_v0_evidence_refs": [
+          "p0.6:cluster:source-routing",
+          "p0.6:node:route-current-intent-first"
+        ],
+        "current_patch_seq": 2
+      },
+      {
+        "name": "prompt_pack",
+        "purpose": "Render the evidence-backed prompts used by extraction and ranking components.",
+        "input_contract": "Sanitized ICP fields and normalized signal names.",
+        "output_contract": "Schema-valid prompt text with required placeholders preserved.",
+        "ablation_leverage": 0.31,
+        "allowed_patch_types": [
+          "PROMPT_EDIT"
+        ],
+        "token_budget": 1800,
+        "cost_budget_cents": 90,
+        "prompt_required_placeholders": [
+          "icp",
+          "signals"
+        ],
+        "engine_v0_evidence_refs": [
+          "p0.6:cluster:prompt-pack",
+          "p0.6:node:signal-specific-extraction-prompt"
+        ],
+        "current_patch_seq": 1
+      },
+      {
+        "name": "hyperparams",
+        "purpose": "Hold bounded numeric controls for fixed-pipeline experimentation.",
+        "input_contract": "Typed parameter name and value.",
+        "output_contract": "Parameter value within declared safety bounds.",
+        "ablation_leverage": 0.18,
+        "allowed_patch_types": [
+          "PARAM_EDIT"
+        ],
+        "token_budget": 250,
+        "cost_budget_cents": 25,
+        "param_bounds": {
+          "max_sources_per_icp": {
+            "min": 3,
+            "max": 12
+          },
+          "candidate_batch_size": {
+            "min": 5,
+            "max": 50
+          }
+        },
+        "engine_v0_evidence_refs": [
+          "p0.6:cluster:param-headroom",
+          "p0.6:node:max-sources-cost-coverage"
+        ],
+        "current_patch_seq": 0
+      }
+    ]
+  },
+  "scenarios": {
+    "winning": {
+      "scenario_id": "winning",
+      "target_component": "source_router",
+      "target_metric": "coverage",
+      "query_ref": "query:hosted-loop:winning",
+      "url_ref": "url:hosted-loop:winning",
+      "novelty_similarity": 0.12,
+      "fixtures_used": [
+        "fixture:hosted-loop:coverage:001",
+        "fixture:hosted-loop:cost:001"
+      ],
+      "guardrails": {
+        "max_evidence_defect_rate_increase": 0.02,
+        "min_coverage": 0.05,
+        "max_cost_per_icp_cents": 250,
+        "max_latency_ms": 15000,
+        "max_complexity_increase": 50,
+        "flat_metric_tolerance": 0.1
+      },
+      "parent_metrics": {
+        "proxy_score": 50.0,
+        "evidence_defect_rate": 0.05,
+        "coverage": 0.5,
+        "cost_per_icp_cents": 120,
+        "latency_ms": 4000,
+        "schema_validity": true,
+        "complexity": {
+          "diff_loc": 20,
+          "prompt_pack_tokens": 500,
+          "component_count": 8,
+          "strategy_count": 3
+        }
+      },
+      "candidates": [
+        {
+          "node_id": "node:hosted:strategy:001",
+          "targeted_metric": "coverage",
+          "model_used": "engine-v1-local",
+          "tokens": {
+            "in": 1200,
+            "out": 260
+          },
+          "costs_cents": {
+            "draft": 300,
+            "eval": 250,
+            "reflect": 100
+          },
+          "fixture_refs": [
+            "fixture:hosted-loop:coverage:001"
+          ],
+          "hypothesis": {
+            "hypothesis_id": "hyp:hosted:strategy:001",
+            "component": "source_router",
+            "failure_mode": "coverage_gap",
+            "mechanism": "Route current-intent sources before broad search, then fill missing evidence with Exa.",
+            "patch_type": "STRATEGY_SWAP",
+            "predicted_delta": 4.0,
+            "falsifier": "coverage",
+            "context_pack_refs": [
+              "manifest:loop-engine-v1-manifest:v1",
+              "receipt:p0.6:research-loop-v0:source-routing-headroom"
+            ],
+            "miner_brief_ref": "brief:sanitized:hosted-loop:coverage-cost-001",
+            "generated_by": "engine"
+          },
+          "patch": {
+            "patch_id": "patch:hosted:strategy:001",
+            "hypothesis_id": "hyp:hosted:strategy:001",
+            "component": "source_router",
+            "patch_type": "STRATEGY_SWAP",
+            "payload": {
+              "strategy_name": "sonar_first_exa_fill"
+            }
+          },
+          "candidate_metrics": {
+            "proxy_score": 54.0,
+            "evidence_defect_rate": 0.055,
+            "coverage": 0.58,
+            "cost_per_icp_cents": 130,
+            "latency_ms": 4200,
+            "schema_validity": true,
+            "complexity": {
+              "diff_loc": 25,
+              "prompt_pack_tokens": 510,
+              "component_count": 8,
+              "strategy_count": 3
+            }
+          },
+          "reflection": {
+            "worked": "Current-intent routing improved coverage.",
+            "failed": "Cost rose slightly on broad ICPs.",
+            "why": "Source ordering found fresher evidence before broad fallback.",
+            "next_question": "Can the same routing lower cost with a tighter source cap?"
+          }
+        },
+        {
+          "node_id": "node:hosted:param:001",
+          "targeted_metric": "cost_per_icp_cents",
+          "model_used": "engine-v1-local",
+          "tokens": {
+            "in": 900,
+            "out": 210
+          },
+          "costs_cents": {
+            "draft": 260,
+            "eval": 220,
+            "reflect": 90
+          },
+          "fixture_refs": [
+            "fixture:hosted-loop:cost:001"
+          ],
+          "hypothesis": {
+            "hypothesis_id": "hyp:hosted:param:001",
+            "component": "hyperparams",
+            "failure_mode": "cost_overrun",
+            "mechanism": "Bound max sources per ICP while preserving enough coverage.",
+            "patch_type": "PARAM_EDIT",
+            "predicted_delta": 18.0,
+            "falsifier": "cost_per_icp_cents",
+            "context_pack_refs": [
+              "manifest:loop-engine-v1-manifest:v1",
+              "receipt:p0.6:param-headroom"
+            ],
+            "miner_brief_ref": "brief:sanitized:hosted-loop:coverage-cost-001",
+            "generated_by": "engine"
+          },
+          "patch": {
+            "patch_id": "patch:hosted:param:001",
+            "hypothesis_id": "hyp:hosted:param:001",
+            "component": "hyperparams",
+            "patch_type": "PARAM_EDIT",
+            "payload": {
+              "param_name": "max_sources_per_icp",
+              "new_value": 8
+            }
+          },
+          "candidate_metrics": {
+            "proxy_score": 51.0,
+            "evidence_defect_rate": 0.05,
+            "coverage": 0.52,
+            "cost_per_icp_cents": 90,
+            "latency_ms": 3900,
+            "schema_validity": true,
+            "complexity": {
+              "diff_loc": 18,
+              "prompt_pack_tokens": 500,
+              "component_count": 8,
+              "strategy_count": 3
+            }
+          },
+          "reflection": {
+            "worked": "The source cap cut cost without dropping below coverage guardrails.",
+            "failed": "Proxy score only improved mildly.",
+            "why": "The cap removed low-yield long-tail pages.",
+            "next_question": "Can routing and caps be combined without defect regression?"
+          }
+        },
+        {
+          "node_id": "node:hosted:prompt:001",
+          "targeted_metric": "proxy_score",
+          "model_used": "engine-v1-local",
+          "tokens": {
+            "in": 1000,
+            "out": 220
+          },
+          "costs_cents": {
+            "draft": 280,
+            "eval": 230,
+            "reflect": 90
+          },
+          "fixture_refs": [
+            "fixture:hosted-loop:prompt:001"
+          ],
+          "hypothesis": {
+            "hypothesis_id": "hyp:hosted:prompt:001",
+            "component": "prompt_pack",
+            "failure_mode": "generic_prompting",
+            "mechanism": "Tighten the extraction instruction around normalized signals.",
+            "patch_type": "PROMPT_EDIT",
+            "predicted_delta": 2.0,
+            "falsifier": "proxy_score",
+            "context_pack_refs": [
+              "manifest:loop-engine-v1-manifest:v1",
+              "receipt:p0.6:prompt-pack"
+            ],
+            "miner_brief_ref": "brief:sanitized:hosted-loop:coverage-cost-001",
+            "generated_by": "engine"
+          },
+          "patch": {
+            "patch_id": "patch:hosted:prompt:001",
+            "hypothesis_id": "hyp:hosted:prompt:001",
+            "component": "prompt_pack",
+            "patch_type": "PROMPT_EDIT",
+            "payload": {
+              "template_name": "signal_extraction",
+              "new_template": "For ICP {icp}, extract only evidence-backed signals from this normalized set: {signals}."
+            }
+          },
+          "candidate_metrics": {
+            "proxy_score": 49.0,
+            "evidence_defect_rate": 0.05,
+            "coverage": 0.5,
+            "cost_per_icp_cents": 115,
+            "latency_ms": 3900,
+            "schema_validity": true,
+            "complexity": {
+              "diff_loc": 18,
+              "prompt_pack_tokens": 480,
+              "component_count": 8,
+              "strategy_count": 3
+            }
+          },
+          "reflection": {
+            "worked": "The template stayed schema-valid.",
+            "failed": "It did not improve the proxy score.",
+            "why": "The tightened instruction removed ambiguous but useful context.",
+            "next_question": "Can the template preserve context while still rejecting unsupported signals?"
+          }
+        }
+      ]
+    },
+    "losing": {
+      "scenario_id": "losing",
+      "target_component": "source_router",
+      "target_metric": "coverage",
+      "query_ref": "query:hosted-loop:losing",
+      "url_ref": "url:hosted-loop:losing",
+      "novelty_similarity": 0.18,
+      "fixtures_used": [
+        "fixture:hosted-loop:coverage:001",
+        "fixture:hosted-loop:cost:001"
+      ],
+      "guardrails": {
+        "max_evidence_defect_rate_increase": 0.02,
+        "min_coverage": 0.05,
+        "max_cost_per_icp_cents": 250,
+        "max_latency_ms": 15000,
+        "max_complexity_increase": 50,
+        "flat_metric_tolerance": 0.1
+      },
+      "parent_metrics": {
+        "proxy_score": 50.0,
+        "evidence_defect_rate": 0.05,
+        "coverage": 0.5,
+        "cost_per_icp_cents": 120,
+        "latency_ms": 4000,
+        "schema_validity": true,
+        "complexity": {
+          "diff_loc": 20,
+          "prompt_pack_tokens": 500,
+          "component_count": 8,
+          "strategy_count": 3
+        }
+      },
+      "candidates": [
+        {
+          "node_id": "node:hosted:strategy:lose",
+          "targeted_metric": "coverage",
+          "model_used": "engine-v1-local",
+          "tokens": {
+            "in": 1200,
+            "out": 260
+          },
+          "costs_cents": {
+            "draft": 300,
+            "eval": 250,
+            "reflect": 100
+          },
+          "fixture_refs": [
+            "fixture:hosted-loop:coverage:001"
+          ],
+          "hypothesis": {
+            "hypothesis_id": "hyp:hosted:strategy:lose",
+            "component": "source_router",
+            "failure_mode": "coverage_gap",
+            "mechanism": "Try routing through the alternate strategy first.",
+            "patch_type": "STRATEGY_SWAP",
+            "predicted_delta": 1.0,
+            "falsifier": "coverage",
+            "context_pack_refs": [
+              "manifest:loop-engine-v1-manifest:v1"
+            ],
+            "miner_brief_ref": "brief:sanitized:hosted-loop:coverage-cost-001",
+            "generated_by": "engine"
+          },
+          "patch": {
+            "patch_id": "patch:hosted:strategy:lose",
+            "hypothesis_id": "hyp:hosted:strategy:lose",
+            "component": "source_router",
+            "patch_type": "STRATEGY_SWAP",
+            "payload": {
+              "strategy_name": "sonar_first_exa_fill"
+            }
+          },
+          "candidate_metrics": {
+            "proxy_score": 49.0,
+            "evidence_defect_rate": 0.055,
+            "coverage": 0.47,
+            "cost_per_icp_cents": 130,
+            "latency_ms": 4200,
+            "schema_validity": true,
+            "complexity": {
+              "diff_loc": 25,
+              "prompt_pack_tokens": 510,
+              "component_count": 8,
+              "strategy_count": 3
+            }
+          },
+          "reflection": {
+            "worked": "The patch stayed inside the strategy registry.",
+            "failed": "Coverage regressed on the fixture set.",
+            "why": "The alternate source order buried useful broad-search evidence.",
+            "next_question": "What evidence type should trigger the alternate route?"
+          }
+        },
+        {
+          "node_id": "node:hosted:param:lose",
+          "targeted_metric": "cost_per_icp_cents",
+          "model_used": "engine-v1-local",
+          "tokens": {
+            "in": 900,
+            "out": 210
+          },
+          "costs_cents": {
+            "draft": 260,
+            "eval": 220,
+            "reflect": 90
+          },
+          "fixture_refs": [
+            "fixture:hosted-loop:cost:001"
+          ],
+          "hypothesis": {
+            "hypothesis_id": "hyp:hosted:param:lose",
+            "component": "hyperparams",
+            "failure_mode": "cost_overrun",
+            "mechanism": "Increase source count to find marginal evidence.",
+            "patch_type": "PARAM_EDIT",
+            "predicted_delta": 1.0,
+            "falsifier": "cost_per_icp_cents",
+            "context_pack_refs": [
+              "manifest:loop-engine-v1-manifest:v1"
+            ],
+            "miner_brief_ref": "brief:sanitized:hosted-loop:coverage-cost-001",
+            "generated_by": "engine"
+          },
+          "patch": {
+            "patch_id": "patch:hosted:param:lose",
+            "hypothesis_id": "hyp:hosted:param:lose",
+            "component": "hyperparams",
+            "patch_type": "PARAM_EDIT",
+            "payload": {
+              "param_name": "max_sources_per_icp",
+              "new_value": 12
+            }
+          },
+          "candidate_metrics": {
+            "proxy_score": 50.0,
+            "evidence_defect_rate": 0.05,
+            "coverage": 0.51,
+            "cost_per_icp_cents": 150,
+            "latency_ms": 4300,
+            "schema_validity": true,
+            "complexity": {
+              "diff_loc": 20,
+              "prompt_pack_tokens": 500,
+              "component_count": 8,
+              "strategy_count": 3
+            }
+          },
+          "reflection": {
+            "worked": "The parameter remained in bounds.",
+            "failed": "Cost increased more than coverage improved.",
+            "why": "More sources added low-yield evidence.",
+            "next_question": "Can the source cap be conditional on ICP specificity?"
+          }
+        },
+        {
+          "node_id": "node:hosted:prompt:lose",
+          "targeted_metric": "proxy_score",
+          "model_used": "engine-v1-local",
+          "tokens": {
+            "in": 1000,
+            "out": 220
+          },
+          "costs_cents": {
+            "draft": 280,
+            "eval": 230,
+            "reflect": 90
+          },
+          "fixture_refs": [
+            "fixture:hosted-loop:prompt:001"
+          ],
+          "hypothesis": {
+            "hypothesis_id": "hyp:hosted:prompt:lose",
+            "component": "prompt_pack",
+            "failure_mode": "generic_prompting",
+            "mechanism": "Tighten the extraction instruction around normalized signals.",
+            "patch_type": "PROMPT_EDIT",
+            "predicted_delta": 1.0,
+            "falsifier": "proxy_score",
+            "context_pack_refs": [
+              "manifest:loop-engine-v1-manifest:v1"
+            ],
+            "miner_brief_ref": "brief:sanitized:hosted-loop:coverage-cost-001",
+            "generated_by": "engine"
+          },
+          "patch": {
+            "patch_id": "patch:hosted:prompt:lose",
+            "hypothesis_id": "hyp:hosted:prompt:lose",
+            "component": "prompt_pack",
+            "patch_type": "PROMPT_EDIT",
+            "payload": {
+              "template_name": "signal_extraction",
+              "new_template": "For ICP {icp}, extract only evidence-backed signals from this normalized set: {signals}."
+            }
+          },
+          "candidate_metrics": {
+            "proxy_score": 49.0,
+            "evidence_defect_rate": 0.05,
+            "coverage": 0.5,
+            "cost_per_icp_cents": 115,
+            "latency_ms": 3900,
+            "schema_validity": true,
+            "complexity": {
+              "diff_loc": 18,
+              "prompt_pack_tokens": 480,
+              "component_count": 8,
+              "strategy_count": 3
+            }
+          },
+          "reflection": {
+            "worked": "The prompt stayed schema-valid.",
+            "failed": "The proxy score dropped.",
+            "why": "The narrower prompt filtered useful context.",
+            "next_question": "Can prompt specificity be adjusted by evidence type?"
+          }
+        }
+      ]
+    }
+  }
+}

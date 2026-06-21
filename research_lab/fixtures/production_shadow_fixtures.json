@@ -1,0 +1,188 @@
+{
+  "shadow_case": {
+    "generated_at": "2026-06-20T00:00:00Z",
+    "netuid": 71,
+    "epoch": 4021,
+    "source_refs": [
+      "shadow:production-read:fulfillment-weight-bundle:4021",
+      "shadow:production-read:research-loop-receipts:4021",
+      "shadow:production-read:crown-registry:4021"
+    ],
+    "flags": {
+      "RESEARCH_LAB_SHADOW_BUNDLES_ENABLED": true,
+      "RESEARCH_LAB_SHADOW_WEIGHTS_ENABLED": true,
+      "RESEARCH_LAB_SHADOW_REIMBURSEMENTS_ENABLED": true,
+      "RESEARCH_LAB_PAID_LOOPS_ENABLED": false,
+      "RESEARCH_LAB_HOSTED_RUNS_ENABLED": false,
+      "RESEARCH_LAB_PROBES_ENABLED": false,
+      "RESEARCH_LAB_AUTOPILOT_ENABLED": false,
+      "RESEARCH_LAB_CROWNING_ENABLED": false,
+      "RESEARCH_LAB_REIMBURSEMENTS_ENABLED": false,
+      "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": false,
+      "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": false,
+      "RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED": false
+    },
+    "uids": [0, 1, 2, 3],
+    "miner_uid_by_hotkey": {
+      "5FshadowMinerHotkey111111111111111111111111111111": 1,
+      "5FshadowMinerHotkey222222222222222222222222222222": 2
+    },
+    "live_u16_weights": {
+      "0": 40000,
+      "1": 15000,
+      "2": 10535,
+      "3": 0
+    },
+    "fulfillment_scores": {
+      "0": 700,
+      "1": 200,
+      "2": 100
+    },
+    "leaderboard_scores": {
+      "1": 50,
+      "2": 20
+    },
+    "active_researcher_floor_scores": {
+      "2": 10
+    },
+    "weight_policy": {
+      "total_weight": 65535,
+      "grant_score_per_ppm": "0.001",
+      "reimbursement_score_per_microusd": "0.000001",
+      "fulfillment_scale": "1",
+      "leaderboard_scale": "1",
+      "floor_scale": "1"
+    },
+    "reimbursement_start_epoch": 4021,
+    "reimbursement_policy": {
+      "policy_id": "alpha-reimbursement-production-shadow-v0",
+      "enabled": true,
+      "min_rebate_rate": 0.4,
+      "max_rebate_rate": 0.8,
+      "high_participation_target": 10,
+      "reimbursement_epochs": 4,
+      "max_usd_per_run": 50,
+      "max_usd_per_hotkey_day": 100,
+      "max_usd_per_island_day": 200,
+      "global_budget_usd": 500,
+      "include_loop_start_fee_in_base": false,
+      "distinct_funded_hotkey_weight": 1,
+      "paid_loop_weight": 1,
+      "unique_brief_weight": 1
+    },
+    "participation_snapshots": {
+      "generalist": {
+        "snapshot_id": "participation:generalist:shadow:4021",
+        "island": "generalist",
+        "lookback_start": "2026-06-13T00:00:00Z",
+        "lookback_end": "2026-06-20T00:00:00Z",
+        "distinct_funded_hotkeys": 1,
+        "paid_loop_count": 1,
+        "unique_brief_count": 0
+      },
+      "fintech": {
+        "snapshot_id": "participation:fintech:shadow:4021",
+        "island": "fintech",
+        "lookback_start": "2026-06-13T00:00:00Z",
+        "lookback_end": "2026-06-20T00:00:00Z",
+        "distinct_funded_hotkeys": 4,
+        "paid_loop_count": 3,
+        "unique_brief_count": 3
+      }
+    },
+    "reimbursement_runs": [
+      {
+        "run_id": "shadow-run-generalist-001",
+        "miner_hotkey": "5FshadowMinerHotkey111111111111111111111111111111",
+        "miner_uid": 1,
+        "island": "generalist",
+        "run_day": "2026-06-20",
+        "verified_compute_cost_usd": 15,
+        "miner_openrouter_cost_usd": 5,
+        "loop_start_tao_fee_usd": 5,
+        "paid_research_loop": true,
+        "valid_receipt": true,
+        "verified_loop_start_payment": true,
+        "preserved_loop_start_credit": false,
+        "miner_openrouter_key_present": true,
+        "trusted_cost_ledger": true,
+        "passed_abuse_checks": true,
+        "refunded": false,
+        "voided": false,
+        "duplicate": false,
+        "novelty_rejected": false,
+        "self_cancelled_before_minimum_work": false,
+        "banned_hotkey": false
+      },
+      {
+        "run_id": "shadow-run-fintech-001",
+        "miner_hotkey": "5FshadowMinerHotkey222222222222222222222222222222",
+        "miner_uid": 2,
+        "island": "fintech",
+        "run_day": "2026-06-20",
+        "verified_compute_cost_usd": 15,
+        "miner_openrouter_cost_usd": 5,
+        "loop_start_tao_fee_usd": 5,
+        "paid_research_loop": true,
+        "valid_receipt": true,
+        "verified_loop_start_payment": true,
+        "preserved_loop_start_credit": false,
+        "miner_openrouter_key_present": true,
+        "trusted_cost_ledger": true,
+        "passed_abuse_checks": true,
+        "refunded": false,
+        "voided": false,
+        "duplicate": false,
+        "novelty_rejected": false,
+        "self_cancelled_before_minimum_work": false,
+        "banned_hotkey": false
+      }
+    ],
+    "grant_policy": {
+      "fixed_term_epochs": 4,
+      "delta_min": 0.02,
+      "grant_curve": [
+        {"delta": 0.02, "share_ppm": 2000},
+        {"delta": 0.05, "share_ppm": 5000}
+      ]
+    },
+    "crowns": [
+      {
+        "crowned": true,
+        "house_improvement": false,
+        "miner_uid": 2,
+        "miner_hotkey": "5FshadowMinerHotkey222222222222222222222222222222",
+        "island": "fintech",
+        "area": "current-intent-routing",
+        "delta": 0.03,
+        "crown_epoch": 4020,
+        "grant_start_epoch": 4021
+      }
+    ]
+  },
+  "expectations": {
+    "default_flags": {
+      "shadow_bundles_enabled": false,
+      "shadow_weights_enabled": false,
+      "shadow_reimbursements_enabled": false,
+      "live_paid_loops_enabled": false,
+      "live_hosted_runs_enabled": false,
+      "live_probes_enabled": false,
+      "live_autopilot_enabled": false,
+      "live_crowning_enabled": false,
+      "live_reimbursements_enabled": false,
+      "live_weight_mutation_enabled": false,
+      "production_writes_enabled": false,
+      "fulfillment_mutation_enabled": false
+    },
+    "awarded_reimbursement_count": 2,
+    "scheduled_reimbursement_microusd_by_epoch": {
+      "4021": 5600000,
+      "4022": 5600000,
+      "4023": 5600000,
+      "4024": 5600000
+    },
+    "verifier_divergence_status": "no_official_shadow_bundle_provided",
+    "changed_uid_count": 3
+  }
+}

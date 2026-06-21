@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leadpoet.com/schemas/research_reimbursement.schema.json",
+  "title": "Leadpoet Research Lab Alpha Reimbursement Decision",
+  "description": "Deterministic local record for a participation-based alpha reimbursement award and fixed-window schedule.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "award",
+    "schedule"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "award": {
+      "$ref": "#/$defs/award"
+    },
+    "schedule": {
+      "$ref": "#/$defs/schedule"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "award": {
+      "type": "object",
+      "required": [
+        "award_id",
+        "run_id",
+        "miner_hotkey",
+        "island",
+        "run_day",
+        "status",
+        "participation_score",
+        "participation_fraction",
+        "rebate_rate",
+        "eligible_cost_microusd",
+        "eligible_cost_usd",
+        "capped_cost_basis_microusd",
+        "capped_cost_basis_usd",
+        "raw_reimbursement_microusd",
+        "raw_reimbursement_usd",
+        "target_reimbursement_microusd",
+        "target_reimbursement_usd",
+        "reimbursement_epochs",
+        "caps_applied",
+        "ineligibility_reasons",
+        "loop_start_fee_included",
+        "input_hash"
+      ],
+      "properties": {
+        "award_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "miner_hotkey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "island": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "run_day": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "status": {
+          "enum": [
+            "awarded",
+            "disabled",
+            "ineligible",
+            "capped_to_zero"
+          ]
+        },
+        "participation_score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "participation_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rebate_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "eligible_cost_microusd": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eligible_cost_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "capped_cost_basis_microusd": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capped_cost_basis_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "raw_reimbursement_microusd": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "raw_reimbursement_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "target_reimbursement_microusd": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "target_reimbursement_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "reimbursement_epochs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "caps_applied": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "per_run",
+              "hotkey",
+              "island",
+              "global"
+            ]
+          }
+        },
+        "ineligibility_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "loop_start_fee_included": {
+          "type": "boolean"
+        },
+        "input_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    },
+    "schedule": {
+      "type": "object",
+      "required": [
+        "schedule_id",
+        "award_id",
+        "status",
+        "start_epoch",
+        "epoch_count",
+        "total_microusd",
+        "total_usd",
+        "entries"
+      ],
+      "properties": {
+        "schedule_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "award_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "status": {
+          "enum": [
+            "scheduled",
+            "empty"
+          ]
+        },
+        "start_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "epoch_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_microusd": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "epoch",
+              "amount_microusd",
+              "amount_usd"
+            ],
+            "properties": {
+              "epoch": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "amount_microusd": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "amount_usd": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

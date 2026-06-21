@@ -1,0 +1,251 @@
+{
+  "policy": {
+    "policy_id": "alpha-reimbursement-local-v0",
+    "enabled": true,
+    "min_rebate_rate": 0.4,
+    "max_rebate_rate": 0.8,
+    "high_participation_target": 10,
+    "reimbursement_epochs": 6,
+    "max_usd_per_run": 50,
+    "max_usd_per_hotkey_day": 100,
+    "max_usd_per_island_day": 100,
+    "global_budget_usd": 100,
+    "include_loop_start_fee_in_base": false,
+    "distinct_funded_hotkey_weight": 1,
+    "paid_loop_weight": 1,
+    "unique_brief_weight": 1
+  },
+  "disabled_policy": {
+    "policy_id": "alpha-reimbursement-disabled-local-v0",
+    "enabled": false,
+    "min_rebate_rate": 0.4,
+    "max_rebate_rate": 0.8,
+    "high_participation_target": 10,
+    "reimbursement_epochs": 6,
+    "max_usd_per_run": 50,
+    "max_usd_per_hotkey_day": 100,
+    "max_usd_per_island_day": 100,
+    "global_budget_usd": 100,
+    "include_loop_start_fee_in_base": false,
+    "distinct_funded_hotkey_weight": 1,
+    "paid_loop_weight": 1,
+    "unique_brief_weight": 1
+  },
+  "schedule_start_epoch": 1000,
+  "snapshots": {
+    "low": {
+      "snapshot_id": "participation:quiet-island:2026-06-20",
+      "island": "quiet-island",
+      "lookback_start": "2026-06-13T00:00:00Z",
+      "lookback_end": "2026-06-20T00:00:00Z",
+      "distinct_funded_hotkeys": 0,
+      "paid_loop_count": 0,
+      "unique_brief_count": 0
+    },
+    "high": {
+      "snapshot_id": "participation:crowded-island:2026-06-20",
+      "island": "crowded-island",
+      "lookback_start": "2026-06-13T00:00:00Z",
+      "lookback_end": "2026-06-20T00:00:00Z",
+      "distinct_funded_hotkeys": 4,
+      "paid_loop_count": 3,
+      "unique_brief_count": 3
+    }
+  },
+  "cap_usage": {
+    "none": {
+      "hotkey_day_awarded_usd": 0,
+      "island_day_awarded_usd": 0,
+      "global_awarded_usd": 0
+    },
+    "hotkey_near_cap": {
+      "hotkey_day_awarded_usd": 90,
+      "island_day_awarded_usd": 0,
+      "global_awarded_usd": 0
+    },
+    "island_near_cap": {
+      "hotkey_day_awarded_usd": 0,
+      "island_day_awarded_usd": 95,
+      "global_awarded_usd": 0
+    },
+    "global_near_cap": {
+      "hotkey_day_awarded_usd": 0,
+      "island_day_awarded_usd": 0,
+      "global_awarded_usd": 97
+    }
+  },
+  "runs": {
+    "eligible_low": {
+      "run_id": "run-alpha-low-001",
+      "miner_hotkey": "5FalphaMinerHotkey111111111111111111111111111111",
+      "island": "quiet-island",
+      "run_day": "2026-06-20",
+      "verified_compute_cost_usd": 15,
+      "miner_openrouter_cost_usd": 5,
+      "loop_start_tao_fee_usd": 5,
+      "paid_research_loop": true,
+      "valid_receipt": true,
+      "verified_loop_start_payment": true,
+      "preserved_loop_start_credit": false,
+      "miner_openrouter_key_present": true,
+      "trusted_cost_ledger": true,
+      "passed_abuse_checks": true,
+      "refunded": false,
+      "voided": false,
+      "duplicate": false,
+      "novelty_rejected": false,
+      "self_cancelled_before_minimum_work": false,
+      "banned_hotkey": false
+    },
+    "eligible_high": {
+      "run_id": "run-alpha-high-001",
+      "miner_hotkey": "5FalphaMinerHotkey222222222222222222222222222222",
+      "island": "crowded-island",
+      "run_day": "2026-06-20",
+      "verified_compute_cost_usd": 15,
+      "miner_openrouter_cost_usd": 5,
+      "loop_start_tao_fee_usd": 5,
+      "paid_research_loop": true,
+      "valid_receipt": true,
+      "verified_loop_start_payment": true,
+      "preserved_loop_start_credit": false,
+      "miner_openrouter_key_present": true,
+      "trusted_cost_ledger": true,
+      "passed_abuse_checks": true,
+      "refunded": false,
+      "voided": false,
+      "duplicate": false,
+      "novelty_rejected": false,
+      "self_cancelled_before_minimum_work": false,
+      "banned_hotkey": false
+    },
+    "expensive": {
+      "run_id": "run-alpha-expensive-001",
+      "miner_hotkey": "5FalphaMinerHotkey333333333333333333333333333333",
+      "island": "quiet-island",
+      "run_day": "2026-06-20",
+      "verified_compute_cost_usd": 75,
+      "miner_openrouter_cost_usd": 25,
+      "loop_start_tao_fee_usd": 5,
+      "paid_research_loop": true,
+      "valid_receipt": true,
+      "verified_loop_start_payment": true,
+      "preserved_loop_start_credit": false,
+      "miner_openrouter_key_present": true,
+      "trusted_cost_ledger": true,
+      "passed_abuse_checks": true,
+      "refunded": false,
+      "voided": false,
+      "duplicate": false,
+      "novelty_rejected": false,
+      "self_cancelled_before_minimum_work": false,
+      "banned_hotkey": false
+    },
+    "invalid": {
+      "run_id": "run-alpha-invalid-001",
+      "miner_hotkey": "5FalphaMinerHotkey444444444444444444444444444444",
+      "island": "quiet-island",
+      "run_day": "2026-06-20",
+      "verified_compute_cost_usd": 15,
+      "miner_openrouter_cost_usd": 5,
+      "loop_start_tao_fee_usd": 5,
+      "paid_research_loop": false,
+      "valid_receipt": false,
+      "verified_loop_start_payment": false,
+      "preserved_loop_start_credit": false,
+      "miner_openrouter_key_present": false,
+      "trusted_cost_ledger": false,
+      "passed_abuse_checks": false,
+      "refunded": false,
+      "voided": false,
+      "duplicate": false,
+      "novelty_rejected": false,
+      "self_cancelled_before_minimum_work": false,
+      "banned_hotkey": false
+    },
+    "voided": {
+      "run_id": "run-alpha-voided-001",
+      "miner_hotkey": "5FalphaMinerHotkey555555555555555555555555555555",
+      "island": "quiet-island",
+      "run_day": "2026-06-20",
+      "verified_compute_cost_usd": 15,
+      "miner_openrouter_cost_usd": 5,
+      "loop_start_tao_fee_usd": 5,
+      "voided": true
+    },
+    "duplicate": {
+      "run_id": "run-alpha-duplicate-001",
+      "miner_hotkey": "5FalphaMinerHotkey666666666666666666666666666666",
+      "island": "quiet-island",
+      "run_day": "2026-06-20",
+      "verified_compute_cost_usd": 15,
+      "miner_openrouter_cost_usd": 5,
+      "loop_start_tao_fee_usd": 5,
+      "duplicate": true
+    },
+    "novelty_rejected": {
+      "run_id": "run-alpha-novelty-rejected-001",
+      "miner_hotkey": "5FalphaMinerHotkey777777777777777777777777777777",
+      "island": "quiet-island",
+      "run_day": "2026-06-20",
+      "verified_compute_cost_usd": 15,
+      "miner_openrouter_cost_usd": 5,
+      "loop_start_tao_fee_usd": 5,
+      "novelty_rejected": true
+    },
+    "self_cancelled": {
+      "run_id": "run-alpha-self-cancelled-001",
+      "miner_hotkey": "5FalphaMinerHotkey888888888888888888888888888888",
+      "island": "quiet-island",
+      "run_day": "2026-06-20",
+      "verified_compute_cost_usd": 15,
+      "miner_openrouter_cost_usd": 5,
+      "loop_start_tao_fee_usd": 5,
+      "self_cancelled_before_minimum_work": true
+    },
+    "banned": {
+      "run_id": "run-alpha-banned-001",
+      "miner_hotkey": "5FalphaMinerHotkey999999999999999999999999999999",
+      "island": "quiet-island",
+      "run_day": "2026-06-20",
+      "verified_compute_cost_usd": 15,
+      "miner_openrouter_cost_usd": 5,
+      "loop_start_tao_fee_usd": 5,
+      "banned_hotkey": true
+    }
+  },
+  "expectations": {
+    "loop_fee_excluded_cost_microusd": 20000000,
+    "low_target_microusd": 16000000,
+    "high_target_microusd": 8000000,
+    "per_run_cap_target_microusd": 40000000,
+    "hotkey_cap_target_microusd": 10000000,
+    "island_cap_target_microusd": 5000000,
+    "global_cap_target_microusd": 3000000,
+    "ineligible_cases": {
+      "invalid": [
+        "not_paid_research_loop",
+        "missing_valid_receipt",
+        "missing_loop_start_payment_or_credit",
+        "missing_miner_openrouter_key",
+        "missing_trusted_cost_ledger",
+        "abuse_checks_failed"
+      ],
+      "voided": [
+        "voided"
+      ],
+      "duplicate": [
+        "duplicate_run"
+      ],
+      "novelty_rejected": [
+        "novelty_rejected"
+      ],
+      "self_cancelled": [
+        "self_cancelled_before_minimum_work"
+      ],
+      "banned": [
+        "banned_hotkey"
+      ]
+    }
+  }
+}

@@ -1,0 +1,144 @@
+"""Pydantic models for the Research Lab gateway API."""
+
+from __future__ import annotations
+
+import re
+import time
+from typing import Any, Optional
+from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+SECRET_MARKERS = (
+    "sk-or-",
+    "openrouter_api_key",
+    "raw_openrouter_key",
+    "raw_secret",
+    "service_role",
+)
+
+SECRET_KEY_RE = re.compile(r"(?:api[_-]?key|raw[_-]?secret|raw[_-]?openrouter|token|credential)", re.I)
+
+
+class SignedResearchLabRequest(BaseModel):
+    miner_hotkey: str = Field(min_length=16)
+    signature: str = Field(min_length=16)
+    timestamp: int
+    idempotency_key: str = Field(min_length=8, max_length=160)
+
+    @model_validator(mode="after")
+    def timestamp_is_fresh(self) -> "SignedResearchLabRequest":
+        now = int(time.time())
+        if abs(now - self.timestamp) > 300:
+            raise ValueError("timestamp must be within 5 minutes")
+        return self
+
+    def signed_payload(self) -> dict[str, Any]:
+        return self.model_dump(exclude={"signature"})
+
+
+class ResearchLabTicketCreateRequest(SignedResearchLabRequest):
+    island: str = Field(min_length=1, max_length=80)
+    brief_sanitized_ref: str = Field(min_length=8, max_length=256)
+    requested_loop_count: int = Field(default=1, gt=0, le=100)
+    loop_start_fee_required_usd: float = Field(default=5.0, ge=0)
+    miner_openrouter_key_ref: Optional[str] = Field(default=None, max_length=256)
+    miner_openrouter_key_handling: Optional[str] = Field(default=None)
+
+    @field_validator("brief_sanitized_ref", "miner_openrouter_key_ref")
+    @classmethod
+    def no_raw_secret_refs(cls, value: Optional[str]) -> Optional[str]:
+        if value:
+            reject_secret_material(value)
+        return value
+
+
+class ResearchLabProbeRequest(SignedResearchLabRequest):
+    ticket_id: UUID
+    probe_ref: str = Field(min_length=8, max_length=256)
+
+    @field_validator("probe_ref")
+    @classmethod
+    def no_raw_probe_material(cls, value: str) -> str:
+        reject_secret_material(value)
+        return value
+
+
+class ResearchLabLoopStartRequest(SignedResearchLabRequest):
+    ticket_id: UUID
+    payment_block_hash: str = Field(min_length=8, max_length=160)
+    payment_extrinsic_index: int = Field(ge=0)
+    miner_openrouter_key_ref: str = Field(min_length=8, max_length=256)
+    miner_openrouter_key_handling: str = Field(pattern="^(encrypted_ref|ephemeral_ref)$")
+    miner_openrouter_preflight_status: str = Field(pattern="^(passed|failed|not_run)$")
+    requested_loop_count: int = Field(default=1, gt=0, le=100)
+
+    @field_validator("miner_openrouter_key_ref", "payment_block_hash")
+    @classmethod
+    def no_raw_loop_start_secret(cls, value: str) -> str:
+        reject_secret_material(value)
+        return value
+
+
+class ResearchLabReceiptCreateRequest(BaseModel):
+    internal_run_ref: str = Field(min_length=8, max_length=256)
+    ticket_id: UUID
+    trajectory_id: Optional[UUID] = None
+    run_id: Optional[UUID] = None
+    loop_start_payment_id: Optional[UUID] = None
+    loop_start_credit_id: Optional[str] = Field(default=None, max_length=256)
+    miner_hotkey: str = Field(min_length=16)
+    island: str = Field(min_length=1, max_length=80)
+    receipt_status: str = Field(pattern="^(queued|completed|failed|cancelled|tombstoned)$")
+    loop_count: int = Field(default=1, gt=0)
+    miner_openrouter_key_ref: Optional[str] = Field(default=None, max_length=256)
+    provider_usage: list[dict[str, Any]] = Field(default_factory=list)
+    cost_ledger: dict[str, Any] = Field(default_factory=dict)
+    receipt_doc: dict[str, Any] = Field(default_factory=dict)
+    public_receipt_ref: Optional[str] = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def no_secret_material(self) -> "ResearchLabReceiptCreateRequest":
+        reject_secret_material(self.model_dump())
+        return self
+
+
+class ResearchLabTicketResponse(BaseModel):
+    ticket_id: str
+    status: str
+    event_id: str
+    event_seq: int
+    ticket_hash: str
+
+
+class ResearchLabLoopStartResponse(BaseModel):
+    ticket_id: str
+    run_id: str
+    payment_id: str
+    payment_ref: str
+    queued: bool
+    credit_preserved: bool = False
+    credit_id: Optional[str] = None
+    status: str
+
+
+class ResearchLabReceiptResponse(BaseModel):
+    receipt_id: str
+    receipt_hash: str
+    status: str
+
+
+def reject_secret_material(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if SECRET_KEY_RE.search(str(key)):
+                raise ValueError(f"raw secret field is not allowed: {key}")
+            reject_secret_material(item)
+    elif isinstance(value, list):
+        for item in value:
+            reject_secret_material(item)
+    elif isinstance(value, str):
+        lowered = value.lower()
+        if any(marker in lowered for marker in SECRET_MARKERS):
+            raise ValueError("raw provider secret material is not allowed")

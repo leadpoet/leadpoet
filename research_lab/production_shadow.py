@@ -288,6 +288,100 @@ def build_controlled_production_shadow(record: Mapping[str, Any]) -> dict[str, A
     }
 
 
+def build_shadow_observation_window_report(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    required_epoch_count: int,
+) -> dict[str, Any]:
+    """Build a production shadow observation-window report.
+
+    This is the activation gate artifact: it proves shadow bundles were emitted
+    for a continuous epoch window, stayed read-only, produced reimbursement and
+    live/shadow observability, and did not diverge from verifier recomputation.
+    """
+    if required_epoch_count <= 0:
+        raise ValueError("required_epoch_count must be positive")
+    if len(records) < required_epoch_count:
+        raise ValueError("not enough shadow records for required observation window")
+
+    bundles = []
+    reports = []
+    read_only_checks = []
+    reimbursement_total_by_epoch: dict[str, int] = {}
+    divergence_status_counts: dict[str, int] = {}
+    max_abs_delta_u16 = 0
+    changed_uid_epochs = 0
+
+    for record in records:
+        result = build_controlled_production_shadow(record)
+        bundle = result["bundle"]
+        report = result["report"]
+        read_only = result["read_only_evidence"]
+        bundles.append(bundle)
+        reports.append(report)
+        read_only_checks.append(read_only)
+        divergence_status = str(report["verifier_divergence"]["status"])
+        divergence_status_counts[divergence_status] = divergence_status_counts.get(divergence_status, 0) + 1
+        max_abs_delta_u16 = max(max_abs_delta_u16, int(report["shadow_live_diff"]["max_abs_delta_u16"]))
+        if int(report["shadow_live_diff"]["changed_uid_count"]) > 0:
+            changed_uid_epochs += 1
+        for epoch, amount in report["scheduled_reimbursement_microusd_by_epoch"].items():
+            reimbursement_total_by_epoch[str(epoch)] = reimbursement_total_by_epoch.get(str(epoch), 0) + int(amount)
+
+    epochs = sorted(int(bundle["epoch"]) for bundle in bundles)
+    expected_epochs = list(range(epochs[0], epochs[0] + len(epochs))) if epochs else []
+    missing_epochs = [epoch for epoch in expected_epochs if epoch not in epochs]
+    read_only_failures = [check for check in read_only_checks if not check["passed"]]
+    diverged_epochs = [
+        int(bundle["epoch"])
+        for bundle, report in zip(bundles, reports)
+        if bool(report["verifier_divergence"].get("diverged", False))
+    ]
+
+    window_without_id = {
+        "window_id": "",
+        "schema_version": "1.0",
+        "shadow_version": PRODUCTION_SHADOW_VERSION,
+        "shadow_only": True,
+        "read_only": True,
+        "submission_allowed": False,
+        "on_chain_submission_allowed": False,
+        "required_epoch_count": int(required_epoch_count),
+        "observed_epoch_count": len(epochs),
+        "epoch_start": epochs[0] if epochs else None,
+        "epoch_end": epochs[-1] if epochs else None,
+        "epochs": epochs,
+        "missing_epochs": missing_epochs,
+        "bundle_ids": [bundle["bundle_id"] for bundle in bundles],
+        "report_ids": [report["report_id"] for report in reports],
+        "all_read_only": not read_only_failures,
+        "read_only_failure_count": len(read_only_failures),
+        "diverged_epochs": diverged_epochs,
+        "divergence_status_counts": divergence_status_counts,
+        "changed_uid_epochs": changed_uid_epochs,
+        "max_abs_delta_u16": max_abs_delta_u16,
+        "scheduled_reimbursement_microusd_by_epoch": dict(
+            sorted(reimbursement_total_by_epoch.items(), key=lambda item: int(item[0]))
+        ),
+    }
+    activation_blockers = []
+    if missing_epochs:
+        activation_blockers.append("missing_shadow_epochs")
+    if read_only_failures:
+        activation_blockers.append("shadow_bundle_not_read_only")
+    if diverged_epochs:
+        activation_blockers.append("verifier_divergence")
+    if len(epochs) < required_epoch_count:
+        activation_blockers.append("observation_window_too_short")
+
+    return {
+        **window_without_id,
+        "window_id": "research_shadow_window:" + sha256_json(window_without_id),
+        "activation_ready": not activation_blockers,
+        "activation_blockers": activation_blockers,
+    }
+
+
 def build_shadow_observability_report(
     *,
     epoch: int,
@@ -468,6 +562,16 @@ def verify_controlled_production_shadow(path: Path | str | None = None) -> dict[
     except RuntimeError:
         pass
 
+    window_records = [
+        _epoch_variant(fixture["shadow_case"], epoch)
+        for epoch in range(int(fixture["shadow_case"]["epoch"]), int(fixture["shadow_case"]["epoch"]) + 4)
+    ]
+    window_report = build_shadow_observation_window_report(window_records, required_epoch_count=4)
+    if not window_report["activation_ready"]:
+        errors.append("shadow_observation_window_not_activation_ready")
+    if window_report["observed_epoch_count"] != 4:
+        errors.append("shadow_observation_window_epoch_count_mismatch")
+
     if errors:
         raise AssertionError("; ".join(errors))
 
@@ -481,6 +585,9 @@ def verify_controlled_production_shadow(path: Path | str | None = None) -> dict[
         "max_abs_delta_u16": report["shadow_live_diff"]["max_abs_delta_u16"],
         "verifier_divergence_status": report["verifier_divergence"]["status"],
         "read_only": result["read_only_evidence"]["passed"],
+        "window_id": window_report["window_id"],
+        "window_epoch_count": window_report["observed_epoch_count"],
+        "window_activation_ready": window_report["activation_ready"],
     }
 
 
@@ -496,3 +603,23 @@ def _truthy(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in TRUTHY_VALUES
+
+
+def _epoch_variant(record: Mapping[str, Any], epoch: int) -> dict[str, Any]:
+    variant = json.loads(json.dumps(record))
+    delta = int(epoch) - int(record["epoch"])
+    variant["epoch"] = int(epoch)
+    variant["generated_at"] = f"2026-06-{20 + delta:02d}T00:00:00Z"
+    variant["reimbursement_start_epoch"] = int(epoch)
+    variant["source_refs"] = [
+        str(ref).rsplit(":", 1)[0] + f":{epoch}"
+        if str(ref).rsplit(":", 1)[-1].isdigit()
+        else str(ref)
+        for ref in variant.get("source_refs", [])
+    ]
+    for island_snapshot in variant.get("participation_snapshots", {}).values():
+        island_snapshot["snapshot_id"] = f"participation:{island_snapshot['island']}:shadow:{epoch}"
+        island_snapshot["lookback_end"] = variant["generated_at"]
+    for run in variant.get("reimbursement_runs", []):
+        run["run_id"] = f"{run['run_id']}:epoch:{epoch}"
+    return variant

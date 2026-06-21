@@ -26,7 +26,9 @@ def main() -> int:
         f"{summary['changed_uid_count']} live/shadow changed UIDs, "
         f"max diff {summary['max_abs_delta_u16']} u16, "
         f"verifier divergence status {summary['verifier_divergence_status']}, "
-        f"read_only={summary['read_only']}."
+        f"read_only={summary['read_only']}, "
+        f"window_epochs={summary['window_epoch_count']}, "
+        f"window_ready={summary['window_activation_ready']}."
     )
     return 0
 

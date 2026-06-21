@@ -47,6 +47,15 @@ from gateway.api import role_translate
 # Import qualification router (Lead Qualification Agent Competition - Phase 10)
 from gateway.qualification.api.router import qualification_router
 
+# Import Research Lab router
+try:
+    from gateway.research_lab.api import router as research_lab_router
+    _RESEARCH_LAB_ROUTER_AVAILABLE = True
+except Exception as _research_lab_import_err:
+    _RESEARCH_LAB_ROUTER_AVAILABLE = False
+    import logging as _logging
+    _logging.getLogger(__name__).warning(f"Research Lab router import failed: {_research_lab_import_err}")
+
 # Import fulfillment router (Lead Fulfillment System)
 try:
     from gateway.fulfillment.api import fulfillment_router
@@ -475,6 +484,9 @@ app.include_router(role_translate.router)  # POST /fulfillment/translate-role (D
 # Lead Qualification Agent Competition API (Phase 10)
 app.include_router(qualification_router)
 
+if _RESEARCH_LAB_ROUTER_AVAILABLE:
+    app.include_router(research_lab_router)
+
 if _FULFILLMENT_ROUTER_AVAILABLE:
     app.include_router(fulfillment_router)
 
@@ -794,4 +806,3 @@ if __name__ == "__main__":
         log_level="info"
        
     )
-

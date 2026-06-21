@@ -118,6 +118,7 @@ docs/agent_handoff_loop.md
 docs/leadpoet_research_lab_plan_v5.md
 docs/research_lab_phase*_tracker.md
 docs/research_lab_production_enablement_checklist.md
+docs/research_lab_production_activation_runbook.md
 
 # Legacy miner code - no longer used (replaced by lead_sorcerer_main)
 miner_models/get_leads.py

@@ -1,0 +1,316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leadpoet.com/schemas/research_loop_start_contract.schema.json",
+  "title": "Leadpoet Research Lab Loop-Start Contract Decision",
+  "description": "Local/staged record for loop-start TAO payment verification, miner OpenRouter key reference handling, provider key-source routing, and preserved retry credits.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "decision",
+    "payment_check",
+    "miner_openrouter_key_ref",
+    "provider_key_sources",
+    "preserved_credit"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "decision": {
+      "$ref": "#/$defs/decision"
+    },
+    "payment_check": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "status",
+        "payment_ref",
+        "valid",
+        "required_usd",
+        "amount_usd",
+        "reasons",
+        "input_hash"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "verified",
+            "rejected",
+            "fee_disabled",
+            "staged_gateway_verifier_disabled"
+          ]
+        },
+        "payment_ref": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "required_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "amount_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "input_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    },
+    "miner_openrouter_key_ref": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "provider",
+        "key_ref",
+        "handling",
+        "preflight_status",
+        "secret_material_stored"
+      ],
+      "properties": {
+        "provider": {
+          "const": "openrouter"
+        },
+        "key_ref": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "handling": {
+          "enum": [
+            "encrypted_ref",
+            "ephemeral_ref"
+          ]
+        },
+        "preflight_status": {
+          "enum": [
+            "passed",
+            "failed",
+            "not_run"
+          ]
+        },
+        "secret_material_stored": {
+          "const": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "provider_key_sources": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "$ref": "#/$defs/provider_key_source"
+      }
+    },
+    "preserved_credit": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "credit_id",
+        "miner_hotkey",
+        "payment_ref",
+        "request_id",
+        "status",
+        "reason",
+        "created_from_decision_id",
+        "consumed_by_loop_id"
+      ],
+      "properties": {
+        "credit_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "miner_hotkey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "payment_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "enum": [
+            "available",
+            "consumed"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "created_from_decision_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "consumed_by_loop_id": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "decision": {
+      "type": "object",
+      "required": [
+        "decision_id",
+        "request_id",
+        "miner_hotkey",
+        "island",
+        "status",
+        "can_queue",
+        "payment_required",
+        "payment_verified",
+        "payment_ref",
+        "credit_id",
+        "miner_openrouter_key_ref",
+        "reasons",
+        "provider_key_sources",
+        "input_hash"
+      ],
+      "properties": {
+        "decision_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "miner_hotkey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "island": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "enum": [
+            "disabled",
+            "key_rejected",
+            "payment_rejected",
+            "ready_to_queue",
+            "credit_ready_to_queue",
+            "credit_preserved_after_queue_failure"
+          ]
+        },
+        "can_queue": {
+          "type": "boolean"
+        },
+        "payment_required": {
+          "type": "boolean"
+        },
+        "payment_verified": {
+          "type": "boolean"
+        },
+        "payment_ref": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "credit_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "miner_openrouter_key_ref": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "provider_key_sources": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "$ref": "#/$defs/provider_key_source"
+          }
+        },
+        "input_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    },
+    "provider_key_source": {
+      "type": "object",
+      "required": [
+        "provider",
+        "key_source",
+        "key_ref",
+        "secret_material_stored",
+        "usage"
+      ],
+      "properties": {
+        "provider": {
+          "enum": [
+            "openrouter",
+            "exa",
+            "scrapingdog"
+          ]
+        },
+        "key_source": {
+          "enum": [
+            "miner",
+            "leadpoet_server_side"
+          ]
+        },
+        "key_ref": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "secret_material_stored": {
+          "const": false
+        },
+        "usage": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

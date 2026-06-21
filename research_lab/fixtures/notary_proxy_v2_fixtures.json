@@ -1,0 +1,168 @@
+{
+  "runtime_flags": {
+    "local_mock_calls_enabled": true,
+    "production_network_enabled": false,
+    "gateway_runtime_enabled": false,
+    "supabase_writes_enabled": false,
+    "validator_integration_enabled": false,
+    "fulfillment_touch_enabled": false
+  },
+  "loop_start_policy": {
+    "policy_id": "research-loop-start-local-v0",
+    "contract_enabled": true,
+    "loop_start_fee_enabled": true,
+    "loop_start_fee_usd": 5.0,
+    "amount_buffer_percent": 0.01,
+    "payment_max_age_seconds": 86400,
+    "leadpoet_payment_wallet": "5LeadpoetLoopStartWallet11111111111111111111111111",
+    "miner_openrouter_key_required": true,
+    "miner_openrouter_key_preflight_required": true,
+    "gateway_payment_verifier_enabled": false,
+    "openrouter_key_handling_modes": [
+      "encrypted_ref",
+      "ephemeral_ref"
+    ],
+    "leadpoet_exa_key_ref": "server-side:leadpoet:exa",
+    "leadpoet_scrapingdog_key_ref": "server-side:leadpoet:scrapingdog"
+  },
+  "miner_openrouter_key_ref": {
+    "provider": "openrouter",
+    "key_ref": "encrypted:openrouter:miner:notary-proxy-v2-local-001",
+    "handling": "encrypted_ref",
+    "preflight_status": "passed",
+    "secret_material_stored": false
+  },
+  "run": {
+    "run_id": "55555555-5555-4555-8555-555555555555",
+    "artifact_hash": "sha256:notary-proxy-v2-artifact-local",
+    "icp_set_hash": "sha256:notary-proxy-v2-icp-set-local",
+    "eval_version": {
+      "verifier_hash": "sha256:notary-proxy-v2-verifier-local",
+      "judge_version_hash": "sha256:notary-proxy-v2-judge-local"
+    }
+  },
+  "budget": {
+    "job_budget_cents": 9,
+    "per_provider_budget_cents": {
+      "openrouter": 4,
+      "exa": 2,
+      "scrapingdog": 5
+    },
+    "max_calls_per_provider": {
+      "openrouter": 2,
+      "exa": 2,
+      "scrapingdog": 2
+    },
+    "hard_stop_on_overrun": true
+  },
+  "mock_provider_calls": [
+    {
+      "call_id": "call-openrouter-hypothesis-001",
+      "provider": "openrouter",
+      "method": "POST",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "endpoint": "chat/completions",
+      "purpose": "engine_internal",
+      "model": "openrouter/local-fixture-model",
+      "component": "research_lab.engine.hypothesize",
+      "request_payload": {
+        "messages_hash": "sha256:fixture-openrouter-request",
+        "temperature": 0.2
+      },
+      "response_payload": {
+        "candidate_patch_type": "PROMPT_EDIT",
+        "hypothesis_hash": "sha256:fixture-openrouter-response"
+      },
+      "response_snapshot_content": "OpenRouter local fixture response: propose a PROMPT_EDIT for evidence extraction.",
+      "status_code": 200,
+      "cost_cents": 3,
+      "tokens_in": 240,
+      "tokens_out": 80,
+      "call_emitter": "model",
+      "teacher_model_flag": false,
+      "fetch_ts": "2026-06-20T00:10:00Z"
+    },
+    {
+      "call_id": "call-exa-search-001",
+      "provider": "exa",
+      "method": "POST",
+      "url": "https://api.exa.ai/search",
+      "endpoint": "search",
+      "purpose": "search",
+      "model": "exa-search",
+      "component": "research_lab.source_router",
+      "request_payload": {
+        "query_hash": "sha256:fixture-exa-query",
+        "num_results": 3
+      },
+      "response_payload": {
+        "result_urls_hash": "sha256:fixture-exa-results"
+      },
+      "response_snapshot_content": "Exa local fixture response: three candidate evidence URLs for the ICP.",
+      "status_code": 200,
+      "cost_cents": 2,
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "call_emitter": "code",
+      "teacher_model_flag": false,
+      "fetch_ts": "2026-06-20T00:11:00Z"
+    },
+    {
+      "call_id": "call-scrapingdog-scrape-001",
+      "provider": "scrapingdog",
+      "method": "GET",
+      "url": "https://api.scrapingdog.com/scrape",
+      "endpoint": "scrape",
+      "purpose": "scrape",
+      "model": "scrapingdog-scrape",
+      "component": "research_lab.evidence_fetch",
+      "request_payload": {
+        "target_url_hash": "sha256:fixture-target-url",
+        "dynamic": false
+      },
+      "response_payload": {
+        "page_hash": "sha256:fixture-scraped-page",
+        "status": "ok"
+      },
+      "response_snapshot_content": "ScrapingDog local fixture response: company page text with a hiring SDR signal.",
+      "status_code": 200,
+      "cost_cents": 4,
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "call_emitter": "code",
+      "teacher_model_flag": false,
+      "fetch_ts": "2026-06-20T00:12:00Z"
+    },
+    {
+      "call_id": "call-exa-search-over-budget-002",
+      "provider": "exa",
+      "method": "POST",
+      "url": "https://api.exa.ai/search",
+      "endpoint": "search",
+      "purpose": "search",
+      "model": "exa-search",
+      "component": "research_lab.source_router",
+      "request_payload": {
+        "query_hash": "sha256:fixture-exa-over-budget-query",
+        "num_results": 10
+      },
+      "response_payload": {
+        "result_urls_hash": "sha256:fixture-exa-over-budget-results"
+      },
+      "response_snapshot_content": "Exa local fixture response that should not be captured because the job budget is exhausted.",
+      "status_code": 200,
+      "cost_cents": 2,
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "call_emitter": "code",
+      "teacher_model_flag": false,
+      "fetch_ts": "2026-06-20T00:13:00Z"
+    }
+  ],
+  "expectations": {
+    "successful_call_count": 3,
+    "blocked_call_count": 1,
+    "blocked_reason": "job_budget_exceeded",
+    "total_success_cost_cents": 9
+  }
+}

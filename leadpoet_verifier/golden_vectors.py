@@ -31,6 +31,15 @@ from .crowning import (
     operating_characteristic_curve,
     simulate_sequential_crown_probability,
 )
+from .economics import (
+    build_improvement_grant_schedule,
+    build_reimbursement_schedule,
+    compose_final_weight_vector,
+    compute_reimbursement_award,
+    verify_improvement_grant_schedule,
+    verify_loop_start_payment_state,
+    verify_reimbursement_schedule,
+)
 from .l0 import run_l0_checks
 from .static_checks import run_static_gaming_checks
 
@@ -108,7 +117,10 @@ def run_golden_vectors(
         elif case["kind"] == "aggregate_set_score":
             actual = round(aggregate_set_score(case["per_icp_scores"]), 6)
         elif case["kind"] == "u16_weights_from_scores":
-            actual = u16_weights_from_scores({int(k): v for k, v in case["scores_by_uid"].items()})
+            actual = u16_weights_from_scores(
+                {int(k): v for k, v in case["scores_by_uid"].items()},
+                total_weight=int(case.get("total_weight", 65535)),
+            )
             actual = {str(k): v for k, v in actual.items()}
         else:
             errors.append(f"aggregation {case['id']}: unknown kind {case['kind']}")
@@ -198,6 +210,62 @@ def run_golden_vectors(
         expected = _round_public(case["expected"])
         if actual != expected:
             errors.append(f"crowning {case['id']}: {actual!r} != {expected!r}")
+
+    for case in fixture.get("research_lab_cases", []):
+        if case["kind"] == "compute_reimbursement_award":
+            actual = compute_reimbursement_award(
+                case["run"],
+                case["snapshot"],
+                case["policy"],
+                case.get("cap_usage", {}),
+            )
+        elif case["kind"] == "build_reimbursement_schedule":
+            award = compute_reimbursement_award(
+                case["run"],
+                case["snapshot"],
+                case["policy"],
+                case.get("cap_usage", {}),
+            )
+            actual = build_reimbursement_schedule(award, start_epoch=case["start_epoch"])
+        elif case["kind"] == "verify_reimbursement_schedule":
+            award = compute_reimbursement_award(
+                case["run"],
+                case["snapshot"],
+                case["policy"],
+                case.get("cap_usage", {}),
+            )
+            schedule = build_reimbursement_schedule(award, start_epoch=case["start_epoch"])
+            actual = verify_reimbursement_schedule(award, schedule)
+        elif case["kind"] == "verify_loop_start_payment_state":
+            actual = verify_loop_start_payment_state(
+                case["payment"],
+                case["policy"],
+                used_payment_refs=case.get("used_payment_refs", []),
+            )
+        elif case["kind"] == "build_improvement_grant_schedule":
+            actual = build_improvement_grant_schedule(case["crown"], case["policy"])
+        elif case["kind"] == "verify_improvement_grant_schedule":
+            schedule = build_improvement_grant_schedule(case["crown"], case["policy"])
+            actual = verify_improvement_grant_schedule(case["crown"], case["policy"], schedule)
+        elif case["kind"] == "compose_final_weight_vector":
+            actual = compose_final_weight_vector(
+                epoch=case["epoch"],
+                uids=case["uids"],
+                fulfillment_scores=case.get("fulfillment_scores", {}),
+                leaderboard_scores=case.get("leaderboard_scores", {}),
+                improvement_grant_schedules=case.get("improvement_grant_schedules", []),
+                reimbursement_schedules=case.get("reimbursement_schedules", []),
+                active_researcher_floor_scores=case.get("active_researcher_floor_scores", {}),
+                policy=case.get("policy", {}),
+            )
+        else:
+            errors.append(f"research_lab {case['id']}: unknown kind {case['kind']}")
+            continue
+
+        actual = _round_public(actual)
+        expected = _round_public(case["expected"])
+        if actual != expected:
+            errors.append(f"research_lab {case['id']}: {actual!r} != {expected!r}")
 
     allowlist = None
     if pcr0_allowlist_path:

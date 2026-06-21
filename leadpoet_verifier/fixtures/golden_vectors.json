@@ -511,6 +511,21 @@
         "7": 26214,
         "9": 26214
       }
+    },
+    {
+      "id": "u16_tie_break_lower_uid",
+      "kind": "u16_weights_from_scores",
+      "total_weight": 10,
+      "scores_by_uid": {
+        "2": 1,
+        "1": 1,
+        "3": 1
+      },
+      "expected": {
+        "1": 4,
+        "2": 3,
+        "3": 3
+      }
     }
   ],
   "static_cases": [
@@ -900,6 +915,734 @@
         ],
         "floor_grant_value": 60.0,
         "typical_winning_spend": 50.0
+      }
+    }
+  ],
+  "research_lab_cases": [
+    {
+      "id": "reimbursement_low_participation_award",
+      "kind": "compute_reimbursement_award",
+      "policy": {
+        "policy_id": "alpha-reimbursement-open-verifier-v1",
+        "enabled": true,
+        "min_rebate_rate": 0.4,
+        "max_rebate_rate": 0.8,
+        "high_participation_target": 10,
+        "reimbursement_epochs": 6,
+        "max_usd_per_run": 50,
+        "max_usd_per_hotkey_day": 100,
+        "max_usd_per_island_day": 100,
+        "global_budget_usd": 100,
+        "include_loop_start_fee_in_base": false,
+        "distinct_funded_hotkey_weight": 1,
+        "paid_loop_weight": 1,
+        "unique_brief_weight": 1
+      },
+      "snapshot": {
+        "snapshot_id": "participation:quiet-island:2026-06-20",
+        "island": "quiet-island",
+        "lookback_start": "2026-06-13T00:00:00Z",
+        "lookback_end": "2026-06-20T00:00:00Z",
+        "distinct_funded_hotkeys": 0,
+        "paid_loop_count": 0,
+        "unique_brief_count": 0
+      },
+      "run": {
+        "run_id": "run-alpha-low-open-001",
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "island": "quiet-island",
+        "run_day": "2026-06-20",
+        "verified_compute_cost_usd": 15,
+        "miner_openrouter_cost_usd": 5,
+        "loop_start_tao_fee_usd": 5,
+        "paid_research_loop": true,
+        "valid_receipt": true,
+        "verified_loop_start_payment": true,
+        "preserved_loop_start_credit": false,
+        "miner_openrouter_key_present": true,
+        "trusted_cost_ledger": true,
+        "passed_abuse_checks": true,
+        "refunded": false,
+        "voided": false,
+        "duplicate": false,
+        "novelty_rejected": false,
+        "self_cancelled_before_minimum_work": false,
+        "banned_hotkey": false
+      },
+      "cap_usage": {},
+      "expected": {
+        "award_id": "reimbursement_award:sha256:482874d7a7715110b50dec2377eff8facb23d1d073e6150f02894589b1db49ec",
+        "run_id": "run-alpha-low-open-001",
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "island": "quiet-island",
+        "run_day": "2026-06-20",
+        "status": "awarded",
+        "participation_score": 0.0,
+        "participation_fraction": 0.0,
+        "rebate_rate": 0.8,
+        "eligible_cost_microusd": 20000000,
+        "eligible_cost_usd": 20.0,
+        "capped_cost_basis_microusd": 20000000,
+        "capped_cost_basis_usd": 20.0,
+        "raw_reimbursement_microusd": 16000000,
+        "raw_reimbursement_usd": 16.0,
+        "target_reimbursement_microusd": 16000000,
+        "target_reimbursement_usd": 16.0,
+        "reimbursement_epochs": 6,
+        "caps_applied": [],
+        "ineligibility_reasons": [],
+        "loop_start_fee_included": false,
+        "input_hash": "sha256:31a3b8a8be3bb56aba69df870489c92bcb112d75ac856d0b369e4c5a4e186688"
+      }
+    },
+    {
+      "id": "reimbursement_high_participation_award",
+      "kind": "compute_reimbursement_award",
+      "policy": {
+        "policy_id": "alpha-reimbursement-open-verifier-v1",
+        "enabled": true,
+        "min_rebate_rate": 0.4,
+        "max_rebate_rate": 0.8,
+        "high_participation_target": 10,
+        "reimbursement_epochs": 6,
+        "max_usd_per_run": 50,
+        "max_usd_per_hotkey_day": 100,
+        "max_usd_per_island_day": 100,
+        "global_budget_usd": 100,
+        "include_loop_start_fee_in_base": false,
+        "distinct_funded_hotkey_weight": 1,
+        "paid_loop_weight": 1,
+        "unique_brief_weight": 1
+      },
+      "snapshot": {
+        "snapshot_id": "participation:crowded-island:2026-06-20",
+        "island": "crowded-island",
+        "lookback_start": "2026-06-13T00:00:00Z",
+        "lookback_end": "2026-06-20T00:00:00Z",
+        "distinct_funded_hotkeys": 4,
+        "paid_loop_count": 3,
+        "unique_brief_count": 3
+      },
+      "run": {
+        "run_id": "run-alpha-high-open-001",
+        "miner_hotkey": "5FopenVerifierMinerHigh111111111111111111111111",
+        "island": "crowded-island",
+        "run_day": "2026-06-20",
+        "verified_compute_cost_usd": 15,
+        "miner_openrouter_cost_usd": 5,
+        "loop_start_tao_fee_usd": 5,
+        "paid_research_loop": true,
+        "valid_receipt": true,
+        "verified_loop_start_payment": true,
+        "preserved_loop_start_credit": false,
+        "miner_openrouter_key_present": true,
+        "trusted_cost_ledger": true,
+        "passed_abuse_checks": true,
+        "refunded": false,
+        "voided": false,
+        "duplicate": false,
+        "novelty_rejected": false,
+        "self_cancelled_before_minimum_work": false,
+        "banned_hotkey": false
+      },
+      "cap_usage": {},
+      "expected": {
+        "award_id": "reimbursement_award:sha256:7805f83d09e7096b1b37da6903ce9fe4858399be4949e90d8cd34098fbf43c00",
+        "run_id": "run-alpha-high-open-001",
+        "miner_hotkey": "5FopenVerifierMinerHigh111111111111111111111111",
+        "island": "crowded-island",
+        "run_day": "2026-06-20",
+        "status": "awarded",
+        "participation_score": 10.0,
+        "participation_fraction": 1.0,
+        "rebate_rate": 0.4,
+        "eligible_cost_microusd": 20000000,
+        "eligible_cost_usd": 20.0,
+        "capped_cost_basis_microusd": 20000000,
+        "capped_cost_basis_usd": 20.0,
+        "raw_reimbursement_microusd": 8000000,
+        "raw_reimbursement_usd": 8.0,
+        "target_reimbursement_microusd": 8000000,
+        "target_reimbursement_usd": 8.0,
+        "reimbursement_epochs": 6,
+        "caps_applied": [],
+        "ineligibility_reasons": [],
+        "loop_start_fee_included": false,
+        "input_hash": "sha256:b663e73498952858f03704aa594b3eb583631f9732358913b54a3a229752d152"
+      }
+    },
+    {
+      "id": "reimbursement_disabled_policy",
+      "kind": "compute_reimbursement_award",
+      "policy": {
+        "policy_id": "alpha-reimbursement-open-verifier-disabled-v1",
+        "enabled": false,
+        "min_rebate_rate": 0.4,
+        "max_rebate_rate": 0.8,
+        "high_participation_target": 10,
+        "reimbursement_epochs": 6,
+        "max_usd_per_run": 50,
+        "max_usd_per_hotkey_day": 100,
+        "max_usd_per_island_day": 100,
+        "global_budget_usd": 100,
+        "include_loop_start_fee_in_base": false,
+        "distinct_funded_hotkey_weight": 1,
+        "paid_loop_weight": 1,
+        "unique_brief_weight": 1
+      },
+      "snapshot": {
+        "snapshot_id": "participation:quiet-island:2026-06-20",
+        "island": "quiet-island",
+        "lookback_start": "2026-06-13T00:00:00Z",
+        "lookback_end": "2026-06-20T00:00:00Z",
+        "distinct_funded_hotkeys": 0,
+        "paid_loop_count": 0,
+        "unique_brief_count": 0
+      },
+      "run": {
+        "run_id": "run-alpha-low-open-001",
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "island": "quiet-island",
+        "run_day": "2026-06-20",
+        "verified_compute_cost_usd": 15,
+        "miner_openrouter_cost_usd": 5,
+        "loop_start_tao_fee_usd": 5,
+        "paid_research_loop": true,
+        "valid_receipt": true,
+        "verified_loop_start_payment": true,
+        "preserved_loop_start_credit": false,
+        "miner_openrouter_key_present": true,
+        "trusted_cost_ledger": true,
+        "passed_abuse_checks": true,
+        "refunded": false,
+        "voided": false,
+        "duplicate": false,
+        "novelty_rejected": false,
+        "self_cancelled_before_minimum_work": false,
+        "banned_hotkey": false
+      },
+      "cap_usage": {},
+      "expected": {
+        "award_id": "reimbursement_award:sha256:8da35e504b63202f3d87ae271eb03efb430d33896d031f59bc0d19a80535866f",
+        "run_id": "run-alpha-low-open-001",
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "island": "quiet-island",
+        "run_day": "2026-06-20",
+        "status": "disabled",
+        "participation_score": 0.0,
+        "participation_fraction": 0.0,
+        "rebate_rate": 0.8,
+        "eligible_cost_microusd": 20000000,
+        "eligible_cost_usd": 20.0,
+        "capped_cost_basis_microusd": 0,
+        "capped_cost_basis_usd": 0.0,
+        "raw_reimbursement_microusd": 0,
+        "raw_reimbursement_usd": 0.0,
+        "target_reimbursement_microusd": 0,
+        "target_reimbursement_usd": 0.0,
+        "reimbursement_epochs": 6,
+        "caps_applied": [],
+        "ineligibility_reasons": [
+          "policy_disabled"
+        ],
+        "loop_start_fee_included": false,
+        "input_hash": "sha256:05c9c22eb12e5512758f5cb98f51be2599709de08801d4b445a9059a53de4764"
+      }
+    },
+    {
+      "id": "reimbursement_hotkey_cap_behavior",
+      "kind": "compute_reimbursement_award",
+      "policy": {
+        "policy_id": "alpha-reimbursement-open-verifier-v1",
+        "enabled": true,
+        "min_rebate_rate": 0.4,
+        "max_rebate_rate": 0.8,
+        "high_participation_target": 10,
+        "reimbursement_epochs": 6,
+        "max_usd_per_run": 50,
+        "max_usd_per_hotkey_day": 100,
+        "max_usd_per_island_day": 100,
+        "global_budget_usd": 100,
+        "include_loop_start_fee_in_base": false,
+        "distinct_funded_hotkey_weight": 1,
+        "paid_loop_weight": 1,
+        "unique_brief_weight": 1
+      },
+      "snapshot": {
+        "snapshot_id": "participation:quiet-island:2026-06-20",
+        "island": "quiet-island",
+        "lookback_start": "2026-06-13T00:00:00Z",
+        "lookback_end": "2026-06-20T00:00:00Z",
+        "distinct_funded_hotkeys": 0,
+        "paid_loop_count": 0,
+        "unique_brief_count": 0
+      },
+      "run": {
+        "run_id": "run-alpha-low-open-001",
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "island": "quiet-island",
+        "run_day": "2026-06-20",
+        "verified_compute_cost_usd": 15,
+        "miner_openrouter_cost_usd": 5,
+        "loop_start_tao_fee_usd": 5,
+        "paid_research_loop": true,
+        "valid_receipt": true,
+        "verified_loop_start_payment": true,
+        "preserved_loop_start_credit": false,
+        "miner_openrouter_key_present": true,
+        "trusted_cost_ledger": true,
+        "passed_abuse_checks": true,
+        "refunded": false,
+        "voided": false,
+        "duplicate": false,
+        "novelty_rejected": false,
+        "self_cancelled_before_minimum_work": false,
+        "banned_hotkey": false
+      },
+      "cap_usage": {
+        "hotkey_day_awarded_usd": 90,
+        "island_day_awarded_usd": 0,
+        "global_awarded_usd": 0
+      },
+      "expected": {
+        "award_id": "reimbursement_award:sha256:90d65c35b9b7876c2fc851addb1bd773ba9dacda0358999545bff21051a782d8",
+        "run_id": "run-alpha-low-open-001",
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "island": "quiet-island",
+        "run_day": "2026-06-20",
+        "status": "awarded",
+        "participation_score": 0.0,
+        "participation_fraction": 0.0,
+        "rebate_rate": 0.8,
+        "eligible_cost_microusd": 20000000,
+        "eligible_cost_usd": 20.0,
+        "capped_cost_basis_microusd": 20000000,
+        "capped_cost_basis_usd": 20.0,
+        "raw_reimbursement_microusd": 16000000,
+        "raw_reimbursement_usd": 16.0,
+        "target_reimbursement_microusd": 10000000,
+        "target_reimbursement_usd": 10.0,
+        "reimbursement_epochs": 6,
+        "caps_applied": [
+          "hotkey"
+        ],
+        "ineligibility_reasons": [],
+        "loop_start_fee_included": false,
+        "input_hash": "sha256:6e95af6cb1202eb7a91fc51c3da2850d788864e3b8829de3b98aba2224150703"
+      }
+    },
+    {
+      "id": "reimbursement_schedule_rounding",
+      "kind": "build_reimbursement_schedule",
+      "start_epoch": 1000,
+      "policy": {
+        "policy_id": "alpha-reimbursement-open-verifier-v1",
+        "enabled": true,
+        "min_rebate_rate": 0.4,
+        "max_rebate_rate": 0.8,
+        "high_participation_target": 10,
+        "reimbursement_epochs": 6,
+        "max_usd_per_run": 50,
+        "max_usd_per_hotkey_day": 100,
+        "max_usd_per_island_day": 100,
+        "global_budget_usd": 100,
+        "include_loop_start_fee_in_base": false,
+        "distinct_funded_hotkey_weight": 1,
+        "paid_loop_weight": 1,
+        "unique_brief_weight": 1
+      },
+      "snapshot": {
+        "snapshot_id": "participation:quiet-island:2026-06-20",
+        "island": "quiet-island",
+        "lookback_start": "2026-06-13T00:00:00Z",
+        "lookback_end": "2026-06-20T00:00:00Z",
+        "distinct_funded_hotkeys": 0,
+        "paid_loop_count": 0,
+        "unique_brief_count": 0
+      },
+      "run": {
+        "run_id": "run-alpha-low-open-001",
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "island": "quiet-island",
+        "run_day": "2026-06-20",
+        "verified_compute_cost_usd": 15,
+        "miner_openrouter_cost_usd": 5,
+        "loop_start_tao_fee_usd": 5
+      },
+      "cap_usage": {},
+      "expected": {
+        "schedule_id": "reimbursement_schedule:reimbursement_award:sha256:b658ed75f92f398629bd49d8915c28908fef8fea66c0474282ba65ca253408d8",
+        "award_id": "reimbursement_award:sha256:b658ed75f92f398629bd49d8915c28908fef8fea66c0474282ba65ca253408d8",
+        "status": "scheduled",
+        "start_epoch": 1000,
+        "epoch_count": 6,
+        "total_microusd": 16000000,
+        "total_usd": 16.0,
+        "entries": [
+          {
+            "epoch": 1000,
+            "amount_microusd": 2666667,
+            "amount_usd": 2.666667
+          },
+          {
+            "epoch": 1001,
+            "amount_microusd": 2666667,
+            "amount_usd": 2.666667
+          },
+          {
+            "epoch": 1002,
+            "amount_microusd": 2666667,
+            "amount_usd": 2.666667
+          },
+          {
+            "epoch": 1003,
+            "amount_microusd": 2666667,
+            "amount_usd": 2.666667
+          },
+          {
+            "epoch": 1004,
+            "amount_microusd": 2666666,
+            "amount_usd": 2.666666
+          },
+          {
+            "epoch": 1005,
+            "amount_microusd": 2666666,
+            "amount_usd": 2.666666
+          }
+        ]
+      }
+    },
+    {
+      "id": "reimbursement_schedule_verifier",
+      "kind": "verify_reimbursement_schedule",
+      "start_epoch": 1000,
+      "policy": {
+        "policy_id": "alpha-reimbursement-open-verifier-v1",
+        "enabled": true,
+        "min_rebate_rate": 0.4,
+        "max_rebate_rate": 0.8,
+        "high_participation_target": 10,
+        "reimbursement_epochs": 6,
+        "max_usd_per_run": 50,
+        "max_usd_per_hotkey_day": 100,
+        "max_usd_per_island_day": 100,
+        "global_budget_usd": 100,
+        "include_loop_start_fee_in_base": false,
+        "distinct_funded_hotkey_weight": 1,
+        "paid_loop_weight": 1,
+        "unique_brief_weight": 1
+      },
+      "snapshot": {
+        "snapshot_id": "participation:quiet-island:2026-06-20",
+        "island": "quiet-island",
+        "lookback_start": "2026-06-13T00:00:00Z",
+        "lookback_end": "2026-06-20T00:00:00Z",
+        "distinct_funded_hotkeys": 0,
+        "paid_loop_count": 0,
+        "unique_brief_count": 0
+      },
+      "run": {
+        "run_id": "run-alpha-low-open-001",
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "island": "quiet-island",
+        "run_day": "2026-06-20",
+        "verified_compute_cost_usd": 15,
+        "miner_openrouter_cost_usd": 5,
+        "loop_start_tao_fee_usd": 5
+      },
+      "cap_usage": {},
+      "expected": {
+        "passed": true,
+        "errors": [],
+        "schedule_total_microusd": 16000000,
+        "award_target_microusd": 16000000
+      }
+    },
+    {
+      "id": "loop_start_payment_verified",
+      "kind": "verify_loop_start_payment_state",
+      "policy": {
+        "loop_start_fee_enabled": true,
+        "loop_start_fee_usd": 5.0,
+        "amount_buffer_percent": 0.01,
+        "payment_max_age_seconds": 86400,
+        "leadpoet_payment_wallet": "5LeadpoetLoopStartWallet11111111111111111111111111"
+      },
+      "payment": {
+        "payment_ref": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:3",
+        "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "extrinsic_index": 3,
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "sender_coldkey": "5FopenVerifierColdkey111111111111111111111111111",
+        "hotkey_owner_coldkey": "5FopenVerifierColdkey111111111111111111111111111",
+        "destination_wallet": "5LeadpoetLoopStartWallet11111111111111111111111111",
+        "amount_usd": 5.05,
+        "call_function": "transfer_keep_alive",
+        "extrinsic_success": true,
+        "age_seconds": 120
+      },
+      "expected": {
+        "status": "verified",
+        "payment_ref": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:3",
+        "valid": true,
+        "required_usd": 5.0,
+        "amount_usd": 5.05,
+        "reasons": []
+      }
+    },
+    {
+      "id": "loop_start_payment_duplicate_rejected",
+      "kind": "verify_loop_start_payment_state",
+      "used_payment_refs": [
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:3"
+      ],
+      "policy": {
+        "loop_start_fee_enabled": true,
+        "loop_start_fee_usd": 5.0,
+        "amount_buffer_percent": 0.01,
+        "payment_max_age_seconds": 86400,
+        "leadpoet_payment_wallet": "5LeadpoetLoopStartWallet11111111111111111111111111"
+      },
+      "payment": {
+        "payment_ref": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:3",
+        "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "extrinsic_index": 3,
+        "miner_hotkey": "5FopenVerifierMinerLow1111111111111111111111111",
+        "sender_coldkey": "5FopenVerifierColdkey111111111111111111111111111",
+        "hotkey_owner_coldkey": "5FopenVerifierColdkey111111111111111111111111111",
+        "destination_wallet": "5LeadpoetLoopStartWallet11111111111111111111111111",
+        "amount_usd": 5.05,
+        "call_function": "transfer_keep_alive",
+        "extrinsic_success": true,
+        "age_seconds": 120
+      },
+      "expected": {
+        "status": "rejected",
+        "payment_ref": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:3",
+        "valid": false,
+        "required_usd": 5.0,
+        "amount_usd": 5.05,
+        "reasons": [
+          "duplicate_payment"
+        ]
+      }
+    },
+    {
+      "id": "improvement_grant_schedule",
+      "kind": "build_improvement_grant_schedule",
+      "policy": {
+        "fixed_term_epochs": 4,
+        "delta_min": 2.0,
+        "grant_curve": [
+          {
+            "delta": 2.0,
+            "share_ppm": 1000
+          },
+          {
+            "delta": 4.0,
+            "share_ppm": 2000
+          },
+          {
+            "delta": 8.0,
+            "share_ppm": 5000
+          }
+        ]
+      },
+      "crown": {
+        "crown_id": "crown:healthcare:2026-06-20:001",
+        "crowned": true,
+        "house_improvement": false,
+        "miner_uid": 3,
+        "miner_hotkey": "5FopenVerifierCrownMiner1111111111111111111111",
+        "island": "healthcare",
+        "area": "healthcare:source_router",
+        "delta": 5.0,
+        "crown_epoch": 300,
+        "grant_start_epoch": 301
+      },
+      "expected": {
+        "grant_id": "improvement_grant:sha256:2a1d691f0a729f61b2e8c8e073b59af3b2d924e8a9f284083b8910de5c2da56a",
+        "status": "scheduled",
+        "reason": "",
+        "miner_uid": 3,
+        "miner_hotkey": "5FopenVerifierCrownMiner1111111111111111111111",
+        "island": "healthcare",
+        "area": "healthcare:source_router",
+        "delta": 5.0,
+        "start_epoch": 301,
+        "epoch_count": 4,
+        "per_epoch_share_ppm": 2750,
+        "total_share_ppm_epochs": 11000,
+        "entries": [
+          {
+            "epoch": 301,
+            "uid": 3,
+            "share_ppm": 2750
+          },
+          {
+            "epoch": 302,
+            "uid": 3,
+            "share_ppm": 2750
+          },
+          {
+            "epoch": 303,
+            "uid": 3,
+            "share_ppm": 2750
+          },
+          {
+            "epoch": 304,
+            "uid": 3,
+            "share_ppm": 2750
+          }
+        ]
+      }
+    },
+    {
+      "id": "improvement_grant_schedule_verifier",
+      "kind": "verify_improvement_grant_schedule",
+      "policy": {
+        "fixed_term_epochs": 4,
+        "delta_min": 2.0,
+        "grant_curve": [
+          {
+            "delta": 2.0,
+            "share_ppm": 1000
+          },
+          {
+            "delta": 4.0,
+            "share_ppm": 2000
+          },
+          {
+            "delta": 8.0,
+            "share_ppm": 5000
+          }
+        ]
+      },
+      "crown": {
+        "crown_id": "crown:healthcare:2026-06-20:001",
+        "crowned": true,
+        "house_improvement": false,
+        "miner_uid": 3,
+        "miner_hotkey": "5FopenVerifierCrownMiner1111111111111111111111",
+        "island": "healthcare",
+        "area": "healthcare:source_router",
+        "delta": 5.0,
+        "crown_epoch": 300,
+        "grant_start_epoch": 301
+      },
+      "expected": {
+        "passed": true,
+        "errors": [],
+        "expected_schedule_hash": "sha256:c3a541b6909dd0b92e213ecd08e4899414fae3c1db74533bbee901c2a94b29da",
+        "actual_schedule_hash": "sha256:c3a541b6909dd0b92e213ecd08e4899414fae3c1db74533bbee901c2a94b29da"
+      }
+    },
+    {
+      "id": "final_weight_vector_composition",
+      "kind": "compose_final_weight_vector",
+      "epoch": 301,
+      "uids": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "fulfillment_scores": {
+        "1": 30,
+        "2": 20,
+        "3": 0,
+        "4": 1
+      },
+      "leaderboard_scores": {
+        "1": 5,
+        "2": 5,
+        "3": 10
+      },
+      "improvement_grant_schedules": [
+        {
+          "entries": [
+            {
+              "epoch": 301,
+              "uid": 3,
+              "share_ppm": 2750
+            },
+            {
+              "epoch": 302,
+              "uid": 3,
+              "share_ppm": 2750
+            }
+          ]
+        }
+      ],
+      "reimbursement_schedules": [
+        {
+          "uid": 2,
+          "entries": [
+            {
+              "epoch": 301,
+              "amount_microusd": 2500000,
+              "amount_usd": 2.5
+            }
+          ]
+        }
+      ],
+      "active_researcher_floor_scores": {
+        "4": 2
+      },
+      "policy": {
+        "grant_score_per_ppm": "0.01",
+        "reimbursement_score_per_microusd": "0.000001",
+        "total_weight": 1000
+      },
+      "expected": {
+        "epoch": 301,
+        "components_by_uid": {
+          "1": {
+            "fulfillment": 30.0,
+            "weekly_leaderboard": 5.0,
+            "active_improvement_grant": 0.0,
+            "active_reimbursement": 0.0,
+            "active_researcher_floor": 0.0,
+            "total": 35.0
+          },
+          "2": {
+            "fulfillment": 20.0,
+            "weekly_leaderboard": 5.0,
+            "active_improvement_grant": 0.0,
+            "active_reimbursement": 2.5,
+            "active_researcher_floor": 0.0,
+            "total": 27.5
+          },
+          "3": {
+            "fulfillment": 0.0,
+            "weekly_leaderboard": 10.0,
+            "active_improvement_grant": 27.5,
+            "active_reimbursement": 0.0,
+            "active_researcher_floor": 0.0,
+            "total": 37.5
+          },
+          "4": {
+            "fulfillment": 1.0,
+            "weekly_leaderboard": 0.0,
+            "active_improvement_grant": 0.0,
+            "active_reimbursement": 0.0,
+            "active_researcher_floor": 2.0,
+            "total": 3.0
+          }
+        },
+        "scores_by_uid": {
+          "1": 35.0,
+          "2": 27.5,
+          "3": 37.5,
+          "4": 3.0
+        },
+        "u16_weights": {
+          "1": 340,
+          "2": 267,
+          "3": 364,
+          "4": 29
+        },
+        "weight_sum": 1000
       }
     }
   ],

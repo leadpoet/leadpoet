@@ -3,7 +3,6 @@ import asyncio
 import threading
 import argparse
 import traceback
-import sys
 import bittensor as bt
 import socket
 from Leadpoet.base.miner import BaseMinerNeuron
@@ -2305,10 +2304,6 @@ async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
     return False
 
 
-def _truthy_env(name: str, default: str = "false") -> bool:
-    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
-
-
 def show_research_lab_loop_status(wallet) -> None:
     """Show the hosted Research Lab auto-research loop entrypoint status."""
     import requests
@@ -2321,13 +2316,13 @@ def show_research_lab_loop_status(wallet) -> None:
     print(f"Miner hotkey: {wallet.hotkey.ss58_address}")
     print(f"Gateway: {gateway_url}")
     print("")
-    print("Auto-research loops replace the legacy qualification model submission path.")
+    print("Auto-research loops are the current miner research workflow.")
     print("Miners fund hosted research loops with a TAO loop-start fee and a miner")
     print("OpenRouter key reference; Leadpoet keeps Exa/ScrapingDog server-side.")
     print("")
 
     try:
-        response = requests.get(f"{gateway_url}/research-lab/status", timeout=20)
+        response = requests.get(f"{gateway_url}/research-lab/status", timeout=5)
         if response.status_code != 200:
             print(f"❌ Research Lab status unavailable: HTTP {response.status_code}")
             print(f"   {response.text[:300]}")
@@ -2348,12 +2343,11 @@ def show_research_lab_loop_status(wallet) -> None:
     if not status.get("api_enabled") or not status.get("paid_loops_enabled"):
         print("")
         print("Auto-research loop starts are not enabled on this gateway yet.")
-        print("This miner client will not submit legacy qualification models by default.")
+        print("This miner client will not start a paid loop until the gateway is enabled.")
         return
 
     print("")
-    print("Auto-research loop gateway is enabled. Use the Research Lab ticket/loop-start")
-    print("flow rather than the retired qualification model submission flow.")
+    print("Auto-research loop gateway is enabled. Use the Research Lab ticket/loop-start flow.")
 
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
@@ -2419,8 +2413,7 @@ def main():
             print("\n❌ Terms not accepted. Miner disabled.")
             print("   You must accept the Contributor Terms to participate in the Leadpoet network.")
             print("   Please review the terms at: https://leadpoet.com/contributor-terms\n")
-            import sys
-            sys.exit(0)
+            raise SystemExit(0)
         
         # Record attestation LOCALLY (gateway verifies via lead metadata)
         # Load wallet to get SS58 address
@@ -2430,8 +2423,7 @@ def main():
         except Exception as e:
             bt.logging.error(f"❌ Could not load wallet for attestation: {e}")
             print("\n❌ Failed to load wallet. Cannot proceed without valid wallet.")
-            import sys
-            sys.exit(1)
+            raise SystemExit(1)
         
         attestation = create_attestation_record(wallet_address, TERMS_VERSION_HASH)
         
@@ -2459,8 +2451,7 @@ def main():
             if response != "Y":
                 print("\n❌ Updated terms not accepted. Miner disabled.")
                 print("   You must accept the updated Contributor Terms to continue mining.\n")
-                import sys
-                sys.exit(0)
+                raise SystemExit(0)
             
             # Update attestation
             # Load wallet to get SS58 address
@@ -2470,8 +2461,7 @@ def main():
             except Exception as e:
                 bt.logging.error(f"❌ Could not load wallet for attestation: {e}")
                 print("\n❌ Failed to load wallet. Cannot proceed without valid wallet.")
-                import sys
-                sys.exit(1)
+                raise SystemExit(1)
             
             attestation = create_attestation_record(wallet_address, TERMS_VERSION_HASH)
             attestation["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -2490,29 +2480,19 @@ def main():
     print(" LEADPOET MINER — SELECT MODE")
     print("="*80)
     print("")
-    show_legacy_modes = _truthy_env("LEADPOET_SHOW_LEGACY_MINER_MODES")
     print("  1. Auto Research  — Check hosted auto-research loop availability (default)")
     print("  2. Fulfillment    — Poll for client ICP requests and fulfill them")
-    if show_legacy_modes:
-        print("")
-        print("  Legacy operator modes:")
-        print("  3. Legacy Sourcing       — Continuously source and submit leads")
-        print("  4. Legacy Qualification  — Submit a legacy qualification model")
     print("")
     print("  You can run multiple active modes simultaneously in separate terminals.")
     print("")
 
-    valid_modes = ("1", "2", "3", "4") if show_legacy_modes else ("1", "2")
-    prompt_modes = "1/2/3/4" if show_legacy_modes else "1/2"
-    mode_input = input(f"❓ Select mode ({prompt_modes}) [default: 1]: ").strip()
-    if mode_input not in valid_modes:
+    mode_input = input("❓ Select mode (1/2) [default: 1]: ").strip()
+    if mode_input not in ("1", "2"):
         mode_input = "1"
 
     miner_mode = {
         "1": "research_lab",
         "2": "fulfillment",
-        "3": "sourcing",
-        "4": "qualification",
     }[mode_input]
     print(f"\n✅ Selected mode: {miner_mode.upper()}")
 
@@ -2526,23 +2506,7 @@ def main():
             import traceback
             traceback.print_exc()
         print("\n👋 Done. Run the miner again to select another mode.")
-        sys.exit(0)
-
-    if miner_mode == "qualification":
-        try:
-            temp_wallet = bt.wallet(config=config)
-            print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
-            success = run_qualification_submission_flow(temp_wallet, config, config.netuid)
-            if success:
-                print("\n✅ Qualification model submitted!")
-            else:
-                print("\n⚠️  Qualification submission was not completed.")
-        except Exception as e:
-            bt.logging.error(f"❌ Error during qualification submission: {e}")
-            import traceback
-            traceback.print_exc()
-        print("\n👋 Done. Run the miner again to select another mode.")
-        sys.exit(0)
+        raise SystemExit(0)
 
     print("")
 

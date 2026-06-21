@@ -2304,6 +2304,57 @@ async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
         print(f"❌ gRPC preflight FAIL → {addr} | {e}")
     return False
 
+
+def _truthy_env(name: str, default: str = "false") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def show_research_lab_loop_status(wallet) -> None:
+    """Show the hosted Research Lab auto-research loop entrypoint status."""
+    import requests
+
+    gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
+    print("\n" + "="*80)
+    print(" LEADPOET AUTO-RESEARCH LOOPS")
+    print("="*80)
+    print("")
+    print(f"Miner hotkey: {wallet.hotkey.ss58_address}")
+    print(f"Gateway: {gateway_url}")
+    print("")
+    print("Auto-research loops replace the legacy qualification model submission path.")
+    print("Miners fund hosted research loops with a TAO loop-start fee and a miner")
+    print("OpenRouter key reference; Leadpoet keeps Exa/ScrapingDog server-side.")
+    print("")
+
+    try:
+        response = requests.get(f"{gateway_url}/research-lab/status", timeout=20)
+        if response.status_code != 200:
+            print(f"❌ Research Lab status unavailable: HTTP {response.status_code}")
+            print(f"   {response.text[:300]}")
+            return
+        status = response.json()
+    except Exception as exc:
+        print(f"❌ Could not reach Research Lab gateway status: {exc}")
+        return
+
+    print("Research Lab gateway status:")
+    print(f"  api_enabled: {status.get('api_enabled')}")
+    print(f"  production_writes_enabled: {status.get('production_writes_enabled')}")
+    print(f"  paid_loops_enabled: {status.get('paid_loops_enabled')}")
+    print(f"  hosted_runs_enabled: {status.get('hosted_runs_enabled')}")
+    print(f"  loop_start_fee_usd: {status.get('loop_start_fee_usd')}")
+    print(f"  miner_openrouter_key_required: {status.get('miner_openrouter_key_required')}")
+
+    if not status.get("api_enabled") or not status.get("paid_loops_enabled"):
+        print("")
+        print("Auto-research loop starts are not enabled on this gateway yet.")
+        print("This miner client will not submit legacy qualification models by default.")
+        return
+
+    print("")
+    print("Auto-research loop gateway is enabled. Use the Research Lab ticket/loop-start")
+    print("flow rather than the retired qualification model submission flow.")
+
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
@@ -2432,26 +2483,50 @@ def main():
             bt.logging.info(f"✅ Contributor terms attestation valid (hash: {TERMS_VERSION_HASH[:16]}...)")
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # QUALIFICATION MODEL SUBMISSION (OPTIONAL)
+    # MINER MODE SELECTION
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
     print("\n" + "="*80)
     print(" LEADPOET MINER — SELECT MODE")
     print("="*80)
     print("")
-    print("  1. Sourcing       — Continuously source and submit leads (default)")
+    show_legacy_modes = _truthy_env("LEADPOET_SHOW_LEGACY_MINER_MODES")
+    print("  1. Auto Research  — Check hosted auto-research loop availability (default)")
     print("  2. Fulfillment    — Poll for client ICP requests and fulfill them")
-    print("  3. Qualification  — Submit a qualification model (10% of emissions)")
+    if show_legacy_modes:
+        print("")
+        print("  Legacy operator modes:")
+        print("  3. Legacy Sourcing       — Continuously source and submit leads")
+        print("  4. Legacy Qualification  — Submit a legacy qualification model")
     print("")
-    print("  You can run multiple modes simultaneously in separate terminals.")
+    print("  You can run multiple active modes simultaneously in separate terminals.")
     print("")
 
-    mode_input = input("❓ Select mode (1/2/3) [default: 1]: ").strip()
-    if mode_input not in ("1", "2", "3"):
+    valid_modes = ("1", "2", "3", "4") if show_legacy_modes else ("1", "2")
+    prompt_modes = "1/2/3/4" if show_legacy_modes else "1/2"
+    mode_input = input(f"❓ Select mode ({prompt_modes}) [default: 1]: ").strip()
+    if mode_input not in valid_modes:
         mode_input = "1"
 
-    miner_mode = {"1": "sourcing", "2": "fulfillment", "3": "qualification"}[mode_input]
+    miner_mode = {
+        "1": "research_lab",
+        "2": "fulfillment",
+        "3": "sourcing",
+        "4": "qualification",
+    }[mode_input]
     print(f"\n✅ Selected mode: {miner_mode.upper()}")
+
+    if miner_mode == "research_lab":
+        try:
+            temp_wallet = bt.wallet(config=config)
+            print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
+            show_research_lab_loop_status(temp_wallet)
+        except Exception as e:
+            bt.logging.error(f"❌ Error during Research Lab mode: {e}")
+            import traceback
+            traceback.print_exc()
+        print("\n👋 Done. Run the miner again to select another mode.")
+        sys.exit(0)
 
     if miner_mode == "qualification":
         try:
@@ -2525,4 +2600,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.research_lab.api import router
+from gateway.research_lab.bundles import build_shadow_report_bundle, sha256_json
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.models import (
     ResearchLabLoopStartRequest,
@@ -99,6 +100,42 @@ def main() -> int:
             }
         )
         errors.append("raw OpenRouter key was accepted")
+    except ValueError:
+        pass
+
+    bundle = build_shadow_report_bundle(
+        epoch=123,
+        weight_input_snapshots=[
+            {
+                "weight_input_snapshot_id": "11111111-1111-4111-8111-111111111111",
+                "epoch": 123,
+                "snapshot_status": "shadow",
+                "snapshot_doc": {},
+            }
+        ],
+        ticket_rows=[],
+        queue_rows=[],
+        receipt_rows=[],
+        reimbursement_rows=[],
+    )
+    if not bundle.get("shadow_only") or not bundle.get("read_only"):
+        errors.append("shadow report bundle must be read-only")
+    if bundle.get("submission_allowed") or bundle.get("on_chain_submission_allowed"):
+        errors.append("shadow report bundle must not allow submission")
+    if sha256_json(bundle["source_state"]) != bundle["source_state_hash"]:
+        errors.append("shadow report source_state_hash mismatch")
+    if sha256_json(bundle["weight_vector"]) != bundle["weight_vector_hash"]:
+        errors.append("shadow report weight_vector_hash mismatch")
+    try:
+        build_shadow_report_bundle(
+            epoch=123,
+            weight_input_snapshots=[],
+            ticket_rows=[{"ticket_doc": {"raw_secret": "should-fail"}}],
+            queue_rows=[],
+            receipt_rows=[],
+            reimbursement_rows=[],
+        )
+        errors.append("shadow report accepted raw secret source state")
     except ValueError:
         pass
 

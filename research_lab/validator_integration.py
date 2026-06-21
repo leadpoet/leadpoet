@@ -33,6 +33,7 @@ TRUTHY_VALUES = {"1", "true", "yes", "on"}
 class ResearchLabValidatorFlags:
     fetch_enabled: bool = False
     shadow_verify_enabled: bool = False
+    require_shadow_verification_before_submit: bool = False
     weight_mutation_enabled: bool = False
     production_writes_enabled: bool = False
     submit_on_chain_enabled: bool = False
@@ -45,6 +46,12 @@ class ResearchLabValidatorFlags:
             fetch_enabled=_truthy(data.get("RESEARCH_LAB_VALIDATOR_FETCH_ENABLED", data.get("fetch_enabled", False))),
             shadow_verify_enabled=_truthy(
                 data.get("RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED", data.get("shadow_verify_enabled", False))
+            ),
+            require_shadow_verification_before_submit=_truthy(
+                data.get(
+                    "RESEARCH_LAB_REQUIRE_SHADOW_VERIFICATION_BEFORE_SUBMIT",
+                    data.get("require_shadow_verification_before_submit", False),
+                )
             ),
             weight_mutation_enabled=_truthy(
                 data.get("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", data.get("weight_mutation_enabled", False))
@@ -111,11 +118,22 @@ def verify_research_lab_shadow_bundle(
     if _contains_secret_material(bundle):
         errors.append("bundle_contains_raw_secret_material")
 
+    source_state = bundle.get("source_state")
+    source_state_hash = bundle.get("source_state_hash")
+    if source_state is not None or source_state_hash is not None:
+        if not source_state or not source_state_hash:
+            errors.append("source_state_and_hash_must_be_present_together")
+        elif sha256_json(source_state) != source_state_hash:
+            errors.append("source_state_hash_diverged")
+
     golden_errors = run_golden_vectors()
     if golden_errors:
         errors.extend(f"open_verifier:{error}" for error in golden_errors)
 
     weight_vector = bundle.get("weight_vector", {})
+    if not isinstance(weight_vector, Mapping):
+        errors.append("weight_vector_must_be_object")
+        weight_vector = {}
     divergence = compute_verifier_divergence(
         weight_vector,
         official_weight_hash=official_weight_hash or bundle.get("weight_vector_hash"),
@@ -151,6 +169,9 @@ def build_research_lab_weight_component(
         "shadow_only": True,
         "read_only": True,
         "submission_allowed": False,
+        "on_chain_submission_allowed": False,
+        "bundle_id": bundle.get("bundle_id"),
+        "source_state_hash": bundle.get("source_state_hash"),
         "u16_weights": dict(weight_vector.get("u16_weights", {})),
         "weight_sum": int(weight_vector.get("weight_sum", 0)),
         "weight_vector_hash": verification["weight_vector_hash"],
@@ -159,6 +180,36 @@ def build_research_lab_weight_component(
 
 def build_on_chain_weight_payload(_component: Mapping[str, Any]) -> dict[str, Any]:
     raise RuntimeError("Research Lab shadow verification cannot build on-chain weight payloads")
+
+
+def write_research_lab_validator_artifact(
+    *,
+    output_dir: Path | str,
+    epoch: int,
+    bundle: Mapping[str, Any],
+    verification: Mapping[str, Any],
+    component: Mapping[str, Any] | None = None,
+) -> Path:
+    """Write the validator's local Research Lab verification artifact.
+
+    This is a local file only; it is not a production database write and never
+    contains raw provider keys.
+    """
+    if _contains_secret_material(bundle) or _contains_secret_material(verification) or _contains_secret_material(component or {}):
+        raise ValueError("Research Lab validator artifact contains raw secret material")
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    artifact_path = output_path / f"research_lab_shadow_epoch_{int(epoch)}.json"
+    payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_validator_shadow_verification",
+        "epoch": int(epoch),
+        "bundle": dict(bundle),
+        "verification": dict(verification),
+        "component": dict(component or {}),
+    }
+    artifact_path.write_text(json.dumps(payload, sort_keys=True, indent=2, default=str), encoding="utf-8")
+    return artifact_path
 
 
 def verify_research_lab_validator_integration(path: Path | str | None = None) -> dict[str, Any]:
@@ -188,6 +239,15 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
     unsafe = verify_research_lab_shadow_bundle(bundle, flags=fixture["unsafe_validator_flags"])
     if unsafe["passed"] or not unsafe["errors"]:
         raise AssertionError("unsafe mutation flags were not rejected")
+
+    tampered_source = {
+        **bundle,
+        "source_state": {"tampered": True},
+        "source_state_hash": sha256_json({"tampered": False}),
+    }
+    tampered = verify_research_lab_shadow_bundle(tampered_source, flags=fixture["validator_flags"])
+    if tampered["passed"] or "source_state_hash_diverged" not in tampered["errors"]:
+        raise AssertionError("source-state hash tamper was not rejected")
 
     return {
         "bundle_id": bundle["bundle_id"],

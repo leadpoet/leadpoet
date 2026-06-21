@@ -3142,6 +3142,86 @@ class Validator(BaseValidatorNeuron):
             bt.logging.warning(f"Fulfillment emission share error (safe fallback): {e}")
             return 0.0, {}
 
+    async def _research_lab_pre_weight_submission_guard(self, current_epoch: int) -> dict:
+        """Fetch and verify Research Lab shadow output before any set_weights call.
+
+        Default behavior is read-only. If Research Lab mutation/submission flags
+        are enabled, this guard fails closed unless the fetched bundle is both
+        locally verified and explicitly allowed for on-chain submission.
+        """
+        try:
+            from research_lab.validator_integration import (
+                ResearchLabValidatorFlags,
+                build_research_lab_weight_component,
+                fetch_research_lab_shadow_bundle,
+                verify_research_lab_shadow_bundle,
+                write_research_lab_validator_artifact,
+            )
+        except Exception as exc:
+            mutation_enabled = os.environ.get("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if mutation_enabled:
+                print(f"   ❌ Research Lab verifier import failed while mutation is enabled: {exc}")
+                return {"abort_chain_submission": True, "reason": "research_lab_verifier_import_failed"}
+            return {"abort_chain_submission": False, "skipped": True, "reason": f"import_failed:{exc}"}
+
+        flags = ResearchLabValidatorFlags.from_mapping(os.environ)
+        if not flags.fetch_enabled:
+            return {"abort_chain_submission": False, "skipped": True, "reason": "fetch_disabled"}
+
+        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
+        print("\n🔬 Research Lab validator guard enabled")
+        print(f"   Fetching shadow bundle for epoch {current_epoch} from {gateway_url}")
+
+        try:
+            bundle = await asyncio.to_thread(fetch_research_lab_shadow_bundle, gateway_url, current_epoch)
+            verification = verify_research_lab_shadow_bundle(bundle, flags=flags)
+            component = None
+            if verification.get("passed"):
+                component = build_research_lab_weight_component(bundle, flags=flags)
+
+            artifact_path = write_research_lab_validator_artifact(
+                output_dir=Path("validator_weights"),
+                epoch=current_epoch,
+                bundle=bundle,
+                verification=verification,
+                component=component,
+            )
+            print(f"   Research Lab artifact written: {artifact_path}")
+
+            if not verification.get("passed"):
+                print(f"   ⚠️ Research Lab verification failed: {verification.get('errors')}")
+                if (
+                    flags.weight_mutation_enabled
+                    or flags.submit_on_chain_enabled
+                    or flags.require_shadow_verification_before_submit
+                ):
+                    print("   ❌ Aborting weights because Research Lab verification is required")
+                    return {"abort_chain_submission": True, "reason": "research_lab_verification_failed"}
+                return {"abort_chain_submission": False, "verified": False, "errors": verification.get("errors", [])}
+
+            print(f"   ✅ Research Lab shadow bundle verified: {verification.get('weight_vector_hash')}")
+            if flags.weight_mutation_enabled or flags.submit_on_chain_enabled:
+                print("   ❌ Research Lab bundle is shadow-only; live Research Lab on-chain weights are not authorized")
+                return {"abort_chain_submission": True, "reason": "research_lab_shadow_only_not_submittable"}
+
+            return {
+                "abort_chain_submission": False,
+                "verified": True,
+                "component": component,
+                "weight_vector_hash": verification.get("weight_vector_hash"),
+            }
+        except Exception as exc:
+            print(f"   ⚠️ Research Lab validator guard error: {exc}")
+            if flags.weight_mutation_enabled or flags.submit_on_chain_enabled or flags.require_shadow_verification_before_submit:
+                print("   ❌ Aborting weights because Research Lab verification is required")
+                return {"abort_chain_submission": True, "reason": "research_lab_guard_error"}
+            return {"abort_chain_submission": False, "verified": False, "errors": [str(exc)]}
+
     async def submit_weights_at_epoch_end(self):
         """
         Submit accumulated weights to Bittensor chain at end of epoch (block 345+).
@@ -3176,6 +3256,11 @@ class Validator(BaseValidatorNeuron):
                 # Already submitted for this epoch - don't resubmit!
                 # This is the PRIMARY guard against duplicate submissions
                 return True
+
+            research_lab_guard = await self._research_lab_pre_weight_submission_guard(current_epoch)
+            if research_lab_guard.get("abort_chain_submission"):
+                print(f"   ❌ Research Lab pre-submission guard blocked weights: {research_lab_guard.get('reason')}")
+                return False
             
             # ═══════════════════════════════════════════════════════════════════
             # Load current epoch data (may be empty if gateway was down)

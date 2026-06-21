@@ -22,6 +22,7 @@ from gateway.qualification.utils.chain import (
 )
 from gateway.utils.bans import is_hotkey_banned
 
+from .bundles import build_shadow_report_bundle
 from .config import ResearchLabGatewayConfig
 from .models import (
     ResearchLabLoopStartRequest,
@@ -269,19 +270,42 @@ async def get_research_lab_shadow_report(epoch: int):
     _require_enabled(config.shadow_bundles_enabled, "Research Lab shadow bundles are disabled")
     _require_enabled(config.shadow_weights_enabled, "Research Lab shadow weights are disabled")
 
-    rows = await select_many(
+    weight_rows = await select_many(
         "research_loop_shadow_weight_inputs",
         filters=(("epoch", epoch),),
-        limit=100,
+        limit=1000,
     )
-    return {
-        "epoch": epoch,
-        "shadow_only": True,
-        "read_only": True,
-        "submission_allowed": False,
-        "on_chain_submission_allowed": False,
-        "weight_input_snapshots": rows,
-    }
+    ticket_rows = await select_many(
+        "research_loop_ticket_current",
+        filters=(),
+        limit=1000,
+    )
+    queue_rows = await select_many(
+        "research_loop_run_queue_current",
+        filters=(),
+        limit=1000,
+    )
+    receipt_rows = await select_many(
+        "research_loop_receipt_current",
+        filters=(),
+        limit=1000,
+    )
+    reimbursement_rows = await select_many(
+        "research_reimbursement_award_current",
+        filters=(),
+        limit=1000,
+    )
+    try:
+        return build_shadow_report_bundle(
+            epoch=epoch,
+            weight_input_snapshots=weight_rows,
+            ticket_rows=ticket_rows,
+            queue_rows=queue_rows,
+            receipt_rows=receipt_rows,
+            reimbursement_rows=reimbursement_rows,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 async def _verify_signed_miner(payload: object) -> None:

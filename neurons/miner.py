@@ -40,6 +40,7 @@ import requests
 import random
 import grpc
 from pathlib import Path
+import hashlib
 
 
 class _SilenceInvalidRequest(logging.Filter):
@@ -2304,10 +2305,40 @@ async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
     return False
 
 
-def show_research_lab_loop_status(wallet) -> None:
-    """Show the hosted Research Lab auto-research loop entrypoint status."""
-    import requests
+def _looks_like_raw_research_lab_secret(value: str) -> bool:
+    lowered = (value or "").lower()
+    return any(marker in lowered for marker in ("sk-or-", "openrouter_api_key", "raw_openrouter", "raw_secret", "service_role"))
 
+
+def _research_lab_signed_payload(wallet, payload: dict) -> dict:
+    message = json.dumps(payload, sort_keys=True)
+    signature = wallet.hotkey.sign(message.encode()).hex()
+    return {**payload, "signature": signature}
+
+
+def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> dict:
+    response = requests.post(f"{QUALIFICATION_GATEWAY_URL.rstrip('/')}{path}", json=payload, timeout=timeout)
+    if response.status_code >= 400:
+        try:
+            detail = response.json()
+        except Exception:
+            detail = response.text
+        return {"error": detail, "status_code": response.status_code}
+    return response.json()
+
+
+def _brief_sanitized_ref_from_input(value: str) -> str:
+    value = value.strip()
+    if value.startswith("brief_sanitized:"):
+        if _looks_like_raw_research_lab_secret(value):
+            raise ValueError("brief_sanitized_ref cannot contain raw secret material")
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"brief_sanitized:sha256:{digest}"
+
+
+def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
+    """Run the miner-facing Research Lab auto-research entrypoint."""
     gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
     print("\n" + "="*80)
     print(" LEADPOET AUTO-RESEARCH LOOPS")
@@ -2322,7 +2353,7 @@ def show_research_lab_loop_status(wallet) -> None:
     print("")
 
     try:
-        response = requests.get(f"{gateway_url}/research-lab/status", timeout=5)
+        response = requests.get(f"{gateway_url}/research-lab/status", timeout=10)
         if response.status_code != 200:
             print(f"❌ Research Lab status unavailable: HTTP {response.status_code}")
             print(f"   {response.text[:300]}")
@@ -2340,14 +2371,132 @@ def show_research_lab_loop_status(wallet) -> None:
     print(f"  loop_start_fee_usd: {status.get('loop_start_fee_usd')}")
     print(f"  miner_openrouter_key_required: {status.get('miner_openrouter_key_required')}")
 
-    if not status.get("api_enabled") or not status.get("paid_loops_enabled"):
+    if not status.get("api_enabled"):
         print("")
-        print("Auto-research loop starts are not enabled on this gateway yet.")
-        print("This miner client will not start a paid loop until the gateway is enabled.")
+        print("Auto-research APIs are not enabled on this gateway yet.")
         return
 
     print("")
-    print("Auto-research loop gateway is enabled. Use the Research Lab ticket/loop-start flow.")
+    create_ticket = input("❓ Open a new Research Lab ticket? [Y/n]: ").strip().lower()
+    if create_ticket not in ("", "y", "yes"):
+        return
+
+    island = input("   Island [generalist]: ").strip() or "generalist"
+    brief_input = input("   Brief text or brief_sanitized ref: ").strip()
+    if not brief_input:
+        print("❌ Brief text/ref is required.")
+        return
+    try:
+        brief_sanitized_ref = _brief_sanitized_ref_from_input(brief_input)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        return
+
+    try:
+        requested_loop_count = int(input("   Requested loop count [1]: ").strip() or "1")
+    except ValueError:
+        print("❌ Requested loop count must be an integer.")
+        return
+    if requested_loop_count <= 0:
+        print("❌ Requested loop count must be positive.")
+        return
+
+    key_ref = input("   Miner OpenRouter key ref (encrypted/ephemeral ref only, optional until loop-start): ").strip()
+    if key_ref and _looks_like_raw_research_lab_secret(key_ref):
+        print("❌ Do not paste a raw OpenRouter key. Provide an encrypted_ref or ephemeral_ref.")
+        return
+    key_handling = None
+    if key_ref:
+        key_handling = "ephemeral_ref" if key_ref.startswith("ephemeral_ref:") else "encrypted_ref"
+
+    import time
+    ticket_payload = _research_lab_signed_payload(
+        wallet,
+        {
+            "miner_hotkey": wallet.hotkey.ss58_address,
+            "timestamp": int(time.time()),
+            "idempotency_key": f"research-ticket:{wallet.hotkey.ss58_address}:{int(time.time())}",
+            "island": island,
+            "brief_sanitized_ref": brief_sanitized_ref,
+            "requested_loop_count": requested_loop_count,
+            "loop_start_fee_required_usd": float(status.get("loop_start_fee_usd") or 5.0),
+            "miner_openrouter_key_ref": key_ref or None,
+            "miner_openrouter_key_handling": key_handling,
+        },
+    )
+    ticket_result = _post_research_lab_json("/research-lab/tickets", ticket_payload)
+    if "error" in ticket_result:
+        print(f"❌ Ticket creation failed: HTTP {ticket_result.get('status_code')}")
+        print(f"   {ticket_result['error']}")
+        return
+
+    ticket_id = ticket_result["ticket_id"]
+    print("✅ Research Lab ticket opened")
+    print(f"   Ticket ID: {ticket_id}")
+    print(f"   Event seq: {ticket_result.get('event_seq')}")
+
+    if not status.get("paid_loops_enabled") or not status.get("hosted_runs_enabled"):
+        print("")
+        print("Paid hosted loop starts are not enabled on this gateway yet.")
+        print("The ticket is open, but this client will not submit a paid loop-start request.")
+        return
+
+    start_now = input("❓ Submit paid loop-start request now? [y/N]: ").strip().lower()
+    if start_now not in ("y", "yes"):
+        return
+
+    if not key_ref:
+        key_ref = input("   Miner OpenRouter key ref (encrypted/ephemeral ref only): ").strip()
+        if not key_ref or _looks_like_raw_research_lab_secret(key_ref):
+            print("❌ A safe OpenRouter key reference is required for paid loop starts.")
+            return
+        key_handling = "ephemeral_ref" if key_ref.startswith("ephemeral_ref:") else "encrypted_ref"
+
+    preflight = input("   OpenRouter key preflight status [passed/failed/not_run]: ").strip() or "not_run"
+    if preflight != "passed":
+        print("❌ Paid loop-start requires a passed OpenRouter key preflight.")
+        return
+
+    dest_coldkey = get_leadpoet_coldkey(netuid)
+    print("")
+    print(f"Loop-start fee: ${float(status.get('loop_start_fee_usd') or 5.0):.2f} USD-equivalent in TAO")
+    print(f"Payment destination coldkey for netuid {netuid}: {dest_coldkey}")
+    print("Paste the block hash and extrinsic index from the TAO transfer.")
+    payment_block_hash = input("   Payment block hash: ").strip()
+    try:
+        payment_extrinsic_index = int(input("   Payment extrinsic index: ").strip())
+    except ValueError:
+        print("❌ Payment extrinsic index must be an integer.")
+        return
+    if not payment_block_hash:
+        print("❌ Payment block hash is required.")
+        return
+
+    loop_payload = _research_lab_signed_payload(
+        wallet,
+        {
+            "miner_hotkey": wallet.hotkey.ss58_address,
+            "timestamp": int(time.time()),
+            "idempotency_key": f"research-loop-start:{ticket_id}:{int(time.time())}",
+            "ticket_id": ticket_id,
+            "payment_block_hash": payment_block_hash,
+            "payment_extrinsic_index": payment_extrinsic_index,
+            "miner_openrouter_key_ref": key_ref,
+            "miner_openrouter_key_handling": key_handling or "encrypted_ref",
+            "miner_openrouter_preflight_status": "passed",
+            "requested_loop_count": requested_loop_count,
+        },
+    )
+    loop_result = _post_research_lab_json("/research-lab/loop-start", loop_payload, timeout=600)
+    if "error" in loop_result:
+        print(f"❌ Loop-start failed: HTTP {loop_result.get('status_code')}")
+        print(f"   {loop_result['error']}")
+        return
+
+    print("✅ Research Lab loop-start accepted")
+    print(f"   Run ID: {loop_result.get('run_id')}")
+    print(f"   Status: {loop_result.get('status')}")
+    print(f"   Payment ref: {loop_result.get('payment_ref')}")
 
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
@@ -2500,7 +2649,7 @@ def main():
         try:
             temp_wallet = bt.wallet(config=config)
             print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
-            show_research_lab_loop_status(temp_wallet)
+            run_research_lab_auto_research_flow(temp_wallet, config.netuid)
         except Exception as e:
             bt.logging.error(f"❌ Error during Research Lab mode: {e}")
             import traceback

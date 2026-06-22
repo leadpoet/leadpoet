@@ -302,20 +302,6 @@
               "strategy_name": "sonar_first_exa_fill"
             }
           },
-          "candidate_metrics": {
-            "proxy_score": 54.0,
-            "evidence_defect_rate": 0.055,
-            "coverage": 0.58,
-            "cost_per_icp_cents": 130,
-            "latency_ms": 4200,
-            "schema_validity": true,
-            "complexity": {
-              "diff_loc": 25,
-              "prompt_pack_tokens": 510,
-              "component_count": 8,
-              "strategy_count": 3
-            }
-          },
           "reflection": {
             "worked": "Current-intent routing improved coverage.",
             "failed": "Cost rose slightly on broad ICPs.",
@@ -364,20 +350,6 @@
               "new_value": 8
             }
           },
-          "candidate_metrics": {
-            "proxy_score": 51.0,
-            "evidence_defect_rate": 0.05,
-            "coverage": 0.52,
-            "cost_per_icp_cents": 90,
-            "latency_ms": 3900,
-            "schema_validity": true,
-            "complexity": {
-              "diff_loc": 18,
-              "prompt_pack_tokens": 500,
-              "component_count": 8,
-              "strategy_count": 3
-            }
-          },
           "reflection": {
             "worked": "The source cap cut cost without dropping below coverage guardrails.",
             "failed": "Proxy score only improved mildly.",
@@ -424,20 +396,6 @@
             "payload": {
               "template_name": "signal_extraction",
               "new_template": "For ICP {icp}, extract only evidence-backed signals from this normalized set: {signals}."
-            }
-          },
-          "candidate_metrics": {
-            "proxy_score": 49.0,
-            "evidence_defect_rate": 0.05,
-            "coverage": 0.5,
-            "cost_per_icp_cents": 115,
-            "latency_ms": 3900,
-            "schema_validity": true,
-            "complexity": {
-              "diff_loc": 18,
-              "prompt_pack_tokens": 480,
-              "component_count": 8,
-              "strategy_count": 3
             }
           },
           "reflection": {
@@ -522,20 +480,6 @@
               "strategy_name": "sonar_first_exa_fill"
             }
           },
-          "candidate_metrics": {
-            "proxy_score": 49.0,
-            "evidence_defect_rate": 0.055,
-            "coverage": 0.47,
-            "cost_per_icp_cents": 130,
-            "latency_ms": 4200,
-            "schema_validity": true,
-            "complexity": {
-              "diff_loc": 25,
-              "prompt_pack_tokens": 510,
-              "component_count": 8,
-              "strategy_count": 3
-            }
-          },
           "reflection": {
             "worked": "The patch stayed inside the strategy registry.",
             "failed": "Coverage regressed on the fixture set.",
@@ -583,20 +527,6 @@
               "new_value": 12
             }
           },
-          "candidate_metrics": {
-            "proxy_score": 50.0,
-            "evidence_defect_rate": 0.05,
-            "coverage": 0.51,
-            "cost_per_icp_cents": 150,
-            "latency_ms": 4300,
-            "schema_validity": true,
-            "complexity": {
-              "diff_loc": 20,
-              "prompt_pack_tokens": 500,
-              "component_count": 8,
-              "strategy_count": 3
-            }
-          },
           "reflection": {
             "worked": "The parameter remained in bounds.",
             "failed": "Cost increased more than coverage improved.",
@@ -642,20 +572,6 @@
             "payload": {
               "template_name": "signal_extraction",
               "new_template": "For ICP {icp}, extract only evidence-backed signals from this normalized set: {signals}."
-            }
-          },
-          "candidate_metrics": {
-            "proxy_score": 49.0,
-            "evidence_defect_rate": 0.05,
-            "coverage": 0.5,
-            "cost_per_icp_cents": 115,
-            "latency_ms": 3900,
-            "schema_validity": true,
-            "complexity": {
-              "diff_loc": 18,
-              "prompt_pack_tokens": 480,
-              "component_count": 8,
-              "strategy_count": 3
             }
           },
           "reflection": {

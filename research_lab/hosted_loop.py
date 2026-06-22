@@ -27,11 +27,8 @@ from .engine_v1 import (
     MetricVector,
     PatchRecord,
     PromotionDecision,
-    build_reflection_record,
-    evaluate_dev_metrics,
     validate_hypothesis,
     validate_patch,
-    validate_reflection_record,
 )
 from .evidence import build_evidence_bundle, evidence_refs_from_bundle
 from .fabric import (
@@ -637,54 +634,25 @@ def run_sandboxed_engine_v1(
     key_ref: MinerOpenRouterKeyReference,
     run_id: str,
 ) -> HostedSandboxResult:
-    parent_metrics = MetricVector.from_mapping(scenario["parent_metrics"])
-    guardrails = scenario["guardrails"]
     patch_runs: list[HostedPatchRun] = []
 
     for candidate in scenario["candidates"]:
+        if "candidate_metrics" in candidate:
+            raise ValueError(
+                "fixture_candidate_metrics_rejected: hosted Research Lab loops "
+                "require a real evaluator-backed score bundle before any "
+                "candidate can be kept, discarded, or rewarded."
+            )
         patch = PatchRecord.from_mapping(candidate["patch"])
         if patch.patch_type not in ENGINE_V1_ENABLED_PATCH_TYPES:
             raise ValueError(f"hosted MVP does not enable patch type: {patch.patch_type}")
         hypothesis = HypothesisRecord.from_mapping(candidate["hypothesis"])
         _raise_if_errors(validate_hypothesis(hypothesis, registry), f"hypothesis {hypothesis.hypothesis_id}")
         _raise_if_errors(validate_patch(patch, registry), f"patch {patch.patch_id}")
-        candidate_metrics = MetricVector.from_mapping(candidate["candidate_metrics"])
-        dev_result = evaluate_dev_metrics(
-            node_id=str(candidate["node_id"]),
-            patch=patch,
-            parent_metrics=parent_metrics,
-            candidate_metrics=candidate_metrics,
-            targeted_metric=str(candidate["targeted_metric"]),
-            guardrails=guardrails,
-        )
-        reflection = build_reflection_record(
-            lesson_id="lesson:" + sha256_json({"node_id": candidate["node_id"], "patch_id": patch.patch_id}),
-            node_id=str(candidate["node_id"]),
-            worked=str(candidate["reflection"]["worked"]),
-            failed=str(candidate["reflection"]["failed"]),
-            why=str(candidate["reflection"]["why"]),
-            next_question=str(candidate["reflection"]["next_question"]),
-            registry=registry,
-            component=hypothesis.component,
-        )
-        _raise_if_errors(validate_reflection_record(reflection, registry), f"reflection {candidate['node_id']}")
-        patch_runs.append(
-            HostedPatchRun(
-                node_id=str(candidate["node_id"]),
-                hypothesis=hypothesis,
-                patch=patch,
-                targeted_metric=str(candidate["targeted_metric"]),
-                candidate_metrics=candidate_metrics,
-                result=dev_result,
-                reflection=reflection.to_dict(),
-                model_used=str(candidate.get("model_used", "engine-v1-local")),
-                tokens_in=int(candidate["tokens"]["in"]),
-                tokens_out=int(candidate["tokens"]["out"]),
-                draft_cost_cents=int(candidate["costs_cents"]["draft"]),
-                eval_cost_cents=int(candidate["costs_cents"]["eval"]),
-                reflect_cost_cents=int(candidate["costs_cents"]["reflect"]),
-                fixture_refs=tuple(str(item) for item in candidate.get("fixture_refs", [])),
-            )
+        raise ValueError(
+            "real_evaluator_score_bundle_required: hosted Research Lab loops "
+            "must score candidate patches with the production evaluator before "
+            "emitting receipts, ledger rows, map projections, or reward inputs."
         )
 
     if not patch_runs:
@@ -1184,6 +1152,8 @@ def validate_hosted_loop_result(result: HostedLoopRunResult | Mapping[str, Any])
 
 def verify_research_lab_hosted_loop(fixture_path: Path | str = FIXTURE_PATH) -> dict[str, Any]:
     fixture = load_hosted_loop_fixture(fixture_path)
+    fixture_text = Path(fixture_path).read_text()
+    _assert('"candidate_metrics"' not in fixture_text, "hosted loop fixture must not include simulated candidate metrics")
 
     try:
         run_hosted_loop_fixture(scenario="winning", fixture_path=fixture_path)
@@ -1201,41 +1171,20 @@ def verify_research_lab_hosted_loop(fixture_path: Path | str = FIXTURE_PATH) -> 
         raise AssertionError("production runtime flags should block hosted loop execution")
 
     flags = HostedLoopRuntimeFlags.from_mapping(fixture["runtime_flags"])
-    winning = run_hosted_loop_fixture(scenario="winning", flags=flags, fixture_path=fixture_path)
-    winning_rerun = run_hosted_loop_fixture(scenario="winning", flags=flags, fixture_path=fixture_path)
-    _assert(winning.public_bundle() == winning_rerun.public_bundle(), "winning public bundle is deterministic")
-    _assert(winning.receipt.receipt_ref, "winning run emits receipt")
-    _assert(winning.sandbox.best_dev_delta_lcb > 0, "winning run has positive best delta")
-    _assert(any(row["status"] == "keep" for row in winning.results_ledger_rows), "winning run keeps a patch")
-    _assert(winning.committed_reservation.released_cents > 0, "unspent loop balance is released")
-    _assert(
-        _provider_key_source(winning.sandbox.provider_usage, "openrouter") == "miner",
-        "OpenRouter usage routes to miner key ref",
-    )
-    _assert(
-        _provider_key_source(winning.sandbox.provider_usage, "exa") == "leadpoet_server_side",
-        "Exa usage routes to Leadpoet server-side key",
-    )
-    _assert(
-        _provider_key_source(winning.sandbox.provider_usage, "scrapingdog") == "leadpoet_server_side",
-        "ScrapingDog usage routes to Leadpoet server-side key",
-    )
-
-    losing = run_hosted_loop_fixture(scenario="losing", flags=flags, fixture_path=fixture_path)
-    _assert(losing.receipt.receipt_ref, "losing run emits receipt")
-    _assert(losing.sandbox.best_dev_delta_lcb <= 0, "losing run has non-positive best delta")
-    _assert(all(row["status"] == "discard" for row in losing.results_ledger_rows), "losing run discards all patches")
-    _assert(losing.receipt.best_dev_delta_lcb <= 0, "losing receipt carries negative/flat result")
+    try:
+        run_hosted_loop_fixture(scenario="winning", flags=flags, fixture_path=fixture_path)
+    except ValueError as exc:
+        _assert("real_evaluator_score_bundle_required" in str(exc), "hosted loop requires real evaluator score bundle")
+    else:
+        raise AssertionError("hosted loop must not create a scored result without a real evaluator")
 
     return {
-        "winning_receipt_ref": winning.receipt.receipt_ref,
-        "losing_receipt_ref": losing.receipt.receipt_ref,
-        "trajectory_events": len(winning.trajectory["events"]),
-        "results_rows": len(winning.results_ledger_rows),
-        "map_projection_id": winning.research_map_projection.projection_id,
-        "released_cents": winning.committed_reservation.released_cents,
-        "actual_spend_cents": winning.sandbox.actual_spend_cents,
-        "provider_usage_count": len(winning.sandbox.provider_usage),
+        "fixture_candidate_metrics_absent": True,
+        "real_evaluator_score_bundle_required": True,
+        "production_improvement_scoring_enabled": False,
+        "required_evaluator": "research_lab_qualification_style_evaluator",
+        "required_source_of_truth": "sealed benchmark ICP set plus qualification.scoring.lead_scorer score bundles",
+        "runtime_flags_verified": flags.to_dict(),
     }
 
 

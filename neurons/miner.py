@@ -2337,6 +2337,67 @@ def _brief_sanitized_ref_from_input(value: str) -> str:
     return f"brief_sanitized:sha256:{digest}"
 
 
+def _research_lab_default_model_tier(default_tier: str, approved_tiers: dict) -> str:
+    if default_tier:
+        return default_tier
+    if approved_tiers:
+        return sorted(approved_tiers)[0]
+    return "default"
+
+
+def _research_lab_prompt_model_tier(default_tier: str, approved_tiers: dict) -> str:
+    tiers = sorted(str(tier) for tier in approved_tiers) if approved_tiers else [default_tier or "default"]
+    if len(tiers) <= 1:
+        return tiers[0]
+    print("   Available model tiers:")
+    for index, tier in enumerate(tiers, start=1):
+        print(f"     {index}. {tier}")
+    default_choice = default_tier if default_tier in tiers else tiers[0]
+    value = input(f"   Model tier [{default_choice}]: ").strip()
+    if not value:
+        return default_choice
+    if value.isdigit():
+        selected_index = int(value)
+        if 1 <= selected_index <= len(tiers):
+            return tiers[selected_index - 1]
+    if value in tiers:
+        return value
+    print(f"❌ Unknown model tier. Using default: {default_choice}")
+    return default_choice
+
+
+def _research_lab_prompt_budget(label: str, *, default: float, minimum: float, maximum: float) -> float:
+    while True:
+        value = input(f"{label} [{default:.2f}]: ").strip()
+        if not value:
+            return float(default)
+        try:
+            parsed = float(value)
+        except ValueError:
+            print("❌ Enter a number.")
+            continue
+        if parsed < minimum or parsed > maximum:
+            print(f"❌ Budget must be between ${minimum:.2f} and ${maximum:.2f}.")
+            continue
+        return parsed
+
+
+def _research_lab_prompt_int(label: str, *, default: int, minimum: int, maximum: int) -> int:
+    while True:
+        value = input(f"{label} [{default}]: ").strip()
+        if not value:
+            return int(default)
+        try:
+            parsed = int(value)
+        except ValueError:
+            print("❌ Enter an integer.")
+            continue
+        if parsed < minimum or parsed > maximum:
+            print(f"❌ Value must be between {minimum} and {maximum}.")
+            continue
+        return parsed
+
+
 def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
     """Run the miner-facing Research Lab auto-research entrypoint."""
     gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
@@ -2363,22 +2424,19 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
         print(f"❌ Could not reach Research Lab gateway status: {exc}")
         return
 
-    print("Research Lab gateway status:")
-    print(f"  api_enabled: {status.get('api_enabled')}")
-    print(f"  production_writes_enabled: {status.get('production_writes_enabled')}")
-    print(f"  paid_loops_enabled: {status.get('paid_loops_enabled')}")
-    print(f"  hosted_runs_enabled: {status.get('hosted_runs_enabled')}")
-    print(f"  loop_start_fee_usd: {status.get('loop_start_fee_usd')}")
-    print(f"  miner_openrouter_key_required: {status.get('miner_openrouter_key_required')}")
     worker_status = status.get("hosted_worker") if isinstance(status.get("hosted_worker"), dict) else {}
     approved_tiers = worker_status.get("approved_model_tiers") if isinstance(worker_status.get("approved_model_tiers"), dict) else {}
     default_tier = str(worker_status.get("default_model_tier") or "default")
     default_budget = float(worker_status.get("default_compute_budget_usd") or 5.0)
     min_budget = float(worker_status.get("min_compute_budget_usd") or 1.0)
     max_budget = float(worker_status.get("max_compute_budget_usd") or 100.0)
-    if approved_tiers:
-        print(f"  approved_model_tiers: {', '.join(sorted(approved_tiers))}")
-    print(f"  compute_budget_range_usd: {min_budget:.2f} to {max_budget:.2f}")
+    loop_fee = float(status.get("loop_start_fee_usd") or 5.0)
+
+    print("Research Lab status:")
+    ready = bool(status.get("api_enabled") and status.get("paid_loops_enabled") and status.get("hosted_runs_enabled"))
+    print(f"  hosted auto-research: {'ready' if ready else 'not ready'}")
+    print(f"  loop-start fee: ${loop_fee:.2f} USD-equivalent in TAO")
+    print(f"  default compute budget: ${default_budget:.2f}")
 
     if not status.get("api_enabled"):
         print("")
@@ -2386,8 +2444,8 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
         return
 
     print("")
-    top_up_existing = input("❓ Top up an existing Research Lab run instead? [y/N]: ").strip().lower()
-    if top_up_existing in ("y", "yes"):
+    run_choice = input("❓ Start new loop or top up an existing promising loop? [new/topup] ").strip().lower() or "new"
+    if run_choice in ("topup", "top-up", "t"):
         _run_research_lab_topup_flow(
             wallet=wallet,
             netuid=netuid,
@@ -2398,12 +2456,10 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
             max_budget=max_budget,
         )
         return
-
-    create_ticket = input("❓ Open a new Research Lab ticket? [Y/n]: ").strip().lower()
-    if create_ticket not in ("", "y", "yes"):
+    if run_choice not in ("new", "n", "start"):
+        print("❌ Choose either 'new' or 'topup'.")
         return
 
-    island = input("   Island [generalist]: ").strip() or "generalist"
     brief_input = input("   Brief text or brief_sanitized ref: ").strip()
     if not brief_input:
         print("❌ Brief text/ref is required.")
@@ -2414,35 +2470,27 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
         print(f"❌ {exc}")
         return
 
-    try:
-        requested_loop_count = int(input("   Requested loop count [1]: ").strip() or "1")
-    except ValueError:
-        print("❌ Requested loop count must be an integer.")
-        return
-    if requested_loop_count <= 0:
-        print("❌ Requested loop count must be positive.")
-        return
-    research_model_tier = input(f"   Auto-research model tier [{default_tier}]: ").strip() or default_tier
-    if approved_tiers and research_model_tier not in approved_tiers:
-        print(f"❌ Unknown model tier. Approved tiers: {', '.join(sorted(approved_tiers))}")
-        return
-    try:
-        requested_compute_budget_usd = float(
-            input(f"   Compute budget USD [{default_budget:.2f}]: ").strip() or str(default_budget)
+    island = "generalist"
+    requested_loop_count = 1
+    research_model_tier = _research_lab_default_model_tier(default_tier, approved_tiers)
+    requested_compute_budget_usd = default_budget
+    max_compute_budget_usd = default_budget
+    advanced = input("❓ Adjust advanced settings? [y/N]: ").strip().lower()
+    if advanced in ("y", "yes"):
+        island = input("   Island [generalist]: ").strip() or "generalist"
+        requested_loop_count = _research_lab_prompt_int("   Requested loop count", default=1, minimum=1, maximum=100)
+        research_model_tier = _research_lab_prompt_model_tier(default_tier, approved_tiers)
+        requested_compute_budget_usd = _research_lab_prompt_budget(
+            "   Compute budget USD",
+            default=default_budget,
+            minimum=min_budget,
+            maximum=max_budget,
         )
-        max_compute_budget_usd = float(
-            input(f"   Max compute budget USD [{max(default_budget, requested_compute_budget_usd):.2f}]: ").strip()
-            or str(max(default_budget, requested_compute_budget_usd))
-        )
-    except ValueError:
-        print("❌ Compute budgets must be numbers.")
-        return
-    if requested_compute_budget_usd < min_budget or max_compute_budget_usd > max_budget:
-        print(f"❌ Compute budget must be between ${min_budget:.2f} and ${max_budget:.2f}.")
-        return
-    if requested_compute_budget_usd > max_compute_budget_usd:
-        print("❌ Requested compute budget cannot exceed max compute budget.")
-        return
+        max_compute_budget_usd = requested_compute_budget_usd
+    print(
+        f"   Using: island={island}, budget=${requested_compute_budget_usd:.2f}, "
+        f"model_tier={research_model_tier}, loops={requested_loop_count}"
+    )
 
     key_ref = input("   Miner OpenRouter key ref (encrypted/ephemeral ref only, optional until loop-start): ").strip()
     if key_ref and _looks_like_raw_research_lab_secret(key_ref):
@@ -2487,8 +2535,8 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
         print("The ticket is open, but this client will not submit a paid loop-start request.")
         return
 
-    start_now = input("❓ Submit paid loop-start request now? [y/N]: ").strip().lower()
-    if start_now not in ("y", "yes"):
+    start_now = input("❓ Continue to payment and queue this run now? [Y/n]: ").strip().lower()
+    if start_now in ("n", "no"):
         return
 
     if not key_ref:
@@ -2498,14 +2546,14 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
             return
         key_handling = "ephemeral_ref" if key_ref.startswith("ephemeral_ref:") else "encrypted_ref"
 
-    preflight = input("   OpenRouter key preflight status [passed/failed/not_run]: ").strip() or "not_run"
-    if preflight != "passed":
+    preflight_ok = input("   Has this OpenRouter key ref passed preflight? [Y/n]: ").strip().lower()
+    if preflight_ok in ("n", "no"):
         print("❌ Paid loop-start requires a passed OpenRouter key preflight.")
         return
 
     dest_coldkey = get_leadpoet_coldkey(netuid)
     print("")
-    print(f"Loop-start fee: ${float(status.get('loop_start_fee_usd') or 5.0):.2f} USD-equivalent in TAO")
+    print(f"Loop-start fee: ${loop_fee:.2f} USD-equivalent in TAO")
     print(f"Payment destination coldkey for netuid {netuid}: {dest_coldkey}")
     print("Paste the block hash and extrinsic index from the TAO transfer.")
     payment_block_hash = input("   Payment block hash: ").strip()
@@ -2562,24 +2610,25 @@ def _run_research_lab_topup_flow(
 
     ticket_id = input("   Existing ticket ID: ").strip()
     continue_from_run_id = input("   Continue from run ID (optional): ").strip()
-    research_model_tier = input(f"   Auto-research model tier [{default_tier}]: ").strip() or default_tier
-    try:
-        additional_compute_budget_usd = float(
-            input(f"   Additional compute budget USD [{default_budget:.2f}]: ").strip() or str(default_budget)
-        )
-    except ValueError:
-        print("❌ Additional compute budget must be a number.")
-        return
-    if additional_compute_budget_usd < min_budget or additional_compute_budget_usd > max_budget:
-        print(f"❌ Additional compute budget must be between ${min_budget:.2f} and ${max_budget:.2f}.")
-        return
+    research_model_tier = _research_lab_default_model_tier(default_tier, {})
+    additional_compute_budget_usd = _research_lab_prompt_budget(
+        "   Additional compute budget USD",
+        default=default_budget,
+        minimum=min_budget,
+        maximum=max_budget,
+    )
+    advanced = input("❓ Adjust advanced top-up settings? [y/N]: ").strip().lower()
+    if advanced in ("y", "yes"):
+        worker_status = status.get("hosted_worker") if isinstance(status.get("hosted_worker"), dict) else {}
+        approved_tiers = worker_status.get("approved_model_tiers") if isinstance(worker_status.get("approved_model_tiers"), dict) else {}
+        research_model_tier = _research_lab_prompt_model_tier(default_tier, approved_tiers)
     key_ref = input("   Miner OpenRouter key ref (encrypted/ephemeral ref only): ").strip()
     if not key_ref or _looks_like_raw_research_lab_secret(key_ref):
         print("❌ A safe OpenRouter key reference is required for top-ups.")
         return
     key_handling = "ephemeral_ref" if key_ref.startswith("ephemeral_ref:") else "encrypted_ref"
-    preflight = input("   OpenRouter key preflight status [passed/failed/not_run]: ").strip() or "not_run"
-    if preflight != "passed":
+    preflight_ok = input("   Has this OpenRouter key ref passed preflight? [Y/n]: ").strip().lower()
+    if preflight_ok in ("n", "no"):
         print("❌ Top-up requires a passed OpenRouter key preflight.")
         return
 

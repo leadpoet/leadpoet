@@ -110,6 +110,12 @@ def verify_sql(sql: str) -> list[str]:
         if required_ref not in sql:
             errors.append(f"missing evidence/trajectory linkage reference: {required_ref}")
 
+    receipt_table = _extract_create_table(sql, "research_loop_receipts")
+    if "REFERENCES public.execution_traces" in receipt_table:
+        errors.append("research_loop_receipts.run_id must not reference execution_traces")
+    if "Hosted Research Lab run UUID from the event-sourced run queue" not in receipt_table:
+        errors.append("research_loop_receipts.run_id must document hosted run queue semantics")
+
     if FORBIDDEN_GRANT_RE.search(sql):
         errors.append("migration must not grant privileges to anon/authenticated")
     if re.search(r"GRANT\s+[^;]*(UPDATE|DELETE)[^;]*TO\s+service_role", sql, re.IGNORECASE):
@@ -120,6 +126,17 @@ def verify_sql(sql: str) -> list[str]:
         errors.append("migration should include raw OpenRouter key tripwire checks")
 
     return errors
+
+
+def _extract_create_table(sql: str, table: str) -> str:
+    marker = f"CREATE TABLE IF NOT EXISTS public.{table}"
+    start = sql.find(marker)
+    if start == -1:
+        return ""
+    next_create = sql.find("CREATE TABLE IF NOT EXISTS public.", start + len(marker))
+    if next_create == -1:
+        return sql[start:]
+    return sql[start:next_create]
 
 
 def _require_table_contract(sql: str, table: str, errors: list[str]) -> None:

@@ -172,8 +172,10 @@ CREATE TABLE IF NOT EXISTS public.research_loop_receipts (
                                           ON DELETE RESTRICT,
     trajectory_id            UUID        REFERENCES public.research_trajectories(trajectory_id)
                                           ON DELETE RESTRICT,
-    run_id                   UUID        REFERENCES public.execution_traces(run_id)
-                                          ON DELETE SET NULL,
+    -- Hosted Research Lab run UUID from the event-sourced run queue.
+    -- This intentionally does not reference execution_traces; private hosted
+    -- runs are queued in research_loop_run_queue_events.
+    run_id                   UUID,
     loop_start_payment_id    UUID        REFERENCES public.research_loop_start_payments(payment_id)
                                           ON DELETE RESTRICT,
     loop_start_credit_id     TEXT,

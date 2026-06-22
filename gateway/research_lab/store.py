@@ -132,6 +132,10 @@ async def create_ticket(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "ticket_doc": {
             "idempotency_key_hash": canonical_hash(request.idempotency_key),
             "source": "gateway_research_lab_api",
+            "research_model_tier": getattr(request, "research_model_tier", "default"),
+            "requested_compute_budget_usd": float(getattr(request, "requested_compute_budget_usd", 5.0)),
+            "max_compute_budget_usd": float(getattr(request, "max_compute_budget_usd", 25.0)),
+            "budget_policy_version": "research-lab-budget:v1",
         },
     }
     ticket_payload["ticket_hash"] = canonical_hash(ticket_payload)
@@ -249,7 +253,22 @@ async def create_loop_start_payment(
     miner_hotkey: str,
     payment_info: dict[str, Any],
     required_usd: float,
+    payment_kind: str = "loop_start",
+    run_id: str | None = None,
+    compute_budget_usd: float | None = None,
+    extra_verification_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    verification_doc = {
+        "call_function": payment_info.get("call_function"),
+        "amount_rao": payment_info.get("amount_rao"),
+        "payment_kind": payment_kind,
+    }
+    if run_id:
+        verification_doc["run_id"] = run_id
+    if compute_budget_usd is not None:
+        verification_doc["compute_budget_usd"] = float(compute_budget_usd)
+    if extra_verification_doc:
+        verification_doc.update(extra_verification_doc)
     row = {
         "payment_id": str(uuid4()),
         "schema_version": "1.0",
@@ -268,10 +287,7 @@ async def create_loop_start_payment(
         "tao_price_usd": payment_info.get("tao_price_at_payment", 0.0),
         "payment_status": "verified",
         "verification_error": None,
-        "verification_doc": {
-            "call_function": payment_info.get("call_function"),
-            "amount_rao": payment_info.get("amount_rao"),
-        },
+        "verification_doc": verification_doc,
         "verified_at": now_iso(),
     }
     return await insert_row("research_loop_start_payments", row)

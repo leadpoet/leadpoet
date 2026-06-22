@@ -71,6 +71,7 @@ def build_default_auto_research_messages(
     artifact_manifest: Mapping[str, Any],
     component_registry: Mapping[str, Any],
     benchmark_public_summary: Mapping[str, Any],
+    budget_context: Mapping[str, Any] | None = None,
     max_candidates: int,
 ) -> list[dict[str, str]]:
     """Build the default server-side prompt for candidate generation."""
@@ -79,6 +80,7 @@ def build_default_auto_research_messages(
         "artifact_manifest": _redacted_mapping(artifact_manifest),
         "component_registry": _redacted_mapping(component_registry),
         "benchmark_public_summary": _redacted_mapping(benchmark_public_summary),
+        "budget_context": _redacted_mapping(budget_context or {}),
         "max_candidates": int(max_candidates),
         "enabled_patch_types": list(ENGINE_V1_ENABLED_PATCH_TYPES),
         "disallowed_patch_types": ["CODE_EDIT", "SOURCE_ADD"],
@@ -96,6 +98,8 @@ def build_default_auto_research_messages(
         "Return strict JSON only, no markdown.\n\n"
         "Rules:\n"
         "- Return at most max_candidates candidates.\n"
+        "- Respect budget_context: use fewer, more precise candidates when the compute budget is small.\n"
+        "- For top_up payment_kind, focus on pushing the prior promising direction over starting broad new exploration.\n"
         "- Allowed patch types: PROMPT_EDIT, PARAM_EDIT, STRATEGY_SWAP.\n"
         "- Never use CODE_EDIT or SOURCE_ADD.\n"
         "- target_component_id must be one of the component registry entry names.\n"

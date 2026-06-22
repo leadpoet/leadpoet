@@ -21,6 +21,7 @@ SECRET_MARKERS = (
 )
 
 SECRET_KEY_RE = re.compile(r"(?:api[_-]?key|raw[_-]?secret|raw[_-]?openrouter|token|credential)", re.I)
+MODEL_TIER_RE = r"^[A-Za-z0-9_.:/-]+$"
 
 
 class SignedResearchLabRequest(BaseModel):
@@ -45,6 +46,9 @@ class ResearchLabTicketCreateRequest(SignedResearchLabRequest):
     brief_sanitized_ref: str = Field(min_length=8, max_length=256)
     requested_loop_count: int = Field(default=1, gt=0, le=100)
     loop_start_fee_required_usd: float = Field(default=5.0, ge=0)
+    research_model_tier: str = Field(default="default", min_length=1, max_length=80, pattern=MODEL_TIER_RE)
+    requested_compute_budget_usd: float = Field(default=5.0, ge=0)
+    max_compute_budget_usd: float = Field(default=25.0, ge=0)
     miner_openrouter_key_ref: Optional[str] = Field(default=None, max_length=256)
     miner_openrouter_key_handling: Optional[str] = Field(default=None)
 
@@ -54,6 +58,12 @@ class ResearchLabTicketCreateRequest(SignedResearchLabRequest):
         if value:
             reject_secret_material(value)
         return value
+
+    @model_validator(mode="after")
+    def valid_budget_bounds(self) -> "ResearchLabTicketCreateRequest":
+        if self.max_compute_budget_usd and self.requested_compute_budget_usd > self.max_compute_budget_usd:
+            raise ValueError("requested_compute_budget_usd cannot exceed max_compute_budget_usd")
+        return self
 
 
 class ResearchLabProbeRequest(SignedResearchLabRequest):
@@ -75,10 +85,42 @@ class ResearchLabLoopStartRequest(SignedResearchLabRequest):
     miner_openrouter_key_handling: str = Field(pattern="^(encrypted_ref|ephemeral_ref)$")
     miner_openrouter_preflight_status: str = Field(pattern="^(passed|failed|not_run)$")
     requested_loop_count: int = Field(default=1, gt=0, le=100)
+    research_model_tier: Optional[str] = Field(default=None, min_length=1, max_length=80, pattern=MODEL_TIER_RE)
+    requested_compute_budget_usd: Optional[float] = Field(default=None, ge=0)
+    max_compute_budget_usd: Optional[float] = Field(default=None, ge=0)
 
     @field_validator("miner_openrouter_key_ref", "payment_block_hash")
     @classmethod
     def no_raw_loop_start_secret(cls, value: str) -> str:
+        reject_secret_material(value)
+        return value
+
+    @model_validator(mode="after")
+    def valid_budget_bounds(self) -> "ResearchLabLoopStartRequest":
+        if (
+            self.requested_compute_budget_usd is not None
+            and self.max_compute_budget_usd is not None
+            and self.requested_compute_budget_usd > self.max_compute_budget_usd
+        ):
+            raise ValueError("requested_compute_budget_usd cannot exceed max_compute_budget_usd")
+        return self
+
+
+class ResearchLabLoopTopUpRequest(SignedResearchLabRequest):
+    ticket_id: UUID
+    continue_from_run_id: Optional[UUID] = None
+    payment_block_hash: str = Field(min_length=8, max_length=160)
+    payment_extrinsic_index: int = Field(ge=0)
+    additional_compute_budget_usd: float = Field(gt=0)
+    research_model_tier: Optional[str] = Field(default=None, min_length=1, max_length=80, pattern=MODEL_TIER_RE)
+    topup_reason: str = Field(default="promising_needs_topup", pattern="^(promising_needs_topup|manual_budget_increase)$")
+    miner_openrouter_key_ref: str = Field(min_length=8, max_length=256)
+    miner_openrouter_key_handling: str = Field(pattern="^(encrypted_ref|ephemeral_ref)$")
+    miner_openrouter_preflight_status: str = Field(pattern="^(passed|failed|not_run)$")
+
+    @field_validator("miner_openrouter_key_ref", "payment_block_hash")
+    @classmethod
+    def no_raw_topup_secret(cls, value: str) -> str:
         reject_secret_material(value)
         return value
 
@@ -147,6 +189,16 @@ class ResearchLabLoopStartResponse(BaseModel):
     queued: bool
     credit_preserved: bool = False
     credit_id: Optional[str] = None
+    status: str
+
+
+class ResearchLabLoopTopUpResponse(BaseModel):
+    ticket_id: str
+    run_id: str
+    continued_from_run_id: Optional[str] = None
+    topup_payment_id: str
+    payment_ref: str
+    queued: bool
     status: str
 
 

@@ -33,6 +33,12 @@ def main() -> int:
         env["RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS"] = str(worker_count)
         env["RESEARCH_LAB_HOSTED_WORKER_INDEX"] = str(index)
         env["RESEARCH_LAB_HOSTED_WORKER_ID"] = f"{args.worker_prefix}-{index + 1}"
+        proxy = _proxy_for_worker(index)
+        if proxy:
+            env["HTTP_PROXY"] = proxy
+            env["HTTPS_PROXY"] = proxy
+            env["http_proxy"] = proxy
+            env["https_proxy"] = proxy
         command = [
             sys.executable,
             str(WORKER_SCRIPT),
@@ -93,6 +99,16 @@ def main() -> int:
             if child.poll() is None:
                 child.kill()
     return exit_code
+
+
+def _proxy_for_worker(index: int) -> str:
+    one_based = index + 1
+    return (
+        os.getenv(f"RESEARCH_LAB_WORKER_PROXY_{one_based}")
+        or os.getenv(f"RESEARCH_LAB_WORKER_HTTPS_PROXY_{one_based}")
+        or os.getenv("RESEARCH_LAB_WORKER_PROXY")
+        or ""
+    ).strip()
 
 
 if __name__ == "__main__":

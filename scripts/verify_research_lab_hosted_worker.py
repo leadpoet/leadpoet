@@ -15,11 +15,13 @@ from leadpoet_verifier.research_evaluation import build_research_evaluation_scor
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.worker import ResearchLabHostedWorker, _is_claim_race_error, _row_partition  # noqa: E402
 from research_lab.auto_research_prompt import (  # noqa: E402
+    build_default_auto_research_messages,
     build_validated_candidate_manifest,
     coerce_component_registry,
     parse_auto_research_response,
 )
 from research_lab.canonical import sha256_json  # noqa: E402
+from research_lab.eval.private_runtime import DEFAULT_ENV_PASSTHROUGH  # noqa: E402
 from research_lab.eval.artifacts import PrivateModelArtifactManifest  # noqa: E402
 from research_lab.validator_integration import verify_research_lab_evaluation_bundle_page  # noqa: E402
 
@@ -54,6 +56,24 @@ def main() -> int:
         errors.append("parser accepted CODE_EDIT candidate")
     except ValueError:
         pass
+
+    prompt_messages = build_default_auto_research_messages(
+        ticket={"ticket_id": "ticket-1", "run_id": "run-1", "miner_hotkey": "5FminerHotkey111"},
+        artifact_manifest=artifact.to_dict(),
+        component_registry=registry.to_dict(),
+        benchmark_public_summary={"item_count": 3},
+        budget_context={
+            "research_model_tier": "default",
+            "requested_compute_budget_usd": 5.0,
+            "payment_kind": "top_up",
+            "continue_from_run_id": "run-0",
+        },
+        max_candidates=2,
+    )
+    if "budget_context" not in prompt_messages[1]["content"] or "top_up" not in prompt_messages[1]["content"]:
+        errors.append("auto-research prompt did not include budget/top-up context")
+    if "HTTPS_PROXY" not in DEFAULT_ENV_PASSTHROUGH or "HTTP_PROXY" not in DEFAULT_ENV_PASSTHROUGH:
+        errors.append("private Docker runner does not pass through proxy env vars")
 
     eval_bundle = _score_bundle()
     page = {

@@ -35,6 +35,12 @@ DEFAULT_ENV_PASSTHROUGH = (
     "OPENROUTER_API_KEY",
     "QUALIFICATION_OPENROUTER_API_KEY",
     "OPENROUTER_KEY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
 )
 
 

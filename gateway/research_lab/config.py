@@ -8,10 +8,14 @@ require their own explicit gate.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import logging
 import os
+from typing import Any, Mapping
 
 
 TRUTHY = {"1", "true", "yes", "on"}
+logger = logging.getLogger(__name__)
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -68,6 +72,12 @@ class ResearchLabGatewayConfig:
     score_bundle_kms_key_id: str = "alias/leadpoet-research-lab-artifact-signing"
     score_bundle_signature_uri_prefix: str = ""
     auto_research_model: str = ""
+    approved_auto_research_models_json: str = ""
+    default_auto_research_model_tier: str = "default"
+    default_compute_budget_usd: float = 5.0
+    min_compute_budget_usd: float = 1.0
+    max_compute_budget_usd: float = 100.0
+    topup_promising_delta_threshold: float = 0.5
     miner_openrouter_key_env_var: str = ""
     miner_openrouter_key_ref_env_map_json: str = ""
     evaluation_epoch: int = 0
@@ -119,10 +129,86 @@ class ResearchLabGatewayConfig:
             ),
             score_bundle_signature_uri_prefix=os.getenv("RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX", ""),
             auto_research_model=os.getenv("RESEARCH_LAB_AUTO_RESEARCH_MODEL", ""),
+            approved_auto_research_models_json=os.getenv("RESEARCH_LAB_APPROVED_AUTO_RESEARCH_MODELS_JSON", ""),
+            default_auto_research_model_tier=os.getenv("RESEARCH_LAB_DEFAULT_AUTO_RESEARCH_MODEL_TIER", "default"),
+            default_compute_budget_usd=_float("RESEARCH_LAB_DEFAULT_COMPUTE_BUDGET_USD", 5.0),
+            min_compute_budget_usd=_float("RESEARCH_LAB_MIN_COMPUTE_BUDGET_USD", 1.0),
+            max_compute_budget_usd=_float("RESEARCH_LAB_MAX_COMPUTE_BUDGET_USD", 100.0),
+            topup_promising_delta_threshold=_float("RESEARCH_LAB_TOPUP_PROMISING_DELTA_THRESHOLD", 0.5),
             miner_openrouter_key_env_var=os.getenv("RESEARCH_LAB_MINER_OPENROUTER_KEY_ENV_VAR", ""),
             miner_openrouter_key_ref_env_map_json=os.getenv("RESEARCH_LAB_OPENROUTER_KEY_REF_ENV_MAP_JSON", ""),
             evaluation_epoch=_int("RESEARCH_LAB_EVALUATION_EPOCH", 0),
         )
+
+    def approved_auto_research_models(self) -> dict[str, dict[str, Any]]:
+        configured = self._decode_model_tiers()
+        if configured:
+            return configured
+        if not self.auto_research_model:
+            return {}
+        return {
+            self.default_auto_research_model_tier: {
+                "model": self.auto_research_model,
+                "max_candidates": self.hosted_worker_max_candidates,
+                "description": "Default hosted auto-research model",
+            }
+        }
+
+    def resolve_auto_research_model(self, tier: str | None) -> tuple[str, str, dict[str, Any]]:
+        tiers = self.approved_auto_research_models()
+        if not tiers:
+            if self.auto_research_model:
+                return self.default_auto_research_model_tier, self.auto_research_model, {
+                    "model": self.auto_research_model,
+                    "max_candidates": self.hosted_worker_max_candidates,
+                }
+            raise ValueError("no hosted auto-research model is configured")
+        effective_tier = str(tier or self.default_auto_research_model_tier or "default")
+        if not tier and effective_tier not in tiers:
+            effective_tier = sorted(tiers)[0]
+        if effective_tier not in tiers:
+            raise ValueError(f"auto-research model tier is not approved: {effective_tier}")
+        doc = dict(tiers[effective_tier])
+        model = str(doc.get("model") or "")
+        if not model:
+            raise ValueError(f"approved auto-research model tier has no model: {effective_tier}")
+        return effective_tier, model, doc
+
+    def clamp_compute_budget_usd(self, value: float | int | str | None) -> float:
+        try:
+            budget = float(self.default_compute_budget_usd if value is None else value)
+        except (TypeError, ValueError):
+            budget = float(self.default_compute_budget_usd)
+        lower = max(0.0, float(self.min_compute_budget_usd))
+        upper = max(lower, float(self.max_compute_budget_usd))
+        return min(max(budget, lower), upper)
+
+    def _decode_model_tiers(self) -> dict[str, dict[str, Any]]:
+        if not self.approved_auto_research_models_json:
+            return {}
+        try:
+            decoded = json.loads(self.approved_auto_research_models_json)
+        except json.JSONDecodeError as exc:
+            logger.warning("Invalid RESEARCH_LAB_APPROVED_AUTO_RESEARCH_MODELS_JSON: %s", exc)
+            return {}
+        if not isinstance(decoded, Mapping):
+            logger.warning("RESEARCH_LAB_APPROVED_AUTO_RESEARCH_MODELS_JSON must decode to an object")
+            return {}
+        tiers: dict[str, dict[str, Any]] = {}
+        for name, value in decoded.items():
+            if not isinstance(value, Mapping):
+                logger.warning("Skipping invalid auto-research model tier %s: expected object", name)
+                continue
+            model = str(value.get("model") or "")
+            if not model:
+                logger.warning("Skipping invalid auto-research model tier %s: missing model", name)
+                continue
+            tiers[str(name)] = {
+                key: item
+                for key, item in dict(value).items()
+                if key in {"model", "max_candidates", "max_compute_budget_usd", "description"}
+            }
+        return tiers
 
     def live_mutation_flags(self) -> dict[str, bool]:
         return {
@@ -165,5 +251,18 @@ class ResearchLabGatewayConfig:
                 "private_model_manifest_uri_configured": bool(self.private_model_manifest_uri),
                 "private_benchmark_path_configured": bool(self.private_benchmark_path),
                 "auto_research_model_configured": bool(self.auto_research_model),
+                "approved_model_tiers": {
+                    tier: {
+                        "model_configured": bool(doc.get("model")),
+                        "max_candidates": doc.get("max_candidates", self.hosted_worker_max_candidates),
+                        "max_compute_budget_usd": doc.get("max_compute_budget_usd", self.max_compute_budget_usd),
+                        "description": doc.get("description"),
+                    }
+                    for tier, doc in self.approved_auto_research_models().items()
+                },
+                "default_model_tier": self.default_auto_research_model_tier,
+                "default_compute_budget_usd": self.default_compute_budget_usd,
+                "min_compute_budget_usd": self.min_compute_budget_usd,
+                "max_compute_budget_usd": self.max_compute_budget_usd,
             },
         }

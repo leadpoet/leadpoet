@@ -89,6 +89,7 @@ class HostedRunContext:
     ticket: Mapping[str, Any]
     payment: Mapping[str, Any] | None
     ticket_events: tuple[Mapping[str, Any], ...] = ()
+    queue_events: tuple[Mapping[str, Any], ...] = ()
     receipt_id: str | None = None
     provider_env: dict[str, str] = field(default_factory=dict)
 
@@ -209,7 +210,7 @@ class ResearchLabHostedWorker:
             raise HostedResearchLabWorkerError("private model manifest URI is not configured")
         if not self.config.private_benchmark_path:
             raise HostedResearchLabWorkerError("private benchmark path is not configured")
-        if not self.config.auto_research_model:
+        if not self.config.approved_auto_research_models():
             raise HostedResearchLabWorkerError("auto-research OpenRouter model is not configured")
 
     async def _next_queued_run(self) -> Mapping[str, Any] | None:
@@ -242,22 +243,36 @@ class ResearchLabHostedWorker:
         )
         if not ticket:
             raise HostedResearchLabWorkerError("queued Research Lab run is missing ticket")
-        payment_rows = await select_many(
-            "research_loop_start_payments",
-            filters=(("ticket_id", str(queue_row["ticket_id"])),),
-            limit=1,
-        )
         ticket_events = await select_many(
             "research_loop_ticket_events",
             filters=(("ticket_id", str(queue_row["ticket_id"])),),
             order_by=(("seq", True),),
             limit=20,
         )
+        queue_events = await select_many(
+            "research_loop_run_queue_events",
+            filters=(("run_id", str(queue_row["run_id"])),),
+            order_by=(("seq", True),),
+            limit=20,
+        )
+        payment = None
+        payment_id = _payment_id_from_queue_events(queue_events)
+        if payment_id:
+            payment = await select_one("research_loop_start_payments", filters=(("payment_id", payment_id),))
+        if not payment:
+            payment_rows = await select_many(
+                "research_loop_start_payments",
+                filters=(("ticket_id", str(queue_row["ticket_id"])),),
+                order_by=(("verified_at", True),),
+                limit=1,
+            )
+            payment = payment_rows[0] if payment_rows else None
         return HostedRunContext(
             queue_row=queue_row,
             ticket=ticket,
-            payment=payment_rows[0] if payment_rows else None,
+            payment=payment,
             ticket_events=tuple(ticket_events),
+            queue_events=tuple(queue_events),
         )
 
     async def _process_run(self, context: HostedRunContext) -> HostedWorkerOutcome:
@@ -266,6 +281,11 @@ class ResearchLabHostedWorker:
         context.provider_env = provider_env
         receipt, _event = await create_receipt(self._queued_receipt_request(context))
         context.receipt_id = str(receipt["receipt_id"])
+        budget_context = self._run_budget_context(context)
+        _tier, model_id, model_doc = self.config.resolve_auto_research_model(
+            str(budget_context.get("research_model_tier") or "")
+        )
+        max_candidates = self._max_candidates_for_run(budget_context, model_doc)
 
         artifact = self._load_private_artifact()
         benchmark, benchmark_items = self._load_private_benchmark()
@@ -290,6 +310,9 @@ class ResearchLabHostedWorker:
             artifact=artifact,
             component_registry=registry.to_dict(),
             benchmark_public_summary=benchmark_summary,
+            model_id=model_id,
+            budget_context=budget_context,
+            max_candidates=max_candidates,
         )
         if not drafts:
             raise HostedResearchLabWorkerError("auto-research generated no valid candidate drafts")
@@ -360,6 +383,8 @@ class ResearchLabHostedWorker:
                 "score_bundle_ids": bundle_ids,
                 "best_candidate": best,
                 "candidate_count": len(candidate_summaries),
+                "budget_context": _redacted_budget_context(budget_context),
+                "followup_status": _followup_status(best, self.config.topup_promising_delta_threshold),
             },
         )
         await create_queue_event(
@@ -369,14 +394,23 @@ class ResearchLabHostedWorker:
             queue_priority=int(context.queue_row.get("queue_priority") or 0),
             worker_ref=self.worker_ref,
             reason="hosted_research_lab_run_completed",
-            event_doc={"receipt_id": context.receipt_id, "score_bundle_ids": bundle_ids},
+            event_doc={
+                "receipt_id": context.receipt_id,
+                "score_bundle_ids": bundle_ids,
+                "followup_status": _followup_status(best, self.config.topup_promising_delta_threshold),
+            },
         )
         await create_ticket_event(
             ticket_id=context.ticket_id,
             event_type="completed",
             actor_hotkey=None,
             reason="hosted_research_lab_run_completed",
-            event_doc={"run_id": context.run_id, "receipt_id": context.receipt_id, "score_bundle_ids": bundle_ids},
+            event_doc={
+                "run_id": context.run_id,
+                "receipt_id": context.receipt_id,
+                "score_bundle_ids": bundle_ids,
+                "followup_status": _followup_status(best, self.config.topup_promising_delta_threshold),
+            },
         )
         return HostedWorkerOutcome(
             processed=True,
@@ -458,6 +492,7 @@ class ResearchLabHostedWorker:
         )
 
     def _queued_receipt_request(self, context: HostedRunContext) -> ResearchLabReceiptCreateRequest:
+        budget_context = self._run_budget_context(context)
         return ResearchLabReceiptCreateRequest(
             internal_run_ref=f"research_lab_hosted_worker:{context.run_id}",
             ticket_id=context.ticket_id,
@@ -469,16 +504,23 @@ class ResearchLabHostedWorker:
             loop_count=int(context.ticket.get("requested_loop_count") or 1),
             miner_openrouter_key_ref=_miner_openrouter_key_ref(context),
             provider_usage=self._provider_usage(context),
-            cost_ledger={"schema_version": "1.0", "status": "queued", "total_usd": 0.0},
+            cost_ledger={
+                "schema_version": "1.0",
+                "status": "queued",
+                "total_usd": 0.0,
+                "budget_context": _redacted_budget_context(budget_context),
+            },
             receipt_doc={
                 "schema_version": "1.0",
                 "run_id": context.run_id,
                 "worker_ref": self.worker_ref,
                 "private_model_manifest_uri": self.config.private_model_manifest_uri,
+                "budget_context": _redacted_budget_context(budget_context),
             },
         )
 
     def _failed_receipt_request(self, context: HostedRunContext, error: str) -> ResearchLabReceiptCreateRequest:
+        budget_context = self._run_budget_context(context)
         return ResearchLabReceiptCreateRequest(
             internal_run_ref=f"research_lab_hosted_worker:{context.run_id}",
             ticket_id=context.ticket_id,
@@ -490,21 +532,29 @@ class ResearchLabHostedWorker:
             loop_count=int(context.ticket.get("requested_loop_count") or 1),
             miner_openrouter_key_ref=_miner_openrouter_key_ref(context),
             provider_usage=self._provider_usage(context),
-            cost_ledger={"schema_version": "1.0", "status": "failed", "total_usd": 0.0},
+            cost_ledger={
+                "schema_version": "1.0",
+                "status": "failed",
+                "total_usd": 0.0,
+                "budget_context": _redacted_budget_context(budget_context),
+            },
             receipt_doc={
                 "schema_version": "1.0",
                 "run_id": context.run_id,
                 "worker_ref": self.worker_ref,
                 "failure_reason": error[:500],
+                "budget_context": _redacted_budget_context(budget_context),
             },
         )
 
     def _provider_usage(self, context: HostedRunContext) -> list[dict[str, Any]]:
+        budget_context = self._run_budget_context(context)
         return [
             {
                 "provider": "openrouter",
                 "key_source": "miner_key_ref",
                 "key_ref": _miner_openrouter_key_ref(context),
+                "research_model_tier": budget_context.get("research_model_tier"),
             },
             {"provider": "exa", "key_source": "leadpoet_server_side"},
             {"provider": "scrapingdog", "key_source": "leadpoet_server_side"},
@@ -552,6 +602,9 @@ class ResearchLabHostedWorker:
         artifact: PrivateModelArtifactManifest,
         component_registry: Mapping[str, Any],
         benchmark_public_summary: Mapping[str, Any],
+        model_id: str,
+        budget_context: Mapping[str, Any],
+        max_candidates: int,
     ):
         messages = build_default_auto_research_messages(
             ticket={
@@ -565,16 +618,23 @@ class ResearchLabHostedWorker:
             artifact_manifest=artifact.to_dict(),
             component_registry=component_registry,
             benchmark_public_summary=benchmark_public_summary,
-            max_candidates=self.config.hosted_worker_max_candidates,
+            budget_context=budget_context,
+            max_candidates=max_candidates,
         )
-        raw = await self._call_openrouter(messages=messages, api_key=context.provider_env["OPENROUTER_API_KEY"])
-        return parse_auto_research_response(raw, max_candidates=self.config.hosted_worker_max_candidates)
+        raw = await self._call_openrouter(
+            messages=messages,
+            api_key=context.provider_env["OPENROUTER_API_KEY"],
+            model_id=model_id,
+        )
+        return parse_auto_research_response(raw, max_candidates=max_candidates)
 
-    async def _call_openrouter(self, *, messages: Sequence[Mapping[str, str]], api_key: str) -> str:
+    async def _call_openrouter(self, *, messages: Sequence[Mapping[str, str]], api_key: str, model_id: str) -> str:
         if not api_key:
             raise HostedResearchLabWorkerError("OpenRouter key is required for hosted auto-research")
+        if not model_id:
+            raise HostedResearchLabWorkerError("OpenRouter auto-research model is required")
         body = {
-            "model": self.config.auto_research_model,
+            "model": model_id,
             "messages": list(messages),
             "temperature": 0.2,
             "max_tokens": 1800,
@@ -646,6 +706,57 @@ class ResearchLabHostedWorker:
             "observed_cost_usd": 0.0,
         }
 
+    def _run_budget_context(self, context: HostedRunContext) -> dict[str, Any]:
+        ticket_doc = context.ticket.get("ticket_doc") if isinstance(context.ticket.get("ticket_doc"), Mapping) else {}
+        queue_doc = _latest_event_doc(context.queue_events)
+        payment_doc = (
+            context.payment.get("verification_doc")
+            if context.payment and isinstance(context.payment.get("verification_doc"), Mapping)
+            else {}
+        )
+        tier = (
+            queue_doc.get("research_model_tier")
+            or payment_doc.get("research_model_tier")
+            or ticket_doc.get("research_model_tier")
+            or self.config.default_auto_research_model_tier
+        )
+        requested_budget = (
+            queue_doc.get("requested_compute_budget_usd")
+            or payment_doc.get("compute_budget_usd")
+            or payment_doc.get("requested_compute_budget_usd")
+            or ticket_doc.get("requested_compute_budget_usd")
+            or self.config.default_compute_budget_usd
+        )
+        max_budget = (
+            queue_doc.get("max_compute_budget_usd")
+            or payment_doc.get("max_compute_budget_usd")
+            or ticket_doc.get("max_compute_budget_usd")
+            or self.config.max_compute_budget_usd
+        )
+        payment_kind = queue_doc.get("payment_kind") or payment_doc.get("payment_kind") or "loop_start"
+        additional_budget = queue_doc.get("additional_compute_budget_usd") or payment_doc.get("additional_compute_budget_usd")
+        context_doc: dict[str, Any] = {
+            "schema_version": "1.0",
+            "research_model_tier": str(tier),
+            "requested_compute_budget_usd": self.config.clamp_compute_budget_usd(requested_budget),
+            "max_compute_budget_usd": self.config.clamp_compute_budget_usd(max_budget),
+            "payment_kind": str(payment_kind),
+            "budget_policy_version": "research-lab-budget:v1",
+        }
+        if additional_budget is not None:
+            context_doc["additional_compute_budget_usd"] = self.config.clamp_compute_budget_usd(additional_budget)
+        if queue_doc.get("continue_from_run_id"):
+            context_doc["continue_from_run_id"] = str(queue_doc["continue_from_run_id"])
+        if queue_doc.get("topup_reason"):
+            context_doc["topup_reason"] = str(queue_doc["topup_reason"])
+        return context_doc
+
+    def _max_candidates_for_run(self, budget_context: Mapping[str, Any], model_doc: Mapping[str, Any]) -> int:
+        configured = int(model_doc.get("max_candidates") or self.config.hosted_worker_max_candidates)
+        budget = float(budget_context.get("requested_compute_budget_usd") or self.config.default_compute_budget_usd)
+        budget_limited = max(1, min(configured, int(max(1.0, budget // max(1.0, self.config.min_compute_budget_usd)))))
+        return max(1, min(self.config.hosted_worker_max_candidates, budget_limited))
+
 
 def _normalize_benchmark_item(item: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(item, Mapping):
@@ -667,6 +778,49 @@ def _miner_openrouter_key_ref(context: HostedRunContext) -> str:
         if isinstance(event_doc, Mapping) and event_doc.get("miner_openrouter_key_ref"):
             return str(event_doc["miner_openrouter_key_ref"])
     raise HostedResearchLabWorkerError("Research Lab run is missing miner OpenRouter key ref")
+
+
+def _payment_id_from_queue_events(events: Sequence[Mapping[str, Any]]) -> str:
+    for event in events:
+        event_doc = event.get("event_doc")
+        if isinstance(event_doc, Mapping) and event_doc.get("payment_id"):
+            return str(event_doc["payment_id"])
+    return ""
+
+
+def _latest_event_doc(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    for event in events:
+        event_doc = event.get("event_doc")
+        if isinstance(event_doc, Mapping):
+            return dict(event_doc)
+    return {}
+
+
+def _redacted_budget_context(value: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "schema_version",
+        "research_model_tier",
+        "requested_compute_budget_usd",
+        "max_compute_budget_usd",
+        "payment_kind",
+        "budget_policy_version",
+        "additional_compute_budget_usd",
+        "continue_from_run_id",
+        "topup_reason",
+    }
+    return {key: value[key] for key in allowed if key in value}
+
+
+def _followup_status(best_candidate: Mapping[str, Any] | None, promising_delta_threshold: float) -> str:
+    if not best_candidate:
+        return "completed_no_candidates"
+    if best_candidate.get("eligible_for_probation"):
+        return "improvement_candidate"
+    mean_delta = float(best_candidate.get("mean_delta") or 0.0)
+    delta_lcb = float(best_candidate.get("delta_lcb") or 0.0)
+    if max(mean_delta, delta_lcb) >= float(promising_delta_threshold):
+        return "promising_needs_topup"
+    return "completed_no_upgrade"
 
 
 def _row_partition(row: Mapping[str, Any], total_workers: int) -> int:

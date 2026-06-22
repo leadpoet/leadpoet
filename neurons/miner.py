@@ -2468,13 +2468,13 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
         return
 
     print("")
-    print("Optional research direction.")
-    print("This is a weak hint, not a request to tune the model for one market niche.")
-    print("Leave blank for default general improvement against the sealed Research Lab benchmark.")
-    print("Examples: improve evidence freshness scoring; reduce overbroad matches; improve source routing.")
-    brief_input = input("   Research direction [general model improvement]: ").strip()
+    print("Research focus (optional).")
+    print("Use this to suggest a broad model-improvement area; evaluation remains benchmark-wide.")
+    print("Leave blank to let the system choose the highest-priority general improvement path.")
+    print("Examples: evidence freshness scoring; reducing overbroad matches; source-routing quality.")
+    brief_input = input("   Research focus [benchmark-wide model improvement]: ").strip()
     if not brief_input:
-        brief_input = "default: general Leadpoet sourcing-model improvement across the sealed Research Lab benchmark"
+        brief_input = "default: benchmark-wide Leadpoet sourcing-model improvement"
     try:
         brief_sanitized_ref = _brief_sanitized_ref_from_input(brief_input)
         brief_public_summary = _brief_public_summary_from_input(brief_input)

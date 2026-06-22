@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 from typing import Optional
 from uuid import uuid4
@@ -670,7 +671,25 @@ def _validate_compute_budget(config: ResearchLabGatewayConfig, value: float, fie
 
 
 def _raise_storage_error(exc: Exception) -> None:
-    message = str(exc)
+    message = _redact_storage_error_text(str(exc))
+    json_detail = getattr(exc, "json", None)
+    if callable(json_detail):
+        try:
+            json_detail = json_detail()
+        except Exception:
+            json_detail = None
+    logger.warning(
+        "research_lab_storage_error type=%s detail=%s json=%s",
+        type(exc).__name__,
+        message,
+        _redact_storage_error_text(str(json_detail)) if json_detail else None,
+    )
     if "does not exist" in message or "relation" in message:
         raise HTTPException(status_code=503, detail="Research Lab SQL migrations are not applied") from exc
     raise HTTPException(status_code=500, detail="Research Lab storage operation failed") from exc
+
+
+def _redact_storage_error_text(value: str) -> str:
+    value = re.sub(r"sk-or-v1-[A-Za-z0-9_-]+", "[REDACTED_OPENROUTER_KEY]", value or "")
+    value = re.sub(r"sb_(secret|publishable)_[A-Za-z0-9_-]+", "[REDACTED_SUPABASE_KEY]", value)
+    return value[:2000]

@@ -102,6 +102,34 @@ async def payment_ref_exists(block_hash: str, extrinsic_index: int) -> bool:
     return row is not None
 
 
+async def create_openrouter_key_ref(
+    *,
+    key_ref: str,
+    miner_hotkey: str,
+    key_hash: str,
+    encrypted_key_ciphertext: str,
+    kms_key_id: str,
+    encryption_context_hash: str,
+    preflight_doc: dict[str, Any],
+) -> dict[str, Any]:
+    existing = await select_one("research_lab_openrouter_key_refs", filters=(("key_ref", key_ref),))
+    if existing:
+        return existing
+    row = {
+        "key_ref": key_ref,
+        "schema_version": "1.0",
+        "miner_hotkey": miner_hotkey,
+        "key_hash": key_hash,
+        "encrypted_key_ciphertext": encrypted_key_ciphertext,
+        "kms_key_id": kms_key_id,
+        "encryption_context_hash": encryption_context_hash,
+        "preflight_status": "passed",
+        "preflight_doc": preflight_doc,
+    }
+    row["anchored_hash"] = canonical_hash(row)
+    return await insert_row("research_lab_openrouter_key_refs", row)
+
+
 async def create_ticket(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     ticket_id = deterministic_uuid("ticket", request.miner_hotkey, request.idempotency_key)
     existing_ticket = await select_one("research_loop_tickets", filters=(("ticket_id", ticket_id),))

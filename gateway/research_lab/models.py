@@ -78,6 +78,18 @@ class ResearchLabProbeRequest(SignedResearchLabRequest):
         return value
 
 
+class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):
+    openrouter_api_key: str = Field(min_length=1, max_length=512)
+    key_label: Optional[str] = Field(default=None, max_length=120)
+
+    @field_validator("key_label")
+    @classmethod
+    def label_has_no_secret_material(cls, value: Optional[str]) -> Optional[str]:
+        if value:
+            reject_secret_material(value)
+        return value
+
+
 class ResearchLabLoopStartRequest(SignedResearchLabRequest):
     ticket_id: UUID
     payment_block_hash: str = Field(min_length=8, max_length=160)
@@ -201,6 +213,14 @@ class ResearchLabLoopTopUpResponse(BaseModel):
     payment_ref: str
     queued: bool
     status: str
+
+
+class ResearchLabOpenRouterKeyRegisterResponse(BaseModel):
+    key_ref: str
+    preflight_status: str
+    key_hash: str
+    limit_remaining: Optional[Any] = None
+    limit_reset: Optional[str] = None
 
 
 class ResearchLabReceiptResponse(BaseModel):

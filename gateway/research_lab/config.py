@@ -82,6 +82,7 @@ class ResearchLabGatewayConfig:
     topup_promising_delta_threshold: float = 0.5
     miner_openrouter_key_env_var: str = ""
     miner_openrouter_key_ref_env_map_json: str = ""
+    openrouter_key_kms_key_id: str = ""
     evaluation_epoch: int = 0
 
     @classmethod
@@ -144,6 +145,7 @@ class ResearchLabGatewayConfig:
             topup_promising_delta_threshold=_float("RESEARCH_LAB_TOPUP_PROMISING_DELTA_THRESHOLD", 0.5),
             miner_openrouter_key_env_var=os.getenv("RESEARCH_LAB_MINER_OPENROUTER_KEY_ENV_VAR", ""),
             miner_openrouter_key_ref_env_map_json=os.getenv("RESEARCH_LAB_OPENROUTER_KEY_REF_ENV_MAP_JSON", ""),
+            openrouter_key_kms_key_id=os.getenv("RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID", ""),
             evaluation_epoch=_int("RESEARCH_LAB_EVALUATION_EPOCH", 0),
         )
 
@@ -246,6 +248,7 @@ class ResearchLabGatewayConfig:
             "live_mutation_flags": self.live_mutation_flags(),
             "loop_start_fee_usd": self.loop_start_fee_usd,
             "miner_openrouter_key_required": self.miner_openrouter_key_required,
+            "openrouter_key_registration_enabled": bool(self.openrouter_key_kms_key_id),
             "hosted_worker": {
                 "enabled": self.hosted_worker_enabled,
                 "dry_run": self.hosted_worker_dry_run,

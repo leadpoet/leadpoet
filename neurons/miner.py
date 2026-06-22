@@ -3,6 +3,7 @@ import asyncio
 import threading
 import argparse
 import traceback
+import getpass
 import bittensor as bt
 import socket
 from Leadpoet.base.miner import BaseMinerNeuron
@@ -2327,6 +2328,39 @@ def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> d
     return response.json()
 
 
+def _register_research_lab_openrouter_key(wallet, status: dict) -> tuple[str, str] | None:
+    if status.get("openrouter_key_registration_enabled"):
+        raw_key = getpass.getpass("   OpenRouter API key (hidden; encrypted by gateway): ").strip()
+        if not raw_key:
+            print("❌ OpenRouter API key is required for paid auto-research loops.")
+            return None
+        if not raw_key.startswith("sk-or-v1-"):
+            print("❌ OpenRouter API key must start with sk-or-v1-.")
+            return None
+        import time
+        payload = _research_lab_signed_payload(
+            wallet,
+            {
+                "miner_hotkey": wallet.hotkey.ss58_address,
+                "timestamp": int(time.time()),
+                "idempotency_key": f"research-openrouter-key:{wallet.hotkey.ss58_address}:{int(time.time())}",
+                "openrouter_api_key": raw_key,
+                "key_label": "research-lab-miner-key",
+            },
+        )
+        result = _post_research_lab_json("/research-lab/openrouter-keys", payload, timeout=45)
+        if "error" in result:
+            print(f"❌ OpenRouter key verification failed: HTTP {result.get('status_code')}")
+            print(f"   {result['error']}")
+            return None
+        print("✅ OpenRouter key verified and encrypted by gateway")
+        return str(result["key_ref"]), "encrypted_ref"
+
+    print("❌ This gateway does not have encrypted OpenRouter key registration enabled.")
+    print("   Ask the operator to set RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID.")
+    return None
+
+
 def _brief_sanitized_ref_from_input(value: str) -> str:
     value = value.strip()
     if value.startswith("brief_sanitized:"):
@@ -2504,13 +2538,10 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
         f"model_tier={research_model_tier}, loops={requested_loop_count}"
     )
 
-    key_ref = input("   Miner OpenRouter key ref (encrypted/ephemeral ref only, optional until loop-start): ").strip()
-    if key_ref and _looks_like_raw_research_lab_secret(key_ref):
-        print("❌ Do not paste a raw OpenRouter key. Provide an encrypted_ref or ephemeral_ref.")
+    key_result = _register_research_lab_openrouter_key(wallet, status)
+    if key_result is None:
         return
-    key_handling = None
-    if key_ref:
-        key_handling = "ephemeral_ref" if key_ref.startswith("ephemeral_ref:") else "encrypted_ref"
+    key_ref, key_handling = key_result
 
     import time
     ticket_payload = _research_lab_signed_payload(
@@ -2527,7 +2558,7 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
             "research_model_tier": research_model_tier,
             "requested_compute_budget_usd": requested_compute_budget_usd,
             "max_compute_budget_usd": max_compute_budget_usd,
-            "miner_openrouter_key_ref": key_ref or None,
+            "miner_openrouter_key_ref": key_ref,
             "miner_openrouter_key_handling": key_handling,
         },
     )
@@ -2550,18 +2581,6 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
 
     start_now = input("❓ Continue to payment and queue this run now? [Y/n]: ").strip().lower()
     if start_now in ("n", "no"):
-        return
-
-    if not key_ref:
-        key_ref = input("   Miner OpenRouter key ref (encrypted/ephemeral ref only): ").strip()
-        if not key_ref or _looks_like_raw_research_lab_secret(key_ref):
-            print("❌ A safe OpenRouter key reference is required for paid loop starts.")
-            return
-        key_handling = "ephemeral_ref" if key_ref.startswith("ephemeral_ref:") else "encrypted_ref"
-
-    preflight_ok = input("   Has this OpenRouter key ref passed preflight? [Y/n]: ").strip().lower()
-    if preflight_ok in ("n", "no"):
-        print("❌ Paid loop-start requires a passed OpenRouter key preflight.")
         return
 
     dest_coldkey = get_leadpoet_coldkey(netuid)
@@ -2589,7 +2608,7 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
             "payment_block_hash": payment_block_hash,
             "payment_extrinsic_index": payment_extrinsic_index,
             "miner_openrouter_key_ref": key_ref,
-            "miner_openrouter_key_handling": key_handling or "encrypted_ref",
+            "miner_openrouter_key_handling": key_handling,
             "miner_openrouter_preflight_status": "passed",
             "requested_loop_count": requested_loop_count,
             "research_model_tier": research_model_tier,
@@ -2635,15 +2654,10 @@ def _run_research_lab_topup_flow(
         worker_status = status.get("hosted_worker") if isinstance(status.get("hosted_worker"), dict) else {}
         approved_tiers = worker_status.get("approved_model_tiers") if isinstance(worker_status.get("approved_model_tiers"), dict) else {}
         research_model_tier = _research_lab_prompt_model_tier(default_tier, approved_tiers)
-    key_ref = input("   Miner OpenRouter key ref (encrypted/ephemeral ref only): ").strip()
-    if not key_ref or _looks_like_raw_research_lab_secret(key_ref):
-        print("❌ A safe OpenRouter key reference is required for top-ups.")
+    key_result = _register_research_lab_openrouter_key(wallet, status)
+    if key_result is None:
         return
-    key_handling = "ephemeral_ref" if key_ref.startswith("ephemeral_ref:") else "encrypted_ref"
-    preflight_ok = input("   Has this OpenRouter key ref passed preflight? [Y/n]: ").strip().lower()
-    if preflight_ok in ("n", "no"):
-        print("❌ Top-up requires a passed OpenRouter key preflight.")
-        return
+    key_ref, key_handling = key_result
 
     dest_coldkey = get_leadpoet_coldkey(netuid)
     print("")

@@ -15,6 +15,7 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key
 from gateway.research_lab.models import ResearchLabReceiptCreateRequest, ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.store import (
     canonical_hash,
@@ -108,18 +109,39 @@ class OpenRouterKeyResolver:
     def __init__(self, config: ResearchLabGatewayConfig):
         self.config = config
 
-    def resolve(self, key_ref: str) -> dict[str, str]:
+    async def resolve(self, key_ref: str, *, miner_hotkey: str) -> dict[str, str]:
+        value = await self._resolve_key_value(key_ref, miner_hotkey=miner_hotkey)
+        return {
+            "OPENROUTER_API_KEY": value,
+            "QUALIFICATION_OPENROUTER_API_KEY": value,
+            "OPENROUTER_KEY": value,
+        }
+
+    async def _resolve_key_value(self, key_ref: str, *, miner_hotkey: str) -> str:
+        if str(key_ref).startswith("encrypted_ref:openrouter:"):
+            row = await select_one(
+                "research_lab_openrouter_key_refs",
+                filters=(("key_ref", key_ref), ("miner_hotkey", miner_hotkey)),
+            )
+            if not row:
+                raise HostedResearchLabWorkerError("encrypted OpenRouter key ref was not found for miner")
+            try:
+                return await asyncio.to_thread(
+                    decrypt_openrouter_key,
+                    ciphertext_b64=str(row["encrypted_key_ciphertext"]),
+                    miner_hotkey=miner_hotkey,
+                    key_ref=key_ref,
+                )
+            except OpenRouterKeyVaultError as exc:
+                raise HostedResearchLabWorkerError(str(exc)) from exc
+
         env_name = self._env_name_for_ref(key_ref)
         if not env_name:
             raise HostedResearchLabWorkerError("no OpenRouter key env var configured for miner key ref")
         value = os.getenv(env_name)
         if not value:
             raise HostedResearchLabWorkerError(f"configured OpenRouter key env var is empty: {env_name}")
-        return {
-            "OPENROUTER_API_KEY": value,
-            "QUALIFICATION_OPENROUTER_API_KEY": value,
-            "OPENROUTER_KEY": value,
-        }
+        return value
 
     def _env_name_for_ref(self, key_ref: str) -> str:
         if self.config.miner_openrouter_key_ref_env_map_json:
@@ -303,8 +325,12 @@ class ResearchLabHostedWorker:
 
     async def _process_run(self, context: HostedRunContext) -> HostedWorkerOutcome:
         await self._append_started_events(context)
+        resolved_openrouter_env = await self.key_resolver.resolve(
+            _miner_openrouter_key_ref(context),
+            miner_hotkey=str(context.ticket["miner_hotkey"]),
+        )
         provider_env = {
-            **self.key_resolver.resolve(_miner_openrouter_key_ref(context)),
+            **resolved_openrouter_env,
             **_worker_proxy_env(self.config),
         }
         context.provider_env = provider_env

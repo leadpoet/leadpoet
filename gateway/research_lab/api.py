@@ -6,6 +6,7 @@ require explicit Research Lab flags and write only Research Lab tables/events.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from typing import Optional
@@ -24,11 +25,19 @@ from gateway.utils.bans import is_hotkey_banned
 
 from .bundles import build_shadow_report_bundle
 from .config import ResearchLabGatewayConfig
+from .key_vault import (
+    OpenRouterKeyVaultError,
+    encrypt_openrouter_key,
+    openrouter_key_ref,
+    preflight_openrouter_key,
+)
 from .models import (
     ResearchLabLoopStartRequest,
     ResearchLabLoopStartResponse,
     ResearchLabLoopTopUpRequest,
     ResearchLabLoopTopUpResponse,
+    ResearchLabOpenRouterKeyRegisterRequest,
+    ResearchLabOpenRouterKeyRegisterResponse,
     ResearchLabProbeRequest,
     ResearchLabReceiptCreateRequest,
     ResearchLabReceiptResponse,
@@ -41,6 +50,7 @@ from .store import (
     canonical_hash,
     create_credit_event,
     create_loop_start_payment,
+    create_openrouter_key_ref,
     create_queue_event,
     create_receipt,
     create_score_bundle,
@@ -121,6 +131,59 @@ async def create_research_lab_probe(payload: ResearchLabProbeRequest):
         "event_id": event["event_id"],
         "event_seq": int(event["seq"]),
     }
+
+
+@router.post("/openrouter-keys", response_model=ResearchLabOpenRouterKeyRegisterResponse)
+async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKeyRegisterRequest):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
+    if not config.openrouter_key_kms_key_id:
+        raise HTTPException(status_code=503, detail="Research Lab OpenRouter key vault KMS key is not configured")
+    await _verify_signed_miner(payload)
+
+    try:
+        preflight_doc = await asyncio.to_thread(preflight_openrouter_key, payload.openrouter_api_key)
+        key_hash = str(preflight_doc["key_hash"])
+        key_ref = openrouter_key_ref(miner_hotkey=payload.miner_hotkey, key_hash=key_hash)
+        encrypted = await asyncio.to_thread(
+            encrypt_openrouter_key,
+            raw_key=payload.openrouter_api_key,
+            kms_key_id=config.openrouter_key_kms_key_id,
+            miner_hotkey=payload.miner_hotkey,
+            key_ref=key_ref,
+        )
+        await create_openrouter_key_ref(
+            key_ref=key_ref,
+            miner_hotkey=payload.miner_hotkey,
+            key_hash=key_hash,
+            encrypted_key_ciphertext=encrypted["ciphertext_b64"],
+            kms_key_id=encrypted["kms_key_id"],
+            encryption_context_hash=encrypted["encryption_context_hash"],
+            preflight_doc={
+                "source": "openrouter_current_key",
+                "limit": preflight_doc.get("limit"),
+                "limit_remaining": preflight_doc.get("limit_remaining"),
+                "limit_reset": preflight_doc.get("limit_reset"),
+                "usage": preflight_doc.get("usage"),
+                "is_free_tier": preflight_doc.get("is_free_tier"),
+                "is_management_key": preflight_doc.get("is_management_key"),
+                "expires_at": preflight_doc.get("expires_at"),
+                "key_label": payload.key_label,
+            },
+        )
+    except OpenRouterKeyVaultError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        _raise_storage_error(exc)
+
+    return ResearchLabOpenRouterKeyRegisterResponse(
+        key_ref=key_ref,
+        preflight_status="passed",
+        key_hash=key_hash,
+        limit_remaining=preflight_doc.get("limit_remaining"),
+        limit_reset=preflight_doc.get("limit_reset"),
+    )
 
 
 @router.post("/loop-start", response_model=ResearchLabLoopStartResponse)

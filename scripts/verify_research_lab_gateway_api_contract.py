@@ -18,10 +18,12 @@ from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.models import (
     ResearchLabLoopStartRequest,
     ResearchLabLoopTopUpRequest,
+    ResearchLabOpenRouterKeyRegisterRequest,
     ResearchLabReceiptCreateRequest,
     ResearchLabScoreBundleCreateRequest,
     ResearchLabTicketCreateRequest,
 )
+from gateway.research_lab.key_vault import openrouter_key_ref, validate_openrouter_key_format
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle
 
 
@@ -41,6 +43,7 @@ def main() -> int:
     paths = {route.path for route in router.routes}
     for required in {
         "/research-lab/status",
+        "/research-lab/openrouter-keys",
         "/research-lab/tickets",
         "/research-lab/probes",
         "/research-lab/loop-start",
@@ -68,6 +71,27 @@ def main() -> int:
     reparsed_ticket = ResearchLabTicketCreateRequest.model_validate(ticket.model_dump(mode="json"))
     if reparsed_ticket != ticket:
         errors.append("ticket request failed json round-trip")
+
+    key_registration = ResearchLabOpenRouterKeyRegisterRequest(
+        miner_hotkey=ticket.miner_hotkey,
+        signature=ticket.signature,
+        timestamp=now,
+        idempotency_key="openrouter-key-idempotency-001",
+        openrouter_api_key="sk-or-v1-" + "a" * 48,
+        key_label="research-lab-test-key",
+    )
+    reparsed_key_registration = ResearchLabOpenRouterKeyRegisterRequest.model_validate(
+        key_registration.model_dump(mode="json")
+    )
+    if reparsed_key_registration != key_registration:
+        errors.append("OpenRouter key registration request failed json round-trip")
+    try:
+        validate_openrouter_key_format(key_registration.openrouter_api_key)
+    except ValueError:
+        errors.append("valid OpenRouter key format was rejected")
+    ref = openrouter_key_ref(miner_hotkey=ticket.miner_hotkey, key_hash="a" * 64)
+    if not ref.startswith("encrypted_ref:openrouter:") or len(ref.rsplit(":", 1)[-1]) != 32:
+        errors.append("OpenRouter key ref shape is invalid")
 
     loop_start = ResearchLabLoopStartRequest(
         miner_hotkey=ticket.miner_hotkey,

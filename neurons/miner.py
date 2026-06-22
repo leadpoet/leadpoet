@@ -2439,7 +2439,74 @@ def _research_lab_prompt_int(label: str, *, default: int, minimum: int, maximum:
         return parsed
 
 
-def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
+def _execute_research_lab_payment(
+    *,
+    wallet,
+    config,
+    netuid: int,
+    usd_amount: float,
+    payment_label: str,
+) -> tuple[str, int] | None:
+    """Submit a TAO payment and return the on-chain proof for gateway verification."""
+    dest_coldkey = get_leadpoet_coldkey(netuid)
+    print("")
+    print(f"{payment_label}: ${usd_amount:.2f} USD-equivalent in TAO")
+    print(f"Payment destination coldkey for netuid {netuid}: {dest_coldkey}")
+
+    try:
+        tao_price = get_tao_price_sync()
+        tao_required = calculate_tao_required(usd_amount)
+    except Exception as exc:
+        print(f"\n{exc}")
+        print("\nPayment cancelled because TAO pricing could not be fetched.")
+        return None
+
+    tao_with_buffer = round(tao_required * 1.01, 6)
+    print(f"   Current TAO price: ${tao_price:.2f}")
+    print(f"   TAO required: {tao_required:.6f}")
+    print(f"   TAO to send with 1% buffer: {tao_with_buffer:.6f}")
+
+    confirm = input("   Proceed with TAO transfer? [Y/n]: ").strip().lower()
+    if confirm in ("n", "no"):
+        print("Payment cancelled.")
+        return None
+
+    print("\nConnecting to chain...")
+    subtensor = None
+    retry_delays = [0, 10, 20]
+    for attempt, delay in enumerate(retry_delays, start=1):
+        if delay > 0:
+            import time
+
+            print(f"   Waiting {delay}s before retry {attempt}/3...")
+            time.sleep(delay)
+        try:
+            print(f"   Connection attempt {attempt}/3...")
+            subtensor = bt.subtensor(config=config)
+            print(f"   Connected to: {subtensor.chain_endpoint}")
+            break
+        except Exception as exc:
+            print(f"   Attempt {attempt}/3 failed: {exc}")
+
+    if subtensor is None:
+        print("Could not connect to chain. Payment was not sent.")
+        return None
+
+    success, block_hash, extrinsic_index, error = transfer_tao(
+        wallet=wallet,
+        dest_coldkey=dest_coldkey,
+        amount_tao=tao_with_buffer,
+        subtensor=subtensor,
+    )
+    if not success or not block_hash or extrinsic_index is None:
+        print(f"\nPayment failed: {error or 'missing payment proof'}")
+        return None
+
+    print("\nPayment submitted. Gateway will now verify it on-chain.")
+    return str(block_hash), int(extrinsic_index)
+
+
+def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     """Run the miner-facing Research Lab auto-research entrypoint."""
     gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
     print("\n" + "="*80)
@@ -2489,6 +2556,7 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
     if run_choice in ("topup", "top-up", "t"):
         _run_research_lab_topup_flow(
             wallet=wallet,
+            config=config,
             netuid=netuid,
             status=status,
             default_tier=default_tier,
@@ -2583,20 +2651,16 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
     if start_now in ("n", "no"):
         return
 
-    dest_coldkey = get_leadpoet_coldkey(netuid)
-    print("")
-    print(f"Loop-start fee: ${loop_fee:.2f} USD-equivalent in TAO")
-    print(f"Payment destination coldkey for netuid {netuid}: {dest_coldkey}")
-    print("Paste the block hash and extrinsic index from the TAO transfer.")
-    payment_block_hash = input("   Payment block hash: ").strip()
-    try:
-        payment_extrinsic_index = int(input("   Payment extrinsic index: ").strip())
-    except ValueError:
-        print("❌ Payment extrinsic index must be an integer.")
+    payment_result = _execute_research_lab_payment(
+        wallet=wallet,
+        config=config,
+        netuid=netuid,
+        usd_amount=loop_fee,
+        payment_label="Loop-start fee",
+    )
+    if payment_result is None:
         return
-    if not payment_block_hash:
-        print("❌ Payment block hash is required.")
-        return
+    payment_block_hash, payment_extrinsic_index = payment_result
 
     loop_payload = _research_lab_signed_payload(
         wallet,
@@ -2631,6 +2695,7 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
 def _run_research_lab_topup_flow(
     *,
     wallet,
+    config,
     netuid: int,
     status: dict,
     default_tier: str,
@@ -2659,19 +2724,19 @@ def _run_research_lab_topup_flow(
         return
     key_ref, key_handling = key_result
 
-    dest_coldkey = get_leadpoet_coldkey(netuid)
-    print("")
-    print(f"Top-up payment: ${additional_compute_budget_usd:.2f} USD-equivalent in TAO")
-    print(f"Payment destination coldkey for netuid {netuid}: {dest_coldkey}")
-    payment_block_hash = input("   Payment block hash: ").strip()
-    try:
-        payment_extrinsic_index = int(input("   Payment extrinsic index: ").strip())
-    except ValueError:
-        print("❌ Payment extrinsic index must be an integer.")
+    if not ticket_id:
+        print("❌ Ticket ID is required.")
         return
-    if not ticket_id or not payment_block_hash:
-        print("❌ Ticket ID and payment block hash are required.")
+    payment_result = _execute_research_lab_payment(
+        wallet=wallet,
+        config=config,
+        netuid=netuid,
+        usd_amount=additional_compute_budget_usd,
+        payment_label="Top-up payment",
+    )
+    if payment_result is None:
         return
+    payment_block_hash, payment_extrinsic_index = payment_result
 
     topup_payload = _research_lab_signed_payload(
         wallet,
@@ -2852,7 +2917,7 @@ def main():
         try:
             temp_wallet = bt.wallet(config=config)
             print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
-            run_research_lab_auto_research_flow(temp_wallet, config.netuid)
+            run_research_lab_auto_research_flow(temp_wallet, config, config.netuid)
         except Exception as e:
             bt.logging.error(f"❌ Error during Research Lab mode: {e}")
             import traceback

@@ -158,7 +158,7 @@ class QualificationStyleCompanyScorer:
         seen_companies: set[str] = set()
         scores: list[float] = []
         for company in companies:
-            company_obj = CompanyOutput(**dict(company))
+            company_obj = CompanyOutput(**_normalize_company_output(company))
             result = await score_company(
                 company=company_obj,
                 icp=icp_obj,
@@ -175,3 +175,66 @@ async def _maybe_await(value: Any) -> Any:
     if asyncio.iscoroutine(value):
         return await value
     return value
+
+
+def _normalize_company_output(company: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize private sourcing-model output into CompanyOutput shape.
+
+    The private model currently returns a product-facing company record with
+    ``hq_country`` / ``hq_state`` and a compact ``intent`` object. The scorer's
+    public contract is ``CompanyOutput`` with ``country`` / ``state`` and
+    ``intent_signals``. This adapter is intentionally narrow and deterministic.
+    """
+    row = dict(company)
+    intent = row.get("intent") if isinstance(row.get("intent"), Mapping) else {}
+    signal = {
+        "source": _normalize_intent_source(intent.get("source") or row.get("intent_source") or "news"),
+        "description": str(
+            intent.get("signal")
+            or intent.get("description")
+            or row.get("intent_signal")
+            or "Private sourcing model returned intent evidence."
+        )[:350],
+        "url": str(intent.get("url") or row.get("intent_url") or row.get("company_website") or ""),
+        "date": intent.get("date") or row.get("intent_date"),
+        "snippet": str(
+            intent.get("snippet")
+            or intent.get("signal")
+            or intent.get("description")
+            or row.get("description")
+            or "Private sourcing model returned intent evidence."
+        )[:600],
+        "matched_icp_signal": int(intent.get("matched_icp_signal", 0) or 0),
+    }
+    return {
+        "company_name": row.get("company_name", ""),
+        "company_website": row.get("company_website", ""),
+        "company_linkedin": row.get("company_linkedin", ""),
+        "industry": row.get("industry", ""),
+        "sub_industry": row.get("sub_industry") or row.get("subindustry") or "",
+        "employee_count": row.get("employee_count", ""),
+        "company_stage": row.get("company_stage", ""),
+        "country": row.get("country") or row.get("hq_country") or "",
+        "state": row.get("state") or row.get("hq_state") or "",
+        "description": row.get("description", ""),
+        "intent_signals": row.get("intent_signals") or [signal],
+    }
+
+
+def _normalize_intent_source(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    aliases = {
+        "news": "news",
+        "filing": "news",
+        "job_listing": "job_board",
+        "job_board": "job_board",
+        "company_site": "company_website",
+        "company_website": "company_website",
+        "social": "social_media",
+        "social_media": "social_media",
+        "linkedin": "linkedin",
+        "github": "github",
+        "review_site": "review_site",
+        "wikipedia": "wikipedia",
+    }
+    return aliases.get(raw, "other")

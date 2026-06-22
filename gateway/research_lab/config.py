@@ -57,6 +57,10 @@ class ResearchLabGatewayConfig:
     hosted_worker_max_runs: int = 0
     hosted_worker_max_candidates: int = 3
     hosted_worker_dry_run: bool = True
+    hosted_worker_id: str = ""
+    hosted_worker_index: int = 0
+    hosted_worker_total_workers: int = 1
+    hosted_worker_queue_fetch_limit: int = 20
     private_model_manifest_uri: str = (
         "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
     )
@@ -70,6 +74,12 @@ class ResearchLabGatewayConfig:
 
     @classmethod
     def from_env(cls) -> "ResearchLabGatewayConfig":
+        total_workers = max(1, _int("RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS", 1))
+        worker_index = _int("RESEARCH_LAB_HOSTED_WORKER_INDEX", 0)
+        if worker_index < 0:
+            worker_index = 0
+        if worker_index >= total_workers:
+            worker_index = worker_index % total_workers
         return cls(
             api_enabled=_truthy("RESEARCH_LAB_GATEWAY_API_ENABLED"),
             production_writes_enabled=_truthy("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED"),
@@ -94,6 +104,10 @@ class ResearchLabGatewayConfig:
             hosted_worker_max_runs=_int("RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS", 0),
             hosted_worker_max_candidates=max(1, _int("RESEARCH_LAB_HOSTED_WORKER_MAX_CANDIDATES", 3)),
             hosted_worker_dry_run=_truthy("RESEARCH_LAB_HOSTED_WORKER_DRY_RUN", "true"),
+            hosted_worker_id=os.getenv("RESEARCH_LAB_HOSTED_WORKER_ID", ""),
+            hosted_worker_index=worker_index,
+            hosted_worker_total_workers=total_workers,
+            hosted_worker_queue_fetch_limit=max(1, _int("RESEARCH_LAB_HOSTED_WORKER_QUEUE_FETCH_LIMIT", 20)),
             private_model_manifest_uri=os.getenv(
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
                 "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
@@ -144,6 +158,10 @@ class ResearchLabGatewayConfig:
                 "dry_run": self.hosted_worker_dry_run,
                 "poll_seconds": self.hosted_worker_poll_seconds,
                 "max_candidates": self.hosted_worker_max_candidates,
+                "worker_id": self.hosted_worker_id,
+                "worker_index": self.hosted_worker_index,
+                "total_workers": self.hosted_worker_total_workers,
+                "queue_fetch_limit": self.hosted_worker_queue_fetch_limit,
                 "private_model_manifest_uri_configured": bool(self.private_model_manifest_uri),
                 "private_benchmark_path_configured": bool(self.private_benchmark_path),
                 "auto_research_model_configured": bool(self.auto_research_model),

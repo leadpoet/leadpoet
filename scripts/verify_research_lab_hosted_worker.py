@@ -12,6 +12,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle  # noqa: E402
+from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
+from gateway.research_lab.worker import ResearchLabHostedWorker, _is_claim_race_error, _row_partition  # noqa: E402
 from research_lab.auto_research_prompt import (  # noqa: E402
     build_validated_candidate_manifest,
     coerce_component_registry,
@@ -73,11 +75,37 @@ def main() -> int:
     if verification["verified_bundle_count"] != 1 or verification["ignored_bundle_count"] != 1:
         errors.append("validator did not ignore non-scored bundle rows")
 
+    rows = [{"run_id": f"run-{idx}"} for idx in range(64)]
+    partitions = {_row_partition(row, 4) for row in rows}
+    if partitions != {0, 1, 2, 3}:
+        errors.append("worker partitioning does not distribute queued runs across all workers")
+    preferred_cfg = ResearchLabGatewayConfig(
+        hosted_worker_enabled=True,
+        production_writes_enabled=True,
+        hosted_runs_enabled=True,
+        receipts_enabled=True,
+        evaluation_bundles_enabled=True,
+        private_benchmark_path="/sealed/benchmark.json",
+        auto_research_model="test/model",
+        hosted_worker_index=2,
+        hosted_worker_total_workers=4,
+        hosted_worker_queue_fetch_limit=64,
+    )
+    preferred_worker = ResearchLabHostedWorker(preferred_cfg, worker_ref="test-worker-3")
+    selected = preferred_worker._select_preferred_queued_row(rows)
+    if not selected or _row_partition(selected, 4) != 2:
+        errors.append("worker did not prefer its assigned queue partition")
+    if not _is_claim_race_error(Exception("duplicate key violates research_loop_run_queue_events_run_seq_key")):
+        errors.append("worker claim-race detector missed queue event duplicate-key errors")
+
     if errors:
         for error in errors:
             print(f"ERROR: {error}")
         return 1
-    print("Research Lab hosted worker contracts verified: candidate parser, Engine v1 validation, validator scored-bundle filtering.")
+    print(
+        "Research Lab hosted worker contracts verified: candidate parser, Engine v1 validation, "
+        "validator scored-bundle filtering, worker partitioning, claim-race detection."
+    )
     return 0
 
 

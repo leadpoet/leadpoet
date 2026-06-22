@@ -55,6 +55,10 @@ class HostedResearchLabWorkerError(RuntimeError):
     """Raised when a hosted Research Lab run cannot complete safely."""
 
 
+class HostedResearchLabClaimLost(HostedResearchLabWorkerError):
+    """Raised when another worker safely claimed the queued run first."""
+
+
 @dataclass(frozen=True)
 class HostedWorkerOutcome:
     processed: bool
@@ -135,7 +139,11 @@ class ResearchLabHostedWorker:
 
     def __init__(self, config: ResearchLabGatewayConfig | None = None, *, worker_ref: str | None = None):
         self.config = config or ResearchLabGatewayConfig.from_env()
-        self.worker_ref = worker_ref or f"research-lab-hosted-worker:{os.uname().nodename}:{os.getpid()}"
+        self.worker_ref = (
+            worker_ref
+            or self.config.hosted_worker_id
+            or f"research-lab-hosted-worker:{os.uname().nodename}:{os.getpid()}"
+        )
         self.key_resolver = OpenRouterKeyResolver(self.config)
 
     async def run_forever(self) -> None:
@@ -167,6 +175,21 @@ class ResearchLabHostedWorker:
         context = await self._load_run_context(queued)
         try:
             return await self._process_run(context)
+        except HostedResearchLabClaimLost as exc:
+            logger.info(
+                "Research Lab queued run was claimed elsewhere: run_id=%s ticket_id=%s worker_ref=%s",
+                run_id,
+                ticket_id,
+                self.worker_ref,
+            )
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=False,
+                run_id=run_id,
+                ticket_id=ticket_id,
+                status="claim_lost",
+                error=str(exc)[:500],
+            )
         except Exception as exc:
             logger.exception("Research Lab hosted run failed: run_id=%s ticket_id=%s", run_id, ticket_id)
             return await self._mark_failed(context, str(exc))
@@ -194,9 +217,23 @@ class ResearchLabHostedWorker:
             "research_loop_run_queue_current",
             filters=(("current_queue_status", "queued"),),
             order_by=(("queue_priority", False), ("current_status_at", False)),
-            limit=1,
+            limit=self.config.hosted_worker_queue_fetch_limit,
         )
-        return rows[0] if rows else None
+        return self._select_preferred_queued_row(rows)
+
+    def _select_preferred_queued_row(self, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+        if not rows:
+            return None
+        total_workers = max(1, int(self.config.hosted_worker_total_workers or 1))
+        worker_index = int(self.config.hosted_worker_index or 0) % total_workers
+        if total_workers <= 1:
+            return rows[0]
+        for row in rows:
+            if _row_partition(row, total_workers) == worker_index:
+                return row
+        # Avoid starvation if this worker's preferred shard is temporarily empty.
+        # Claim conflicts are handled as no-ops, not failures.
+        return rows[0]
 
     async def _load_run_context(self, queue_row: Mapping[str, Any]) -> HostedRunContext:
         ticket = await select_one(
@@ -357,16 +394,21 @@ class ResearchLabHostedWorker:
             filters=(("run_id", context.run_id),),
         )
         if not current or current.get("current_queue_status") != "queued":
-            raise HostedResearchLabWorkerError("queued Research Lab run was claimed by another worker")
-        await create_queue_event(
-            run_id=context.run_id,
-            ticket_id=context.ticket_id,
-            event_type="started",
-            queue_priority=int(context.queue_row.get("queue_priority") or 0),
-            worker_ref=self.worker_ref,
-            reason="hosted_worker_started",
-            event_doc={"worker_ref": self.worker_ref},
-        )
+            raise HostedResearchLabClaimLost("queued Research Lab run is no longer queued")
+        try:
+            await create_queue_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                event_type="started",
+                queue_priority=int(context.queue_row.get("queue_priority") or 0),
+                worker_ref=self.worker_ref,
+                reason="hosted_worker_started",
+                event_doc={"worker_ref": self.worker_ref},
+            )
+        except Exception as exc:
+            if _is_claim_race_error(exc):
+                raise HostedResearchLabClaimLost("queued Research Lab run was claimed by another worker") from exc
+            raise
         await create_ticket_event(
             ticket_id=context.ticket_id,
             event_type="running",
@@ -625,6 +667,22 @@ def _miner_openrouter_key_ref(context: HostedRunContext) -> str:
         if isinstance(event_doc, Mapping) and event_doc.get("miner_openrouter_key_ref"):
             return str(event_doc["miner_openrouter_key_ref"])
     raise HostedResearchLabWorkerError("Research Lab run is missing miner OpenRouter key ref")
+
+
+def _row_partition(row: Mapping[str, Any], total_workers: int) -> int:
+    total = max(1, int(total_workers))
+    digest = canonical_hash({"run_id": str(row.get("run_id", ""))}).split(":", 1)[1]
+    return int(digest[:12], 16) % total
+
+
+def _is_claim_race_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "research_loop_run_queue_events_run_seq_key" in message
+        or "duplicate key" in message
+        or "unique constraint" in message
+        or "23505" in message
+    )
 
 
 def _best_candidate_summary(candidates: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:

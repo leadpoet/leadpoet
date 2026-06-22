@@ -21,12 +21,13 @@ from typing import Any, Mapping, Sequence
 
 from .canonical import sha256_json
 from .schema_validation import validate_schema_record
+from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD as GATEWAY_DEFAULT_LOOP_START_FEE_USD
 
 
 SCHEMA_VERSION = "1.0"
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "loop_start_contract_fixtures.json"
 
-DEFAULT_LOOP_START_FEE_USD = Decimal("0.20")
+DEFAULT_LOOP_START_FEE_USD = Decimal(str(GATEWAY_DEFAULT_LOOP_START_FEE_USD))
 DEFAULT_PAYMENT_MAX_AGE_SECONDS = 86_400
 DEFAULT_AMOUNT_BUFFER_PERCENT = Decimal("0.01")
 USD_QUANT = Decimal("0.000001")
@@ -740,7 +741,7 @@ async def verify_research_loop_start_payment_with_gateway_primitive(
 
 
 def verify_research_lab_loop_start_contract(fixture_path: Path | str = FIXTURE_PATH) -> dict[str, Any]:
-    fixture = _load_fixture(Path(fixture_path))
+    fixture = _normalize_fixture_loop_start_fee(_load_fixture(Path(fixture_path)))
     policy = LoopStartPolicy.from_mapping(fixture["policy"])
     disabled_policy = LoopStartPolicy.from_mapping(fixture["disabled_policy"])
     request = ResearchLoopStartRequest.from_mapping(fixture["request"])
@@ -985,6 +986,27 @@ def _run_gateway_disabled_check_fixture(policy: LoopStartPolicy) -> PaymentCheck
 def _load_fixture(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _normalize_fixture_loop_start_fee(fixture: dict[str, Any]) -> dict[str, Any]:
+    """Keep the staged verifier fixture aligned with the gateway fee default."""
+    fee = DEFAULT_LOOP_START_FEE_USD
+    valid_amount = fee * Decimal("1.05")
+    insufficient_amount = fee * Decimal("0.95")
+
+    for policy_key in ("policy", "disabled_policy"):
+        policy = fixture.get(policy_key)
+        if isinstance(policy, dict):
+            policy["loop_start_fee_usd"] = _usd(fee)
+
+    payments = fixture.get("payments")
+    if isinstance(payments, dict):
+        for name, payment in payments.items():
+            if not isinstance(payment, dict) or "amount_usd" not in payment:
+                continue
+            payment["amount_usd"] = _usd(insufficient_amount if name == "insufficient" else valid_amount)
+
+    return fixture
 
 
 def _assert(condition: bool, label: str) -> None:

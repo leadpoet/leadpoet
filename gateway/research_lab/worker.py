@@ -173,6 +173,23 @@ class ResearchLabHostedWorker:
                 ticket_id=ticket_id,
                 status="dry_run_queued_run_found",
             )
+        try:
+            self._require_worker_proxy_for_execution()
+        except HostedResearchLabWorkerError as exc:
+            logger.error(
+                "Research Lab worker proxy is required before claiming run: run_id=%s ticket_id=%s worker_ref=%s",
+                run_id,
+                ticket_id,
+                self.worker_ref,
+            )
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=False,
+                run_id=run_id,
+                ticket_id=ticket_id,
+                status="worker_proxy_required",
+                error=str(exc)[:500],
+            )
         context = await self._load_run_context(queued)
         try:
             return await self._process_run(context)
@@ -212,6 +229,15 @@ class ResearchLabHostedWorker:
             raise HostedResearchLabWorkerError("private benchmark path is not configured")
         if not self.config.approved_auto_research_models():
             raise HostedResearchLabWorkerError("auto-research OpenRouter model is not configured")
+
+    def _require_worker_proxy_for_execution(self) -> None:
+        if not self.config.hosted_worker_require_proxy:
+            return
+        if not _worker_proxy_url(self.config):
+            raise HostedResearchLabWorkerError(
+                "worker proxy is required for hosted auto-research execution; "
+                "set RESEARCH_LAB_HOSTED_WORKER_PROXY or per-worker RESEARCH_LAB_WORKER_PROXY_N"
+            )
 
     async def _next_queued_run(self) -> Mapping[str, Any] | None:
         rows = await select_many(
@@ -277,7 +303,10 @@ class ResearchLabHostedWorker:
 
     async def _process_run(self, context: HostedRunContext) -> HostedWorkerOutcome:
         await self._append_started_events(context)
-        provider_env = self.key_resolver.resolve(_miner_openrouter_key_ref(context))
+        provider_env = {
+            **self.key_resolver.resolve(_miner_openrouter_key_ref(context)),
+            **_worker_proxy_env(self.config),
+        }
         context.provider_env = provider_env
         receipt, _event = await create_receipt(self._queued_receipt_request(context))
         context.receipt_id = str(receipt["receipt_id"])
@@ -296,44 +325,45 @@ class ResearchLabHostedWorker:
                 timeout_seconds=900,
             )
         )
-        metadata = runner.metadata()
-        registry = coerce_component_registry(metadata)
-        benchmark_summary = {
-            "benchmark_id": benchmark.benchmark_id,
-            "icp_set_hash": benchmark.icp_set_hash,
-            "split_ref": benchmark.split_ref,
-            "item_count": len(benchmark_items),
-            "scoring_version": benchmark.scoring_version,
-        }
-        drafts = await self._generate_candidate_drafts(
-            context=context,
-            artifact=artifact,
-            component_registry=registry.to_dict(),
-            benchmark_public_summary=benchmark_summary,
-            model_id=model_id,
-            budget_context=budget_context,
-            max_candidates=max_candidates,
-        )
-        if not drafts:
-            raise HostedResearchLabWorkerError("auto-research generated no valid candidate drafts")
+        with _temporary_env(provider_env):
+            metadata = runner.metadata()
+            registry = coerce_component_registry(metadata)
+            benchmark_summary = {
+                "benchmark_id": benchmark.benchmark_id,
+                "icp_set_hash": benchmark.icp_set_hash,
+                "split_ref": benchmark.split_ref,
+                "item_count": len(benchmark_items),
+                "scoring_version": benchmark.scoring_version,
+            }
+            drafts = await self._generate_candidate_drafts(
+                context=context,
+                artifact=artifact,
+                component_registry=registry.to_dict(),
+                benchmark_public_summary=benchmark_summary,
+                model_id=model_id,
+                budget_context=budget_context,
+                max_candidates=max_candidates,
+            )
+            if not drafts:
+                raise HostedResearchLabWorkerError("auto-research generated no valid candidate drafts")
 
         bundle_ids: list[str] = []
         candidate_summaries: list[dict[str, Any]] = []
-        with _temporary_env(provider_env):
-            for index, draft in enumerate(drafts):
-                patch_manifest, hypothesis, patch = build_validated_candidate_manifest(
-                    draft=draft,
-                    artifact_manifest=artifact,
-                    component_registry=registry,
-                    run_id=context.run_id,
-                    sequence=index,
-                    miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
-                )
-                run_context = self._evaluation_run_context(
-                    context=context,
-                    candidate_index=index,
-                    patch_hash=patch_manifest.manifest_hash(),
-                )
+        for index, draft in enumerate(drafts):
+            patch_manifest, hypothesis, patch = build_validated_candidate_manifest(
+                draft=draft,
+                artifact_manifest=artifact,
+                component_registry=registry,
+                run_id=context.run_id,
+                sequence=index,
+                miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
+            )
+            run_context = self._evaluation_run_context(
+                context=context,
+                candidate_index=index,
+                patch_hash=patch_manifest.manifest_hash(),
+            )
+            with _temporary_env(provider_env):
                 score_bundle = await evaluate_private_model_pair(
                     artifact_manifest=artifact,
                     benchmark=benchmark,
@@ -344,34 +374,34 @@ class ResearchLabHostedWorker:
                     run_context=run_context,
                     policy=self._evaluation_policy(len(benchmark_items)),
                 )
-                signature_ref = await asyncio.to_thread(
-                    sign_digest_with_kms,
-                    key_id=self.config.score_bundle_kms_key_id,
-                    digest_hash=score_bundle["score_bundle_hash"],
-                    signature_uri_prefix=self.config.score_bundle_signature_uri_prefix,
-                )
-                score_bundle = {**score_bundle, "signature_ref": signature_ref}
-                request = ResearchLabScoreBundleCreateRequest(
-                    receipt_id=context.receipt_id,
-                    bundle_status="scored",
-                    score_bundle=score_bundle,
-                )
-                bundle_row, _bundle_event = await create_score_bundle(request)
-                bundle_ids.append(str(bundle_row["score_bundle_id"]))
-                candidate_summaries.append(
-                    {
-                        "candidate_index": index,
-                        "score_bundle_id": str(bundle_row["score_bundle_id"]),
-                        "score_bundle_hash": str(bundle_row["score_bundle_hash"]),
-                        "candidate_artifact_hash": patch_manifest.candidate_artifact_hash,
-                        "candidate_patch_hash": patch_manifest.manifest_hash(),
-                        "mean_delta": score_bundle.get("aggregates", {}).get("mean_delta"),
-                        "delta_lcb": score_bundle.get("aggregates", {}).get("delta_lcb"),
-                        "eligible_for_probation": score_bundle.get("improvement_gate", {}).get("eligible_for_probation"),
-                        "hypothesis": hypothesis.to_dict(),
-                        "patch": patch.to_dict(),
-                    }
-                )
+            signature_ref = await asyncio.to_thread(
+                sign_digest_with_kms,
+                key_id=self.config.score_bundle_kms_key_id,
+                digest_hash=score_bundle["score_bundle_hash"],
+                signature_uri_prefix=self.config.score_bundle_signature_uri_prefix,
+            )
+            score_bundle = {**score_bundle, "signature_ref": signature_ref}
+            request = ResearchLabScoreBundleCreateRequest(
+                receipt_id=context.receipt_id,
+                bundle_status="scored",
+                score_bundle=score_bundle,
+            )
+            bundle_row, _bundle_event = await create_score_bundle(request)
+            bundle_ids.append(str(bundle_row["score_bundle_id"]))
+            candidate_summaries.append(
+                {
+                    "candidate_index": index,
+                    "score_bundle_id": str(bundle_row["score_bundle_id"]),
+                    "score_bundle_hash": str(bundle_row["score_bundle_hash"]),
+                    "candidate_artifact_hash": patch_manifest.candidate_artifact_hash,
+                    "candidate_patch_hash": patch_manifest.manifest_hash(),
+                    "mean_delta": score_bundle.get("aggregates", {}).get("mean_delta"),
+                    "delta_lcb": score_bundle.get("aggregates", {}).get("delta_lcb"),
+                    "eligible_for_probation": score_bundle.get("improvement_gate", {}).get("eligible_for_probation"),
+                    "hypothesis": hypothesis.to_dict(),
+                    "patch": patch.to_dict(),
+                }
+            )
 
         best = _best_candidate_summary(candidate_summaries)
         await create_receipt_event(
@@ -821,6 +851,27 @@ def _followup_status(best_candidate: Mapping[str, Any] | None, promising_delta_t
     if max(mean_delta, delta_lcb) >= float(promising_delta_threshold):
         return "promising_needs_topup"
     return "completed_no_upgrade"
+
+
+def _worker_proxy_url(config: ResearchLabGatewayConfig) -> str:
+    return str(config.hosted_worker_proxy_url or "").strip()
+
+
+def _worker_proxy_env(config: ResearchLabGatewayConfig) -> dict[str, str]:
+    proxy = _worker_proxy_url(config)
+    if not proxy:
+        return {}
+    env = {
+        "HTTP_PROXY": proxy,
+        "HTTPS_PROXY": proxy,
+        "http_proxy": proxy,
+        "https_proxy": proxy,
+    }
+    no_proxy = os.getenv("NO_PROXY") or os.getenv("no_proxy")
+    if no_proxy:
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
+    return env
 
 
 def _row_partition(row: Mapping[str, Any], total_workers: int) -> int:

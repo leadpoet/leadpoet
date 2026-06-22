@@ -65,6 +65,8 @@ class ResearchLabGatewayConfig:
     hosted_worker_index: int = 0
     hosted_worker_total_workers: int = 1
     hosted_worker_queue_fetch_limit: int = 20
+    hosted_worker_require_proxy: bool = False
+    hosted_worker_proxy_url: str = ""
     private_model_manifest_uri: str = (
         "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
     )
@@ -118,6 +120,11 @@ class ResearchLabGatewayConfig:
             hosted_worker_index=worker_index,
             hosted_worker_total_workers=total_workers,
             hosted_worker_queue_fetch_limit=max(1, _int("RESEARCH_LAB_HOSTED_WORKER_QUEUE_FETCH_LIMIT", 20)),
+            hosted_worker_require_proxy=(
+                _truthy("RESEARCH_LAB_REQUIRE_WORKER_PROXY")
+                or _truthy("RESEARCH_LAB_HOSTED_WORKER_REQUIRE_PROXY")
+            ),
+            hosted_worker_proxy_url=os.getenv("RESEARCH_LAB_HOSTED_WORKER_PROXY", ""),
             private_model_manifest_uri=os.getenv(
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
                 "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
@@ -248,6 +255,8 @@ class ResearchLabGatewayConfig:
                 "worker_index": self.hosted_worker_index,
                 "total_workers": self.hosted_worker_total_workers,
                 "queue_fetch_limit": self.hosted_worker_queue_fetch_limit,
+                "require_proxy": self.hosted_worker_require_proxy,
+                "worker_proxy_configured": bool(self.hosted_worker_proxy_url),
                 "private_model_manifest_uri_configured": bool(self.private_model_manifest_uri),
                 "private_benchmark_path_configured": bool(self.private_benchmark_path),
                 "auto_research_model_configured": bool(self.auto_research_model),

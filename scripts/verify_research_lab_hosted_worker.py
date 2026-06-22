@@ -13,7 +13,13 @@ if str(ROOT) not in sys.path:
 
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle  # noqa: E402
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
-from gateway.research_lab.worker import ResearchLabHostedWorker, _is_claim_race_error, _row_partition  # noqa: E402
+from gateway.research_lab.worker import (  # noqa: E402
+    HostedResearchLabWorkerError,
+    ResearchLabHostedWorker,
+    _is_claim_race_error,
+    _row_partition,
+    _worker_proxy_env,
+)
 from research_lab.auto_research_prompt import (  # noqa: E402
     build_default_auto_research_messages,
     build_validated_candidate_manifest,
@@ -117,6 +123,16 @@ def main() -> int:
         errors.append("worker did not prefer its assigned queue partition")
     if not _is_claim_race_error(Exception("duplicate key violates research_loop_run_queue_events_run_seq_key")):
         errors.append("worker claim-race detector missed queue event duplicate-key errors")
+    proxy_cfg = ResearchLabGatewayConfig(hosted_worker_require_proxy=True, hosted_worker_proxy_url="http://proxy.example:8080")
+    proxy_env = _worker_proxy_env(proxy_cfg)
+    if proxy_env.get("HTTPS_PROXY") != "http://proxy.example:8080" or proxy_env.get("HTTP_PROXY") != "http://proxy.example:8080":
+        errors.append("worker proxy env did not map configured proxy to HTTP/HTTPS proxy variables")
+    missing_proxy_cfg = ResearchLabGatewayConfig(hosted_worker_require_proxy=True)
+    try:
+        ResearchLabHostedWorker(missing_proxy_cfg, worker_ref="test-worker-no-proxy")._require_worker_proxy_for_execution()
+        errors.append("worker accepted missing proxy while proxy enforcement was enabled")
+    except HostedResearchLabWorkerError:
+        pass
 
     if errors:
         for error in errors:

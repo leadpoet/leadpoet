@@ -43,7 +43,7 @@ def main() -> int:
     if args.once:
         outcome = asyncio.run(worker.run_once())
         print(outcome.to_dict())
-        return 0 if outcome.status not in {"failed"} else 1
+        return 0 if outcome.status not in {"failed", "worker_proxy_required"} else 1
     asyncio.run(worker.run_forever())
     return 0
 

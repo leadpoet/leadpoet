@@ -35,6 +35,7 @@ def main() -> int:
         env["RESEARCH_LAB_HOSTED_WORKER_ID"] = f"{args.worker_prefix}-{index + 1}"
         proxy = _proxy_for_worker(index)
         if proxy:
+            env["RESEARCH_LAB_HOSTED_WORKER_PROXY"] = proxy
             env["HTTP_PROXY"] = proxy
             env["HTTPS_PROXY"] = proxy
             env["http_proxy"] = proxy

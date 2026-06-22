@@ -78,6 +78,8 @@ def main() -> int:
     )
     if "budget_context" not in prompt_messages[1]["content"] or "top_up" not in prompt_messages[1]["content"]:
         errors.append("auto-research prompt did not include budget/top-up context")
+    if "Do not overfit to one supplied market segment" not in prompt_messages[1]["content"]:
+        errors.append("auto-research prompt did not guard against client-specific overfitting")
     if "HTTPS_PROXY" not in DEFAULT_ENV_PASSTHROUGH or "HTTP_PROXY" not in DEFAULT_ENV_PASSTHROUGH:
         errors.append("private Docker runner does not pass through proxy env vars")
 
@@ -156,7 +158,7 @@ def _metadata() -> dict[str, object]:
                 {
                     "name": "discovery_query_builder",
                     "purpose": "Build precise search prompts for high-intent lead discovery.",
-                    "input_contract": "ICP and target intent signals",
+                    "input_contract": "ICP and observable intent signals",
                     "output_contract": "Search query template",
                     "ablation_leverage": 1.0,
                     "allowed_patch_types": ["PROMPT_EDIT"],
@@ -200,8 +202,8 @@ def _candidate_response() -> str:
   "candidates": [
     {
       "hypothesis": {
-        "failure_mode": "Queries are too broad for urgent enterprise buying intent.",
-        "mechanism": "Tightening the query template around explicit budget, hiring, and vendor replacement signals should improve precision.",
+        "failure_mode": "Queries are too broad for observable buying intent.",
+        "mechanism": "Tightening the query template around fresh budget, hiring, and vendor replacement signals should improve precision across benchmark ICPs.",
         "expected_improvement": "Higher candidate score on ICPs where intent evidence is fresh and specific.",
         "risk": "Could reduce coverage on sparse markets.",
         "predicted_delta": 3.0,
@@ -211,10 +213,10 @@ def _candidate_response() -> str:
         "patch_type": "PROMPT_EDIT",
         "target_component_id": "discovery_query_builder",
         "patch_doc": {
-          "template_name": "enterprise_intent_query",
+          "template_name": "general_intent_query",
           "new_template": "Find companies matching {icp} with recent budget, hiring, expansion, vendor replacement, or compliance signals tied to {intent_signals}."
         },
-        "redacted_summary": "Tighten discovery query toward fresh enterprise buying-intent evidence."
+        "redacted_summary": "Tighten discovery query toward fresh buying-intent evidence."
       }
     },
     {

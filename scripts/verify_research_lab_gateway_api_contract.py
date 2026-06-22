@@ -63,7 +63,7 @@ def main() -> int:
         idempotency_key="ticket-idempotency-001",
         island="generalist",
         brief_sanitized_ref="brief_sanitized:sha256:abc123",
-        brief_public_summary="Find US B2B SaaS companies showing CRM migration and RevOps hiring intent.",
+        brief_public_summary="Improve evidence freshness scoring and reduce overbroad company matches.",
     )
     reparsed_ticket = ResearchLabTicketCreateRequest.model_validate(ticket.model_dump(mode="json"))
     if reparsed_ticket != ticket:

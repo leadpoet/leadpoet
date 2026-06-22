@@ -87,11 +87,11 @@ def build_default_auto_research_messages(
     }
     system = (
         "You are the Leadpoet Research Lab auto-research engine. Your job is to propose small, "
-        "typed improvements to the private sourcing model so it finds better high-intent leads "
-        "for enterprise and strategic clients. Optimize for precise target-market fit, fresh "
-        "observable buying intent, evidence quality, low hallucination rate, and repeatable lead "
-        "quality. You must not request or reveal private code, raw provider keys, hidden benchmark "
-        "plaintext, customer secrets, or judge prompts."
+        "typed improvements to the private sourcing model so it improves general high-intent "
+        "lead discovery across the sealed Research Lab evaluation distribution. Optimize for "
+        "generalizable ICP fit, fresh observable buying intent, evidence quality, low "
+        "hallucination rate, and repeatable lead quality. You must not request or reveal private "
+        "code, raw provider keys, hidden benchmark plaintext, private customer data, or judge prompts."
     )
     user = (
         "Generate candidate model-improvement patches from the JSON context below.\n"
@@ -100,6 +100,8 @@ def build_default_auto_research_messages(
         "- Return at most max_candidates candidates.\n"
         "- Respect budget_context: use fewer, more precise candidates when the compute budget is small.\n"
         "- For top_up payment_kind, focus on pushing the prior promising direction over starting broad new exploration.\n"
+        "- Treat ticket.brief_public_summary as an optional miner research direction, not as a client-specific ICP.\n"
+        "- Do not overfit to one supplied market segment; propose changes that should generalize across sealed benchmark items.\n"
         "- Allowed patch types: PROMPT_EDIT, PARAM_EDIT, STRATEGY_SWAP.\n"
         "- Never use CODE_EDIT or SOURCE_ADD.\n"
         "- target_component_id must be one of the component registry entry names.\n"

@@ -2416,8 +2416,8 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
     print(f"Gateway: {gateway_url}")
     print("")
     print("Auto-research loops are the current miner research workflow.")
-    print("Miners fund hosted research loops with a TAO loop-start fee and a miner")
-    print("OpenRouter key reference; Leadpoet keeps Exa/ScrapingDog server-side.")
+    print("Miners fund hosted model-improvement loops. Leadpoet runs the private")
+    print("model, sealed benchmark, and server-side data providers.")
     print("")
 
     try:
@@ -2468,13 +2468,13 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
         return
 
     print("")
-    print("Describe the target leads this research loop should improve for.")
-    print("Example: Find US B2B SaaS companies hiring RevOps leaders and showing CRM migration intent.")
-    print("Do not include raw client secrets, private keys, or confidential customer names.")
-    brief_input = input("   Target market + intent signals: ").strip()
+    print("Optional research direction.")
+    print("This is a weak hint, not a request to tune the model for one market niche.")
+    print("Leave blank for default general improvement against the sealed Research Lab benchmark.")
+    print("Examples: improve evidence freshness scoring; reduce overbroad matches; improve source routing.")
+    brief_input = input("   Research direction [general model improvement]: ").strip()
     if not brief_input:
-        print("❌ Target market and intent signals are required.")
-        return
+        brief_input = "default: general Leadpoet sourcing-model improvement across the sealed Research Lab benchmark"
     try:
         brief_sanitized_ref = _brief_sanitized_ref_from_input(brief_input)
         brief_public_summary = _brief_public_summary_from_input(brief_input)
@@ -2545,7 +2545,7 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
     if not status.get("paid_loops_enabled") or not status.get("hosted_runs_enabled"):
         print("")
         print("Paid hosted loop starts are not enabled on this gateway yet.")
-        print("The ticket is open, but this client will not submit a paid loop-start request.")
+        print("The ticket is open, but this miner process will not submit a paid loop-start request.")
         return
 
     start_now = input("❓ Continue to payment and queue this run now? [Y/n]: ").strip().lower()

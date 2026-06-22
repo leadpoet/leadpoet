@@ -43,10 +43,17 @@ _MAX_RETRIES = 2
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _LOCATION_MODEL = "google/gemini-2.5-flash-lite"
 _TM_RE = re.compile(r'[®™©℠]+')
+# MUST stay identical to stage5_verification._LEGAL_SUFFIXES_RE — Stage 4 (person)
+# and Stage 5 (company) compare the same lead `business` string against vendor
+# names, so they have to agree on the canonical form. This list includes the
+# international suffixes (GmbH/AG/SA/S.A./SAS/SARL/SpA/BV) that were previously
+# missing here, which let "Encender Comunicación S.A." fail to normalize.
 _LEGAL_SUFFIXES_RE = re.compile(
     r',?\s*\b(?:Inc\.?|LLC|L\.L\.C\.?|Corp\.?|Corporation|Ltd\.?|Limited|'
-    r'Co\.?|Company|Group|PLC|P\.L\.C\.?|LLP|L\.L\.P\.?|PLLC|P\.L\.L\.C\.?|'
-    r'PC|P\.C\.?|LP|L\.P\.?|NA|N\.A\.?)\s*\.?\s*$', re.IGNORECASE
+    r'Co\.?|Company|Group|Holdings?|PLC|P\.L\.C\.?|LLP|L\.L\.P\.?|'
+    r'PLLC|P\.L\.L\.C\.?|PC|P\.C\.?|LP|L\.P\.?|NA|N\.A\.?|GmbH|'
+    r'AG|SA|S\.A\.?|SAS|SARL|S\.R\.L\.?|S\.p\.A\.?|SpA|BV|B\.V\.?)\s*\.?\s*$',
+    re.IGNORECASE,
 )
 
 
@@ -58,6 +65,25 @@ def _normalize_company(name: str) -> str:
     s = re.sub(r'\band\b', '&', s, flags=re.IGNORECASE)
     s = re.sub(r'\s+', ' ', s).strip()
     return s.lower()
+
+
+def _company_name_lenient_match(a: str, b: str) -> bool:
+    """Match company names allowing Apify's short brand form vs the full legal name.
+
+    Apify often returns just the brand ("Encender") while the lead carries the
+    full name ("Encender Comunicación S.A."). The normalizer only strips US-style
+    legal suffixes, so international suffixes/descriptors (S.A., GmbH, "Comunicación")
+    remain and break an exact compare. Treat it as a match when the names are
+    equal, or the shorter normalized name is the leading token(s) of the longer.
+    """
+    na, nb = _normalize_company(a), _normalize_company(b)
+    if not na or not nb:
+        return True            # nothing real to compare -> don't reject on name alone
+    if na == nb:
+        return True
+    shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
+    return longer.startswith(shorter + " ")   # e.g. "encender comunicación s.a." vs "encender"
+
 
 _ROLE_PROMPT = (
     'LinkedIn shows current role: "{actual_role}" at "{company}".\n'
@@ -837,6 +863,7 @@ async def fulfillment_person_verification(
     lead_company_linkedin = lead.get("company_linkedin", "")
     apify_slug = _extract_company_slug(actual_company_url)
     lead_slug = _extract_company_slug(lead_company_linkedin)
+    company_url_confirmed = False   # a matched /company/ slug or ID is authoritative
 
     if apify_slug and not apify_slug.isdigit():
         # Real slug — must match miner's slug
@@ -847,6 +874,7 @@ async def fulfillment_person_verification(
                 f"Company LinkedIn URL mismatch: '{apify_slug}' vs '{lead_slug}'",
                 ["company_linkedin"],
             )
+        company_url_confirmed = True
         print(f"   ✅ Company URL match: {apify_slug}")
     elif apify_slug and apify_slug.isdigit():
         # Numeric ID — compare against ScrapingDog's linkedin_internal_id
@@ -865,6 +893,7 @@ async def fulfillment_person_verification(
                 f"Apify returned numeric company ID '{apify_slug}' but no ScrapingDog internal ID to verify against",
                 ["company_linkedin"],
             )
+        company_url_confirmed = True
         print(f"   ✅ Company ID match: {apify_slug}")
     else:
         # No /company/ URL or numeric ID from Apify. This commonly happens for
@@ -876,7 +905,11 @@ async def fulfillment_person_verification(
         print(f"   ⚠️ No /company/ URL from Apify — falling through to name match")
 
     # --- Company name match (always from Apify, normalized) ---
-    if _normalize_company(actual_company) != _normalize_company(lead_company):
+    # A confirmed company-URL/ID match above is AUTHORITATIVE (same LinkedIn
+    # company page = same company), so skip the name-string check. Otherwise use
+    # a lenient match so Apify's short brand ("Encender") matches the lead's full
+    # name ("Encender Comunicación S.A.").
+    if not company_url_confirmed and not _company_name_lenient_match(actual_company, lead_company):
         print(f"   ❌ Company name mismatch: Apify='{actual_company}' vs Lead='{lead_company}'")
         return False, _rejection(
             "fulfillment_person_company_name_mismatch",

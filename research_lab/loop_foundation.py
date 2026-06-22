@@ -37,7 +37,7 @@ class BaselineDependencyGate(str, Enum):
     PRODUCTION_SQL_APPLIED = "production_sql_applied"
     PAIRED_DAY_CLOCK_STARTED = "paired_day_clock_started"
     SAME_DAY_CROWNING_CERTIFIED = "same_day_crowning_certified"
-    ENGINE_V0_EXTERNAL_COST_CALIBRATED = "engine_v0_external_cost_calibrated"
+    MEASURED_EXTERNAL_COST_CALIBRATED = "measured_external_cost_calibrated"
 
 
 ARTIFACT_RELEASE_STATES: tuple[str, ...] = tuple(state.value for state in ArtifactReleaseState)
@@ -131,7 +131,7 @@ class BaselineCarryForwardStatus:
     production_sql_applied: bool = False
     paired_day_clock_started: bool = False
     same_day_crowning_certified: bool = False
-    engine_v0_external_cost_calibrated: bool = False
+    measured_external_cost_calibrated: bool = False
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "BaselineCarryForwardStatus":

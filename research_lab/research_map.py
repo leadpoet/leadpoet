@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from .canonical import sha256_json
-from .engine_v1 import PatchType, verify_research_lab_engine_v1
+from .engine_v1 import PatchType
 from .loop_game import FailureBoardItem, validate_failure_board_item, verify_research_lab_loop_game
 from .loop_foundation import (
     ArtifactReleaseState,
@@ -694,7 +694,6 @@ def validate_research_map_artifact_record(
 
 
 def verify_research_lab_research_map(fixture_path: Path | str = FIXTURE_PATH) -> dict[str, Any]:
-    engine_summary = verify_research_lab_engine_v1()
     loop_summary = verify_research_lab_loop_game()
     fixture = _load_fixture(Path(fixture_path))
 
@@ -772,7 +771,6 @@ def verify_research_lab_research_map(fixture_path: Path | str = FIXTURE_PATH) ->
     _assert(unsafe_errors, "unsafe workflow guards block map projection")
 
     return {
-        "engine_components": engine_summary["components"],
         "loop_failure_board_items": loop_summary["failure_board_items"],
         "projection_id": projection.projection_id,
         "artifact_ref": artifact.artifact_ref,

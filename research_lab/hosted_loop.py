@@ -21,12 +21,8 @@ from .canonical import sha256_json
 from .engine_v1 import (
     ENGINE_V1_ENABLED_PATCH_TYPES,
     ComponentRegistry,
-    DevEvalResult,
-    EvalStatus,
     HypothesisRecord,
-    MetricVector,
     PatchRecord,
-    PromotionDecision,
     validate_hypothesis,
     validate_patch,
 )
@@ -210,8 +206,8 @@ class HostedPatchRun:
     hypothesis: HypothesisRecord
     patch: PatchRecord
     targeted_metric: str
-    candidate_metrics: MetricVector
-    result: DevEvalResult
+    score_bundle: dict[str, Any]
+    score_result: dict[str, Any]
     reflection: dict[str, Any]
     model_used: str
     tokens_in: int
@@ -231,8 +227,8 @@ class HostedPatchRun:
             "hypothesis": self.hypothesis.to_dict(),
             "patch": self.patch.to_dict(),
             "targeted_metric": self.targeted_metric,
-            "candidate_metrics": self.candidate_metrics.to_dict(),
-            "result": self.result.to_dict(),
+            "score_bundle": dict(self.score_bundle),
+            "score_result": dict(self.score_result),
             "reflection": dict(self.reflection),
             "model_used": self.model_used,
             "tokens_in": self.tokens_in,
@@ -248,7 +244,6 @@ class HostedPatchRun:
 class HostedSandboxResult:
     run_id: str
     sandbox_job: ResearchSandboxJobRecord
-    parent_metrics: MetricVector
     patch_runs: tuple[HostedPatchRun, ...]
     evidence_bundle: dict[str, Any]
     execution_trace: dict[str, Any]
@@ -262,7 +257,6 @@ class HostedSandboxResult:
         return {
             "run_id": self.run_id,
             "sandbox_job": self.sandbox_job.to_dict(),
-            "parent_metrics": self.parent_metrics.to_dict(),
             "patch_runs": [run.to_dict() for run in self.patch_runs],
             "evidence_bundle": self.evidence_bundle,
             "execution_trace": self.execution_trace,
@@ -637,12 +631,6 @@ def run_sandboxed_engine_v1(
     patch_runs: list[HostedPatchRun] = []
 
     for candidate in scenario["candidates"]:
-        if "candidate_metrics" in candidate:
-            raise ValueError(
-                "fixture_candidate_metrics_rejected: hosted Research Lab loops "
-                "require a real evaluator-backed score bundle before any "
-                "candidate can be kept, discarded, or rewarded."
-            )
         patch = PatchRecord.from_mapping(candidate["patch"])
         if patch.patch_type not in ENGINE_V1_ENABLED_PATCH_TYPES:
             raise ValueError(f"hosted MVP does not enable patch type: {patch.patch_type}")
@@ -895,7 +883,7 @@ def build_hosted_trajectory(
                 "node_id": patch_run.node_id,
                 "status": patch_run.result.status,
                 "rung": "L1",
-                "metrics": _trajectory_metrics(patch_run.candidate_metrics),
+                "score_bundle_ref": patch_run.score_bundle.get("score_bundle_ref"),
                 "paired_lcb_vs_parent": patch_run.result.target_delta,
                 "fixtures": list(patch_run.fixture_refs),
                 "cache_hits": {"snapshot": 1, "verdict": 0},
@@ -1152,8 +1140,6 @@ def validate_hosted_loop_result(result: HostedLoopRunResult | Mapping[str, Any])
 
 def verify_research_lab_hosted_loop(fixture_path: Path | str = FIXTURE_PATH) -> dict[str, Any]:
     fixture = load_hosted_loop_fixture(fixture_path)
-    fixture_text = Path(fixture_path).read_text()
-    _assert('"candidate_metrics"' not in fixture_text, "hosted loop fixture must not include simulated candidate metrics")
 
     try:
         run_hosted_loop_fixture(scenario="winning", fixture_path=fixture_path)
@@ -1179,7 +1165,6 @@ def verify_research_lab_hosted_loop(fixture_path: Path | str = FIXTURE_PATH) -> 
         raise AssertionError("hosted loop must not create a scored result without a real evaluator")
 
     return {
-        "fixture_candidate_metrics_absent": True,
         "real_evaluator_score_bundle_required": True,
         "production_improvement_scoring_enabled": False,
         "required_evaluator": "research_lab_qualification_style_evaluator",
@@ -1372,30 +1357,14 @@ def _trajectory_hypothesis(hypothesis: HypothesisRecord) -> dict[str, Any]:
     }
 
 
-def _trajectory_metrics(metrics: MetricVector) -> dict[str, Any]:
-    return {
-        "proxy_score": metrics.proxy_score,
-        "evidence_defect_rate_by_category": {"overall": metrics.evidence_defect_rate},
-        "coverage": metrics.coverage,
-        "cost_per_icp": round(metrics.cost_per_icp_cents / 100.0, 6),
-        "latency_s": round(metrics.latency_ms / 1000.0, 6),
-        "schema_validity": metrics.schema_validity,
-        "complexity": {
-            "diff_loc": metrics.complexity.diff_loc,
-            "prompt_pack_tokens": metrics.complexity.prompt_pack_tokens,
-            "component_count": metrics.complexity.component_count,
-        },
-    }
-
-
-def _ledger_status(result: DevEvalResult) -> str:
-    if result.status == EvalStatus.TIMEOUT.value:
+def _ledger_status(result: Any) -> str:
+    if result.status == "timeout":
         return "timeout"
-    if result.status == EvalStatus.CRASH.value:
+    if result.status == "crash":
         return "crash"
     if result.promotion_decision in {
-        PromotionDecision.KEEP.value,
-        PromotionDecision.SIMPLIFICATION_KEEP.value,
+        "keep",
+        "simplification_keep",
     }:
         return "keep"
     return "discard"

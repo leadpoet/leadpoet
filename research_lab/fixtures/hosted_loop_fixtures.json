@@ -151,7 +151,7 @@
     "manifest_version": "loop-engine-v1-manifest:v1",
     "champion_base": "reference:qualification_model:v1",
     "eval_version": "eval:loop:v1",
-    "engine_v0_receipt_refs": [
+    "source_receipt_refs": [
       "receipt:p0.6:research-loop-v0:source-routing-headroom"
     ],
     "meta_allocator_priors_enabled": false,
@@ -171,7 +171,7 @@
           "reference_routing",
           "sonar_first_exa_fill"
         ],
-        "engine_v0_evidence_refs": [
+        "source_evidence_refs": [
           "p0.6:cluster:source-routing",
           "p0.6:node:route-current-intent-first"
         ],
@@ -192,7 +192,7 @@
           "icp",
           "signals"
         ],
-        "engine_v0_evidence_refs": [
+        "source_evidence_refs": [
           "p0.6:cluster:prompt-pack",
           "p0.6:node:signal-specific-extraction-prompt"
         ],
@@ -219,7 +219,7 @@
             "max": 50
           }
         },
-        "engine_v0_evidence_refs": [
+        "source_evidence_refs": [
           "p0.6:cluster:param-headroom",
           "p0.6:node:max-sources-cost-coverage"
         ],

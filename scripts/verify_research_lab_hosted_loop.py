@@ -18,7 +18,6 @@ def main() -> int:
     summary = verify_research_lab_hosted_loop()
     print(
         "Research Lab Hosted Loop evaluator gate verified: "
-        f"fixture_candidate_metrics_absent={summary['fixture_candidate_metrics_absent']}, "
         f"real_evaluator_score_bundle_required={summary['real_evaluator_score_bundle_required']}, "
         f"production_improvement_scoring_enabled={summary['production_improvement_scoring_enabled']}, "
         f"required_evaluator={summary['required_evaluator']}."

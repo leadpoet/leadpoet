@@ -29,7 +29,7 @@ class MarketDependencyGate(str, Enum):
     DUAL_ARM_PAIRED_DAY_CLOCK_STARTED = "dual_arm_paired_day_clock_started"
     DUAL_ARM_PAIRED_DAYS_ACCUMULATED = "dual_arm_paired_days_accumulated"
     SAME_DAY_CROWNING_CERTIFIED = "same_day_crowning_certified"
-    ENGINE_V0_EXTERNAL_COST_CALIBRATED = "engine_v0_external_cost_calibrated"
+    MEASURED_EXTERNAL_COST_CALIBRATED = "measured_external_cost_calibrated"
     LOOP_HOSTED_RUN_CORPUS_READY = "loop_hosted_run_corpus_ready"
     HOSTED_RUN_CROWNING_SURVIVED_PROBATION = "hosted_run_crowning_survived_probation"
     EXTERNAL_VALIDATORS_VERIFIED = "external_validators_verified"
@@ -79,7 +79,7 @@ class MarketCarryForwardStatus:
     dual_arm_paired_day_clock_started: bool = False
     dual_arm_paired_days_accumulated: bool = False
     same_day_crowning_certified: bool = False
-    engine_v0_external_cost_calibrated: bool = False
+    measured_external_cost_calibrated: bool = False
     loop_hosted_run_corpus_ready: bool = False
     hosted_run_crowning_survived_probation: bool = False
     external_validators_verified: bool = False

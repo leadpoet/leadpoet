@@ -138,6 +138,6 @@
     "production_sql_applied": false,
     "paired_day_clock_started": false,
     "same_day_crowning_certified": false,
-    "engine_v0_external_cost_calibrated": false
+    "measured_external_cost_calibrated": false
   }
 }

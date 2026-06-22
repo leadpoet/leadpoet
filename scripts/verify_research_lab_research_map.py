@@ -22,7 +22,6 @@ def main() -> int:
         f"artifact {summary['artifact_ref']}, "
         f"{summary['cell_count']} cells, "
         f"{summary['allocator_predictions']} allocator predictions, "
-        f"{summary['engine_components']} engine components, "
         f"{summary['loop_failure_board_items']} loop-game board items."
     )
     return 0

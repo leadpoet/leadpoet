@@ -2337,6 +2337,13 @@ def _brief_sanitized_ref_from_input(value: str) -> str:
     return f"brief_sanitized:sha256:{digest}"
 
 
+def _brief_public_summary_from_input(value: str) -> str | None:
+    value = value.strip()
+    if value.startswith("brief_sanitized:"):
+        return None
+    return value[:2000]
+
+
 def _research_lab_default_model_tier(default_tier: str, approved_tiers: dict) -> str:
     if default_tier:
         return default_tier
@@ -2460,12 +2467,17 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
         print("❌ Choose either 'new' or 'topup'.")
         return
 
-    brief_input = input("   Brief text or brief_sanitized ref: ").strip()
+    print("")
+    print("Describe the target leads this research loop should improve for.")
+    print("Example: Find US B2B SaaS companies hiring RevOps leaders and showing CRM migration intent.")
+    print("Do not include raw client secrets, private keys, or confidential customer names.")
+    brief_input = input("   Target market + intent signals: ").strip()
     if not brief_input:
-        print("❌ Brief text/ref is required.")
+        print("❌ Target market and intent signals are required.")
         return
     try:
         brief_sanitized_ref = _brief_sanitized_ref_from_input(brief_input)
+        brief_public_summary = _brief_public_summary_from_input(brief_input)
     except ValueError as exc:
         print(f"❌ {exc}")
         return
@@ -2509,6 +2521,7 @@ def run_research_lab_auto_research_flow(wallet, netuid: int) -> None:
             "idempotency_key": f"research-ticket:{wallet.hotkey.ss58_address}:{int(time.time())}",
             "island": island,
             "brief_sanitized_ref": brief_sanitized_ref,
+            "brief_public_summary": brief_public_summary,
             "requested_loop_count": requested_loop_count,
             "loop_start_fee_required_usd": float(status.get("loop_start_fee_usd") or 5.0),
             "research_model_tier": research_model_tier,

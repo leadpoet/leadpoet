@@ -132,6 +132,7 @@ async def create_ticket(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "ticket_doc": {
             "idempotency_key_hash": canonical_hash(request.idempotency_key),
             "source": "gateway_research_lab_api",
+            "brief_public_summary": getattr(request, "brief_public_summary", None),
             "research_model_tier": getattr(request, "research_model_tier", "default"),
             "requested_compute_budget_usd": float(getattr(request, "requested_compute_budget_usd", 5.0)),
             "max_compute_budget_usd": float(getattr(request, "max_compute_budget_usd", 25.0)),

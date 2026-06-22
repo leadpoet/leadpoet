@@ -643,6 +643,7 @@ class ResearchLabHostedWorker:
                 "miner_hotkey": context.ticket.get("miner_hotkey"),
                 "island": context.ticket.get("island"),
                 "brief_sanitized_ref": context.ticket.get("brief_sanitized_ref"),
+                "brief_public_summary": _ticket_doc_value(context, "brief_public_summary"),
                 "requested_loop_count": context.ticket.get("requested_loop_count"),
             },
             artifact_manifest=artifact.to_dict(),
@@ -808,6 +809,13 @@ def _miner_openrouter_key_ref(context: HostedRunContext) -> str:
         if isinstance(event_doc, Mapping) and event_doc.get("miner_openrouter_key_ref"):
             return str(event_doc["miner_openrouter_key_ref"])
     raise HostedResearchLabWorkerError("Research Lab run is missing miner OpenRouter key ref")
+
+
+def _ticket_doc_value(context: HostedRunContext, key: str) -> Any:
+    ticket_doc = context.ticket.get("ticket_doc")
+    if isinstance(ticket_doc, Mapping):
+        return ticket_doc.get(key)
+    return None
 
 
 def _payment_id_from_queue_events(events: Sequence[Mapping[str, Any]]) -> str:

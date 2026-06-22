@@ -63,6 +63,7 @@ def main() -> int:
         idempotency_key="ticket-idempotency-001",
         island="generalist",
         brief_sanitized_ref="brief_sanitized:sha256:abc123",
+        brief_public_summary="Find US B2B SaaS companies showing CRM migration and RevOps hiring intent.",
     )
     reparsed_ticket = ResearchLabTicketCreateRequest.model_validate(ticket.model_dump(mode="json"))
     if reparsed_ticket != ticket:
@@ -122,6 +123,17 @@ def main() -> int:
     reparsed_receipt = ResearchLabReceiptCreateRequest.model_validate(receipt.model_dump(mode="json"))
     if reparsed_receipt != receipt:
         errors.append("receipt request failed json round-trip")
+
+    try:
+        ResearchLabTicketCreateRequest(
+            **{
+                **ticket.model_dump(),
+                "brief_public_summary": "raw_secret_should_fail",
+            }
+        )
+        errors.append("raw secret marker in ticket public summary was accepted")
+    except ValueError:
+        pass
 
     try:
         ResearchLabLoopStartRequest(

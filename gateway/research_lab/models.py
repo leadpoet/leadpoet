@@ -44,6 +44,7 @@ class SignedResearchLabRequest(BaseModel):
 class ResearchLabTicketCreateRequest(SignedResearchLabRequest):
     island: str = Field(min_length=1, max_length=80)
     brief_sanitized_ref: str = Field(min_length=8, max_length=256)
+    brief_public_summary: Optional[str] = Field(default=None, max_length=2000)
     requested_loop_count: int = Field(default=1, gt=0, le=100)
     loop_start_fee_required_usd: float = Field(default=5.0, ge=0)
     research_model_tier: str = Field(default="default", min_length=1, max_length=80, pattern=MODEL_TIER_RE)
@@ -52,7 +53,7 @@ class ResearchLabTicketCreateRequest(SignedResearchLabRequest):
     miner_openrouter_key_ref: Optional[str] = Field(default=None, max_length=256)
     miner_openrouter_key_handling: Optional[str] = Field(default=None)
 
-    @field_validator("brief_sanitized_ref", "miner_openrouter_key_ref")
+    @field_validator("brief_sanitized_ref", "brief_public_summary", "miner_openrouter_key_ref")
     @classmethod
     def no_raw_secret_refs(cls, value: Optional[str]) -> Optional[str]:
         if value:

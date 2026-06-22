@@ -308,7 +308,7 @@ async def get_research_lab_latest_evaluation_bundles(epoch: int):
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
     rows = await select_many(
         "research_evaluation_score_bundle_current",
-        filters=(("evaluation_epoch", epoch),),
+        filters=(("evaluation_epoch", epoch), ("bundle_status", "scored"), ("current_event_status", "scored")),
         limit=1000,
     )
     return {

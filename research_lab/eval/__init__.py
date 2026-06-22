@@ -17,15 +17,21 @@ from .evaluator import (
 )
 from .patches import CandidatePatchManifest, validate_candidate_patch_manifest
 from .private_runtime import (
+    DockerPrivateModelRunner,
+    DockerPrivateModelSpec,
     PrivateModelAdapterSpec,
     PrivateModelRuntimeError,
     SubprocessPrivateModelRunner,
     build_local_private_artifact_manifest,
     compute_private_source_tree_hash,
+    load_private_artifact_manifest,
+    sign_digest_with_kms,
 )
 
 __all__ = [
     "CandidatePatchManifest",
+    "DockerPrivateModelRunner",
+    "DockerPrivateModelSpec",
     "PrivateModelArtifactManifest",
     "PrivateModelAdapterSpec",
     "PrivateModelRuntimeError",
@@ -36,6 +42,8 @@ __all__ = [
     "build_score_bundle_from_scored_icps",
     "compute_private_source_tree_hash",
     "evaluate_private_model_pair",
+    "load_private_artifact_manifest",
+    "sign_digest_with_kms",
     "validate_candidate_patch_manifest",
     "validate_private_model_artifact_manifest",
     "validate_sealed_benchmark_set",

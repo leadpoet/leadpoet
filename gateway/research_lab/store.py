@@ -61,12 +61,15 @@ async def select_many(
     *,
     columns: str = "*",
     filters: Iterable[tuple[str, Any]],
+    order_by: Iterable[tuple[str, bool]] = (),
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     def _call() -> Any:
         query = get_write_client().table(table).select(columns)
         for field, value in filters:
             query = query.eq(field, str(value) if isinstance(value, UUID) else value)
+        for field, desc in order_by:
+            query = query.order(field, desc=desc)
         return query.limit(limit).execute()
 
     response = await asyncio.to_thread(_call)
@@ -212,6 +215,7 @@ async def create_queue_event(
     event_type: str,
     queue_priority: int,
     reason: str,
+    worker_ref: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     seq = await next_event_seq("research_loop_run_queue_events", "run_id", run_id)
@@ -221,6 +225,7 @@ async def create_queue_event(
         "seq": seq,
         "event_type": event_type,
         "queue_priority": queue_priority,
+        "worker_ref": worker_ref,
         "reason": reason,
         "event_doc": event_doc or {},
     }

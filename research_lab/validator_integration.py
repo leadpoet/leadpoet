@@ -212,9 +212,13 @@ def verify_research_lab_evaluation_bundle_page(
 
     verified_inputs: list[dict[str, Any]] = []
     bundle_results: list[dict[str, Any]] = []
+    ignored_bundle_count = 0
     for row in rows:
         if not isinstance(row, Mapping):
             errors.append("score_bundle_row_must_be_object")
+            continue
+        if not _row_is_scored_bundle(row):
+            ignored_bundle_count += 1
             continue
         bundle = row.get("score_bundle_doc", row)
         if not isinstance(bundle, Mapping):
@@ -238,6 +242,7 @@ def verify_research_lab_evaluation_bundle_page(
         "errors": errors,
         "epoch": page.get("epoch"),
         "bundle_count": len(rows),
+        "ignored_bundle_count": ignored_bundle_count,
         "verified_bundle_count": len(verified_inputs),
         "verified_weight_inputs": verified_inputs,
         "bundle_results": bundle_results,
@@ -379,7 +384,10 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
         "schema_version": "1.0",
         "bundle_type": "research_lab_evaluation_score_bundle_page",
         "epoch": int(bundle["epoch"]),
-        "score_bundles": [{"score_bundle_doc": eval_bundle}],
+        "score_bundles": [
+            {"bundle_status": "rejected", "current_event_status": "rejected", "score_bundle_doc": eval_bundle},
+            {"bundle_status": "scored", "current_event_status": "scored", "score_bundle_doc": eval_bundle},
+        ],
         "on_chain_submission_allowed": False,
     }
     eval_verification = verify_research_lab_evaluation_bundle_page(
@@ -388,6 +396,8 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
     )
     if not eval_verification["passed"]:
         raise AssertionError("evaluation score-bundle page did not verify: " + "; ".join(eval_verification["errors"]))
+    if eval_verification["verified_bundle_count"] != 1 or eval_verification["ignored_bundle_count"] != 1:
+        raise AssertionError("evaluation verification did not ignore non-scored score bundles")
 
     tampered_eval = {
         **eval_page,
@@ -431,6 +441,19 @@ def _contains_secret_material(value: Any) -> bool:
         lowered = value.lower()
         return any(marker in lowered for marker in ("sk-or-", "raw_openrouter_key", "openrouter_api_key", "raw_secret"))
     return False
+
+
+def _row_is_scored_bundle(row: Mapping[str, Any]) -> bool:
+    status = row.get("bundle_status")
+    current_status = row.get("current_event_status") or row.get("current_bundle_status")
+    if status is not None and status != "scored":
+        return False
+    if current_status is not None and current_status != "scored":
+        return False
+    bundle = row.get("score_bundle_doc", row)
+    if isinstance(bundle, Mapping) and bundle.get("bundle_status") not in (None, "scored"):
+        return False
+    return True
 
 
 def _truthy(value: Any) -> bool:

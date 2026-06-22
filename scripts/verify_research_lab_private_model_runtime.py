@@ -17,12 +17,16 @@ from research_lab.canonical import sha256_json  # noqa: E402
 from research_lab.eval.artifacts import validate_private_model_artifact_manifest  # noqa: E402
 from research_lab.eval.evaluator import _normalize_company_output  # noqa: E402
 from research_lab.eval.private_runtime import (  # noqa: E402
+    DockerPrivateModelRunner,
+    DockerPrivateModelSpec,
     PrivateModelAdapterSpec,
     PrivateModelRuntimeError,
     SubprocessPrivateModelRunner,
     build_local_private_artifact_manifest,
     compute_private_source_tree_hash,
+    load_private_artifact_manifest,
 )
+import research_lab.eval.private_runtime as private_runtime_module  # noqa: E402
 
 
 def main() -> int:
@@ -102,6 +106,37 @@ def run_icp(icp, context):
             errors.append("generated private model artifact manifest did not validate")
         if manifest["manifest_hash"] != sha256_json({k: v for k, v in manifest.items() if k != "manifest_hash"}):
             errors.append("manifest hash mismatch")
+        manifest_path = root / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+        loaded_manifest = load_private_artifact_manifest(str(manifest_path))
+        if loaded_manifest["manifest_hash"] != manifest["manifest_hash"]:
+            errors.append("local private artifact manifest loader changed the manifest")
+
+        original_run = private_runtime_module.subprocess.run
+
+        class _Completed:
+            returncode = 0
+            stdout = '[{"raw_secret":"should-fail"}]'
+            stderr = ""
+
+        def _fake_run(*_args, **_kwargs):
+            return _Completed()
+
+        private_runtime_module.subprocess.run = _fake_run
+        try:
+            try:
+                DockerPrivateModelRunner(
+                    DockerPrivateModelSpec(
+                        image_digest="123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:" + "9" * 64,
+                        pull_before_run=False,
+                        timeout_seconds=30,
+                    )
+                )({}, {})
+                errors.append("docker private model runner accepted raw secret output")
+            except PrivateModelRuntimeError:
+                pass
+        finally:
+            private_runtime_module.subprocess.run = original_run
 
         secret_adapter = root / "secret_adapter.py"
         secret_adapter.write_text(

@@ -15,6 +15,11 @@ from typing import Any, Mapping
 from urllib.request import Request, urlopen
 
 from leadpoet_verifier.golden_vectors import run_golden_vectors
+from leadpoet_verifier.research_evaluation import (
+    build_research_evaluation_score_bundle,
+    score_bundle_to_weight_input,
+    verify_research_evaluation_score_bundle,
+)
 
 from .canonical import sha256_json
 from .production_shadow import (
@@ -33,7 +38,9 @@ TRUTHY_VALUES = {"1", "true", "yes", "on"}
 class ResearchLabValidatorFlags:
     fetch_enabled: bool = False
     shadow_verify_enabled: bool = False
+    evaluation_verify_enabled: bool = False
     require_shadow_verification_before_submit: bool = False
+    require_evaluation_verification_before_submit: bool = False
     weight_mutation_enabled: bool = False
     production_writes_enabled: bool = False
     submit_on_chain_enabled: bool = False
@@ -47,10 +54,19 @@ class ResearchLabValidatorFlags:
             shadow_verify_enabled=_truthy(
                 data.get("RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED", data.get("shadow_verify_enabled", False))
             ),
+            evaluation_verify_enabled=_truthy(
+                data.get("RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED", data.get("evaluation_verify_enabled", False))
+            ),
             require_shadow_verification_before_submit=_truthy(
                 data.get(
                     "RESEARCH_LAB_REQUIRE_SHADOW_VERIFICATION_BEFORE_SUBMIT",
                     data.get("require_shadow_verification_before_submit", False),
+                )
+            ),
+            require_evaluation_verification_before_submit=_truthy(
+                data.get(
+                    "RESEARCH_LAB_REQUIRE_EVALUATION_VERIFICATION_BEFORE_SUBMIT",
+                    data.get("require_evaluation_verification_before_submit", False),
                 )
             ),
             weight_mutation_enabled=_truthy(
@@ -92,6 +108,23 @@ def fetch_research_lab_shadow_bundle(gateway_url: str, epoch: int, *, timeout_se
     base = gateway_url.rstrip("/")
     request = Request(
         f"{base}/research-lab/reports/shadow/{int(epoch)}",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_research_lab_evaluation_bundle_page(
+    gateway_url: str,
+    epoch: int,
+    *,
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    """Fetch official Research Lab evaluation score bundles for an epoch."""
+    base = gateway_url.rstrip("/")
+    request = Request(
+        f"{base}/research-lab/evaluations/latest/{int(epoch)}",
         headers={"Accept": "application/json"},
         method="GET",
     )
@@ -155,6 +188,63 @@ def verify_research_lab_shadow_bundle(
     }
 
 
+def verify_research_lab_evaluation_bundle_page(
+    page: Mapping[str, Any],
+    *,
+    flags: ResearchLabValidatorFlags | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    validator_flags = flags if isinstance(flags, ResearchLabValidatorFlags) else ResearchLabValidatorFlags.from_mapping(flags)
+    errors: list[str] = []
+    if not validator_flags.evaluation_verify_enabled:
+        errors.append("validator_evaluation_verify_disabled")
+    errors.extend(validator_flags.enabled_mutation_flags())
+    if _contains_secret_material(page):
+        errors.append("evaluation_bundle_page_contains_raw_secret_material")
+    if page.get("on_chain_submission_allowed"):
+        errors.append("evaluation_bundle_page_must_not_allow_on_chain_submission")
+    if page.get("bundle_type") != "research_lab_evaluation_score_bundle_page":
+        errors.append("unexpected_evaluation_bundle_page_type")
+
+    rows = page.get("score_bundles", [])
+    if not isinstance(rows, list):
+        errors.append("score_bundles_must_be_array")
+        rows = []
+
+    verified_inputs: list[dict[str, Any]] = []
+    bundle_results: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            errors.append("score_bundle_row_must_be_object")
+            continue
+        bundle = row.get("score_bundle_doc", row)
+        if not isinstance(bundle, Mapping):
+            errors.append("score_bundle_doc_must_be_object")
+            continue
+        verification = verify_research_evaluation_score_bundle(bundle)
+        bundle_results.append(verification)
+        if not verification["passed"]:
+            errors.extend(f"score_bundle:{verification.get('score_bundle_hash')}:{error}" for error in verification["errors"])
+            continue
+        try:
+            verified_inputs.append(score_bundle_to_weight_input(bundle))
+        except Exception as exc:
+            errors.append(f"score_bundle_weight_input_failed:{str(exc)[:120]}")
+
+    if validator_flags.require_evaluation_verification_before_submit and not verified_inputs:
+        errors.append("no_verified_evaluation_score_bundles")
+
+    return {
+        "passed": not errors,
+        "errors": errors,
+        "epoch": page.get("epoch"),
+        "bundle_count": len(rows),
+        "verified_bundle_count": len(verified_inputs),
+        "verified_weight_inputs": verified_inputs,
+        "bundle_results": bundle_results,
+        "on_chain_submission_allowed": False,
+    }
+
+
 def build_research_lab_weight_component(
     bundle: Mapping[str, Any],
     *,
@@ -189,6 +279,7 @@ def write_research_lab_validator_artifact(
     bundle: Mapping[str, Any],
     verification: Mapping[str, Any],
     component: Mapping[str, Any] | None = None,
+    artifact_kind: str = "shadow",
 ) -> Path:
     """Write the validator's local Research Lab verification artifact.
 
@@ -197,12 +288,13 @@ def write_research_lab_validator_artifact(
     """
     if _contains_secret_material(bundle) or _contains_secret_material(verification) or _contains_secret_material(component or {}):
         raise ValueError("Research Lab validator artifact contains raw secret material")
+    safe_kind = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in artifact_kind).strip("_") or "shadow"
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    artifact_path = output_path / f"research_lab_shadow_epoch_{int(epoch)}.json"
+    artifact_path = output_path / f"research_lab_{safe_kind}_epoch_{int(epoch)}.json"
     payload = {
         "schema_version": "1.0",
-        "artifact_type": "research_lab_validator_shadow_verification",
+        "artifact_type": f"research_lab_validator_{safe_kind}_verification",
         "epoch": int(epoch),
         "bundle": dict(bundle),
         "verification": dict(verification),
@@ -249,12 +341,79 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
     if tampered["passed"] or "source_state_hash_diverged" not in tampered["errors"]:
         raise AssertionError("source-state hash tamper was not rejected")
 
+    eval_bundle = build_research_evaluation_score_bundle(
+        run_id="11111111-1111-4111-8111-111111111111",
+        ticket_id="22222222-2222-4222-8222-222222222222",
+        miner_hotkey="5FevalMiner111111111111111111111111111111111",
+        island="generalist",
+        evaluation_epoch=int(bundle["epoch"]),
+        parent_artifact_hash="sha256:" + "1" * 64,
+        candidate_artifact_hash="sha256:" + "2" * 64,
+        private_model_manifest_hash="sha256:" + "3" * 64,
+        candidate_patch_hash="sha256:" + "4" * 64,
+        icp_set_hash="sha256:" + "5" * 64,
+        scoring_version="qualification-company-scorer:v1",
+        evaluator_version="research-lab-private-evaluator:v1",
+        per_icp_results=[
+            {
+                "icp_ref": "icp:a",
+                "icp_hash": "sha256:" + "a" * 64,
+                "base_company_scores": [80, 60],
+                "candidate_company_scores": [90, 70],
+            }
+        ],
+        evidence_bundle_refs=["evidence_bundle:sha256:" + "6" * 64],
+        execution_trace_ref="execution_trace:11111111-1111-4111-8111-111111111111",
+        cost_ledger_ref="cost_ledger:sha256:" + "7" * 64,
+        benchmark_split_ref="sealed_benchmark:qualification:intent:v1",
+        policy={
+            "min_delta": 2.0,
+            "min_delta_lcb": 2.0,
+            "min_successful_icps": 1,
+            "min_candidate_score": 15.0,
+            "observed_cost_usd": 1.25,
+        },
+        signature_ref="kms-signature:research-lab-eval:test",
+    )
+    eval_page = {
+        "schema_version": "1.0",
+        "bundle_type": "research_lab_evaluation_score_bundle_page",
+        "epoch": int(bundle["epoch"]),
+        "score_bundles": [{"score_bundle_doc": eval_bundle}],
+        "on_chain_submission_allowed": False,
+    }
+    eval_verification = verify_research_lab_evaluation_bundle_page(
+        eval_page,
+        flags={**fixture["validator_flags"], "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED": True},
+    )
+    if not eval_verification["passed"]:
+        raise AssertionError("evaluation score-bundle page did not verify: " + "; ".join(eval_verification["errors"]))
+
+    tampered_eval = {
+        **eval_page,
+        "score_bundles": [
+            {
+                "score_bundle_doc": {
+                    **eval_bundle,
+                    "aggregates": {**eval_bundle["aggregates"], "candidate_score": 999.0},
+                }
+            }
+        ],
+    }
+    tampered_eval_verification = verify_research_lab_evaluation_bundle_page(
+        tampered_eval,
+        flags={**fixture["validator_flags"], "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED": True},
+    )
+    if tampered_eval_verification["passed"] or not tampered_eval_verification["errors"]:
+        raise AssertionError("tampered evaluation score bundle was not rejected")
+
     return {
         "bundle_id": bundle["bundle_id"],
         "epoch": bundle["epoch"],
         "weight_vector_hash": component["weight_vector_hash"],
         "weight_sum": component["weight_sum"],
         "unsafe_errors": unsafe["errors"],
+        "evaluation_bundle_count": eval_verification["verified_bundle_count"],
     }
 
 

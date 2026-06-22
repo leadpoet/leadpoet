@@ -328,3 +328,79 @@ async def create_receipt_event(
         "anchored_hash": canonical_hash(payload),
     }
     return await insert_row("research_loop_receipt_events", row)
+
+
+async def create_score_bundle(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    bundle = dict(request.score_bundle)
+    score_bundle_hash = str(bundle["score_bundle_hash"])
+    score_bundle_id = "score_bundle:" + score_bundle_hash.split(":", 1)[1]
+    existing = await select_one(
+        "research_evaluation_score_bundles",
+        filters=(("score_bundle_id", score_bundle_id),),
+    )
+    if existing:
+        event = await select_one(
+            "research_evaluation_score_bundle_events",
+            filters=(("score_bundle_id", score_bundle_id), ("seq", 0)),
+        )
+        if not event:
+            raise RuntimeError("existing Research Lab score bundle is missing its opening event")
+        return existing, event
+
+    row = {
+        "score_bundle_id": score_bundle_id,
+        "schema_version": "1.0",
+        "run_id": bundle["run_id"],
+        "ticket_id": bundle["ticket_id"],
+        "receipt_id": str(request.receipt_id) if request.receipt_id else None,
+        "miner_hotkey": bundle["miner_hotkey"],
+        "island": bundle["island"],
+        "evaluation_epoch": int(bundle["evaluation_epoch"]),
+        "bundle_status": request.bundle_status,
+        "parent_artifact_hash": bundle["parent_artifact_hash"],
+        "candidate_artifact_hash": bundle["candidate_artifact_hash"],
+        "private_model_manifest_hash": bundle["private_model_manifest_hash"],
+        "candidate_patch_hash": bundle["candidate_patch_hash"],
+        "icp_set_hash": bundle["icp_set_hash"],
+        "scoring_version": bundle["scoring_version"],
+        "evaluator_version": bundle["evaluator_version"],
+        "score_bundle_hash": score_bundle_hash,
+        "anchored_hash": bundle["anchored_hash"],
+        "signature_ref": bundle["signature_ref"],
+        "score_bundle_doc": bundle,
+    }
+    inserted = await insert_row("research_evaluation_score_bundles", row)
+    event = await create_score_bundle_event(
+        score_bundle_id=score_bundle_id,
+        event_type=request.bundle_status,
+        event_status=request.bundle_status,
+        reason="score_bundle_created",
+        event_doc={"score_bundle_hash": score_bundle_hash},
+    )
+    return inserted, event
+
+
+async def create_score_bundle_event(
+    *,
+    score_bundle_id: str,
+    event_type: str,
+    event_status: str,
+    reason: str,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_evaluation_score_bundle_events", "score_bundle_id", score_bundle_id)
+    payload = {
+        "score_bundle_id": score_bundle_id,
+        "seq": seq,
+        "event_type": event_type,
+        "event_status": event_status,
+        "reason": reason,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_evaluation_score_bundle_events", row)

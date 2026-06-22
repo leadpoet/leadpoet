@@ -30,6 +30,8 @@ from .models import (
     ResearchLabProbeRequest,
     ResearchLabReceiptCreateRequest,
     ResearchLabReceiptResponse,
+    ResearchLabScoreBundleCreateRequest,
+    ResearchLabScoreBundleResponse,
     ResearchLabTicketCreateRequest,
     ResearchLabTicketResponse,
 )
@@ -39,6 +41,7 @@ from .store import (
     create_loop_start_payment,
     create_queue_event,
     create_receipt,
+    create_score_bundle,
     create_ticket,
     create_ticket_event,
     payment_ref_exists,
@@ -242,6 +245,31 @@ async def create_research_lab_receipt(
     )
 
 
+@router.post("/evaluations/score-bundles", response_model=ResearchLabScoreBundleResponse)
+async def create_research_lab_score_bundle(
+    payload: ResearchLabScoreBundleCreateRequest,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
+    _require_enabled(config.evaluation_bundles_enabled, "Research Lab evaluation bundle writes are disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+
+    try:
+        bundle, event = await create_score_bundle(payload)
+    except Exception as exc:
+        _raise_storage_error(exc)
+
+    return ResearchLabScoreBundleResponse(
+        score_bundle_id=bundle["score_bundle_id"],
+        score_bundle_hash=bundle["score_bundle_hash"],
+        status=bundle["bundle_status"],
+        event_id=event["event_id"],
+        event_seq=int(event["seq"]),
+    )
+
+
 @router.get("/tickets/{ticket_id}")
 async def get_research_lab_ticket(ticket_id: str):
     config = ResearchLabGatewayConfig.from_env()
@@ -260,6 +288,37 @@ async def get_research_lab_receipt(receipt_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Research Lab receipt not found")
     return row
+
+
+@router.get("/evaluations/score-bundles/{score_bundle_id}")
+async def get_research_lab_score_bundle(score_bundle_id: str):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    row = await select_one("research_evaluation_score_bundle_current", filters=(("score_bundle_id", score_bundle_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="Research Lab evaluation score bundle not found")
+    return row
+
+
+@router.get("/evaluations/latest/{epoch}")
+async def get_research_lab_latest_evaluation_bundles(epoch: int):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    rows = await select_many(
+        "research_evaluation_score_bundle_current",
+        filters=(("evaluation_epoch", epoch),),
+        limit=1000,
+    )
+    return {
+        "schema_version": "1.0",
+        "bundle_type": "research_lab_evaluation_score_bundle_page",
+        "epoch": int(epoch),
+        "count": len(rows),
+        "score_bundles": rows,
+        "on_chain_submission_allowed": False,
+    }
 
 
 @router.get("/reports/shadow/{epoch}")

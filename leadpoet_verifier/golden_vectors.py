@@ -41,6 +41,12 @@ from .economics import (
     verify_reimbursement_schedule,
 )
 from .l0 import run_l0_checks
+from .research_evaluation import (
+    build_research_evaluation_score_bundle,
+    compute_evaluation_aggregates,
+    evaluate_improvement_gate,
+    verify_research_evaluation_score_bundle,
+)
 from .static_checks import run_static_gaming_checks
 
 
@@ -258,6 +264,29 @@ def run_golden_vectors(
                 active_researcher_floor_scores=case.get("active_researcher_floor_scores", {}),
                 policy=case.get("policy", {}),
             )
+        elif case["kind"] == "compute_evaluation_aggregates":
+            actual = compute_evaluation_aggregates(
+                case["per_icp_results"],
+                leads_per_icp_normalizer=case.get("leads_per_icp_normalizer", 5),
+                lcb_z=case.get("lcb_z", 1.96),
+            )
+        elif case["kind"] == "evaluate_improvement_gate":
+            aggregates = compute_evaluation_aggregates(
+                case["per_icp_results"],
+                leads_per_icp_normalizer=case.get("leads_per_icp_normalizer", 5),
+                lcb_z=case.get("lcb_z", 1.96),
+            )
+            actual = evaluate_improvement_gate(aggregates, case.get("policy", {}))
+        elif case["kind"] == "verify_research_evaluation_score_bundle":
+            bundle = build_research_evaluation_score_bundle(**case["bundle_inputs"])
+            actual = verify_research_evaluation_score_bundle(bundle, policy=case.get("policy", {}))
+            actual = {
+                "passed": actual["passed"],
+                "errors": actual["errors"],
+                "score_bundle_hash": actual["score_bundle_hash"],
+                "eligible_for_probation": actual["eligible_for_probation"],
+                "on_chain_submission_allowed": actual["on_chain_submission_allowed"],
+            }
         else:
             errors.append(f"research_lab {case['id']}: unknown kind {case['kind']}")
             continue

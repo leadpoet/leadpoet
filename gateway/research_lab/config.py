@@ -33,6 +33,7 @@ class ResearchLabGatewayConfig:
     probes_enabled: bool = False
     hosted_runs_enabled: bool = False
     receipts_enabled: bool = False
+    evaluation_bundles_enabled: bool = False
     reports_enabled: bool = False
     shadow_bundles_enabled: bool = False
     shadow_weights_enabled: bool = False
@@ -54,6 +55,7 @@ class ResearchLabGatewayConfig:
             probes_enabled=_truthy("RESEARCH_LAB_PROBES_ENABLED"),
             hosted_runs_enabled=_truthy("RESEARCH_LAB_HOSTED_RUNS_ENABLED"),
             receipts_enabled=_truthy("RESEARCH_LAB_RECEIPTS_ENABLED"),
+            evaluation_bundles_enabled=_truthy("RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED"),
             reports_enabled=_truthy("RESEARCH_LAB_REPORTS_ENABLED"),
             shadow_bundles_enabled=_truthy("RESEARCH_LAB_SHADOW_BUNDLES_ENABLED"),
             shadow_weights_enabled=_truthy("RESEARCH_LAB_SHADOW_WEIGHTS_ENABLED"),
@@ -86,6 +88,7 @@ class ResearchLabGatewayConfig:
             "probes_enabled": self.probes_enabled,
             "hosted_runs_enabled": self.hosted_runs_enabled,
             "receipts_enabled": self.receipts_enabled,
+            "evaluation_bundles_enabled": self.evaluation_bundles_enabled,
             "reports_enabled": self.reports_enabled,
             "shadow_flags": {
                 "RESEARCH_LAB_SHADOW_BUNDLES_ENABLED": self.shadow_bundles_enabled,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 import time
 from typing import Any, Optional
 from uuid import UUID
@@ -104,6 +106,31 @@ class ResearchLabReceiptCreateRequest(BaseModel):
         return self
 
 
+class ResearchLabScoreBundleCreateRequest(BaseModel):
+    bundle_status: str = Field(default="scored", pattern="^(scored|failed|rejected|tombstoned)$")
+    receipt_id: Optional[UUID] = None
+    score_bundle: dict[str, Any]
+
+    @model_validator(mode="after")
+    def valid_score_bundle_shape(self) -> "ResearchLabScoreBundleCreateRequest":
+        reject_secret_material(self.model_dump())
+        bundle = self.score_bundle
+        if bundle.get("bundle_type") != "research_lab_evaluation_score_bundle":
+            raise ValueError("score_bundle must be a Research Lab evaluation score bundle")
+        if bundle.get("schema_version") != "1.0":
+            raise ValueError("unsupported score bundle schema version")
+        if not bundle.get("signature_ref"):
+            raise ValueError("score bundle signature_ref is required")
+        if bundle.get("score_bundle_hash") != bundle.get("anchored_hash"):
+            raise ValueError("score_bundle_hash must match anchored_hash")
+        if bundle.get("score_bundle_hash") != _score_bundle_hash(bundle):
+            raise ValueError("score bundle hash mismatch")
+        reward_path = bundle.get("reward_path") or {}
+        if reward_path.get("eligible_for_crown") or reward_path.get("eligible_for_improvement_grant"):
+            raise ValueError("score bundle cannot directly create crown or improvement-grant eligibility")
+        return self
+
+
 class ResearchLabTicketResponse(BaseModel):
     ticket_id: str
     status: str
@@ -129,6 +156,14 @@ class ResearchLabReceiptResponse(BaseModel):
     status: str
 
 
+class ResearchLabScoreBundleResponse(BaseModel):
+    score_bundle_id: str
+    score_bundle_hash: str
+    status: str
+    event_id: str
+    event_seq: int
+
+
 def reject_secret_material(value: Any) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -142,3 +177,13 @@ def reject_secret_material(value: Any) -> None:
         lowered = value.lower()
         if any(marker in lowered for marker in SECRET_MARKERS):
             raise ValueError("raw provider secret material is not allowed")
+
+
+def _canonical_json(data: Any) -> str:
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
+def _score_bundle_hash(bundle: dict[str, Any]) -> str:
+    excluded = {"score_bundle_hash", "anchored_hash", "signature", "signature_ref"}
+    payload = {key: value for key, value in dict(bundle).items() if key not in excluded}
+    return "sha256:" + hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()

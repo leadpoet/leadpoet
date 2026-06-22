@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leadpoet.ai/schemas/research_evaluation_score_bundle.schema.json",
+  "title": "Leadpoet Research Lab Evaluation Score Bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "bundle_type",
+    "run_id",
+    "ticket_id",
+    "miner_hotkey",
+    "island",
+    "evaluation_epoch",
+    "parent_artifact_hash",
+    "candidate_artifact_hash",
+    "private_model_manifest_hash",
+    "candidate_patch_hash",
+    "icp_set_hash",
+    "scoring_version",
+    "evaluator_version",
+    "benchmark_split_ref",
+    "evidence_bundle_refs",
+    "execution_trace_ref",
+    "cost_ledger_ref",
+    "aggregates",
+    "improvement_gate",
+    "score_bundle_hash",
+    "anchored_hash",
+    "signature_ref",
+    "reward_path"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "bundle_type": { "const": "research_lab_evaluation_score_bundle" },
+    "run_id": { "type": "string", "format": "uuid" },
+    "ticket_id": { "type": "string", "format": "uuid" },
+    "miner_hotkey": { "type": "string", "minLength": 16 },
+    "island": { "type": "string", "minLength": 1 },
+    "evaluation_epoch": { "type": "integer", "minimum": 0 },
+    "parent_artifact_hash": { "$ref": "#/$defs/sha256" },
+    "candidate_artifact_hash": { "$ref": "#/$defs/sha256" },
+    "private_model_manifest_hash": { "$ref": "#/$defs/sha256" },
+    "candidate_patch_hash": { "$ref": "#/$defs/sha256" },
+    "icp_set_hash": { "$ref": "#/$defs/sha256" },
+    "scoring_version": { "type": "string", "minLength": 1 },
+    "evaluator_version": { "type": "string", "minLength": 1 },
+    "benchmark_split_ref": { "type": "string", "minLength": 1 },
+    "evidence_bundle_refs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "execution_trace_ref": { "type": "string", "minLength": 1 },
+    "cost_ledger_ref": { "type": "string", "minLength": 1 },
+    "aggregates": {
+      "type": "object",
+      "required": [
+        "icp_count",
+        "successful_icp_count",
+        "hard_failure_count",
+        "base_score",
+        "candidate_score",
+        "mean_delta",
+        "sd_delta",
+        "se_delta",
+        "delta_lcb",
+        "leads_per_icp_normalizer",
+        "lcb_z",
+        "per_icp_results"
+      ],
+      "properties": {
+        "icp_count": { "type": "integer", "minimum": 1 },
+        "successful_icp_count": { "type": "integer", "minimum": 0 },
+        "hard_failure_count": { "type": "integer", "minimum": 0 },
+        "base_score": { "type": "number", "minimum": 0 },
+        "candidate_score": { "type": "number", "minimum": 0 },
+        "mean_delta": { "type": "number" },
+        "sd_delta": { "type": "number", "minimum": 0 },
+        "se_delta": { "type": "number", "minimum": 0 },
+        "delta_lcb": { "type": "number" },
+        "total_cost_usd": { "type": "number", "minimum": 0 },
+        "leads_per_icp_normalizer": { "type": "integer", "minimum": 1 },
+        "lcb_z": { "type": "number", "minimum": 0 },
+        "per_icp_results": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/per_icp_result" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "improvement_gate": {
+      "type": "object",
+      "required": [
+        "decision",
+        "eligible_for_probation",
+        "blockers",
+        "policy"
+      ],
+      "properties": {
+        "decision": { "enum": ["eligible_for_probation", "not_eligible"] },
+        "eligible_for_probation": { "type": "boolean" },
+        "blockers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "policy": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "score_bundle_hash": { "$ref": "#/$defs/sha256" },
+    "anchored_hash": { "$ref": "#/$defs/sha256" },
+    "signature_ref": { "type": "string", "minLength": 1 },
+    "reward_path": {
+      "type": "object",
+      "required": [
+        "eligible_for_probation",
+        "eligible_for_crown",
+        "eligible_for_improvement_grant",
+        "reason"
+      ],
+      "properties": {
+        "eligible_for_probation": { "type": "boolean" },
+        "eligible_for_crown": { "type": "boolean" },
+        "eligible_for_improvement_grant": { "type": "boolean" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "per_icp_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "icp_ref",
+        "icp_hash",
+        "status",
+        "hard_failure",
+        "base_company_scores",
+        "candidate_company_scores",
+        "base_per_icp_score",
+        "candidate_per_icp_score",
+        "delta_vs_base",
+        "failure_reason"
+      ],
+      "properties": {
+        "icp_ref": { "type": "string" },
+        "icp_hash": { "$ref": "#/$defs/sha256" },
+        "status": { "type": "string" },
+        "hard_failure": { "type": "boolean" },
+        "base_company_scores": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0, "maximum": 100 }
+        },
+        "candidate_company_scores": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0, "maximum": 100 }
+        },
+        "base_per_icp_score": { "type": "number", "minimum": 0 },
+        "candidate_per_icp_score": { "type": "number", "minimum": 0 },
+        "delta_vs_base": { "type": "number" },
+        "failure_reason": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1644,6 +1644,200 @@
         },
         "weight_sum": 1000
       }
+    },
+    {
+      "id": "research_evaluation_aggregates",
+      "kind": "compute_evaluation_aggregates",
+      "per_icp_results": [
+        {
+          "icp_ref": "icp:a",
+          "icp_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "base_company_scores": [
+            80,
+            60
+          ],
+          "candidate_company_scores": [
+            90,
+            70
+          ]
+        },
+        {
+          "icp_ref": "icp:b",
+          "icp_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "base_company_scores": [
+            40
+          ],
+          "candidate_company_scores": [
+            70,
+            20
+          ]
+        },
+        {
+          "icp_ref": "icp:c",
+          "icp_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "base_company_scores": [
+            50,
+            0
+          ],
+          "candidate_company_scores": [
+            65,
+            5
+          ]
+        }
+      ],
+      "expected": {
+        "icp_count": 3,
+        "successful_icp_count": 3,
+        "hard_failure_count": 0,
+        "base_score": 15.333333,
+        "candidate_score": 21.333333,
+        "mean_delta": 6.0,
+        "sd_delta": 3.464102,
+        "se_delta": 2.0,
+        "delta_lcb": 2.08,
+        "leads_per_icp_normalizer": 5,
+        "lcb_z": 1.96,
+        "per_icp_results": [
+          {
+            "icp_ref": "icp:a",
+            "icp_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "status": "completed",
+            "hard_failure": false,
+            "base_company_scores": [
+              80.0,
+              60.0
+            ],
+            "candidate_company_scores": [
+              90.0,
+              70.0
+            ],
+            "base_per_icp_score": 28.0,
+            "candidate_per_icp_score": 32.0,
+            "delta_vs_base": 4.0,
+            "failure_reason": ""
+          },
+          {
+            "icp_ref": "icp:b",
+            "icp_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "status": "completed",
+            "hard_failure": false,
+            "base_company_scores": [
+              40.0
+            ],
+            "candidate_company_scores": [
+              70.0,
+              20.0
+            ],
+            "base_per_icp_score": 8.0,
+            "candidate_per_icp_score": 18.0,
+            "delta_vs_base": 10.0,
+            "failure_reason": ""
+          },
+          {
+            "icp_ref": "icp:c",
+            "icp_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "status": "completed",
+            "hard_failure": false,
+            "base_company_scores": [
+              50.0,
+              0.0
+            ],
+            "candidate_company_scores": [
+              65.0,
+              5.0
+            ],
+            "base_per_icp_score": 10.0,
+            "candidate_per_icp_score": 14.0,
+            "delta_vs_base": 4.0,
+            "failure_reason": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "research_evaluation_score_bundle_verifier",
+      "kind": "verify_research_evaluation_score_bundle",
+      "policy": {
+        "min_delta": 2.0,
+        "min_delta_lcb": 2.0,
+        "min_successful_icps": 3,
+        "max_hard_failures": 0,
+        "min_candidate_score": 15.0,
+        "observed_cost_usd": 1.25
+      },
+      "bundle_inputs": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "ticket_id": "22222222-2222-4222-8222-222222222222",
+        "miner_hotkey": "5FevalMiner111111111111111111111111111111111",
+        "island": "generalist",
+        "evaluation_epoch": 301,
+        "parent_artifact_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "candidate_artifact_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "private_model_manifest_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "candidate_patch_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "icp_set_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "scoring_version": "qualification-company-scorer:v1",
+        "evaluator_version": "research-lab-private-evaluator:v1",
+        "per_icp_results": [
+          {
+            "icp_ref": "icp:a",
+            "icp_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "base_company_scores": [
+              80,
+              60
+            ],
+            "candidate_company_scores": [
+              90,
+              70
+            ]
+          },
+          {
+            "icp_ref": "icp:b",
+            "icp_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "base_company_scores": [
+              40
+            ],
+            "candidate_company_scores": [
+              70,
+              20
+            ]
+          },
+          {
+            "icp_ref": "icp:c",
+            "icp_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "base_company_scores": [
+              50,
+              0
+            ],
+            "candidate_company_scores": [
+              65,
+              5
+            ]
+          }
+        ],
+        "evidence_bundle_refs": [
+          "evidence_bundle:sha256:6666666666666666666666666666666666666666666666666666666666666666"
+        ],
+        "execution_trace_ref": "execution_trace:11111111-1111-4111-8111-111111111111",
+        "cost_ledger_ref": "cost_ledger:sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "benchmark_split_ref": "sealed_benchmark:qualification:intent:v1",
+        "policy": {
+          "min_delta": 2.0,
+          "min_delta_lcb": 2.0,
+          "min_successful_icps": 3,
+          "max_hard_failures": 0,
+          "min_candidate_score": 15.0,
+          "observed_cost_usd": 1.25
+        },
+        "signature_ref": "kms-signature:research-lab-eval:test"
+      },
+      "expected": {
+        "passed": true,
+        "errors": [],
+        "score_bundle_hash": "sha256:779e35ca12253b2ffa2d1cb37e8a51277c2d162dc7be39d445e64b4e11844296",
+        "eligible_for_probation": true,
+        "on_chain_submission_allowed": false
+      }
     }
   ],
   "attestation_cases": [

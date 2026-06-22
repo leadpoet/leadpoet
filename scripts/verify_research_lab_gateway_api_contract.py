@@ -18,8 +18,10 @@ from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.models import (
     ResearchLabLoopStartRequest,
     ResearchLabReceiptCreateRequest,
+    ResearchLabScoreBundleCreateRequest,
     ResearchLabTicketCreateRequest,
 )
+from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle
 
 
 def main() -> int:
@@ -32,6 +34,8 @@ def main() -> int:
         errors.append("production writes must default disabled")
     if any(defaults.live_mutation_flags().values()):
         errors.append("live mutation flags must default false")
+    if defaults.evaluation_bundles_enabled:
+        errors.append("evaluation bundle writes must default disabled")
 
     paths = {route.path for route in router.routes}
     for required in {
@@ -42,6 +46,9 @@ def main() -> int:
         "/research-lab/receipts",
         "/research-lab/tickets/{ticket_id}",
         "/research-lab/receipts/{receipt_id}",
+        "/research-lab/evaluations/score-bundles",
+        "/research-lab/evaluations/score-bundles/{score_bundle_id}",
+        "/research-lab/evaluations/latest/{epoch}",
         "/research-lab/reports/shadow/{epoch}",
     }:
         if required not in paths:
@@ -136,6 +143,50 @@ def main() -> int:
             reimbursement_rows=[],
         )
         errors.append("shadow report accepted raw secret source state")
+    except ValueError:
+        pass
+
+    score_bundle = build_research_evaluation_score_bundle(
+        run_id="11111111-1111-4111-8111-111111111111",
+        ticket_id="11111111-1111-4111-8111-111111111111",
+        miner_hotkey=ticket.miner_hotkey,
+        island="generalist",
+        evaluation_epoch=123,
+        parent_artifact_hash="sha256:" + "1" * 64,
+        candidate_artifact_hash="sha256:" + "2" * 64,
+        private_model_manifest_hash="sha256:" + "3" * 64,
+        candidate_patch_hash="sha256:" + "4" * 64,
+        icp_set_hash="sha256:" + "5" * 64,
+        scoring_version="qualification-company-scorer:v1",
+        evaluator_version="research-lab-private-evaluator:v1",
+        per_icp_results=[
+            {
+                "icp_ref": "icp:a",
+                "icp_hash": "sha256:" + "a" * 64,
+                "base_company_scores": [80, 60],
+                "candidate_company_scores": [90, 70],
+            }
+        ],
+        evidence_bundle_refs=["evidence_bundle:sha256:" + "6" * 64],
+        execution_trace_ref="execution_trace:11111111-1111-4111-8111-111111111111",
+        cost_ledger_ref="cost_ledger:sha256:" + "7" * 64,
+        benchmark_split_ref="sealed_benchmark:qualification:intent:v1",
+        policy={
+            "min_delta": 2.0,
+            "min_delta_lcb": 2.0,
+            "min_successful_icps": 1,
+            "min_candidate_score": 15.0,
+            "observed_cost_usd": 1.25,
+        },
+        signature_ref="kms-signature:research-lab-eval:test",
+    )
+    score_request = ResearchLabScoreBundleCreateRequest(score_bundle=score_bundle)
+    reparsed_score_request = ResearchLabScoreBundleCreateRequest.model_validate(score_request.model_dump(mode="json"))
+    if reparsed_score_request != score_request:
+        errors.append("score-bundle request failed json round-trip")
+    try:
+        ResearchLabScoreBundleCreateRequest(score_bundle={**score_bundle, "signature_ref": ""})
+        errors.append("score-bundle request accepted missing signature_ref")
     except ValueError:
         pass
 

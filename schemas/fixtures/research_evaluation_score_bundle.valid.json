@@ -1,0 +1,78 @@
+{
+  "schema_version": "1.0",
+  "bundle_type": "research_lab_evaluation_score_bundle",
+  "run_id": "11111111-1111-4111-8111-111111111111",
+  "ticket_id": "22222222-2222-4222-8222-222222222222",
+  "miner_hotkey": "5FevalMiner111111111111111111111111111111111",
+  "island": "generalist",
+  "evaluation_epoch": 301,
+  "parent_artifact_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "candidate_artifact_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "private_model_manifest_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "candidate_patch_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  "icp_set_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "scoring_version": "qualification-company-scorer:v1",
+  "evaluator_version": "research-lab-private-evaluator:v1",
+  "benchmark_split_ref": "sealed_benchmark:qualification:intent:v1",
+  "evidence_bundle_refs": [
+    "evidence_bundle:sha256:6666666666666666666666666666666666666666666666666666666666666666"
+  ],
+  "execution_trace_ref": "execution_trace:11111111-1111-4111-8111-111111111111",
+  "cost_ledger_ref": "cost_ledger:sha256:7777777777777777777777777777777777777777777777777777777777777777",
+  "aggregates": {
+    "icp_count": 1,
+    "successful_icp_count": 1,
+    "hard_failure_count": 0,
+    "base_score": 28.0,
+    "candidate_score": 32.0,
+    "mean_delta": 4.0,
+    "sd_delta": 0.0,
+    "se_delta": 0.0,
+    "delta_lcb": 4.0,
+    "total_cost_usd": 1.25,
+    "leads_per_icp_normalizer": 5,
+    "lcb_z": 1.96,
+    "per_icp_results": [
+      {
+        "icp_ref": "icp:a",
+        "icp_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "completed",
+        "hard_failure": false,
+        "base_company_scores": [
+          80.0,
+          60.0
+        ],
+        "candidate_company_scores": [
+          90.0,
+          70.0
+        ],
+        "base_per_icp_score": 28.0,
+        "candidate_per_icp_score": 32.0,
+        "delta_vs_base": 4.0,
+        "failure_reason": ""
+      }
+    ]
+  },
+  "improvement_gate": {
+    "decision": "eligible_for_probation",
+    "eligible_for_probation": true,
+    "blockers": [],
+    "policy": {
+      "min_delta": 2.0,
+      "min_delta_lcb": 2.0,
+      "min_successful_icps": 1,
+      "max_hard_failures": 0,
+      "min_candidate_score": 15.0,
+      "max_cost_usd": null
+    }
+  },
+  "score_bundle_hash": "sha256:83c9dce71a6aa37361abd573a86b277d0def029f29fcaa7acd983c9be4ec9b51",
+  "anchored_hash": "sha256:83c9dce71a6aa37361abd573a86b277d0def029f29fcaa7acd983c9be4ec9b51",
+  "signature_ref": "kms-signature:research-lab-eval:test",
+  "reward_path": {
+    "eligible_for_probation": true,
+    "eligible_for_crown": false,
+    "eligible_for_improvement_grant": false,
+    "reason": "probation_gate_only; crown/grant require later gated workflow"
+  }
+}

@@ -3152,8 +3152,10 @@ class Validator(BaseValidatorNeuron):
         try:
             from research_lab.validator_integration import (
                 ResearchLabValidatorFlags,
+                fetch_research_lab_evaluation_bundle_page,
                 build_research_lab_weight_component,
                 fetch_research_lab_shadow_bundle,
+                verify_research_lab_evaluation_bundle_page,
                 verify_research_lab_shadow_bundle,
                 write_research_lab_validator_artifact,
             )
@@ -3209,11 +3211,41 @@ class Validator(BaseValidatorNeuron):
                 print("   ❌ Research Lab bundle is shadow-only; live Research Lab on-chain weights are not authorized")
                 return {"abort_chain_submission": True, "reason": "research_lab_shadow_only_not_submittable"}
 
+            evaluation_verification = None
+            if flags.evaluation_verify_enabled:
+                print(f"   Fetching Research Lab evaluation bundles for epoch {current_epoch}")
+                evaluation_page = await asyncio.to_thread(fetch_research_lab_evaluation_bundle_page, gateway_url, current_epoch)
+                evaluation_verification = verify_research_lab_evaluation_bundle_page(evaluation_page, flags=flags)
+                eval_artifact_path = write_research_lab_validator_artifact(
+                    output_dir=Path("validator_weights"),
+                    epoch=current_epoch,
+                    bundle=evaluation_page,
+                    verification=evaluation_verification,
+                    component={"verified_weight_inputs": evaluation_verification.get("verified_weight_inputs", [])},
+                    artifact_kind="evaluation",
+                )
+                print(f"   Research Lab evaluation artifact written: {eval_artifact_path}")
+                if not evaluation_verification.get("passed"):
+                    print(f"   ⚠️ Research Lab evaluation verification failed: {evaluation_verification.get('errors')}")
+                    if (
+                        flags.weight_mutation_enabled
+                        or flags.submit_on_chain_enabled
+                        or flags.require_evaluation_verification_before_submit
+                    ):
+                        print("   ❌ Aborting weights because Research Lab evaluation verification is required")
+                        return {"abort_chain_submission": True, "reason": "research_lab_evaluation_verification_failed"}
+                else:
+                    print(
+                        "   ✅ Research Lab evaluation bundles verified: "
+                        f"{evaluation_verification.get('verified_bundle_count')} bundle(s)"
+                    )
+
             return {
                 "abort_chain_submission": False,
                 "verified": True,
                 "component": component,
                 "weight_vector_hash": verification.get("weight_vector_hash"),
+                "evaluation_verification": evaluation_verification,
             }
         except Exception as exc:
             print(f"   ⚠️ Research Lab validator guard error: {exc}")

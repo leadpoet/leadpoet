@@ -42,7 +42,21 @@ CASES = [
     ),
     ("execution_trace.schema.json", "execution_trace.invalid_judge_prompt.json", False),
     ("evidence_bundle.schema.json", "evidence_bundle.invalid_page_content.json", False),
+    ("research_evaluation_score_bundle.schema.json", "research_evaluation_score_bundle.valid.json", True),
+    (
+        "research_evaluation_score_bundle.schema.json",
+        "research_evaluation_score_bundle.invalid_raw_secret.json",
+        False,
+    ),
 ]
+
+RAW_SECRET_MARKERS = (
+    "sk-or-",
+    "openrouter_api_key",
+    "raw_openrouter_key",
+    "raw_secret",
+    "service_role",
+)
 
 
 def load_json(path: Path) -> Any:
@@ -281,6 +295,8 @@ def main() -> int:
         schema = schemas[schema_name]
         fixture = load_json(FIXTURE_DIR / fixture_name)
         errors = backend.validate(schema, fixture)
+        if schema_name == "research_evaluation_score_bundle.schema.json" and contains_raw_secret_marker(fixture):
+            errors.append("score bundle fixture contains raw secret marker")
         passed = not errors
         if passed != should_pass:
             status = "passed" if passed else "failed"
@@ -295,6 +311,17 @@ def main() -> int:
 
     print(f"Research Lab schema fixtures verified with {backend.name}.")
     return 0
+
+
+def contains_raw_secret_marker(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(contains_raw_secret_marker(key) or contains_raw_secret_marker(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(contains_raw_secret_marker(item) for item in value)
+    if isinstance(value, str):
+        lowered = value.lower()
+        return any(marker in lowered for marker in RAW_SECRET_MARKERS)
+    return False
 
 
 if __name__ == "__main__":

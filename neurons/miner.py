@@ -2538,7 +2538,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     default_budget = float(worker_status.get("default_compute_budget_usd") or 5.0)
     min_budget = float(worker_status.get("min_compute_budget_usd") or 1.0)
     max_budget = float(worker_status.get("max_compute_budget_usd") or 100.0)
-    loop_fee = float(status.get("loop_start_fee_usd") or 5.0)
+    loop_fee = float(status.get("loop_start_fee_usd") or 0.2)
 
     print("Research Lab status:")
     ready = bool(status.get("api_enabled") and status.get("paid_loops_enabled") and status.get("hosted_runs_enabled"))
@@ -2622,7 +2622,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
             "brief_sanitized_ref": brief_sanitized_ref,
             "brief_public_summary": brief_public_summary,
             "requested_loop_count": requested_loop_count,
-            "loop_start_fee_required_usd": float(status.get("loop_start_fee_usd") or 5.0),
+            "loop_start_fee_required_usd": float(status.get("loop_start_fee_usd") or 0.2),
             "research_model_tier": research_model_tier,
             "requested_compute_budget_usd": requested_compute_budget_usd,
             "max_compute_budget_usd": max_compute_budget_usd,

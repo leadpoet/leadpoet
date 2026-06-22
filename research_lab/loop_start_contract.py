@@ -26,7 +26,7 @@ from .schema_validation import validate_schema_record
 SCHEMA_VERSION = "1.0"
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "loop_start_contract_fixtures.json"
 
-DEFAULT_LOOP_START_FEE_USD = Decimal("5.00")
+DEFAULT_LOOP_START_FEE_USD = Decimal("0.20")
 DEFAULT_PAYMENT_MAX_AGE_SECONDS = 86_400
 DEFAULT_AMOUNT_BUFFER_PERCENT = Decimal("0.01")
 USD_QUANT = Decimal("0.000001")

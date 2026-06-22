@@ -46,7 +46,7 @@ class ResearchLabTicketCreateRequest(SignedResearchLabRequest):
     brief_sanitized_ref: str = Field(min_length=8, max_length=256)
     brief_public_summary: Optional[str] = Field(default=None, max_length=2000)
     requested_loop_count: int = Field(default=1, gt=0, le=100)
-    loop_start_fee_required_usd: float = Field(default=5.0, ge=0)
+    loop_start_fee_required_usd: float = Field(default=0.2, ge=0)
     research_model_tier: str = Field(default="default", min_length=1, max_length=80, pattern=MODEL_TIER_RE)
     requested_compute_budget_usd: float = Field(default=5.0, ge=0)
     max_compute_budget_usd: float = Field(default=25.0, ge=0)

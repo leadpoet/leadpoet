@@ -71,6 +71,41 @@ class ResearchLabGatewayConfig:
     hosted_worker_queue_fetch_limit: int = 20
     hosted_worker_require_proxy: bool = False
     hosted_worker_proxy_url: str = ""
+    auto_research_min_seconds: int = 600
+    auto_research_max_seconds: int = 1800
+    auto_research_min_iterations: int = 2
+    auto_research_max_iterations: int = 12
+    auto_research_draft_timeout_seconds: int = 90
+    auto_research_reflection_timeout_seconds: int = 90
+    auto_research_estimated_iteration_cost_usd: float = 0.5
+    reimbursement_policy_id: str = "alpha-reimbursement-production-v1"
+    reimbursement_min_rebate_rate: float = 0.25
+    reimbursement_base_rebate_rate: float = 0.50
+    reimbursement_max_rebate_rate: float = 0.80
+    reimbursement_high_participation_target: float = 10.0
+    reimbursement_epochs: int = 20
+    reimbursement_max_usd_per_run: float = 100.0
+    reimbursement_max_usd_per_hotkey_day: float = 100.0
+    reimbursement_max_usd_per_island_day: float = 1000.0
+    reimbursement_global_budget_usd: float = 5000.0
+    reimbursement_material_spend_ratio: float = 0.80
+    reimbursement_default_island: str = "generalist"
+    reimbursement_usd_per_0_1_percent_epoch: float = 0.162
+    lab_emission_percent: float = 10.0
+    fulfillment_emission_percent: float = 80.5
+    fulfillment_leaderboard_emission_percent: float = 9.5
+    lab_reward_epochs: int = 20
+    lab_reimbursement_allow_overpay_without_champions: bool = True
+    lab_reimbursement_max_cost_multiplier_with_champions: float = 1.0
+    lab_reimbursement_min_alpha_percent: float = 0.0
+    lab_champion_min_alpha_percent: float = 2.0
+    lab_champion_extra_alpha_percent_per_point: float = 0.1
+    lab_champion_max_alpha_percent: float = 5.0
+    lab_champion_placeholder_alpha_percent: float = 0.0001
+    lab_champion_queue_trigger_ratio: float = 0.50
+    lab_champion_threshold_points: float = 2.0
+    lab_champion_eval_days: int = 10
+    lab_champion_icps_per_day: int = 5
     private_model_manifest_uri: str = (
         "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
     )
@@ -130,6 +165,98 @@ class ResearchLabGatewayConfig:
                 or _truthy("RESEARCH_LAB_HOSTED_WORKER_REQUIRE_PROXY")
             ),
             hosted_worker_proxy_url=os.getenv("RESEARCH_LAB_HOSTED_WORKER_PROXY", ""),
+            auto_research_min_seconds=max(0, _int("RESEARCH_LAB_AUTO_RESEARCH_MIN_SECONDS", 600)),
+            auto_research_max_seconds=max(1, _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_SECONDS", 1800)),
+            auto_research_min_iterations=max(1, _int("RESEARCH_LAB_AUTO_RESEARCH_MIN_ITERATIONS", 2)),
+            auto_research_max_iterations=max(1, _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_ITERATIONS", 12)),
+            auto_research_draft_timeout_seconds=max(
+                10,
+                _int("RESEARCH_LAB_AUTO_RESEARCH_DRAFT_TIMEOUT_SECONDS", 90),
+            ),
+            auto_research_reflection_timeout_seconds=max(
+                10,
+                _int("RESEARCH_LAB_AUTO_RESEARCH_REFLECTION_TIMEOUT_SECONDS", 90),
+            ),
+            auto_research_estimated_iteration_cost_usd=max(
+                0.01,
+                _float("RESEARCH_LAB_AUTO_RESEARCH_ESTIMATED_ITERATION_COST_USD", 0.5),
+            ),
+            reimbursement_policy_id=os.getenv(
+                "RESEARCH_LAB_REIMBURSEMENT_POLICY_ID",
+                "alpha-reimbursement-production-v1",
+            ),
+            reimbursement_min_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MIN_REBATE_RATE", 0.25)),
+            reimbursement_base_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_BASE_REBATE_RATE", 0.50)),
+            reimbursement_max_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MAX_REBATE_RATE", 0.80)),
+            reimbursement_high_participation_target=max(
+                0.01,
+                _float("RESEARCH_LAB_REIMBURSEMENT_HIGH_PARTICIPATION_TARGET", 10.0),
+            ),
+            reimbursement_epochs=max(
+                1,
+                _int(
+                    "RESEARCH_LAB_REIMBURSEMENT_EPOCHS",
+                    _int("RESEARCH_LAB_REWARD_EPOCHS", 20),
+                ),
+            ),
+            reimbursement_max_usd_per_run=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MAX_USD_PER_RUN", 100.0)),
+            reimbursement_max_usd_per_hotkey_day=max(
+                0.0,
+                _float("RESEARCH_LAB_REIMBURSEMENT_MAX_USD_PER_HOTKEY_DAY", 100.0),
+            ),
+            reimbursement_max_usd_per_island_day=max(
+                0.0,
+                _float("RESEARCH_LAB_REIMBURSEMENT_MAX_USD_PER_ISLAND_DAY", 1000.0),
+            ),
+            reimbursement_global_budget_usd=max(
+                0.0,
+                _float("RESEARCH_LAB_REIMBURSEMENT_GLOBAL_BUDGET_USD", 5000.0),
+            ),
+            reimbursement_material_spend_ratio=min(
+                1.0,
+                max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MATERIAL_SPEND_RATIO", 0.80)),
+            ),
+            reimbursement_default_island=os.getenv("RESEARCH_LAB_REIMBURSEMENT_DEFAULT_ISLAND", "generalist"),
+            reimbursement_usd_per_0_1_percent_epoch=max(
+                0.000001,
+                _float("RESEARCH_LAB_REIMBURSEMENT_USD_PER_0_1_PERCENT_EPOCH", 0.162),
+            ),
+            lab_emission_percent=max(0.0, _float("RESEARCH_LAB_EMISSION_PERCENT", 10.0)),
+            fulfillment_emission_percent=max(0.0, _float("RESEARCH_LAB_FULFILLMENT_EMISSION_PERCENT", 80.5)),
+            fulfillment_leaderboard_emission_percent=max(
+                0.0,
+                _float("RESEARCH_LAB_FULFILLMENT_LEADERBOARD_EMISSION_PERCENT", 9.5),
+            ),
+            lab_reward_epochs=max(1, _int("RESEARCH_LAB_REWARD_EPOCHS", 20)),
+            lab_reimbursement_allow_overpay_without_champions=_truthy(
+                "RESEARCH_LAB_REIMBURSEMENT_ALLOW_OVERPAY_WITHOUT_CHAMPIONS",
+                "true",
+            ),
+            lab_reimbursement_max_cost_multiplier_with_champions=max(
+                0.0,
+                _float("RESEARCH_LAB_REIMBURSEMENT_MAX_COST_MULTIPLIER_WITH_CHAMPIONS", 1.0),
+            ),
+            lab_reimbursement_min_alpha_percent=max(
+                0.0,
+                _float("RESEARCH_LAB_REIMBURSEMENT_MIN_ALPHA_PERCENT", 0.0),
+            ),
+            lab_champion_min_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MIN_ALPHA_PERCENT", 2.0)),
+            lab_champion_extra_alpha_percent_per_point=max(
+                0.0,
+                _float("RESEARCH_LAB_CHAMPION_EXTRA_ALPHA_PERCENT_PER_POINT", 0.1),
+            ),
+            lab_champion_max_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MAX_ALPHA_PERCENT", 5.0)),
+            lab_champion_placeholder_alpha_percent=max(
+                0.0,
+                _float("RESEARCH_LAB_CHAMPION_PLACEHOLDER_ALPHA_PERCENT", 0.0001),
+            ),
+            lab_champion_queue_trigger_ratio=min(
+                1.0,
+                max(0.0, _float("RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO", 0.50)),
+            ),
+            lab_champion_threshold_points=max(0.0, _float("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS", 2.0)),
+            lab_champion_eval_days=max(1, _int("RESEARCH_LAB_CHAMPION_EVAL_DAYS", 10)),
+            lab_champion_icps_per_day=max(1, _int("RESEARCH_LAB_CHAMPION_ICPS_PER_DAY", 5)),
             private_model_manifest_uri=os.getenv(
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
                 "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
@@ -234,6 +361,47 @@ class ResearchLabGatewayConfig:
             "RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED": self.fulfillment_mutation_enabled,
         }
 
+    def reimbursement_policy_doc(self, *, enabled: bool | None = None) -> dict[str, object]:
+        return {
+            "policy_id": self.reimbursement_policy_id,
+            "enabled": self.reimbursements_enabled if enabled is None else bool(enabled),
+            "min_rebate_rate": self.reimbursement_min_rebate_rate,
+            "base_rebate_rate": self.reimbursement_base_rebate_rate,
+            "max_rebate_rate": self.reimbursement_max_rebate_rate,
+            "high_participation_target": self.reimbursement_high_participation_target,
+            "reimbursement_epochs": self.reimbursement_epochs,
+            "max_usd_per_run": self.reimbursement_max_usd_per_run,
+            "max_usd_per_hotkey_day": self.reimbursement_max_usd_per_hotkey_day,
+            "max_usd_per_island_day": self.reimbursement_max_usd_per_island_day,
+            "global_budget_usd": self.reimbursement_global_budget_usd,
+            "include_loop_start_fee_in_base": False,
+            "material_spend_ratio": self.reimbursement_material_spend_ratio,
+            "default_island": self.reimbursement_default_island,
+            "usd_per_0_1_percent_epoch": self.reimbursement_usd_per_0_1_percent_epoch,
+            "distinct_funded_hotkey_weight": 1,
+            "paid_loop_weight": 1,
+            "unique_brief_weight": 1,
+            "research_lab_emission_percent": self.lab_emission_percent,
+            "fulfillment_emission_percent": self.fulfillment_emission_percent,
+            "fulfillment_leaderboard_emission_percent": self.fulfillment_leaderboard_emission_percent,
+            "reward_epochs": self.lab_reward_epochs,
+            "reimbursement_allow_overpay_without_champions": (
+                self.lab_reimbursement_allow_overpay_without_champions
+            ),
+            "reimbursement_max_cost_multiplier_with_champions": (
+                self.lab_reimbursement_max_cost_multiplier_with_champions
+            ),
+            "reimbursement_min_alpha_percent": self.lab_reimbursement_min_alpha_percent,
+            "champion_min_alpha_percent": self.lab_champion_min_alpha_percent,
+            "champion_extra_alpha_percent_per_point": self.lab_champion_extra_alpha_percent_per_point,
+            "champion_max_alpha_percent": self.lab_champion_max_alpha_percent,
+            "champion_placeholder_alpha_percent": self.lab_champion_placeholder_alpha_percent,
+            "champion_queue_trigger_ratio": self.lab_champion_queue_trigger_ratio,
+            "champion_threshold_points": self.lab_champion_threshold_points,
+            "champion_eval_days": self.lab_champion_eval_days,
+            "champion_icps_per_day": self.lab_champion_icps_per_day,
+        }
+
     def public_status(self) -> dict[str, object]:
         return {
             "api_enabled": self.api_enabled,
@@ -253,6 +421,33 @@ class ResearchLabGatewayConfig:
             "loop_start_fee_usd": self.loop_start_fee_usd,
             "miner_openrouter_key_required": self.miner_openrouter_key_required,
             "openrouter_key_registration_enabled": bool(self.openrouter_key_kms_key_id),
+            "reimbursement": {
+                "enabled": self.reimbursements_enabled,
+                "shadow_enabled": self.shadow_reimbursements_enabled,
+                "policy_id": self.reimbursement_policy_id,
+                "default_island": self.reimbursement_default_island,
+                "min_rebate_rate": self.reimbursement_min_rebate_rate,
+                "base_rebate_rate": self.reimbursement_base_rebate_rate,
+                "max_rebate_rate": self.reimbursement_max_rebate_rate,
+                "default_rebate_rate_estimate": self.reimbursement_base_rebate_rate,
+                "reimbursement_epochs": self.reimbursement_epochs,
+                "material_spend_ratio": self.reimbursement_material_spend_ratio,
+                "usd_per_0_1_percent_epoch": self.reimbursement_usd_per_0_1_percent_epoch,
+                "loop_start_fee_included": False,
+                "lab_emission_percent": self.lab_emission_percent,
+                "fulfillment_emission_percent": self.fulfillment_emission_percent,
+                "fulfillment_leaderboard_emission_percent": self.fulfillment_leaderboard_emission_percent,
+                "reward_epochs": self.lab_reward_epochs,
+                "allow_overpay_without_champions": self.lab_reimbursement_allow_overpay_without_champions,
+                "max_cost_multiplier_with_champions": self.lab_reimbursement_max_cost_multiplier_with_champions,
+                "champion_min_alpha_percent": self.lab_champion_min_alpha_percent,
+                "champion_extra_alpha_percent_per_point": self.lab_champion_extra_alpha_percent_per_point,
+                "champion_max_alpha_percent": self.lab_champion_max_alpha_percent,
+                "champion_placeholder_alpha_percent": self.lab_champion_placeholder_alpha_percent,
+                "champion_threshold_points": self.lab_champion_threshold_points,
+                "champion_eval_days": self.lab_champion_eval_days,
+                "champion_icps_per_day": self.lab_champion_icps_per_day,
+            },
             "hosted_worker": {
                 "enabled": self.hosted_worker_enabled,
                 "dry_run": self.hosted_worker_dry_run,
@@ -264,6 +459,13 @@ class ResearchLabGatewayConfig:
                 "queue_fetch_limit": self.hosted_worker_queue_fetch_limit,
                 "require_proxy": self.hosted_worker_require_proxy,
                 "worker_proxy_configured": bool(self.hosted_worker_proxy_url),
+                "auto_research_min_seconds": self.auto_research_min_seconds,
+                "auto_research_max_seconds": self.auto_research_max_seconds,
+                "auto_research_min_iterations": self.auto_research_min_iterations,
+                "auto_research_max_iterations": self.auto_research_max_iterations,
+                "auto_research_draft_timeout_seconds": self.auto_research_draft_timeout_seconds,
+                "auto_research_reflection_timeout_seconds": self.auto_research_reflection_timeout_seconds,
+                "auto_research_estimated_iteration_cost_usd": self.auto_research_estimated_iteration_cost_usd,
                 "private_model_manifest_uri_configured": bool(self.private_model_manifest_uri),
                 "scoring_owner": "validator_qualification_workers",
                 "auto_research_model_configured": bool(self.auto_research_model),

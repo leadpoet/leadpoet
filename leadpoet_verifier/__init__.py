@@ -54,6 +54,8 @@ from .crowning import (
     simulate_sequential_crown_probability,
 )
 from .economics import (
+    allocate_research_lab_epoch,
+    build_champion_reward_obligation,
     build_improvement_grant_schedule,
     build_reimbursement_schedule,
     compose_final_weight_vector,
@@ -106,6 +108,7 @@ __all__ = [
     "SCORE_BUNDLE_TYPE",
     "STUDENT_T_ONE_SIDED_95_BY_N",
     "aggregate_set_score",
+    "allocate_research_lab_epoch",
     "apply_signal_time_decay",
     "attacker_expected_value",
     "boundary_for_look",
@@ -115,6 +118,7 @@ __all__ = [
     "check_date_precision",
     "check_grant_curve_shape",
     "company_final_score",
+    "build_champion_reward_obligation",
     "build_improvement_grant_schedule",
     "build_research_evaluation_score_bundle",
     "build_reimbursement_schedule",

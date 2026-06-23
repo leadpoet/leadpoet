@@ -158,6 +158,10 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 256
+        },
+        "usd_per_0_1_percent_epoch": {
+          "type": "number",
+          "exclusiveMinimum": 0
         }
       },
       "additionalProperties": false
@@ -227,6 +231,14 @@
               },
               "amount_usd": {
                 "type": "number",
+                "minimum": 0
+              },
+              "alpha_percent": {
+                "type": "number",
+                "minimum": 0
+              },
+              "alpha_share_ppm": {
+                "type": "integer",
                 "minimum": 0
               }
             },

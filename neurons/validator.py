@@ -364,16 +364,28 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" a
 # ════════════════════════════════════════════════════════════════════════════
 # DEDICATED QUALIFICATION CONTAINERS CONFIGURATION
 # ════════════════════════════════════════════════════════════════════════════
-# 5 containers dedicated ONLY to qualification model evaluation.
+# Dedicated containers used for validator-side Research Lab candidate scoring.
 # These run PARALLEL to sourcing (not after).
-# Set via QUALIFICATION_WEBSHARE_PROXY_1 through QUALIFICATION_WEBSHARE_PROXY_5
+# Set via QUALIFICATION_WEBSHARE_PROXY_N. Worker count is detected dynamically
+# from configured proxy env vars; QUALIFICATION_CONTAINERS_COUNT is only a
+# backwards-compatible default for old local commands.
 # ════════════════════════════════════════════════════════════════════════════
 
-QUALIFICATION_CONTAINERS_COUNT = 5  # 5 dedicated qualification containers
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+QUALIFICATION_CONTAINERS_COUNT = _positive_int_env("QUALIFICATION_CONTAINERS_COUNT", 5)
 QUALIFICATION_MODELS_PER_CONTAINER = 1  # Each container handles 1 model per evaluation cycle
-QUALIFICATION_MAX_MODELS_PER_EPOCH = QUALIFICATION_CONTAINERS_COUNT * QUALIFICATION_MODELS_PER_CONTAINER  # 5 models
-QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK = (QUALIFICATION_CONTAINERS_COUNT - 1) * QUALIFICATION_MODELS_PER_CONTAINER  # 4 models (1 container does rebenchmark)
+QUALIFICATION_MAX_MODELS_PER_EPOCH = QUALIFICATION_CONTAINERS_COUNT * QUALIFICATION_MODELS_PER_CONTAINER
+QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK = (QUALIFICATION_CONTAINERS_COUNT - 1) * QUALIFICATION_MODELS_PER_CONTAINER
 QUALIFICATION_EVAL_EPOCH_WINDOW = 3  # Models get 3 full epochs (~216 min) to complete 100-ICP evaluation before forced cutoff
+QUALIFICATION_PROXY_PLACEHOLDER = "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80"
+QUALIFICATION_PROXY_ENV_RE = re.compile(r"^QUALIFICATION_WEBSHARE_PROXY_(\d+)$")
+QUALIFICATION_WORK_FILE_RE = re.compile(r"^qual_worker_(\d+)_work_(\d+)$")
 
 _TRUTHY_ENV_VALUES = {"true", "1", "yes", "y", "on"}
 
@@ -408,12 +420,45 @@ def detect_fulfillment_proxies():
 def detect_qualification_proxies():
     """Detect QUALIFICATION_WEBSHARE_PROXY_* environment variables."""
     proxies_found = []
-    for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
-        proxy_var = f"QUALIFICATION_WEBSHARE_PROXY_{i}"
-        proxy_value = os.getenv(proxy_var)
-        if proxy_value and proxy_value != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80":
-            proxies_found.append((proxy_var, proxy_value))
-    return proxies_found
+    for proxy_var, proxy_value in os.environ.items():
+        match = QUALIFICATION_PROXY_ENV_RE.match(proxy_var)
+        if not match:
+            continue
+        worker_id = int(match.group(1))
+        if worker_id <= 0:
+            continue
+        if proxy_value and proxy_value != QUALIFICATION_PROXY_PLACEHOLDER:
+            proxies_found.append((worker_id, proxy_var, proxy_value))
+    proxies_found.sort(key=lambda item: item[0])
+    return [(proxy_var, proxy_value) for _worker_id, proxy_var, proxy_value in proxies_found]
+
+
+def detect_qualification_worker_ids() -> List[int]:
+    """Return configured qualification worker IDs from QUALIFICATION_WEBSHARE_PROXY_N."""
+    worker_ids = []
+    for proxy_var, _proxy_value in detect_qualification_proxies():
+        match = QUALIFICATION_PROXY_ENV_RE.match(proxy_var)
+        if match:
+            worker_ids.append(int(match.group(1)))
+    return sorted(set(worker_ids))
+
+
+def qualification_worker_capacity(extra_worker_id: Optional[int] = None) -> int:
+    """Best-effort worker count for logs/config; assignment uses explicit IDs."""
+    worker_ids = detect_qualification_worker_ids()
+    max_worker_id = max(worker_ids, default=0)
+    if extra_worker_id:
+        max_worker_id = max(max_worker_id, int(extra_worker_id))
+    if max_worker_id:
+        return max(max_worker_id, 1)
+    return max(QUALIFICATION_CONTAINERS_COUNT, 1)
+
+
+def qualification_worker_id_from_work_file(path: Path) -> Optional[int]:
+    match = QUALIFICATION_WORK_FILE_RE.match(path.stem)
+    if not match:
+        return None
+    return int(match.group(1))
 
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -679,6 +724,18 @@ def _normalize_icp_dict_for_prompt(icp_data: dict) -> dict:
     if "sub_industry" in out:
         out["sub_industry"] = ", ".join(_coerce_industry_list(out.get("sub_industry"))) or ""
     return out
+
+
+def _normalize_research_lab_sha256_ref(value: Any, *, fallback: Any = None, field_name: str = "hash") -> str:
+    """Normalize Research Lab hash refs to the verifier-required sha256:<hex> shape."""
+    text = str(value or "").strip().lower()
+    if not text and fallback is not None:
+        text = str(fallback or "").strip().lower()
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", text):
+        return text
+    if re.fullmatch(r"[0-9a-f]{64}", text):
+        return f"sha256:{text}"
+    raise ValueError(f"{field_name}_must_be_sha256")
 
 
 class Validator(BaseValidatorNeuron):
@@ -5103,11 +5160,8 @@ class Validator(BaseValidatorNeuron):
             for check_epoch in range(current_epoch, current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW - 1, -1):
                 if check_epoch < 0:
                     break
-                for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
-                    work_file = weights_dir / f"qual_worker_{i}_work_{check_epoch}.json"
-                    if work_file.exists():
-                        active_work_epoch = check_epoch
-                        break
+                if any(weights_dir.glob(f"qual_worker_*_work_{check_epoch}.json")):
+                    active_work_epoch = check_epoch
                 if active_work_epoch is not None:
                     break
             
@@ -5155,14 +5209,16 @@ class Validator(BaseValidatorNeuron):
                     if should_log:
                         pending_workers = []
                         completed_workers = []
-                        for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
-                            work_file = weights_dir / f"qual_worker_{i}_work_{active_work_epoch}.json"
-                            results_file = weights_dir / f"qual_worker_{i}_results_{active_work_epoch}.json"
+                        for work_file in sorted(weights_dir.glob(f"qual_worker_*_work_{active_work_epoch}.json")):
+                            worker_id = qualification_worker_id_from_work_file(work_file)
+                            if worker_id is None:
+                                continue
+                            results_file = weights_dir / f"qual_worker_{worker_id}_results_{active_work_epoch}.json"
                             if work_file.exists():
                                 if results_file.exists():
-                                    completed_workers.append(i)
+                                    completed_workers.append(worker_id)
                                 else:
-                                    pending_workers.append(i)
+                                    pending_workers.append(worker_id)
                         
                         if pending_workers:
                             remaining_epochs = QUALIFICATION_EVAL_EPOCH_WINDOW - epochs_since_assignment
@@ -5211,13 +5267,13 @@ class Validator(BaseValidatorNeuron):
         # DEDICATED QUALIFICATION WORKERS REQUIRED
         # ═══════════════════════════════════════════════════════════════════
         # Qualification now runs PARALLEL to sourcing via dedicated workers.
-        # Set QUALIFICATION_WEBSHARE_PROXY_1 through QUALIFICATION_WEBSHARE_PROXY_5
-        # to enable dedicated qualification containers.
+        # Set QUALIFICATION_WEBSHARE_PROXY_N values to enable dedicated
+        # qualification workers.
         # ═══════════════════════════════════════════════════════════════════
         if not hasattr(self, '_qual_no_dedicated_workers_logged'):
             self._qual_no_dedicated_workers_logged = True
             print(f"⚠️ QUALIFICATION: No dedicated workers detected")
-            print(f"   Set QUALIFICATION_WEBSHARE_PROXY_1 through QUALIFICATION_WEBSHARE_PROXY_5")
+            print(f"   Set QUALIFICATION_WEBSHARE_PROXY_N values")
             print(f"   to enable parallel qualification model evaluation")
         return
     
@@ -7051,6 +7107,67 @@ class Validator(BaseValidatorNeuron):
             f"candidate={candidate_id}, status={candidate_status}"
         )
 
+    async def _notify_gateway_research_lab_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        candidate_status: str,
+        evaluation_epoch: int,
+        qual_worker_id: int,
+        reason: str,
+    ) -> bool:
+        """
+        Submit non-terminal Research Lab candidate lifecycle status.
+
+        The gateway marks candidates `assigned` while preparing a batch. Once
+        the coordinator writes a local worker file, this callback confirms the
+        validator actually handed the candidate to a worker by marking it
+        `evaluating`. That lets the gateway quickly reset orphaned `assigned`
+        claims caused by HTTP client timeouts without resetting real work.
+        """
+        import httpx
+
+        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
+        internal_key = os.environ.get("RESEARCH_LAB_INTERNAL_API_KEY", "")
+        if not internal_key:
+            bt.logging.warning(
+                "RESEARCH_LAB_INTERNAL_API_KEY is required to submit Research Lab candidate status"
+            )
+            return False
+
+        payload = {
+            "candidate_id": candidate_id,
+            "candidate_status": candidate_status,
+            "evaluator_ref": f"validator:{self.wallet.hotkey.ss58_address}:qual_worker:{qual_worker_id}",
+            "reason": reason,
+            "result_doc": {
+                "schema_version": "1.0",
+                "work_kind": "research_lab_candidate",
+                "qual_worker_id": qual_worker_id,
+                "evaluation_epoch": evaluation_epoch,
+            },
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{gateway_url}/research-lab/evaluations/candidate-results",
+                    json=payload,
+                    headers={"x-leadpoet-internal-key": internal_key},
+                )
+                response.raise_for_status()
+                bt.logging.info(
+                    f"✅ Submitted Research Lab candidate status: "
+                    f"candidate={candidate_id[-12:]}, status={candidate_status}"
+                )
+                return True
+        except Exception as exc:
+            bt.logging.warning(
+                f"Research Lab candidate status submission failed: "
+                f"candidate={candidate_id[-12:]}, status={candidate_status}, "
+                f"{type(exc).__name__}: {exc or '(empty - likely timeout)'}"
+            )
+            return False
+
     # ═══════════════════════════════════════════════════════════════════════════
     # DEDICATED VALIDATOR EVALUATION WORKERS: Assignment at Epoch Start
     # ═══════════════════════════════════════════════════════════════════════════
@@ -7081,13 +7198,7 @@ class Validator(BaseValidatorNeuron):
             print(f"   ℹ️ Already assigned qualification work for epoch {current_epoch}")
             return True
 
-        configured_worker_ids = []
-        for proxy_var, _proxy in detect_qualification_proxies():
-            try:
-                configured_worker_ids.append(int(proxy_var.rsplit("_", 1)[1]))
-            except Exception:
-                pass
-        configured_worker_ids = sorted(set(configured_worker_ids))
+        configured_worker_ids = detect_qualification_worker_ids()
         if not configured_worker_ids:
             print("   ⚠️ No configured qualification workers found")
             return False
@@ -7485,6 +7596,20 @@ class Validator(BaseValidatorNeuron):
                     "is_rebenchmark_container": assignment["is_rebenchmark_container"],
                     "assigned_at": time.time()
                 }, f, indent=2)
+
+            for model in assignment["models"]:
+                if model.get("work_kind") != "research_lab_candidate":
+                    continue
+                candidate_id = model.get("candidate_id") or model.get("model_id")
+                if not candidate_id:
+                    continue
+                await self._notify_gateway_research_lab_candidate_status(
+                    candidate_id=str(candidate_id),
+                    candidate_status="evaluating",
+                    evaluation_epoch=current_epoch,
+                    qual_worker_id=worker_id,
+                    reason="validator_worker_file_written",
+                )
             
             num_models = len(assignment["models"])
             rebench_str = " (REBENCHMARK)" if assignment["is_rebenchmark_container"] else ""
@@ -7522,10 +7647,10 @@ class Validator(BaseValidatorNeuron):
         
         # Check which workers have work assigned for current epoch
         expected_workers = set()
-        for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
-            work_file = weights_dir / f"qual_worker_{i}_work_{current_epoch}.json"
-            if work_file.exists():
-                expected_workers.add(i)
+        for work_file in sorted(weights_dir.glob(f"qual_worker_*_work_{current_epoch}.json")):
+            worker_id = qualification_worker_id_from_work_file(work_file)
+            if worker_id is not None:
+                expected_workers.add(worker_id)
         
         # Also collect uncollected results from recent epochs (workers may have
         # finished a previous epoch's work after the coordinator moved on).
@@ -9502,10 +9627,15 @@ def run_dedicated_qualification_worker(config):
                     })
                     item_refs.append(icp_ref)
 
-                icp_set_hash = str(model.get("icp_set_hash") or sha256_json([
+                fallback_icp_set_hash = sha256_json([
                     {"icp_ref": item["icp_ref"], "icp_hash": item["icp_hash"]}
                     for item in benchmark_items
-                ]))
+                ])
+                icp_set_hash = _normalize_research_lab_sha256_ref(
+                    model.get("icp_set_hash"),
+                    fallback=fallback_icp_set_hash,
+                    field_name="icp_set_hash",
+                )
                 benchmark = SealedBenchmarkSet(
                     benchmark_id="supabase:qualification_private_icp_sets:active",
                     icp_set_hash=icp_set_hash,
@@ -10781,7 +10911,9 @@ def main():
         config = bt.Config()
         config.neuron = bt.Config()
         config.neuron.qualification_container_id = getattr(args, 'container_id', 1)
-        config.neuron.total_qualification_containers = QUALIFICATION_CONTAINERS_COUNT
+        config.neuron.total_qualification_containers = qualification_worker_capacity(
+            config.neuron.qualification_container_id
+        )
         config.neuron.mode = "qualification_worker"
         
         # Run dedicated qualification worker loop

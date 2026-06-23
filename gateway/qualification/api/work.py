@@ -16,6 +16,7 @@ import os
 import json
 import base64
 import logging
+import re
 from uuid import UUID, uuid4
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
@@ -42,6 +43,22 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_optional_sha256_ref(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", text):
+        return text
+    if re.fullmatch(r"[0-9a-f]{64}", text):
+        return f"sha256:{text}"
+    return text
 
 # =============================================================================
 # Champion Selection Constants
@@ -1237,23 +1254,49 @@ async def _reset_stale_evaluations() -> None:
 async def _reset_stale_research_lab_candidates() -> None:
     """
     Append queued reset events for Research Lab candidate evaluations that were
-    assigned but not completed by a validator worker within the same timeout
-    window used for public qualification models.
+    claimed but not completed by a validator worker.
+
+    `assigned` is only a short gateway claim. The validator confirms real
+    worker handoff by appending `evaluating` after it writes the local worker
+    file. If the HTTP response times out before that handoff, `assigned`
+    candidates must return to the queue quickly. `evaluating` candidates keep
+    the longer model-evaluation timeout.
     """
     try:
         from gateway.db.client import get_write_client
         from gateway.research_lab.store import create_candidate_evaluation_event
 
         supabase = get_write_client()
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=CONFIG.TOTAL_EVALUATION_TIMEOUT_MINUTES)).isoformat()
-        result = supabase.table("research_lab_candidate_evaluation_current").select(
-            "candidate_id, run_id, ticket_id, current_candidate_status, current_status_at"
-        ).in_(
-            "current_candidate_status", ["assigned", "evaluating"]
-        ).lt(
-            "current_status_at", cutoff
-        ).limit(100).execute()
-        rows = result.data or []
+        now = datetime.now(timezone.utc)
+        assigned_timeout_seconds = _env_int(
+            "RESEARCH_LAB_ASSIGNMENT_ACK_TIMEOUT_SECONDS",
+            120,
+            minimum=30,
+        )
+        reset_specs = [
+            (
+                "assigned",
+                (now - timedelta(seconds=assigned_timeout_seconds)).isoformat(),
+                "validator_assignment_ack_timeout_reset",
+            ),
+            (
+                "evaluating",
+                (now - timedelta(minutes=CONFIG.TOTAL_EVALUATION_TIMEOUT_MINUTES)).isoformat(),
+                "validator_evaluation_stale_reset",
+            ),
+        ]
+        rows: list[dict[str, Any]] = []
+        for status, cutoff, reason in reset_specs:
+            result = supabase.table("research_lab_candidate_evaluation_current").select(
+                "candidate_id, run_id, ticket_id, current_candidate_status, current_status_at"
+            ).eq(
+                "current_candidate_status", status
+            ).lt(
+                "current_status_at", cutoff
+            ).limit(100).execute()
+            for row in result.data or []:
+                row["_reset_reason"] = reason
+                rows.append(row)
         for row in rows:
             await create_candidate_evaluation_event(
                 candidate_id=str(row["candidate_id"]),
@@ -1261,7 +1304,7 @@ async def _reset_stale_research_lab_candidates() -> None:
                 ticket_id=str(row["ticket_id"]),
                 event_type="queued",
                 candidate_status="queued",
-                reason="validator_assignment_stale_reset",
+                reason=str(row["_reset_reason"]),
                 event_doc={"previous_status": row.get("current_candidate_status")},
             )
         if rows:
@@ -1446,7 +1489,7 @@ async def prepare_research_lab_candidate_work_item(
             "island": candidate.get("island", "generalist"),
             "agent_code": "",
             "evaluation_runs": evaluation_runs,
-            "icp_set_hash": icp_set_hash,
+            "icp_set_hash": _normalize_optional_sha256_ref(icp_set_hash),
             "queued_at": candidate.get("current_status_at", candidate.get("created_at", datetime.now(timezone.utc).isoformat())),
             "private_model_manifest": candidate.get("private_model_manifest_doc") or {},
             "candidate_patch_manifest": candidate.get("candidate_patch_manifest") or {},

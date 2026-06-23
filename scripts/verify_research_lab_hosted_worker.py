@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import sys
 
@@ -13,6 +14,12 @@ if str(ROOT) not in sys.path:
 
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle  # noqa: E402
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
+from gateway.research_lab.loop_engine import (  # noqa: E402
+    AutoResearchLoopEngine,
+    AutoResearchLoopEvent,
+    AutoResearchLoopSettings,
+    OpenRouterCallResult,
+)
 from gateway.research_lab.worker import (  # noqa: E402
     HostedResearchLabWorkerError,
     ResearchLabHostedWorker,
@@ -138,6 +145,7 @@ def main() -> int:
         errors.append("worker accepted missing proxy while proxy enforcement was enabled")
     except HostedResearchLabWorkerError:
         pass
+    errors.extend(asyncio.run(_verify_auto_research_loop_engine(artifact, registry)))
 
     if errors:
         for error in errors:
@@ -148,6 +156,80 @@ def main() -> int:
         "validator scored-bundle filtering, worker partitioning, claim-race detection, no gateway benchmark path."
     )
     return 0
+
+
+async def _verify_auto_research_loop_engine(artifact: PrivateModelArtifactManifest, registry) -> list[str]:
+    errors: list[str] = []
+    events: list[AutoResearchLoopEvent] = []
+    calls: list[dict[str, object]] = []
+
+    async def _call_model(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
+        calls.append({"timeout_seconds": timeout_seconds, "max_tokens": max_tokens, "message_count": len(messages)})
+        if max_tokens <= 700:
+            return OpenRouterCallResult(
+                content='{"worked":"kept valid typed patches","failed":"none","why":"contract validation passed","next_question":"try one narrower variant","decision":"continue"}',
+                provider_usage={"provider": "openrouter", "response_id": f"reflection-{len(calls)}", "cost_microusd": 100000},
+                cost_microusd=100000,
+            )
+        return OpenRouterCallResult(
+            content=_candidate_response(),
+            provider_usage={"provider": "openrouter", "response_id": f"draft-{len(calls)}", "cost_microusd": 400000},
+            cost_microusd=400000,
+        )
+
+    async def _event_sink(event: AutoResearchLoopEvent) -> None:
+        events.append(event)
+
+    result = await AutoResearchLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=5,
+            min_iterations=2,
+            max_iterations=2,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.5,
+            max_candidates=2,
+        ),
+        call_openrouter=_call_model,
+        event_sink=_event_sink,
+    ).run(
+        run_id="11111111-1111-4111-8111-111111111111",
+        ticket={
+            "ticket_id": "22222222-2222-4222-8222-222222222222",
+            "miner_hotkey": "5FminerHotkey111",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief_sanitized:sha256:abc123",
+            "ticket_doc": {"brief_public_summary": "benchmark-wide improvement"},
+            "requested_loop_count": 2,
+        },
+        artifact=artifact,
+        component_registry=registry,
+        benchmark_public_summary={"item_count": "validator_resolved"},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=2,
+        miner_brief_ref="brief_sanitized:sha256:abc123",
+    )
+
+    event_types = [event.event_type for event in events]
+    if result.iterations_completed != 2:
+        errors.append("auto-research loop engine did not honor requested multi-iteration count")
+    if len(calls) < 4:
+        errors.append("auto-research loop engine did not make draft and reflection calls per iteration")
+    if not result.selected_candidates:
+        errors.append("auto-research loop engine did not select candidate finalists")
+    if result.actual_openrouter_cost_microusd != 1000000:
+        errors.append("auto-research loop engine did not aggregate actual OpenRouter spend")
+    if len(result.provider_usage) != 4:
+        errors.append("auto-research loop engine did not retain provider usage for all model calls")
+    for expected in ("loop_started", "hypothesis_drafted", "patch_drafted", "reflection_recorded", "candidate_selected", "loop_completed"):
+        if expected not in event_types:
+            errors.append(f"auto-research loop engine missing event: {expected}")
+    if "candidate_selected" in event_types and "reflection_recorded" in event_types:
+        if event_types.index("candidate_selected") < event_types.index("reflection_recorded"):
+            errors.append("auto-research loop selected candidates before recording any reflection")
+    return errors
 
 
 def _metadata() -> dict[str, object]:

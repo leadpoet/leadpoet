@@ -435,6 +435,185 @@ async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[
     return inserted, event
 
 
+async def create_auto_research_loop_event(
+    *,
+    run_id: str,
+    ticket_id: str,
+    event_type: str,
+    loop_status: str,
+    worker_ref: str,
+    receipt_id: str | None = None,
+    node_id: str | None = None,
+    elapsed_seconds: float = 0.0,
+    candidate_artifact_hash: str | None = None,
+    candidate_patch_hash: str | None = None,
+    provider_usage: list[dict[str, Any]] | None = None,
+    cost_ledger: dict[str, Any] | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_lab_auto_research_loop_events", "run_id", run_id)
+    payload = {
+        "run_id": run_id,
+        "ticket_id": ticket_id,
+        "receipt_id": receipt_id,
+        "seq": seq,
+        "event_type": event_type,
+        "loop_status": loop_status,
+        "node_id": node_id,
+        "worker_ref": worker_ref,
+        "elapsed_seconds": round(float(elapsed_seconds), 3),
+        "candidate_artifact_hash": candidate_artifact_hash,
+        "candidate_patch_hash": candidate_patch_hash,
+        "provider_usage": provider_usage or [],
+        "cost_ledger": cost_ledger or {},
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_auto_research_loop_events", row)
+
+
+async def create_participation_snapshot(
+    *,
+    island: str,
+    lookback_start: str,
+    lookback_end: str,
+    distinct_funded_hotkeys: int,
+    paid_loop_count: int,
+    unique_brief_count: int,
+    participation_score: float,
+    policy_id: str,
+    snapshot_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "island": island,
+        "lookback_start": lookback_start,
+        "lookback_end": lookback_end,
+        "distinct_funded_hotkeys": max(0, int(distinct_funded_hotkeys)),
+        "paid_loop_count": max(0, int(paid_loop_count)),
+        "unique_brief_count": max(0, int(unique_brief_count)),
+        "source_add_count": 0,
+        "red_team_count": 0,
+        "participation_score": float(participation_score),
+        "policy_id": policy_id,
+        "snapshot_doc": snapshot_doc or {},
+    }
+    input_hash = canonical_hash(payload)
+    existing = await select_one(
+        "research_island_participation_snapshots",
+        filters=(("input_hash", input_hash),),
+    )
+    if existing:
+        return existing
+    row = {
+        "participation_snapshot_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "input_hash": input_hash,
+    }
+    return await insert_row("research_island_participation_snapshots", row)
+
+
+async def create_reimbursement_award(
+    *,
+    award: dict[str, Any],
+    receipt_id: str | None,
+    participation_snapshot_id: str | None,
+    policy_id: str,
+    award_doc: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    existing = await select_one("research_reimbursement_awards", filters=(("award_id", award["award_id"]),))
+    if existing:
+        event = await select_one(
+            "research_reimbursement_award_events",
+            filters=(("award_id", award["award_id"]), ("seq", 0)),
+        )
+        if not event:
+            raise RuntimeError("existing Research Lab reimbursement award is missing its opening event")
+        return existing, event
+    row = {
+        "award_id": str(award["award_id"]),
+        "schema_version": "1.0",
+        "receipt_id": receipt_id,
+        "participation_snapshot_id": participation_snapshot_id,
+        "run_id": str(award["run_id"]),
+        "miner_hotkey": str(award["miner_hotkey"]),
+        "island": str(award["island"]),
+        "run_day": str(award["run_day"]),
+        "policy_id": policy_id,
+        "award_status": str(award["status"]),
+        "participation_score": float(award["participation_score"]),
+        "participation_fraction": float(award["participation_fraction"]),
+        "rebate_rate": float(award["rebate_rate"]),
+        "eligible_cost_microusd": int(award["eligible_cost_microusd"]),
+        "target_reimbursement_microusd": int(award["target_reimbursement_microusd"]),
+        "reimbursement_epochs": int(award["reimbursement_epochs"]),
+        "loop_start_fee_included": bool(award["loop_start_fee_included"]),
+        "input_hash": str(award["input_hash"]),
+        "award_doc": award_doc or award,
+    }
+    inserted = await insert_row("research_reimbursement_awards", row)
+    event = await create_reimbursement_award_event(
+        award_id=str(award["award_id"]),
+        event_type=str(award["status"]),
+        award_status=str(award["status"]),
+        event_doc={"award_id": str(award["award_id"]), "target_reimbursement_microusd": int(award["target_reimbursement_microusd"])},
+    )
+    return inserted, event
+
+
+async def create_reimbursement_award_event(
+    *,
+    award_id: str,
+    event_type: str,
+    award_status: str,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_reimbursement_award_events", "award_id", award_id)
+    payload = {
+        "award_id": award_id,
+        "seq": seq,
+        "event_type": event_type,
+        "award_status": award_status,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_reimbursement_award_events", row)
+
+
+async def create_reimbursement_schedule(
+    *,
+    schedule: dict[str, Any],
+    schedule_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    existing = await select_one("research_reimbursement_schedules", filters=(("schedule_id", schedule["schedule_id"]),))
+    if existing:
+        return existing
+    doc = schedule_doc or schedule
+    row = {
+        "schedule_id": str(schedule["schedule_id"]),
+        "schema_version": "1.0",
+        "award_id": str(schedule["award_id"]),
+        "schedule_status": str(schedule["status"]),
+        "start_epoch": int(schedule["start_epoch"]),
+        "epoch_count": int(schedule["epoch_count"]),
+        "total_microusd": int(schedule["total_microusd"]),
+        "entries": list(schedule.get("entries", [])),
+        "schedule_hash": canonical_hash(doc),
+        "schedule_doc": doc,
+    }
+    return await insert_row("research_reimbursement_schedules", row)
+
+
 async def create_candidate_evaluation_event(
     *,
     candidate_id: str,

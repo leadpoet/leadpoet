@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "scripts" / "30-research-lab-evaluation-bundles.sql"
 CANDIDATE_MIGRATION = ROOT / "scripts" / "33-research-lab-candidate-evaluation-queue.sql"
+AUTO_LOOP_MIGRATION = ROOT / "scripts" / "34-research-lab-auto-research-loop-events.sql"
 
 REQUIRED_TABLES = (
     "research_evaluation_score_bundles",
@@ -21,6 +22,8 @@ CANDIDATE_REQUIRED_TABLES = (
     "research_lab_candidate_evaluation_events",
 )
 CANDIDATE_REQUIRED_VIEWS = ("research_lab_candidate_evaluation_current",)
+AUTO_LOOP_REQUIRED_TABLES = ("research_lab_auto_research_loop_events",)
+AUTO_LOOP_REQUIRED_VIEWS = ("research_lab_auto_research_loop_current",)
 
 FORBIDDEN_GRANT_RE = re.compile(
     r"\bGRANT\b(?!\s+EXECUTE\b)[^;]*\b(?:anon|authenticated)\b",
@@ -31,15 +34,17 @@ FORBIDDEN_GRANT_RE = re.compile(
 def main() -> int:
     sql = MIGRATION.read_text(encoding="utf-8")
     candidate_sql = CANDIDATE_MIGRATION.read_text(encoding="utf-8")
+    auto_loop_sql = AUTO_LOOP_MIGRATION.read_text(encoding="utf-8")
     errors = verify_sql(sql)
     errors.extend(verify_candidate_sql(candidate_sql))
+    errors.extend(verify_auto_loop_sql(auto_loop_sql))
     if errors:
         for error in errors:
             print(f"ERROR: {error}")
         return 1
     print(
         "Research Lab evaluation SQL verified: score-bundle table, event table, "
-        "candidate queue tables, current views, service-role RLS, append-only triggers, no fulfillment writes."
+        "candidate queue tables, auto-research loop events, current views, service-role RLS, append-only triggers, no fulfillment writes."
     )
     return 0
 
@@ -109,6 +114,47 @@ def verify_candidate_sql(sql: str) -> list[str]:
     ):
         if marker not in sql:
             errors.append(f"candidate migration missing marker: {marker}")
+    return errors
+
+
+def verify_auto_loop_sql(sql: str) -> list[str]:
+    errors: list[str] = []
+    lowered = sql.lower()
+    if "begin;" not in lowered or "commit;" not in lowered:
+        errors.append("auto-research loop migration must be wrapped in BEGIN/COMMIT")
+    if "auto-research" not in lowered or "loop" not in lowered:
+        errors.append("auto-research loop migration must document loop execution ownership")
+    if re.search(r"\b(?:CREATE|ALTER|DROP)\s+TABLE\b[^;]*\bfulfillment_", sql, re.IGNORECASE):
+        errors.append("auto-research loop migration must not modify fulfillment tables")
+    if FORBIDDEN_GRANT_RE.search(sql):
+        errors.append("auto-research loop migration must not grant privileges to anon/authenticated")
+    if re.search(r"GRANT\s+[^;]*(UPDATE|DELETE)[^;]*TO\s+service_role", sql, re.IGNORECASE):
+        errors.append("append-only auto-research loop tables must not grant UPDATE/DELETE to service_role")
+
+    for table in AUTO_LOOP_REQUIRED_TABLES:
+        _require_table(sql, table, errors)
+    for view in AUTO_LOOP_REQUIRED_VIEWS:
+        _require_view(sql, view, errors)
+
+    for marker in (
+        "'loop_started'",
+        "'hypothesis_drafted'",
+        "'patch_drafted'",
+        "'patch_validation_passed'",
+        "'patch_validation_failed'",
+        "'dev_check_passed'",
+        "'dev_check_failed'",
+        "'reflection_recorded'",
+        "'candidate_selected'",
+        "'loop_completed'",
+        "'loop_failed'",
+        "hidden_icp",
+        "icp_plaintext",
+        "judge_prompt",
+        "WITH (security_invoker = true)",
+    ):
+        if marker not in sql:
+            errors.append(f"auto-research loop migration missing marker: {marker}")
     return errors
 
 

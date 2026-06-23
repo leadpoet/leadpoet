@@ -5,33 +5,46 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
 import os
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key
+from gateway.research_lab.loop_engine import (
+    AutoResearchLoopEngine,
+    AutoResearchLoopEvent,
+    AutoResearchLoopSettings,
+    OpenRouterCallResult,
+)
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
 from gateway.research_lab.store import (
     canonical_hash,
+    create_auto_research_loop_event,
     create_candidate_artifact,
+    create_participation_snapshot,
     create_queue_event,
     create_receipt,
     create_receipt_event,
+    create_reimbursement_award,
+    create_reimbursement_schedule,
     create_ticket_event,
     select_many,
     select_one,
 )
-from research_lab.auto_research_prompt import (
-    build_default_auto_research_messages,
-    build_validated_candidate_manifest,
-    coerce_component_registry,
-    parse_auto_research_response,
+from research_lab.reimbursements import (
+    ReimbursementCapUsage,
+    build_reimbursement_schedule,
+    compute_participation_score,
+    compute_reimbursement_award,
 )
+from research_lab.auto_research_prompt import coerce_component_registry
 from research_lab.eval import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
@@ -343,29 +356,105 @@ class ResearchLabHostedWorker:
         with _temporary_env(provider_env):
             metadata = runner.metadata()
             registry = coerce_component_registry(metadata)
-            drafts = await self._generate_candidate_drafts(
-                context=context,
+            logger.info(
+                "Research Lab auto-research loop started: run_id=%s ticket_id=%s min_seconds=%s max_seconds=%s max_iterations=%s",
+                context.run_id,
+                context.ticket_id,
+                self.config.auto_research_min_seconds,
+                self.config.auto_research_max_seconds,
+                self.config.auto_research_max_iterations,
+            )
+
+            async def _record_loop_event(event: AutoResearchLoopEvent) -> None:
+                await create_auto_research_loop_event(
+                    run_id=context.run_id,
+                    ticket_id=context.ticket_id,
+                    receipt_id=context.receipt_id,
+                    event_type=event.event_type,
+                    loop_status=event.loop_status,
+                    worker_ref=self.worker_ref,
+                    node_id=event.node_id,
+                    elapsed_seconds=event.elapsed_seconds,
+                    candidate_artifact_hash=event.candidate_artifact_hash,
+                    candidate_patch_hash=event.candidate_patch_hash,
+                    provider_usage=event.provider_usage or self._provider_usage(context),
+                    cost_ledger=event.cost_ledger,
+                    event_doc=event.event_doc,
+                )
+                if event.event_type in {"patch_validation_passed", "patch_validation_failed", "candidate_selected", "loop_completed", "loop_failed"}:
+                    logger.info(
+                        "Research Lab auto-research event: run_id=%s event=%s elapsed=%.1fs node=%s",
+                        context.run_id,
+                        event.event_type,
+                        event.elapsed_seconds,
+                        event.node_id,
+                    )
+
+            async def _call_loop_model(
+                messages: Sequence[Mapping[str, str]],
+                timeout_seconds: int,
+                max_tokens: int,
+            ) -> str:
+                return await self._call_openrouter(
+                    messages=messages,
+                    api_key=context.provider_env["OPENROUTER_API_KEY"],
+                    model_id=model_id,
+                    timeout_seconds=timeout_seconds,
+                    max_tokens=max_tokens,
+                )
+
+            loop_result = await AutoResearchLoopEngine(
+                settings=AutoResearchLoopSettings(
+                    min_seconds=self.config.auto_research_min_seconds,
+                    max_seconds=self.config.auto_research_max_seconds,
+                    min_iterations=self.config.auto_research_min_iterations,
+                    max_iterations=self.config.auto_research_max_iterations,
+                    draft_timeout_seconds=self.config.auto_research_draft_timeout_seconds,
+                    reflection_timeout_seconds=self.config.auto_research_reflection_timeout_seconds,
+                    estimated_iteration_cost_usd=self.config.auto_research_estimated_iteration_cost_usd,
+                    max_candidates=max_candidates,
+                ),
+                call_openrouter=_call_loop_model,
+                event_sink=_record_loop_event,
+            ).run(
+                run_id=context.run_id,
+                ticket=context.ticket,
                 artifact=artifact,
-                component_registry=registry.to_dict(),
+                component_registry=registry,
                 benchmark_public_summary=_validator_evaluation_summary(),
                 model_id=model_id,
                 budget_context=budget_context,
-                max_candidates=max_candidates,
+                requested_loop_count=int(context.ticket.get("requested_loop_count") or 1),
+                miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
             )
-            if not drafts:
-                raise HostedResearchLabWorkerError("auto-research generated no valid candidate drafts")
+            if not loop_result.selected_candidates:
+                raise HostedResearchLabWorkerError("auto-research loop completed without valid candidate finalists")
+
+        reimbursement_decision = await self._maybe_create_reimbursement_decision(
+            context=context,
+            budget_context=budget_context,
+            loop_result=loop_result,
+        )
+        await create_receipt_event(
+            receipt_id=str(context.receipt_id),
+            ticket_id=context.ticket_id,
+            event_type="completed",
+            receipt_status="completed",
+            event_doc={
+                "run_id": context.run_id,
+                "worker_ref": self.worker_ref,
+                "final_cost_ledger": loop_result.cost_ledger(),
+                "provider_usage": list(loop_result.provider_usage) or self._provider_usage(context),
+                "reimbursement": reimbursement_decision or {"status": "not_written"},
+            },
+        )
 
         candidate_ids: list[str] = []
         candidate_summaries: list[dict[str, Any]] = []
-        for index, draft in enumerate(drafts):
-            patch_manifest, hypothesis, patch = build_validated_candidate_manifest(
-                draft=draft,
-                artifact_manifest=artifact,
-                component_registry=registry,
-                run_id=context.run_id,
-                sequence=index,
-                miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
-            )
+        for index, candidate in enumerate(loop_result.selected_candidates):
+            patch_manifest = candidate.patch_manifest
+            hypothesis = candidate.hypothesis
+            patch = candidate.patch
             request = ResearchLabCandidateArtifactCreateRequest(
                 run_id=context.run_id,
                 ticket_id=context.ticket_id,
@@ -382,6 +471,8 @@ class ResearchLabHostedWorker:
             candidate_summaries.append(
                 {
                     "candidate_index": index,
+                    "loop_iteration": candidate.iteration,
+                    "loop_node_id": candidate.node_id,
                     "candidate_id": str(candidate_row["candidate_id"]),
                     "candidate_artifact_hash": patch_manifest.candidate_artifact_hash,
                     "candidate_patch_hash": patch_manifest.manifest_hash(),
@@ -402,6 +493,15 @@ class ResearchLabHostedWorker:
                 "candidate_ids": candidate_ids,
                 "candidate_count": len(candidate_ids),
                 "budget_context": _redacted_budget_context(budget_context),
+                "auto_research_loop": {
+                    "iterations_completed": loop_result.iterations_completed,
+                    "elapsed_seconds": round(loop_result.elapsed_seconds, 3),
+                    "stop_reason": loop_result.stop_reason,
+                    "openrouter_call_count": loop_result.openrouter_call_count,
+                    "estimated_cost_usd": round(loop_result.estimated_cost_usd, 6),
+                    "actual_openrouter_cost_usd": round(loop_result.actual_openrouter_cost_usd, 6),
+                },
+                "reimbursement": reimbursement_decision or {"status": "not_written"},
                 "next_stage": "validator_qualification_worker_evaluation",
             },
         )
@@ -414,6 +514,11 @@ class ResearchLabHostedWorker:
                 "run_id": context.run_id,
                 "receipt_id": context.receipt_id,
                 "candidate_ids": candidate_ids,
+                "auto_research_loop": {
+                    "iterations_completed": loop_result.iterations_completed,
+                    "elapsed_seconds": round(loop_result.elapsed_seconds, 3),
+                    "stop_reason": loop_result.stop_reason,
+                },
                 "next_stage": "validator_qualification_worker_evaluation",
             },
         )
@@ -426,6 +531,167 @@ class ResearchLabHostedWorker:
             receipt_id=context.receipt_id,
             candidate_ids=tuple(candidate_ids),
         )
+
+    async def _maybe_create_reimbursement_decision(
+        self,
+        *,
+        context: HostedRunContext,
+        budget_context: Mapping[str, Any],
+        loop_result: Any,
+    ) -> dict[str, Any] | None:
+        if not (self.config.reimbursements_enabled or self.config.shadow_reimbursements_enabled):
+            return None
+        policy = self.config.reimbursement_policy_doc(
+            enabled=self.config.reimbursements_enabled or self.config.shadow_reimbursements_enabled
+        )
+        snapshot_doc, snapshot_row = await self._create_participation_snapshot(context, policy)
+        cap_usage = await self._reimbursement_cap_usage(context, run_day=_utc_day())
+        run_cost = {
+            "run_id": context.run_id,
+            "miner_hotkey": str(context.ticket["miner_hotkey"]),
+            "island": str(context.ticket["island"] or self.config.reimbursement_default_island),
+            "run_day": _utc_day(),
+            "funded_compute_budget_usd": float(budget_context.get("requested_compute_budget_usd") or 0.0),
+            "actual_openrouter_cost_usd": float(loop_result.actual_openrouter_cost_usd),
+            "loop_start_tao_fee_usd": float(self.config.loop_start_fee_usd),
+            "paid_research_loop": True,
+            "valid_receipt": bool(context.receipt_id),
+            "verified_loop_start_payment": bool(context.payment),
+            "preserved_loop_start_credit": False,
+            "miner_openrouter_key_present": True,
+            "trusted_cost_ledger": True,
+            "passed_abuse_checks": True,
+            "refunded": False,
+            "voided": False,
+            "duplicate": False,
+            "novelty_rejected": False,
+            "self_cancelled_before_minimum_work": False,
+            "banned_hotkey": False,
+        }
+        award_obj = compute_reimbursement_award(run_cost, snapshot_doc, policy, ReimbursementCapUsage.from_mapping(cap_usage))
+        award = award_obj.to_dict()
+        schedule = build_reimbursement_schedule(
+            award,
+            start_epoch=max(0, int(self.config.evaluation_epoch or 0) + (1 if self.config.evaluation_epoch else 0)),
+        ).to_dict()
+        shadow_only = not self.config.reimbursements_enabled
+        award_doc = {
+            "schema_version": "1.0",
+            "award": award,
+            "run_cost": _redacted_reimbursement_run_cost(run_cost),
+            "policy": policy,
+            "participation_snapshot": snapshot_doc,
+            "cap_usage": cap_usage,
+            "shadow_only": shadow_only,
+            "submission_allowed": self.config.reimbursements_enabled,
+            "source": "hosted_auto_research_loop_completion",
+        }
+        schedule_doc = {
+            "schema_version": "1.0",
+            "schedule": schedule,
+            "shadow_only": shadow_only,
+            "submission_allowed": self.config.reimbursements_enabled,
+            "source": "hosted_auto_research_loop_completion",
+        }
+        award_row, _award_event = await create_reimbursement_award(
+            award=award,
+            receipt_id=context.receipt_id,
+            participation_snapshot_id=str(snapshot_row["participation_snapshot_id"]),
+            policy_id=str(policy["policy_id"]),
+            award_doc=award_doc,
+        )
+        schedule_row = await create_reimbursement_schedule(schedule=schedule, schedule_doc=schedule_doc)
+        logger.info(
+            "Research Lab reimbursement decision: run_id=%s status=%s target_usd=%.6f actual_openrouter_usd=%.6f shadow_only=%s",
+            context.run_id,
+            award["status"],
+            float(award["target_reimbursement_usd"]),
+            float(loop_result.actual_openrouter_cost_usd),
+            shadow_only,
+        )
+        return {
+            "status": award["status"],
+            "award_id": str(award_row["award_id"]),
+            "schedule_id": str(schedule_row["schedule_id"]),
+            "target_reimbursement_usd": award["target_reimbursement_usd"],
+            "rebate_rate": award["rebate_rate"],
+            "actual_openrouter_cost_usd": round(float(loop_result.actual_openrouter_cost_usd), 6),
+            "shadow_only": shadow_only,
+        }
+
+    async def _create_participation_snapshot(
+        self,
+        context: HostedRunContext,
+        policy: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        island = str(context.ticket.get("island") or self.config.reimbursement_default_island)
+        lookback_end = datetime.now(timezone.utc)
+        lookback_start = lookback_end - timedelta(days=7)
+        ticket_rows = await select_many(
+            "research_loop_ticket_current",
+            filters=(("island", island),),
+            order_by=(("created_at", True),),
+            limit=1000,
+        )
+        ticket_rows = [
+            row
+            for row in ticket_rows
+            if _row_dt(row.get("created_at") or row.get("current_status_at")) >= lookback_start
+        ]
+        ticket_ids = {str(row.get("ticket_id")) for row in ticket_rows}
+        queue_rows = await select_many("research_loop_run_queue_current", filters=(), limit=1000)
+        funded_queue_rows = [
+            row
+            for row in queue_rows
+            if str(row.get("ticket_id")) in ticket_ids
+            and str(row.get("current_queue_status")) in {"queued", "started", "completed"}
+            and _row_dt(row.get("current_status_at")) >= lookback_start
+        ]
+        distinct_hotkeys = {str(row.get("miner_hotkey")) for row in ticket_rows if row.get("miner_hotkey")}
+        brief_refs = {str(row.get("brief_sanitized_ref")) for row in ticket_rows if row.get("brief_sanitized_ref")}
+        snapshot_doc = {
+            "snapshot_id": f"participation:{island}:{lookback_end.date().isoformat()}",
+            "island": island,
+            "lookback_start": lookback_start.isoformat(),
+            "lookback_end": lookback_end.isoformat(),
+            "distinct_funded_hotkeys": len(distinct_hotkeys),
+            "paid_loop_count": len(funded_queue_rows),
+            "unique_brief_count": len(brief_refs),
+        }
+        participation_score = compute_participation_score(snapshot_doc, policy)
+        snapshot_row = await create_participation_snapshot(
+            island=island,
+            lookback_start=snapshot_doc["lookback_start"],
+            lookback_end=snapshot_doc["lookback_end"],
+            distinct_funded_hotkeys=snapshot_doc["distinct_funded_hotkeys"],
+            paid_loop_count=snapshot_doc["paid_loop_count"],
+            unique_brief_count=snapshot_doc["unique_brief_count"],
+            participation_score=float(participation_score),
+            policy_id=str(policy["policy_id"]),
+            snapshot_doc={
+                **snapshot_doc,
+                "participation_score": float(participation_score),
+                "source": "research_loop_ticket_current_and_run_queue_current",
+                "postgrest_limit": 1000,
+            },
+        )
+        return snapshot_doc, snapshot_row
+
+    async def _reimbursement_cap_usage(self, context: HostedRunContext, *, run_day: str) -> dict[str, float]:
+        rows = await select_many("research_reimbursement_award_current", filters=(), limit=1000)
+        miner_hotkey = str(context.ticket["miner_hotkey"])
+        island = str(context.ticket["island"] or self.config.reimbursement_default_island)
+        eligible_rows = [
+            row
+            for row in rows
+            if str(row.get("run_day")) == run_day
+            and str(row.get("current_award_status") or row.get("award_status")) == "awarded"
+        ]
+        return {
+            "hotkey_day_awarded_usd": _sum_award_usd(row for row in eligible_rows if str(row.get("miner_hotkey")) == miner_hotkey),
+            "island_day_awarded_usd": _sum_award_usd(row for row in eligible_rows if str(row.get("island")) == island),
+            "global_awarded_usd": _sum_award_usd(eligible_rows),
+        }
 
     async def _append_started_events(self, context: HostedRunContext) -> None:
         current = await select_one(
@@ -573,41 +839,15 @@ class ResearchLabHostedWorker:
             raise HostedResearchLabWorkerError("private artifact manifest failed validation: " + "; ".join(errors))
         return artifact
 
-    async def _generate_candidate_drafts(
+    async def _call_openrouter(
         self,
         *,
-        context: HostedRunContext,
-        artifact: PrivateModelArtifactManifest,
-        component_registry: Mapping[str, Any],
-        benchmark_public_summary: Mapping[str, Any],
+        messages: Sequence[Mapping[str, str]],
+        api_key: str,
         model_id: str,
-        budget_context: Mapping[str, Any],
-        max_candidates: int,
-    ):
-        messages = build_default_auto_research_messages(
-            ticket={
-                "ticket_id": context.ticket_id,
-                "run_id": context.run_id,
-                "miner_hotkey": context.ticket.get("miner_hotkey"),
-                "island": context.ticket.get("island"),
-                "brief_sanitized_ref": context.ticket.get("brief_sanitized_ref"),
-                "brief_public_summary": _ticket_doc_value(context, "brief_public_summary"),
-                "requested_loop_count": context.ticket.get("requested_loop_count"),
-            },
-            artifact_manifest=artifact.to_dict(),
-            component_registry=component_registry,
-            benchmark_public_summary=benchmark_public_summary,
-            budget_context=budget_context,
-            max_candidates=max_candidates,
-        )
-        raw = await self._call_openrouter(
-            messages=messages,
-            api_key=context.provider_env["OPENROUTER_API_KEY"],
-            model_id=model_id,
-        )
-        return parse_auto_research_response(raw, max_candidates=max_candidates)
-
-    async def _call_openrouter(self, *, messages: Sequence[Mapping[str, str]], api_key: str, model_id: str) -> str:
+        timeout_seconds: int = 90,
+        max_tokens: int = 1800,
+    ) -> OpenRouterCallResult:
         if not api_key:
             raise HostedResearchLabWorkerError("OpenRouter key is required for hosted auto-research")
         if not model_id:
@@ -616,11 +856,11 @@ class ResearchLabHostedWorker:
             "model": model_id,
             "messages": list(messages),
             "temperature": 0.2,
-            "max_tokens": 1800,
+            "max_tokens": int(max_tokens),
             "response_format": {"type": "json_object"},
         }
 
-        def _call() -> str:
+        def _call() -> OpenRouterCallResult:
             req = urlrequest.Request(
                 "https://openrouter.ai/api/v1/chat/completions",
                 data=json.dumps(body).encode("utf-8"),
@@ -632,7 +872,7 @@ class ResearchLabHostedWorker:
                 method="POST",
             )
             try:
-                with urlrequest.urlopen(req, timeout=90) as response:
+                with urlrequest.urlopen(req, timeout=int(timeout_seconds)) as response:
                     decoded = json.loads(response.read().decode("utf-8"))
             except HTTPError as exc:
                 message = exc.read().decode("utf-8", errors="replace")[:500]
@@ -645,7 +885,26 @@ class ResearchLabHostedWorker:
             content = choices[0].get("message", {}).get("content")
             if not content:
                 raise HostedResearchLabWorkerError("OpenRouter returned empty candidate-generation content")
-            return str(content)
+            usage = decoded.get("usage") if isinstance(decoded.get("usage"), Mapping) else {}
+            cost_usd = _usage_cost_usd(usage)
+            cost_microusd = _usd_to_microusd(cost_usd)
+            provider_usage = {
+                "provider": "openrouter",
+                "key_source": "miner_key_ref",
+                "response_id": str(decoded.get("id") or ""),
+                "model": str(decoded.get("model") or model_id),
+                "prompt_tokens": _int_or_none(usage.get("prompt_tokens")),
+                "completion_tokens": _int_or_none(usage.get("completion_tokens")),
+                "total_tokens": _int_or_none(usage.get("total_tokens")),
+                "cost_usd": round(cost_microusd / 1_000_000, 6),
+                "cost_microusd": cost_microusd,
+                "cost_details": _safe_cost_details(usage.get("cost_details")),
+            }
+            return OpenRouterCallResult(
+                content=str(content),
+                provider_usage=provider_usage,
+                cost_microusd=cost_microusd,
+            )
 
         return await asyncio.to_thread(_call)
 
@@ -710,6 +969,61 @@ def _miner_openrouter_key_ref(context: HostedRunContext) -> str:
         if isinstance(event_doc, Mapping) and event_doc.get("miner_openrouter_key_ref"):
             return str(event_doc["miner_openrouter_key_ref"])
     raise HostedResearchLabWorkerError("Research Lab run is missing miner OpenRouter key ref")
+
+
+def _utc_day() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _row_dt(value: Any) -> datetime:
+    if not value:
+        return datetime.fromtimestamp(0, timezone.utc)
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.fromtimestamp(0, timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _sum_award_usd(rows: Iterable[Mapping[str, Any]]) -> float:
+    total = Decimal("0")
+    for row in rows:
+        try:
+            total += Decimal(str(row.get("target_reimbursement_microusd", 0))) / Decimal("1000000")
+        except Exception:
+            continue
+    return float(total.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
+
+
+def _redacted_reimbursement_run_cost(value: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "run_id",
+        "miner_hotkey",
+        "island",
+        "run_day",
+        "funded_compute_budget_usd",
+        "actual_openrouter_cost_usd",
+        "loop_start_tao_fee_usd",
+        "paid_research_loop",
+        "valid_receipt",
+        "verified_loop_start_payment",
+        "preserved_loop_start_credit",
+        "miner_openrouter_key_present",
+        "trusted_cost_ledger",
+        "passed_abuse_checks",
+        "refunded",
+        "voided",
+        "duplicate",
+        "novelty_rejected",
+        "self_cancelled_before_minimum_work",
+        "banned_hotkey",
+    }
+    return {key: value[key] for key in allowed if key in value}
 
 
 def _ticket_doc_value(context: HostedRunContext, key: str) -> Any:
@@ -796,6 +1110,52 @@ def _is_claim_race_error(exc: BaseException) -> bool:
         or "unique constraint" in message
         or "23505" in message
     )
+
+
+def _usage_cost_usd(usage: Mapping[str, Any]) -> Decimal:
+    for key in ("cost", "total_cost", "cost_usd"):
+        value = usage.get(key)
+        if value is None:
+            continue
+        try:
+            return Decimal(str(value))
+        except Exception:
+            continue
+    return Decimal("0")
+
+
+def _usd_to_microusd(value: Decimal | float | int | str) -> int:
+    try:
+        decimal_value = Decimal(str(value))
+    except Exception:
+        decimal_value = Decimal("0")
+    if decimal_value < 0:
+        decimal_value = Decimal("0")
+    return int((decimal_value * Decimal("1000000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("research_lab_openrouter_usage_int_parse_failed value_type=%s", type(value).__name__)
+        return None
+
+
+def _safe_cost_details(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    allowed: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        if key.lower() in {"api_key", "openrouter_api_key", "raw_secret", "raw_openrouter_key"}:
+            continue
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            allowed[key] = item
+    return allowed
 
 
 @contextmanager

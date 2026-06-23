@@ -2388,6 +2388,19 @@ def _research_lab_default_model_tier(default_tier: str, approved_tiers: dict) ->
     return "default"
 
 
+def _research_lab_runtime_label(min_seconds: int, max_seconds: int) -> str:
+    if min_seconds <= 0 and max_seconds <= 0:
+        return ""
+
+    def _minutes_label(seconds: int) -> str:
+        minutes = max(1, round(seconds / 60))
+        return f"{minutes} min"
+
+    if min_seconds > 0 and max_seconds > 0 and min_seconds != max_seconds:
+        return f"{_minutes_label(min_seconds)}-{_minutes_label(max_seconds)}"
+    return _minutes_label(max(min_seconds, max_seconds))
+
+
 def _research_lab_prompt_model_tier(default_tier: str, approved_tiers: dict) -> str:
     tiers = sorted(str(tier) for tier in approved_tiers) if approved_tiers else [default_tier or "default"]
     if len(tiers) <= 1:
@@ -2541,12 +2554,24 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     min_budget = float(worker_status.get("min_compute_budget_usd") or 1.0)
     max_budget = float(worker_status.get("max_compute_budget_usd") or 100.0)
     loop_fee = float(status.get("loop_start_fee_usd") or RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD)
+    min_runtime_seconds = int(worker_status.get("auto_research_min_seconds") or 0)
+    max_runtime_seconds = int(worker_status.get("auto_research_max_seconds") or 0)
+    runtime_label = _research_lab_runtime_label(min_runtime_seconds, max_runtime_seconds)
+    reimbursement_status = status.get("reimbursement") if isinstance(status.get("reimbursement"), dict) else {}
 
     print("Research Lab status:")
     ready = bool(status.get("api_enabled") and status.get("paid_loops_enabled") and status.get("hosted_runs_enabled"))
     print(f"  hosted auto-research: {'ready' if ready else 'not ready'}")
     print(f"  loop-start fee: ${loop_fee:.2f} USD-equivalent in TAO")
     print(f"  default compute budget: ${default_budget:.2f}")
+    if runtime_label:
+        print(f"  expected research runtime: {runtime_label}")
+    if reimbursement_status:
+        estimate = float(reimbursement_status.get("default_rebate_rate_estimate") or 0.0)
+        epochs = int(reimbursement_status.get("reimbursement_epochs") or 0)
+        included = "yes" if reimbursement_status.get("loop_start_fee_included") else "no"
+        print(f"  estimated default reimbursement: {estimate * 100:.1f}% over {epochs} epochs")
+        print(f"  loop-start fee reimbursed: {included}")
 
     if not status.get("api_enabled"):
         print("")
@@ -2606,6 +2631,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     print(
         f"   Using: island={island}, budget=${requested_compute_budget_usd:.2f}, "
         f"model_tier={research_model_tier}, loops={requested_loop_count}"
+        + (f", expected_runtime={runtime_label}" if runtime_label else "")
     )
 
     key_result = _register_research_lab_openrouter_key(wallet, status)

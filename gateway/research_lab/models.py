@@ -207,7 +207,7 @@ class ResearchLabScoreBundleCreateRequest(BaseModel):
 
 class ResearchLabCandidateEvaluationResultRequest(BaseModel):
     candidate_id: str = Field(pattern=r"^candidate:[0-9a-f]{64}$")
-    candidate_status: str = Field(pattern="^(scored|failed|rejected)$")
+    candidate_status: str = Field(pattern="^(evaluating|scored|failed|rejected)$")
     evaluator_ref: Optional[str] = Field(default=None, max_length=256)
     reason: Optional[str] = Field(default=None, max_length=500)
     score_bundle: Optional[dict[str, Any]] = None

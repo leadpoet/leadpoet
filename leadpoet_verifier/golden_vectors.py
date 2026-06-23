@@ -32,6 +32,8 @@ from .crowning import (
     simulate_sequential_crown_probability,
 )
 from .economics import (
+    allocate_research_lab_epoch,
+    build_champion_reward_obligation,
     build_improvement_grant_schedule,
     build_reimbursement_schedule,
     compose_final_weight_vector,
@@ -253,6 +255,15 @@ def run_golden_vectors(
         elif case["kind"] == "verify_improvement_grant_schedule":
             schedule = build_improvement_grant_schedule(case["crown"], case["policy"])
             actual = verify_improvement_grant_schedule(case["crown"], case["policy"], schedule)
+        elif case["kind"] == "build_champion_reward_obligation":
+            actual = build_champion_reward_obligation(case["candidate"], case["policy"])
+        elif case["kind"] == "allocate_research_lab_epoch":
+            actual = allocate_research_lab_epoch(
+                case["epoch"],
+                case["policy"],
+                case.get("reimbursement_obligations", []),
+                case.get("champion_obligations", []),
+            )
         elif case["kind"] == "compose_final_weight_vector":
             actual = compose_final_weight_vector(
                 epoch=case["epoch"],
@@ -261,6 +272,7 @@ def run_golden_vectors(
                 leaderboard_scores=case.get("leaderboard_scores", {}),
                 improvement_grant_schedules=case.get("improvement_grant_schedules", []),
                 reimbursement_schedules=case.get("reimbursement_schedules", []),
+                research_lab_allocation=case.get("research_lab_allocation"),
                 active_researcher_floor_scores=case.get("active_researcher_floor_scores", {}),
                 policy=case.get("policy", {}),
             )

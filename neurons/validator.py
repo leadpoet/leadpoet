@@ -2163,6 +2163,9 @@ class Validator(BaseValidatorNeuron):
             # set for a rollback/test run.
             # ═══════════════════════════════════════════════════════════════════
             container_mode_check = getattr(self.config.neuron, 'mode', None)
+            qual_enabled = False
+            qual_proxies = []
+            assignment_ok = True
             if container_mode_check == "coordinator" or container_mode_check is None:
                 # Check if validator-side Research Lab/qualification worker evaluation is enabled.
                 qual_enabled = _env_flag("ENABLE_QUALIFICATION_EVALUATION")
@@ -2173,9 +2176,10 @@ class Validator(BaseValidatorNeuron):
                     work_label = "legacy qualification + Research Lab" if legacy_model_competition_enabled else "Research Lab candidate"
                     print(f"\n🎯 VALIDATOR EVALUATION: Assigning {work_label} work to {len(qual_proxies)} dedicated workers...")
                     try:
-                        await self._assign_qualification_to_dedicated_workers(current_epoch)
+                        assignment_ok = await self._assign_qualification_to_dedicated_workers(current_epoch)
                         print(f"   ✅ Validator evaluation assignment complete")
                     except Exception as qual_assign_err:
+                        assignment_ok = False
                         print(f"   ⚠️ Validator evaluation assignment failed: {qual_assign_err}")
 
             # Legacy sourcing is retired.  Keep the old lead-validation path
@@ -2184,6 +2188,13 @@ class Validator(BaseValidatorNeuron):
             if not _env_flag("ENABLE_LEGACY_SOURCING"):
                 print(f"\n🚫 Legacy sourcing disabled; skipping gateway lead fetch for epoch {current_epoch}")
                 print("   Active validator tracks: fulfillment + Research Lab candidate scoring")
+                if qual_enabled and qual_proxies and not assignment_ok:
+                    print(
+                        f"   ⚠️ Research Lab candidate assignment did not complete for epoch {current_epoch}; "
+                        "not marking epoch processed so the validator will retry."
+                    )
+                    await asyncio.sleep(10)
+                    return
                 self._last_processed_epoch = current_epoch
                 print(f"✅ Marked epoch {current_epoch} as processed (legacy sourcing skipped)\n")
                 await asyncio.sleep(10)
@@ -7048,7 +7059,7 @@ class Validator(BaseValidatorNeuron):
     # requires an explicit operator rollback flag.
     # ═══════════════════════════════════════════════════════════════════════════
     
-    async def _assign_qualification_to_dedicated_workers(self, current_epoch: int):
+    async def _assign_qualification_to_dedicated_workers(self, current_epoch: int) -> bool:
         """
         Assign validator evaluation work to dedicated workers at epoch start.
 
@@ -7059,16 +7070,27 @@ class Validator(BaseValidatorNeuron):
         Args:
             current_epoch: Current epoch number
         """
-        import httpx
         from pathlib import Path
+        import httpx
         
         # Check if we've already assigned for this epoch
         if not hasattr(self, '_qual_dedicated_last_assigned_epoch'):
             self._qual_dedicated_last_assigned_epoch = -1
-        
+
         if self._qual_dedicated_last_assigned_epoch == current_epoch:
             print(f"   ℹ️ Already assigned qualification work for epoch {current_epoch}")
-            return
+            return True
+
+        configured_worker_ids = []
+        for proxy_var, _proxy in detect_qualification_proxies():
+            try:
+                configured_worker_ids.append(int(proxy_var.rsplit("_", 1)[1]))
+            except Exception:
+                pass
+        configured_worker_ids = sorted(set(configured_worker_ids))
+        if not configured_worker_ids:
+            print("   ⚠️ No configured qualification workers found")
+            return False
         
         weights_dir = Path("validator_weights")
         weights_dir.mkdir(exist_ok=True)
@@ -7161,7 +7183,7 @@ class Validator(BaseValidatorNeuron):
         for check_epoch in range(current_epoch - 1, current_epoch - QUALIFICATION_EVAL_EPOCH_WINDOW - 1, -1):
             if check_epoch < 0:
                 break
-            for i in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
+            for i in configured_worker_ids:
                 work_file = weights_dir / f"qual_worker_{i}_work_{check_epoch}.json"
                 results_file = weights_dir / f"qual_worker_{i}_results_{check_epoch}.json"
                 if work_file.exists() and not results_file.exists():
@@ -7169,7 +7191,13 @@ class Validator(BaseValidatorNeuron):
         
         if busy_workers:
             print(f"   ⏳ Busy workers (still evaluating from previous epoch): {sorted(busy_workers)}")
-        
+
+        free_worker_ids = [worker_id for worker_id in configured_worker_ids if worker_id not in busy_workers]
+        if not free_worker_ids:
+            print(f"   ⚠️ All configured qualification workers busy — skipping assignment this epoch")
+            self._qual_dedicated_last_assigned_epoch = current_epoch
+            return True
+
         # Clean up old work files (older than the eval window).
         # CRITICAL: Do NOT clean up results files here — the collection step
         # needs them. Results are cleaned up AFTER they are collected and processed.
@@ -7186,7 +7214,7 @@ class Validator(BaseValidatorNeuron):
         # Initialize qualification validator if needed
         if not QUALIFICATION_AVAILABLE:
             print(f"   ⚠️ Qualification module not available")
-            return
+            return False
         
         if not hasattr(self, '_qualification_validator') or not self._qualification_session_id:
             try:
@@ -7203,7 +7231,7 @@ class Validator(BaseValidatorNeuron):
                 
             except Exception as e:
                 print(f"   ❌ Failed to initialize qualification: {type(e).__name__}: {e or '(empty - likely timeout)'}")
-                return
+                return False
         
         legacy_model_competition_enabled = _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION")
 
@@ -7221,7 +7249,7 @@ class Validator(BaseValidatorNeuron):
         # Determine max models to pull
         if rebenchmark_needed:
             # Worker 1 does rebenchmark, others get 1 each = 4*1 = 4 from queue
-            max_models = QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK
+            max_models = max(0, len(free_worker_ids) - 1) * QUALIFICATION_MODELS_PER_CONTAINER
             print(f"   🔄 Rebenchmark needed - pulling max {max_models} new models from queue")
             
             # ═══════════════════════════════════════════════════════════════════
@@ -7307,7 +7335,7 @@ class Validator(BaseValidatorNeuron):
                     self._mark_rebenchmark_attempted_today(champion_data_for_date)
         else:
             # All 5 workers get 1 each = 5 from queue
-            max_models = QUALIFICATION_MAX_MODELS_PER_EPOCH
+            max_models = max(1, len(free_worker_ids) * QUALIFICATION_MODELS_PER_CONTAINER)
             if legacy_model_competition_enabled:
                 print(f"   📦 No rebenchmark - pulling max {max_models} models from queue")
             else:
@@ -7315,6 +7343,7 @@ class Validator(BaseValidatorNeuron):
         
         # Fetch batch of NEW models from gateway (DB query - excludes rebenchmark)
         # Note: all_models may already contain a model from rebenchmark mismatch fallback
+        batch_fetch_failed = False
         try:
             gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
             
@@ -7361,6 +7390,7 @@ class Validator(BaseValidatorNeuron):
                 all_models.extend(fetched_models)
                 
         except Exception as e:
+            batch_fetch_failed = True
             print(f"   ❌ Failed to fetch models from gateway: {type(e).__name__}: {e or '(empty - likely timeout)'}")
             # Clear session on any error to force re-registration next epoch
             if "404" in str(e) or "Session not found" in str(e):
@@ -7368,11 +7398,13 @@ class Validator(BaseValidatorNeuron):
             # Continue with rebenchmark if we have it
         
         if not all_models and not rebenchmark_model:
+            if batch_fetch_failed:
+                return False
             if legacy_model_competition_enabled:
                 print(f"   ℹ️ No models to evaluate this epoch - will retry next iteration")
             else:
                 print(f"   ℹ️ No Research Lab candidates queued for validator scoring this epoch")
-            return
+            return True
         
         model_label = "model(s)" if legacy_model_competition_enabled else "Research Lab candidate(s)"
         print(f"   📥 Received {len(all_models)} new {model_label}" + (f" + 1 rebenchmark" if rebenchmark_model else ""))
@@ -7402,7 +7434,7 @@ class Validator(BaseValidatorNeuron):
                 rebenchmark_model["is_rebenchmark"] = True
             else:
                 # Worker 1 is busy — assign rebenchmark to first free worker
-                for w in range(1, QUALIFICATION_CONTAINERS_COUNT + 1):
+                for w in configured_worker_ids:
                     if w not in busy_workers:
                         worker_assignments[w] = {
                             "models": [rebenchmark_model],
@@ -7415,21 +7447,21 @@ class Validator(BaseValidatorNeuron):
             models_to_distribute = all_models
             rebenchmark_worker = next(iter(worker_assignments), None)
             available_workers = [
-                w for w in range(1, QUALIFICATION_CONTAINERS_COUNT + 1)
+                w for w in configured_worker_ids
                 if w not in busy_workers and w != rebenchmark_worker
             ]
         else:
             # No rebenchmark - all free workers available (round-robin)
             models_to_distribute = all_models
             available_workers = [
-                w for w in range(1, QUALIFICATION_CONTAINERS_COUNT + 1)
+                w for w in configured_worker_ids
                 if w not in busy_workers
             ]
         
         if not available_workers and not worker_assignments:
             print(f"   ⚠️ All workers busy — skipping assignment this epoch")
             self._qual_dedicated_last_assigned_epoch = current_epoch
-            return
+            return True
         
         # 1:1 DISTRIBUTION: Each worker gets exactly 1 model (max).
         # If more models than workers, excess models wait for next epoch.
@@ -7460,6 +7492,7 @@ class Validator(BaseValidatorNeuron):
         
         self._qual_dedicated_last_assigned_epoch = current_epoch
         print(f"   ✅ Assigned {sum(len(a['models']) for a in worker_assignments.values())} models to {len(worker_assignments)} workers")
+        return True
 
     async def _collect_dedicated_qualification_results(
         self, 

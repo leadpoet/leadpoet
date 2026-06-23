@@ -491,11 +491,12 @@ async def request_batch_evaluation(request: BatchEvaluationRequest):
     
     # Get remaining queue depth
     try:
-        from gateway.db.client import get_read_client
-        supabase = get_read_client()
+        from gateway.db.client import get_read_client, get_write_client
+        read_supabase = get_read_client()
+        private_supabase = get_write_client()
         total_public_pending = 0
         if not research_lab_only and legacy_model_competition_enabled:
-            count_result = supabase.table("qualification_models").select(
+            count_result = read_supabase.table("qualification_models").select(
                 "id", count="exact"
             ).is_(
                 "evaluated_at", "null"
@@ -503,7 +504,7 @@ async def request_batch_evaluation(request: BatchEvaluationRequest):
                 "status", "submitted"
             ).execute()
             total_public_pending = count_result.count if count_result.count else 0
-        research_result = supabase.table("research_lab_candidate_evaluation_current").select(
+        research_result = private_supabase.table("research_lab_candidate_evaluation_current").select(
             "candidate_id", count="exact"
         ).eq(
             "current_candidate_status", "queued"

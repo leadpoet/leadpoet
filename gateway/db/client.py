@@ -18,8 +18,10 @@ ASYNC CLIENTS:
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
+import httpx
 from supabase import create_client, Client
 from supabase import create_async_client, AsyncClient
 
@@ -30,6 +32,31 @@ from gateway.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Bounded HTTP read timeout (seconds) for SYNCHRONOUS Supabase clients.
+# The synchronous postgrest client defaults to a 120s timeout, and the
+# fulfillment lifecycle tick makes these sync calls directly on the asyncio
+# event loop. When the PostgREST layer intermittently stalls (Postgres itself
+# stays idle/fast), the tick's sequential calls each block up to 120s, wedging
+# the ENTIRE gateway — every endpoint returns 000 and miners get read-timeouts
+# for minutes until the connections finally die. Capping at 30s means the first
+# stalled call raises at 30s; the lifecycle loop's try/except then aborts that
+# tick and retries next interval, so a stall becomes a ~30s blip instead of a
+# multi-minute outage. 30s is far above normal PostgREST latency (sub-second to
+# a few seconds), so legitimate queries never trip it.
+_SYNC_HTTP_TIMEOUT_SECONDS = int(os.getenv("SUPABASE_SYNC_TIMEOUT_SECONDS", "30"))
+
+
+def _apply_sync_timeout(client: Client) -> Client:
+    """Bound the sync postgrest HTTP timeout. Best-effort: wrapped in try/except
+    so it can never break client creation — worst case the cap isn't applied and
+    behaviour falls back to the library's 120s default."""
+    try:
+        client.postgrest.session.timeout = httpx.Timeout(float(_SYNC_HTTP_TIMEOUT_SECONDS))
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not apply Supabase sync HTTP timeout: %s", e)
+    return client
+
 
 # ============================================================
 # Sync Singleton Clients (lazily initialized)
@@ -54,9 +81,9 @@ def get_read_client() -> Client:
         logger.warning("⚠️ SUPABASE_ANON_KEY not configured - using SERVICE_ROLE_KEY for reads")
         if not SUPABASE_SERVICE_ROLE_KEY:
             raise RuntimeError("No Supabase key configured")
-        _read_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        _read_client = _apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY))
     else:
-        _read_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        _read_client = _apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_ANON_KEY))
         logger.info("✅ Supabase READ client initialized (ANON_KEY)")
     
     return _read_client
@@ -77,7 +104,7 @@ def get_write_client() -> Client:
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY not configured")
     
-    _write_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    _write_client = _apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY))
     logger.info("✅ Supabase WRITE client initialized (SERVICE_ROLE_KEY)")
     
     return _write_client

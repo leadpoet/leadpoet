@@ -102,7 +102,10 @@ NITRO_ROOT_CERT_DER: bytes = bytes.fromhex(
 # This is the source of truth for allowed PCR0 values
 PCR0_ALLOWLIST_URL = os.environ.get(
     "PCR0_ALLOWLIST_URL",
-    "https://raw.githubusercontent.com/LeadPoet/Bittensor-subnet/main/pcr0_allowlist.json"
+    # Repo was renamed LeadPoet/Bittensor-subnet -> leadpoet/leadpoet; the old URL
+    # 404s, which silently dropped the gateway to the (stale) static fallback and
+    # rejected every validator weight-bundle publish. Point at the live repo.
+    "https://raw.githubusercontent.com/leadpoet/leadpoet/main/pcr0_allowlist.json"
 )
 
 # Cache TTL in seconds (default: 5 minutes)
@@ -123,6 +126,7 @@ FALLBACK_GATEWAY_PCR0_VALUES: List[str] = [
     "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5",
 ]
 FALLBACK_VALIDATOR_PCR0_VALUES: List[str] = [
+    "46b34413f6a5fbc08058f401b23ea8ae7faf787d056e79d981d4a4c438b3e96e80bef77a3aa9bac9391f29efd9ebd934",  # 2026-06-23 build (commit d267acb)
     "1697ef7e8c095ff5fc3d7e0e79bb7d00d29d0bdfa487d2c7353812ebafb35667ebd428c42db59ad1efe1c2999d1e5d85",
 ]
 
